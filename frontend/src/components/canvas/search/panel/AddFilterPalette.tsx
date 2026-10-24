@@ -35,37 +35,7 @@
  * The parent (QueryCard) decides how to integrate them.
  */
 import { motion } from 'framer-motion'
-import {
-    AlignLeft,
-    ArrowUpToLine,
-    Asterisk,
-    Boxes,
-    Crosshair,
-    Equal,
-    Flag,
-    FolderTree,
-    GitBranchPlus,
-    GitMerge,
-    Hash,
-    KeyRound,
-    GitBranch,
-    Layers,
-    ListTree,
-    Milestone,
-    Network,
-    Parentheses,
-    Plus,
-    Radar,
-    Route,
-    Search,
-    Share2,
-    Sparkles,
-    Tag,
-    Type,
-    Unplug,
-    Workflow,
-    type LucideIcon,
-} from 'lucide-react'
+import { Plus, Search, Sparkles } from 'lucide-react'
 import {
     type FC,
     memo,
@@ -80,74 +50,22 @@ import {
 import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
-import type { Predicate, EdgeClass } from '@/types/search'
+import type { Predicate } from '@/types/search'
 
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
 import { topLevelConditions } from './predicateComposition'
 import { RelationContext } from './relationContext'
-import { newRelation, RELATION_DEPTH_MAX } from './relations'
+import {
+    availableCategories as kindsAvailable,
+    ICON_TONES,
+    type CodeKind,
+    type FilterKind,
+} from './vocabulary/filterKinds'
 
 
-const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
-
-/** Entries that scope the whole search, which a relationship's condition
- *  can't hold. */
-const SCOPE_ENTRIES = new Set(['root-in-view', 'inside-subtree', 'inside-named', 'path', 'within-hops'])
-
-/** The condition kinds with no visual editor: authored as JSON in Code. */
-export type CodeKind = 'withinHops' | 'degree'
-
-
-/**
- * Per-category icon accents. The Add Filter palette previously
- * rendered every entry with the same lineage-purple ASCII glyph,
- * which made the categories visually indistinguishable. Tying each
- * category to a curated accent gives the palette a typed taxonomy
- * the user reads at a glance — text rows pulse cyan, structure
- * emerald, governance amber, lineage rose, and so on — matching the
- * "premium / modern" UX bar of the template picker.
- */
-type IconTone =
-    | 'text'
-    | 'structure'
-    | 'governance'
-    | 'lineage-missing'   // negative — "no X" rows
-    | 'lineage-present'   // positive — "has X" rows
-    | 'group'
-
-const ICON_TONES: Record<IconTone, { container: string; icon: string }> = {
-    text: {
-        container: 'bg-sky-500/[0.10] border-sky-500/25 dark:bg-sky-500/[0.14]',
-        icon: 'text-sky-600 dark:text-sky-400',
-    },
-    structure: {
-        container: 'bg-emerald-500/[0.10] border-emerald-500/25 dark:bg-emerald-500/[0.14]',
-        icon: 'text-emerald-600 dark:text-emerald-400',
-    },
-    governance: {
-        container: 'bg-amber-500/[0.10] border-amber-500/30 dark:bg-amber-500/[0.14]',
-        icon: 'text-amber-700 dark:text-amber-300',
-    },
-    // Negative lineage signal (no upstream / no downstream / orphan).
-    // Rose reads as "warning / gap" so a user scanning the palette
-    // doesn't confuse "no upstream" (these are sources) with
-    // "has upstream" (these are sinks).
-    'lineage-missing': {
-        container: 'bg-rose-500/[0.10] border-rose-500/25 dark:bg-rose-500/[0.14]',
-        icon: 'text-rose-600 dark:text-rose-400',
-    },
-    // Positive lineage signal (has upstream / has downstream).
-    // Teal sits between the structure-emerald and the text-sky so
-    // it reads as connected-data without clashing with either.
-    'lineage-present': {
-        container: 'bg-teal-500/[0.10] border-teal-500/25 dark:bg-teal-500/[0.14]',
-        icon: 'text-teal-600 dark:text-teal-400',
-    },
-    group: {
-        container: 'bg-violet-500/[0.10] border-violet-500/25 dark:bg-violet-500/[0.14]',
-        icon: 'text-violet-600 dark:text-violet-400',
-    },
-}
+/** The condition kinds with no visual editor (kept exported here for the
+ *  builders that name it by this module). */
+export type { CodeKind }
 
 
 export interface AddFilterPaletteProps {
@@ -196,24 +114,11 @@ export interface AddFilterPaletteProps {
  *  felt placeholder). ``tone`` keys into ICON_TONES below to give
  *  each category a distinct accent (text → cyan, structure →
  *  emerald, etc.) instead of every row being the same lineage purple. */
-interface PaletteEntry {
-    id: string
-    icon: LucideIcon
-    tone?: IconTone
-    label: string
-    description?: string
+type PaletteEntry = FilterKind & {
     count?: number
     /** Sample values rendered as small chips below the description.
      *  Up to ~4 are surfaced; the rest fold into a "+N more" chip. */
     samples?: ReadonlyArray<string>
-    /** Row action:
-     *    - ``emit``: build a predicate and add it to the query.
-     *    - ``advanced``: open the Advanced drawer (groups, options).
-     *    - ``code``: open the JSON editor with a stub of ``codeKind``
-     *      appended to the current draft (withinHops / degree). */
-    action: 'emit' | 'advanced' | 'code'
-    build?: () => Predicate
-    codeKind?: CodeKind
 }
 
 
@@ -305,370 +210,23 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
         }
     }, [query])
 
-    const categories = useMemo<{
+    // The catalog (vocabulary/filterKinds) says what can be added and where;
+    // the palette adds this view's counts and samples to it. Entries whose
+    // hand-off isn't wired here drop out: ``code`` entries need
+    // ``onOpenCode``, ``advanced`` ones ``onOpenAdvanced`` (the Property
+    // Manager's rule editor has neither, so group authoring there goes
+    // through the AND/OR/NOT-group entries).
+    const availableCategories = useMemo<{
         label: string
         entries: PaletteEntry[]
-    }[]>(() => [
-        {
-            label: 'Text',
-            entries: [
-                {
-                    id: 'text-name',
-                    icon: Type, tone: 'text',
-                    label: 'Name contains…',
-                    description: 'Substring match against the display name',
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'text', value: '', target: 'name',
-                        match: 'substring', caseSensitive: false, boost: 1.0,
-                    }),
-                },
-                {
-                    id: 'text-qname',
-                    icon: Hash, tone: 'text',
-                    label: 'Qualified name contains…',
-                    description: 'Match against the fully-qualified name',
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'text', value: '', target: 'qualifiedName',
-                        match: 'substring', caseSensitive: false, boost: 1.0,
-                    }),
-                },
-                {
-                    id: 'text-desc',
-                    icon: AlignLeft, tone: 'text',
-                    label: 'Description contains…',
-                    description: 'Match against the entity description',
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'text', value: '', target: 'description',
-                        match: 'substring', caseSensitive: false, boost: 1.0,
-                    }),
-                },
-            ],
-        },
-        {
-            label: 'Structure',
-            entries: [
-                {
-                    id: 'entity-type',
-                    icon: Boxes, tone: 'structure',
-                    label: 'Entity type is…',
-                    description: 'Restrict to specific node types',
-                    count: counts.entityTypes,
-                    samples: samples?.entityTypes,
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'entityType', op: 'in', values: [],
-                    }),
-                },
-                {
-                    id: 'root-in-view',
-                    icon: Layers, tone: 'structure',
-                    label: 'Root in view is…',
-                    description:
-                        'Restrict to entities under one of the view\'s '
-                        + 'top-level containers (e.g. SILVER, GOLD, a '
-                        + 'top-level Layer). The simple, common case — '
-                        + 'pick from the same containers visible at the '
-                        + 'top of the canvas tree.',
-                    count: counts.layers,
-                    samples: samples?.layers,
-                    action: 'emit',
-                    // ``uiScope: 'roots'`` is the FE-only hint that
-                    // routes ConditionRow to the roots-only picker.
-                    // Stripped at the API boundary so the wire-format
-                    // predicate is plain ``descendantOf``.
-                    build: () => ({
-                        kind: 'descendantOf', urns: [],
-                        uiScope: 'roots',
-                    } as Predicate),
-                },
-                {
-                    id: 'inside-subtree',
-                    icon: GitBranch, tone: 'structure',
-                    label: 'Inside Subtree',
-                    description:
-                        'Restrict results to descendants of any node on '
-                        + 'the canvas — Layer, Object, Container, or '
-                        + 'deeper. Power-user isolation for searching '
-                        + 'a specific section of the graph that isn\'t '
-                        + 'a top-level root.',
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'descendantOf', urns: [],
-                        uiScope: 'any',
-                    } as Predicate),
-                },
-            ],
-        },
-        {
-            label: 'Tags & properties',
-            entries: [
-                {
-                    id: 'tag',
-                    icon: Tag, tone: 'governance',
-                    label: 'Tag is…',
-                    description: 'Has one or more of the chosen tags',
-                    count: counts.tags,
-                    samples: samples?.tags,
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'tag', op: 'hasAny', values: [],
-                    }),
-                },
-                {
-                    id: 'has-property',
-                    icon: KeyRound, tone: 'governance',
-                    label: 'Has property…',
-                    description: 'A given metadata key is set on the node',
-                    count: counts.propertyKeys,
-                    samples: samples?.propertyKeys,
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'hasProperty', key: '', negate: false,
-                    }),
-                },
-                {
-                    id: 'property',
-                    icon: Equal, tone: 'governance',
-                    label: 'Property compares to…',
-                    description: 'Filter by property = / ≠ / > / < value',
-                    count: counts.propertyKeys,
-                    samples: samples?.propertyKeys,
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'property', key: '', op: 'eq', value: '',
-                    }),
-                },
-            ],
-        },
-        {
-            label: 'Graph shape',
-            entries: [
-                {
-                    id: 'no-upstream',
-                    icon: Milestone, tone: 'lineage-missing',
-                    label: 'No upstream lineage',
-                    description: 'Source nodes — nothing feeds them',
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'isRoot', edgeClass: DEFAULT_EDGE_CLASS,
-                    }),
-                },
-                {
-                    id: 'no-downstream',
-                    icon: Flag, tone: 'lineage-missing',
-                    label: 'No downstream lineage',
-                    description: 'Terminal nodes — nothing reads from them',
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'isLeaf', edgeClass: DEFAULT_EDGE_CLASS,
-                    }),
-                },
-                {
-                    id: 'no-lineage',
-                    icon: Unplug, tone: 'lineage-missing',
-                    label: 'No lineage edges',
-                    description: 'Disconnected nodes — no upstream AND no downstream',
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'isOrphan', edgeClass: DEFAULT_EDGE_CLASS,
-                    }),
-                },
-                {
-                    id: 'has-upstream',
-                    icon: GitMerge, tone: 'lineage-present',
-                    label: 'Has upstream lineage',
-                    description: 'Nodes fed by at least one source',
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'hasIncoming', edgeClass: DEFAULT_EDGE_CLASS,
-                    }),
-                },
-                {
-                    id: 'has-downstream',
-                    icon: Share2, tone: 'lineage-present',
-                    label: 'Has downstream lineage',
-                    description: 'Nodes that feed at least one consumer',
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'hasOutgoing', edgeClass: DEFAULT_EDGE_CLASS,
-                    }),
-                },
-            ],
-        },
-        {
-            label: 'Relationships',
-            entries: [
-                {
-                    id: 'rel-parent',
-                    icon: ArrowUpToLine, tone: 'structure',
-                    label: 'Parent is…',
-                    description: 'A condition on the container one level up — "datasets whose parent is a domain"',
-                    action: 'emit',
-                    build: () => newRelation('parent', { kind: 'entityType', op: 'in', values: [] }),
-                },
-                {
-                    id: 'rel-root',
-                    icon: Network, tone: 'structure',
-                    label: 'Top-level container is…',
-                    description: 'A condition on the container at the top of its tree',
-                    action: 'emit',
-                    build: () => newRelation('root', {
-                        kind: 'text', value: '', target: 'name', match: 'exact',
-                        caseSensitive: false, boost: 1.0,
-                    }),
-                },
-                {
-                    id: 'rel-ancestor',
-                    icon: ListTree, tone: 'structure',
-                    label: 'Any container above it…',
-                    description: 'A condition on any ancestor — "inside anything with region = EMEA"',
-                    action: 'emit',
-                    build: () => newRelation('ancestor', { kind: 'property', key: '', op: 'eq', value: '' }),
-                },
-                {
-                    id: 'rel-child',
-                    icon: FolderTree, tone: 'structure',
-                    label: 'Contains…',
-                    description: 'A condition on what it contains — "tables with a PII column"; every one, none, or how many',
-                    action: 'emit',
-                    build: () => newRelation('child', { kind: 'entityType', op: 'in', values: [] }),
-                },
-                {
-                    id: 'rel-upstream',
-                    icon: GitMerge, tone: 'lineage-present',
-                    label: 'Fed by…',
-                    description: 'A condition on its sources, one hop or several, through edges you choose',
-                    action: 'emit',
-                    build: () => newRelation('upstream', { kind: 'entityType', op: 'in', values: [] }),
-                },
-                {
-                    id: 'rel-downstream',
-                    icon: Workflow, tone: 'lineage-present',
-                    label: 'Feeds…',
-                    description: 'A condition on its targets — "feeds a dashboard within 3 hops"',
-                    action: 'emit',
-                    build: () => newRelation('downstream', { kind: 'entityType', op: 'in', values: [] }),
-                },
-                {
-                    id: 'is-named',
-                    icon: Crosshair, tone: 'structure',
-                    label: 'Is a named entity…',
-                    description: 'By its path of names — "Sales / orders" — or a URN',
-                    action: 'emit',
-                    build: () => ({ kind: 'is', refs: [] }),
-                },
-                {
-                    id: 'inside-named',
-                    icon: FolderTree, tone: 'structure',
-                    label: 'Inside a container named…',
-                    description: 'Under "Country / United Kingdom" — names, not URNs, so it works in every environment',
-                    action: 'emit',
-                    build: () => ({ kind: 'descendantOf', urns: [], uiScope: 'name' } as Predicate),
-                },
-            ] as PaletteEntry[],
-        },
-        {
-            label: 'Advanced',
-            entries: [
-                {
-                    id: 'path',
-                    icon: Route, tone: 'group',
-                    label: 'Paths from A to B',
-                    description:
-                        'Every route from named entities — or any entity meeting a '
-                        + 'condition — to others, through edges you choose. '
-                        + 'The results become the routes.',
-                    action: 'emit',
-                    build: () => ({
-                        kind: 'path', sourceUrns: [], targetUrns: [], maxHops: 4,
-                        edgeClass: 'lineage', direction: 'outgoing',
-                    } as Predicate),
-                },
-                {
-                    id: 'within-hops',
-                    icon: Radar, tone: 'group',
-                    label: 'Within N hops of…',
-                    description:
-                        'N-hop neighbourhood of an anchor URN — Code only. '
-                        + 'Opens the JSON editor with a stub; fill in '
-                        + 'urns and hops.',
-                    action: 'code',
-                    codeKind: 'withinHops',
-                },
-                {
-                    id: 'degree',
-                    icon: GitBranchPlus, tone: 'group',
-                    label: 'Number of edges…',
-                    description:
-                        'Entities with more, fewer or exactly N edges — Code only. '
-                        + 'Opens the JSON editor with a stub; fill in '
-                        + 'direction, op and value.',
-                    action: 'code',
-                    codeKind: 'degree',
-                },
-                {
-                    id: 'all',
-                    icon: Asterisk, tone: 'group',
-                    label: 'Every entity',
-                    description: 'Every entity in the view — to count or export them all',
-                    action: 'emit',
-                    build: () => ({ kind: 'all' }),
-                },
-                {
-                    id: 'and-group',
-                    icon: Parentheses, tone: 'group',
-                    label: 'AND group',
-                    description: 'Group of conditions where every child must match',
-                    action: 'emit',
-                    build: () => ({ kind: 'group', op: 'and', children: [] }),
-                },
-                {
-                    id: 'or-group',
-                    icon: Parentheses, tone: 'group',
-                    label: 'OR group',
-                    description: 'Group of conditions where at least one child must match',
-                    action: 'emit',
-                    build: () => ({ kind: 'group', op: 'or', children: [] }),
-                },
-                {
-                    id: 'not-group',
-                    icon: Parentheses, tone: 'group',
-                    label: 'NOT group',
-                    description: 'Invert the result of the wrapped condition',
-                    action: 'emit',
-                    build: () => ({ kind: 'group', op: 'not', children: [] }),
-                },
-            ],
-        },
-    ], [counts])
-
-    // Drop entries whose handoff isn't wired in this context: ``code``
-    // entries (withinHops / degree) need ``onOpenCode``; ``advanced``
-    // entries need ``onOpenAdvanced``. In the Property Manager rule
-    // editor neither is supplied, so those entries are hidden and
-    // now-empty categories collapse — group authoring still works via
-    // the ``emit`` AND/OR/NOT-group entries.
-    const availableCategories = useMemo(() => {
-        return categories
-            .map((cat) => ({
-                ...cat,
-                entries: cat.entries.filter((e) => {
-                    // A relationship's condition is about the relative: the
-                    // scope of the search is the query's alone, and
-                    // relationships nest only so deep.
-                    if (relationDepth > 0 && SCOPE_ENTRIES.has(e.id)) return false
-                    if (rule && e.id === 'path') return false
-                    if (relationDepth >= RELATION_DEPTH_MAX && e.id.startsWith('rel-')) return false
-                    if (e.action === 'code') return !!onOpenCode
-                    if (e.action === 'advanced') return !!onOpenAdvanced
-                    return true
-                }),
-            }))
-            .filter((cat) => cat.entries.length > 0)
-    }, [categories, onOpenCode, onOpenAdvanced, relationDepth, rule])
+    }[]>(() => kindsAvailable({
+        relationDepth, rule, canCode: !!onOpenCode, canAdvanced: !!onOpenAdvanced,
+    }).map((cat) => ({
+        label: cat.label,
+        entries: cat.entries.map((e): PaletteEntry => (e.countKey
+            ? { ...e, count: counts[e.countKey], samples: samples?.[e.countKey] }
+            : e)),
+    })), [counts, samples, onOpenCode, onOpenAdvanced, relationDepth, rule])
 
     const filteredCategories = useMemo(() => {
         const q = query.trim().toLowerCase()

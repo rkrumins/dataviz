@@ -13,6 +13,8 @@
  */
 import type { EdgeClass, Predicate } from '@/types/search'
 
+import { filterKindById } from '../panel/vocabulary/filterKinds'
+
 
 export type LeafKind =
     | 'property'
@@ -52,7 +54,7 @@ export interface LeafKindMeta {
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
 
 
-export const LEAF_KINDS: readonly LeafKindMeta[] = [
+const OWN_WORDS: readonly LeafKindMeta[] = [
     // -- property facet --------------------------------------------------
     {
         kind: 'property',
@@ -269,6 +271,24 @@ export const LEAF_KINDS: readonly LeafKindMeta[] = [
         }),
     },
 ]
+
+
+/** The kinds the "+ Add filter" palette offers too, by its id: the in-group
+ *  picker calls them what the palette does, so one condition never goes by
+ *  two names ("Dead-end nodes" here, "No downstream lineage" there). */
+const PALETTE_ID: Partial<Record<LeafKind, string>> = {
+    property: 'property', hasProperty: 'has-property', tag: 'tag', entityType: 'entity-type',
+    isOrphan: 'no-lineage', isLeaf: 'no-downstream', isRoot: 'no-upstream',
+    hasIncoming: 'has-upstream', hasOutgoing: 'has-downstream', degree: 'degree',
+    is: 'is-named', path: 'path', withinHops: 'within-hops',
+}
+
+
+export const LEAF_KINDS: readonly LeafKindMeta[] = OWN_WORDS.map((meta) => {
+    const id = PALETTE_ID[meta.kind]
+    const palette = id ? filterKindById(id) : undefined
+    return palette ? { ...meta, label: palette.label } : meta
+})
 
 
 export function findLeafKind(kind: LeafKind): LeafKindMeta | undefined {
