@@ -29,7 +29,7 @@
  * (``AddFilterPalette``) is 871 lines with no keyboard navigation at all.
  */
 import { Command } from 'cmdk'
-import { CornerDownLeft, Search, SlidersHorizontal, X } from 'lucide-react'
+import { CornerDownLeft, Search, X } from 'lucide-react'
 import { type FC, useCallback, useMemo, useRef, useState } from 'react'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
@@ -53,9 +53,6 @@ export interface SearchOmniboxProps {
      *  predicate still wants a value, so the caller can focus the new
      *  row's editor. */
     onAdd: (predicate: Predicate, complete: boolean) => void
-    /** Open the full filter taxonomy (AddFilterPalette) for the long
-     *  tail this fast path deliberately doesn't carry. */
-    onBrowseAll?: () => void
     entityTypes: ReadonlyArray<string>
     tagValues: ReadonlyArray<string>
     propertyKeys: ReadonlyArray<string>
@@ -74,7 +71,7 @@ export interface SearchOmniboxProps {
 
 
 export const SearchOmnibox: FC<SearchOmniboxProps> = ({
-    onAdd, onBrowseAll, entityTypes, tagValues, propertyKeys,
+    onAdd, entityTypes, tagValues, propertyKeys,
     valueSamples, layers, variant = 'hero', initialQuery = '',
     discoveryLoading = false, disabled = false,
 }) => {
@@ -217,21 +214,6 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
                                     {facet.label}
                                 </button>
                             ))}
-                            {onBrowseAll && (
-                                <button
-                                    type="button"
-                                    onClick={onBrowseAll}
-                                    className={cn(
-                                        'inline-flex items-center gap-1 h-6 px-2 rounded-md ml-auto',
-                                        'text-[10.5px] font-medium',
-                                        'text-ink-muted hover:text-ink hover:bg-glass/70',
-                                        'transition-colors',
-                                    )}
-                                >
-                                    <SlidersHorizontal className="w-3 h-3" />
-                                    All filters
-                                </button>
-                            )}
                         </div>
                     )}
 

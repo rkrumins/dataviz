@@ -72,7 +72,7 @@ import { SEARCH_OPTIONS } from '../searchOptions'
 import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
 import { entityTypesInView, layerOptions, type LayerOption } from './layerOptions'
-import type { CodeKind } from './AddFilterPalette'
+import { AddFilterPalette, type CodeKind } from './AddFilterPalette'
 import { appendCondition, topLevelConditions } from './predicateComposition'
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
@@ -290,6 +290,32 @@ export const QueryCard: FC<QueryCardProps> = ({
         if (!complete) setFreshRowKind(predicate.kind ?? null)
     }, [commitDraft])
 
+    // The empty hero's way to every kind of filter: the palette the rows
+    // end with once something is composed, fed the way VisualQueryBuilder
+    // feeds it.
+    const paletteCounts = useMemo(() => ({
+        entityTypes: knownEntityTypes.length,
+        tags: discovery.tagValues.length,
+        propertyKeys: discovery.allKeys.length,
+        layers: discoveredLayers.length,
+    }), [knownEntityTypes, discovery.tagValues, discovery.allKeys, discoveredLayers])
+    const paletteSamples = useMemo(() => ({
+        entityTypes: knownEntityTypes.slice(0, 8),
+        tags: discovery.tagValues.slice(0, 8),
+        propertyKeys: discovery.allKeys.slice(0, 8),
+        layers: discoveredLayers.slice(0, 8).map((o) => o.label),
+    }), [knownEntityTypes, discovery.tagValues, discovery.allKeys, discoveredLayers])
+    const handleAddFromPalette = useCallback((predicate: Predicate) => {
+        handleAddFromOmnibox(predicate, !isRowIncomplete(predicate))
+    }, [handleAddFromOmnibox])
+    const handleAddManyFromPalette = useCallback((predicates: Predicate[]) => {
+        let next = useSearchStore.getState().draftPredicate
+        for (const p of predicates) next = appendCondition(next, p)
+        commitDraft(next)
+        const last = predicates[predicates.length - 1]
+        if (last && isRowIncomplete(last)) setFreshRowKind(last.kind ?? null)
+    }, [commitDraft])
+
     // Property-value samples, flattened across every discovered key so
     // the omnibox can match a bare token against values as well as
     // names. The corpus is bounded server-side (20 values per key, 64
@@ -337,7 +363,6 @@ export const QueryCard: FC<QueryCardProps> = ({
         <SearchOmnibox
             variant={isEmptyVisual ? 'hero' : 'inline'}
             onAdd={handleAddFromOmnibox}
-            onBrowseAll={onOpenAdvanced}
             entityTypes={presentEntityTypes}
             tagValues={discovery.tagValues}
             propertyKeys={discovery.allKeys}
@@ -440,6 +465,17 @@ export const QueryCard: FC<QueryCardProps> = ({
                     isEmptyVisual ? (
                         <PremiumEmptyHero
                             omnibox={omnibox}
+                            palette={
+                                <AddFilterPalette
+                                    counts={paletteCounts}
+                                    samples={paletteSamples}
+                                    onAdd={handleAddFromPalette}
+                                    onAddMany={handleAddManyFromPalette}
+                                    onOpenAdvanced={onOpenAdvanced}
+                                    onOpenCode={handleOpenCode}
+                                    disabled={isRunning}
+                                />
+                            }
                             onSeed={(p) => commitDraft(p)}
                             onUseCodeMode={() => setMode('code')}
                             discoveredEntityTypes={presentEntityTypes}
@@ -734,13 +770,15 @@ function ParseFeedback({
  * working query against THEIR data, not a placeholder.
  */
 function PremiumEmptyHero({
-    omnibox, onSeed, onUseCodeMode,
+    omnibox, palette, onSeed, onUseCodeMode,
     discoveredEntityTypes, discoveredTags, discoveredLayers,
     discoveryLoading, discoveryError, propertyKeyCount,
 }: {
     /** The SearchOmnibox, owned by QueryCard so the same instance can
      *  also render beneath the rows once the query is non-empty. */
     omnibox: ReactNode
+    /** Every kind of filter, by category — the "+ Add filter" palette. */
+    palette: ReactNode
     onSeed: (p: Predicate) => void
     onUseCodeMode: () => void
     discoveredEntityTypes: string[]
@@ -878,8 +916,9 @@ function PremiumEmptyHero({
                 shape at once. It replaced a name-only quick search,
                 which was why reaching a property filter used to mean
                 composing a text search and then deleting it. */}
-            <div className="relative px-5 pb-3">
+            <div className="relative px-5 pb-3 flex flex-col gap-2">
                 {omnibox}
+                <div>{palette}</div>
             </div>
 
             {/* Examples — the teaching surface. The omnibox above is
