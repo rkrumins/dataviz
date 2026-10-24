@@ -980,6 +980,10 @@ _FAILURE_TYPES = frozenset({
     "identity.api_key.rejected", "identity.api_key.misuse",
 })
 _DENIED_TYPES = frozenset({"user.access_denied"})
+#: A native query refused by the guard or the engine's read-only check —
+#: the attempts an administrator filters for — as opposed to one that
+#: failed to answer.
+_NATIVE_REFUSALS = frozenset({"native_query_refused", "native_query_write_refused"})
 
 #: Verbs that undo or destroy, for event types with no catalogue severity.
 _WARNING_VERBS = (
@@ -1159,11 +1163,17 @@ def fallback_projection(event_type: str) -> dict[str, Any]:
     }
 
 
-def _outcome(event_type: str) -> str:
+def _outcome(event_type: str, p: Optional[dict] = None) -> str:
     if event_type in _DENIED_TYPES:
         return "denied"
     if event_type in _FAILURE_TYPES:
         return "failure"
+    if event_type == "workspace.data_source.native_query_run" and p is not None:
+        ran = _detail(p, "outcome")
+        if ran in _NATIVE_REFUSALS:
+            return "denied"
+        if ran not in (None, "ok"):
+            return "failure"
     return "success"
 
 
@@ -1202,7 +1212,7 @@ def _project(
         "category": category_of(event_type),
         "audience": _audience(event_type, p, workspace_id),
         "severity": severity_of(event_type),
-        "outcome": _outcome(event_type),
+        "outcome": _outcome(event_type, p),
         "actor_id": actor_id,
         "actor_kind": actor_kind,
         "subject_id": _subject_user(event_type, p),
