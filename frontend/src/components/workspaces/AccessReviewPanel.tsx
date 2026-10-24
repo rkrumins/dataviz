@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 
 import { ProvenanceChip } from '@/components/access/ProvenanceChip'
+import { ServiceAccountBadge } from '@/components/serviceAccounts/parts'
 import { roleLabel } from '@/components/access/accessRequestCopy'
 import { Segmented } from '@/components/ui/Segmented'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -27,6 +28,7 @@ import {
     type AccessReviewDecision,
     type AccessReviewItem,
 } from '@/services/accessReviewsService'
+import { isServiceAccountId } from '@/lib/serviceAccounts'
 import { timeAgo } from '@/lib/timeAgo'
 import { useNow } from '@/lib/useNow'
 import { cn } from '@/lib/utils'
@@ -271,6 +273,9 @@ function ReviewItem({ item, workspaceId, reviewId, onDecided }: {
         onError: err => notify('error', (err as Error).message),
     })
     const removed = item.decision === 'remove'
+    // An integration's account: nobody signs in as it, and its managers are
+    // who hear of a removal.
+    const account = isServiceAccountId(item.subject.id)
 
     return (
         <li className={cn('px-4 py-3 flex flex-wrap items-center gap-3', removed && 'opacity-60')}>
@@ -278,6 +283,7 @@ function ReviewItem({ item, workspaceId, reviewId, onDecided }: {
                 <div className="flex flex-wrap items-center gap-2">
                     {item.subject.type === 'group' && <Users2 className="w-3.5 h-3.5 text-violet-500" aria-label="Team" />}
                     <p className={cn('text-sm font-semibold text-ink truncate', removed && 'line-through')}>{name}</p>
+                    {account && <ServiceAccountBadge />}
                     <span className="text-xs text-ink-muted">{roleLabel(item.role)}</span>
                     {item.origin && (
                         <ProvenanceChip provenance={{
@@ -290,9 +296,10 @@ function ReviewItem({ item, workspaceId, reviewId, onDecided }: {
                     {item.subject.secondary && <>{item.subject.secondary} · </>}
                     {item.grantedAt && <>granted {day(item.grantedAt)}</>}
                     {item.expiresAt && <> · ends {day(item.expiresAt)}</>}
-                    {item.subject.type === 'user' && (
+                    {item.subject.type === 'user' && !account && (
                         <> · {item.lastLoginAt ? `last signed in ${timeAgo(item.lastLoginAt)}` : 'never signed in'}</>
                     )}
+                    {account && <> · an integration acts as it; nobody signs in as it</>}
                 </p>
             </div>
             {removed ? (
@@ -301,7 +308,9 @@ function ReviewItem({ item, workspaceId, reviewId, onDecided }: {
                 </span>
             ) : confirming ? (
                 <div className="flex items-center gap-1.5">
-                    <span className="text-xs text-ink-secondary">Remove now? {item.subject.type === 'user' ? 'They’ll hear why.' : 'Its members lose it.'}</span>
+                    <span className="text-xs text-ink-secondary">
+                        Remove now? {account ? 'Its managers will hear why.' : item.subject.type === 'user' ? 'They’ll hear why.' : 'Its members lose it.'}
+                    </span>
                     <button
                         type="button"
                         onClick={() => decide.mutate('remove')}

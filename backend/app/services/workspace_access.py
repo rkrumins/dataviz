@@ -43,6 +43,7 @@ from backend.app.db.models import (
     RoleBindingORM,
     RoleORM,
     RolePermissionORM,
+    ServiceAccountManagerORM,
     UserORM,
     WorkspaceORM,
 )
@@ -56,6 +57,7 @@ from backend.app.db.repositories import (
 from backend.app.db.repositories.binding_repo import _is_expired
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.common.roles import role_label  # noqa: F401 — read as workspace_access.role_label
+from backend.common.service_accounts import is_service_account
 
 logger = logging.getLogger(__name__)
 
@@ -174,7 +176,9 @@ async def addable_groups(
     """App-managed teams bound in the workspace that the caller may add
     someone to: not protected, not filled by the identity provider, and
     every binding they carry — in any workspace — one the caller could
-    make there. A group bound globally never qualifies."""
+    make there. A group bound globally never qualifies, and nor does one that
+    manages a service account: joining it would let someone act as the
+    account, wherever the account reaches."""
     bound = [
         b for b in await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id)
         if b.subject_type == "group"
@@ -190,6 +194,11 @@ async def addable_groups(
             GroupORM.is_protected.is_(False),
         )
     )).scalars().all()
+    managing = set((await session.execute(
+        select(ServiceAccountManagerORM.group_id)
+        .where(ServiceAccountManagerORM.group_id.in_([g.id for g in groups]))
+    )).scalars())
+    groups = [g for g in groups if g.id not in managing]
     if not groups:
         return []
     carried = (await session.execute(
@@ -260,7 +269,7 @@ async def grant_role(
 async def audience(session: AsyncSession, ws_ids: Iterable[str]) -> dict[str, tuple[set[str], set[str]]]:
     """``{workspace: (people, approvers)}``: who holds a current grant in
     each workspace — directly or through a group — and which of them may
-    let people in."""
+    let people in. A service account's grant counts as neither."""
     ids = list(dict.fromkeys(ws_ids))
     out: dict[str, tuple[set[str], set[str]]] = {ws: (set(), set()) for ws in ids}
     if not ids:
@@ -286,6 +295,8 @@ async def audience(session: AsyncSession, ws_ids: Iterable[str]) -> dict[str, tu
         for gid, uid in rows:
             members.setdefault(gid, set()).add(uid)
     for b in bindings:
+        if is_service_account(b.subject_id):
+            continue
         people, approvers = out[b.scope_id]
         users = {b.subject_id} if b.subject_type == "user" else members.get(b.subject_id, set())
         people |= users

@@ -41,9 +41,11 @@ export const STATUS_LABEL: Record<ApiKeyStatus, string> = {
     ip_not_allowed: 'Used from an address it does not allow',
 }
 
-/** A key ended by its own rotation was replaced, not revoked. */
-export function statusLabel(key: Pick<ApiKey, 'status' | 'revokedReason'>): string {
+/** A key ended by its own rotation was replaced, not revoked; a service
+ *  account's key is paused for want of a manager, not of a sign-in. */
+export function statusLabel(key: Pick<ApiKey, 'status' | 'revokedReason'> & { kind?: string }): string {
     if (key.status === 'revoked' && key.revokedReason === 'rotated') return 'Replaced'
+    if (key.status === 'paused' && key.kind === 'service') return 'Paused — needs a manager'
     return STATUS_LABEL[key.status] ?? key.status
 }
 
@@ -53,6 +55,7 @@ export function describeRevocation(key: Pick<ApiKey, 'revokedReason'>, viewer: '
         case 'rotated': return 'Replaced by a new key'
         case 'owner': return viewer === 'owner' ? 'You revoked it' : 'Revoked by its owner'
         case 'admin': return 'Revoked by an administrator'
+        case 'manager': return 'Revoked by a manager of its service account'
         case 'self': return 'Revoked with the key itself'
         default: return 'Revoked'
     }

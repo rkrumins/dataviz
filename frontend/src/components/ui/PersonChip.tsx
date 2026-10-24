@@ -13,13 +13,17 @@
  * - An id that names nobody stays the id, verbatim — a system actor, a
  *   hard-deleted row. "Unknown user" would claim a fact nobody has.
  * - A deleted account is still named, and marked.
+ * - A service account is shown as one: a bot for a face, no address, and its
+ *   name opens it under Service accounts rather than User Management.
  *
  * Names come from the record when it carries them (`person`: an activity
  * event names its people), and otherwise from one batched directory lookup
  * per page (`usePerson`). A page of people without pictures asks for none.
  */
 import type { ReactNode } from 'react'
+import { Bot } from 'lucide-react'
 
+import { isServiceAccountId, serviceAccountHref } from '@/lib/serviceAccounts'
 import { cn } from '@/lib/utils'
 import { usePersonLookup } from '@/hooks/usePerson'
 
@@ -51,6 +55,9 @@ const OUTER = 'inline-flex min-w-0 max-w-full align-middle'
 /** Where a person is managed. Kept beside the chip so every surface links the same way. */
 export const personHref = (id: string) => `/admin/users?user=${encodeURIComponent(id)}`
 
+/** Where whoever an id names is looked after: a service account has its own page. */
+export const accountHref = (id: string) => isServiceAccountId(id) ? serviceAccountHref(id) : personHref(id)
+
 export function PersonChip({ id, person, size = 'sm', showEmail = false, caption, link = true, className }: {
     id: string
     /** The person as the record names them; omitted, they are looked up. */
@@ -79,8 +86,10 @@ export function PersonChip({ id, person, size = 'sm', showEmail = false, caption
         )
     }
 
+    const account = isServiceAccountId(id)
     const name = who?.name || who?.displayName || null
-    const email = who?.email || null
+    // A service account's address is a placeholder nobody can write to.
+    const email = account ? null : who?.email || null
     const resolved = !!(name || email)
     const label = name || email || id
     const deleted = !!who?.deleted
@@ -110,6 +119,14 @@ export function PersonChip({ id, person, size = 'sm', showEmail = false, caption
         )
     }
 
+    const face = (className: string) => account ? (
+        <span aria-hidden className={cn('grid shrink-0 place-items-center rounded-full bg-sky-500/10 text-sky-600 dark:text-sky-400', className)}>
+            <Bot className="h-3/5 w-3/5" />
+        </span>
+    ) : (
+        <UserAvatar userId={id} name={label} avatarId={who?.avatarId} hasImage={who?.hasImage} className={className} />
+    )
+
     const nameNode = (
         <span className={cn('block truncate font-semibold text-ink', s.text, link && 'group-hover/person:text-accent-lineage group-hover/person:underline')}>
             {label}
@@ -120,12 +137,10 @@ export function PersonChip({ id, person, size = 'sm', showEmail = false, caption
         <HoverTip
             label={
                 <span className="flex items-center gap-3">
-                    <UserAvatar
-                        userId={id} name={label} avatarId={who?.avatarId} hasImage={who?.hasImage}
-                        className={cn('h-10 w-10 text-sm font-bold', deleted && 'grayscale')}
-                    />
+                    {face(cn('h-10 w-10 text-sm font-bold', deleted && 'grayscale'))}
                     <span className="min-w-0">
                         <span className="block truncate font-semibold text-ink">{label}</span>
+                        {account && <span className="block truncate text-[11px] text-ink-secondary">Service account</span>}
                         {email && email !== label && <span className="block truncate text-[11px] text-ink-secondary">{email}</span>}
                         <span className="block truncate font-mono text-[10px] text-ink-muted">{id}</span>
                     </span>
@@ -133,17 +148,14 @@ export function PersonChip({ id, person, size = 'sm', showEmail = false, caption
             }
             detail={deleted
                 ? 'This account has been deleted. It is still named here: the record is of what happened.'
-                : link ? 'Opens their account in User Management.' : undefined}
+                : link ? (account ? 'Opens it in Service accounts.' : 'Opens their account in User Management.') : undefined}
             className={cn(OUTER, className)}
         >
             <span className={cn('group/person inline-flex min-w-0 max-w-full items-center', s.gap)}>
-                <UserAvatar
-                    userId={id} name={label} avatarId={who?.avatarId} hasImage={who?.hasImage}
-                    className={cn(s.avatar, 'font-bold ring-1 ring-black/[0.04] dark:ring-white/[0.08]', deleted && 'grayscale opacity-70')}
-                />
+                {face(cn(s.avatar, 'font-bold ring-1 ring-black/[0.04] dark:ring-white/[0.08]', deleted && 'grayscale opacity-70'))}
                 <span className="min-w-0 leading-tight">
                     {link ? (
-                        <a href={personHref(id)} onClick={(e) => e.stopPropagation()} className="outline-none focus-visible:underline">
+                        <a href={accountHref(id)} onClick={(e) => e.stopPropagation()} className="outline-none focus-visible:underline">
                             {nameNode}
                         </a>
                     ) : nameNode}

@@ -34,11 +34,12 @@ so sees them all.
 | **Announcements** | Show a banner to everyone | Super Admin | [Below](#announcements) |
 | **User Management** | Invite, add, approve and look after accounts | Super Admin | [Users & Access](/guide/users-access) |
 | **Groups** | Bundle people to grant roles in bulk | `system:groups:manage` — Org Admins and Super Admins; only Super Admins change the members of a group that grants Super Admin | [Users & Access](/guide/users-access#groups) |
+| **Service accounts** | Create the accounts integrations act as, and choose who manages them | `system:service-accounts:manage` — Org Admins and Super Admins | [Service Accounts](/guide/service-accounts) |
 | **Permissions** | See and change what each role grants, and who has access where | Super Admin | [Users & Access](/guide/users-access#permissions) |
 | **SSO** | Connect and run single sign-on | Super Admin | [Single Sign-On](/guide/sso-setup) |
 
 > **Note:** An **Org Auditor** sees **Activity** and **Telemetry**, and lands
-> on **Activity**. An **Org Admin** sees only **Groups**.
+> on **Activity**. An **Org Admin** sees **Groups** and **Service accounts**.
 
 ---
 

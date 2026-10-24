@@ -66,6 +66,7 @@ from backend.app.db.models import (
     WorkspaceORM,
     view_is_live,
 )
+from backend.common.service_accounts import is_person, is_service_account
 from backend.app.db.repositories import stats_repo
 from backend.app.db.repositories.access_request_repo import OPEN_STATUSES
 from backend.app.db.repositories.view_repo import resolve_user_ids
@@ -826,7 +827,8 @@ async def _actors_by_day(
     workspace_id: Optional[str] = None,
 ) -> dict[str, set[str]]:
     """Distinct active users per day, unioned across the two signals that carry
-    a real actor column.
+    a real actor column. People only: a service account's key at work is not
+    someone using the platform.
 
     Deliberately not sign-ins. ``auth_audit_log`` is filled by the outbox relay,
     which only runs on the scheduler-owner role, so on a web-only replica it is
@@ -849,7 +851,9 @@ async def _actors_by_day(
         )
         for day, actors in from_events.items():
             merged.setdefault(day, set()).update(actors)
-    return merged
+    return {
+        day: {a for a in actors if not is_service_account(a)} for day, actors in merged.items()
+    }
 
 
 def _flatten(actors_by_day: dict[str, set[str]], days: Optional[Iterable[str]] = None) -> set[str]:
@@ -876,7 +880,7 @@ async def platform_summary(
     now = now or datetime.now(timezone.utc)
     w = build_window(days, start=start, end=end, now=now)
 
-    live_user = [UserORM.deleted_at.is_(None)]
+    live_user = [UserORM.deleted_at.is_(None), is_person(UserORM.id)]
     live_ws = [WorkspaceORM.deleted_at.is_(None)]
     live_view = [view_is_live()]
     live_ds = [WorkspaceDataSourceORM.deleted_at.is_(None)]
@@ -2059,6 +2063,7 @@ async def _engagement(
         uid for (uid,) in (await session.execute(
             select(UserORM.id).where(
                 UserORM.created_at >= w.start, UserORM.deleted_at.is_(None),
+                is_person(UserORM.id),
             )
         )).all()
     }
@@ -2191,7 +2196,10 @@ async def _retention_cohorts(
 
     signups = (await session.execute(
         select(UserORM.id, UserORM.created_at)
-        .where(UserORM.created_at >= w.start, UserORM.deleted_at.is_(None))
+        .where(
+            UserORM.created_at >= w.start, UserORM.deleted_at.is_(None),
+            is_person(UserORM.id),
+        )
     )).all()
     if not signups:
         return []
@@ -2245,7 +2253,7 @@ async def _retention_cohorts(
 
 async def _breakdowns(session: AsyncSession, w: Window, *, opens: _OpenFold) -> dict:
     """Categorical splits — who the users are, and what the content looks like."""
-    live_user = [UserORM.deleted_at.is_(None)]
+    live_user = [UserORM.deleted_at.is_(None), is_person(UserORM.id)]
     live_view = [view_is_live()]
 
     by_visibility = await _count_group(session, ViewORM.visibility, where=live_view)
@@ -2321,6 +2329,12 @@ async def _leaderboards(session: AsyncSession, w: Window, *, opens: _OpenFold) -
         )
         .group_by(ViewORM.created_by)
     )).all()))
+
+    # People only: an integration acting through a service account's key is
+    # not one of the users these rank.
+    for counter in (activity_per_actor, opens_per_actor, creations_per_actor):
+        for uid in [u for u in counter if is_service_account(u)]:
+            del counter[uid]
 
     combined: Counter = Counter()
     combined.update(activity_per_actor)
@@ -2599,7 +2613,8 @@ async def workspace_rows(
 async def _member_counts(
     session: AsyncSession, *, now: datetime,
 ) -> Counter:
-    """Distinct workspace members, counting through groups and honouring expiry.
+    """Distinct workspace members — people, not service accounts — counting
+    through groups and honouring expiry.
 
     ``role_bindings.expires_at`` is never enforced in SQL — the binding repo
     filters it in Python after fetching — so an expired grant would otherwise be
@@ -2629,7 +2644,7 @@ async def _member_counts(
             continue
         if subject_type == "group":
             per_ws[scope_id].update(group_members.get(subject_id, ()))
-        elif subject_id:
+        elif subject_id and not is_service_account(subject_id):
             per_ws[scope_id].add(subject_id)
     return Counter({ws_id: len(users) for ws_id, users in per_ws.items()})
 
@@ -2643,6 +2658,7 @@ async def _actors_by_workspace(
             ViewActivityLogORM.created_at >= since,
             ViewActivityLogORM.workspace_id.is_not(None),
             ViewActivityLogORM.actor.is_not(None),
+            is_person(ViewActivityLogORM.actor),
         )
         .group_by(ViewActivityLogORM.workspace_id, ViewActivityLogORM.actor)
     )).all()
@@ -2774,6 +2790,7 @@ async def workspace_detail(
         .where(
             ViewActivityLogORM.created_at >= w.start,
             ViewActivityLogORM.actor.is_not(None),
+            is_person(ViewActivityLogORM.actor),
             *ws_activity,
         )
         .group_by(ViewActivityLogORM.actor)

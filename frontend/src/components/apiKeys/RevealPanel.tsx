@@ -17,8 +17,9 @@ import { Check, CheckCircle2, Copy, Eye, EyeOff, ShieldCheck } from 'lucide-reac
 import { HoverTip } from '@/components/ui/HoverTip'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { cn } from '@/lib/utils'
-import { apiKeyService, type CreatedApiKey } from '@/services/apiKeyService'
+import type { CreatedApiKey } from '@/services/apiKeyService'
 import { clientName, describePermissions, describeResources, expiryCountdown } from './apiKeyFormat'
+import { useKeyClient } from './keyClient'
 import { SNIPPETS, snippet } from './snippets'
 
 const POLL_MS = 3000
@@ -171,6 +172,7 @@ function FirstCallStatus({ call }: { call: FirstCall }) {
 
 /** Watches the key's record until something uses it, for two minutes at most. */
 function useFirstCall(keyId: string): FirstCall {
+    const client = useKeyClient()
     const [call, setCall] = useState<FirstCall>({ state: 'waiting' })
     useEffect(() => {
         const started = Date.now()
@@ -181,7 +183,7 @@ function useFirstCall(keyId: string): FirstCall {
             else timer = setTimeout(poll, POLL_MS)
         }
         const poll = () => {
-            apiKeyService.lastUse(keyId, abort.signal).then((use) => {
+            client.lastUse(keyId, abort.signal).then((use) => {
                 if (abort.signal.aborted) return
                 if (use.lastUsedAt) {
                     setCall({ state: 'seen', ip: use.lastUsedIp, client: clientName(use.lastUsedUserAgent) })
@@ -197,7 +199,7 @@ function useFirstCall(keyId: string): FirstCall {
             abort.abort()
             clearTimeout(timer)
         }
-    }, [keyId])
+    }, [keyId, client])
     return call
 }
 

@@ -4,8 +4,9 @@
  * Sentences first, because a sentence is what a person can actually check
  * ("only answer calls from 203.0.113.0/24"), each with a way back to the step
  * that set it. Then how far a leaked copy would reach, with the reasons;
- * then the server's own preview of what the key would reach today — your
- * access as it is now, narrowed by the key — and last, confirming it's you.
+ * then the server's own preview of what the key would reach today — its
+ * owner's access as it is now, yours or a service account's, narrowed by the
+ * key — and last, confirming it's you.
  */
 import {
     CalendarClock, ClipboardCheck, Network, Pencil, Shield, ShieldAlert, ShieldCheck, Target,
@@ -21,6 +22,7 @@ import { AccessMatrix } from '../../AccessMatrix'
 import { StepUpField } from '../../StepUpField'
 import { expiryFields, formatDay, type ExpiryChoice } from '../../apiKeyFormat'
 import type { ApiKeyDraft, WizardStep } from '../../apiKeyDraft'
+import { useOwnerWords, type OwnerWords } from '../../keyClient'
 import type { ApiKeyWizardState } from '../useApiKeyWizard'
 
 /** "a and b", "a, b, and c". */
@@ -29,8 +31,8 @@ function listed(items: string[]): string {
     return `${items.slice(0, -1).join(', ')}, and ${items[items.length - 1]}`
 }
 
-function does(p: ApiKeyPermissions): string {
-    return `Act as you to ${listed([
+function does(p: ApiKeyPermissions, owner: OwnerWords): string {
+    return `Act as ${owner.object} to ${listed([
         p.views === 'write' ? 'read and change views' : p.views === 'read' ? 'read views' : null,
         p.publish ? 'publish them to everyone' : null,
         p.data === 'write' ? 'read and change data' : p.data === 'read' ? 'read data' : null,
@@ -42,8 +44,12 @@ function names(items: { name: string }[]): string {
     return items.length > 3 ? `${shown.join(', ')} and ${items.length - 3} more` : shown.join(', ')
 }
 
-function reaches(d: ApiKeyDraft, workspaces: ApiKeyOptions['workspaces']): string {
-    if (d.resourceMode === 'all') return 'On everything you can access, including what you gain later'
+function reaches(d: ApiKeyDraft, workspaces: ApiKeyOptions['workspaces'], owner: OwnerWords): string {
+    if (d.resourceMode === 'all') {
+        return owner.you
+            ? 'On everything you can access, including what you gain later'
+            : `On everything ${owner.object} can access, including what it gains later`
+    }
     if (d.resourceMode === 'workspaces') {
         const picked = workspaces.filter((w) => d.workspaces.includes(w.id))
         return `In ${picked.length === 1 ? 'the workspace' : `${picked.length} workspaces:`} ${names(picked)} — including what is added to ${picked.length === 1 ? 'it' : 'them'}`
@@ -79,6 +85,7 @@ export function ReviewStep({ w, options, onEdit }: {
     onEdit: (step: WizardStep) => void
 }) {
     const d = w.draft
+    const owner = useOwnerWords()
     const band = BANDS[w.exposure.band]
     const BandIcon = band.icon
     const preview = w.preview
@@ -96,8 +103,8 @@ export function ReviewStep({ w, options, onEdit }: {
                     <p className="px-4 pt-3.5 pb-1 text-xs font-semibold text-indigo-600 dark:text-indigo-400">
                         “{d.name.trim()}” will
                     </p>
-                    <Sentence icon={Shield} text={does(d.permissions)} onEdit={() => onEdit('permissions')} tone={d.permissions.publish || d.permissions.data === 'write' ? 'warn' : undefined} />
-                    <Sentence icon={Target} text={reaches(d, options.workspaces)} onEdit={() => onEdit('reach')} tone={d.resourceMode === 'all' ? 'warn' : undefined} />
+                    <Sentence icon={Shield} text={does(d.permissions, owner)} onEdit={() => onEdit('permissions')} tone={d.permissions.publish || d.permissions.data === 'write' ? 'warn' : undefined} />
+                    <Sentence icon={Target} text={reaches(d, options.workspaces, owner)} onEdit={() => onEdit('reach')} tone={d.resourceMode === 'all' ? 'warn' : undefined} />
                     <Sentence icon={CalendarClock} text={until(d)} onEdit={() => onEdit('safety')} tone={d.expiry === 'never' ? 'warn' : undefined} />
                     <Sentence
                         icon={Network}
@@ -157,7 +164,7 @@ export function ReviewStep({ w, options, onEdit }: {
                     <p className="text-sm font-semibold text-ink">What it would reach today</p>
                     {preview?.status === 'ready' && (
                         <p className="text-[11px] text-ink-muted tabular-nums">
-                            Your key {preview.data.activeKeys + 1} of {preview.data.maxActiveKeys}
+                            {owner.you ? 'Your' : owner.possessive} key {preview.data.activeKeys + 1} of {preview.data.maxActiveKeys}
                         </p>
                     )}
                 </div>

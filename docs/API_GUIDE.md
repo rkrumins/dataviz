@@ -29,7 +29,8 @@ most often. Each recipe is a short procedure with the real request.
 
 ## Sign in from a script
 
-A script acts as a person, and every change it makes is recorded under that person's name.
+A script acts as a person, and every change it makes is recorded under that person's name — or,
+with a key a [service account](/guide/service-accounts)'s managers made, as that account, under its name.
 It gets in one of two ways:
 
 | | API key | Password |
@@ -815,6 +816,8 @@ in [Single Sign-On](/guide/sso-setup).
 | Every write answers `403` `csrf_failed` | The `X-CSRF-Token` header is missing, or holds an old value after a renewal. With an API key: the request carries an `Origin` or `Referer` from another site | Read `nx_csrf` again before every write, as the helpers above do. With a key, send neither header |
 | `401` `api_key_expired`, `api_key_revoked` or `invalid_api_key` | The key is past its expiry, revoked, or not copied in full | Find it on **Account → API keys** by its first characters: rotate an expired key, create a new one for a revoked key |
 | `401` `owner_reauth_required` | The key is paused: its owner hasn't signed in through the identity provider for a while | Sign in to the app once; the key resumes |
+| `401` `api_key_unmanaged` | A service account's key is paused: nobody has managed the account for longer than the grace period | Ask an administrator to appoint a manager; the key resumes at once |
+| `401` `api_key_owner_inactive` | The person the key acts as is suspended, or the service account is disabled | Ask an administrator to reactivate them, or to enable the account |
 | `403` `api_key_not_allowed` | The route can't be called with a key — administration, sharing, settings, importing a view file | Sign in with a password for it |
 | `403` `api_key_out_of_scope` | The request reaches past what the key was limited to — or a key limited to data sources didn't name one | Pass `?dataSourceId=`, or use a key that reaches it |
 | `403` `api_key_read_only` | A read-only key asked to change something | Use a key with read & write |

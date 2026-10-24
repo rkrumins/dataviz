@@ -358,6 +358,14 @@ export const guideEntries: GuideEntry[] = [
     importFn: () => import('@docs/guide/USERS_ACCESS.md?raw'),
   },
   {
+    slug: 'service-accounts',
+    section: 'admin',
+    persona: 'admin',
+    title: 'Service Accounts',
+    description: 'Accounts integrations run as: their managers and teams, their keys, and what happens when someone leaves',
+    importFn: () => import('@docs/guide/SERVICE_ACCOUNTS.md?raw'),
+  },
+  {
     slug: 'sso-setup',
     section: 'admin',
     persona: 'admin',

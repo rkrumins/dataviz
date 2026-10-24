@@ -134,8 +134,9 @@ export function retentionPhrase(days: number): string {
     return `${years} year${years === 1 ? '' : 's'}`
 }
 
-/** A user id, as a drill-in writes it — not text to match against names. */
-export const isPersonId = (value: string) => /^usr_[A-Za-z0-9_-]{2,}$/.test(value)
+/** A user id — a person's, or a service account's — as a drill-in writes it;
+ *  not text to match against names. */
+export const isPersonId = (value: string) => /^(usr|svc)_[A-Za-z0-9_-]{2,}$/.test(value)
 
 const addDays = (day: string, n: number) =>
     new Date(Date.parse(`${day.slice(0, 10)}T00:00:00Z`) + n * 86_400_000).toISOString().slice(0, 10)

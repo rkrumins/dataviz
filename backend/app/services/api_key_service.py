@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ApiKeyORM
 from backend.app.db.repositories import api_key_repo, notification_repo, outbox_event_repo
-from backend.app.services import permission_service
+from backend.app.services import permission_service, service_account_standing
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.revocation_service import get_revocation_service
 
@@ -129,14 +129,14 @@ _SAMPLE_SECONDS = 3600
 _MISUSE_COPY = {
     "revoked": (
         "A revoked API key was used",
-        "Your key “{name}” ({prefix}…) was revoked, but someone presented it "
-        "from {ip}. Nothing was allowed. If that wasn't you, the key has "
-        "leaked — check where it was stored.",
+        "{key} was revoked, but someone presented it from {ip}. Nothing was "
+        "allowed. If that wasn't you, the key has leaked — check where it was "
+        "stored.",
     ),
     "ip_not_allowed": (
         "An API key was used from an address it doesn't allow",
-        "Your key “{name}” ({prefix}…) was presented from {ip}, outside the "
-        "networks it is limited to. The request was refused.",
+        "{key} was presented from {ip}, outside the networks it is limited "
+        "to. The request was refused.",
     ),
 }
 
@@ -164,7 +164,9 @@ async def record_rejection(
     user_agent: Optional[str],
 ) -> None:
     """The rejection hook: one audit event per key, reason and hour, and for
-    misuse an inbox note to the owner. Written in the caller's transaction."""
+    misuse an inbox note to the owner — for a service account's key, to those
+    who answer for it (``key_audience``). Written in the caller's
+    transaction."""
     if not await _first_this_hour(key.id, reason):
         return
     misuse = reason in MISUSE_REASONS
@@ -186,15 +188,16 @@ async def record_rejection(
     )
     if misuse:
         title, body = _MISUSE_COPY[reason]
+        audience = await service_account_standing.key_audience(
+            session, key.user_id, maker=key.created_by,
+        )
         await notification_repo.notify(
             session,
-            user_ids=[key.user_id],
+            user_ids=audience.user_ids,
             kind="api_key_misuse",
             title=title,
-            body=body.format(
-                name=key.name, prefix=key.token_prefix, ip=client_ip or "an unknown address",
-            ),
-            link="/me/api-keys",
+            body=body.format(key=audience.key(key), ip=client_ip or "an unknown address"),
+            link=audience.link,
             resource_type="api_key",
             resource_id=key.id,
             dedupe_unread=True,

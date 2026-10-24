@@ -14,6 +14,7 @@ import {
 import { cn } from '@/lib/utils'
 import type { ApiKeyOptions } from '@/services/apiKeyService'
 import { describePermissions, expiryOptions, fitExpiry } from '../../apiKeyFormat'
+import { useOwnerWords } from '../../keyClient'
 import { PRESETS, presetAvailability, presetById, type PresetId } from '../../presets'
 import type { ApiKeyWizardState } from '../useApiKeyWizard'
 
@@ -26,6 +27,7 @@ const LOOK: Record<PresetId, { icon: typeof BarChart3; tone: string }> = {
 
 export function PurposeStep({ w, options }: { w: ApiKeyWizardState; options: ApiKeyOptions }) {
     const chosen = presetById(w.draft.preset)
+    const owner = useOwnerWords()
     const max = options.policy.maxLifetimeDays
     return (
         <StepColumn wide>
@@ -41,7 +43,7 @@ export function PurposeStep({ w, options }: { w: ApiKeyWizardState; options: Api
                     {PRESETS.map((p) => {
                         const { icon: Icon, tone } = LOOK[p.id]
                         const selected = w.draft.preset === p.id
-                        const availability = presetAvailability(p, options.workspaces)
+                        const availability = presetAvailability(p, options.workspaces, owner)
                         const lasts = expiryOptions(max).find((o) => o.value === fitExpiry(p.expiry, max))?.label
                         return (
                             <button

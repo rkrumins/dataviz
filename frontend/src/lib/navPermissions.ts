@@ -72,7 +72,7 @@ export const DEFAULT_SIDEBAR_PERMISSIONS: Record<NavigationTab, NavPermissionSpe
     // Every permission that opens an admin section must open the parent too —
     // `/admin` is guarded before any section is. `system:audit:read` is how the
     // org_auditor role reaches Activity (and Telemetry).
-    admin:      { kind: 'anyPerm', perms: ['system:admin', 'system:groups:manage', 'system:audit:read'] },
+    admin:      { kind: 'anyPerm', perms: ['system:admin', 'system:groups:manage', 'system:audit:read', 'system:service-accounts:manage'] },
 }
 
 /**
@@ -98,6 +98,7 @@ export const DEFAULT_ADMIN_SECTION_PERMISSIONS: Record<string, NavPermissionSpec
     sso:           { kind: 'perm', perm: 'system:admin' },
     audit:         { kind: 'perm', perm: 'system:audit:read' },
     'api-keys':    { kind: 'perm', perm: 'system:audit:read' },
+    'service-accounts': { kind: 'perm', perm: 'system:service-accounts:manage' },
 }
 
 

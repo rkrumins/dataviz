@@ -178,6 +178,8 @@ The sidebar groups the guide into six sections, in this order.
 - [Workspace Admin](/guide/workspace-admin) — data sources, views and members
   in a workspace.
 - [Users & Access](/guide/users-access) — approvals, roles, groups and grants.
+- [Service Accounts](/guide/service-accounts) — accounts integrations act as,
+  and who answers for them.
 - [Single Sign-On](/guide/sso-setup) — connect an identity provider.
 - [Running Single Sign-On](/guide/sso-operations) — access rules, linking, and
   why a sign-in failed.

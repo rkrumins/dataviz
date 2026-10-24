@@ -10,14 +10,16 @@ import { Info, Pencil, ShieldAlert } from 'lucide-react'
 
 import { BigInput, BigTextarea, FieldLabel, Hint } from '@/components/admin/InviteWizard/ui'
 import { Button } from '@/components/ui/Button'
-import { ApiKeyError, apiKeyService, type ApiKey, type UpdateApiKeyBody } from '@/services/apiKeyService'
+import { ApiKeyError, type ApiKey, type UpdateApiKeyBody } from '@/services/apiKeyService'
 import { KeyDialog } from './KeyDialog'
+import { useKeyClient } from './keyClient'
 
 export function EditKeyDialog({ apiKey, onClose, onSaved }: {
     apiKey: ApiKey
     onClose: () => void
     onSaved: (key: ApiKey) => void
 }) {
+    const client = useKeyClient()
     const [name, setName] = useState(apiKey.name)
     const [description, setDescription] = useState(apiKey.description ?? '')
     const [busy, setBusy] = useState(false)
@@ -32,7 +34,7 @@ export function EditKeyDialog({ apiKey, onClose, onSaved }: {
         setBusy(true)
         setError(null)
         try {
-            onSaved(await apiKeyService.update(apiKey.id, body))
+            onSaved(await client.update(apiKey.id, body))
         } catch (err) {
             setError(err instanceof ApiKeyError && err.status === 409
                 ? 'This key has been revoked, so it can no longer be changed.'
