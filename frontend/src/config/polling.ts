@@ -5,8 +5,7 @@
  *
  * 1. **One place to tune intervals.** Every poll across the app reads
  *    its baseline from here so an operator can re-balance the load
- *    floor (announcements every 30s instead of 15s, etc.) without
- *    grepping for `setInterval(`.
+ *    floor without grepping for `setInterval(`.
  *
  * 2. **Jitter helper.** Adds up to ±`frac` random noise to a base
  *    interval so 1000 clients don't all poll at the same instant.
@@ -15,31 +14,42 @@
  *    flat. For 1000 users at 15s baseline that's `~67 req/s spike → ~67
  *    req/s flat` — same average but no thundering herd.
  *
- * The values here are baselines. The announcements poll is also
- * admin-configurable via the backend's announcement config (overrides
- * the constant below) so ops can dial it remotely without a deploy.
+ * The values here are baselines. The change manifest's is also
+ * admin-configurable: every manifest carries the Live updates interval,
+ * which overrides the constant below, so ops can dial it remotely
+ * without a deploy.
  */
 
 /** Baseline interval constants. All values in milliseconds. */
 export const POLLING_INTERVALS = {
   /**
-   * Active announcements (banner). Backend's admin config can
-   * override this per-deployment via `/announcements/config`; this is
-   * the fallback used until the config response lands. 60s (was 15s):
-   * this was the highest-frequency idle poll in the app — at fleet
-   * scale it dominated baseline request volume for a surface where a
-   * minute of announcement latency is invisible. Ops can still dial
-   * it down remotely via the admin config when a faster banner is
-   * genuinely needed.
+   * Provider health/status, re-read while a provider is down and only
+   * then (`lib/outageRecheck.ts`). Otherwise both follow the change feed.
+   * The cadence the old background poll used, kept for the one moment
+   * that matters: noticing a recovery whose published transition was
+   * lost, or is waiting behind a long change-feed interval.
    */
-  announcements: 60_000,
+  providerOutageRecheck: 60_000,
   /**
-   * Provider health/status. Background poll for the connection status
-   * indicator across all configured providers. 60s (was 30s): the
-   * indicator is advisory; real outages surface through request
-   * failures and the health banner long before this poll.
+   * The change manifest (`GET /api/v1/changes`) — the one request that
+   * replaced seven — until the server says otherwise. Every manifest
+   * carries `checkAfterSeconds`, the admin's Live updates setting (15s to
+   * 10 minutes), and the feed follows it.
+   *
+   * With live push on, this is a reconciliation floor rather than the
+   * mechanism: it catches what the stream missed (a delivery lost across
+   * a reconnect, a stream refused because a process was full). 60s is
+   * the interval most of the seven polls it replaced ran at.
    */
-  providerStatus: 60_000,
+  changeManifest: 60_000,
+  /**
+   * Aggregation worker fleet panel (admin → workspace). Ticks while the
+   * panel is mounted; the fleet is a live operational view, so 10s is
+   * the cadence an operator expects. Jitter and the hidden-tab pause
+   * come from `usePolling`, which this now uses — the panel previously
+   * hand-rolled its own loop and had neither.
+   */
+  aggregationFleet: 10_000,
   /**
    * Aggregation job history — only ticks while a job is actually
    * pending/running. Bumped from 3s to 5s because below 5s the UI
@@ -47,29 +57,6 @@ export const POLLING_INTERVALS = {
    * scales linearly with how many users are watching.
    */
   aggregationHistoryActive: 5_000,
-  /**
-   * Caller's own permissions (``GET /me/permissions``). Catches the
-   * idle-user case where an admin mutates bindings while the user is
-   * staring at a page without making any API calls — the silent
-   * refresh-on-401 dance only fires when the user actively requests
-   * something, so without this poll, idle users would still be on
-   * stale claims until natural JWT expiry. The endpoint is a no-DB
-   * JWT decode (``backend/app/api/v1/endpoints/me.py:39``) so a 60s
-   * poll is essentially free.
-   */
-  permissions: 60_000,
-  /**
-   * The bell (``GET /me/notifications``). Like announcements and
-   * permissions this is an always-mounted, idle poll, so it belongs to
-   * the same fleet-cost class: one small query per minute per tab. 60s
-   * is chosen for that reason rather than for latency — a notification
-   * is a message that already waited on someone else's action, so
-   * arriving up to a minute later changes nothing for the reader. The
-   * poll pauses on hidden tabs and refetches immediately on focus, so
-   * the case people actually notice (come back to the tab, see the
-   * badge) is covered by the focus refetch, not by the interval.
-   */
-  notifications: 60_000,
   /**
    * "Your connections are still catching up" — the canvas asks the projector
    * whether a source really is behind, and it only arms once a read came back

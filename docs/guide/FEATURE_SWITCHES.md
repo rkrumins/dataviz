@@ -3,7 +3,7 @@
 *For Administrators.* Turn whole capabilities on or off for everyone in your
 deployment — editing, tracing, exports, sign-up, Analytics and more — and know
 who will notice before you do. This page shows you how to change a switch
-safely, then describes all 34 switches on **Administration → Features**.
+safely, then describes all 35 switches on **Administration → Features**.
 
 > **Before you start:** You need the **Super admin** role (the `system:admin`
 > permission). Nobody else sees **Features** under **Administration**, and the
@@ -123,7 +123,7 @@ Badges in the right-hand pane tell you how a switch behaves:
 | Badge | Meaning |
 | --- | --- |
 | **Enforced by the server** | Turning it off doesn't just hide a button — the server refuses the request. |
-| **Not enforced — the endpoint still answers** | The switch only changes what the browser shows. On a new deployment the summary says **3 switches are not enforced**: **Guided product tours** and **Fold distant layers**, which only change the screen, and the retired **Roll up lineage to unloaded entities**. |
+| **Not enforced — the endpoint still answers** | The switch only changes what the browser shows. On a new deployment the summary says **4 switches are not enforced**: **Guided product tours**, **Fold distant layers** and **Live updates**, which only change what the browser does, and the retired **Roll up lineage to unloaded entities**. |
 | **Security setting** | If the setting can't be read, the more restrictive answer is assumed. |
 | **Preview — still being built** | A preview that ships off. Turning it on exposes unfinished work to everyone. |
 | **Being removed** | On its way out. Don't rely on it. |
@@ -248,6 +248,7 @@ will ask for.
 | **Fold distant layers** (`canvasLayerFoldEnabled`) | Off (preview) | Offers a **Fold** button on the Context View when a view is wider than the screen, so layers outside the part being read fold into slim spines. Each person still chooses whether to fold. | People reading wide Context Views. Every layer stays full width and wide views scroll sideways; folding one layer from its header still works. | [The Lineage Lens & Context View](/guide/lineage-lens) |
 | **Roll up lineage to unloaded entities** (`canvasLineageRollupEnabled`) | Off | Retired: nothing reads it, so it has no effect either way. A line to an entity the canvas hasn't loaded always rolls up to the nearest container on screen. | Nobody. It shows **Being removed** and will be removed in a later release. | — |
 | **One placement rule for every view surface** (`placementContractEnabled`) | Off (preview) | Uses one shared rule to decide which layer each entity sits in, everywhere views place entities — the canvas, the View wizard's preview, trace lanes, search badges, edit mode and view imports — so they can't disagree. | Off keeps today's placement, including its known disagreements. Saved views aren't changed either way. While it's on, creating a view or saving its layers refuses a layer rule that can never match. Ask your platform team to run the placement dry run before you turn it on. | [Navigating Layers](/guide/navigating-layers) |
+| **Live updates** (`realtimeChangeFeedEnabled`) | Off (preview) | Lets the server tell open tabs the moment something changes — announcements, notifications, your permissions, provider status — over one connection per browser, shared across its tabs. Underneath, each browser also checks for changes periodically: every 60 seconds by default, adjustable on this switch's page (15 seconds to 10 minutes), and paused while none of its tabs is visible. | Nobody loses an update. Browsers rely on the periodic check alone, so a change appears within that interval instead of within a second, at one request per browser per interval. | — |
 
 ---
 

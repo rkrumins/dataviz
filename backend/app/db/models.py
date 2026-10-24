@@ -284,6 +284,11 @@ class PlatformSettingsORM(Base):
     history_alerts_enabled = Column(Boolean, nullable=True)
     history_alert_min_severity = Column(Text, nullable=True)
     history_alert_cooldown_secs = Column(Integer, nullable=True)
+    #: How often browsers check the change feed for anything that moved
+    #: (Administration → Features → Live updates). NULL = unset, which is
+    #: ``changes.cadence.DEFAULT_CHECK_SECONDS``. Read through that
+    #: module's short cache, never per request.
+    change_check_interval_secs = Column(Integer, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
@@ -3645,7 +3650,13 @@ class AnnouncementConfigORM(Base):
     __tablename__ = "announcement_config"
 
     id = Column(Integer, primary_key=True, default=1)
-    poll_interval_seconds = Column(Integer, nullable=False, default=15)        # how often users poll for updates
+    # 60s, not 15s. This default is what the banner actually polls at — the
+    # frontend's POLLING_INTERVALS.announcements only applies until
+    # /announcements/config resolves, so a 15s default here silently overrode
+    # the tuned constant in every deployment. A minute of banner latency is
+    # invisible; four polls a minute per tab is not. Ops can still dial it
+    # down remotely for a genuine incident.
+    poll_interval_seconds = Column(Integer, nullable=False, default=60)        # how often users poll for updates
     default_snooze_minutes = Column(Integer, nullable=False, default=30)       # default snooze duration for new announcements
     updated_by = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)

@@ -21,6 +21,8 @@ from typing import Optional, Sequence
 from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.changes import topics as change_topics
+from backend.app.changes.publish import publish_change_after_commit
 from backend.app.db.models import InviteORM, InviteRedemptionORM
 
 
@@ -238,6 +240,20 @@ async def record_redemption(
     )
     session.add(redemption)
     await session.flush()
+
+    # The invite-activity bell belongs to whoever minted the link, so the
+    # topic is keyed on the creator, not the person redeeming. One extra
+    # point-read on a path that runs once per accepted invitation.
+    creator = (
+        await session.execute(
+            select(InviteORM.created_by).where(InviteORM.id == invite_id)
+        )
+    ).scalar_one_or_none()
+    if creator:
+        publish_change_after_commit(
+            session, change_topics.invite_activity_for(creator)
+        )
+
     return redemption
 
 

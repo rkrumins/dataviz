@@ -26,6 +26,8 @@ from .middleware.security_headers import SecurityHeadersMiddleware
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 from .providers.manager import provider_manager
+from backend.app.common.sse_registry import is_sse_path
+from backend.app.observability.request_metrics import RequestMetricsMiddleware
 from backend.auth_service.csrf import CSRFMiddleware
 from backend.auth_service.cookies import (
     ACCESS_COOKIE_NAME as _ACCESS_COOKIE_NAME,
@@ -1602,6 +1604,21 @@ async def lifespan(_app: FastAPI):
     except Exception as exc:
         logger.warning("Versioning projection worker not started: %s", exc)
 
+    # Change-feed hub. Runs on EVERY web process, unlike the singleton
+    # workers below — it is not doing work, it is a fan-out: one tail of
+    # the change stream serving every client attached to this process.
+    # Which is exactly why it must be per-process and cannot be a
+    # singleton role: a client's SSE connection lands on an arbitrary one
+    # of the eight, so all eight need to be listening.
+    try:
+        from .changes.hub import get_hub as _get_change_hub
+        _get_change_hub().start()
+    except Exception as exc:
+        # Non-fatal. Without the hub the stream endpoint refuses and
+        # clients fall back to polling the manifest, which is the
+        # documented degraded mode rather than an outage.
+        logger.warning("Change-feed hub not started: %s", exc)
+
     # Phase 0 — outbox relay → append-only auth_audit_log. In a split
     # deployment the aggregation control plane runs it, with the retention
     # sweeps and the analytics warmer below (see
@@ -1811,6 +1828,16 @@ async def lifespan(_app: FastAPI):
             await asyncio.wait_for(_event_loop_task, timeout=1.0)
         except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
             pass
+
+    # Stop the change-feed hub. Before the Redis teardown below, and
+    # before the DB pools: it wakes every attached subscriber so their
+    # streams close deliberately rather than being cut mid-flight and
+    # reconnecting in lockstep.
+    try:
+        from .changes.hub import get_hub as _get_change_hub
+        await _get_change_hub().stop()
+    except Exception as exc:
+        logger.warning("Change-feed hub shutdown warning: %s", exc)
 
     # Phase 0 — stop the outbox relay before DB pool teardown.
     _outbox_relay_shutdown = getattr(_app.state, "_outbox_relay_shutdown", None)
@@ -2777,15 +2804,31 @@ class _TimeoutMiddleware:
     unrecoverable state.
     """
 
-    # P1.8 — explicit SSE path registry: each live feed by its exact shape,
-    # never by how its path ends. Matching any path ending in ``/events``
-    # also exempted the activity log's event lists — ordinary paged reads —
-    # from every deadline.
-    _SSE_PATHS: tuple[re.Pattern, ...] = (
-        # An aggregation job's progress (``aggregation.stream_job_events``).
-        re.compile(r"^/api/v1/admin/data-sources/[^/]+/aggregation-jobs/[^/]+/events$"),
-    )
-    _SSE_EXACT_PATHS: frozenset[str] = frozenset()
+    # P1.8 — explicit SSE path registry, in
+    # ``backend/app/common/sse_registry.py``. Streaming routes call
+    # ``register_sse_path(...)`` beside their own handler.
+    #
+    # Both sides of this merge found the same bug independently: matching
+    # ``path.endswith("/events")`` is a guess about naming rather than a
+    # statement about behaviour, and it exempted ordinary reads from every
+    # deadline — ``POST /api/v1/telemetry/events`` on this side, the
+    # activity log's paged event lists on main's.
+    #
+    # Main's fix was a regex per live feed, kept here in main.py. This one
+    # registers at the handler, which is the same answer one file over, so
+    # main's ``_SSE_PATHS`` is dropped rather than kept beside it — its one
+    # entry, the aggregation job stream, is already registered in
+    # ``aggregation.py`` and the registry compiles it to the identical
+    # match (verified against main's regex on both the parameterised path
+    # and the near-misses). Keeping both would mean two places to edit and
+    # one of them silently optional.
+    #
+    # The registry also covers ``/api/v1/changes/stream``, which main's
+    # list has no entry for — so taking main's verbatim would have put a
+    # deadline back on the change feed.
+    #
+    # ``_STREAM_PATHS`` below is a SEPARATE concern and is kept as main
+    # wrote it: those are not event streams, they are long downloads.
     # Downloads streamed while they are produced (a whole data source can be gigabytes), and a
     # stored export's download (up to 50 GB, at the client's pace). A deadline would cut one
     # short, and T-2 would end it cleanly, so a truncated file would look complete. They pace
@@ -2866,9 +2909,9 @@ class _TimeoutMiddleware:
         return self._default_timeout
 
     def _is_sse_path(self, path: str) -> bool:
-        if path in self._SSE_EXACT_PATHS:
-            return True
-        return any(p.match(path) for p in (*self._SSE_PATHS, *self._STREAM_PATHS))
+        return is_sse_path(path) or any(
+            p.match(path) for p in self._STREAM_PATHS
+        )
 
     # P1.10 — paths that are ALWAYS allowed through, even when the app
     # has not flipped its readiness gate. Liveness probes must answer
@@ -2879,6 +2922,12 @@ class _TimeoutMiddleware:
         "/api/v1/health/live",
         "/health",            # alias for /health/live
         "/api/v1/health",     # alias for /health/live
+        # Metrics answer while the app is still coming up, or stuck
+        # coming up. Observability that disappears exactly when the
+        # process is unwell is not observability — a degraded start is
+        # the moment you most want to see pool and request numbers, and
+        # gating them behind readiness makes that window invisible.
+        "/internal/metrics",
     )
 
     @staticmethod
@@ -3119,6 +3168,24 @@ app.add_middleware(
 # placement put it innermost and left gzip outside the deadline.
 app.add_middleware(_TimeoutMiddleware)
 
+# Request counters. Added LAST, which makes it the OUTERMOST layer —
+# ``add_middleware`` inserts at position 0 and the stack is built in
+# reverse, so the last one added is the first one entered. (Worth
+# checking against, rather than trusting, the "outermost → innermost"
+# banner above: registration order is the opposite of entry order.)
+#
+# Outermost is deliberate: it is the only position that sees requests
+# the layers below refuse — a CSRF rejection, a 503 from the readiness
+# gate during a bad deploy. Those are exactly the requests worth
+# counting, and a middleware placed nearer the router would show a
+# fleet under load as quiet.
+#
+# The route-template label still resolves from here because the ASGI
+# scope is one dict passed down the chain; the router writes
+# ``scope["route"]`` into it, and this layer reads the label after the
+# inner app has returned.
+app.add_middleware(RequestMetricsMiddleware)
+
 # ------------------------------------------------------------------ #
 # Routers                                                              #
 # ------------------------------------------------------------------ #
@@ -3141,6 +3208,12 @@ app.openapi = _openapi_with_api_keys
 # INTERNAL_METRICS_ENABLED=true. Restrict at ingress in production.
 from .middleware.db_metrics import router as db_metrics_router  # noqa: E402
 app.include_router(db_metrics_router)
+
+# Prometheus scrape target, same opt-in switch. Sits beside the JSON
+# endpoint above rather than replacing it: that one is what an operator
+# curls during an incident, this one is what a scraper polls.
+from .observability.endpoint import router as prometheus_router  # noqa: E402
+app.include_router(prometheus_router)
 
 
 # ------------------------------------------------------------------ #

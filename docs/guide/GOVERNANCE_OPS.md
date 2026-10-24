@@ -299,8 +299,9 @@ maintenance, a new feature, a known issue. **Who:** Super Admins.
 6. Select **Create**.
 
 **You should now see** the announcement in the list, and the banner appears for
-everyone within one check — browsers look for changes every 15 seconds unless
-you change **Polling Interval** under **Banner Settings** (the gear button).
+everyone at their browser's next check for changes: every 60 seconds unless you
+change **Check for changes every** under **Administration → Features → Live
+updates**. With the **Live updates** switch on, it appears as soon as you save.
 
 On each announcement in the list, the switch pauses or republishes it ("is
 paused — nobody sees the banner now"), the pencil opens **Edit Announcement**,

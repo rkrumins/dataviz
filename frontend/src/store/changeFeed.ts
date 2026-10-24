@@ -1,0 +1,822 @@
+/**
+ * changeFeed — one subscription in place of seven idle polls.
+ *
+ * Seven always-mounted surfaces each ran their own timer against their
+ * own endpoint, and every one of them was asking a question whose
+ * answer is almost always no. This store asks that question once, for
+ * all of them, and only wakes a surface when its answer changed.
+ *
+ * A surface registers what it cares about and how to refresh itself:
+ *
+ *     useChangeTopic(TOPICS.announcements, () => fetchActive())
+ *
+ * and stops owning a timer. The refresh function is the one it already
+ * had — nothing about *what* it fetches changes, only *when*.
+ *
+ * ## The ordering invariant
+ *
+ * Read the version FIRST, then the data, then record the version:
+ *
+ *     v = manifest[topic]        // 1
+ *     await refresh()            // 2
+ *     applied[topic] = v         // 3
+ *
+ * The natural implementation does this backwards — refresh, then record
+ * whatever the manifest says now — and that permanently loses any change
+ * committed while the refresh was in flight: the client stores a version
+ * it never actually fetched, sees no mismatch on the next poll, and
+ * never asks again. Nothing errors, nothing logs, and the data is just
+ * quietly wrong until the next unrelated change to the same topic.
+ *
+ * ## Comparing versions
+ *
+ * With `!==`, never `>`. Counters can go backwards — they carry a TTL so
+ * Redis can evict them under memory pressure, and a missing counter
+ * reads as 0. A client holding 4000 that only refreshed on `new > applied`
+ * would never refresh again.
+ */
+import { useEffect, useRef } from 'react'
+import { fetchChangeManifest, type ChangeVersions } from '@/services/changesService'
+import { POLLING_INTERVALS, withJitter } from '@/config/polling'
+import { onAppVisible } from '@/lib/appVisibility'
+
+/**
+ * Topic names. These are a wire contract with `backend/app/changes/topics.py`
+ * — the per-user ones are keyed on user id server-side, but a client
+ * never constructs those: the manifest only ever contains topics this
+ * session is entitled to, so the client matches on the prefix it is
+ * given rather than composing a name it might not be allowed to ask for.
+ */
+export const TOPICS = {
+  announcements: 'announcements',
+  features: 'features',
+  providerHealth: 'providers:health',
+  providerStatus: 'providers:status',
+} as const
+
+/** Prefixes for the per-user topics, whose suffix is the caller's id. */
+const USER_TOPIC_PREFIXES = {
+  permissions: 'perms:',
+  notifications: 'notif:',
+  inviteActivity: 'invite:',
+} as const
+
+export type UserTopic = keyof typeof USER_TOPIC_PREFIXES
+
+interface Subscription {
+  /** Either an exact topic name or a per-user prefix to match. */
+  match: (topic: string) => boolean
+  refresh: () => void | Promise<void>
+  /**
+   * Version this subscriber has actually fetched. `null` means "not
+   * seeded yet" — the first manifest seeds it WITHOUT refreshing,
+   * because the surface fetches on mount under its own steam and a
+   * refresh here would just duplicate that.
+   */
+  applied: Map<string, number>
+  minIntervalMs: number
+  lastFiredAt: number
+  /** Guards against a slow refresh overlapping its own next trigger. */
+  inFlight: boolean
+}
+
+/**
+ * Floor between refreshes of one subscriber. Provider state is the
+ * reason this exists: it is bumped on transition, but a genuinely
+ * flapping provider would otherwise turn every client's idle poll into
+ * an idle refetch — strictly worse than the 60s poll it replaced.
+ */
+const DEFAULT_MIN_INTERVAL_MS = 5_000
+
+const subscriptions = new Set<Subscription>()
+
+/** Last manifest the server gave us. */
+let versions: ChangeVersions = {}
+/** True once a manifest has been read at least once. */
+let seeded = false
+
+function matchingTopics(sub: Subscription): string[] {
+  return Object.keys(versions).filter(sub.match)
+}
+
+async function fire(sub: Subscription, targets: string[]): Promise<void> {
+  // Capture the versions BEFORE refreshing. See the ordering invariant
+  // in the module docstring — recording them afterwards would drop any
+  // change committed while the refresh was in flight.
+  const observed = new Map(targets.map((t) => [t, versions[t] ?? 0]))
+
+  sub.inFlight = true
+  sub.lastFiredAt = Date.now()
+  try {
+    await sub.refresh()
+    // Only on success. A failed refresh leaves `applied` alone so the
+    // next tick retries rather than recording data it never got.
+    for (const [topic, version] of observed) sub.applied.set(topic, version)
+  } catch {
+    // The surface owns its own error reporting; the feed's job is to
+    // keep asking.
+  } finally {
+    sub.inFlight = false
+  }
+}
+
+/** Compare the latest manifest against what each subscriber holds. */
+function reconcile(): void {
+  const now = Date.now()
+  for (const sub of subscriptions) {
+    if (sub.inFlight) continue
+
+    const topics = matchingTopics(sub)
+    if (topics.length === 0) continue
+
+    const unseeded = topics.filter((t) => !sub.applied.has(t))
+    if (unseeded.length > 0) {
+      // Seed without refreshing: the surface fetched on mount, and the
+      // version we are seeding from was read before that fetch, so it
+      // cannot be newer than what the surface holds.
+      for (const topic of unseeded) sub.applied.set(topic, versions[topic] ?? 0)
+      continue
+    }
+
+    const moved = topics.filter((t) => (versions[t] ?? 0) !== sub.applied.get(t))
+    if (moved.length === 0) continue
+    if (now - sub.lastFiredAt < sub.minIntervalMs) continue
+
+    void fire(sub, moved)
+  }
+}
+
+/**
+ * True when this tab was hidden at a moment every surface needed a
+ * refresh. It does it when it is next looked at.
+ */
+let refreshOwed = false
+
+/**
+ * Refresh every surface, whatever the versions say, for when they cannot
+ * be trusted; see `check`.
+ *
+ * Only a visible tab does it at once, as the surfaces' own timers did
+ * before the feed. A hidden one puts it off until it is looked at. No
+ * version is recorded, because the versions are what is in doubt.
+ */
+function refreshEverything(): void {
+  if (typeof document !== 'undefined' && document.hidden) {
+    refreshOwed = true
+    return
+  }
+  refreshOwed = false
+  const now = Date.now()
+  for (const sub of subscriptions) {
+    if (sub.inFlight || now - sub.lastFiredAt < sub.minIntervalMs) continue
+    void fire(sub, [])
+  }
+}
+
+/**
+ * Bumped whenever the stream pushes something. Used to discard a manifest
+ * response that was already in flight when a push landed — see
+ * `pollChangeFeed`.
+ */
+let pushGeneration = 0
+
+/**
+ * Read the manifest and wake whatever moved.
+ *
+ * Exported so any transport can drive it: the poll timer, a stream
+ * opening, a `resync` frame, a tab regaining focus.
+ *
+ * A response that raced a push is discarded rather than applied. The
+ * manifest is authoritative in general — it is what lets a counter go
+ * *backwards* after a Redis eviction — but a read that started before a
+ * bump and returned after it holds a value that is simply older than
+ * what the stream just delivered. Applying it would roll the version
+ * back to what the subscriber has already satisfied, and the push would
+ * be silently lost until the next unrelated poll.
+ */
+export async function pollChangeFeed(): Promise<void> {
+  const generationAtStart = pushGeneration
+  const next = await fetchChangeManifest()
+  noteCheckInterval(next.checkAfterSeconds)
+  if (pushGeneration !== generationAtStart) return
+  versions = next.topics
+  seeded = true
+  reconcile()
+}
+
+/**
+ * The server's bounds on the check interval, mirrored here so that a
+ * malformed value cannot turn the timer into a tight loop or a silence.
+ */
+const MIN_CHECK_MS = 15_000
+const MAX_CHECK_MS = 600_000
+
+/**
+ * How long the leader waits between manifest checks: the admin's Live
+ * updates setting, as the last manifest reported it.
+ */
+let checkIntervalMs: number = POLLING_INTERVALS.changeManifest
+
+function noteCheckInterval(seconds: unknown): void {
+  // Absent (an older server), zero, negative or NaN: keep what we have.
+  if (typeof seconds !== 'number' || !(seconds > 0)) return
+  checkIntervalMs = Math.min(MAX_CHECK_MS, Math.max(MIN_CHECK_MS, seconds * 1000))
+}
+
+/** Latest known version map. Diagnostics and tests. */
+export function currentVersions(): ChangeVersions {
+  return { ...versions }
+}
+
+/** True once a manifest has been read. */
+export function isSeeded(): boolean {
+  return seeded
+}
+
+function subscribe(
+  match: (topic: string) => boolean,
+  refresh: () => void | Promise<void>,
+  minIntervalMs: number,
+): () => void {
+  const sub: Subscription = {
+    match,
+    refresh,
+    applied: new Map(),
+    minIntervalMs,
+    lastFiredAt: 0,
+    inFlight: false,
+  }
+  subscriptions.add(sub)
+  // Seed immediately against whatever we already know, so a surface
+  // mounting mid-session does not treat the current version as a change.
+  if (seeded) reconcile()
+  return () => {
+    subscriptions.delete(sub)
+  }
+}
+
+/** Refresh when `topic` moves. `refresh` is the surface's existing fetch. */
+export function useChangeTopic(
+  topic: string,
+  refresh: () => void | Promise<void>,
+  options?: { minIntervalMs?: number; enabled?: boolean },
+): void {
+  // Held in a ref so an inline arrow does not re-subscribe every render,
+  // and assigned in an effect rather than during render — writing a ref
+  // mid-render is what React's rules-of-hooks lint is objecting to, and
+  // it misbehaves under concurrent rendering.
+  const refreshRef = useRef(refresh)
+  useEffect(() => {
+    refreshRef.current = refresh
+  })
+  const { minIntervalMs = DEFAULT_MIN_INTERVAL_MS, enabled = true } = options ?? {}
+
+  useEffect(() => {
+    if (!enabled) return
+    return subscribe(
+      (t) => t === topic,
+      () => refreshRef.current(),
+      minIntervalMs,
+    )
+  }, [topic, minIntervalMs, enabled])
+}
+
+/**
+ * Refresh when one of the caller's own per-user topics moves.
+ *
+ * Matched by prefix rather than by composing `notif:${userId}`, because
+ * the client has no business naming a topic: the manifest contains only
+ * what this session may hear, so a prefix match cannot reach anyone
+ * else's.
+ */
+export function useUserChangeTopic(
+  kind: UserTopic,
+  refresh: () => void | Promise<void>,
+  options?: { minIntervalMs?: number; enabled?: boolean },
+): void {
+  // Held in a ref so an inline arrow does not re-subscribe every render,
+  // and assigned in an effect rather than during render — writing a ref
+  // mid-render is what React's rules-of-hooks lint is objecting to, and
+  // it misbehaves under concurrent rendering.
+  const refreshRef = useRef(refresh)
+  useEffect(() => {
+    refreshRef.current = refresh
+  })
+  const { minIntervalMs = DEFAULT_MIN_INTERVAL_MS, enabled = true } = options ?? {}
+
+  useEffect(() => {
+    if (!enabled) return
+    const prefix = USER_TOPIC_PREFIXES[kind]
+    return subscribe(
+      (t) => t.startsWith(prefix),
+      () => refreshRef.current(),
+      minIntervalMs,
+    )
+  }, [kind, minIntervalMs, enabled])
+}
+
+/** Subscribe outside React (module-scoped stores). Returns teardown. */
+export function subscribeToTopic(
+  topic: string,
+  refresh: () => void | Promise<void>,
+  options?: { minIntervalMs?: number },
+): () => void {
+  return subscribe(
+    (t) => t === topic,
+    refresh,
+    options?.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS,
+  )
+}
+
+/** `subscribeToTopic` for a per-user topic. Returns teardown. */
+export function subscribeToUserTopic(
+  kind: UserTopic,
+  refresh: () => void | Promise<void>,
+  options?: { minIntervalMs?: number },
+): () => void {
+  const prefix = USER_TOPIC_PREFIXES[kind]
+  return subscribe(
+    (t) => t.startsWith(prefix),
+    refresh,
+    options?.minIntervalMs ?? DEFAULT_MIN_INTERVAL_MS,
+  )
+}
+
+// ── Transport ─────────────────────────────────────────────────────────
+
+let pollTimer: ReturnType<typeof setTimeout> | null = null
+let transportEpoch = 0
+
+/**
+ * Apply a batch of `{topic: version}` pushed by the stream.
+ *
+ * The stream carries the new version with the notification, so a delta
+ * is actionable on its own — no follow-up manifest read just to discover
+ * what the version became.
+ */
+function applyPushedVersions(pushed: ChangeVersions): void {
+  pushGeneration += 1
+  versions = { ...versions, ...pushed }
+  seeded = true
+  reconcile()
+}
+
+/** Full jitter: `random(0, min(cap, base * 2^attempt))`. */
+function backoffDelay(attempt: number): number {
+  const ceiling = Math.min(30_000, 1_000 * 2 ** Math.min(attempt, 5))
+  return Math.random() * ceiling
+}
+
+/**
+ * Hold a stream, reconnecting as needed. Returns a teardown.
+ *
+ * Three things here are not optional:
+ *
+ *  * **`close()` in `onerror`.** `EventSource` retries on its own, so a
+ *    handler that only records state leaves the browser's retry running
+ *    *alongside* ours and the connection count doubles per failure. The
+ *    job-progress hook nearby does exactly that; it gets away with it
+ *    only because its streams are short-lived and few.
+ *  * **Full jitter, not base-plus-jitter.** When a replica dies its
+ *    clients all reconnect at once, and only full jitter actually
+ *    decorrelates them.
+ *  * **Reconcile on every open.** The stream is allowed to lose things;
+ *    the manifest is what makes that safe.
+ */
+function connectStream(myEpoch: number): () => void {
+  let source: EventSource | null = null
+  let retryTimer: ReturnType<typeof setTimeout> | null = null
+  let attempt = 0
+  let closed = false
+
+  const open = () => {
+    if (closed || myEpoch !== transportEpoch) return
+    const es = new EventSource('/api/v1/changes/stream', { withCredentials: true })
+    source = es
+
+    es.onopen = () => {
+      attempt = 0
+      // Whatever happened while we were not listening shows up here as a
+      // version mismatch.
+      void pollChangeFeed().catch(() => {})
+    }
+
+    es.addEventListener('changed', (ev) => {
+      try {
+        const payload = JSON.parse((ev as MessageEvent).data)
+        if (payload?.topics) applyPushedVersions(payload.topics)
+      } catch {
+        // A frame we cannot parse is a reason to reconcile, not to fail.
+        void pollChangeFeed().catch(() => {})
+      }
+    })
+
+    es.addEventListener('resync', () => {
+      void pollChangeFeed().catch(() => {})
+    })
+
+    // The server closes on a schedule so every stream's authorization
+    // stays fresh — it authenticates once at open and cannot re-read the
+    // cookie afterwards. Reconnecting picks up whatever the keepalive
+    // has since rotated.
+    es.addEventListener('reauth', () => {
+      es.close()
+      if (closed || myEpoch !== transportEpoch) return
+      retryTimer = setTimeout(open, backoffDelay(0))
+    })
+
+    es.onerror = () => {
+      // Close before scheduling: the browser's own retry would otherwise
+      // run in parallel with ours.
+      es.close()
+      if (closed || myEpoch !== transportEpoch) return
+      retryTimer = setTimeout(open, backoffDelay(attempt++))
+    }
+  }
+
+  open()
+
+  return () => {
+    closed = true
+    if (retryTimer) clearTimeout(retryTimer)
+    source?.close()
+    source = null
+  }
+}
+
+// ── Cross-tab consolidation ───────────────────────────────────────────
+//
+// Everything above is per-tab, and tabs are the multiplier that made the
+// original problem as large as it was: nine pollers with no cross-tab
+// coordination meant N tabs cost N times as much. The stream removes the
+// request cost but not the connection cost — five tabs is five held
+// connections, and at fleet scale that is thousands of them doing the
+// same work.
+//
+// So one tab does the work and tells the others. The two primitives this
+// needs are both already in the codebase and are used the same way here:
+//
+//  * **Web Locks** for the election. `fetchWithTimeout` uses
+//    `navigator.locks` to keep concurrent tabs from racing a token
+//    refresh. A lock is held for as long as its callback's promise is
+//    pending, and — the property that matters — it is released
+//    automatically when the holding tab goes away, crash included. That
+//    is failover with no heartbeat, no lease, and no stale-leader
+//    detection to get wrong.
+//  * **BroadcastChannel** for the fan-out, extending the bus
+//    `permissionChangeBus` already runs rather than standing up a second.
+
+const LEADER_LOCK = 'nx-change-feed-leader'
+const BROADCAST_CHANNEL = 'nx-change-feed'
+
+let channel: BroadcastChannel | null = null
+
+function openChannel(): BroadcastChannel | null {
+  if (typeof BroadcastChannel === 'undefined') return null
+  if (channel === null) channel = new BroadcastChannel(BROADCAST_CHANNEL)
+  return channel
+}
+
+/** Leader → followers. BroadcastChannel does not echo to the sender. */
+function broadcastVersions(next: ChangeVersions): void {
+  try {
+    openChannel()?.postMessage({ versions: next })
+  } catch {
+    // A closed or unavailable channel just means the other tabs fall
+    // back to their own reconciliation floor.
+  }
+}
+
+/**
+ * How many of the feed's checks must fail in a row before it stops
+ * waiting for the versions to move and refreshes every surface on each
+ * check instead. One failure is usually a blip; three is an outage.
+ */
+const FAILED_CHECKS_BEFORE_REFRESHING = 3
+
+/** The feed's checks that have failed in a row, in this tab. */
+let failedChecks = 0
+
+/**
+ * A check for changes: the leader's, on its interval, or a follower's
+ * whose leader has gone quiet. The leader shares the outcome with the
+ * other tabs.
+ *
+ * The versions cannot be trusted across a failed check. The server
+ * answers 503 while its change registry (Redis) is unreachable, and a
+ * change made meanwhile is never counted: its bump fails and is dropped.
+ * Waiting for the versions to move would leave every surface as it was
+ * until the registry came back, and a change made during the outage would
+ * not show even then. So after a few failures in a row, each check
+ * refreshes every surface instead, and the first to succeed after any
+ * failure does it once more, for whatever the failures hid.
+ */
+async function check(isLeader: boolean): Promise<void> {
+  const refreshEveryTab = () => {
+    if (isLeader) {
+      try {
+        openChannel()?.postMessage({ refreshEverything: true })
+      } catch {
+        // The other tabs check for themselves once the leader has been
+        // quiet for a while.
+      }
+    }
+    refreshEverything()
+  }
+
+  try {
+    await pollChangeFeed()
+  } catch {
+    failedChecks += 1
+    if (failedChecks >= FAILED_CHECKS_BEFORE_REFRESHING) refreshEveryTab()
+    return
+  }
+  // Versions first, so the other tabs wake what moved before refreshing
+  // the rest.
+  if (isLeader) broadcastVersions(versions)
+  if (failedChecks > 0) {
+    failedChecks = 0
+    refreshEveryTab()
+  }
+}
+
+/** How often a visible tab tells the leader that somebody is looking. */
+const PRESENCE_INTERVAL_MS = 30_000
+/**
+ * How long the leader keeps checking after the last sign of a visible
+ * tab: two missed heartbeats and a margin, so one late message does not
+ * pause it under somebody's nose.
+ */
+const PRESENCE_TTL_MS = 75_000
+
+/** When a visible tab last said so, as far as the leader knows. */
+let lastPresenceAt = 0
+
+/**
+ * How many check intervals a visible follower waits without hearing from
+ * the leader before it checks for itself. The leader broadcasts after every
+ * check, so silence this long means it has stopped.
+ */
+const LEADER_SILENCE_CHECKS = 2.5
+
+/**
+ * Tell the leader, while this tab is visible, that somebody is looking.
+ *
+ * Every tab does this, leader included (it costs no requests: the
+ * channel never leaves the browser). A hidden tab says nothing, so once
+ * no tab is visible the messages stop and the leader stops checking.
+ */
+function announcePresence(myEpoch: number): () => void {
+  const say = () => {
+    if (myEpoch !== transportEpoch) return
+    if (typeof document !== 'undefined' && document.hidden) return
+    try {
+      openChannel()?.postMessage({ present: true })
+    } catch {
+      // No channel: the leader falls back to its own visibility.
+    }
+  }
+
+  say()
+  const timer = setInterval(() => {
+    if (myEpoch !== transportEpoch) {
+      clearInterval(timer)
+      return
+    }
+    say()
+  }, PRESENCE_INTERVAL_MS)
+  // On return, at once rather than at the next heartbeat: this is the
+  // moment a paused leader has to resume.
+  const unsubscribeVisible = onAppVisible(say, { minIntervalMs: 0 })
+
+  return () => {
+    clearInterval(timer)
+    unsubscribeVisible()
+  }
+}
+
+/**
+ * Do the actual work of the feed: hold a stream and a reconciliation
+ * poll, and tell the other tabs whatever we learn.
+ */
+function startLeaderWork(myEpoch: number, useStream: boolean): () => void {
+  const stopStream = useStream ? connectStream(myEpoch) : () => {}
+  let paused = false
+  // A new leader has not heard from anybody yet; give the visible tabs
+  // one heartbeat's grace before concluding that nobody is there.
+  lastPresenceAt = Date.now()
+
+  // Gated on whether ANY tab in the browser is visible, not on this
+  // one. The leader works on behalf of every tab, and it is whichever
+  // tab won the lock — very often a background one while the user reads
+  // a different tab — so pausing on its own visibility would stop the
+  // reconciliation floor for a tab somebody is looking at.
+  const someoneIsLooking = () =>
+    (typeof document === 'undefined' || !document.hidden)
+    || Date.now() - lastPresenceAt < PRESENCE_TTL_MS
+
+  const tick = async () => {
+    if (myEpoch !== transportEpoch) return
+    if (!someoneIsLooking()) {
+      // Nobody is looking at any tab. Stop until somebody does; the
+      // check that resumes us runs at once.
+      paused = true
+      return
+    }
+    await check(true)
+    if (myEpoch !== transportEpoch) return
+    pollTimer = setTimeout(tick, withJitter(checkIntervalMs))
+  }
+
+  const resume = () => {
+    if (myEpoch !== transportEpoch || !paused) return
+    paused = false
+    void tick()
+  }
+
+  const onPresence = (ev: MessageEvent) => {
+    if (ev.data?.present !== true) return
+    lastPresenceAt = Date.now()
+    resume()
+  }
+  openChannel()?.addEventListener('message', onPresence)
+
+  void tick()
+  const unsubscribeVisible = onAppVisible(() => {
+    if (myEpoch !== transportEpoch) return
+    if (paused) resume()
+    else void check(true)
+  })
+
+  return () => {
+    if (pollTimer) {
+      clearTimeout(pollTimer)
+      pollTimer = null
+    }
+    unsubscribeVisible()
+    openChannel()?.removeEventListener('message', onPresence)
+    stopStream()
+  }
+}
+
+/**
+ * Contend for leadership; do the work if we win, listen if we do not.
+ *
+ * Without Web Locks — jsdom, and a few older browsers — every tab leads.
+ * That is the pre-consolidation behaviour, which is correct and merely
+ * unconsolidated, so it is the right thing to degrade to.
+ */
+function startWithLeaderElection(myEpoch: number, useStream: boolean): () => void {
+  let stopWork: (() => void) | null = null
+  let releaseLock: (() => void) | null = null
+  let abandoned = false
+
+  const stopPresence = announcePresence(myEpoch)
+
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined
+  if (!locks?.request) {
+    const stopLeading = startLeaderWork(myEpoch, useStream)
+    return () => {
+      stopPresence()
+      stopLeading()
+    }
+  }
+
+  // Followers apply what the leader learns. A follower opens no stream
+  // and makes no request while the leader is heard, so its steady-state
+  // cost is zero.
+  let lastHeardFromLeader = Date.now()
+  const onMessage = (ev: MessageEvent) => {
+    if (myEpoch !== transportEpoch) return
+    const next = ev.data?.versions
+    if (next && typeof next === 'object') {
+      lastHeardFromLeader = Date.now()
+      applyPushedVersions(next)
+    } else if (ev.data?.refreshEverything === true) {
+      // The leader cannot trust the versions just now; see `check`.
+      lastHeardFromLeader = Date.now()
+      refreshEverything()
+    }
+  }
+  openChannel()?.addEventListener('message', onMessage)
+
+  // A leader can stop without leaving: a browser that freezes a background
+  // tab keeps its lock, so nobody takes over, and the tab being looked at
+  // would wait for broadcasts that never come. So a visible follower that
+  // has heard nothing for a while checks for itself, every interval, until
+  // the leader is heard again. Coming back to the tab restarts the wait:
+  // a leader paused because nobody was looking resumes on our presence.
+  const unsubscribeVisible = onAppVisible(() => {
+    lastHeardFromLeader = Date.now()
+  }, { minIntervalMs: 0 })
+  let watchdog: ReturnType<typeof setTimeout> | null = null
+  const watch = () => {
+    if (abandoned || myEpoch !== transportEpoch) return
+    const visible = typeof document === 'undefined' || !document.hidden
+    const silentFor = Date.now() - lastHeardFromLeader
+    if (stopWork === null && visible && silentFor > LEADER_SILENCE_CHECKS * checkIntervalMs) {
+      void check(false)
+    }
+    watchdog = setTimeout(watch, withJitter(checkIntervalMs))
+  }
+  watchdog = setTimeout(watch, withJitter(checkIntervalMs))
+
+  // One read on startup regardless of role: a tab opened mid-session
+  // holds nothing, and waiting for the leader's next broadcast would
+  // leave it blank until something happened to change.
+  void pollChangeFeed().catch(() => {})
+
+  // Resolves when we acquire the lock, which for a follower is when the
+  // current leader's tab goes away — that is the whole failover story.
+  void locks
+    .request(LEADER_LOCK, () =>
+      new Promise<void>((resolve) => {
+        if (abandoned || myEpoch !== transportEpoch) {
+          resolve()
+          return
+        }
+        releaseLock = resolve
+        stopWork = startLeaderWork(myEpoch, useStream)
+      }),
+    )
+    .catch(() => {
+      // A lock manager that rejects (private-mode quirks, a released
+      // context) must not leave the tab with no feed at all.
+      if (!abandoned && myEpoch === transportEpoch) {
+        stopWork = startLeaderWork(myEpoch, useStream)
+      }
+    })
+
+  return () => {
+    abandoned = true
+    stopPresence()
+    unsubscribeVisible()
+    if (watchdog) clearTimeout(watchdog)
+    openChannel()?.removeEventListener('message', onMessage)
+    stopWork?.()
+    stopWork = null
+    // Releasing hands leadership to whichever tab is next in the queue.
+    releaseLock?.()
+    releaseLock = null
+  }
+}
+
+/**
+ * Start reconciling. Returns a teardown.
+ *
+ * One tab per browser does the work; the rest listen. Within that tab,
+ * two transports run together, and that is deliberate rather than
+ * redundant:
+ *
+ *  * **A stream**, which is what makes an idle tab cost nothing at all.
+ *  * **A slow manifest poll**, which is what makes the stream safe to be
+ *    lossy. It is the reconciliation floor — it catches a bump lost to a
+ *    Redis blip, a gap across a reconnect, a stream refused because a
+ *    process was full. Without it every one of those would be a surface
+ *    silently stuck on stale data.
+ *
+ * The poll runs on the admin's Live updates interval, which each manifest
+ * carries (60s unless changed, 15s to 10 minutes), and stops while no tab
+ * in the browser is visible. So even fully degraded — no stream, no
+ * leader election — a tab makes one request per interval rather than
+ * the seven its surfaces used to. Only while the manifest itself keeps
+ * failing does a visible tab make those seven again (see `check`).
+ */
+export function startChangeFeed(options?: { stream?: boolean }): () => void {
+  const myEpoch = ++transportEpoch
+  const useStream = options?.stream ?? typeof EventSource !== 'undefined'
+  const stopWork = startWithLeaderElection(myEpoch, useStream)
+  // A refresh this tab put off while hidden; see `refreshEverything`.
+  const unsubscribeVisible = onAppVisible(() => {
+    if (refreshOwed) refreshEverything()
+  }, { minIntervalMs: 0 })
+
+  return () => {
+    transportEpoch += 1
+    unsubscribeVisible()
+    stopWork()
+  }
+}
+
+/** Test-only: drop all state. */
+export function __resetChangeFeedForTests(): void {
+  subscriptions.clear()
+  versions = {}
+  seeded = false
+  pushGeneration = 0
+  lastPresenceAt = 0
+  failedChecks = 0
+  refreshOwed = false
+  checkIntervalMs = POLLING_INTERVALS.changeManifest
+  try {
+    channel?.close()
+  } catch {
+    // Already closed.
+  }
+  channel = null
+  transportEpoch += 1
+  if (pollTimer) {
+    clearTimeout(pollTimer)
+    pollTimer = null
+  }
+}

@@ -16,6 +16,8 @@ import * as Popover from '@radix-ui/react-popover'
 import { adminUserService, type InviteActivityItem } from '@/services/adminUserService'
 import { formatUtc, timeAgo, toUtcDate } from '@/lib/timeAgo'
 import { roleVisualFor } from '@/lib/roleVisual'
+import { onAppVisible } from '@/lib/appVisibility'
+import { subscribeToUserTopic } from '@/store/changeFeed'
 
 const SEEN_KEY = 'nx-invite-activity-seen'
 
@@ -35,10 +37,6 @@ function writeSeenAt(ms: number): void {
   }
 }
 
-/** Poll only while the tab is visible, and re-check the moment it is
- *  looked at — the same posture the features store takes. A background
- *  tab polling for read receipts is pure waste. */
-const REFRESH_MS = 120_000
 
 export function NotificationBell() {
   const [items, setItems] = useState<InviteActivityItem[]>([])
@@ -63,14 +61,18 @@ export function NotificationBell() {
     })()
 
     const refresh = () => setTick(n => n + 1)
-    document.addEventListener('visibilitychange', refresh)
-    window.addEventListener('focus', refresh)
-    const timer = window.setInterval(refresh, REFRESH_MS)
+    // One coalesced signal instead of a `visibilitychange` + `focus`
+    // pair. Listening to both fired this twice on every alt-tab, and
+    // four other surfaces were doing the same thing beside it.
+    const unsubscribeVisible = onAppVisible(refresh)
+    // Somebody redeeming your invite is an event, and it is a rare one.
+    // The 120s timer this replaces asked about it thirty times an hour
+    // and got the same answer every time.
+    const unsubscribeTopic = subscribeToUserTopic('inviteActivity', refresh)
     return () => {
       cancelled = true
-      document.removeEventListener('visibilitychange', refresh)
-      window.removeEventListener('focus', refresh)
-      window.clearInterval(timer)
+      unsubscribeVisible()
+      unsubscribeTopic()
     }
   }, [tick])
 

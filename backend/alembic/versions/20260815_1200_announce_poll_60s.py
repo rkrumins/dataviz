@@ -1,0 +1,62 @@
+"""Announcement banner polls every 60s, not every 15s.
+
+Revision ID: 20260815_1200_announce_poll_60s
+Revises: 20261020_1000_ds_transfers
+Create Date: 2026-08-15 12:00
+
+``announcement_config.poll_interval_seconds`` shipped with a default of
+15. The frontend has a tuned constant of 60
+(``frontend/src/config/polling.ts``) with a comment explaining why 15
+was too expensive at fleet scale — but that constant only applies until
+``GET /announcements/config`` resolves, at which point the DB value
+takes over. So the tuning never actually took effect anywhere: every
+deployment polled the banner four times a minute, per tab, forever.
+
+This moves the seeded row to 60 **only if it is still sitting at the old
+default**. An operator who deliberately chose a value — including
+deliberately choosing 15 — keeps it; this is a default correction, not a
+policy override. The admin config endpoint still accepts anything >= 5,
+so dialling it down for a live incident is unaffected.
+
+Re-parented on each merge of main (2026-08-23, 2026-10-12, 2026-10-17, 2026-10-19, 2026-10-24). This originally hung
+off ``20260802_1000_open_publish``, which by then was also the parent of
+main's own ``20260817_1200_node_ident_scopes`` — so the merge left the
+tree with TWO heads and ``alembic upgrade head`` refusing to run. Git
+cannot flag that: both files merge cleanly and nothing is red until
+somebody migrates. Main hit the identical collision in ``35781fe`` and
+resolved it the same way, for the reason given there: re-parenting moves
+FORWARD onto a revision already stamped on shared databases, so an
+existing environment simply upgrades through this one, with nothing to
+stamp back.
+
+Plain forward DDL per docs/MIGRATIONS.md.
+"""
+from __future__ import annotations
+
+from typing import Sequence, Union
+
+from alembic import op
+
+
+revision: str = "20260815_1200_announce_poll_60s"
+down_revision: Union[str, None] = "20261020_1000_ds_transfers"
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    # WHERE poll_interval_seconds = 15 — the old default. A deployment
+    # that never touched this setting moves to 60; one that chose a
+    # value keeps it. The table is single-row (CHECK id = 1), so this
+    # touches at most one row.
+    op.execute(
+        "UPDATE announcement_config SET poll_interval_seconds = 60 "
+        "WHERE poll_interval_seconds = 15"
+    )
+
+
+def downgrade() -> None:
+    op.execute(
+        "UPDATE announcement_config SET poll_interval_seconds = 15 "
+        "WHERE poll_interval_seconds = 60"
+    )

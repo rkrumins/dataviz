@@ -1,9 +1,10 @@
 """Platform-wide defaults.
 
-Two of them: the node-identity mapping — the bottom of the resolution chain in
+Three of them: the node-identity mapping — the bottom of the resolution chain in
 ``backend.app.services.node_identity``, applied to every data source that does
-not resolve one from its own row, its provider, or its workspace — and the
-counts-history retention policy.
+not resolve one from its own row, its provider, or its workspace — the
+counts-history retention policy, and how often browsers check the change feed
+(``/live-updates``, served to them through ``changes.cadence``).
 
 This is the level an operator reaches for when a whole deployment's graphs are
 shaped the same way (everything keys on ``id``, everything names on ``title``),
@@ -22,6 +23,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
+from backend.app.changes import cadence
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import PlatformSettingsORM
 from backend.app.services.activity import recorder
@@ -145,3 +147,93 @@ async def put_node_identity_defaults(
         await invalidate_node_identity(session, scopes, "platform_identity_changed")
 
     return _to_response(await session.get(PlatformSettingsORM, 1))
+
+
+# ── Live updates: how often browsers check for changes ─────────────────────
+
+
+class LiveUpdatesRequest(BaseModel):
+    """Partial update. Absent = untouched; ``null`` = clear back to the code
+    default; a number must sit within the bounds the response reports."""
+
+    check_interval_seconds: Optional[int] = Field(
+        None, alias="checkIntervalSeconds",
+        ge=cadence.MIN_CHECK_SECONDS, le=cadence.MAX_CHECK_SECONDS,
+    )
+
+    class Config:
+        populate_by_name = True
+
+
+class LiveUpdatesResponse(BaseModel):
+    #: What is persisted. ``None`` = unset; the default applies.
+    check_interval_seconds: Optional[int] = Field(None, alias="checkIntervalSeconds")
+    #: The default and the bounds, so the editor can show what "unset"
+    #: means and refuse what the server would.
+    default_check_interval_seconds: int = Field(
+        cadence.DEFAULT_CHECK_SECONDS, alias="defaultCheckIntervalSeconds")
+    min_check_interval_seconds: int = Field(
+        cadence.MIN_CHECK_SECONDS, alias="minCheckIntervalSeconds")
+    max_check_interval_seconds: int = Field(
+        cadence.MAX_CHECK_SECONDS, alias="maxCheckIntervalSeconds")
+    updated_at: Optional[str] = Field(None, alias="updatedAt")
+    updated_by: Optional[str] = Field(None, alias="updatedBy")
+
+    class Config:
+        populate_by_name = True
+
+
+def _live_updates_response(row: Optional[PlatformSettingsORM]) -> LiveUpdatesResponse:
+    if row is None:
+        return LiveUpdatesResponse()
+    return LiveUpdatesResponse(
+        checkIntervalSeconds=row.change_check_interval_secs,
+        updatedAt=row.updated_at,
+        updatedBy=row.updated_by,
+    )
+
+
+@router.get(
+    "/live-updates",
+    response_model=LiveUpdatesResponse,
+    summary="Get how often browsers check for changes",
+    dependencies=[Depends(_REQUIRES_SYSTEM_ADMIN)],
+)
+async def get_live_updates(session: AsyncSession = Depends(get_db_session)):
+    return _live_updates_response(await session.get(PlatformSettingsORM, 1))
+
+
+@router.put(
+    "/live-updates",
+    response_model=LiveUpdatesResponse,
+    summary="Set how often browsers check for changes",
+    dependencies=[Depends(_REQUIRES_SYSTEM_ADMIN)],
+)
+async def put_live_updates(
+    req: LiveUpdatesRequest = Body(...),
+    user: User = Depends(_REQUIRES_SYSTEM_ADMIN),
+    session: AsyncSession = Depends(get_db_session),
+):
+    row = await session.get(PlatformSettingsORM, 1)
+    if row is None:
+        row = PlatformSettingsORM(id=1)
+        session.add(row)
+    before = row.change_check_interval_secs
+
+    if "check_interval_seconds" in req.model_fields_set:
+        row.change_check_interval_secs = req.check_interval_seconds
+    row.updated_at = datetime.now(timezone.utc).isoformat()
+    row.updated_by = getattr(user, "id", None)
+    after = row.change_check_interval_secs
+    if before != after:
+        await recorder.record_for_request(
+            session, "platform.live_updates.updated",
+            details={"from": before, "to": after},
+        )
+    await session.commit()
+
+    # This process answers the new interval on its next manifest; other
+    # processes within the cache's TTL. Browsers pick it up at their next
+    # check either way.
+    cadence.invalidate_cache()
+    return _live_updates_response(await session.get(PlatformSettingsORM, 1))

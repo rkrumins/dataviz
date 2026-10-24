@@ -19,6 +19,27 @@ export const queryClient = new QueryClient({
       staleTime: 5 * 60 * 1000,   // 5 minutes default stale time
       retry: 1,
       refetchOnWindowFocus: false,
+      // Both of these were previously unset, which meant React Query's
+      // own defaults (true) applied — invisibly, because nothing here
+      // said so.
+      //
+      // ``refetchOnMount`` stays true: it respects ``staleTime``, so the
+      // real control over "does navigating refetch" is each query's
+      // staleTime, not this flag. Stated explicitly so the next person
+      // tuning a staleTime knows it is the lever.
+      refetchOnMount: true,
+      // ``refetchOnReconnect`` is false because recovery already has an
+      // owner. ``useBackendRecovery`` (mounted in AppLayout) subscribes
+      // to the health store and, on a real recovery transition, resets
+      // the circuit breakers and reloads workspaces, views, graph schema
+      // and insights — deliberately, by key. Leaving this true added an
+      // uncoordinated blanket refetch of every stale active query on the
+      // browser's ``online`` event, racing that handler and the health
+      // banner's own ``online`` probe: three mechanisms firing on one
+      // event. The health store is also the better signal — the backend
+      // can be down while the network is up, and ``navigator.onLine``
+      // cannot tell the difference.
+      refetchOnReconnect: false,
     },
   },
 })

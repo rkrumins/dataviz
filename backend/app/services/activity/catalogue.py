@@ -722,6 +722,7 @@ _EVENT_META.update({
     "platform.feature_flag.changed": ("info", _summary_flag),
     "platform.profiling_policy.updated": ("info", lambda p: "Changed profiling retention and alerting"),
     "platform.node_identity.updated": ("info", lambda p: "Changed the platform's node-identity default"),
+    "platform.live_updates.updated": ("info", lambda p: "Changed how often browsers check for updates"),
     "platform.activity.exported": ("info", lambda p: (
         f"Exported the activity of {_subject(p)} as CSV" if p.get("workspace_id")
         else "Exported platform activity as CSV"
@@ -779,6 +780,7 @@ LABELS: dict[str, str] = {
     "platform.feature_flag.changed": "Changed a feature flag",
     "platform.profiling_policy.updated": "Changed profiling policy",
     "platform.node_identity.updated": "Changed node identity",
+    "platform.live_updates.updated": "Changed live updates",
     "platform.activity.exported": "Exported activity",
     "rbac.group.member_added": "Added to a group",
     "rbac.group.member_removed": "Removed from a group",

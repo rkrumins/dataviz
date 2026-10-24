@@ -10,7 +10,10 @@ import {
   enableProviderStatusPolling,
   disableProviderStatusPolling,
 } from '@/store/providerStatus'
-import { enableProviderHealthPolling } from '@/store/providerHealth'
+import {
+  enableProviderHealthPolling,
+  disableProviderHealthPolling,
+} from '@/store/providerHealth'
 import {
   enablePermissionPolling,
   disablePermissionPolling,
@@ -20,6 +23,8 @@ import {
   disableSessionKeepalive,
 } from '@/store/sessionKeepalive'
 import { usePreferencesStore } from '@/store/preferences'
+import { startChangeFeed } from '@/store/changeFeed'
+import { useFeature } from '@/store/features'
 import { queryClient } from '@/lib/queryClient'
 
 /**
@@ -34,7 +39,7 @@ import { queryClient } from '@/lib/queryClient'
  * user is authenticated — eliminating the startup request storm on the
  * login page.
  */
-function AuthBootstrap({ children }: { children: React.ReactNode }) {
+export function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const bootstrap = useAuthStore((s) => s.bootstrap)
   const status = useAuthStore((s) => s.status)
   // Phase 17/18: provider-status polling hits ``/admin/providers/status``
@@ -48,6 +53,9 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const isPlatformAdmin = usePermission('system:admin')
   const canReadProviders = useAnyWorkspacePermission('workspace:provider:read')
   const canPollProviders = isPlatformAdmin || canReadProviders
+  // Read reactively, not once: the flag reaches every tab through the feed
+  // itself, and the effect below restarts the feed when it flips.
+  const liveUpdates = useFeature('realtimeChangeFeedEnabled')
 
   useEffect(() => {
     void bootstrap()
@@ -58,27 +66,44 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     if (status !== 'authenticated') {
-      // Logout / session-lost: stop the permission poller so it
-      // doesn't keep firing /me/permissions against an empty cookie.
+      // Logout / session-lost: drop the change-feed subscriptions so
+      // nothing keeps refreshing against an empty cookie.
       disablePermissionPolling()
+      disableProviderHealthPolling()
       disableSessionKeepalive()
       return
     }
     // Renew the access token before it expires rather than after a 401.
-    // Started here, alongside the poller, because both need the same
-    // precondition — a resolved, authenticated session.
+    // Started here, alongside the subscriptions, because both need the
+    // same precondition — a resolved, authenticated session.
     enableSessionKeepalive()
+    // The change feed. One manifest read tells every subscribed surface
+    // below whether it has anything to fetch, which is what lets them
+    // stop asking on their own timers. Started before them so the first
+    // manifest is usually in hand by the time they subscribe — a
+    // subscriber that already knows the current version seeds from it
+    // silently instead of refetching what it just fetched on mount.
+    //
+    // The flag gates only the STREAM, not the feed: with it off the
+    // periodic manifest check still runs, so every surface still updates
+    // — within the admin's check interval (a minute by default) rather
+    // than within a second. That is why turning this off is a latency
+    // decision and never a correctness one. It takes effect in open tabs
+    // too: a flip re-runs this effect, so turning push off closes their
+    // streams and turning it on opens them, with no reload.
+    const stopChangeFeed = startChangeFeed({ stream: liveUpdates })
     // Public endpoint — every authenticated user.
     enableProviderHealthPolling()
     // Workspace-scoped read endpoint. Toggle in both directions so a
-    // mid-session demotion that drops provider:read stops the timer.
+    // mid-session demotion that drops provider:read unsubscribes.
     if (canPollProviders) enableProviderStatusPolling()
     else disableProviderStatusPolling()
     // Catch idle-user permission updates and cross-tab changes. The
-    // poller compares against its own last snapshot, so a stable
+    // subscriber compares against its own last snapshot, so a stable
     // claims response is a silent no-op.
     enablePermissionPolling()
-  }, [status, canPollProviders])
+    return stopChangeFeed
+  }, [status, canPollProviders, liveUpdates])
 
   // Block rendering until auth resolves — prevents premature API calls
   if (status === 'idle' || status === 'loading') return null

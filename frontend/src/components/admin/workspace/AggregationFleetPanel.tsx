@@ -9,9 +9,11 @@
  *   (GET/PUT /aggregation/settings) that seeds every new job.
  */
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useState } from 'react'
 import { Cpu, Settings2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { usePolling } from '@/hooks/usePolling'
+import { POLLING_INTERVALS } from '@/config/polling'
 import { DefaultsDialog } from '../shared/DefaultsDialog'
 import {
     aggregationService,
@@ -48,19 +50,14 @@ export function AggregationFleetPanel() {
         } catch { /* endpoint unavailable (e.g. non-admin) — hide panel */ }
     }, [])
 
-    // WS0.4: self-scheduling poll with BACKPRESSURE — the next tick arms only
+    // WS0.4's self-scheduling poll with BACKPRESSURE — the next tick arms only
     // after the previous settles, so a hung workers endpoint (e.g. fleet
     // unavailable while a provider is down) can't stack requests every 10s.
-    useEffect(() => {
-        let cancelled = false
-        let timer: ReturnType<typeof setTimeout> | undefined
-        const tick = async () => {
-            await poll()
-            if (!cancelled) timer = setTimeout(tick, 10_000)
-        }
-        tick()
-        return () => { cancelled = true; if (timer) clearTimeout(timer) }
-    }, [poll])
+    // `usePolling` is that same await-then-arm loop, and it also jitters each
+    // tick and pauses while the tab is hidden — neither of which the local
+    // copy did, so this panel kept hitting the fleet endpoint every 10s in
+    // background tabs.
+    usePolling(poll, POLLING_INTERVALS.aggregationFleet)
 
     return (
         <div className="rounded-xl border border-glass-border/60 bg-canvas p-4 space-y-3">

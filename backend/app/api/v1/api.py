@@ -16,7 +16,7 @@ from .endpoints import (
     groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
-    workspace_directory, data_source_transfers,
+    workspace_directory, data_source_transfers, changes,
     versioning,
     admin_idp_groups,
     admin_idp_providers,
@@ -192,6 +192,15 @@ api_router.include_router(
     notifications.router,
     prefix="/me/notifications",
     tags=["me:notifications"],
+)
+# The change manifest: "which of the things you are showing have moved?"
+# One request in place of the nine idle polls the client used to run.
+# Topics are derived from the session, so like the bell above this is
+# scoped to the caller by construction rather than by a route guard.
+api_router.include_router(
+    changes.router,
+    prefix="/changes",
+    tags=["changes"],
 )
 # People/group directory for share pickers — any signed-in user (the
 # route itself enforces authentication; see directory.py for why it is

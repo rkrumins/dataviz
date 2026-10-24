@@ -212,6 +212,29 @@ The wedge watchdog still only logs
 Resilience you cannot observe fails silently. Every control in this document
 degrades quietly rather than loudly.
 
+**There are now two scrape endpoints, and neither is finished.** The change-feed
+branch added `GET /internal/metrics` (`backend/app/observability/`) in parallel
+with the one above, and the two split the problem the wrong way:
+
+| | `/api/v1/metrics` | `/internal/metrics` |
+|---|---|---|
+| gate | `METRICS_ENABLED` **+ bearer token**, fail-closed | `INTERNAL_METRICS_ENABLED` only |
+| across gunicorn workers | per-process — a scrape reads **one worker at random** | aggregated via `PROMETHEUS_MULTIPROC_DIR` |
+| series | provider breakers, provider-manager events, job counters | requests by route template, DB statements by pool role, pool utilisation, held change-feed connections |
+
+Each has what the other is missing. The token gate is the right one and
+`metrics_authorized()` is already exported for reuse, so the env-flag-only
+endpoint is the weaker door — the argument in `metrics.py`'s own docstring
+applies to it verbatim, and the aggregation worker publishes on `0.0.0.0` with
+no ingress in front of it. In the other direction, a per-process registry
+under four workers under-reports every counter by roughly the worker count
+and jumps between scrapes as different workers answer, which is the failure
+`PROMETHEUS_MULTIPROC_DIR` exists to prevent.
+
+**Recommendation:** one endpoint — main's door, the other's aggregation — before
+anything is pointed at either. Consolidating is a smaller job than reconciling
+two sets of dashboards later.
+
 The previous revision said a Redis outage now fails readiness. It does not:
 `/health/ready` returns 503 in production when the revocation backend *built at
 boot* is process-local (`backend/app/main.py:3216`), which catches a

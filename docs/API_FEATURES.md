@@ -4,7 +4,7 @@
 to know which endpoint a switch turns off.*
 
 This page is the reference for the feature-switch API behind **Administration → Features**:
-every route with its request and answer, how a change is saved safely, and all 34 switches
+every route with its request and answer, how a change is saved safely, and all 35 switches
 with their defaults and the server routes each one controls.
 
 - **Administrators:** what each switch does on screen, and how to change one, is in
@@ -188,7 +188,7 @@ An unknown key answers `404`.
 
 ## Feature flags (authoritative set)
 
-All 34 switches, grouped as **Administration → Features** groups them. **Switch** is the name
+All 35 switches, grouped as **Administration → Features** groups them. **Switch** is the name
 an administrator sees. **When it is off** names the routes the server refuses — `403` with
 `{"detail": {"type": "feature_disabled", "feature": "<key>", "message": "…"}}` unless the row
 says otherwise — or what it does instead. Paths are relative to `/api/v1`. Every switch whose
@@ -278,6 +278,7 @@ feature open to anyone who knows the URL.
 | Fold distant layers | `canvasLayerFoldEnabled` | Off | Nothing on the server — the Context View offers no **Fold** button | Experimental, in the app only |
 | Roll up lineage to unloaded entities | `canvasLineageRollupEnabled` | Off | Nothing: the switch is retired and nothing reads it | Deprecated; to be removed |
 | One placement rule for every view surface | `placementContractEnabled` | Off | While it is **on**: `POST /{ws_id}/graph/assignments/compute` places entities with one shared rule; a view-scoped import pins a new top-level entity to a layer only where that rule would place it elsewhere; `POST /views` and `PUT /views/{view_id}/layout` refuse a new or changed layer rule that can never match | Experimental. Read with "off" as the fallback |
+| Live updates | `realtimeChangeFeedEnabled` | Off | Nothing on the server — browsers keep checking `GET /api/v1/changes` periodically, so updates still arrive, within the check interval instead of within a second | Experimental, in the app only. While it is **on** a browser holds one `GET /api/v1/changes/stream` connection, elected across its tabs. The periodic check stays underneath either way, so toggling never loses an update. Its interval is the manifest's `checkAfterSeconds`, set at `PUT /api/v1/admin/platform/live-updates` (15–600s, default 60) |
 
 ## How a switch is enforced
 

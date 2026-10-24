@@ -137,6 +137,9 @@ The API server: what it accepts and serves, and which part of the backend each p
 | Variable | Default | Description | Read in |
 |---|---|---|---|
 | `API_DOCS_ENABLED` | (empty) | Serve the interactive API docs and schema (`/docs`, `/redoc`, `/openapi.json`) even with `ENV=production`: `true`, `1` or `yes`. Outside production they are always served. | `backend/app/main.py` |
+| `CHANGES_SSE_MAX_KEY_SECONDS` | `300` | the same for a stream opened with an API key, and so how long a revoked key keeps receiving events | `backend/app/api/v1/endpoints/changes.py` |
+| `CHANGES_SSE_MAX_SECONDS` | `900` | how long one stream lives before the browser reconnects; keep it below the load balancer's timeoutSec or streams are cut instead of closed | `backend/app/api/v1/endpoints/changes.py` |
+| `CHANGE_REGISTRY_BACKEND` | `redis` | redis is required with more than one worker, because in_memory cannot see a change made in another process and updates stop crossing workers with no error | `backend/app/changes/registry.py` |
 | `CORS_ALLOWED_ORIGINS` | (empty) | Browser origins allowed to call the API with credentials, comma-separated, for example `https://lineage.example.com`. The CSRF check trusts the same list. Unset, only `http://localhost:3000` and `http://localhost:5173` are allowed. | `backend/app/main.py`, `backend/auth_service/csrf.py` |
 | `ENV` | `dev` | Deployment type. `production` (or `prod`) turns on the safeguards listed under [Must set in production](#must-set-in-production); any other value relaxes them for local work. | `backend/app/auth/dependencies.py`, `backend/app/db/repositories/connection_repo.py`, `backend/app/main.py` +4 more |
 | `SYNODIC_ROLE` | (empty) / `dev` / — *(differs by call site)* | What this process runs: `web` (the API), `worker` (aggregation jobs), `controlplane` (scheduling and recovery) or `dev` (everything in one process, the default). Any role other than `dev` also makes the API write JSON logs. | `backend/app/jobs/metrics_prometheus.py`, `backend/app/middleware/logging.py`, `backend/app/runtime/role.py` |
@@ -145,6 +148,12 @@ The API server: what it accepts and serves, and which part of the backend each p
 
 | Variable | Default | Read in |
 |---|---|---|
+| `CHANGES_REDIS_KEY_PREFIX` | `changes` | `backend/app/changes/registry.py` |
+| `CHANGES_SSE_HEARTBEAT_SECONDS` | `25` | `backend/app/api/v1/endpoints/changes.py` |
+| `CHANGES_SSE_MAX_CONCURRENT` | `500` | `backend/app/api/v1/endpoints/changes.py` |
+| `CHANGES_SSE_RETRY_BASE_MS` | `3000` | `backend/app/api/v1/endpoints/changes.py` |
+| `CHANGES_STREAM_MAXLEN` | `1000` | `backend/app/changes/registry.py` |
+| `CHANGES_VERSION_TTL_SECONDS` | `2592000` | `backend/app/changes/registry.py` |
 | `GZIP_COMPRESSLEVEL` | `1` | `backend/app/main.py` |
 | `HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS` | `120` | `backend/app/main.py` |
 | `HTTP_TIMEOUT_VIEW_TRANSFER_SECS` | `120` | `backend/app/main.py` |
@@ -464,6 +473,7 @@ Rollup rebuilds, the job bus, and automatic reconciliation of stale rollups.
 | `AGGREGATION_DISPATCH_MODE` | `auto` | `backend/app/main.py` |
 | `AGGREGATION_EXTRACT_CONCURRENCY` | `1` | `backend/app/providers/falkordb_materialize.py` |
 | `AGGREGATION_GRAPH_LEASE_TTL_MS` | `60000` | `backend/app/services/aggregation/admission.py` |
+| `AGGREGATION_JOB_SSE_MAX_CONCURRENT` | `5` | `backend/app/api/v1/endpoints/aggregation.py` |
 | `AGGREGATION_JOB_TIMEOUT_SECS` | `7200` | `backend/app/services/aggregation/scheduler.py` |
 | `AGGREGATION_LARGE_JOB_EDGE_THRESHOLD` | `500000` | `backend/app/services/aggregation/fleet.py` |
 | `AGGREGATION_MATERIALIZE_LEAF_PAIRS` | `false` | `backend/app/providers/falkordb_materialize.py` |
@@ -766,6 +776,7 @@ Logs, metrics, health probes and the system status checks.
 | `METRICS_ENABLED` | — | Serve Prometheus metrics: `true`, `1`, `yes` or `on`. The API serves them at `/api/v1/metrics`, the control plane at `/metrics` on its port 8091, and the aggregation worker at `/metrics` on `METRICS_PORT`. Also needs `METRICS_TOKEN`: without one the endpoint answers 404. | `backend/app/api/v1/endpoints/metrics.py` |
 | `METRICS_PORT` | `9100` | the aggregation worker's own scrape port | `backend/app/services/aggregation/__main__.py` |
 | `METRICS_TOKEN` | — (secret, set your own) | Bearer token a scraper must present to read the metrics. | `backend/app/api/v1/endpoints/metrics.py` |
+| `PROMETHEUS_MULTIPROC_DIR` | (empty) / — *(differs by call site)* | a writable per-pod directory that aggregates /internal/metrics across gunicorn workers; unset, a scrape reads one worker at random (it does not affect /api/v1/metrics) | `backend/app/observability/metrics.py`, `backend/gunicorn_conf.py` |
 
 ### Internal tuning
 
@@ -780,7 +791,7 @@ Logs, metrics, health probes and the system status checks.
 | `EVENT_LOOP_WEDGE_DUMP_S` | `10` | `backend/app/observability/event_loop_monitor.py` |
 | `EVENT_LOOP_WINDOW_SIZE` | `300` | `backend/app/observability/event_loop_monitor.py` |
 | `GRAPH_SERVICE_URL` | `http://graph-service:8001` | `backend/app/services/system_status/probes.py` |
-| `INTERNAL_METRICS_ENABLED` | `false` | `backend/app/middleware/db_metrics.py` |
+| `INTERNAL_METRICS_ENABLED` | `false` | `backend/app/middleware/db_metrics.py`, `backend/app/observability/metrics.py` |
 | `REDIS_MEMORY_CRITICAL_PCT` | `95.0` | `backend/app/services/system_status/probes.py` |
 | `REDIS_MEMORY_WARN_PCT` | `85.0` | `backend/app/services/system_status/probes.py` |
 | `SYSTEM_STATUS_CACHE_TTL_S` | `10` | `backend/app/services/system_status/service.py` |

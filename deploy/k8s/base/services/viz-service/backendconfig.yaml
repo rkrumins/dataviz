@@ -16,6 +16,19 @@ spec:
   # export can finish (see the frontend's BackendConfig, which the base
   # ingress routes everything through); the app's own tiers (120s at most)
   # still end every other request first, with its JSON 504.
+  #
+  # Also the hard ceiling on an SSE stream, which is worth stating because
+  # it is the non-obvious half: on a GCP Application Load Balancer this is
+  # NOT an idle timeout. It bounds the whole exchange, first request byte
+  # to last response byte, and an event stream never sends a last byte —
+  # so heartbeats do nothing to extend it. At the old 120 every change-feed
+  # stream died two minutes in, which reads as "realtime is flaky" and
+  # costs a fleet-wide reconnect stampede every two minutes. Anything at
+  # or below the feed's own 15-minute maximum stream lifetime brings that
+  # back.
   timeoutSec: 3600
   connectionDraining:
-    drainingTimeoutSec: 30
+    # Long enough for open streams to be closed by the app's own shutdown
+    # path — which sends a final frame with a jittered retry hint — rather
+    # than being cut mid-flight and reconnecting in lockstep.
+    drainingTimeoutSec: 60

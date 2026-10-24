@@ -46,15 +46,17 @@ export interface AnnouncementUpdateRequest {
   ctaUrl?: string | null
 }
 
+/**
+ * The server still returns ``pollIntervalSeconds``, but nothing reads it:
+ * banners refresh through the change feed, on the Live updates interval.
+ */
 export interface AnnouncementConfigResponse {
-  pollIntervalSeconds: number
   defaultSnoozeMinutes: number
   updatedBy?: string | null
   updatedAt?: string | null
 }
 
 export interface AnnouncementConfigUpdateRequest {
-  pollIntervalSeconds?: number
   defaultSnoozeMinutes?: number
 }
 
@@ -102,10 +104,10 @@ export const announcementService = {
   async getConfig(): Promise<AnnouncementConfigResponse> {
     try {
       const res = await fetchWithTimeout(`${PUBLIC_URL}/config`)
-      if (!res.ok) return { pollIntervalSeconds: 15, defaultSnoozeMinutes: 30 }
+      if (!res.ok) return { defaultSnoozeMinutes: 30 }
       return res.json()
     } catch {
-      return { pollIntervalSeconds: 15, defaultSnoozeMinutes: 30 }
+      return { defaultSnoozeMinutes: 30 }
     }
   },
 
