@@ -12,8 +12,11 @@ A bump is fire-and-forget: if Redis is unreachable the mutation still
 succeeds and the notification is simply lost, because the alternative —
 failing a write because a cache-invalidation hint could not be sent — is
 worse than a client being briefly stale. The REST endpoints remain the
-source of truth and clients keep a slow reconciliation poll, so a lost
-bump costs latency, never correctness.
+source of truth. A lost bump leaves the counter where it was, so no
+version check can find it: the client covers that by refreshing every
+surface after a manifest read fails (``check`` in
+``frontend/src/store/changeFeed.ts``), and a bump lost in a blip that no
+read saw fail waits for the next change to its topic.
 
 Two consequences worth stating, because both have bitten this pattern
 elsewhere:
