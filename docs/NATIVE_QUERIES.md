@@ -121,7 +121,7 @@ wherever it stands as a clause; back it up on the database as below.
 
 | Bound | Default | Set with |
 | --- | --- | --- |
-| Rows shown | 200; at most 1,000 | `NATIVE_QUERY_DEFAULT_ROWS`, `NATIVE_QUERY_MAX_ROWS` (up to 10,000) |
+| Rows shown | 200; at most 1,000 | `NATIVE_QUERY_DEFAULT_ROWS`, `NATIVE_QUERY_MAX_ROWS` (up to 9,999) |
 | Time | 10 s; at most 30 s | `NATIVE_QUERY_DEFAULT_TIMEOUT_MS`, `NATIVE_QUERY_MAX_TIMEOUT_MS` (up to 60 s, under the 120 s budget of `/graph/` routes) |
 | Runs per person | 20 a minute | `NATIVE_QUERY_RATE` (`429`, with `Retry-After`) |
 | Runs at once, per data source, per API process | 2 | `NATIVE_QUERY_CONCURRENCY` (`429` after a 2 s wait) |
@@ -230,6 +230,10 @@ up and bound what one query can cost:
 - `QUERY_MEM_CAPACITY` — the most memory one query may use (`0` means
   unlimited). A query that passes it fails, and the person is told the answer
   was too large.
+- `RESULTSET_SIZE` — the most rows FalkorDB returns in one reply, cutting the
+  rest without saying so (the stock image sets 10,000). Keep it above
+  `NATIVE_QUERY_MAX_ROWS`: a run reads one row past its limit to know that more
+  matched.
 - **Read replicas.** Native queries go to a replica when there is one, so the
   primary — and the writes waiting on FalkorDB's per-graph lock — feel them
   least.

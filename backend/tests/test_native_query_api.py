@@ -428,6 +428,18 @@ async def test_the_limits_are_held_to_the_servers(test_client: AsyncClient, db_s
     assert any("50 rows" in note for note in body["notes"])
 
 
+def test_the_row_ceiling_leaves_room_for_the_row_past_it(monkeypatch):
+    """A run reads one row past its limit to know more matched: 9,999 + 1
+    stays inside the stock FalkorDB image's RESULTSET_SIZE (10,000), past
+    which FalkorDB cuts a reply without saying so."""
+    monkeypatch.setenv("NATIVE_QUERY_MAX_ROWS", "10000")
+    get_native_query_settings.cache_clear()
+    try:
+        assert get_native_query_settings().max_rows == 9_999
+    finally:
+        get_native_query_settings.cache_clear()
+
+
 async def test_an_answer_past_the_size_cap_is_cut_and_says_so(test_client: AsyncClient,
                                                               db_session, estate, engine,
                                                               monkeypatch):

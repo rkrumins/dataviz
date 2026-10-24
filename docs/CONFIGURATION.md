@@ -249,7 +249,7 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `NATIVE_QUERY_DEFAULT_ROWS` | `200` | rows shown when a run doesn't say | `backend/app/services/native_query/settings.py` |
 | `NATIVE_QUERY_DEFAULT_TIMEOUT_MS` | `10000` | how long a run may take when it doesn't say | `backend/app/services/native_query/settings.py` |
 | `NATIVE_QUERY_MAX_REPLY_BYTES` | `16777216` | the most a FalkorDB reply may carry before it is cut off | `backend/app/services/native_query/settings.py` |
-| `NATIVE_QUERY_MAX_ROWS` | `1000` | the most rows a run may ask for (up to 10000) | `backend/app/services/native_query/settings.py` |
+| `NATIVE_QUERY_MAX_ROWS` | `1000` | the most rows a run may ask for (up to 9999) | `backend/app/services/native_query/settings.py` |
 | `NATIVE_QUERY_MAX_TIMEOUT_MS` | `30000` | the longest a run may take (up to 60000) | `backend/app/services/native_query/settings.py` |
 | `NATIVE_QUERY_RATE` | `20/minute` | runs per person | `backend/app/services/native_query/settings.py` |
 | `PROVIDER_CLOSE_TIMEOUT_S` | `2.0` | give up on a wedged close instead of freezing the warmup cycle | `backend/app/providers/manager.py` |

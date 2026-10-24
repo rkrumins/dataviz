@@ -34,7 +34,10 @@ class NativeQuerySettings:
 
     @classmethod
     def from_env(cls) -> "NativeQuerySettings":
-        max_rows = _read_int("NATIVE_QUERY_MAX_ROWS", 1000, 1, 10_000)
+        # A run reads one row past its limit to know more matched; 9,999 + 1
+        # stays inside the stock FalkorDB image's RESULTSET_SIZE (10,000),
+        # past which FalkorDB cuts a reply without saying so.
+        max_rows = _read_int("NATIVE_QUERY_MAX_ROWS", 1000, 1, 9_999)
         max_timeout_ms = _read_int("NATIVE_QUERY_MAX_TIMEOUT_MS", 30_000, 1000, 60_000)
         return cls(
             default_rows=_read_int("NATIVE_QUERY_DEFAULT_ROWS", 200, 1, max_rows),
