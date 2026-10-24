@@ -114,11 +114,13 @@ async def _hydrate_subjects(
     # override column and, for a full-name-only IdP, rendered a raw user id
     # in the UI. Soft-deleted users are included, as they always were here.
     for uid, ident in (await user_repo.get_identities_by_ids(session, user_ids)).items():
+        # A service account's address is a placeholder nobody can write to.
+        email = None if is_service_account(uid) else ident["email"]
         out[("user", uid)] = WorkspaceMemberSubject(
             type="user",
             id=uid,
-            display_name=ident["name"] or ident["email"] or None,
-            secondary=ident["email"],
+            display_name=ident["name"] or email or None,
+            secondary=email,
         )
 
     if group_ids:
@@ -285,7 +287,7 @@ async def list_effective_access(
             WorkspaceAccessUser(
                 user_id=uid,
                 display_name=(ident["name"] or None) if ident else None,
-                email=ident["email"] if ident else None,
+                email=ident["email"] if ident and not is_service_account(uid) else None,
                 avatar_id=ident["avatar_id"] if ident else None,
                 status=ident["status"] if ident else None,
                 deleted=ident["deleted"] if ident else False,

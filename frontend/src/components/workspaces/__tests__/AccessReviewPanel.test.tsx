@@ -99,4 +99,18 @@ describe('AccessReviewPanel', () => {
         await waitFor(() => expect(reviews.complete).toHaveBeenCalledWith('ws_fin', 'rev_1'))
         expect(notify).toHaveBeenCalledWith('success', 'Access review completed.')
     })
+
+    it('shows a service account as one, not as somebody who never signed in', async () => {
+        const user = userEvent.setup()
+        const SYNC = item({ id: 'rvi_sync', subject: { type: 'user', id: 'svc_0123456789ab', displayName: 'Metadata sync', secondary: null } })
+        reviews.list.mockResolvedValue([review([SYNC])])
+        reviews.get.mockResolvedValue(review([SYNC]))
+        renderPanel()
+
+        const row = (await screen.findByText('Metadata sync')).closest('li') as HTMLElement
+        expect(within(row).getByText('Service account')).toBeInTheDocument()
+        expect(within(row).queryByText(/never signed in/)).not.toBeInTheDocument()
+        await user.click(within(row).getByRole('button', { name: 'Remove Metadata sync’s Member access' }))
+        expect(within(row).getByText(/Remove now\? Its managers will hear why./)).toBeInTheDocument()
+    })
 })

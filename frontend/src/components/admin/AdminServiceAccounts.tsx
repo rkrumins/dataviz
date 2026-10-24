@@ -68,7 +68,16 @@ export function AdminServiceAccounts() {
     const [error, setError] = useState<string | null>(null)
     const [creating, setCreating] = useState(false)
     const [handingOver, setHandingOver] = useState(false)
-    const [openId, setOpenId] = useState<string | null>(null)
+    // ``?account=<id>`` opens one account: the link its notices, its activity
+    // and the chips that name it carry. Read once at mount from
+    // ``window.location``, as the users and groups pages read theirs.
+    const [openId, setOpenId] = useState<string | null>(() => {
+        try {
+            return new URLSearchParams(window.location.search).get('account')
+        } catch {
+            return null
+        }
+    })
 
     const request = JSON.stringify([search, tab, page, version])
     const loading = answered !== request

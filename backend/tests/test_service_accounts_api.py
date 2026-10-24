@@ -25,10 +25,12 @@ from backend.app.db.models import (
     RoleBindingORM,
     ServiceAccountORM,
     UserORM,
+    ViewActivityLogORM,
     ViewORM,
     WorkspaceORM,
 )
-from backend.app.db.repositories import api_key_repo, notification_repo, user_repo
+from backend.app.db.repositories import analytics_repo, api_key_repo, notification_repo, user_repo
+from backend.app.services import workspace_access
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.versioning.service import AccessDenied, GraphVersioningService
 from backend.auth_service.core import api_keys
@@ -373,6 +375,52 @@ async def test_nothing_is_shared_with_a_service_account(test_client, db_session,
         await service.open_draft_mr(graph_id="g_sa", branch_id="b_sa", actor=ADMIN, reviewers=[svc])
 
 
+async def test_a_service_account_is_neither_counted_nor_found_as_a_person(
+    test_client, db_session, people,
+):
+    """Who has access shows it, without its placeholder address; how many
+    people there are, who can act on a queue, the admin search and the
+    analytics of people leave it out."""
+    svc = (await _create(test_client))["id"]
+    granted = await test_client.post(f"{BASE}/{svc}/roles", json={
+        "workspaceId": "ws_x", "role": "workspace_viewer",
+    })
+    assert granted.status_code == 201, granted.text
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id="usr_bea", role_name="workspace_viewer",
+        scope_type="workspace", scope_id="ws_x",
+    ))
+    for actor in (svc, "usr_bea"):
+        db_session.add(ViewActivityLogORM(
+            view_id="view_any", workspace_id="ws_x", action="updated", actor=actor,
+        ))
+    await db_session.commit()
+
+    members = (await test_client.get("/api/v1/admin/workspaces/ws_x/members")).json()
+    [bound] = [m for m in members if m["subject"]["id"] == svc]
+    assert (bound["subject"]["displayName"], bound["subject"]["secondary"]) == ("Metadata sync", None)
+    effective = (await test_client.get("/api/v1/admin/workspaces/ws_x/members/effective")).json()
+    [listed] = [u for u in effective["users"] if u["userId"] == svc]
+    assert listed["email"] is None
+
+    assert await notification_repo.workspace_member_count(db_session, "ws_x") == 1
+    assert await notification_repo.users_who_can(
+        db_session, workspace_id="ws_x", permission="workspace:view:read",
+    ) == {"usr_bea"}
+    assert (await workspace_access.audience(db_session, ["ws_x"]))["ws_x"] == ({"usr_bea"}, set())
+    active = [u for u in (await db_session.execute(select(UserORM))).scalars()
+              if u.status == "active" and not u.id.startswith("svc_")]
+    assert await notification_repo.platform_user_count(db_session) == len(active)
+    assert svc not in {u.id for u in await user_repo.search_users(db_session, q="Metadata")}
+
+    summary = await analytics_repo.platform_summary(db_session, days=7)
+    assert [u["userId"] for u in summary["leaderboards"]["topUsers"]] == ["usr_bea"]
+    [row] = [r for r in await analytics_repo.workspace_rows(db_session, days=7) if r["workspaceId"] == "ws_x"]
+    assert (row["members"], row["activeUsers"]) == (1, 1)
+    detail = await analytics_repo.workspace_detail(db_session, "ws_x", days=7)
+    assert [c["userId"] for c in detail["topContributors"]] == ["usr_bea"]
+
+
 # ── What is said to it ──────────────────────────────────────────────
 
 
@@ -408,7 +456,7 @@ async def test_what_is_said_to_an_account_reaches_those_who_answer_for_it(
         db_session, user_ids=[svc], kind="anything", title="hello",
     ) == 1
     assert await _told(db_session, "anything") == [
-        (ADMIN, "For “Metadata sync”: hello", "/admin/service-accounts"),
+        (ADMIN, "For “Metadata sync”: hello", f"/admin/service-accounts?account={svc}"),
     ]
 
 

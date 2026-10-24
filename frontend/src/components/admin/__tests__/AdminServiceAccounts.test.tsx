@@ -98,6 +98,17 @@ describe('creating one', () => {
 })
 
 describe('one account', () => {
+    it('opens straight onto the account a link names', async () => {
+        window.history.pushState({}, '', '/admin/service-accounts?account=svc_sync')
+        try {
+            render(<AdminServiceAccounts />)
+            expect(await screen.findByRole('dialog', { name: 'Metadata sync' })).toBeInTheDocument()
+            expect(sa.get).toHaveBeenCalledWith('svc_sync')
+        } finally {
+            window.history.pushState({}, '', '/')
+        }
+    })
+
     it('asks before removing its last manager', async () => {
         sa.removeManager.mockResolvedValue(detail({ managers: [], managed: false, singleManager: false }))
         render(<AdminServiceAccounts />)

@@ -27,12 +27,12 @@ import { KeyDetailDrawer } from '@/components/apiKeys/KeyDetailDrawer'
 import { RevokeKeyDialog } from '@/components/apiKeys/RevokeKeyDialog'
 import { describePermissions, describeResources } from '@/components/apiKeys/apiKeyFormat'
 import { ExpiryFact, KeyStatusBadge } from '@/components/apiKeys/parts'
+import { ServiceAccountBadge } from '@/components/serviceAccounts/parts'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { Button, IconButton } from '@/components/ui/Button'
 import { DateTime } from '@/components/ui/DateTime'
 import { EmptyState } from '@/components/ui/EmptyState'
 import { HoverTip } from '@/components/ui/HoverTip'
-import { Badge } from '@/components/ui/Badge'
 import { PersonChip } from '@/components/ui/PersonChip'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { Sparkline } from '@/components/ui/Sparkline'
@@ -537,10 +537,6 @@ function Row({ apiKey: key, onOpen, onRevoke }: { apiKey: AdminApiKey; onOpen: (
             </td>
         </tr>
     )
-}
-
-function ServiceAccountBadge() {
-    return <Badge tone="info" size="sm" className="shrink-0">Service account</Badge>
 }
 
 function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {

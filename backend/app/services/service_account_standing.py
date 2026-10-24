@@ -34,7 +34,6 @@ from backend.common.service_accounts import DEFAULT_GRACE_DAYS, grace_days, is_s
 
 #: How far ahead of its keys pausing the administrators are reminded.
 REMIND_AHEAD = timedelta(days=3)
-_LINK = "/admin/service-accounts"
 #: The switches a key request reads (``api_key_auth._policy``), read here by
 #: name: the control plane runs the sweep and must not import the request path.
 _SSO_WINDOW_FLAG = "apiKeySsoSignInWindow"
@@ -56,6 +55,11 @@ def _window_days(value) -> Optional[int]:
     except (TypeError, ValueError):
         return None
     return days if days > 0 else None
+
+
+def _admin_link(account_id: str) -> str:
+    """The administrators' Service accounts page, opened on the account."""
+    return f"/admin/service-accounts?account={account_id}"
 
 
 async def policy(session: AsyncSession) -> Policy:
@@ -108,7 +112,7 @@ async def refresh(
                 )
             await notification_repo.notify(
                 session, user_ids=admins, kind="service_account_unmanaged",
-                title="A service account has no manager left", body=body, link=_LINK,
+                title="A service account has no manager left", body=body, link=_admin_link(account.id),
                 resource_type="service_account", resource_id=account.id, dedupe_unread=True,
             )
     return lost
@@ -136,7 +140,7 @@ async def remind_pausing(
                 f"“{account.name}” still has no manager. Its keys stop working on "
                 f"{pauses.date().isoformat()} unless you appoint one."
             ),
-            link=_LINK, resource_type="service_account", resource_id=account.id,
+            link=_admin_link(account.id), resource_type="service_account", resource_id=account.id,
             dedupe_unread=True,
         )
     await service_account_repo.mark_pause_reminded(session, [a.id for a in due], now=now)
@@ -188,4 +192,4 @@ async def key_audience(session: AsyncSession, owner_id: str) -> KeyAudience:
     ))[owner_id]
     if people:
         return KeyAudience(people, f"/me/service-accounts/{owner_id}", name)
-    return KeyAudience(await binding_repo.platform_admin_user_ids(session), _LINK, name)
+    return KeyAudience(await binding_repo.platform_admin_user_ids(session), _admin_link(owner_id), name)

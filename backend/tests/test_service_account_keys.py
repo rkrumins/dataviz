@@ -454,7 +454,7 @@ async def test_expiry_reminders_go_to_the_managers_or_with_none_left_to_the_admi
     await db_session.commit()
     assert await api_key_housekeeping.remind_once(db_session) == 1
     told = [n for n in await _notes(db_session, "api_key_expiring") if n.resource_id == second.id]
-    assert [(n.user_id, n.link) for n in told] == [(ROOT, "/admin/service-accounts")]
+    assert [(n.user_id, n.link) for n in told] == [(ROOT, f"/admin/service-accounts?account={account}")]
 
 
 async def test_a_persons_own_key_notices_read_as_before(client, db_session):

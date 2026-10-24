@@ -325,7 +325,7 @@ async def search_users(
     """Free-text fan-out across email + first/last name. Used by the
     admin ``/admin/users/search`` endpoint. The identities / external-
     attribute scans live in their own repos; the endpoint joins
-    results."""
+    results. People only: a service account is nobody to find here."""
     q = (q or "").strip()
     if not q:
         return []
@@ -334,6 +334,7 @@ async def search_users(
         select(UserORM)
         .where(
             UserORM.deleted_at.is_(None),
+            is_person(UserORM.id),
         )
         .where(
             (UserORM.email.ilike(needle))

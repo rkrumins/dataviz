@@ -28,7 +28,7 @@ from backend.app.db.models import (
     RolePermissionORM,
     UserORM,
 )
-from backend.common.service_accounts import is_service_account
+from backend.common.service_accounts import is_person, is_service_account
 
 logger = logging.getLogger(__name__)
 
@@ -199,7 +199,7 @@ async def workspace_member_count(
     people — an audience the sharer cannot count from the browser,
     because the workspace list they can see is scoped to their own
     memberships. Group bindings expand to their members; a person bound
-    twice counts once.
+    twice counts once, and a service account is not a person.
     """
     bindings = (await session.execute(
         select(RoleBindingORM).where(
@@ -207,7 +207,10 @@ async def workspace_member_count(
             RoleBindingORM.scope_id == workspace_id,
         )
     )).scalars().all()
-    users = {b.subject_id for b in bindings if b.subject_type == "user"}
+    users = {
+        b.subject_id for b in bindings
+        if b.subject_type == "user" and not is_service_account(b.subject_id)
+    }
     group_ids = {b.subject_id for b in bindings if b.subject_type == "group"}
     if group_ids:
         members = (await session.execute(
@@ -230,10 +233,10 @@ async def platform_user_count(session: AsyncSession) -> int:
     Counts ACTIVE accounts only — pending invitees and suspended
     accounts cannot open anything, so including them would overstate
     the reach and make the number untrustworthy the first time someone
-    checked it against the admin user list.
+    checked it against the admin user list — which lists no service account.
     """
     result = await session.execute(
-        select(func.count(UserORM.id)).where(UserORM.status == "active")
+        select(func.count(UserORM.id)).where(UserORM.status == "active", is_person(UserORM.id))
     )
     return int(result.scalar_one() or 0)
 
@@ -248,7 +251,9 @@ async def users_who_can(
     bindings expand to their members. Global bindings that imply the
     permission everywhere (``system:admin`` / ``system:org-admin``) are
     deliberately NOT included: a platform owner does not want every
-    workspace's publication requests in their bell.
+    workspace's publication requests in their bell. Nor are service
+    accounts: these are queues and alerts for people to act on, and an
+    account is told only what is addressed to it.
     """
     role_rows = (await session.execute(
         select(RolePermissionORM.role_name).where(
@@ -271,7 +276,8 @@ async def users_who_can(
     group_ids: set[str] = set()
     for b in bindings:
         if b.subject_type == "user":
-            users.add(b.subject_id)
+            if not is_service_account(b.subject_id):
+                users.add(b.subject_id)
         elif b.subject_type == "group":
             group_ids.add(b.subject_id)
 

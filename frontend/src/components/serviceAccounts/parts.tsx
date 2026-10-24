@@ -15,6 +15,11 @@ import { Badge, type BadgeTone } from '@/components/ui/Badge'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { ServiceAccount, ServiceAccountManager } from '@/services/serviceAccountService'
 
+/** Marks a service account wherever it is listed among people. */
+export function ServiceAccountBadge() {
+    return <Badge tone="info" size="sm" className="shrink-0">Service account</Badge>
+}
+
 export interface Standing {
     tone: BadgeTone
     label: string

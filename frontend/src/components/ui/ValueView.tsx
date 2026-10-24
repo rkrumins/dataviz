@@ -29,7 +29,8 @@ import { DateTime } from './DateTime'
 import { PersonChip } from './PersonChip'
 
 const ISO_INSTANT = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$/
-const PERSON_ID = /^usr_[A-Za-z0-9_-]{2,}$/
+/** A person's id, or a service account's: either is shown by the chip that names people. */
+const PERSON_ID = /^(usr|svc)_[A-Za-z0-9_-]{2,}$/
 /** A minted id: a short prefix and a hex tail (`agg_3f9c0a1b2c3d`). */
 const ENTITY_ID = /^[a-z]{1,8}_[0-9a-f]{8,}$/
 const UUID = /^(?:[0-9a-f]{32}|[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i

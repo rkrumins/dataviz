@@ -25,6 +25,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { MOTION } from '@/lib/motion'
+import { isServiceAccountId } from '@/lib/serviceAccounts'
 import { cn } from '@/lib/utils'
 import type { AdminApiKey, ApiKey, ApiKeyDetail, KeyRef } from '@/services/apiKeyService'
 import { AccessMatrix } from './AccessMatrix'
@@ -143,7 +144,10 @@ function DrawerBody({ apiKey, variant, load, onClose, actions, onOpenKey }: {
                 {variant === 'admin' && owner && (
                     <div className="mt-4 flex items-center gap-3 p-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.04]">
                         <div className="min-w-0 flex-1">
-                            <PersonChip id={owner.id} person={owner} size="md" showEmail caption="Acts as them" />
+                            <PersonChip
+                                id={owner.id} person={owner} size="md" showEmail
+                                caption={isServiceAccountId(owner.id) ? 'Acts as the service account' : 'Acts as them'}
+                            />
                         </div>
                         {/* What was done with it, and what happened to it — refusals included. */}
                         <a

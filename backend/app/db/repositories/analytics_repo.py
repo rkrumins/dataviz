@@ -2330,6 +2330,12 @@ async def _leaderboards(session: AsyncSession, w: Window, *, opens: _OpenFold) -
         .group_by(ViewORM.created_by)
     )).all()))
 
+    # People only: an integration acting through a service account's key is
+    # not one of the users these rank.
+    for counter in (activity_per_actor, opens_per_actor, creations_per_actor):
+        for uid in [u for u in counter if is_service_account(u)]:
+            del counter[uid]
+
     combined: Counter = Counter()
     combined.update(activity_per_actor)
     combined.update(opens_per_actor)
@@ -2607,7 +2613,8 @@ async def workspace_rows(
 async def _member_counts(
     session: AsyncSession, *, now: datetime,
 ) -> Counter:
-    """Distinct workspace members, counting through groups and honouring expiry.
+    """Distinct workspace members — people, not service accounts — counting
+    through groups and honouring expiry.
 
     ``role_bindings.expires_at`` is never enforced in SQL — the binding repo
     filters it in Python after fetching — so an expired grant would otherwise be
@@ -2637,7 +2644,7 @@ async def _member_counts(
             continue
         if subject_type == "group":
             per_ws[scope_id].update(group_members.get(subject_id, ()))
-        elif subject_id:
+        elif subject_id and not is_service_account(subject_id):
             per_ws[scope_id].add(subject_id)
     return Counter({ws_id: len(users) for ws_id, users in per_ws.items()})
 
@@ -2651,6 +2658,7 @@ async def _actors_by_workspace(
             ViewActivityLogORM.created_at >= since,
             ViewActivityLogORM.workspace_id.is_not(None),
             ViewActivityLogORM.actor.is_not(None),
+            is_person(ViewActivityLogORM.actor),
         )
         .group_by(ViewActivityLogORM.workspace_id, ViewActivityLogORM.actor)
     )).all()
@@ -2782,6 +2790,7 @@ async def workspace_detail(
         .where(
             ViewActivityLogORM.created_at >= w.start,
             ViewActivityLogORM.actor.is_not(None),
+            is_person(ViewActivityLogORM.actor),
             *ws_activity,
         )
         .group_by(ViewActivityLogORM.actor)

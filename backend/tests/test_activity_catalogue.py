@@ -159,6 +159,9 @@ def test_a_moved_source_is_filed_under_where_it_went():
     # Revoked by the platform itself.
     ("user.session_revoked", {"user_id": "usr_1", "reason": "reuse"}, None, "system", "usr_1"),
     ("visualization.view.created", {"workspaceId": "ws_1", "actor": "usr_1"}, "usr_1", "user", None),
+    # Through a service account's key: the account acted, and it is no person.
+    ("visualization.view.created", {"workspaceId": "ws_1", "actor": "svc_0123456789ab"},
+     "svc_0123456789ab", "service", None),
     ("rbac.group.member_added", {"group_id": "grp_1", "user_id": "usr_2", "actor_id": "script"},
      "script", "service", "usr_2"),
     # A key's owner edits it; an admin revokes it; the sweep reminds of it;

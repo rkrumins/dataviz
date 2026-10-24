@@ -55,6 +55,25 @@ describe('PersonChip', () => {
         expect(tip).toHaveTextContent('Opens their account in User Management.')
     })
 
+    it('shows a service account as one: a bot for a face, no address, its own page', async () => {
+        const { container } = wrap(
+            <PersonChip
+                id="svc_0123456789ab" size="md" showEmail
+                person={{ name: 'Metadata sync', email: 'svc_0123456789ab@service-account.invalid', deleted: false }}
+            />,
+        )
+        const link = screen.getByRole('link', { name: 'Metadata sync' })
+        expect(link).toHaveAttribute('href', '/admin/service-accounts?account=svc_0123456789ab')
+        expect(screen.queryByText(/service-account\.invalid/)).not.toBeInTheDocument()
+        expect(container.querySelector('img')).toBeNull()
+
+        await hover(link)
+        const tip = screen.getByRole('tooltip')
+        expect(tip).toHaveTextContent('Service account')
+        expect(tip).toHaveTextContent('Opens it in Service accounts.')
+        expect(peopleById).not.toHaveBeenCalled()
+    })
+
     it('uses the person the record already names, and asks the directory nothing', () => {
         const { container } = wrap(
             <PersonChip id="usr_bo" person={{ name: 'Bo Lind', email: 'bo@example.com', deleted: false, hasImage: false }} />,
