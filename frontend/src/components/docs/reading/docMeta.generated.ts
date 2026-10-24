@@ -23,7 +23,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-10-20",
+    "updated": "2026-10-24",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -75,7 +75,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/FRONTEND.md"
   },
   "api-features": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-24",
     "path": "docs/API_FEATURES.md"
   },
   "services-overview": {
@@ -87,7 +87,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/services/INSIGHTS.md"
   },
   "services-search": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-24",
     "path": "docs/services/SEARCH.md"
   },
   "services-context-engine": {
@@ -111,7 +111,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/features/view-portability.md"
   },
   "feature-search-and-rules-reference": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-24",
     "path": "docs/features/search-and-rules-reference.md"
   },
   "top-level-nodes-performance": {
@@ -179,11 +179,11 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md"
   },
   "security-overview": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-24",
     "path": "docs/SECURITY_OVERVIEW.md"
   },
   "rbac": {
-    "updated": "2026-10-11",
+    "updated": "2026-10-24",
     "path": "docs/RBAC.md"
   },
   "sso": {
@@ -265,6 +265,10 @@ export const docMeta: Record<string, DocMeta> = {
   "read-path-performance": {
     "updated": "2026-10-10",
     "path": "docs/read-path-performance/README.md"
+  },
+  "native-queries": {
+    "updated": "2026-10-24",
+    "path": "docs/NATIVE_QUERIES.md"
   }
 }
 export const guideMeta: Record<string, DocMeta> = {
@@ -293,7 +297,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "advanced-search": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-24",
     "path": "docs/guide/ADVANCED_SEARCH.md"
   },
   "lineage-lens": {
@@ -313,7 +317,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/CREATING_VIEWS.md"
   },
   "managing-views": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-24",
     "path": "docs/guide/MANAGING_VIEWS.md"
   },
   "display-rules": {
@@ -369,7 +373,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/GOVERNANCE_OPS.md"
   },
   "feature-switches": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-24",
     "path": "docs/guide/FEATURE_SWITCHES.md"
   },
   "data-freshness": {
