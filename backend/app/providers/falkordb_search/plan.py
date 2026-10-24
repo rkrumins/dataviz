@@ -63,9 +63,16 @@ WALK_BUCKET_ROOTS = 32
 #: A lineage relationship's walk out from the entities it names drives the
 #: plan when it reaches at most this many entities, from at most
 #: ``REACH_ANCHORS_MAX`` (a container with more inside it): past either,
-#: the scope is read as usual and every candidate walks its own routes.
-REACH_MAX = 50_000
-REACH_ANCHORS_MAX = 20_000
+#: the scope is read as usual and every candidate walks its own routes —
+#: which on a graph of millions does not finish (45 s statements, timing
+#: out one after another). So the bounds are what a plan may hold, the
+#: reached IDs travelling in the session at about 8 bytes each, not what
+#: one statement answers: on 2M nodes and 6M edges a database's 50,021
+#: entities walk 3 hops out to 436,750 in about a second.
+REACH_MAX = 500_000
+REACH_ANCHORS_MAX = 200_000
+#: Anchors one walk statement starts from, so each stays short.
+REACH_STEP = 20_000
 
 Run = Callable[[str, Dict[str, Any]], Awaitable[Any]]
 
@@ -432,13 +439,17 @@ async def _reached_ids(run: Run, anchors: List[int], entry: Dict[str, Any],
     ``REACH_MAX``. ``params``: the compiler's — the edge filter's values."""
     pattern, conds = within_hops_walk(entry, 0)
     where = (" WHERE " + " AND ".join(conds)) if conds else ""
-    res = await run(
-        "UNWIND $_anchors AS _ai MATCH (anchor) WHERE ID(anchor) = _ai "
-        f"MATCH {pattern}{where} WITH DISTINCT n LIMIT $_lim RETURN collect(ID(n))",
-        {**params, "_anchors": anchors, "_lim": REACH_MAX + 1},
-    )
-    reached = sorted(_collected(res))
-    return None if len(reached) > REACH_MAX else reached
+    reached: set = set()
+    for i in range(0, len(anchors), REACH_STEP):
+        res = await run(
+            "UNWIND $_anchors AS _ai MATCH (anchor) WHERE ID(anchor) = _ai "
+            f"MATCH {pattern}{where} WITH DISTINCT n LIMIT $_lim RETURN collect(ID(n))",
+            {**params, "_anchors": anchors[i:i + REACH_STEP], "_lim": REACH_MAX + 1},
+        )
+        reached |= _collected(res)
+        if len(reached) > REACH_MAX:
+            return None
+    return sorted(reached)
 
 
 def _collected(res) -> set:

@@ -613,6 +613,23 @@ class TestReachPlan:
         assert await plan_mod.reach_plan(self._run([]), provider, _query({"kind": "all"}), c,
                                          ["Column"], ("CONTAINS",), width=2, notes=[]) is None
 
+    async def test_a_large_set_of_anchors_is_walked_in_parts(self, monkeypatch):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+        seen = []
+        c = self._compiled(rel("ancestor", IS("ds")))
+        provider = SimpleNamespace(_entity_type_levels={"column": 1})
+        monkeypatch.setattr(plan_mod, "REACH_STEP", 2)
+        plan = await plan_mod.reach_plan(self._run(seen), provider, _query({"kind": "all"}), c,
+                                         ["Column"], ("CONTAINS",), width=2, notes=[])
+        assert [p["_anchors"] for cy, p in seen if "MATCH _whP0" in cy] == [[10, 11], [12]]
+        assert [(u.kind, u.roots) for u in plan.units] == [("ids", [20])]
+        # It stops as soon as what the parts reach passes the bound.
+        seen.clear()
+        monkeypatch.setattr(plan_mod, "REACH_MAX", 2)
+        assert await plan_mod.reach_plan(self._run(seen), provider, _query({"kind": "all"}), c,
+                                         ["Column"], ("CONTAINS",), width=2, notes=[]) is None
+        assert len([1 for cy, _ in seen if "MATCH _whP0" in cy]) == 1
+
     async def test_it_steps_aside_when_the_walk_runs_out_of_time(self):
         from backend.app.providers.falkordb_search import plan as plan_mod
 
