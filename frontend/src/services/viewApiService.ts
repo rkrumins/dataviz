@@ -573,6 +573,7 @@ export async function getWorkspaceAudience(
 export type ViewActivityAction =
     | 'created' | 'updated' | 'visibility_changed' | 'shared' | 'unshared'
     | 'favourited' | 'unfavourited' | 'deleted' | 'restored' | 'data_changed'
+    | 'moved'
 
 /** One entry in a view's activity timeline. Field diffs live in ``changes``
  *  (e.g. { name: { from, to }, viewType: { from, to }, content: true }). */

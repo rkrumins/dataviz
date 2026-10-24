@@ -793,6 +793,16 @@ async def authorize_view_create(
                         detail="Missing permission: workspace:view:publish",
                     )
 
+    # The source it reads must be live and in this workspace — and stay there until the view
+    # is saved: a move of the source either waits for the view and takes it along, or has
+    # finished, and the view is refused rather than stranded in the workspace the source left.
+    if data_source_id is not None and not await data_source_repo.hold_in_workspace(
+        session, data_source_id, workspace_id,
+    ):
+        raise HTTPException(
+            status_code=422, detail="That data source isn't part of this workspace.",
+        )
+
 
 async def _template_version(
     session: AsyncSession, template_id: Optional[str], version: Optional[int],

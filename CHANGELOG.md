@@ -100,6 +100,129 @@ governance pack.
 
 ---
 
+## [Unreleased] — Move a data source to another workspace, with its views
+
+### Added
+
+**Move a data source, and everything built on it.** **Move to another workspace…** on a data
+source's **⋯** menu opens a guided move. Its views go with it — including those in the trash, and
+those with no source of their own that read it as the workspace's default — together with their
+history, its version history, open drafts and reviews, and its aggregation state and stats. Nothing
+is rebuilt. The steps:
+
+- **Destination** says, for each workspace you can see, whether you can move the source there now,
+  ask its admins, or why not.
+- **What moves** counts the views by visibility and shows the version history, then lists what to
+  resolve first (an aggregation run or a version-history job in progress, or a failed attempt to
+  turn on version control) and what to know (the workspace's last source leaving, its primary
+  source, views published to everyone, requests to publish, layout templates that stay behind,
+  open drafts whose owners can't reach the new workspace, a restricted source going to a
+  workspace open to everyone).
+- **Access** shows who keeps access, who gains it and who loses it. The new workspace's own
+  members, groups and identity-provider mappings decide who reads the moved views, so the people
+  and groups who read them only through the old workspace lose them — each listed with where their
+  access came from (the app, a group, or your identity provider).
+- **Confirm** asks why — the reason is shown in both workspaces' activity — and, when anyone loses
+  access, for **I understand … lose access**.
+
+**Nobody is left guessing.** Everyone who loses access gets an Inbox notice saying where the views
+went and how to get back in, the way the new workspace takes people: **Ask to join**, **Join** when
+it's open to everyone, or its admins when it's closed to requests. Both workspaces' admins are told who, the
+source's panel says how many, and the move records each person and group. Nothing is copied to
+keep the old audience reading: a copy would grow with people × views and would outlive an
+identity provider removing someone.
+
+**Ask the other workspace to take it.** When you administer only the workspace a source is in,
+the same steps end in **Send request**. The destination's admins hear in their Inbox and find it
+on **Workspaces → Requests** and as a banner on the workspace's **Data Sources** tab. Review shows
+a fresh picture of what would move, who would lose access, and what has changed since you asked. They **Accept and move** — refused if anything changed after they read it — or
+**Decline** with a reason you see. Requests expire after 14 days. You can cancel yours, and one is
+cancelled when its source is deleted or moved some other way. One that expires unanswered is
+recorded in both workspaces' activity, and you're told.
+
+**Undo, for a week.** A completed move can be undone for 7 days — the workspace, the primary
+source and the views, with the people who lost access told they have it back — while it is the
+source's latest move and nothing new has been built on it in its new workspace. The source's panel says where it came from,
+offers **Undo**, and lists each move under **Where it has lived**. Each moved view's activity says
+where it went.
+
+### Changed
+
+- **`POST /api/v1/admin/workspaces/{id}/data-sources/{ds}/move` moves a source that has views**,
+  which it used to refuse with a 409. For such a source it needs `workspace:admin` in both
+  workspaces (a source with nothing on it still needs `workspace:datasource:manage` in both). It
+  takes `previewToken` — required, with a 422 `preview_required`, when anyone would lose access —
+  and returns the move's record rather than the data source.
+- **A move re-files everything that named the old workspace**, including for a source with no
+  views: each moved view's activity and the aggregation state now go with the versioned graph,
+  which moves with its source since the release below. The graph moves first, so a refusal from
+  version control changes nothing.
+- **Open drafts and review requests no longer hold a move back**, as they did since the release
+  below: they go with the source, and the preview names any draft whose owner can't open the new
+  workspace. A move still waits while version control is busy with the source, or while a failed
+  attempt to turn it on waits to be resumed or cancelled — which the preview now says up front.
+- **Both workspaces' activity records a move**, as `workspace.data_source.moved`; it was filed
+  only under the destination. It names the versioned graph that moved (`graphId`), as
+  `workspace.datasource.moved` did (`graph_id`); those older events still show in history.
+- **`POST /api/v1/views/` checks the data source belongs to the view's workspace**, as the import
+  already did: a view naming a source in another workspace is refused with a 422.
+
+### Security
+
+- A move of a source with views fails closed like every `workspace:admin` route: a session whose
+  revocation can't be checked gets a 503. Answering, cancelling or undoing a transfer requires
+  `workspace:admin` somewhere before the transfer is looked up.
+- A preview, request or move naming a workspace you couldn't find answers 404, as for one that
+  doesn't exist; a preview would otherwise name its sources and people.
+- A view can't be created in the workspace its source is leaving: creating one holds the source's
+  row, so a concurrent move either takes the new view along or has finished and the view is
+  refused.
+- API keys can't reach any of these routes.
+- A restricted source going to a workspace open to everyone, where anyone who joins reads it, is
+  flagged in the preview, as opening a workspace that holds one is. It's a warning, not a refusal,
+  and part of what the preview's token covers: a destination that opens after you read the preview
+  sends you back to it.
+
+### Resilience
+
+- A retried move, request, answer or undo whose first try went through (its response lost) gets
+  that result for ten minutes, instead of an error; so does a second click queued behind the first.
+- The version store is written first and put back if the rest of a move fails. If putting it back
+  fails too, the reaper re-files the graph under its source's workspace — as it does for graphs
+  left behind by moves made before graphs moved with their sources. A source being moved is
+  skipped and looked at next time.
+- Answering a request and expiring it never race: whoever holds the request decides it, once.
+
+### Performance
+
+- A move writes each view's history in bulk and counts who loses access per person or group, never
+  per person per view. Measured on Postgres, 5,000 views move in 1.3 s and 50,000 in 9.5 s.
+- Moves, accepts and undos get two minutes (`HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS`, default 120)
+  rather than the 30-second default, and the browser waits 150 seconds for them
+  (`VITE_TIMEOUT_DATA_SOURCE_MOVE_MS`) so the server's answer always arrives. A source with more
+  than 50,000 views is refused up front.
+- Transfer lists return at most 200 rows.
+
+### Upgrading
+
+- **Run the upgrade job.** Migration `20261020_1000_ds_transfers` adds `data_source_transfers`,
+  the record of every move and request, with one open request per data source, and allows a view
+  activity entry to say `moved`. Downgrading removes the table and those entries.
+
+### Known limitations
+
+- Forks of a source's version history stay in the old workspace.
+- File uploads in progress for the source when it moves have to be started again.
+- API keys limited to the old workspace no longer reach the moved views; keys that name the source
+  or a view follow it.
+- A source with more than 50,000 views (trash included) can't be moved in one go.
+- A layout template shared only in the old workspace stays there: views that use it keep working,
+  but people in the new workspace can't open the template.
+- The picker on **Add Source** doesn't count views that read a source as the workspace's default,
+  so it may offer a move the server then refuses, saying why.
+
+---
+
 ## [Unreleased] — Follow a workspace's graphs and their history from a script
 
 ### Added

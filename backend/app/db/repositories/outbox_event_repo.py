@@ -31,6 +31,7 @@ import re
 import uuid
 from typing import Any, Optional
 
+from sqlalchemy import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.common import activity_context
@@ -136,4 +137,40 @@ async def emit(
     return event
 
 
-__all__ = ["emit", "InvalidEventType"]
+async def emit_many(
+    session: AsyncSession,
+    *,
+    event_type: str,
+    events: list[tuple[str, Optional[dict[str, Any]]]],
+    aggregate_type: Optional[str] = None,
+    event_version: int = 1,
+) -> int:
+    """:func:`emit` for many aggregates of one event type, as one statement.
+
+    ``events`` is ``[(aggregate_id, payload), ...]``. Each row is exactly what
+    :func:`emit` would add; for changes that touch thousands of entities at
+    once, where an object and a flush apiece would dominate the request.
+    Returns how many were added.
+    """
+    domain = _validate_event_type(event_type)
+    if aggregate_type is None:
+        parts = event_type.split(".")
+        aggregate_type = parts[1] if len(parts) >= 2 else domain
+    if not events:
+        return 0
+    await session.execute(insert(OutboxEventORM), [
+        {
+            "id": f"evt_{uuid.uuid4().hex[:12]}",
+            "event_type": event_type,
+            "event_version": event_version,
+            "aggregate_type": aggregate_type,
+            "aggregate_id": aggregate_id,
+            "payload": json.dumps(activity_context.envelope(dict(payload or {}))),
+            "processed": False,
+        }
+        for aggregate_id, payload in events
+    ])
+    return len(events)
+
+
+__all__ = ["emit", "emit_many", "InvalidEventType"]

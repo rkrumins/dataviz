@@ -292,6 +292,61 @@ workspace's own. Unlike a private view, a personal template is **not** readable 
 administrators: a template is a layout, not data, so there is nothing behind it to audit. API keys
 cannot call these routes.
 
+### Moving a data source between workspaces
+
+A data source moves to another workspace together with every view on it, the views in the trash and
+the views with no source of their own that read it as the workspace's default. Their activity, its
+versioned graph and its aggregation state move too (`backend/app/services/data_source_transfer.py`).
+Authority is checked in both workspaces, never only the one in the path, because moving a source
+into a workspace you don't run would be a way to plant data in it:
+
+| To | You need |
+|---|---|
+| Move a source that has views, now | `workspace:admin` in the workspace it is in **and** in the one it goes to |
+| Move a source nothing is built on, now | `workspace:datasource:manage` in both |
+| Ask another workspace to take it | `workspace:admin` where it is |
+| Accept or decline a request | `workspace:admin` in the destination; the person who asked must still administer the source |
+| Cancel a request | the person who asked, or `workspace:admin` where the source is |
+| Undo a move, for 7 days, while nothing new is built on it | a direct move: `workspace:admin` in both; an accepted request: `workspace:admin` in the destination |
+
+Org Admins and Super Admins pass every row through their shortcuts. API keys reach none of these
+routes (they are not on the key surface).
+
+Guards around those rules:
+
+- **Fail closed.** A direct move of a source with views runs the same session-revocation probe as
+  every `workspace:admin` route, so a session whose revocation can't be checked is refused with a
+  503. Transfer detail, accept, decline, cancel and undo require `workspace:admin` in some
+  workspace before the transfer is looked up, so someone who administers nothing gets the same 403
+  whether or not it exists.
+- **No probing.** A preview, request or move naming a workspace the caller couldn't find — they
+  can't open it, and it isn't listed in Find a workspace while that's on — answers 404, as for one
+  that doesn't exist.
+- **No stranded views.** Creating a view checks its data source is live and in the view's
+  workspace, holding the source's row `FOR KEY SHARE` until the view is saved: a move (which holds
+  it `FOR UPDATE`) either waits for the view and takes it along, or has finished and the view is
+  refused.
+- **Restricted sources don't slip into open workspaces unsaid.** Every role reads every source in its
+  workspace, restricted ones included, so a restricted source going to a workspace whose
+  `request_policy` is `open` is flagged in the preview (`restricted_open`) — a warning, not a
+  refusal, as choosing **Open to everyone** is. It is part of the preview's token: a destination
+  that opens after the preview was read sends the mover back to it (409 `preview_stale`).
+
+What happens to access. The destination's own membership governs the moved views — nothing is
+copied to stretch the old workspace's audience across. Grants (`resource_grants`) are keyed by view,
+so the people and groups a view is shared with keep it, and creators keep their own views. A
+`workspace` view's audience becomes the destination's `workspace:view:read` holders, and a `private`
+view's admin reach becomes the destination's admins. The people and groups who read the views only
+through the old workspace lose them; the preview lists them with where their access came from
+(`app`, `group`, or `idp` — an SSO role mapping, or a group the identity provider fills), and a move
+or request that takes anyone's access needs the preview's token (`preview_required`). Afterwards
+they are told how to get back in by the destination's `request_policy` — ask to join, join one open
+to everyone, or ask its admins where it's closed to requests — both workspaces' admins are told
+who, and the move records them.
+Access is given back the usual way — a role or group in the destination, or an identity-provider
+mapping where the provider decides — never by copying it, which would outlive the provider removing
+someone. A pending publication request is put to the destination's publishers.
+
 ## Resolver behaviour
 
 A permission check resolves through a fixed short-circuit ladder — the three global
@@ -654,7 +709,8 @@ at it (`delete_scope_bindings`) and the custom `RoleORM` rows scoped
 to it (`role_repo.delete_workspace_scoped_roles`), which couldn't be
 bound anywhere else. A `rbac.workspace.roles_cascaded` outbox event
 lists the removed bindings + roles. Open access requests for it are
-closed as denied, with the note "The workspace was deleted".
+closed as denied, with the note "The workspace was deleted", and
+requests to move a data source into or out of it are cancelled.
 
 ## Access requests
 

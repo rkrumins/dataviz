@@ -11,7 +11,7 @@
 import { useMemo, useState } from 'react'
 import {
     Plus, Pencil, Eye, Lock, Users, Globe, Share2, UserMinus, Heart, HeartOff,
-    Trash2, RotateCcw, Clock, History, Database,
+    Trash2, RotateCcw, Clock, History, Database, ArrowRightLeft,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -32,6 +32,8 @@ const ACTION_META: Record<ViewActivityAction, { icon: React.ElementType; tint: s
     unshared: { icon: UserMinus, tint: 'bg-slate-500/10 text-slate-500 border-slate-500/20', label: 'Unshared', channel: 'sharing' },
     favourited: { icon: Heart, tint: 'bg-rose-500/10 text-rose-500 border-rose-500/20', label: 'Favourited', channel: 'sharing' },
     unfavourited: { icon: HeartOff, tint: 'bg-slate-500/10 text-slate-500 border-slate-500/20', label: 'Unfavourited', channel: 'sharing' },
+    // With its data source, to another workspace — or back again on an undo.
+    moved: { icon: ArrowRightLeft, tint: 'bg-indigo-500/10 text-indigo-500 border-indigo-500/20', label: 'Moved', channel: 'settings' },
 }
 
 const CHANNELS: { key: Channel | 'all'; label: string }[] = [

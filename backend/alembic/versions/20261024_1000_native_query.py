@@ -18,7 +18,7 @@ idempotent data. Revision id is kept <=32 chars (alembic_version.version_num
 is VARCHAR(32)).
 
 Revision ID: 20261024_1000_native_query
-Revises: 20261019_1600_access_life
+Revises: 20261020_1000_ds_transfers
 Create Date: 2026-10-24 10:00
 """
 from __future__ import annotations
@@ -31,7 +31,7 @@ import sqlalchemy as sa
 
 
 revision: str = "20261024_1000_native_query"
-down_revision: Union[str, None] = "20261019_1600_access_life"
+down_revision: Union[str, None] = "20261020_1000_ds_transfers"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
