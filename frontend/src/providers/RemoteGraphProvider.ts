@@ -293,7 +293,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
     // Internal Fetch Helper
     // ==========================================
 
-    private async fetch<T>(path: string, options?: RequestInit & { extraParams?: Record<string, string>, timeoutMs?: number, apiVersion?: 'v1' | 'v2' }): Promise<T> {
+    private async fetch<T>(path: string, options?: RequestInit & { extraParams?: Record<string, string>, timeoutMs?: number, apiVersion?: 'v1' | 'v2', silent403?: boolean }): Promise<T> {
         const { extraParams, timeoutMs, apiVersion, ...fetchOptions } = options ?? {}
         const method = (fetchOptions.method ?? 'GET').toUpperCase()
         const url = this.buildUrl(path, extraParams, apiVersion)
@@ -715,6 +715,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
      * activity log, so a replay would be a second run — which is why
      * ``/search/native`` is absent from the idempotent read list. The
      * request may take as long as the query is allowed, and a little more.
+     * A refusal is the console's to show, so a 403 opens no global notice.
      */
     async runNativeQuery(body: NativeQueryRequest, opts?: { signal?: AbortSignal }): Promise<NativeQueryResponse> {
         return await this.fetch<NativeQueryResponse>('/search/native', {
@@ -722,6 +723,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             body: JSON.stringify(body),
             signal: opts?.signal,
             timeoutMs: (body.timeoutMs ?? 10_000) + 15_000,
+            silent403: true,
         })
     }
 
