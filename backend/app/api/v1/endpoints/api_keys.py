@@ -53,6 +53,7 @@ from backend.app.auth.api_key_auth import (
 )
 from backend.app.auth.dependencies import (
     _identity_service,
+    assert_session_alive_or_503,
     get_current_user,
     get_permission_claims,
     requires,
@@ -1209,7 +1210,11 @@ async def _principal(
         account, _row = found
         if await service_account_repo.is_manager(session, account_id, user.id):
             return _Principal(actor=user, account=account)
-        if has_permission(await get_permission_claims(request), MINT_ANY):
+        claims = await get_permission_claims(request)
+        if has_permission(claims, MINT_ANY):
+            # Power over every account: honoured only while the session is
+            # known to be alive, as ``requires`` does for its sensitive ones.
+            await assert_session_alive_or_503(claims, permission=MINT_ANY, user_id=user.id)
             return _Principal(actor=user, account=account, manages=False)
     raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service account not found")
 
@@ -1227,6 +1232,21 @@ def _unless_disabled(principal: _Principal) -> None:
                 ),
             },
         )
+
+
+async def _still_acting(session: AsyncSession, principal: _Principal) -> None:
+    """Proving it's them may have waited on a sign-in. Under the principal's
+    lock, the account must still be there and enabled, and a manager must
+    still manage it."""
+    if principal.account is None:
+        return
+    found = await service_account_repo.get(session, principal.id)
+    if found is None or (
+        principal.manages
+        and not await service_account_repo.is_manager(session, principal.id, principal.actor.id)
+    ):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service account not found")
+    _unless_disabled(_Principal(actor=principal.actor, account=found[0], manages=principal.manages))
 
 
 async def _tell_managers(session: AsyncSession, principal: _Principal, key: ApiKeyORM) -> None:
@@ -1512,6 +1532,7 @@ async def create_my_api_key(
     # Counted again and minted under one lock: two requests racing each
     # other cannot both pass the limit.
     await api_key_repo.hold_principal(session, principal.id)
+    await _still_acting(session, principal)
     if await _at_limit():
         raise _too_many(who=principal.who)
 
@@ -1629,6 +1650,7 @@ async def rotate_my_api_key(
     # revocation racing this rotation either lands first (and is seen) or
     # waits for it (and revokes the old key, which has its successor).
     await api_key_repo.hold_principal(session, principal.id)
+    await _still_acting(session, principal)
     await session.refresh(old)
     await _replaceable()
     old_expiry = api_keys.effective_expiry(old, max_lifetime_days=policy.max_lifetime_days)
@@ -1753,7 +1775,21 @@ async def revoke_this_key(
     """Revoke the key making this request — for whoever finds one where it
     should not be. Works whatever the key's state, short of already revoked."""
     _context, key = await _this_key(request, session)
-    await _revoke(session, key, by=key.user_id, reason="self", client_ip=_client_ip(request))
+    if await _revoke(session, key, by=key.user_id, reason="self", client_ip=_client_ip(request)) and (
+        key.kind == api_keys.KIND_SERVICE
+    ):
+        # An integration just stopped, by the hand of whoever held its key:
+        # those who answer for the account hear of it.
+        audience = await service_account_standing.key_audience(session, key.user_id, maker=key.created_by)
+        await notification_repo.notify(
+            session, user_ids=audience.user_ids, kind="api_key_revoked_itself",
+            title=f"A key of “{audience.account}” was revoked by whoever held it",
+            body=(
+                f"{audience.key(key)} no longer works: a request made with it revoked it. "
+                "If nobody you know did that, find out where the key was."
+            ),
+            link=audience.link, resource_type="api_key", resource_id=key.id,
+        )
     await session.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 

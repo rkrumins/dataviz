@@ -176,6 +176,27 @@ class KeyAudience:
         return f"{whose} key “{key.name}” ({key.token_prefix}…)"
 
 
+async def tell_team_grew(
+    session: AsyncSession, account_ids: Iterable[str], *, team: str,
+    member_id: str, member_name: str, actor_id: Optional[str],
+) -> None:
+    """Someone joined a team that manages service accounts: they can now make
+    keys that act as each. Those who answer for each account hear of it."""
+    for account_id in sorted(set(account_ids)):
+        audience = await key_audience(session, account_id)
+        await notification_repo.notify(
+            session, user_ids=audience.user_ids - {member_id},
+            kind="service_account_team_joined",
+            title=f"{member_name} can now act as “{audience.account}”",
+            body=(
+                f"They joined {team}, which manages this service account, so they can make keys "
+                "that act as it. If that wasn't meant, take them out of the team."
+            ),
+            link=audience.link, actor_id=actor_id,
+            resource_type="service_account", resource_id=account_id,
+        )
+
+
 async def key_audience(
     session: AsyncSession, owner_id: str, *, maker: Optional[str] = None,
 ) -> KeyAudience:

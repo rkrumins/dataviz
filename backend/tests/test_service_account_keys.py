@@ -14,6 +14,7 @@ import json
 from datetime import datetime, timedelta, timezone
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from backend.app.api.v1.endpoints import api_keys as api_keys_endpoints
@@ -165,6 +166,57 @@ async def _notes(session, kind: str) -> list[NotificationORM]:
 
 
 # ── Who may ─────────────────────────────────────────────────────────
+
+
+async def test_a_super_admin_makes_no_key_while_their_session_cant_be_confirmed(
+    client, db_session, account, monkeypatch,
+):
+    async def unconfirmed(*_args, **_kwargs):
+        raise HTTPException(status_code=503, detail="Session state unavailable")
+
+    monkeypatch.setattr(api_keys_endpoints, "assert_session_alive_or_503", unconfirmed)
+    headers = _sign_in(client, ROOT, global_perms=_ROOT_PERMS)
+    assert (await _create(client, account, headers)).status_code == 503
+    # A manager acts by managing it, not by a power over every account.
+    assert (await _create(client, account, _sign_in(client))).status_code == 201
+
+
+async def test_who_acts_is_checked_again_once_they_have_proved_it(client, db_session, account):
+    """Proving it's them may wait on a sign-in; meanwhile the manager may be
+    removed or the account disabled."""
+    owner = await db_session.get(UserORM, OWNER)
+    principal = api_keys_endpoints._Principal(actor=owner, account=(await service_account_repo.get(db_session, account))[0])
+    await api_keys_endpoints._still_acting(db_session, principal)
+
+    await service_account_repo.remove_manager(db_session, account, user_id=OWNER)
+    with pytest.raises(HTTPException) as removed:
+        await api_keys_endpoints._still_acting(db_session, principal)
+    assert removed.value.status_code == 404
+
+    await service_account_repo.add_manager(db_session, account, user_id=OWNER, added_by=ROOT)
+    (await db_session.get(UserORM, account)).status = "suspended"
+    await db_session.commit()
+    with pytest.raises(HTTPException) as disabled:
+        await api_keys_endpoints._still_acting(db_session, principal)
+    assert disabled.value.status_code == 409
+
+
+async def test_a_key_that_revokes_itself_is_heard_of(client, db_session, account):
+    key = await _minted(db_session, account)
+    gone = await client.delete("/api/v1/api-keys/self", headers={"Authorization": f"Bearer {key.token}"})
+    assert gone.status_code == 204, gone.text
+    assert [n.user_id for n in await _notes(db_session, "api_key_revoked_itself")] == [OWNER]
+
+
+async def test_nobody_approves_what_they_opened_through_an_account_they_manage(client, db_session, account):
+    from backend.app.api.v1.endpoints import versioning
+
+    with pytest.raises(HTTPException) as refused:
+        await versioning._not_their_own(db_session, {"actor": account}, OWNER)
+    assert refused.value.status_code == 403
+    await versioning._not_their_own(db_session, {"actor": account}, OTHER)
+    await versioning._not_their_own(db_session, {"actor": OTHER}, OWNER)
+
 
 
 async def test_a_manager_makes_a_key_that_acts_as_the_account(client, db_session, account):

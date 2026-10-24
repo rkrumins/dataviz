@@ -15,10 +15,11 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import List, Literal, Optional
+from typing import Iterable, List, Literal, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
@@ -30,6 +31,7 @@ from backend.app.db.repositories import (
     group_repo,
     notification_repo,
     outbox_event_repo,
+    role_repo,
     service_account_repo,
     user_repo,
 )
@@ -250,6 +252,35 @@ async def _detail(session: AsyncSession, account_id: str) -> ServiceAccountDetai
     )
 
 
+async def _may_delegate(
+    session: AsyncSession, claims: PermissionClaims, account_ids: Iterable[str],
+) -> None:
+    """Making someone a manager hands them everything the account can do:
+    only someone who could grant each of its roles themselves may."""
+    wanted = sorted(set(account_ids))
+    if not wanted:
+        return
+    bindings = [
+        b for b in (await session.execute(
+            select(RoleBindingORM).where(
+                RoleBindingORM.subject_type == "user", RoleBindingORM.subject_id.in_(wanted),
+                RoleBindingORM.scope_type == "workspace",
+            )
+        )).scalars().all()
+    ]
+    perms = await role_repo.role_names_with_permissions(session, sorted({b.role_name for b in bindings}))
+    for b in bindings:
+        if not workspace_access.can_grant(claims, b.scope_id, b.role_name, perms.get(b.role_name, [])):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "A manager can do whatever the service account can, so only someone who could "
+                    f"grant its roles may appoint one — and you couldn't grant "
+                    f"{workspace_access.role_label(b.role_name)} in that workspace"
+                ),
+            )
+
+
 async def _record(session: AsyncSession, verb: str, account_id: str, name: str, **payload) -> None:
     await outbox_event_repo.emit(
         session,
@@ -383,6 +414,7 @@ async def create_service_account(
 async def hand_over(
     body: HandOverRequest,
     admin: User = Depends(requires(MANAGE)),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Move the service accounts a person manages to a successor — before
@@ -399,6 +431,7 @@ async def hand_over(
     rows, _total = await service_account_repo.list_page(session, managed_by=body.from_user_id, limit=1000)
     names = {user.id: user.first_name for user, _account in rows}
     wanted = set(names) if body.account_ids is None else set(names) & set(body.account_ids)
+    await _may_delegate(session, claims, wanted)
     for account_id in sorted(wanted):
         await _appoint(
             session, account_id, names[account_id], user_id=to_user, group_id=to_group,
@@ -502,11 +535,13 @@ async def appoint_manager(
     kind: Literal["users", "groups"] = Path(...),
     subject_id: str = Path(..., max_length=64),
     admin: User = Depends(requires(MANAGE)),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Make a person, or a team, a manager of the account. A team's members
     — now and later — may then make keys that act as it."""
     user, _account = await _account_or_404(session, account_id)
+    await _may_delegate(session, claims, [account_id])
     ref = ManagerRef(type="user" if kind == "users" else "group", id=subject_id)
     user_id, group_id, manager_name = await _manager_subject(session, ref)
     await _appoint(

@@ -44,7 +44,7 @@ from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import data_source_repo
+from backend.app.db.repositories import data_source_repo, service_account_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
@@ -3275,13 +3275,26 @@ async def diff_pull_request_children(
             containment_edge_types=cset, limit=limit, offset=offset)
 
 
+async def _not_their_own(session: AsyncSession, pr: dict, approver_id: str) -> None:
+    """Nobody approves what they opened through a service account they
+    manage: the approval would be of their own work."""
+    author = pr.get("actor")
+    if is_service_account(author) and await service_account_repo.is_manager(session, author, approver_id):
+        raise HTTPException(status_code=403, detail={
+            "type": "access_denied",
+            "message": "You manage the service account that opened this, so someone else approves it",
+        })
+
+
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
 async def approve_pull_request(
     ws_id: str, pr_id: str,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # a manager approves
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    await _not_their_own(session, _pr, user.id)
     with _domain_errors():
         return await svc.approve_pr(pr_id=pr_id, actor=user.id)
 
@@ -3509,7 +3522,9 @@ async def approve_merge_request(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    await _not_their_own(session, _pr, user.id)
     with _domain_errors():
         return await svc.approve_pr(pr_id=pr_id, actor=user.id)
 

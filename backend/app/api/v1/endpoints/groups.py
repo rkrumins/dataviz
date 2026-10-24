@@ -339,11 +339,30 @@ async def add_member(
         # roles; a service account holds only roles given to it directly.
         raise HTTPException(status_code=409, detail="A service account can't join a team")
     await _require_super_admin_for_super_admin_group(session, group_id, claims)
+    # Whoever joins a team that manages service accounts can act as them:
+    # putting someone there is looking after those accounts.
+    managed = await service_account_repo.accounts_managed_by_team(session, group_id)
+    if managed and not has_permission(claims, "system:service-accounts:manage"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This team manages service accounts, so whoever joins it can act as them. "
+                "Adding someone takes the permission to look after service accounts."
+            ),
+        )
 
     member = await group_repo.add_member(
         session, group_id, body.user_id, added_by=admin.id,
     )
     await _restand_service_accounts(session, group_id)
+    if managed:
+        group = await group_repo.get_group_by_id(session, group_id)
+        joined = await user_repo.get_identities_by_ids(session, [body.user_id])
+        await service_account_standing.tell_team_grew(
+            session, managed, team=group.name if group else group_id, member_id=body.user_id,
+            member_name=(joined.get(body.user_id) or {}).get("name") or body.user_id,
+            actor_id=admin.id,
+        )
 
     # The user just inherited every binding this group holds. Their
     # current JWT was issued BEFORE the membership existed, so its

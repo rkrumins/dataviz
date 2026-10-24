@@ -43,6 +43,7 @@ from backend.app.db.models import (
     RoleBindingORM,
     RoleORM,
     RolePermissionORM,
+    ServiceAccountManagerORM,
     UserORM,
     WorkspaceORM,
 )
@@ -175,7 +176,9 @@ async def addable_groups(
     """App-managed teams bound in the workspace that the caller may add
     someone to: not protected, not filled by the identity provider, and
     every binding they carry — in any workspace — one the caller could
-    make there. A group bound globally never qualifies."""
+    make there. A group bound globally never qualifies, and nor does one that
+    manages a service account: joining it would let someone act as the
+    account, wherever the account reaches."""
     bound = [
         b for b in await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id)
         if b.subject_type == "group"
@@ -191,6 +194,11 @@ async def addable_groups(
             GroupORM.is_protected.is_(False),
         )
     )).scalars().all()
+    managing = set((await session.execute(
+        select(ServiceAccountManagerORM.group_id)
+        .where(ServiceAccountManagerORM.group_id.in_([g.id for g in groups]))
+    )).scalars())
+    groups = [g for g in groups if g.id not in managing]
     if not groups:
         return []
     carried = (await session.execute(

@@ -235,6 +235,55 @@ async def test_an_account_is_renamed_disabled_and_enabled(test_client, db_sessio
     ]
 
 
+async def test_only_service_account_admins_put_people_in_a_team_that_manages_one(
+    test_client, db_session, people,
+):
+    """Whoever joins a team that manages a service account can act as it."""
+    await _create(test_client, managers=({"type": "group", "id": "grp_ops"},))
+    with claims("system:groups:manage"):
+        refused = await test_client.post("/api/v1/admin/groups/grp_ops/members", json={"userId": "usr_ada"})
+    assert refused.status_code == 403, refused.text
+    with claims("system:groups:manage", "system:service-accounts:manage"):
+        joined = await test_client.post("/api/v1/admin/groups/grp_ops/members", json={"userId": "usr_ada"})
+    assert joined.status_code == 201, joined.text
+    # Those who answer for it hear who can now act as it — not the newcomer.
+    assert [(uid, title) for uid, title, _ in await _told(db_session, "service_account_team_joined")] == [
+        ("usr_bea", "Ada P can now act as “Metadata sync”"),
+    ]
+
+    # Nor can answering an access request put anyone in it.
+    db_session.add(GroupORM(id="grp_plain", name="Readers"))
+    await db_session.flush()
+    for team in ("grp_ops", "grp_plain"):
+        db_session.add(RoleBindingORM(
+            subject_type="group", subject_id=team, role_name="workspace_viewer",
+            scope_type="workspace", scope_id="ws_x",
+        ))
+    await db_session.commit()
+    org_admin = PermissionClaims(sid="sess_org", global_perms=("system:org-admin",), ws_perms={})
+    offered = {g["id"] for g in await workspace_access.addable_groups(db_session, org_admin, "ws_x")}
+    assert offered == {"grp_plain"}
+
+
+async def test_appointing_a_manager_takes_being_able_to_grant_the_accounts_roles(
+    test_client, db_session, people,
+):
+    """A manager can do whatever the account can: whoever appoints one, or
+    hands an account over, must be able to grant its roles themselves."""
+    svc = (await _create(test_client))["id"]
+    assert (await test_client.post(f"{BASE}/{svc}/roles", json={
+        "workspaceId": "ws_x", "role": "workspace_viewer",
+    })).status_code == 201
+    with claims("system:service-accounts:manage"):
+        appointed = await test_client.put(f"{BASE}/{svc}/managers/users/usr_bea")
+        handed = await test_client.post(f"{BASE}/hand-over", json={
+            "fromUserId": "usr_ada", "to": {"type": "user", "id": "usr_bea"},
+        })
+    assert (appointed.status_code, handed.status_code) == (403, 403)
+    with claims("system:org-admin", "system:service-accounts:manage"):
+        assert (await test_client.put(f"{BASE}/{svc}/managers/users/usr_bea")).status_code == 200
+
+
 # ── Workspace roles ─────────────────────────────────────────────────
 
 
