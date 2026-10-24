@@ -328,9 +328,11 @@ export function buildSentence(draft: Predicate | null): Sentence {
         lines.push({ ...base, kind: 'clause', path, predicate: p, many })
     }
 
+    // "Find Datasets that are tagged", "Find anything that is tagged".
     const offset = subject ? 1 : 0
+    const many = !!subject
     clauses.forEach(({ predicate, path }, k) => {
-        emit(predicate, path, 1, leadFor(predicate, k, combine, true), 0, true, offset + k, k > 0)
+        emit(predicate, path, 1, leadFor(predicate, k, combine, many), 0, many, offset + k, k > 0)
     })
     lines.push({ key: 'root+', depth: 1, lead: '', relationDepth: 0, topIndex: null,
         kind: 'add', into, joiner: combine })

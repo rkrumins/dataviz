@@ -53,6 +53,7 @@ const SCOPE = [
   'components/canvas/property-manager/PropertyManagerButton.tsx',
   'components/canvas/search/panel/sentence',
   'components/canvas/search/panel/map',
+  'components/canvas/search/panel/ask',
   'features/versioning/components',
 ]
 

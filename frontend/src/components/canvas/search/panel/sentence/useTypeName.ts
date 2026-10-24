@@ -10,7 +10,7 @@ export function useTypeName(): (type: string, plural?: boolean) => string {
         const byId = new Map((entityTypes ?? []).map((t) => [t.id.toLowerCase(), t]))
         return (type: string, plural = false) => {
             const t = byId.get(type.toLowerCase())
-            if (!t) return type
+            if (!t) return plural ? `${type}s` : type
             return plural ? (t.pluralName || `${t.name}s`) : t.name
         }
     }, [entityTypes])

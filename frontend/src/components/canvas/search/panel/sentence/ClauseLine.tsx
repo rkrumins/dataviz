@@ -17,22 +17,16 @@ import { ConditionEditor } from '../ConditionRow'
 import { NodeRefList } from '../NodeRefPicker'
 import { RelationContext } from '../relationContext'
 import { RelationshipEditor } from '../RelationshipEditor'
-import { axisMeta, refName } from '../relations'
+import { axisMeta } from '../relations'
 import { filterKindById } from '../vocabulary/filterKinds'
-import {
-    leafSegments,
-    reachSegments,
-    relationVerb,
-    viaSegments,
-    type Segment,
-    type Slot,
-} from '../vocabulary/sentenceGrammar'
+import { leafSegments, type Slot } from '../vocabulary/sentenceGrammar'
 import { UNCOUNTABLE_WORDS, type Uncountable } from '../counts/countable'
 import type { CountsStatus, CountState } from '../counts/useCounts'
 
 import type { SentenceLine } from './clauseModel'
 import { CombinePicker, GroupOpPicker, ShapePicker, TypeIcon, TypePicker } from './editors'
 import { AddClauseMenu } from './AddClauseMenu'
+import { relationWords, toRuns } from './lineWords'
 import { useSentence } from './sentenceContext'
 import { Token, type TokenTone } from './Token'
 import { useTypeName } from './useTypeName'
@@ -49,51 +43,6 @@ export interface LineCount {
     scale: number
 }
 
-
-// ---------------------------------------------------------------------------
-// Segments → tokens
-// ---------------------------------------------------------------------------
-
-interface Run {
-    slot?: Slot
-    text: string
-    tone?: TokenTone | 'em' | 'note' | 'cond'
-    predicate?: Predicate
-}
-
-/** Separators that keep a list one token: "#PII, #GDPR", "10 and 20". */
-const SEPARATORS = new Set([', ', ' / ', ' and '])
-
-function toRuns(segments: Segment[]): Run[] {
-    const runs: Run[] = []
-    let sep = ''
-    let open: Run | null = null
-    const flushSep = () => { if (sep) { runs.push({ text: sep }); sep = '' } }
-    for (const seg of segments) {
-        const slot = seg.t === 'text' || seg.t === 'value' || seg.t === 'gap' ? seg.slot : undefined
-        if (slot) {
-            const text = seg.t === 'gap' ? 'pick…' : seg.t === 'value' && seg.quoted ? `“${seg.text}”` : seg.t === 'text' || seg.t === 'value' ? seg.text : ''
-            if (open && open.slot === slot && sep) {
-                open.text += sep + text
-                sep = ''
-                continue
-            }
-            flushSep()
-            open = { slot, text, tone: seg.t === 'gap' ? 'gap' : seg.t === 'value' ? 'value' : 'phrase' }
-            runs.push(open)
-            continue
-        }
-        if (seg.t === 'text' && open && SEPARATORS.has(seg.text)) { sep = seg.text; continue }
-        flushSep()
-        open = null
-        if (seg.t === 'text') runs.push({ text: seg.text })
-        else if (seg.t === 'em') runs.push({ text: seg.text, tone: 'em' })
-        else if (seg.t === 'note') runs.push({ text: seg.text, tone: 'note' })
-        else if (seg.t === 'cond') runs.push({ text: 'anything that…', tone: 'cond', predicate: seg.predicate })
-    }
-    flushSep()
-    return runs
-}
 
 const SLOT_TITLE: Partial<Record<Slot, string>> = {
     text: 'What text', types: 'Which types', tags: 'Which tags', layer: 'Which layer',
@@ -298,26 +247,7 @@ function RelationTokens({ line, tokenState }: {
     const p = line.predicate
     const relative = line.relative
     const relativeColor = useEntityVisual(relative.kind === 'types' ? relative.types[0] ?? '' : '').color
-    const several = p.count ? p.count.value !== 1 : p.quantifier === 'all'
-    const bare = relative.kind === 'something' && !p.count
-    // "feed something" / "feed nothing": an unnamed relative carries the
-    // quantifier itself.
-    const verb = bare
-        ? relationVerb({ ...p, quantifier: undefined }, line.many)
-        : `${relationVerb(p, line.many)}${p.count ? ` ${p.count.value}` : ''}`
-
-    let relativeLabel: string
-    if (relative.kind === 'types') {
-        const names = relative.types.map((t) => typeName(t, several))
-        const list = names.join(' or ')
-        relativeLabel = several || p.quantifier === 'none' ? list : `${/^[aeiou]/i.test(names[0] ?? '') ? 'an' : 'a'} ${list}`
-    } else if (relative.kind === 'names') {
-        const names = relative.refs.map(refName).join(', ')
-        relativeLabel = relative.orInside ? `${names} or anything inside it` : names
-    } else {
-        relativeLabel = p.count ? (p.count.value === 1 ? 'entity' : 'entities')
-            : p.quantifier === 'none' ? 'nothing' : 'something'
-    }
+    const { verb, relative: relativeLabel, reach, via: viaText } = relationWords(line, typeName)
 
     const nested = useMemo(() => ({ ...relationCtx, depth: line.relationDepth }), [relationCtx, line.relationDepth])
     const relationEditor = (
@@ -330,13 +260,6 @@ function RelationTokens({ line, tokenState }: {
                                 isRunning={ctx.isRunning} onSubmit={ctx.editorProps.onSubmit} />
         </RelationContext.Provider>
     )
-    const reach = reachSegments(p)
-    const reachText = reach.find((s) => s.t === 'text' && s.slot === 'hops')
-    const via = viaSegments(p)
-    const viaText = via.length
-        ? via.map((s) => (s.t === 'text' || s.t === 'value' || s.t === 'em' ? s.text : '')).join('')
-            .replace(/^,? through edges where /, '')
-        : ''
     const lineage = axisMeta(p.axis).lineage
 
     return (
@@ -358,10 +281,10 @@ function RelationTokens({ line, tokenState }: {
                                      onChange={(types) => ctx.setRelativeTypes(line, types)} types={ctx.presentTypes} />}>
                 {relativeLabel}
             </Token>
-            {(reachText || lineage) && (
+            {(reach || lineage) && (
                 <Token {...tokenState('hops')} tone="phrase" title="How far" width="lg" editor={relationEditor}
-                       ariaLabel={`How far: ${reachText && reachText.t === 'text' ? reachText.text : 'directly'}`}>
-                    {reachText && reachText.t === 'text' ? reachText.text : 'directly'}
+                       ariaLabel={`How far: ${reach ?? 'directly'}`}>
+                    {reach ?? 'directly'}
                 </Token>
             )}
             {viaText && (

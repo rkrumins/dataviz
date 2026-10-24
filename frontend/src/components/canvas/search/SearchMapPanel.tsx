@@ -75,6 +75,7 @@ import { NoViewState } from './panel/NoViewState'
 import { QueryCard } from './panel/QueryCard'
 import { QuerySentence } from './panel/QuerySentence'
 import { useEditorMode } from './panel/builderMode'
+import { ResultsAskBar } from './panel/ask/ResultsAskBar'
 import { ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
 import { ResultsPane } from './panel/ResultsPane'
 import { SaveQueryDialog } from './panel/SaveQueryDialog'
@@ -567,7 +568,9 @@ function PanelInner({
                         {showResultsSection && (
                             <div className="flex flex-col gap-2">
                                 {/* With the builder folded away this is the
-                                    only statement of what was asked. */}
+                                    only statement of what was asked — and
+                                    a new question is still one line away. */}
+                                {!refineOpen && <ResultsAskBar viewId={viewId} onRun={handleRun} />}
                                 {!sentenceShowing && <QuerySentence draftPredicate={draftPredicate} />}
                                 <MatchBar
                                     count={resultsCount}

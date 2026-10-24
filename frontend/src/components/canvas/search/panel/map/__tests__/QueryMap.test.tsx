@@ -43,7 +43,7 @@ describe('QueryMap', () => {
 
     it('names what the query finds and each relative, with how many there are', () => {
         setup()
-        expect(screen.getByRole('button', { name: /Change what the query finds: dataset.*9$/ })).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Change what the query finds: datasets, 9' })).toBeInTheDocument()
         expect(screen.getByRole('button', { name: /Change which relatives: chart, is tagged #Finance, 0$/ }))
             .toBeInTheDocument()
     })

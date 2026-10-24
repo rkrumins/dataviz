@@ -48,7 +48,7 @@ describe('SentenceBuilder', () => {
         setup(all(type('dataset'), tag('PII')))
         const sentence = screen.getByRole('list', { name: 'The query, as a sentence' })
         expect(within(sentence).getByText('Find')).toBeInTheDocument()
-        expect(within(sentence).getByRole('button', { name: 'What the query finds: dataset' })).toBeInTheDocument()
+        expect(within(sentence).getByRole('button', { name: 'What the query finds: datasets' })).toBeInTheDocument()
         expect(within(sentence).getByRole('button', { name: 'Which tags: #PII' })).toBeInTheDocument()
         // No relationship, no route: nothing to draw.
         expect(screen.queryByRole('figure', { name: "The query's shape" })).not.toBeInTheDocument()
@@ -56,7 +56,7 @@ describe('SentenceBuilder', () => {
 
     it('changes a value without an undo step', async () => {
         const { onSeed, onCommit } = setup(all(type('dataset'), tag('PII')))
-        fireEvent.click(screen.getByRole('button', { name: 'What the query finds: dataset' }))
+        fireEvent.click(screen.getByRole('button', { name: 'What the query finds: datasets' }))
         await userEvent.click(await screen.findByRole('option', { name: /chart/ }))
         expect(onSeed).toHaveBeenLastCalledWith(all(type('dataset', 'chart'), tag('PII')))
         expect(onCommit).not.toHaveBeenCalled()

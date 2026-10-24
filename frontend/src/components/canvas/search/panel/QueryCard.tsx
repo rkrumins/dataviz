@@ -56,7 +56,7 @@ import { Segmented } from '@/components/ui/Segmented'
 import { cn } from '@/lib/utils'
 import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
-import { useActiveView, useSchemaStore } from '@/store/schema'
+import { useSchemaStore } from '@/store/schema'
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import {
     useCanRedo,
@@ -73,8 +73,10 @@ import { SEARCH_OPTIONS } from '../searchOptions'
 
 import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
-import { entityTypesInView, layerOptions, type LayerOption } from './layerOptions'
+import { entityTypesInView, useViewLayerOptions, type LayerOption } from './layerOptions'
 import { AddFilterPalette, type CodeKind } from './AddFilterPalette'
+import { AskBar } from './ask/AskBar'
+import { useAskVocabulary } from './ask/useAskVocabulary'
 import { useEditorMode, type EditorMode } from './builderMode'
 import { CypherView } from './CypherView'
 import { isNativeResult } from './native/nativeCells'
@@ -162,6 +164,7 @@ export const QueryCard: FC<QueryCardProps> = ({
     // ``layerAssignment`` values entities carry, named from the view's
     // reference-layout config, or else the view's configured layers.
     const discoveredLayers = useViewLayerOptions(discovery.getValueSamples)
+    const askVocabulary = useAskVocabulary(discovery, discoveredLayers)
     // What Code mode's editor completes from: the view's own types, tags,
     // layers and keys, values and names from the server as they're typed.
     const provider = useGraphProviderIfAvailable()
@@ -238,6 +241,15 @@ export const QueryCard: FC<QueryCardProps> = ({
         if (!runnable) return
         onRun(runnable.predicate, SEARCH_OPTIONS)
     }, [runnable, onRun])
+
+    // A question applied is a change of shape, and runs at once: Auto runs
+    // the committed draft itself, Manual is told to.
+    const handleAsk = useCallback((result: Predicate) => {
+        commitDraft(result)
+        if (runMode !== 'manual') return
+        const next = buildRunnablePredicate(result)
+        if (next) onRun(next.predicate, SEARCH_OPTIONS)
+    }, [commitDraft, runMode, onRun])
 
     useEffect(() => {
         // Nothing complete — clear results so the canvas spotlight
@@ -377,13 +389,6 @@ export const QueryCard: FC<QueryCardProps> = ({
         if (runnable) setRuleModalOpen(true)
     }, [runnable])
 
-    // One omnibox instance, rendered in both states — as the hero when
-    // nothing is composed, and as the compact "add another filter" bar
-    // beneath the rows once something is. Before this, the empty state
-    // mounted a name-only quick search and did NOT mount the builder,
-    // so the whole filter palette was unreachable from a cold start and
-    // reaching a property filter meant composing a text search and then
-    // deleting it.
     // ─── Header summary ────────────────────────────────────────────
     const completeCount = conditions.filter((c) => !isRowIncomplete(c)).length
     const incompleteCount = conditions.length - completeCount
@@ -395,9 +400,18 @@ export const QueryCard: FC<QueryCardProps> = ({
     const isEmptyVisual = pointing && conditions.length === 0
     const showHeader = !isEmptyVisual
 
+    // The Ask bar leads every pointing editor: the empty card's front
+    // door, then a compact bar above the Sentence or the cards. The
+    // omnibox stays the compact "add another filter" bar beneath Form's
+    // rows.
+    const askBar = (variant: 'hero' | 'compact') => (
+        <AskBar viewId={viewId} vocabulary={askVocabulary} draft={draftPredicate} onAsk={handleAsk}
+                presentTypes={presentEntityTypes} variant={variant} disabled={isRunning} />
+    )
+
     const omnibox = (
         <SearchOmnibox
-            variant={isEmptyVisual ? 'hero' : 'inline'}
+            variant="inline"
             onAdd={handleAddFromOmnibox}
             entityTypes={presentEntityTypes}
             tagValues={discovery.tagValues}
@@ -490,7 +504,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                 {pointing ? (
                     isEmptyVisual ? (
                         <PremiumEmptyHero
-                            omnibox={omnibox}
+                            ask={askBar('hero')}
                             palette={
                                 <AddFilterPalette
                                     counts={paletteCounts}
@@ -513,6 +527,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                         />
                     ) : mode === 'sentence' ? (
                         <RelationProvider viewId={viewId} edges={edgeDiscovery}>
+                            {askBar('compact')}
                             <SentenceBuilder
                                 viewId={viewId}
                                 predicate={draftPredicate}
@@ -537,6 +552,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                         </RelationProvider>
                     ) : (
                         <>
+                            {askBar('compact')}
                             <RelationProvider viewId={viewId} edges={edgeDiscovery}>
                                 <VisualQueryBuilder
                                     predicate={draftPredicate}
@@ -640,13 +656,12 @@ export const QueryCard: FC<QueryCardProps> = ({
  * working query against THEIR data, not a placeholder.
  */
 function PremiumEmptyHero({
-    omnibox, palette, onSeed, onUseCodeMode,
+    ask, palette, onSeed, onUseCodeMode,
     discoveredEntityTypes, discoveredTags, discoveredLayers,
     discoveryLoading, discoveryError, propertyKeyCount,
 }: {
-    /** The SearchOmnibox, owned by QueryCard so the same instance can
-     *  also render beneath the rows once the query is non-empty. */
-    omnibox: ReactNode
+    /** The Ask bar: a question in plain words is the way in. */
+    ask: ReactNode
     /** Every kind of filter, by category — the "+ Add filter" palette. */
     palette: ReactNode
     onSeed: (p: Predicate) => void
@@ -772,30 +787,26 @@ function PremiumEmptyHero({
                             Search this view
                         </div>
                         <p className="mt-1 text-[12px] text-ink-muted leading-snug">
-                            Type anything — a name, a tag, a type, a property, a
-                            value — and pick what you meant. Or browse by category.
-                            Everything offered comes from your real data.
+                            Ask in plain words — what it is, how it connects,
+                            what it's tagged — and see what it reads as before
+                            anything changes. Or browse every kind of condition.
                         </p>
                     </div>
                 </div>
             </div>
 
-            {/* The omnibox is the entry point: one input that reads
-                what you type against tags, entity types, property
-                keys, sampled property VALUES, layers and lineage
-                shape at once. It replaced a name-only quick search,
-                which was why reaching a property filter used to mean
-                composing a text search and then deleting it. */}
+            {/* The Ask bar is the entry point: a question read against
+                the view's own types, tags, properties, values and
+                layers, shown back before it is applied. */}
             <div className="relative px-5 pb-3 flex flex-col gap-2">
-                {omnibox}
+                {ask}
                 <div>{palette}</div>
             </div>
 
-            {/* Examples — the teaching surface. The omnibox above is
+            {/* Examples — the teaching surface. The Ask bar above is
                 the fast path; these explain, in a sentence each, what a
-                query of that shape actually does. Trimmed to three now
-                that the omnibox carries its own "start with something
-                real" list. Recents live in the header's Library. */}
+                query of that shape actually does. Recents live in the
+                header's Library. */}
             <div className="relative px-3 pb-3">
                 <div className="flex flex-col gap-1.5">
                     {examples.slice(0, 3).map((ex, i) => (
@@ -1470,27 +1481,3 @@ function useEntityTypeNames(): string[] {
 }
 
 
-/**
- * Resolve layer options for the active view.
- *
- * Strategy:
- *   1. Sample DB-stored ``layerAssignment`` values (exactly what the BE
- *      compares against). For each, enrich the label from the view
- *      config when possible.
- *   2. If discovery returns nothing, fall back to the view's reference-
- *      layout config — using ``layer.id`` as value (typical assignment
- *      writer) and ``layer.name`` as label.
- *
- * This handles both common conventions:
- *   - DB stores layer IDs → label is enriched from view config
- *   - DB stores layer names → label IS the value (visibly the same)
- */
-function useViewLayerOptions(
-    getValueSamples: (key: string) => unknown[],
-): LayerOption[] {
-    const activeView = useActiveView()
-    return useMemo<LayerOption[]>(
-        () => layerOptions(activeView?.layout?.referenceLayout?.layers ?? [], getValueSamples),
-        [activeView, getValueSamples],
-    )
-}
