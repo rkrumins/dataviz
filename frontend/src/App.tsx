@@ -24,7 +24,7 @@ import {
 } from '@/store/sessionKeepalive'
 import { usePreferencesStore } from '@/store/preferences'
 import { startChangeFeed } from '@/store/changeFeed'
-import { featureEnabled } from '@/store/features'
+import { useFeature } from '@/store/features'
 import { queryClient } from '@/lib/queryClient'
 
 /**
@@ -39,7 +39,7 @@ import { queryClient } from '@/lib/queryClient'
  * user is authenticated — eliminating the startup request storm on the
  * login page.
  */
-function AuthBootstrap({ children }: { children: React.ReactNode }) {
+export function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const bootstrap = useAuthStore((s) => s.bootstrap)
   const status = useAuthStore((s) => s.status)
   // Phase 17/18: provider-status polling hits ``/admin/providers/status``
@@ -53,6 +53,9 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
   const isPlatformAdmin = usePermission('system:admin')
   const canReadProviders = useAnyWorkspacePermission('workspace:provider:read')
   const canPollProviders = isPlatformAdmin || canReadProviders
+  // Read reactively, not once: the flag reaches every tab through the feed
+  // itself, and the effect below restarts the feed when it flips.
+  const liveUpdates = useFeature('realtimeChangeFeedEnabled')
 
   useEffect(() => {
     void bootstrap()
@@ -85,10 +88,10 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     // periodic manifest check still runs, so every surface still updates
     // — within the admin's check interval (a minute by default) rather
     // than within a second. That is why turning this off is a latency
-    // decision and never a correctness one.
-    const stopChangeFeed = startChangeFeed({
-      stream: featureEnabled('realtimeChangeFeedEnabled'),
-    })
+    // decision and never a correctness one. It takes effect in open tabs
+    // too: a flip re-runs this effect, so turning push off closes their
+    // streams and turning it on opens them, with no reload.
+    const stopChangeFeed = startChangeFeed({ stream: liveUpdates })
     // Public endpoint — every authenticated user.
     enableProviderHealthPolling()
     // Workspace-scoped read endpoint. Toggle in both directions so a
@@ -100,7 +103,7 @@ function AuthBootstrap({ children }: { children: React.ReactNode }) {
     // claims response is a silent no-op.
     enablePermissionPolling()
     return stopChangeFeed
-  }, [status, canPollProviders])
+  }, [status, canPollProviders, liveUpdates])
 
   // Block rendering until auth resolves — prevents premature API calls
   if (status === 'idle' || status === 'loading') return null
