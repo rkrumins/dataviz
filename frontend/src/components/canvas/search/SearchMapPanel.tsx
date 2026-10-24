@@ -268,9 +268,10 @@ function PanelInner({
     ) => {
         void runPredicate(p, options)
     }, [runPredicate])
-    // A fix offered over an empty answer: the query changes and runs at
-    // once, whether or not the builder is open to run it.
-    const handleApplyFix = useCallback((next: Predicate) => {
+    // A change made from the results — a fix for an empty answer, a type
+    // to narrow to: the query changes and runs at once, whether or not
+    // the builder is open to run it.
+    const handleRefine = useCallback((next: Predicate) => {
         useSearchStore.getState().commitDraft(next)
         const runnable = buildRunnablePredicate(next)
         if (runnable) handleRun(runnable.predicate, SEARCH_OPTIONS)
@@ -620,7 +621,7 @@ function PanelInner({
                                     isLoadingAll={isLoadingAll}
                                     onCancelLoadAll={cancelLoadAll}
                                     draft={draftPredicate}
-                                    onApplyFix={handleApplyFix}
+                                    onRefine={handleRefine}
                                 />
                                 {exportOpen && view.kind === 'results' && (
                                     <ExportMatchesDialog

@@ -172,3 +172,30 @@ describe('SearchHitRow — how it matches', () => {
         expect(screen.queryByRole('button', { name: /How it matches/ })).not.toBeInTheDocument()
     })
 })
+
+
+describe('SearchHitRow — where it lives, and why it is here', () => {
+    const inside = {
+        node: { urn: 'c', displayName: 'customer_id', entityType: 'schemaField', properties: {}, tags: ['PII'] },
+        ancestorPath: [{ urn: 'urn:gold', displayName: 'GOLD', entityType: 'container' }],
+    } as unknown as SearchHit
+
+    it('looks inside a container when its breadcrumb is clicked', () => {
+        const seen: string[] = []
+        render(<SearchHitRow hit={inside} index={0} onAncestorClick={(a) => seen.push(a.urn)} />)
+        fireEvent.click(screen.getByRole('button', { name: 'Look inside GOLD' }))
+        expect(seen).toEqual(['urn:gold'])
+    })
+
+    it('names the alternatives of an any-of query the row meets', () => {
+        const query: Predicate = { kind: 'group', op: 'or', children: [
+            { kind: 'tag', op: 'hasAny', values: ['PII'] }, { kind: 'isLeaf' }] }
+        render(
+            <ShownQueryContext.Provider value={query}>
+                <SearchHitRow hit={inside} index={0} />
+            </ShownQueryContext.Provider>,
+        )
+        expect(screen.getByText('meets')).toBeInTheDocument()
+        expect(screen.getByText('is tagged #PII')).toBeInTheDocument()
+    })
+})

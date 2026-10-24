@@ -297,6 +297,18 @@ export function withCombine(draft: Predicate | null, op: 'and' | 'or'): Predicat
 }
 
 
+/** ``draft`` finding ``types``: its subject replaced, dropped (none),
+ *  or put first — clauses combined by any stay so, after it. */
+export function withSubject(draft: Predicate | null, types: string[]): Predicate | null {
+    const condition: Predicate = { kind: 'entityType', op: 'in', values: types }
+    if (listedClauses(draft).subject) return setAt(draft, [{ child: 0 }], types.length ? condition : null)
+    if (!types.length) return draft
+    return draft?.kind === 'group' && draft.op === 'or'
+        ? { kind: 'group', op: 'and', children: [condition, draft] }
+        : prependAt(draft, [], condition)
+}
+
+
 export function buildSentence(draft: Predicate | null): Sentence {
     const { subject, clauses, combine, into } = listedClauses(draft)
     const lines: SentenceLine[] = []

@@ -35,6 +35,7 @@ import {
     prependAt,
     setAt,
     withCombine,
+    withSubject,
     wrapAt,
     type Path,
     type SentenceLine,
@@ -100,15 +101,10 @@ export function SentenceBuilder({
         wrap: (path: Path, op: 'or' | 'not') => onCommit(wrapAt(draftRef.current, path, op)),
         setSubject: (types: string[]) => {
             const draft = draftRef.current
-            if (listedClauses(draft).subject) {
-                if (types.length) onSeed(setAt(draft, [{ child: 0 }], typeCondition(types)))
-                else onCommit(setAt(draft, [{ child: 0 }], null))
-            } else if (types.length) {
-                // Clauses combined by any stay so, after the new subject.
-                onCommit(draft?.kind === 'group' && draft.op === 'or'
-                    ? { kind: 'group', op: 'and', children: [typeCondition(types), draft] }
-                    : prependAt(draft, [], typeCondition(types)))
-            }
+            // Other types for the subject are a value; a subject added or
+            // dropped is a change of shape.
+            if (listedClauses(draft).subject && types.length) onSeed(withSubject(draft, types))
+            else onCommit(withSubject(draft, types))
         },
         setCombine: (op: 'and' | 'or') => onCommit(withCombine(draftRef.current, op)),
         setRelativeTypes: (line: Extract<SentenceLine, { kind: 'relation' }>, types: string[]) => {

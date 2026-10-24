@@ -9,12 +9,10 @@
  * the focused-match auto-reveal effect.
  */
 import { Filter, X } from 'lucide-react'
-import { type FC, type RefObject, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { type FC, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
 
-import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
 import type { PanelView } from '@/hooks/useAdvancedSearch'
-import { useSchemaStore } from '@/store/schema'
 import {
     useAncestorMatchCounts,
     useDraftPredicate,
@@ -41,6 +39,8 @@ import { HitsByLayer, groupHitsByLayer } from './HitsByLayer'
 import { HitsByParent } from './HitsByParent'
 import { RunningSkeleton } from './RunningSkeleton'
 import { findScopeCondition } from './predicateComposition'
+import { FacetChips } from './results/FacetChips'
+import { useTypeFacet } from './results/useTypeFacet'
 
 
 /**
@@ -101,16 +101,17 @@ export interface ResultsPaneProps {
     isLoadingAll?: boolean
     /** Stop the loop where it is; the pages already loaded stay. */
     onCancelLoadAll?: () => void
-    /** The builder's query, and how to change it — an empty answer then
-     *  offers the fixes that would find something. */
+    /** The builder's query, and how to change it from the results: an
+     *  empty answer offers the fixes that would find something, the type
+     *  chips narrow it, a breadcrumb looks inside its container. */
     draft?: Predicate | null
-    onApplyFix?: (next: Predicate) => void
+    onRefine?: (next: Predicate) => void
 }
 
 
 export const ResultsPane: FC<ResultsPaneProps> = ({
     view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
-    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onApplyFix,
+    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine,
 }) => {
     // Ref to the scroll container. Threaded through to HitsByParent →
     // VirtualizedHitList so the virtualizer can measure the visible
@@ -143,7 +144,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
                     isLoadingAll={isLoadingAll}
                     onCancelLoadAll={onCancelLoadAll}
                     draft={draft}
-                    onApplyFix={onApplyFix}
+                    onRefine={onRefine}
                     scrollElementRef={scrollContainerRef}
                 />
             </div>
@@ -154,7 +155,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
 
 function Dispatch({
     view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
-    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onApplyFix, scrollElementRef,
+    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine, scrollElementRef,
 }: ResultsPaneProps & { scrollElementRef: RefObject<HTMLDivElement | null> }) {
     switch (view.kind) {
         case 'running':
@@ -176,7 +177,7 @@ function Dispatch({
                         isLoadingAll={isLoadingAll}
                         onCancelLoadAll={onCancelLoadAll}
                         draft={draft}
-                        onApplyFix={onApplyFix}
+                        onRefine={onRefine}
                         scrollElementRef={scrollElementRef}
                     />
                 </ShownQueryContext.Provider>
@@ -189,7 +190,7 @@ function Dispatch({
 
 function ResultsContent({
     view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
-    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onApplyFix, scrollElementRef,
+    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine, scrollElementRef,
 }: {
     view: Extract<PanelView, { kind: 'results' }>
     viewId: string
@@ -202,7 +203,7 @@ function ResultsContent({
     isLoadingAll?: ResultsPaneProps['isLoadingAll']
     onCancelLoadAll?: ResultsPaneProps['onCancelLoadAll']
     draft?: ResultsPaneProps['draft']
-    onApplyFix?: ResultsPaneProps['onApplyFix']
+    onRefine?: ResultsPaneProps['onRefine']
     scrollElementRef: RefObject<HTMLDivElement | null>
 }) {
     const { result } = view
@@ -238,55 +239,25 @@ function ResultsContent({
     // narrows down what's visible in the rows below. Filters by
     // case-insensitive substring on displayName + qualifiedName.
     const [filter, setFilter] = useState('')
-    // Entity-type facet filter — set of entity types the user wants to
-    // include. Empty set = "show all types". Toggling the same pill
-    // off twice removes the filter entirely.
-    const [activeTypes, setActiveTypes] = useState<Set<string>>(new Set())
-    const toggleType = useCallback((typeId: string) => {
-        setActiveTypes((prev) => {
-            const next = new Set(prev)
-            if (next.has(typeId)) next.delete(typeId)
-            else next.add(typeId)
-            return next
-        })
-    }, [])
-    const resetTypes = useCallback(() => setActiveTypes(new Set()), [])
-
-    // Per-entity-type counts across the full hits[] (NOT the filtered
-    // subset) — so the pills always show the full breakdown of what's
-    // available, not what's currently visible.
-    const typeCounts = useMemo(() => {
-        const counts = new Map<string, number>()
-        for (const h of hits) {
-            const t = h.node.entityType ?? '(untyped)'
-            counts.set(t, (counts.get(t) ?? 0) + 1)
-        }
-        return counts
-    }, [hits])
-    const sortedTypeCounts = useMemo(
-        () => Array.from(typeCounts.entries())
-            .sort((a, b) => b[1] - a[1]),
-        [typeCounts],
-    )
-    const showFacets = sortedTypeCounts.length >= 2
+    // The types the matches come in — chips that narrow the query.
+    const facets = useTypeFacet(viewId, view.query.predicate, hits,
+        result.totalCount ?? result.candidateCount ?? null)
+    // A row's breadcrumb, clicked: look inside that container, as a
+    // group card does.
+    const lookInside = useMemo(() => (a: AncestorRef) => onScopeToGroup({
+        ancestorUrn: a.urn, ancestorDisplayName: a.displayName, ancestorEntityType: a.entityType,
+    }), [onScopeToGroup])
 
     const filteredHits = useMemo(() => {
         const q = filter.trim().toLowerCase()
-        const typeFilterActive = activeTypes.size > 0
-        if (!q && !typeFilterActive) return hits
+        if (!q) return hits
         return hits.filter((h) => {
-            if (typeFilterActive && !activeTypes.has(h.node.entityType ?? '(untyped)')) {
-                return false
-            }
-            if (q) {
-                const dn = (h.node.displayName ?? '').toLowerCase()
-                const qn = (h.node.qualifiedName ?? '').toLowerCase()
-                if (!dn.includes(q) && !qn.includes(q)) return false
-            }
-            return true
+            const dn = (h.node.displayName ?? '').toLowerCase()
+            const qn = (h.node.qualifiedName ?? '').toLowerCase()
+            return dn.includes(q) || qn.includes(q)
         })
-    }, [hits, filter, activeTypes])
-    const filterActive = filter.trim().length > 0 || activeTypes.size > 0
+    }, [hits, filter])
+    const filterActive = filter.trim().length > 0
 
     // Index of hits by URN for O(1) ancestor-path lookup when the
     // MatchBar stepper / J-K keyboard advances the focused match. We
@@ -382,7 +353,7 @@ function ResultsContent({
                             ? (match) => session.setQuick({ match })
                             : undefined}
                         draft={draft}
-                        onApplyFix={onApplyFix}
+                        onApplyFix={onRefine}
                     />
                 </div>
             )}
@@ -480,13 +451,8 @@ function ResultsContent({
                                         : 'Grouped by immediate parent · click a folder to collapse'
                         }
                     />
-                    {showFacets && (
-                        <EntityTypeFacets
-                            typeCounts={sortedTypeCounts}
-                            activeTypes={activeTypes}
-                            onToggle={toggleType}
-                            onReset={resetTypes}
-                        />
+                    {facets.length >= 2 && onRefine && draft !== undefined && (
+                        <FacetChips facets={facets} draft={draft} onRefine={onRefine} />
                     )}
                     <HitsFilter
                         value={filter}
@@ -500,13 +466,10 @@ function ResultsContent({
                                 {' '}
                                 <button
                                     type="button"
-                                    onClick={() => {
-                                        setFilter('')
-                                        resetTypes()
-                                    }}
+                                    onClick={() => setFilter('')}
                                     className="text-accent-lineage hover:underline not-italic"
                                 >
-                                    Reset filters
+                                    Clear the filter
                                 </button>
                             </div>
                         ) : session ? (
@@ -514,6 +477,7 @@ function ResultsContent({
                                 groups={layerGroups}
                                 onReveal={onReveal}
                                 onOpen={onOpen}
+                                onAncestorClick={lookInside}
                                 scrollElementRef={scrollElementRef}
                             />
                         ) : (
@@ -521,6 +485,7 @@ function ResultsContent({
                                 hits={filteredHits}
                                 onReveal={onReveal}
                                 onOpen={onOpen}
+                                onAncestorClick={lookInside}
                                 scrollElementRef={scrollElementRef}
                             />
                         )}
@@ -598,102 +563,6 @@ function ResultsContent({
                         )}
                     </div>
                 </section>
-            )}
-        </div>
-    )
-}
-
-
-/**
- * Entity-type facet pills shown above the hits list. Each pill
- * represents one entity type appearing in the current hits[] with its
- * count, the schema's icon, and the schema's color. Click toggles
- * inclusion in the active set; empty set = "all types shown".
- *
- * Pure list-narrowing — does not touch matchUrnSet (the canvas keeps
- * highlighting every backend match while the user narrows the rows).
- */
-function EntityTypeFacets({
-    typeCounts, activeTypes, onToggle, onReset,
-}: {
-    typeCounts: ReadonlyArray<readonly [string, number]>
-    activeTypes: ReadonlySet<string>
-    onToggle: (typeId: string) => void
-    onReset: () => void
-}) {
-    const schema = useSchemaStore((s) => s.schema)
-    const noneActive = activeTypes.size === 0
-    return (
-        <div className="mt-1.5 mx-1 flex items-center gap-1.5 flex-wrap">
-            <span className="text-[10px] uppercase tracking-[0.14em] text-ink-muted/70 mr-0.5">
-                Type
-            </span>
-            {typeCounts.map(([typeId, count]) => {
-                const meta = schema?.entityTypes.find((t) => t.id === typeId)
-                const color = meta?.visual?.color ?? '#94a3b8'
-                const iconName = meta?.visual?.icon ?? 'Box'
-                const label = meta?.name ?? typeId
-                const active = activeTypes.has(typeId)
-                const dim = !noneActive && !active
-                return (
-                    <button
-                        key={typeId}
-                        type="button"
-                        onClick={() => onToggle(typeId)}
-                        title={`${active ? 'Hide' : 'Show'} ${label} (${count.toLocaleString()})`}
-                        className={cn(
-                            'inline-flex items-center gap-1.5 px-1.5 h-6 rounded-full',
-                            'text-[11px] font-medium transition-all duration-150',
-                            'border',
-                            active
-                                ? 'shadow-[0_1px_8px_-2px_rgba(0,0,0,0.4)]'
-                                : 'hover:scale-[1.03]',
-                            dim && 'opacity-50 hover:opacity-90',
-                        )}
-                        style={active
-                            ? {
-                                background: `linear-gradient(135deg, ${color}30 0%, ${color}18 100%)`,
-                                borderColor: `${color}80`,
-                                color,
-                            }
-                            : {
-                                background: `${color}10`,
-                                borderColor: `${color}30`,
-                                color: dim ? undefined : color,
-                            }
-                        }
-                    >
-                        <span
-                            className="inline-flex items-center justify-center w-3.5 h-3.5 rounded shrink-0"
-                            style={{ background: `${color}25` }}
-                        >
-                            <DynamicIcon
-                                name={iconName}
-                                className="w-2.5 h-2.5"
-                                style={{ color }}
-                            />
-                        </span>
-                        <span className="truncate max-w-[120px]">{label}</span>
-                        <span className="tabular-nums text-[10px] opacity-80">
-                            {count.toLocaleString()}
-                        </span>
-                    </button>
-                )
-            })}
-            {!noneActive && (
-                <button
-                    type="button"
-                    onClick={onReset}
-                    className={cn(
-                        'inline-flex items-center gap-1 px-2 h-6 rounded-full',
-                        'text-[10.5px] text-ink-muted hover:text-ink',
-                        'border border-glass-border/60 hover:border-glass-border',
-                        'transition-colors',
-                    )}
-                >
-                    <X className="w-2.5 h-2.5" />
-                    All types
-                </button>
             )}
         </div>
     )

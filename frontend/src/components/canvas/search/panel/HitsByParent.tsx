@@ -36,6 +36,8 @@ export interface HitsByParentProps {
     hits: SearchHit[]
     onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpen?: (urn: string) => void
+    /** A breadcrumb clicked: look inside that container. */
+    onAncestorClick?: (ancestor: AncestorRef) => void
     /** Ref to the scrollable parent in ``ResultsPane``. Required for
      *  the virtualized render path to measure its viewport. When
      *  unset, ``HitsByParent`` always uses the grouped folder render
@@ -58,7 +60,7 @@ interface Group {
 
 
 export const HitsByParent: FC<HitsByParentProps> = ({
-    hits, onReveal, onOpen, minGroupSize = 1, scrollElementRef,
+    hits, onReveal, onOpen, onAncestorClick, minGroupSize = 1, scrollElementRef,
 }) => {
     // Compute groups upfront so the hook order is stable across the
     // virtualized / grouped render branches below.
@@ -75,6 +77,7 @@ export const HitsByParent: FC<HitsByParentProps> = ({
                 scrollElementRef={scrollElementRef}
                 onReveal={onReveal}
                 onOpen={onOpen}
+                onAncestorClick={onAncestorClick}
             />
         )
     }
@@ -98,6 +101,7 @@ export const HitsByParent: FC<HitsByParentProps> = ({
                             index={i}
                             onReveal={onReveal}
                             onOpen={onOpen}
+                            onAncestorClick={onAncestorClick}
                         />
                     ))}
                 </div>
@@ -108,6 +112,7 @@ export const HitsByParent: FC<HitsByParentProps> = ({
                     group={group}
                     onReveal={onReveal}
                     onOpen={onOpen}
+                    onAncestorClick={onAncestorClick}
                 />
             ))}
         </div>
@@ -120,11 +125,12 @@ export const HitsByParent: FC<HitsByParentProps> = ({
 // ---------------------------------------------------------------------------
 
 function ParentGroup({
-    group, onReveal, onOpen,
+    group, onReveal, onOpen, onAncestorClick,
 }: {
     group: Group
     onReveal?: HitsByParentProps['onReveal']
     onOpen?: HitsByParentProps['onOpen']
+    onAncestorClick?: HitsByParentProps['onAncestorClick']
 }) {
     const [open, setOpen] = useState(true)
     const parent = group.parent
@@ -169,6 +175,7 @@ function ParentGroup({
                             index={i}
                             onReveal={onReveal}
                             onOpen={onOpen}
+                            onAncestorClick={onAncestorClick}
                         />
                     ))}
                 </div>

@@ -258,6 +258,14 @@ export const SEARCH_FIXTURES: Record<string, SearchFixture> = {
             { kind: 'related', axis: 'downstream', where: type('dashboard') },
         ] },
     },
+    results: {
+        editorMode: 'sentence',
+        note: 'Results in several types: chips to narrow by type, breadcrumbs to look inside, and which alternative each row meets.',
+        draft: { kind: 'group', op: 'or', children: [
+            { kind: 'tag', op: 'hasAny', values: ['PII'] },
+            { kind: 'tag', op: 'hasAny', values: ['Certified'] },
+        ] },
+    },
     sentenceAny: {
         editorMode: 'sentence',
         note: 'Any of several clauses, each counted within the subject: datasets holding PII or read by nothing.',

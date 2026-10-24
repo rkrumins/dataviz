@@ -55,6 +55,7 @@ const SCOPE = [
   'components/canvas/search/panel/map',
   'components/canvas/search/panel/ask',
   'components/canvas/search/panel/rescue',
+  'components/canvas/search/panel/results',
   'features/versioning/components',
 ]
 

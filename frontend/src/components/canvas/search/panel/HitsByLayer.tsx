@@ -224,11 +224,13 @@ export interface HitsByLayerProps {
     scrollElementRef: RefObject<HTMLElement | null>
     onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpen?: (urn: string) => void
+    /** A breadcrumb clicked: look inside that container. */
+    onAncestorClick?: (ancestor: AncestorRef) => void
 }
 
 
 export const HitsByLayer: FC<HitsByLayerProps> = ({
-    groups, scrollElementRef, onReveal, onOpen,
+    groups, scrollElementRef, onReveal, onOpen, onAncestorClick,
 }) => {
     const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(() => new Set())
 
@@ -279,11 +281,12 @@ export const HitsByLayer: FC<HitsByLayerProps> = ({
                             index={row.index}
                             onReveal={onReveal}
                             onOpen={onOpen}
+                            onAncestorClick={onAncestorClick}
                         />
                     </div>
                 )
         }
-    }, [rows, collapsed, toggle, onReveal, onOpen])
+    }, [rows, collapsed, toggle, onReveal, onOpen, onAncestorClick])
 
     if (rows.length === 0) {
         return (
