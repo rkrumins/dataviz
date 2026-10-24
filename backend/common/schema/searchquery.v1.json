@@ -2673,6 +2673,19 @@
           "title": "Hoisted Root Urns",
           "type": "array"
         },
+        "inlinedCypher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "`hits_cypher` with every parameter written as its value \u2014 a statement that runs on its own, to copy or edit. Null when a value has no Cypher literal.",
+          "title": "Inlinedcypher"
+        },
         "notes": {
           "description": "Human-readable diagnostics (e.g. 'predicate hoisted to candidate seed').",
           "items": {

@@ -698,10 +698,11 @@ export class RemoteGraphProvider implements GraphDataProvider {
      * button and is the first stop when a query silently returns 0
      * results.
      */
-    async searchExplain(query: SearchQuery): Promise<SearchExplainResult> {
+    async searchExplain(query: SearchQuery, opts?: { signal?: AbortSignal }): Promise<SearchExplainResult> {
         return await this.fetch<SearchExplainResult>('/search/explain', {
             method: 'POST',
             body: JSON.stringify(query),
+            signal: opts?.signal,
         })
     }
 

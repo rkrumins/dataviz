@@ -61,6 +61,7 @@ import {
     type SearchTemplate,
 } from '@/components/canvas/search/searchTemplates'
 import { stringifyPredicate } from '@/components/canvas/search/panel/predicateDsl'
+import { currentScope, requestPredicate } from '@/components/canvas/search/searchRequest'
 import { recordEvent } from '@/services/telemetryService'
 
 
@@ -571,48 +572,13 @@ export function useAdvancedSearch(
          inputs: Record<string, string | number>): SearchQuery => {
             const raw = template.build(inputs)
             // ALWAYS stamp the viewId — the backend's ViewScopeResolver
-            // requires it on every request.
-            const scopeMode = useSearchStore.getState().scopeMode
-
-            // Read live canvas state at call time so we don't capture
-            // stale closures.
-            const canvas = useCanvasStore.getState()
-
-            // Collect the visible URN set straight from the canvas
-            // store. Always attach when mode='visible' so the backend
-            // doesn't have to guess.
-            const visibleUrns = scopeMode === 'visible'
-                ? Array.from(new Set(
-                    canvas.nodes
-                        .map((n) => n.id ?? n.data?.urn)
-                        .filter((u): u is string => typeof u === 'string' && u.length > 0),
-                ))
-                : undefined
-
-            // No rootUrns hint for the view itself: the backend
-            // resolves the view's roots from ``scope.viewId`` and only
-            // ever intersects a client hint with them. A template that
-            // targets a specific container still rides through the
-            // ``raw.scope`` spread below.
-            const scope: SearchScope = {
-                ...(raw.scope ?? {}),
-                viewId,
-                scopeMode,
-                ...(visibleUrns ? { visibleUrns } : {}),
+            // requires it on every request. Scope and the root wrap are
+            // ``searchRequest``'s, the same the Cypher tab shows.
+            return {
+                ...raw,
+                predicate: requestPredicate(raw.predicate),
+                scope: currentScope(viewId, raw.scope),
             }
-            // Defensive normalisation: the backend's predicate compiler
-            // currently mishandles bare top-level leaf predicates
-            // (text / isOrphan / isLeaf / …) — they evaluate to zero
-            // results even when an equivalent group-wrapped version
-            // returns the expected hits. Wrap leaf-rooted predicates in
-            // a single-child AND group so every outgoing request has the
-            // shape the compiler is happy with. No-op when the root is
-            // already a group.
-            const predicate = raw.predicate.kind === 'group'
-                ? raw.predicate
-                : { kind: 'group' as const, op: 'and' as const,
-                    children: [raw.predicate] }
-            return { ...raw, predicate, scope }
         },
         [viewId],
     )

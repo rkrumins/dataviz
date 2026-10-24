@@ -571,6 +571,10 @@ export type HitsCypher = string
  */
 export type HoistedRootUrns = string[][]
 /**
+ * `hits_cypher` with every parameter written as its value — a statement that runs on its own, to copy or edit. Null when a value has no Cypher literal.
+ */
+export type Inlinedcypher = string | null
+/**
  * Human-readable diagnostics (e.g. 'predicate hoisted to candidate seed').
  */
 export type Notes2 = string[]
@@ -1512,6 +1516,7 @@ export interface SearchExplainResult {
     effective_root_urns?: EffectiveRootUrns
     hits_cypher: HitsCypher
     hoisted_root_urns?: HoistedRootUrns
+    inlinedCypher?: Inlinedcypher
     notes?: Notes2
     params?: Params
     resolvedScope?: Resolvedscope

@@ -35,6 +35,7 @@ from backend.app.services.deep_search import (
     SearchRunContext,
     get_deep_search_settings,
 )
+from backend.app.services.native_query.cypher_text import inline_params
 from backend.app.services.search_downloads import mint_download_token
 from backend.app.services.view_scope import (
     EffectiveViewScope,
@@ -1101,6 +1102,11 @@ class AdvancedSearchService:
                 "scopeHash": eff_scope.scope_hash,
                 "droppedUrns": list(eff_scope.dropped_urns),
             }
+            # The statement to copy or edit: values written in.
+            result["inlinedCypher"] = inline_params(
+                result.get("hits_cypher") or result.get("cypher") or "",
+                result.get("params") or {},
+            )
         return result
 
     async def discover(self, *, sample_per_label: int = 200):

@@ -1337,6 +1337,7 @@ class SearchExplainResult(_Base):
     effective_root_urns: Optional[List[str]] = Field(None, alias="effective_root_urns", description="Final root URNs after intersecting scope + hoisted (null = no scope).")
     notes: List[str] = Field(default_factory=list, description="Human-readable diagnostics (e.g. 'predicate hoisted to candidate seed').")
     resolved_scope: Optional[Dict[str, Any]] = Field(None, alias="resolvedScope", description="Effective scope after ViewScopeResolver: root URNs, max depth, entity-type allow-list, scope hash, dropped URNs.")
+    inlined_cypher: Optional[str] = Field(None, alias="inlinedCypher", description="`hits_cypher` with every parameter written as its value — a statement that runs on its own, to copy or edit. Null when a value has no Cypher literal.")
 
 
 class SearchDiscoverLabelInfo(_Base):

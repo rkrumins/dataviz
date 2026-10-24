@@ -1,7 +1,7 @@
 /**
  * QueryCard — the single Query Lens that holds the entire active query.
  *
- *   ╭─ Query · 3 filters ──────────── 🅥 Visual  </> Code ╮
+ *   ╭─ Query · 3 filters ─────── 🅥 Visual  </> Code  >_ Cypher ╮
  *   │ ⌕  name contains   [ customer       ]              │
  *   │ #  tag is          [ #PII ] [ + ]                  │
  *   │ ◇  type is in      [ dataset, schemaField   ▾ ]    │
@@ -13,8 +13,7 @@
  * every top-level condition as a ConditionRow. Editing a row commits
  * back through ``upsertCondition`` and triggers a debounced auto-run.
  * The Visual ↔ Code toggle does NOT lose state — both modes write the
- * same draft. Code mode is a plain textarea with live "parsed N
- * filters" feedback; CodeMirror upgrade is deferred.
+ * same draft, and Cypher shows the Cypher that draft runs as.
  *
  * Discovery telemetry shows next to the Add-filter button as a passive
  * chip ("12 tags · 37 keys · 4 types") so the user sees what
@@ -32,6 +31,7 @@ import {
     Zap,
     Hand,
     Search,
+    Terminal,
     Box,
     Tag as TagIcon,
     Layers,
@@ -74,6 +74,7 @@ import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
 import { entityTypesInView, layerOptions, type LayerOption } from './layerOptions'
 import { AddFilterPalette, type CodeKind } from './AddFilterPalette'
+import { CypherView } from './CypherView'
 import { CodeMode } from './dsl/CodeMode'
 import type { DslVocabulary } from './dsl/dslLanguage'
 import { namePathFor, searchEntitiesByName } from './entityNames'
@@ -103,7 +104,7 @@ export interface QueryCardProps {
 }
 
 
-type ViewMode = 'visual' | 'code'
+type ViewMode = 'visual' | 'code' | 'cypher'
 
 
 export const QueryCard: FC<QueryCardProps> = ({
@@ -204,7 +205,7 @@ export const QueryCard: FC<QueryCardProps> = ({
         }
         commitDraft(next)
         setMode('code')
-    }, [commitDraft])
+    }, [commitDraft, setMode])
     // ─── Run mode (auto vs manual) + dispatch ──────────────────────
     // Auto: dispatch a debounced run on every complete draft change
     //       (snappy, original behaviour — the default).
@@ -409,7 +410,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                 "manage this query" UI reads as one premium block at
                 the top of the card. Body sits cleanly below.
                 Two rows internally so the layout breathes:
-                  Row 1 — Title · filter status               · Visual│Code
+                  Row 1 — Title · filter status               · Visual│Code│Cypher
                   Row 2 — [↺ Back] [↶][↷] [Auto│Manual]          [🗑] [▷ Run]
             */}
             {showHeader && (
@@ -435,7 +436,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                 </span>
                             ) : (
                                 <span className="text-[11px] text-ink-muted/80 italic truncate">
-                                    · Code mode · paste DSL
+                                    {mode === 'cypher' ? '· Cypher' : '· Code mode · paste DSL'}
                                 </span>
                             )}
                         </div>
@@ -449,6 +450,9 @@ export const QueryCard: FC<QueryCardProps> = ({
                             </ToggleBtn>
                             <ToggleBtn active={mode === 'code'} onClick={() => setMode('code')}>
                                 <Code2 className="w-3 h-3" /> Code
+                            </ToggleBtn>
+                            <ToggleBtn active={mode === 'cypher'} onClick={() => setMode('cypher')}>
+                                <Terminal className="w-3 h-3" /> Cypher
                             </ToggleBtn>
                         </div>
                     </div>
@@ -477,7 +481,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                 </div>
             )}
 
-            {/* Body — Visual / Code */}
+            {/* Body — Visual / Code / Cypher */}
             <div className={cn(
                 'flex flex-col gap-2',
                 isEmptyVisual ? 'p-0' : 'p-2.5',
@@ -538,13 +542,15 @@ export const QueryCard: FC<QueryCardProps> = ({
                             {omnibox}
                         </>
                     )
-                ) : (
+                ) : mode === 'code' ? (
                     <CodeMode
                         draft={draftPredicate}
                         isRunning={isRunning}
                         onCommit={commitDraft}
                         vocabulary={vocabulary}
                     />
+                ) : (
+                    <CypherView viewId={viewId} />
                 )}
             </div>
 
@@ -1364,12 +1370,14 @@ const RUN_MODE_KEY = 'synodic.advancedSearch.runMode'
 const EDITOR_MODE_KEY = 'synodic.advancedSearch.editorMode'
 type RunMode = 'auto' | 'manual'
 
-/** Visual or Code, as this browser last left it — the card remounts each
- *  time the Advanced drawer closes, and a power user's Code mode with it. */
+/** Visual, Code or Cypher, as this browser last left it — the card
+ *  remounts each time the Advanced drawer closes, and a power user's Code
+ *  mode with it. */
 function useEditorMode(): [ViewMode, (next: ViewMode) => void] {
     const [mode, setMode] = useState<ViewMode>(() => {
         try {
-            return localStorage.getItem(EDITOR_MODE_KEY) === 'code' ? 'code' : 'visual'
+            const saved = localStorage.getItem(EDITOR_MODE_KEY)
+            return saved === 'code' || saved === 'cypher' ? saved : 'visual'
         } catch {
             return 'visual'
         }

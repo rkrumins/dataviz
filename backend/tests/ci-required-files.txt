@@ -73,6 +73,7 @@ tests/test_configmap_matches_manifests.py
 tests/test_controlplane_loops_wiring.py
 tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
+tests/test_cypher_text.py
 tests/test_data_source_list_versioning.py
 tests/test_data_source_move.py
 tests/test_default_data_source_ids.py
