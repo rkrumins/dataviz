@@ -9,7 +9,13 @@ Within that:
   own build. Only cheap revisions may follow it (``20261018_1200_layout_templates``
   adds three nullable columns and swaps a CHECK; ``20261018_1300_tpl_lifecycle``
   adds nullable columns, two empty tables and a v1 row per template, and swaps
-  a CHECK; ``20260815_1200_announce_poll_60s`` updates one row;
+  a CHECK; ``20261019_1000_ws_access`` adds columns with constant defaults,
+  swaps CHECKs, builds a partial index on the small ``access_requests`` and
+  seeds a permission and a role; ``20261019_1600_access_life`` adds nullable
+  columns and a constant default, swaps a CHECK and creates two empty
+  tables; ``20261020_1000_ds_transfers`` adds an empty table with its indexes
+  and swaps ``view_activity_log``'s action CHECK;
+  ``20260815_1200_announce_poll_60s`` updates one row;
   ``20261018_1200_change_check_secs`` adds one nullable column), since on a
   database upgrading through them the lock is also held while they run;
 * a revision that locks a table other requests use bounds how long it waits
@@ -38,6 +44,9 @@ _LAST = "20261014_1200_aal_api_key.py"
 _AFTER_LEDGER = (
     "20261018_1200_layout_templates",
     "20261018_1300_tpl_lifecycle",
+    "20261019_1000_ws_access",
+    "20261019_1600_access_life",
+    "20261020_1000_ds_transfers",
     "20260815_1200_announce_poll_60s",
     "20261018_1200_change_check_secs",
 )
@@ -51,6 +60,9 @@ _ON_LIVE_TABLES = {
     _LAST: ("upgrade", "downgrade"),
     "20261018_1200_layout_templates.py": ("upgrade", "downgrade"),
     "20261018_1300_tpl_lifecycle.py": ("upgrade", "downgrade"),
+    "20261019_1000_ws_access.py": ("upgrade", "downgrade"),
+    "20261019_1600_access_life.py": ("upgrade", "downgrade"),
+    "20261020_1000_ds_transfers.py": ("upgrade", "downgrade"),
     "20261018_1200_change_check_secs.py": ("upgrade", "downgrade"),
 }
 

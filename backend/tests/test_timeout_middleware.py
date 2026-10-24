@@ -542,6 +542,23 @@ def test_workspace_scoped_graph_routes_get_their_tier(monkeypatch, path, expecte
     assert mw._resolve_timeout(path) == float(tiers[expected])
 
 
+@pytest.mark.parametrize("path, expected", [
+    ("/api/v1/admin/workspaces/ws_1/data-sources/ds_1/move", 120.0),
+    ("/api/v1/admin/data-source-transfers/xfer_1/accept", 120.0),
+    ("/api/v1/admin/data-source-transfers/xfer_1/undo", 120.0),
+    # Its neighbours keep the default: the preview and a request write nothing big.
+    ("/api/v1/admin/workspaces/ws_1/data-sources/ds_1/move-preview", 30.0),
+    ("/api/v1/admin/workspaces/ws_1/data-sources/ds_1/transfer-requests", 30.0),
+    ("/api/v1/admin/workspaces/ws_1/data-sources/ds_1", 30.0),
+])
+def test_moving_a_data_source_gets_two_minutes(monkeypatch, path, expected):
+    """A move rewrites every view on the source in one transaction; at tens of thousands of
+    views that outlasts the 30s default, and a cut-off move would only roll back."""
+    monkeypatch.delenv("HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS", raising=False)
+    monkeypatch.delenv("HTTP_TIMEOUT_DEFAULT_SECS", raising=False)
+    assert _TimeoutMiddleware(_instant_app())._resolve_timeout(path) == expected
+
+
 def test_every_provider_budget_sits_under_its_http_tier(monkeypatch):
     """The provider's per-query deadlines must fire BEFORE the HTTP tier
     around them: the provider's timeout is structured (504 PROVIDER_TIMEOUT,

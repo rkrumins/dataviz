@@ -128,6 +128,10 @@ def _to_response(row: WorkspaceORM, identities=None) -> WorkspaceResponse:
         identityProperty=getattr(row, "identity_property", None),
         nameProperty=getattr(row, "name_property", None),
         defaultLayoutTemplateId=getattr(row, "default_layout_template_id", None),
+        directoryListed=row.directory_listed is not False,
+        accessMode=row.access_mode or "app",
+        accessNote=row.access_note,
+        requestPolicy=row.request_policy or "approval",
     )
 
 
@@ -342,6 +346,10 @@ async def update_workspace(
     row = await get_workspace_orm(session, workspace_id)
     if not row:
         return None
+    if (req.request_policy or row.request_policy) == "open" and (req.access_mode or row.access_mode) == "idp":
+        raise ValueError(
+            "A workspace whose identity provider decides who is in can't be open to everyone"
+        )
 
     if req.name is not None:
         row.name = req.name
@@ -362,6 +370,14 @@ async def update_workspace(
     # Checked by the endpoint (``template_access.can_be_workspace_default``).
     if req.default_layout_template_id is not None:
         row.default_layout_template_id = req.default_layout_template_id or None
+    if req.directory_listed is not None:
+        row.directory_listed = req.directory_listed
+    if req.access_mode is not None:
+        row.access_mode = req.access_mode
+    if req.access_note is not None:
+        row.access_note = req.access_note.strip() or None
+    if req.request_policy is not None:
+        row.request_policy = req.request_policy
 
     row.updated_at = datetime.now(timezone.utc).isoformat()
     await session.flush()

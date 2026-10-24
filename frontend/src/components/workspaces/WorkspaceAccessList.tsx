@@ -9,19 +9,22 @@
  * bound groups (and maybe bound directly too) is ONE row with a grant each.
  *
  * Borrows the member-row visuals from ``GroupMembersDrawer`` so a person
- * reads the same on both surfaces.
+ * reads the same on both surfaces. Every grant says how it came about
+ * (``ProvenanceChip``), and people who reach every workspace through an
+ * organization-wide role are listed too, marked as such.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
     Users, Search, Loader2, X, Mail, ChevronRight, UserCheck, Users2,
-    Shield, RefreshCw, AlertCircle,
+    Shield, RefreshCw, AlertCircle, Building2,
 } from 'lucide-react'
 import {
     workspaceMembersService,
     type WorkspaceAccessUser,
     type WorkspaceAccessGrant,
 } from '@/services/workspaceMembersService'
+import { ProvenanceChip } from '@/components/access/ProvenanceChip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { UserAvatar } from '@/components/ui/UserAvatar'
@@ -63,6 +66,11 @@ function GrantRow({ grant }: { grant: WorkspaceAccessGrant }) {
                     <UserCheck className="w-3.5 h-3.5 text-sky-500 shrink-0" />
                     Bound directly
                 </span>
+            ) : grant.via === 'org' ? (
+                <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary">
+                    <Building2 className="w-3.5 h-3.5 text-rose-500 shrink-0" />
+                    Every workspace{grant.groupName && <> via <span className="font-semibold text-ink">{grant.groupName}</span></>}
+                </span>
             ) : (
                 <span className="inline-flex items-center gap-1.5 text-[11px] font-medium text-ink-secondary min-w-0">
                     <Users2 className="w-3.5 h-3.5 text-violet-500 shrink-0" />
@@ -74,6 +82,7 @@ function GrantRow({ grant }: { grant: WorkspaceAccessGrant }) {
             )}
             <span className="text-ink-muted">·</span>
             <RoleBadge role={grant.role} />
+            <ProvenanceChip provenance={grant.provenance} />
             {grant.expiresAt && (
                 <span className="text-[10px] text-amber-600 dark:text-amber-400 shrink-0">
                     expires {new Date(grant.expiresAt).toLocaleDateString()}
@@ -90,6 +99,7 @@ function AccessRow({ user }: { user: WorkspaceAccessUser }) {
     const name = user.displayName ?? user.userId
     const groupCount = user.grants.filter(g => g.via === 'group').length
     const hasDirect = user.grants.some(g => g.via === 'direct')
+    const orgWide = user.grants.some(g => g.via === 'org')
 
     // A one-line summary of HOW they have access, before expanding.
     const viaSummary: string = (() => {
@@ -101,6 +111,7 @@ function AccessRow({ user }: { user: WorkspaceAccessUser }) {
         } else if (groupCount > 1) {
             parts.push(`via ${groupCount} groups`)
         }
+        if (orgWide) parts.push('Organization-wide')
         return parts.join(' · ')
     })()
 
@@ -166,8 +177,10 @@ function AccessRow({ user }: { user: WorkspaceAccessUser }) {
                         )}
                     </div>
                 </div>
-                {/* Effective role badge, plus a count when there is more than one. */}
+                {/* How their first route came about, the effective role badge,
+                    and a count when there is more than one role. */}
                 <div className="flex items-center gap-1.5 shrink-0">
+                    <ProvenanceChip provenance={user.grants[0]?.provenance} className="hidden sm:inline-flex" />
                     <RoleBadge role={user.effectiveRole} />
                     {user.roles.length > 1 && (
                         <span
@@ -209,8 +222,8 @@ function AccessRow({ user }: { user: WorkspaceAccessUser }) {
 
 export function WorkspaceAccessList({ workspaceId }: { workspaceId: string }) {
     const [users, setUsers] = useState<WorkspaceAccessUser[] | null>(null)
-    const [totals, setTotals] = useState<{ total: number; direct: number; viaGroup: number }>(
-        { total: 0, direct: 0, viaGroup: 0 },
+    const [totals, setTotals] = useState<{ total: number; direct: number; viaGroup: number; orgWide: number }>(
+        { total: 0, direct: 0, viaGroup: 0, orgWide: 0 },
     )
     const [error, setError] = useState<string | null>(null)
     const [search, setSearch] = useState('')
@@ -223,7 +236,10 @@ export function WorkspaceAccessList({ workspaceId }: { workspaceId: string }) {
         try {
             const data = await workspaceMembersService.listEffective(workspaceId)
             setUsers(data.users)
-            setTotals({ total: data.totalUsers, direct: data.directUsers, viaGroup: data.viaGroupUsers })
+            setTotals({
+                total: data.totalUsers, direct: data.directUsers, viaGroup: data.viaGroupUsers,
+                orgWide: data.orgWideUsers ?? 0,
+            })
             setError(null)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to load access list'
@@ -270,8 +286,8 @@ export function WorkspaceAccessList({ workspaceId }: { workspaceId: string }) {
                     <h3 className="text-base font-bold text-ink">Everyone with access</h3>
                     <p className="text-sm text-ink-secondary leading-relaxed mt-0.5">
                         Every person who can reach this workspace, resolved across direct
-                        bindings and every group. Expand a row to see the exact route —
-                        direct, or via which group — for each role they hold.
+                        bindings, every group and organization-wide roles. Expand a row to
+                        see the exact route for each role they hold — and how it came about.
                     </p>
                 </div>
                 <button
@@ -284,10 +300,11 @@ export function WorkspaceAccessList({ workspaceId }: { workspaceId: string }) {
             </div>
 
             {/* Totals strip */}
-            <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
                 <StatChip icon={Users} label="People" value={totals.total} accent="text-emerald-600 dark:text-emerald-400" iconBg="bg-emerald-500/10 text-emerald-500 border-emerald-500/20" />
                 <StatChip icon={UserCheck} label="Bound directly" value={totals.direct} accent="text-sky-600 dark:text-sky-400" iconBg="bg-sky-500/10 text-sky-500 border-sky-500/20" />
                 <StatChip icon={Users2} label="Via a group" value={totals.viaGroup} accent="text-violet-600 dark:text-violet-400" iconBg="bg-violet-500/10 text-violet-500 border-violet-500/20" />
+                <StatChip icon={Building2} label="Organization-wide" value={totals.orgWide} accent="text-rose-600 dark:text-rose-400" iconBg="bg-rose-500/10 text-rose-500 border-rose-500/20" />
             </div>
 
             {/* Search */}

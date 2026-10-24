@@ -102,6 +102,42 @@ async def test_unknown_action_is_noop(db_session: AsyncSession):
     assert rows == []
 
 
+async def test_many_at_once_writes_what_one_at_a_time_does(db_session: AsyncSession):
+    """The bulk form (a data source moving with thousands of views) writes the same history rows
+    and the same outbox events as one call per view — in two statements instead of a flush each."""
+    import json
+
+    ws = await _workspace(db_session)
+    one, two, three = [await _view(db_session, ws.id, name) for name in ("One", "Two", "Three")]
+    changes = {"from": "ws_a", "to": ws.id}
+    await view_activity_repo.record_view_activity(
+        db_session, view_id=one.id, workspace_id=ws.id, action="moved", actor="u1",
+        summary="Moved here", changes=changes)
+    await view_activity_repo.record_view_activity_many(
+        db_session, entries=[(two.id, "Moved here", changes), (three.id, "Moved here", changes)],
+        workspace_id=ws.id, action="moved", actor="u1")
+    await db_session.flush()
+
+    rows = {r.view_id: (r.workspace_id, r.action, r.actor, r.summary, json.loads(r.changes))
+            for r in (await db_session.execute(select(ViewActivityLogORM).where(
+                ViewActivityLogORM.action == "moved"))).scalars()}
+    assert rows[two.id] == rows[three.id] == rows[one.id]
+    events = {e.aggregate_id: (e.aggregate_type, json.loads(e.payload))
+              for e in (await db_session.execute(select(OutboxEventORM).where(
+                  OutboxEventORM.event_type == "visualization.view.moved"))).scalars()}
+    assert set(events) == {one.id, two.id, three.id}
+    assert events[two.id] == events[three.id] == events[one.id]
+
+
+async def test_many_at_once_refuses_an_unknown_action(db_session: AsyncSession):
+    """Unlike the one-view form it is part of the change it records, so it fails loudly."""
+    import pytest
+
+    with pytest.raises(ValueError):
+        await view_activity_repo.record_view_activity_many(
+            db_session, entries=[("v1", None, None)], workspace_id="ws", action="teleported")
+
+
 async def test_recent_activity_feed_pairs_entries_with_views(db_session: AsyncSession):
     """The dashboard feed returns each entry with its ViewORM so the endpoint can
     apply the same read check the views list uses (no cross-workspace leak)."""

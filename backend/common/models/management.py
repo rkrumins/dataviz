@@ -887,6 +887,25 @@ class DataSourceUpdateRequest(BaseModel):
         return self
 
 
+class DataSourceVersioning(BaseModel):
+    """Version control on a data source, as the data-source list reports it when asked
+    (``include=versioning``)."""
+    #: A live versioned graph backs the source in this workspace, and turning version control
+    #: on has finished. False for an external graph (mastered elsewhere, so it has no history
+    #: here) and while version control is still being turned on.
+    enabled: bool
+    graph_id: Optional[str] = Field(None, alias="graphId")
+    kind: Optional[str] = None  # manual | authoritative | hybrid | blank
+    #: The head of ``main`` — the newest published revision. A change watermark: the commit log
+    #: has something new only when it moved.
+    main_head_commit_seq: Optional[int] = Field(None, alias="mainHeadCommitSeq")
+    main_head_commit_id: Optional[str] = Field(None, alias="mainHeadCommitId")
+    main_head_committed_at: Optional[str] = Field(None, alias="mainHeadCommittedAt")
+
+    class Config:
+        populate_by_name = True
+
+
 class DataSourceResponse(BaseModel):
     id: str
     workspace_id: str = Field(alias="workspaceId")
@@ -924,6 +943,9 @@ class DataSourceResponse(BaseModel):
     # derive from shape (no catalog item → managed), mirroring the ORM comment.
     source_mode: Optional[str] = Field(None, alias="sourceMode")  # "managed" | "federated"
     write_back_enabled: bool = Field(False, alias="writeBackEnabled")
+    #: Version control — set by the data-source list when asked (``include=versioning``), null
+    #: wherever it wasn't asked for. Null says nothing about whether the source is versioned.
+    versioning: Optional[DataSourceVersioning] = None
     # Aggregation state
     aggregation_status: str = Field("none", alias="aggregationStatus")
     last_aggregated_at: Optional[str] = Field(None, alias="lastAggregatedAt")
@@ -964,6 +986,15 @@ class WorkspaceUpdateRequest(BaseModel):
     # The layout template new views here start from: a built-in, an
     # organization template or this workspace's own. None = untouched; "" clears.
     default_layout_template_id: Optional[str] = Field(None, alias="defaultLayoutTemplateId")
+    # Joining: listed in Find a workspace; who decides membership ('app' —
+    # approvers here, 'idp' — the identity provider's groups); and a note for
+    # people asking. None = untouched; "" clears the note.
+    directory_listed: Optional[bool] = Field(None, alias="directoryListed")
+    access_mode: Optional[Literal["app", "idp"]] = Field(None, alias="accessMode")
+    access_note: Optional[str] = Field(None, alias="accessNote", max_length=500)
+    # How it takes requests: 'approval', 'open' (anyone joins as a Viewer at
+    # once — app-decided workspaces only) or 'closed'. None = untouched.
+    request_policy: Optional[Literal["approval", "open", "closed"]] = Field(None, alias="requestPolicy")
 
     class Config:
         populate_by_name = True
@@ -992,6 +1023,12 @@ class WorkspaceResponse(BaseModel):
     name_property: Optional[str] = Field(None, alias="nameProperty")
     #: The layout template a new view here starts from, if any.
     default_layout_template_id: Optional[str] = Field(None, alias="defaultLayoutTemplateId")
+    #: Joining: listed in Find a workspace, who decides membership, and the
+    #: note shown to people asking.
+    directory_listed: bool = Field(True, alias="directoryListed")
+    access_mode: str = Field("app", alias="accessMode")
+    access_note: Optional[str] = Field(None, alias="accessNote")
+    request_policy: str = Field("approval", alias="requestPolicy")
 
     class Config:
         populate_by_name = True
@@ -1633,13 +1670,204 @@ class WorkspaceDataSourceImpactResponse(BaseModel):
     restoreWindowDays: int = 30
 
 
-class DataSourceMoveRequest(BaseModel):
-    """Re-home a data source into another workspace."""
+# ─── Moving a data source between workspaces ──────────────────────────────────
 
-    target_workspace_id: str = Field(alias="targetWorkspaceId")
+class DataSourceMoveRequest(BaseModel):
+    """Re-home a data source into another workspace, with its views.
+
+    ``previewToken`` is the token of the preview the caller confirmed: if
+    anything it showed has changed since, the move is refused
+    (``preview_stale``) rather than doing something nobody read. It is required
+    whenever anyone would lose access to moved views (``preview_required``):
+    the preview is where that is said."""
+
+    target_workspace_id: str = Field(alias="targetWorkspaceId", max_length=200)
+    preview_token: Optional[str] = Field(None, alias="previewToken", max_length=64)
 
     class Config:
         populate_by_name = True
+
+
+class TransferAccept(BaseModel):
+    """Accepting a transfer request: the preview the reviewer read."""
+    preview_token: str = Field(alias="previewToken", max_length=64)
+
+    class Config:
+        populate_by_name = True
+
+
+class TransferResolve(BaseModel):
+    """Declining or cancelling a transfer request, with an optional note."""
+    note: Optional[str] = Field(None, max_length=500)
+
+
+class TransferWorkspaceRef(BaseModel):
+    id: str
+    #: None when the reader can't open that workspace: its name stays its own.
+    name: Optional[str] = None
+
+
+class TransferPersonRef(BaseModel):
+    id: str
+    name: str
+    email: Optional[str] = None
+
+
+class TransferIssue(BaseModel):
+    """Something the mover must resolve (a blocker) or should know (a note).
+
+    A ``transient`` blocker clears by itself — an aggregation run finishing —
+    so a request may be filed while it holds, but not accepted."""
+    code: str
+    message: str
+    severity: Literal["blocker", "warning", "info"]
+    transient: bool = False
+    items: List[ImpactedEntity] = []
+
+
+class TransferView(BaseModel):
+    id: str
+    name: str
+    visibility: str
+    ownerId: Optional[str] = None
+    ownerName: Optional[str] = None
+    trashed: bool = False
+    #: Has no data source of its own and reads this one as the workspace default.
+    followsDefault: bool = False
+    publishRequested: bool = False
+
+
+class TransferViewCounts(BaseModel):
+    total: int = 0                # every view that moves, trashed included
+    trashed: int = 0
+    followsDefault: int = 0
+    private: int = 0              # live views, by visibility
+    workspace: int = 0
+    enterprise: int = 0
+    publishRequested: int = 0
+
+
+class TransferSubject(BaseModel):
+    """A person or group who reads moved views today and would lose them."""
+    type: Literal["user", "group"]
+    id: str
+    name: str
+    email: Optional[str] = None
+    memberCount: Optional[int] = None
+    role: str                     # their role in the source workspace, in words
+    views: int                    # how many moved views they'd lose
+    #: Where the access came from, which says how to restore it: ``app`` (granted
+    #: in the app), ``group``, or ``idp`` (an identity provider decides).
+    via: Literal["app", "group", "idp"] = "app"
+
+
+class TransferAccess(BaseModel):
+    creators: int = 0             # people who created moved views: they keep them
+    sharedWith: int = 0           # people and teams the views are shared with: they keep them
+    everyone: int = 0             # views published to everyone: nothing changes
+    gainsPeople: int = 0          # the destination's audience for workspace views
+    gainsViews: int = 0
+    adminViews: int = 0           # private views the destination's admins can now open
+    requestPolicy: str = "approval"  # the destination's: how anyone losing access gets in
+    loses: List[TransferSubject] = []
+
+
+class TransferVersioning(BaseModel):
+    commits: int = 0
+    openDrafts: int = 0
+    openReviews: int = 0
+    forks: int = 0
+
+
+class TransferPrimary(BaseModel):
+    wasPrimary: bool = False      # flagged primary in the source workspace
+    wasDefault: bool = False      # what views with no source of their own read there
+    becomesPrimary: bool = False  # the destination has no live source, so it becomes primary
+    #: The destination source flagged primary so the move can't change its default.
+    pinsDestinationDefault: Optional[str] = None
+
+
+class TransferIdentity(BaseModel):
+    """The node-identity mapping kept on the source because the destination
+    would resolve it differently (None for a property that doesn't change)."""
+    identityProperty: Optional[str] = None
+    nameProperty: Optional[str] = None
+
+
+class TransferPreview(BaseModel):
+    dataSource: ImpactedEntity
+    fromWorkspace: TransferWorkspaceRef
+    toWorkspace: TransferWorkspaceRef
+    #: What the caller may do: move now, ask the destination's admins, or neither.
+    mode: Optional[Literal["direct", "request"]] = None
+    blockers: List[TransferIssue] = []
+    notes: List[TransferIssue] = []
+    views: List[TransferView] = []
+    viewCounts: TransferViewCounts
+    access: TransferAccess
+    versioning: Optional[TransferVersioning] = None
+    primary: TransferPrimary
+    identity: Optional[TransferIdentity] = None
+    #: Changes whenever anything a reviewer must re-read changes.
+    token: str
+
+
+class TransferDestination(BaseModel):
+    id: str
+    name: str
+    description: Optional[str] = None
+    dataSourceCount: int = 0
+    mode: Optional[Literal["direct", "request"]] = None
+    #: Why the source can't go there, when ``mode`` is None.
+    reason: Optional[str] = None
+
+
+class TransferLostAccess(BaseModel):
+    """How many people and groups stopped (or, for a request, would stop) reading moved views."""
+    people: int = 0
+    groups: int = 0
+
+
+class DataSourceTransferResponse(BaseModel):
+    id: str
+    kind: Literal["move", "request"]
+    status: Literal["pending", "completed", "declined", "cancelled", "expired", "undone"]
+    dataSource: ImpactedEntity
+    fromWorkspace: TransferWorkspaceRef
+    toWorkspace: TransferWorkspaceRef
+    createdBy: Optional[TransferPersonRef] = None
+    createdAt: str
+    reason: Optional[str] = None
+    expiresAt: Optional[str] = None
+    resolvedBy: Optional[TransferPersonRef] = None
+    resolvedAt: Optional[str] = None
+    resolutionNote: Optional[str] = None
+    completedAt: Optional[str] = None
+    undoneBy: Optional[TransferPersonRef] = None
+    undoneAt: Optional[str] = None
+    viewCount: int = 0
+    lostAccess: TransferLostAccess = Field(default_factory=lambda: TransferLostAccess())
+    undoUntil: Optional[str] = None
+    canAccept: bool = False
+    canDecline: bool = False
+    canCancel: bool = False
+    canUndo: bool = False
+    undoBlockedBy: Optional[str] = None
+
+
+class TransferChanges(BaseModel):
+    """What changed between a request being sent and being read."""
+    viewsAdded: int = 0
+    viewsRemoved: int = 0
+    newPeople: int = 0
+
+
+class DataSourceTransferDetail(BaseModel):
+    transfer: DataSourceTransferResponse
+    preview: Optional[TransferPreview] = None
+    changesSinceRequest: Optional[TransferChanges] = None
+    #: Once the move happened: who lost access, as it stood then.
+    lost: List[TransferSubject] = []
 
 
 class WorkspaceImpactResponse(BaseModel):

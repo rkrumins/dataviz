@@ -3,7 +3,7 @@
 *For integrators — anyone who scripts against the API or automates {brand}.*
 
 This page gets a script signed in, shows you where to find any endpoint, explains the
-conventions every endpoint shares, and walks through the six integrations people build
+conventions every endpoint shares, and walks through the nine integrations people build
 most often. Each recipe is a short procedure with the real request.
 
 > **Before you start:** you need the address you open the app at, and an account that holds
@@ -14,15 +14,17 @@ most often. Each recipe is a short procedure with the real request.
 ## Your path
 
 1. **API Guide for Integrators** — this page: sign in, find endpoints, conventions, recipes.
-2. [Search & Display Rules: developer reference](/docs/feature-search-and-rules-reference) —
+2. [Graph Metadata & History API](/docs/graph-metadata-api) — a workspace's graphs, external
+   or versioned, and each versioned graph's full commit history, field by field.
+3. [Search & Display Rules: developer reference](/docs/feature-search-and-rules-reference) —
    the query model and every search and view-library endpoint, with curl recipes.
-3. [Versioning API reference](/docs/versioning-api-reference) — drafts, publishing, history,
+4. [Versioning API reference](/docs/versioning-api-reference) — drafts, publishing, history,
    imports and exports over HTTP.
-4. [Import / Export](/docs/versioning-import-export) — how a bulk file is read, matched to
+5. [Import / Export](/docs/versioning-import-export) — how a bulk file is read, matched to
    what is already there, and applied.
-5. [View portability](/docs/feature-view-portability) — the view file format and the checks
+6. [View portability](/docs/feature-view-portability) — the view file format and the checks
    an import runs.
-6. [Feature Switches API](/docs/api-features) — which administrator switch turns which
+7. [Feature Switches API](/docs/api-features) — which administrator switch turns which
    endpoint off.
 
 ## Sign in from a script
@@ -364,8 +366,10 @@ There is no single paging scheme; each route documents its own in the explorer.
   `{items, total, hasMore, nextOffset}`; the versioning lists answer a plain array — stop
   when a page comes back shorter than `limit`. `GET /api/v1/admin/workspaces` sends the total
   in `X-Total-Count` when you pass `limit`.
-- **Cursors** on long or changing lists: search hands back `cursor`, an entity's history
-  hands back `nextBefore`. Send the value back as-is.
+- **Cursors** on long or changing lists: search hands back `cursor`; an entity's history and a
+  graph's commit log hand back `nextBefore` with `hasMore`. Send the value back as-is, and keep
+  going while `hasMore` is `true` — a page can be short and still have more. A commit log also
+  takes `after`, the newest commit you already have, to fetch only what is new.
 
 ### Caching and concurrent edits
 
@@ -430,6 +434,43 @@ or after 60 seconds with `job:timeout` in `actions`. Leave `force` off — it qu
 whether or not anything changed, and on a large graph that is minutes of work for nothing.
 The scopes, the batch verbs and how to check a signal worked are in
 [Telling us an external data source changed](/docs/feature-external-change-notification).
+
+### Keep a copy of a workspace's graphs and their history
+
+**Needs:** `workspace:datasource:read` in the workspace. With an API key, one that covers the
+whole workspace, with **Data: read**.
+
+A workspace's data sources are its graphs. Each is external — loaded and owned elsewhere — or
+versioned, with every published change a commit you can read.
+
+1. List them, each with its version control. `providerId=` narrows the list to one provider:
+
+   ```bash
+   api GET "/api/v1/admin/workspaces/$WS/data-sources?include=versioning" |
+     jq -r '.[] | [.id, .providerId, .graphName, .versioning.enabled, .versioning.graphId // "",
+                   .versioning.mainHeadCommitSeq // ""] | @tsv'
+   ```
+
+   ```text
+   ds_124482eedff6  prov_9f2c1a7d3b44  orders_lineage  true   graph_01M5DQ5P41JQC6HYTWN1YTPWVE  3
+   ds_7c0e9a51b2d8  prov_9f2c1a7d3b44  payments        false
+   ```
+
+2. For each versioned graph, compare `mainHeadCommitSeq` with the newest `commit_seq` you hold.
+   Equal means nothing new.
+3. Otherwise read only what is new, newest first, until `hasMore` is `false`:
+
+   ```bash
+   api GET "/api/v1/$WS/versioning/graphs/$GID/commits?after=$SEEN&limit=500" |
+     jq '{hasMore, nextBefore, commits: [.commits[] | {commit_seq, kind, message, actor, created_at}]}'
+   ```
+
+   While `hasMore` is `true`, ask again with `&before=<nextBefore>` added, keeping `after`.
+4. Store each commit keyed by `commit_id`, then remember the highest `commit_seq` you stored.
+   `after=0` reads the whole history.
+
+What every field means, the kinds of commit, what you can rely on, and a complete Python loop are
+in [Graph Metadata & History API](/docs/graph-metadata-api).
 
 ### Publish a search and display-rule library
 
@@ -805,6 +846,8 @@ in [Single Sign-On](/guide/sso-setup).
 | Trace routes and the retired route | `backend/app/api/v1/endpoints/graph.py` | `trace_v2`, `trace_closure`, `trace_expand`, `trace_expand_batch`, `get_lineage_trace_deprecated` |
 | Trace request and answer | `backend/common/models/graph.py` | `TraceRequest`, `TraceClosureRequest`, `ExpandRequest`, `TraceResult` |
 | Refresh signal | `backend/app/api/v1/endpoints/freshness.py` | `refresh_data_source` |
+| A workspace's data sources, with their version control | `backend/app/api/v1/endpoints/workspaces.py`, `backend/app/services/versioning/service.py` | `list_data_sources`, `GraphVersioningService.main_heads` |
+| A graph's commit log | `backend/app/api/v1/endpoints/versioning.py` | `get_commit_log`, `CommitLogEntry` |
 | Imports, uploads, exports, publish | `backend/app/api/v1/endpoints/versioning.py` | `create_import`, `create_import_upload`, `create_export`, `download_export`, `publish` |
 | View files | `backend/app/api/v1/endpoints/view_transfer.py` | `export_view_file`, `inspect_view_file`, `reconcile_view_file`, `import_view_file` |
 | Library packs | `backend/app/api/v1/endpoints/views.py`, `backend/scripts/publish_view_library.py` | `import_view_library`, `main` |

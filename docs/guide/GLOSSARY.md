@@ -13,7 +13,8 @@ screen.
 
 | Term | What it means | Read more |
 |---|---|---|
-| **Access request** | A request to join a workspace with a chosen role, sent with **Request access**. A workspace admin approves or denies it, and you can follow it under **My access requests**. | [Requesting Access](/guide/requesting-access) |
+| **Access request** | A request to join a workspace at a level you choose, sent with **Request access** — or to keep access that's about to end, sent with **Ask to keep it**. The workspace's admins and stewards approve it, point it to an identity-provider group, or decline it; you follow it — and can withdraw it — under **My access requests**. | [Requesting Access](/guide/requesting-access) |
+| **Access review** | A workspace admin's pass over the grants made in a workspace, keeping or removing each; removing takes the access away at once. Nothing is removed automatically. | [Workspace Admin](/guide/workspace-admin#reviewing-who-has-access) |
 | **Activity** | The record of who did what across the platform — sign-ins, access changes, operations on data sources and settings — and why, under **Administration → Activity**; each workspace has its own **Activity** tab. | [The Admin Console](/guide/governance-ops#activity) |
 | **Aggregation** | The background job that builds a data source's lineage summaries (rollups), so lines can be drawn between collapsed items. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Analytics** | The sidebar page with growth, engagement and adoption figures for the platform. | [Analytics](/guide/analytics) |
@@ -41,9 +42,11 @@ screen.
 | **Editor** / **Viewer** (on a view) | The two roles you can give someone on one view in **Share**: editors can edit it, viewers can read it. | [Managing & Sharing Views](/guide/managing-views) |
 | **Entity** / **entity type** | An item in the graph — a table, a column, a dashboard. Its entity type says what kind of thing it is. | [Key Concepts](/guide/key-concepts) |
 | **Entity drawer** | The panel on the right with an entity's details, opened with **View & Edit** on its right-click menu. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
+| **Exception** | Access granted in the app to a workspace whose identity provider decides who is in. It's granted by the workspace's admins only, for 90 days at most, is labelled **Exception** wherever access is listed, doesn't follow the person's groups, and ends on its own once their groups grant the same access. | [Workspace Admin](/guide/workspace-admin#when-the-identity-provider-decides) |
 | **Explorer** | The catalogue of saved views across all your workspaces. Open it with **Explore** in the sidebar. | [Finding Views](/guide/browsing-views) |
 | **Favorites** | Views you've marked with the heart. Find them in the **Favorites** popover in the top bar, or the Explorer's **Favorites** filter. | [Finding Views](/guide/browsing-views) |
 | **Feature switch** | An on/off setting under **Administration → Features** that turns a capability on or off for everyone in the deployment (also called a feature flag). | [Feature Switches](/guide/feature-switches) |
+| **Find a workspace** | The **Workspaces** tab that lists your organization's workspaces, so you can see what each is for and ask to join one. An administrator switches it on. | [Requesting Access](/guide/requesting-access#find-a-workspace) |
 | **Freshness** | How current a data source's lineage summaries are. Administrators watch it under **Ingestion → Freshness**. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Granularity** | How fine the lineage you see is — column, table or whole system. There's no global switch: open or close containers, or use the Lineage Lens **Density** control. | [Reading Lineage](/guide/reading-lineage) |
 | **Graph** (canvas type) | A canvas type that shows entities and their relationships positioned freely, for exploring how things connect. | [Creating Views](/guide/creating-views) |
@@ -52,7 +55,7 @@ screen.
 | **Help** | The question-mark button in the top bar (or press **?**): search this guide and the documentation without leaving your work. | [Welcome](/guide/welcome) |
 | **Hierarchy** (canvas type) | A canvas type that nests entities inside their parents, as a tree you expand and collapse. | [Creating Views](/guide/creating-views) |
 | **Impact** | Everything downstream of an entity — what a change to it could affect. **Impact** in the entity drawer traces it. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
-| **Inbox** | The bell in the top bar. It lists views shared with you, requests to publish a view, and answers to your own publish requests. | [Managing & Sharing Views](/guide/managing-views) |
+| **Inbox** | The bell in the top bar. It lists views shared with you, requests to publish a view or join a workspace, and the answers to your own requests. | [Managing & Sharing Views](/guide/managing-views) |
 | **Invite link** | A sign-up link an administrator creates, carrying a role and groups. The **Invite links** switch can stop every link at once. | [Users & Access](/guide/users-access) |
 | **Layer** | A column of a Context View, holding the entity types or entities placed in it. | [Navigating Layers](/guide/navigating-layers) |
 | **Lineage** | How data flows from where it starts to where it's used. | [Reading Lineage](/guide/reading-lineage) |
@@ -65,7 +68,7 @@ screen.
 | **Merge** | Apply a reviewed draft's changes to the published version, from its review. | [The Review Center](/guide/review-center) |
 | **Merge request** | A request to merge a draft, opened with **Submit for review**. A reviewer can **Approve**, **Merge** or **Dismiss** it. | [The Review Center](/guide/review-center) |
 | **Multi-entity trace** | A trace started from several entities at once: choose **Select**, pick the entities, then **Trace N Entities** (for example **Trace 3 Entities**). | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
-| **My access** | Your page — avatar menu → **My access** — listing your roles, what they allow, and your access requests. | [Users & Access](/guide/users-access) |
+| **My access** | Your page — avatar menu → **My access** — listing your roles, how each came about, what they allow, and your access requests. | [Users & Access](/guide/users-access) |
 | **New View** | The Explorer button that opens the Create View wizard. | [Creating Views](/guide/creating-views) |
 | **Node** | One item drawn on the canvas — an entity. | [Reading Lineage](/guide/reading-lineage) |
 | **Ontology** | Another name for a semantic layer. | [The Semantic Layer](/guide/semantic-layer) |
@@ -83,7 +86,7 @@ screen.
 | **Relationship type** | A kind of edge, defined by the semantic layer — some mean "contains", others mean data flows. | [The Semantic Layer](/guide/semantic-layer) |
 | **Review & Save** | Where you check every staged edit and save them to your draft together — the **Review & Save Changes** dialog, then **Save N changes**. | [Editing in a Draft](/guide/editing-in-a-draft) |
 | **Review Center** | A workspace's **Reviews** tab: the merge requests waiting for review across the workspace. | [The Review Center](/guide/review-center) |
-| **Role** | A named set of permissions. Organisation-wide: **User**, **Org Auditor**, **Org Admin**, **Super Admin**. In a workspace: **Workspace Admin**, **Data Engineer**, **Member**, **Viewer**. | [Users & Access](/guide/users-access) |
+| **Role** | A named set of permissions. Organisation-wide: **User**, **Org Auditor**, **Org Admin**, **Super Admin**. In a workspace: **Workspace Admin**, **Data Engineer**, **Steward**, **Member**, **Viewer**. | [Users & Access](/guide/users-access) |
 | **Rollup** | A line between two collapsed items that summarises the lineage between everything inside them. Built by the data source's aggregation. | [Rollup Capacity & Large Graphs](/guide/rollup-capacity) |
 | **Root Cause** | Everything upstream of an entity — where its data comes from. **Root Cause** in the entity drawer traces it. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
 
@@ -95,6 +98,7 @@ screen.
 | **Search** | The search box in the top bar (⌘K / Ctrl-K) — find pages, views, workspaces and documentation. Inside a view, **Advanced search** (⌘⇧F / Ctrl-Shift-F) finds every match on the canvas. | [Advanced Search](/guide/advanced-search) |
 | **Semantic layer** | The definitions of what your data means — its entity types, relationship types and how they nest. Managed under **Semantic Layers**; a published version's definitions never change — editing them creates a new version. | [The Semantic Layer](/guide/semantic-layer) |
 | **Stage changes** | The button at the foot of an editing drawer that keeps your edit for **Review & Save** (⌘S / Ctrl-S). Nothing is saved yet. | [Editing in a Draft](/guide/editing-in-a-draft) |
+| **Steward** | A workspace role for the people who let others in: a **Member** who also adds people as viewers or members and answers their access requests. | [Workspace Admin](/guide/workspace-admin#giving-people-access-the-members-tab) |
 | **Sync chip** | The chip next to the data source's name in a view's header that says whether the view reads the latest data — for example **In sync · v12** or **1 version behind**. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Telemetry** | Product usage and content gaps, for administrators, under **Administration → Telemetry**. | [The Admin Console](/guide/governance-ops) |
 | **Trace** | Following an entity's lineage across the graph: **Trace Lineage** on the canvas, or **Root Cause**, **Impact** or **Full Lineage** in the entity drawer. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |

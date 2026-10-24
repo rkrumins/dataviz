@@ -7,7 +7,7 @@ import { useState, useEffect, useMemo, useRef } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import {
-    ChevronLeft, Plus, Database, Loader2, Settings2,
+    ChevronLeft, Plus, Database, Settings2,
     GitBranch, Eye, Info, Compass, HelpCircle, RefreshCw,
     Users, ShieldOff, Send, GitPullRequestArrow, LineChart, History, Trash2,
 } from 'lucide-react'
@@ -25,7 +25,7 @@ import { DEFAULT_TIMEOUT_SECS } from '@/components/admin/shared/AggregationOverr
 import { useAppNotifications } from '@/components/ui/notifications'
 import { usePermission, usePermissionClaims } from '@/store/auth'
 import { useFeature } from '@/store/features'
-import { accessRequestsService } from '@/services/accessRequestsService'
+import { RequestAccessDialog } from '@/components/access/RequestAccessDialog'
 import { AddDataSourceWizard } from '@/components/admin/workspace/AddDataSourceWizard'
 import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspaceDetailData'
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
@@ -43,6 +43,8 @@ import { useCanReadProfiling } from '@/hooks/useProfilingAccess'
 import { ActivityExplorer } from '@/components/activity/ActivityExplorer'
 import { workspaceActivityScope } from '@/components/activity/activityMeta'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
+import { MoveDataSourceWizard, type MoveDataSourceWizardProps } from '@/features/data-source-transfer/MoveDataSourceWizard'
+import { TransferRequestsPanel } from '@/features/data-source-transfer/TransferRequestsPanel'
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -81,6 +83,10 @@ export function WorkspaceDetailPage() {
     // ── Add DS wizard state ────────────────────────────────
     const [showAddDs, setShowAddDs] = useState(false)
 
+    // ── Move wizard: a source of ours going elsewhere, or one pulled in here ──
+    const [moving, setMoving] = useState<Pick<MoveDataSourceWizardProps,
+        'sourceWorkspace' | 'dataSource' | 'presetDestinationId'> | null>(null)
+
     // ── Delete confirm state ───────────────────────────────
 
     // ── Edit DS modal state ────────────────────────────────
@@ -101,10 +107,12 @@ export function WorkspaceDetailPage() {
     // disappears when the admin turns version control off.
     const versioningEnabled = useFeature('versioningEnabled')
 
-    // Workspace admin permission gates the Members tab. The store's
+    // Letting people in opens the Members tab — admins and stewards; the
+    // admins also remove people and set how people get in. The store's
     // `usePermission` re-renders this component on permission changes
     // (e.g. after silent refresh), so the tab appears/disappears live.
     const canManageMembers = usePermission('workspace:admin', wsId ?? null)
+    const canAddMembers = usePermission('workspace:members:add', wsId ?? null)
     // The Activity tab: a workspace admin reads this workspace's activity; an
     // auditor reads everything recorded against it, through the platform log.
     const isAuditor = usePermission('system:audit:read')
@@ -443,12 +451,14 @@ export function WorkspaceDetailPage() {
                 />
             )
         }
-        return (
-            <div className="flex flex-col items-center justify-center h-full">
-                <p className="text-ink-muted">Workspace not found.</p>
-                <button onClick={() => navigate('/workspaces')} className="mt-4 text-indigo-500 hover:underline text-sm">&larr; Back to Workspaces</button>
-            </div>
-        )
+        return wsId
+            ? <WorkspaceUnavailablePanel wsId={wsId} onNavigateHome={() => navigate('/workspaces')} />
+            : (
+                <div className="flex flex-col items-center justify-center h-full">
+                    <p className="text-ink-muted">Workspace not found.</p>
+                    <button onClick={() => navigate('/workspaces')} className="mt-4 text-indigo-500 hover:underline text-sm">&larr; Back to Workspaces</button>
+                </div>
+            )
     }
 
     return (
@@ -524,8 +534,8 @@ export function WorkspaceDetailPage() {
                     ...(versioningEnabled
                         ? [{ id: 'reviews' as const, label: 'Reviews', icon: GitPullRequestArrow, hint: 'Merge requests awaiting review across this workspace' }]
                         : []),
-                    ...(canManageMembers
-                        ? [{ id: 'members' as const, label: 'Members', icon: Users, hint: 'Workspace role bindings — admins / users / viewers' }]
+                    ...(canAddMembers
+                        ? [{ id: 'members' as const, label: 'Members', icon: Users, hint: 'Who is in, their requests to join, and how people get in' }]
                         : []),
                     ...(activityScope
                         ? [{ id: 'activity' as const, label: 'Activity', icon: History, hint: 'Who changed what in this workspace, when, and why' }]
@@ -566,6 +576,9 @@ export function WorkspaceDetailPage() {
                             </p>
                         </div>
                     </div>
+
+                    {/* Sources waiting to move in, or to leave — what an admin must answer. */}
+                    {canManageMembers && wsId && <TransferRequestsPanel variant="banner" workspaceId={wsId} />}
 
                     {/* Workspace-level default, above the grid it governs. */}
                     <WorkspaceNodeIdentityDefaults
@@ -743,8 +756,8 @@ export function WorkspaceDetailPage() {
             )}
 
             {/* ── Members Tab (RBAC) ──────────────────────── */}
-            {activeSection === 'members' && canManageMembers && wsId && (
-                <WorkspaceMembers workspaceId={wsId} />
+            {activeSection === 'members' && canAddMembers && wsId && (
+                <WorkspaceMembers workspaceId={wsId} canManage={canManageMembers} />
             )}
 
             {activeSection === 'activity' && activityScope && (
@@ -764,7 +777,24 @@ export function WorkspaceDetailPage() {
                 catalogItems={allowedCatalogItems}
                 providers={providers}
                 ontologies={ontologies}
+                onMoveWithViews={item => {
+                    if (!wsId || !item.boundWorkspaceId || !item.boundDataSourceId) return
+                    setMoving({
+                        sourceWorkspace: { id: item.boundWorkspaceId, name: item.boundWorkspaceName ?? 'another workspace' },
+                        dataSource: { id: item.boundDataSourceId, label: item.name },
+                        presetDestinationId: wsId,
+                    })
+                }}
             />
+
+            {moving && (
+                <MoveDataSourceWizard
+                    isOpen
+                    {...moving}
+                    onClose={() => setMoving(null)}
+                    onDone={() => { reload(); setTrashKey(k => k + 1) }}
+                />
+            )}
 
             {/* One dialog, two registers. Removing is disruptive but REVERSIBLE, so it shows the
                 full blast radius and then asks for nothing but a click — and the notification carries an
@@ -806,6 +836,24 @@ export function WorkspaceDetailPage() {
                 onDeletePermanent={workspace.dataSources.length > 1 && selectedDs
                     ? () => deletion.openPermanent(selectedDs.id, selectedDs.label || selectedDs.id)
                     : undefined}
+                // Moving its views is a workspace admin's call; a source with nothing
+                // built on it moves for whoever manages data sources in both places.
+                // The server decides either way, and the wizard says why when it won't.
+                onMove={selectedDs && wsId && (canManageMembers
+                    || (canManageDataSources && (viewsByDs[selectedDs.id] || []).length === 0))
+                    ? () => {
+                        setMoving({
+                            sourceWorkspace: { id: wsId, name: workspace.name },
+                            dataSource: {
+                                id: selectedDs.id,
+                                label: selectedDs.label || dsProviderMap[selectedDs.id]?.catalogItemName || 'this data source',
+                            },
+                        })
+                        // The wizard sits under the drawer's layer, so the drawer steps aside.
+                        setSelectedDsId(null)
+                    }
+                    : undefined}
+                onMovedAway={() => { setSelectedDsId(null); reload() }}
                 onReaggregate={() => { if (selectedDs) handleReaggregate(selectedDs) }}
                 onPurge={async () => { if (selectedDs) await handlePurge(selectedDs) }}
                 onSetPrimary={() => { if (selectedDsId) handleSetPrimary(selectedDsId) }}
@@ -822,10 +870,72 @@ export function WorkspaceDetailPage() {
 
 
 // ─────────────────────────────────────────────────────────────────────
+// A workspace that can't be opened — it doesn't exist, or you aren't in
+// it. A shared link is often how people find a workspace, so this is
+// where they can ask to join, whether or not Find a workspace is on. The
+// name stays hidden: the server answers with what may be asked for, never
+// with what the workspace is.
+// ─────────────────────────────────────────────────────────────────────
+
+function WorkspaceUnavailablePanel({
+    wsId,
+    onNavigateHome,
+}: {
+    wsId: string
+    onNavigateHome: () => void
+}) {
+    const [asking, setAsking] = useState(false)
+    const [requested, setRequested] = useState(false)
+    return (
+        <div className="flex h-full overflow-y-auto p-6">
+            <div className="m-auto max-w-md w-full rounded-2xl border border-glass-border bg-canvas-elevated p-6 text-center">
+                <div className="w-12 h-12 rounded-2xl bg-slate-500/10 border border-slate-500/20 flex items-center justify-center mx-auto mb-4">
+                    <ShieldOff className="w-6 h-6 text-slate-500" />
+                </div>
+                <h2 className="text-lg font-bold text-ink">You can’t open this workspace</h2>
+                <p className="text-sm text-ink-muted mt-2">
+                    It doesn’t exist, or you aren’t in it yet. If someone shared a link with
+                    you, ask to join — its admins decide.
+                </p>
+                <div className="mt-5 flex flex-col gap-2">
+                    {requested ? (
+                        <p className="text-xs text-emerald-600 dark:text-emerald-400">
+                            Request sent. You’ll hear in your Inbox.
+                        </p>
+                    ) : (
+                        <button
+                            onClick={() => setAsking(true)}
+                            className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-gradient-to-r from-emerald-500 to-teal-600 text-white text-sm font-semibold shadow-md"
+                        >
+                            <Send className="w-4 h-4" />
+                            Request access
+                        </button>
+                    )}
+                    <button
+                        onClick={onNavigateHome}
+                        className="w-full px-4 py-2 rounded-xl text-sm font-semibold text-ink-secondary hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+                    >
+                        Go to workspaces
+                    </button>
+                </div>
+            </div>
+            {asking && (
+                <RequestAccessDialog
+                    workspaceId={wsId}
+                    onClose={() => setAsking(false)}
+                    onSent={() => setRequested(true)}
+                />
+            )}
+        </div>
+    )
+}
+
+
+// ─────────────────────────────────────────────────────────────────────
 // Access-revoked panel — rendered when the user had access to this
 // workspace earlier in the session but doesn't any more (admin
-// revoked their binding while they were on the page). Offers a
-// "Request access" CTA that submits via accessRequestsService, and
+// revoked their binding while they were on the page). Offers
+// "Request access again" (the same dialog as everywhere else), and
 // auto-redirects home after a short countdown so they aren't stuck
 // on a 404-looking screen.
 // ─────────────────────────────────────────────────────────────────────
@@ -839,10 +949,9 @@ function AccessRevokedPanel({
     wsId: string
     onNavigateHome: () => void
 }) {
-    const { notify } = useAppNotifications()
     const [secondsLeft, setSecondsLeft] = useState(REDIRECT_AFTER_SECONDS)
     const [requested, setRequested] = useState(false)
-    const [submitting, setSubmitting] = useState(false)
+    const [asking, setAsking] = useState(false)
     // Pause the countdown if the user is interacting (clicked the
     // request button). Cancelled redirects let the user read the
     // confirmation notification without being yanked away mid-action.
@@ -858,24 +967,9 @@ function AccessRevokedPanel({
         return () => clearTimeout(t)
     }, [secondsLeft, paused, onNavigateHome])
 
-    const handleRequest = async () => {
+    const handleRequest = () => {
         setPaused(true)
-        setSubmitting(true)
-        try {
-            await accessRequestsService.submit({
-                targetType: 'workspace',
-                targetId: wsId,
-                requestedRole: 'workspace_member',
-                justification: 'Requesting access again after losing membership.',
-            })
-            setRequested(true)
-            notify('success', 'Access request sent to the workspace admin.')
-        } catch (err) {
-            notify('error', err instanceof Error ? err.message : 'Failed to send request')
-            setPaused(false)
-        } finally {
-            setSubmitting(false)
-        }
+        setAsking(true)
     }
 
     return (
@@ -897,14 +991,9 @@ function AccessRevokedPanel({
                     {!requested ? (
                         <button
                             onClick={handleRequest}
-                            disabled={submitting}
                             className="w-full inline-flex items-center justify-center gap-2 px-4 py-2 rounded-xl bg-indigo-500 hover:bg-indigo-600 disabled:opacity-50 text-white text-sm font-semibold transition-colors"
                         >
-                            {submitting ? (
-                                <Loader2 className="w-4 h-4 animate-spin" />
-                            ) : (
-                                <Send className="w-4 h-4" />
-                            )}
+                            <Send className="w-4 h-4" />
                             Request access again
                         </button>
                     ) : (
@@ -920,6 +1009,13 @@ function AccessRevokedPanel({
                     </button>
                 </div>
             </div>
+            {asking && (
+                <RequestAccessDialog
+                    workspaceId={wsId}
+                    onClose={() => setAsking(false)}
+                    onSent={() => setRequested(true)}
+                />
+            )}
         </div>
     )
 }

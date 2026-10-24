@@ -475,6 +475,9 @@ _WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
     "workspace:admin",
     "workspace:datasource:manage",
     "workspace:datasource:read",
+    # Answering access requests and adding people: a workspace admin can do
+    # whatever a Workspace steward can.
+    "workspace:members:add",
     "workspace:view:create",
     "workspace:view:edit",
     "workspace:view:delete",
@@ -1306,6 +1309,27 @@ async def reconcile_sso_targets(
     if created or revoked or reactivated or memberships_added or memberships_removed:
         await session.flush()
 
+    # 6. A request someone was pointed to the identity provider for closes
+    # the moment the access arrives, and an exception the provider now
+    # covers ends. In a savepoint, and never allowed to fail a sign-in: on
+    # any error the request stays open and the exception stays.
+    from backend.app.services.workspace_access import (
+        fulfil_idp_routed_requests,
+        retire_covered_exceptions,
+    )
+
+    requests_fulfilled = exceptions_retired = 0
+    try:
+        async with session.begin_nested():
+            # Exceptions first: one that becomes the provider's grant is
+            # what a waiting request then finds.
+            exceptions_retired = await retire_covered_exceptions(
+                session, user_id=user_id, asserted=role_target_keys,
+            )
+            requests_fulfilled = await fulfil_idp_routed_requests(session, user_id=user_id)
+    except Exception:  # noqa: BLE001 — the sign-in matters more than the request
+        logger.exception("Could not settle access requests for %s after an SSO sign-in", user_id)
+
     return {
         "user_id": user_id,
         "groups": list(idp_groups),
@@ -1315,6 +1339,8 @@ async def reconcile_sso_targets(
         "reactivated": reactivated,
         "memberships_added": memberships_added,
         "memberships_removed": memberships_removed,
+        "requests_fulfilled": requests_fulfilled,
+        "exceptions_retired": exceptions_retired,
     }
 
 

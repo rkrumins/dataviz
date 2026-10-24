@@ -25,14 +25,14 @@ The management database is accessed through the SQLAlchemy 2.0 async ORM, and it
 
 ## Where every table belongs
 
-The ORM maps 94 tables across four PostgreSQL schemas. This page details the core management tables only; the map below places the rest. Which module may read which table — the boundary a lint test guards — is set out in [Domain Ownership](/docs/domain-ownership).
+The ORM maps 97 tables across four PostgreSQL schemas. This page details the core management tables only; the map below places the rest. Which module may read which table — the boundary a lint test guards — is set out in [Domain Ownership](/docs/domain-ownership).
 
 | Area | Schema | Tables | Examples |
 |---|---|---|---|
 | Identity and sessions | `public` | 11 | `users`, `user_identities`, `refresh_tokens`, `revoked_refresh_jti`, `invites`, `api_keys`, `api_key_usage` |
-| Access control | `public` | 8 | `roles`, `permissions`, `role_bindings`, `groups`, `resource_grants`, `access_requests` |
+| Access control | `public` | 10 | `roles`, `permissions`, `role_bindings`, `groups`, `resource_grants`, `access_requests`, `access_reviews`, `access_review_items` |
 | Single sign-on | `public` | 5 | `idp_providers`, `idp_group_role_mappings`, `sso_backchannel_hosts`, `app_auth_config`, `idp_provider_reachability` |
-| Workspaces and data sources | `public` | 3 | `workspaces`, `workspace_data_sources`, `assignment_rule_sets` |
+| Workspaces and data sources | `public` | 4 | `workspaces`, `workspace_data_sources`, `data_source_transfers`, `assignment_rule_sets` |
 | Providers and catalog | `public` | 5 | `providers`, `catalog_items`, `provider_admission_config`, `asset_discovery_cache` |
 | Semantic layer | `public` | 3 | `ontologies`, `ontology_audit_log`, `ontology_source_mappings` |
 | Views | `public` | 13 | `views`, `view_versions`, `view_favourites`, `saved_view_filters`, `context_models`, `layout_template_versions`, `layout_template_favourites`, `object_store_objects` |
@@ -119,6 +119,9 @@ erDiagram
         bool is_default
         bool is_active
         text default_layout_template_id "no FK, new views start from it"
+        bool directory_listed "shown in Find a workspace"
+        text access_mode "app or idp: who decides who is in"
+        text access_note "nullable, shown to people asking"
         datetime created_at
         datetime updated_at
     }
@@ -843,6 +846,7 @@ The legacy `graph_connections` table uses unprefixed UUIDs.
 | `assignment_rule_sets.workspace_id` -> `workspaces.id` | CASCADE |
 | `user_roles.user_id` -> `users.id` | CASCADE |
 | `user_approvals.user_id` -> `users.id` | CASCADE |
+| `access_review_items.review_id` -> `access_reviews.id` | CASCADE |
 
 ### Unique Constraints
 
@@ -855,6 +859,9 @@ The legacy `graph_connections` table uses unprefixed UUIDs.
 | `view_favourites(view_id, user_id)` | One favourite per user per view |
 | `saved_view_filters(user_id, name)` | One saved filter per name per user (names are also compared case-insensitively before writing) |
 | `catalog_items(provider_id, source_identifier)` | One catalog entry per source per provider |
+| `access_requests(requester_id, target_type, target_id)`, among open rows (`status IN ('pending','awaiting_idp')`) | One open access request per person per workspace |
+| `access_reviews(workspace_id)`, among open rows (`status = 'open'`) | One open access review per workspace |
+| `data_source_transfers(data_source_id)`, among pending rows (`status = 'pending'`) | One open request to move a data source at a time |
 
 ### Single-Row Table Enforcement
 

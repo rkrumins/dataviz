@@ -162,12 +162,14 @@ you can do, and there are two kinds.
 | **Super Admin** | Everything, everywhere — including user accounts, sign-in and platform settings. |
 
 **Workspace roles** are granted per workspace — to you, or to a group you're
-in — by that workspace's admins, on its **Members** tab:
+in — by that workspace's admins and stewards, on its **Members** tab, or by
+approving your request to join:
 
 | Role | What it lets you do in that workspace |
 | --- | --- |
 | **Workspace viewer** | Open its views and see its data sources and semantic layers. Read-only. |
 | **Workspace member** | Everything a viewer can, plus create, edit and delete views and manage data sources. |
+| **Workspace steward** | Everything a member can, plus let people in: add them as viewers or members and answer their access requests. |
 | **Data engineer** | Look after the workspace's data — data sources, semantic layers, catalog and views — without managing its members or settings. |
 | **Workspace admin** | Everything in the workspace, including its settings, its members, answering access requests, and deleting it. |
 
@@ -175,7 +177,9 @@ Administrators can also create custom roles, which show up under their own
 names.
 
 To see what you can do, click your avatar in the top bar and choose **My
-access**: it lists every permission you hold and how you got it. On a
+access**: it lists every permission you hold and how you got it — added
+directly, an approved request, your identity provider's groups, a team, or an
+organization-wide role. On a
 workspace's page, the badge under your name in that same menu shows your role
 in that workspace. Missing something you need? See
 [Requesting Access](/guide/requesting-access). Administrators manage all of this

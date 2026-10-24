@@ -20,7 +20,7 @@
  *   1. Extend the RoleVisual interface.
  *   2. Add the value to every entry below (or make it optional).
  */
-import { Shield, UserCog, Eye, Database, ScrollText, Sparkles, type LucideIcon } from 'lucide-react'
+import { Shield, UserCog, UserPlus, Eye, Database, ScrollText, Sparkles, type LucideIcon } from 'lucide-react'
 
 export interface RoleVisual {
     /** Display label for the role (e.g. "Super admin"). For custom
@@ -90,6 +90,15 @@ export const ROLE_VISUAL: Record<string, RoleVisual> = {
         badge: 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20',
         gradient: 'from-emerald-500/20 to-emerald-500/0',
         iconBg: 'bg-emerald-500/10 text-emerald-500 border-emerald-500/20',
+    },
+    // Lets people in: answers access requests, adds viewers and members.
+    workspace_steward: {
+        label: 'Workspace steward',
+        icon: UserPlus,
+        accent: 'teal',
+        badge: 'bg-teal-500/10 text-teal-600 dark:text-teal-400 border-teal-500/20',
+        gradient: 'from-teal-500/20 to-teal-500/0',
+        iconBg: 'bg-teal-500/10 text-teal-500 border-teal-500/20',
     },
     org_auditor: {
         label: 'Org auditor',

@@ -13,13 +13,14 @@
  * Both consumers share a single layout so the two pages can never
  * drift visually or factually.
  */
-import { useMemo } from 'react'
+import { useMemo, type ReactNode } from 'react'
 import { Link } from 'react-router-dom'
 import {
     KeyRound, Shield, UserCog, Users2, Users, Briefcase,
     Sparkles, GitBranch, Lock, Mail, ExternalLink,
 } from 'lucide-react'
 import type { UserAccessResponse, AccessBinding } from '@/services/permissionsService'
+import { ProvenanceChip } from './ProvenanceChip'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { avatarGradient, initialsOf } from '@/lib/avatar'
 import { cn } from '@/lib/utils'
@@ -35,11 +36,14 @@ export interface AccessSummaryProps {
     /** Hide the user header — useful when the page already shows the
      *  identity above the summary. */
     hideHeader?: boolean
+    /** Something to offer beside each direct binding — My access offers to
+     *  keep access that is about to end. */
+    bindingAction?: (binding: AccessBinding) => ReactNode
 }
 
 
 export function AccessSummary({
-    access, mode = 'admin', hideHeader = false,
+    access, mode = 'admin', hideHeader = false, bindingAction,
 }: AccessSummaryProps) {
     const totalBindings = access.directBindings.length + access.inheritedBindings.length
     const wsCount = Object.keys(access.effectiveWs).length
@@ -188,7 +192,7 @@ export function AccessSummary({
                             : 'No direct bindings. All access comes via group membership.'}
                     />
                 ) : (
-                    <BindingList bindings={access.directBindings} />
+                    <BindingList bindings={access.directBindings} action={bindingAction} />
                 )}
             </Section>
 
@@ -411,10 +415,11 @@ function ScopeCard({
 
 
 function BindingList({
-    bindings, suppressViaGroup = false,
+    bindings, suppressViaGroup = false, action,
 }: {
     bindings: AccessBinding[]
     suppressViaGroup?: boolean
+    action?: (binding: AccessBinding) => ReactNode
 }) {
     return (
         <div className="rounded-xl border border-glass-border bg-glass-base/30 divide-y divide-glass-border">
@@ -463,6 +468,13 @@ function BindingList({
                                 {b.viaGroup.name}
                             </span>
                         )}
+                        {b.expiresAt && (
+                            <span className="text-[10px] text-amber-600 dark:text-amber-400 shrink-0">
+                                until {new Date(b.expiresAt).toLocaleDateString()}
+                            </span>
+                        )}
+                        <ProvenanceChip provenance={b.provenance} className="shrink-0" />
+                        {action?.(b)}
                     </div>
                 )
             })}

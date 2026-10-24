@@ -2,12 +2,21 @@
 
 Mounted at ``/api/v1/admin/workspaces/{ws_id}/members`` for the admin
 flow. Workspace admins use the same path; the ``workspace:admin``
-permission gates write operations, so a user bound as Admin in the
-workspace can manage members without holding global ``system:admin``.
+permission gates removing people and changing their access, so a user
+bound as Admin in the workspace can manage members without holding
+global ``system:admin``. Seeing who is in and adding people needs only
+``workspace:members:add`` — the Workspace steward, who adds people one at
+a time as Viewer or Member (``workspace_access`` holds the ceilings).
 
-  GET    /admin/workspaces/{ws_id}/members              list bindings + roles
-  POST   /admin/workspaces/{ws_id}/members              create binding
-  DELETE /admin/workspaces/{ws_id}/members/{binding}    revoke binding
+  GET    /admin/workspaces/{ws_id}/members                list bindings + roles
+  GET    /admin/workspaces/{ws_id}/members/grant-options  what the caller may grant
+  POST   /admin/workspaces/{ws_id}/members                create binding
+  PUT    /admin/workspaces/{ws_id}/members/{binding}/expiry  move its end date
+  DELETE /admin/workspaces/{ws_id}/members/{binding}      revoke binding
+
+A person hears in their Inbox when they are added, removed, or their end
+date moves. People who reach the workspace through a team don't: the team
+was bound, not them.
 """
 from __future__ import annotations
 
@@ -17,20 +26,33 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.auth.dependencies import requires
+from backend.app.auth.dependencies import get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.common.display_name import resolve_display_name
-from backend.app.db.models import GroupORM, WorkspaceORM
-from backend.app.db.repositories import binding_repo, group_repo, role_repo, user_repo
-from backend.app.services.permission_service import simulate_for_user
+from backend.app.db.models import GroupORM, WorkspaceDataSourceORM, WorkspaceORM
+from backend.app.db.repositories import (
+    binding_repo,
+    group_repo,
+    notification_repo,
+    role_repo,
+    user_repo,
+)
+from backend.app.services import workspace_access
+from backend.app.services.permission_service import PermissionClaims, simulate_for_user
 from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
+    AccessProvenance,
     ImpactPreviewResponse,
     ImpactPreviewUser,
+    RequestableRole,
     WorkspaceAccessGrant,
     WorkspaceAccessResponse,
     WorkspaceAccessUser,
+    WorkspaceGrantGroup,
+    WorkspaceGrantOptions,
+    WorkspaceGrantSource,
+    WorkspaceIdpRoute,
     WorkspaceMemberCreateRequest,
     WorkspaceMemberExpiryUpdateRequest,
     WorkspaceMemberResponse,
@@ -41,11 +63,17 @@ from backend.common.models.rbac import (
 # Precedence for the single "effective role" badge. Higher wins; a role
 # not listed (a custom workspace role) ranks below the built-ins but is
 # still carried in ``roles`` and every ``grant`` — the badge is a
-# convenience, never the whole picture.
+# convenience, never the whole picture. An organization-wide role badges
+# what it amounts to here: Super Admin and Org Admin above a workspace
+# admin, Org Auditor alongside a viewer.
 _WS_ROLE_RANK = {
-    "workspace_admin": 3,
+    "super_admin": 6,
+    "org_admin": 5,
+    "workspace_admin": 4,
+    "workspace_steward": 3,
     "workspace_member": 2,
     "workspace_viewer": 1,
+    "org_auditor": 1,
 }
 
 
@@ -118,15 +146,17 @@ async def _hydrate_subject(
     )
 
 
-async def _ensure_workspace_exists(session: AsyncSession, ws_id: str) -> None:
+async def _ensure_workspace_exists(session: AsyncSession, ws_id: str) -> WorkspaceORM:
     row = await session.execute(
         select(WorkspaceORM).where(
             WorkspaceORM.id == ws_id,
             WorkspaceORM.deleted_at.is_(None),
         )
     )
-    if row.scalar_one_or_none() is None:
+    ws = row.scalar_one_or_none()
+    if ws is None:
         raise HTTPException(status_code=404, detail="Workspace not found")
+    return ws
 
 
 # ── Routes ───────────────────────────────────────────────────────────
@@ -138,7 +168,7 @@ async def _ensure_workspace_exists(session: AsyncSession, ws_id: str) -> None:
 )
 async def list_members(
     ws_id: str,
-    _admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    _admin: User = Depends(requires(workspace_access.MEMBERS_ADD, workspace="ws_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     await _ensure_workspace_exists(session, ws_id)
@@ -161,6 +191,7 @@ async def list_members(
                 granted_by=b.granted_by,
                 expires_at=b.expires_at,
                 subject=subject,
+                idp_exception=bool(b.idp_exception),
             )
         )
     return out
@@ -173,7 +204,7 @@ async def list_members(
 )
 async def list_effective_access(
     ws_id: str,
-    _admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    _admin: User = Depends(requires(workspace_access.MEMBERS_ADD, workspace="ws_id")),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAccessResponse:
     """The flattened, inheritance-aware access list for the workspace.
@@ -185,47 +216,58 @@ async def list_effective_access(
     grant per route that got them there. A user in three bound groups
     (and perhaps bound directly too) appears ONCE, with a grant per
     route, so "who can actually get in, and how" reads off one list.
+
+    People who reach every workspace through an organization-wide role
+    are listed too (``via="org"``), and every grant says how it came
+    about (``provenance``): added directly, an approved request, an
+    exception, the identity provider's groups, a team, or that role.
     """
     await _ensure_workspace_exists(session, ws_id)
     bindings = await binding_repo.list_for_scope(
         session, scope_type="workspace", scope_id=ws_id,
     )
 
-    # Names for every bound group, in one query, so a grant can say which
-    # group it came through.
+    # Every bound group, in one query, so a grant can say which group it
+    # came through and whether the identity provider fills it.
     group_ids = [b.subject_id for b in bindings if b.subject_type == "group"]
-    group_names: dict[str, str] = {}
+    groups: dict[str, GroupORM] = {}
     if group_ids:
-        rows = await session.execute(
-            select(GroupORM.id, GroupORM.name).where(GroupORM.id.in_(group_ids))
-        )
-        group_names = {gid: name for gid, name in rows.all()}
+        rows = await session.execute(select(GroupORM).where(GroupORM.id.in_(group_ids)))
+        groups = {g.id: g for g in rows.scalars().all()}
 
-    grants_by_user: dict[str, list[WorkspaceAccessGrant]] = {}
-    direct_ids: set[str] = set()
-    via_group_ids: set[str] = set()
-
+    # (user, binding, via, group, membership) for every route in.
+    routes: list[tuple] = []
     for b in bindings:
         if b.subject_type == "user":
-            grants_by_user.setdefault(b.subject_id, []).append(
-                WorkspaceAccessGrant(
-                    role=b.role_name, via="direct", binding_id=b.id,
-                    expires_at=b.expires_at,
-                )
-            )
-            direct_ids.add(b.subject_id)
+            routes.append((b.subject_id, b, "direct", None, None))
         elif b.subject_type == "group":
-            gname = group_names.get(b.subject_id)
-            members = await group_repo.list_group_members(session, b.subject_id)
-            for m in members:
-                grants_by_user.setdefault(m.user_id, []).append(
-                    WorkspaceAccessGrant(
-                        role=b.role_name, via="group", binding_id=b.id,
-                        group_id=b.subject_id, group_name=gname,
-                        expires_at=b.expires_at,
-                    )
-                )
-                via_group_ids.add(m.user_id)
+            for m in await group_repo.list_group_members(session, b.subject_id):
+                routes.append((m.user_id, b, "group", groups.get(b.subject_id), m))
+    routes += [
+        (uid, b, "org", group, m)
+        for uid, b, group, m in await workspace_access.org_wide_grants(session)
+    ]
+    reader = await workspace_access.provenance_reader(session, [r[0] for r in routes])
+
+    grants_by_user: dict[str, list[WorkspaceAccessGrant]] = {}
+    ids_by_via: dict[str, set[str]] = {"direct": set(), "group": set(), "org": set()}
+    for uid, b, via, group, m in routes:
+        if via == "direct":
+            how = reader.binding(b, uid)
+        elif via == "group":
+            how = reader.membership(m, group, uid)
+        else:
+            how = reader.org_role(b, uid, m, group)
+        grants_by_user.setdefault(uid, []).append(
+            WorkspaceAccessGrant(
+                role=b.role_name, via=via, binding_id=b.id,
+                group_id=b.subject_id if b.subject_type == "group" else None,
+                group_name=group.name if group else None,
+                expires_at=b.expires_at,
+                provenance=AccessProvenance(**how),
+            )
+        )
+        ids_by_via[via].add(uid)
 
     # One batched identity lookup for the whole page — names, emails,
     # avatars, and the deleted flag (a deleted account that still holds
@@ -248,12 +290,14 @@ async def list_effective_access(
                 deleted=ident["deleted"] if ident else False,
                 roles=roles,
                 effective_role=_effective_role(roles),
-                # Direct routes first, then by group name, then role —
-                # stable and readable in the drawer.
+                # Direct routes first, then through groups, then
+                # organization-wide; by group name, then role — stable
+                # and readable in the drawer.
                 grants=sorted(
                     grants,
                     key=lambda g: (
-                        g.via != "direct", (g.group_name or "").lower(), g.role,
+                        ("direct", "group", "org").index(g.via),
+                        (g.group_name or "").lower(), g.role,
                     ),
                 ),
             )
@@ -264,8 +308,58 @@ async def list_effective_access(
     return WorkspaceAccessResponse(
         users=users,
         total_users=len(users),
-        direct_users=len(direct_ids),
-        via_group_users=len(via_group_ids),
+        direct_users=len(ids_by_via["direct"]),
+        via_group_users=len(ids_by_via["group"]),
+        org_wide_users=len(ids_by_via["org"]),
+    )
+
+
+@router.get(
+    "/grant-options",
+    response_model=WorkspaceGrantOptions,
+    response_model_by_alias=True,
+)
+async def get_grant_options(
+    ws_id: str,
+    _user: User = Depends(requires(workspace_access.MEMBERS_ADD, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceGrantOptions:
+    """What the caller may hand out here: the roles, teams and
+    identity-provider groups already narrowed to what they could grant
+    themselves — and the data sources any of them reads, restricted ones
+    marked, so whoever lets someone in sees what they open. Backs Add
+    member and answering an access request."""
+    ws = await _ensure_workspace_exists(session, ws_id)
+    sources = (await session.execute(
+        select(WorkspaceDataSourceORM)
+        .where(WorkspaceDataSourceORM.workspace_id == ws_id, WorkspaceDataSourceORM.deleted_at.is_(None))
+        .order_by(WorkspaceDataSourceORM.label)
+    )).scalars().all()
+    roles = [
+        RequestableRole(name=r.name, description=r.description, is_system=r.is_system)
+        for r, perms in await workspace_access.workspace_roles(session, ws_id)
+        if workspace_access.can_grant(claims, ws_id, r.name, perms)
+    ]
+    routes = await workspace_access.idp_routes(session, ws_id)
+    route_perms = await role_repo.role_names_with_permissions(
+        session, sorted({r["role"] for r in routes}),
+    )
+    return WorkspaceGrantOptions(
+        tier=workspace_access.tier(claims, ws_id),
+        access_mode=ws.access_mode or "app",
+        roles=roles,
+        groups=[
+            WorkspaceGrantGroup(**g)
+            for g in await workspace_access.addable_groups(session, claims, ws_id)
+        ],
+        idp_routes=[
+            WorkspaceIdpRoute(**r) for r in routes
+            if workspace_access.can_grant(claims, ws_id, r["role"], route_perms.get(r["role"], []))
+        ],
+        data_sources=[
+            WorkspaceGrantSource(id=d.id, label=d.label, restricted=bool(d.is_restricted)) for d in sources
+        ],
     )
 
 
@@ -278,10 +372,23 @@ async def list_effective_access(
 async def create_member_binding(
     ws_id: str,
     body: WorkspaceMemberCreateRequest,
-    admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    admin: User = Depends(requires(workspace_access.MEMBERS_ADD, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
-    await _ensure_workspace_exists(session, ws_id)
+    """Grant a person or a group a role here. A steward adds people, not
+    groups, as Viewer or Member; an admin grants any role whose permissions
+    they hold. A lapsed grant of the same role is made current again.
+
+    For a workspace whose access its identity provider decides, adding a
+    person needs ``exception: true``, and the grant is marked as one.
+    """
+    ws = await _ensure_workspace_exists(session, ws_id)
+    if body.subject_type == "group" and workspace_access.tier(claims, ws_id) != "admin":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Stewards add people one at a time; binding a group is for workspace admins",
+        )
 
     # Subject must exist before we bind it.
     if body.subject_type == "user":
@@ -319,33 +426,47 @@ async def create_member_binding(
             ),
         )
 
-    existing = await binding_repo.find_binding(
-        session,
-        subject_type=body.subject_type,
-        subject_id=body.subject_id,
-        role_name=body.role,
-        scope_type="workspace",
-        scope_id=ws_id,
-    )
-    if existing is not None:
+    perms = (await role_repo.role_names_with_permissions(session, [body.role])).get(body.role, [])
+    if not workspace_access.can_grant(claims, ws_id, body.role, perms):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=workspace_access.ceiling_refusal(claims, ws_id, body.role),
+        )
+    exception = (ws.access_mode or "app") == "idp" and body.subject_type == "user"
+    if exception and not body.exception:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "type": "idp_managed",
+                "message": (
+                    "Its identity provider decides who is in this workspace. Add the person to "
+                    "the provider's group, or confirm adding them here as an exception."
+                ),
+            },
+        )
+    if exception:
+        refusal = workspace_access.exception_refusal(claims, ws_id, body.expires_at)
+        if refusal:
+            raise HTTPException(status_code=refusal[0], detail=refusal[1])
+
+    try:
+        binding, outcome = await workspace_access.grant_role(
+            session,
+            subject_type=body.subject_type,
+            subject_id=body.subject_id,
+            role=body.role,
+            ws_id=ws_id,
+            granted_by=admin.id,
+            expires_at=body.expires_at,
+            idp_exception=exception,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if outcome == "existing":
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="Member already has this role in the workspace",
         )
-
-    try:
-        binding = await binding_repo.create_binding(
-            session,
-            subject_type=body.subject_type,
-            subject_id=body.subject_id,
-            role_name=body.role,
-            scope_type="workspace",
-            scope_id=ws_id,
-            granted_by=admin.id,
-            expires_at=body.expires_at,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # The subject's existing JWT pre-dates this binding, so its
     # ``ws_perms`` doesn't include the workspace yet — ``GET /workspaces``
@@ -370,8 +491,26 @@ async def create_member_binding(
             "actor_id": admin.id,
             "expires_at": body.expires_at,
             "sessions_revoked": revoked,
+            "idp_exception": exception,
+            "reactivated": outcome == "reactivated",
         },
     )
+    if body.subject_type == "user":
+        until = f" until {binding.expires_at[:10]}" if binding.expires_at else ""
+        await notification_repo.notify(
+            session,
+            user_ids=[body.subject_id],
+            kind="workspace.member_added",
+            title=f"You were added to {ws.name}",
+            body=f"As {workspace_access.role_label(body.role)}{until}." + (
+                " Granted as an exception: its identity provider otherwise decides who is in."
+                if exception else ""
+            ),
+            link=f"/workspaces/{ws_id}",
+            actor_id=admin.id,
+            resource_type="workspace",
+            resource_id=ws_id,
+        )
     subject = await _hydrate_subject(session, body.subject_type, body.subject_id)
     return WorkspaceMemberResponse(
         binding_id=binding.id,
@@ -380,6 +519,7 @@ async def create_member_binding(
         granted_by=binding.granted_by,
         expires_at=binding.expires_at,
         subject=subject,
+        idp_exception=bool(binding.idp_exception),
     )
 
 
@@ -393,6 +533,7 @@ async def update_member_expiry(
     binding_id: str,
     body: WorkspaceMemberExpiryUpdateRequest,
     admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Phase 7: extend / change / clear a binding's expiry.
@@ -407,6 +548,11 @@ async def update_member_expiry(
     shortening is rare and the JWT TTL is the floor on staleness.
     Callers who want immediate effect should follow up with the
     revoke endpoint instead.
+
+    The person hears about it, is reminded again before the new end, and a
+    request they made to keep the access reads as answered. An exception to
+    the identity provider is confirmed as one again (``exception``) and keeps
+    an end, 90 days away at most.
     """
     binding = await binding_repo.get_binding(session, binding_id)
     if binding is None or binding.scope_type != "workspace" or binding.scope_id != ws_id:
@@ -414,11 +560,43 @@ async def update_member_expiry(
             status_code=404,
             detail="Binding not found in this workspace",
         )
+    if binding.idp_exception:
+        if not body.exception:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "type": "idp_managed",
+                    "message": "This access is an exception to the identity provider. Confirm it stays one.",
+                },
+            )
+        refusal = workspace_access.exception_refusal(claims, ws_id, body.expires_at)
+        if refusal:
+            raise HTTPException(status_code=refusal[0], detail=refusal[1])
 
     updated = await binding_repo.update_binding_expiry(
         session, binding_id, expires_at=body.expires_at,
     )
     assert updated is not None  # we just fetched it
+    updated.expiry_reminded_at = None
+    if updated.subject_type == "user":
+        ends = f"now ends on {updated.expires_at[:10]}" if updated.expires_at else "no longer ends"
+        await workspace_access.settle_extension_requests(
+            session, binding_id=binding_id, resolver_id=admin.id,
+            note=f"A workspace admin changed it: your access {ends}.",
+            expires_at=updated.expires_at,
+        )
+        ws = await session.get(WorkspaceORM, ws_id)
+        await notification_repo.notify(
+            session,
+            user_ids=[updated.subject_id],
+            kind="workspace.access_end_changed",
+            title=f"Your access to {ws.name if ws else 'a workspace'} {ends}",
+            body=f"Your {workspace_access.role_label(updated.role_name)} access was changed by a workspace admin.",
+            link=f"/workspaces/{ws_id}",
+            actor_id=admin.id,
+            resource_type="role_binding",
+            resource_id=binding_id,
+        )
 
     await user_repo.create_outbox_event(
         session,
@@ -444,6 +622,7 @@ async def update_member_expiry(
         granted_by=updated.granted_by,
         expires_at=updated.expires_at,
         subject=subject,
+        idp_exception=bool(updated.idp_exception),
     )
 
 
@@ -464,6 +643,10 @@ async def revoke_member_binding(
             detail="Binding not found in this workspace",
         )
     await binding_repo.delete_binding(session, binding_id)
+    if binding.subject_type == "user":
+        ws = await session.get(WorkspaceORM, ws_id)
+        if ws is not None:
+            await workspace_access.notify_removed(session, ws, binding, actor_id=admin.id)
 
     # Phase 7: kill the affected user's (or every group member's)
     # live sessions so the demotion takes effect immediately rather

@@ -15,8 +15,8 @@ from .endpoints import (
     graph_store,
     groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
     role_bindings,
-    permissions_admin, access_requests, rbac_search, directory, notifications,
-    changes,
+    permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
+    workspace_directory, data_source_transfers, changes,
     versioning,
     admin_idp_groups,
     admin_idp_providers,
@@ -212,8 +212,8 @@ api_router.include_router(
 )
 
 # RBAC Phase 4.3 — self-service access requests.
-# Mounted on three different prefixes so the auth gate is naturally
-# scoped: any-user submit, any-user "my requests", and admin inbox.
+# Mounted on four prefixes so the auth gate is naturally scoped: any-user
+# submit, any-user "my requests", one workspace's list, and answering.
 api_router.include_router(
     access_requests.public_router,
     prefix="/access-requests",
@@ -233,6 +233,37 @@ api_router.include_router(
     access_requests.admin_router,
     prefix="/admin/access-requests",
     tags=["admin:access-requests"],
+)
+# Access reviews — a workspace admin keeps or removes each grant.
+api_router.include_router(
+    access_reviews.router,
+    prefix="/admin/workspaces/{ws_id}/access-reviews",
+    tags=["admin:access-reviews"],
+)
+# Moving a data source, with its views, to another workspace — directly or
+# by asking the destination. Three prefixes so the gate is naturally scoped:
+# one source, one workspace's requests, and the parties answering.
+api_router.include_router(
+    data_source_transfers.source_router,
+    prefix="/admin/workspaces/{workspace_id}/data-sources/{ds_id}",
+    tags=["admin:data-source-transfers"],
+)
+api_router.include_router(
+    data_source_transfers.workspace_router,
+    prefix="/admin/workspaces/{workspace_id}/data-source-transfers",
+    tags=["admin:data-source-transfers"],
+)
+api_router.include_router(
+    data_source_transfers.admin_router,
+    prefix="/admin/data-source-transfers",
+    tags=["admin:data-source-transfers"],
+)
+# Find a workspace — any signed-in user, while the deployment's switch is
+# on (the router carries the gate). Lists workspaces to ask to join.
+api_router.include_router(
+    workspace_directory.router,
+    prefix="/workspace-directory",
+    tags=["workspace-directory"],
 )
 
 # RBAC Phase 4.5 — unified RBAC search across users, groups,

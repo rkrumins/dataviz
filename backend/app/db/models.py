@@ -662,6 +662,19 @@ class WorkspaceORM(Base):
     # an Organization template, or this workspace's own). A plain id: templates
     # belong to the visualization domain. NULL = start from the suggestions.
     default_layout_template_id = Column(Text, nullable=True)
+    # Joining. Listed in the Find a workspace directory (when the deployment's
+    # switch is on), so people who aren't members can see it and ask to join.
+    directory_listed = Column(Boolean, nullable=False, default=True, server_default="true")
+    # Who decides membership: 'app' — approvers grant access here; 'idp' —
+    # the identity provider's groups do, and an in-app grant is a labelled
+    # exception (``role_bindings.idp_exception``).
+    access_mode = Column(Text, nullable=False, default="app", server_default="app")
+    # Shown to people asking to join: how access works here, who to ask.
+    access_note = Column(Text, nullable=True)
+    # How it takes requests: 'approval' — its approvers decide; 'open' —
+    # anyone may join as a Viewer at once (more still needs approval);
+    # 'closed' — no requests, its admins add people.
+    request_policy = Column(Text, nullable=False, default="approval", server_default="approval")
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -684,6 +697,10 @@ class WorkspaceORM(Base):
     __table_args__ = (
         Index("idx_workspaces_is_default", "is_default"),
         Index("idx_workspaces_deleted_at", "deleted_at"),
+        CheckConstraint("access_mode IN ('app', 'idp')", name="ck_workspaces_access_mode"),
+        CheckConstraint(
+            "request_policy IN ('approval', 'open', 'closed')", name="ck_workspaces_request_policy",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -823,6 +840,82 @@ class WorkspaceDataSourceORM(Base):
             name="ck_ds_source_mode",
         ),
     )
+
+
+# ------------------------------------------------------------------ #
+# data_source_transfers  (a data source moving between workspaces)     #
+# ------------------------------------------------------------------ #
+
+class DataSourceTransferORM(Base):
+    """One relocation of a data source, with its views, to another workspace.
+
+    A direct move (``kind='move'``) is born ``completed``. A request
+    (``kind='request'``) is born ``pending`` and is accepted (which runs the
+    move), declined, cancelled or expired. Either may later be ``undone``.
+
+    ``plan`` is what the mover or proposer decided — who keeps access to the
+    moved views — and is never edited. ``manifest`` is written when the move
+    happens: exactly what it changed, which is what undo replays.
+
+    No foreign keys: deleting a workspace is a hard DELETE and a source is
+    eventually purged, and the record of where a source has lived must
+    outlive both. One open request per source (``uq_dsx_one_pending``).
+    """
+    __tablename__ = "data_source_transfers"
+
+    id = Column(Text, primary_key=True, default=lambda: f"xfer_{uuid.uuid4().hex[:12]}")
+    data_source_id = Column(Text, nullable=False)
+    data_source_label = Column(Text, nullable=True)   # the name at the time
+    from_workspace_id = Column(Text, nullable=False)
+    to_workspace_id = Column(Text, nullable=False)
+    kind = Column(Text, nullable=False)               # move | request
+    status = Column(Text, nullable=False)
+    plan = Column(Text, nullable=False, default="{}")  # JSON
+    manifest = Column(Text, nullable=True)             # JSON, written on completion
+    reason = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    expires_at = Column(Text, nullable=True)
+    resolved_by = Column(Text, nullable=True)
+    resolved_at = Column(Text, nullable=True)
+    resolution_note = Column(Text, nullable=True)
+    completed_at = Column(Text, nullable=True)
+    undone_by = Column(Text, nullable=True)
+    undone_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_dsx_ds_created", "data_source_id", "created_at"),
+        Index("idx_dsx_to_status", "to_workspace_id", "status"),
+        Index("idx_dsx_from_status", "from_workspace_id", "status"),
+        # Both dialects, or SQLite silently builds a plain UNIQUE.
+        Index(
+            "uq_dsx_one_pending", "data_source_id",
+            unique=True,
+            postgresql_where=text("status = 'pending'"),
+            sqlite_where=text("status = 'pending'"),
+        ),
+        CheckConstraint("kind IN ('move', 'request')", name="ck_dsx_kind"),
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'declined', 'cancelled', 'expired', 'undone')",
+            name="ck_dsx_status",
+        ),
+        CheckConstraint("from_workspace_id <> to_workspace_id", name="ck_dsx_distinct_workspaces"),
+        CheckConstraint(
+            "(status = 'pending' AND kind = 'request' AND expires_at IS NOT NULL "
+            "AND resolved_at IS NULL AND completed_at IS NULL) "
+            "OR (status IN ('declined', 'cancelled', 'expired') AND kind = 'request' "
+            "AND resolved_at IS NOT NULL AND completed_at IS NULL) "
+            "OR (status = 'completed' AND completed_at IS NOT NULL AND undone_at IS NULL) "
+            "OR (status = 'undone' AND completed_at IS NOT NULL AND undone_at IS NOT NULL)",
+            name="ck_dsx_state_consistency",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<DataSourceTransfer id={self.id!r} ds={self.data_source_id!r} "
+            f"{self.from_workspace_id!r}->{self.to_workspace_id!r} status={self.status!r}>"
+        )
 
 
 # ------------------------------------------------------------------ #
@@ -1087,7 +1180,7 @@ class ViewActivityLogORM(Base):
             "'unshared', 'favourited', 'unfavourited', 'deleted', 'restored', "
             "'data_changed', 'publish_requested', 'publish_denied', "
             "'admin_viewed', 'imported', 'exported', 'version_saved', "
-            "'version_restored')",
+            "'version_restored', 'moved')",
             name="ck_val_action_enum",
         ),
     )
@@ -2700,6 +2793,8 @@ class GroupMemberORM(Base):
     # source='sso'; manually-added members stay untouched even when
     # the IdP later stops asserting the group.
     source = Column(Text, nullable=False, default="local")
+    # The access request whose approval added them, if one did.
+    access_request_id = Column(Text, nullable=True)
 
     group = relationship("GroupORM", back_populates="members")
 
@@ -2852,6 +2947,14 @@ class RoleBindingORM(Base):
     # reconciler only ever touches ``source='sso'`` rows; admin-granted
     # bindings remain authoritative and untouched.
     source = Column(Text, nullable=False, default="local")
+    # The access request whose approval made this grant, if one did.
+    access_request_id = Column(Text, nullable=True)
+    # Granted in the app for a workspace whose access its identity provider
+    # decides — an exception people should be able to see as one.
+    idp_exception = Column(Boolean, nullable=False, default=False, server_default="false")
+    # When the person was told this time-limited grant is about to end; NULL
+    # again whenever its end date moves, so they hear once per end date.
+    expiry_reminded_at = Column(Text, nullable=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -2995,12 +3098,15 @@ class ResourceGrantORM(Base):
 # ------------------------------------------------------------------ #
 
 class AccessRequestORM(Base):
-    """A user asking a workspace admin for access at a specific role.
+    """A user asking to join a workspace at a specific role.
 
-    State machine: ``pending`` → ``approved`` | ``denied``. Approval
-    atomically creates the corresponding role binding (handled in the
-    endpoint). The row stays around in either resolved state so the
-    requester can see the resolution + reason on their My Access page.
+    State machine: ``pending`` → ``approved`` | ``denied`` | ``withdrawn``,
+    or ``pending`` → ``awaiting_idp`` (an approver pointed them to the
+    identity-provider group that grants it) → ``approved`` when that access
+    arrives, or ``denied`` / ``withdrawn``. Approval grants the access in the
+    same transaction (handled in the endpoint). The row stays around once
+    answered so the requester can see the outcome on their My Access page.
+    One open request per person per workspace (``uq_access_requests_one_open``).
 
     No FKs on ``requester_id`` / ``target_id`` — they reference users
     and workspaces respectively but rely on application-level guards
@@ -3021,6 +3127,23 @@ class AccessRequestORM(Base):
     resolved_at = Column(Text, nullable=True)
     resolved_by = Column(Text, nullable=True)
     resolution_note = Column(Text, nullable=True)
+    # What the approver decided, which may differ from what was asked: the
+    # role granted, or the team (group) they were added to, or the identity-
+    # provider group they were pointed to; when granted access ends; and
+    # whether it was granted in the app for an IdP-run workspace.
+    granted_role = Column(Text, nullable=True)
+    granted_group_id = Column(Text, nullable=True)
+    idp_group = Column(Text, nullable=True)
+    access_expires_at = Column(Text, nullable=True)
+    idp_exception = Column(Boolean, nullable=False, default=False, server_default="false")
+    # When access routed to the identity provider actually arrived.
+    fulfilled_at = Column(Text, nullable=True)
+    # A request to keep access that is about to end: the grant it extends.
+    binding_id = Column(Text, nullable=True)
+    # When the approvers were reminded of it still waiting, and when it went
+    # on to the Org Admins.
+    reminded_at = Column(Text, nullable=True)
+    escalated_at = Column(Text, nullable=True)
 
     __table_args__ = (
         Index(
@@ -3036,15 +3159,24 @@ class AccessRequestORM(Base):
             name="ck_access_requests_target_type",
         ),
         CheckConstraint(
-            "status IN ('pending', 'approved', 'denied')",
+            "status IN ('pending', 'awaiting_idp', 'approved', 'denied', 'withdrawn')",
             name="ck_access_requests_status",
         ),
         CheckConstraint(
-            # Pending rows have no resolution; resolved rows have both
-            # a timestamp and (usually) a resolver id.
+            # Pending rows have no decision yet; every other row has one, and
+            # a request waiting on the identity provider names the group.
             "(status = 'pending' AND resolved_at IS NULL AND resolved_by IS NULL) "
-            "OR (status IN ('approved', 'denied') AND resolved_at IS NOT NULL)",
+            "OR (status = 'awaiting_idp' AND resolved_at IS NOT NULL AND idp_group IS NOT NULL) "
+            "OR (status IN ('approved', 'denied', 'withdrawn') AND resolved_at IS NOT NULL)",
             name="ck_access_requests_state_consistency",
+        ),
+        # One open request per person per workspace: a second ask returns
+        # the first. Both dialects, or SQLite silently builds a plain UNIQUE.
+        Index(
+            "uq_access_requests_one_open", "requester_id", "target_type", "target_id",
+            unique=True,
+            postgresql_where=text("status IN ('pending', 'awaiting_idp')"),
+            sqlite_where=text("status IN ('pending', 'awaiting_idp')"),
         ),
     )
 
@@ -3056,6 +3188,77 @@ class AccessRequestORM(Base):
             f"role={self.requested_role!r} "
             f"status={self.status!r}>"
         )
+
+
+class AccessReviewORM(Base):
+    """A workspace admin's review of who holds access to the workspace.
+
+    Started by an admin with a due date; every grant it covers is a row in
+    ``access_review_items``, kept or removed. ``open`` → ``completed`` once
+    every item is decided, or ``cancelled``. Nothing is removed unless a
+    reviewer removes it. One open review per workspace
+    (``uq_access_reviews_one_open``). No FK on ``workspace_id``, like
+    ``access_requests``: workspaces are soft-deleted.
+    """
+    __tablename__ = "access_reviews"
+
+    id = Column(Text, primary_key=True, default=lambda: f"rev_{uuid.uuid4().hex[:12]}")
+    workspace_id = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="open", server_default="open")
+    started_by = Column(Text, nullable=True)
+    started_at = Column(Text, nullable=False, default=_now)
+    due_at = Column(Text, nullable=False)
+    completed_at = Column(Text, nullable=True)
+    completed_by = Column(Text, nullable=True)
+    # When the workspace's admins were told it is past its due date.
+    overdue_notified_at = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_access_reviews_workspace", "workspace_id", "started_at"),
+        Index(
+            "uq_access_reviews_one_open", "workspace_id",
+            unique=True,
+            postgresql_where=text("status = 'open'"),
+            sqlite_where=text("status = 'open'"),
+        ),
+        CheckConstraint(
+            "status IN ('open', 'completed', 'cancelled')", name="ck_access_reviews_status",
+        ),
+    )
+
+
+class AccessReviewItemORM(Base):
+    """One grant in an access review, as it stood when the review began —
+    a person's or a team's role in the workspace, how it came about — and
+    what the reviewer decided."""
+    __tablename__ = "access_review_items"
+
+    id = Column(Text, primary_key=True, default=lambda: f"rvi_{uuid.uuid4().hex[:12]}")
+    review_id = Column(
+        Text, ForeignKey("access_reviews.id", ondelete="CASCADE"), nullable=False,
+    )
+    subject_type = Column(Text, nullable=False)   # user | group
+    subject_id = Column(Text, nullable=False)
+    role_name = Column(Text, nullable=False)
+    binding_id = Column(Text, nullable=True)
+    # direct | request | exception | joined | team — as provenance reads it.
+    origin = Column(Text, nullable=True)
+    granted_at = Column(Text, nullable=True)
+    expires_at = Column(Text, nullable=True)
+    decision = Column(Text, nullable=True)        # NULL until decided: keep | remove
+    decided_by = Column(Text, nullable=True)
+    decided_at = Column(Text, nullable=True)
+    note = Column(Text, nullable=True)
+
+    __table_args__ = (
+        Index("idx_access_review_items_review", "review_id"),
+        CheckConstraint(
+            "subject_type IN ('user', 'group')", name="ck_access_review_items_subject_type",
+        ),
+        CheckConstraint(
+            "decision IS NULL OR decision IN ('keep', 'remove')", name="ck_access_review_items_decision",
+        ),
+    )
 
 
 # ------------------------------------------------------------------ #

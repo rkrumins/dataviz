@@ -32,6 +32,7 @@ from .models import (
     EdgeVersionORM,
     EntityHeadORM,
     GraphORM,
+    JobORM,
     MergeRequestORM,
     NodeVersionORM,
     ProjectionStateORM,
@@ -123,4 +124,60 @@ async def versioning_impact(data_source_id: str, workspace_id: str) -> Optional[
         # graph, and no lifecycle operation may ever touch it.
         "falkorGraphName": (ps.falkor_graph_name if ps else None),
         "falkorGraphOwned": bool(ps.owns_falkor_graph) if ps else False,
+    }
+
+
+# ---------------------------------------------------------------- moving a data source --
+_ACTIVE_JOB = ("pending", "running")
+
+
+async def relocation_facts(data_source_id: str) -> Optional[dict]:
+    """What moving `data_source_id` to another workspace takes with it. None when version control
+    was never enabled.
+
+    Looked up by data source alone: the graph's own ``workspace_id`` is exactly what a move
+    rewrites, and a copy left stale by an earlier move must not hide the graph from this one.
+    """
+    async with graphver_session() as s:
+        graph = (await s.execute(
+            select(GraphORM).where(
+                GraphORM.data_source_id == data_source_id,
+                GraphORM.deleted_at.is_(None),
+            ))).scalars().first()
+        if graph is None:
+            return None
+        gid = graph.id
+        active = (await s.execute(
+            select(JobORM.job_type).where(JobORM.graph_id == gid, JobORM.status.in_(_ACTIVE_JOB))
+        )).scalars().all()
+        # A failed "turn on version control" waits to be resumed or cancelled; until then the
+        # move waits too (``purge_worker._why_graph_stays``).
+        unfinished = await s.scalar(
+            select(func.count()).select_from(JobORM).where(
+                JobORM.graph_id == gid, JobORM.job_type == "bootstrap", JobORM.status == "failed"))
+        commits = await s.scalar(
+            select(func.count()).select_from(CommitORM).where(CommitORM.graph_id == gid)) or 0
+        # Open drafts only: a merged or abandoned draft is history, not someone's work in flight.
+        drafts = (await s.execute(
+            select(BranchORM.id, BranchORM.name, BranchORM.owner).where(
+                BranchORM.graph_id == gid,
+                BranchORM.kind == "draft",
+                BranchORM.status.in_(("open", "publishing")),
+            ))).all()
+        reviews = await s.scalar(
+            select(func.count()).select_from(MergeRequestORM).where(
+                MergeRequestORM.target_graph_id == gid,
+                MergeRequestORM.status.notin_(("merged", "closed")))) or 0
+        forks = await s.scalar(
+            select(func.count()).select_from(GraphORM).where(
+                GraphORM.fork_parent_graph_id == gid, GraphORM.deleted_at.is_(None))) or 0
+    return {
+        "graphId": gid,
+        "activeJobs": sorted(set(active)),
+        "unfinishedBootstrap": bool(unfinished),
+        "commits": int(commits),
+        "openDrafts": [{"id": d[0], "name": d[1] or "Untitled draft", "owner": d[2] or ""}
+                       for d in drafts],
+        "openReviews": int(reviews),
+        "forks": int(forks),
     }

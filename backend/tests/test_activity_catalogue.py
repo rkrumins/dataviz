@@ -127,6 +127,17 @@ def test_an_access_request_is_a_workspace_event_only_for_a_workspace(target_type
     assert (out["actor_id"], out["subject_id"]) == ("usr_a", "usr_r")
 
 
+@pytest.mark.parametrize("event_type, verb", [
+    ("rbac.access_request.approved", "approved"),
+    ("rbac.access_request.withdrawn", "withdrawn"),
+    ("rbac.access_request.routed", "pointed to the identity provider"),
+    ("rbac.access_request.fulfilled", "fulfilled through the identity provider"),
+])
+def test_an_access_request_names_the_workspace_it_targets(event_type, verb):
+    severity, summary = catalogue.summarize(event_type, {"target_type": "workspace", "target_id": "ws_1"})
+    assert (severity, summary) == ("info", f"Access request {verb} for ws_1")
+
+
 def test_a_moved_source_is_filed_under_where_it_went():
     out = catalogue.project(event_type="workspace.datasource.moved", payload={
         "data_source_id": "ds_1", "from_workspace_id": "ws_a",
@@ -304,3 +315,38 @@ def test_outage_session_and_break_glass_events_read_plainly():
     assert catalogue.label_of("auth.config.password_fallback_extended") == (
         "Extended emergency password access"
     )
+
+
+_TRANSFER = {
+    "target_label": "Orders",
+    "details": {"fromWorkspaceId": "ws_a", "fromWorkspaceName": "Finance",
+                "toWorkspaceId": "ws_b", "toWorkspaceName": "Risk"},
+}
+
+
+@pytest.mark.parametrize("event_type, leaving, arriving", [
+    ("workspace.data_source.moved",
+     "Moved data source Orders to Risk", "Moved data source Orders in from Finance"),
+    ("workspace.data_source.move_undone",
+     "Undid the move of Orders: it came back from Risk",
+     "Undid the move of Orders: it went back to Finance"),
+    ("workspace.data_source.transfer_requested",
+     "Asked Risk to take data source Orders", "Finance asked to move data source Orders here"),
+    ("workspace.data_source.transfer_declined",
+     "Risk declined data source Orders", "Declined data source Orders from Finance"),
+    ("workspace.data_source.transfer_cancelled",
+     "Cancelled the request to move Orders to Risk",
+     "The request to move Orders here from Finance was cancelled"),
+    ("workspace.data_source.transfer_expired",
+     "The request to move Orders to Risk expired unanswered",
+     "The request to move Orders here from Finance expired unanswered"),
+])
+def test_a_transfer_reads_from_the_side_it_is_filed_under(event_type, leaving, arriving):
+    """A transfer is recorded once in each workspace, and each copy reads from its own side."""
+    assert catalogue.summarize(event_type, {**_TRANSFER, "workspace_id": "ws_a"}) == ("info", leaving)
+    assert catalogue.summarize(event_type, {**_TRANSFER, "workspace_id": "ws_b"}) == ("info", arriving)
+    # Never raises, even on an empty payload.
+    assert catalogue.summarize(event_type, {})[0] == "info"
+    out = catalogue.project(event_type=event_type, payload={**_TRANSFER, "workspace_id": "ws_b",
+                                                            "data_source_id": "ds_1"})
+    assert (out["workspace_id"], out["audience"]) == ("ws_b", "workspace")

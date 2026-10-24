@@ -37,7 +37,7 @@ import { Link } from 'react-router-dom'
 import { motion } from 'framer-motion'
 import {
     Plus, Pencil, Eye, Share2, UserMinus, Heart, HeartOff, Trash2, RotateCcw,
-    Database, History, ChevronRight,
+    Database, History, ChevronRight, ArrowRightLeft,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { timeAgo } from '@/lib/timeAgo'
@@ -65,6 +65,7 @@ const META: Record<ViewActivityAction, ActionMeta> = {
     restored: { icon: RotateCcw, tint: 'bg-emerald-500/10 text-emerald-500 ring-emerald-500/20', verb: 'restored', summaryAddsDetail: false },
     favourited: { icon: Heart, tint: 'bg-rose-500/10 text-rose-500 ring-rose-500/20', verb: 'favourited', summaryAddsDetail: false },
     unfavourited: { icon: HeartOff, tint: 'bg-slate-500/10 text-slate-500 ring-slate-500/20', verb: 'unfavourited', summaryAddsDetail: false },
+    moved: { icon: ArrowRightLeft, tint: 'bg-indigo-500/10 text-indigo-500 ring-indigo-500/20', verb: 'moved', summaryAddsDetail: true },
 }
 
 const FALLBACK: ActionMeta = META.updated

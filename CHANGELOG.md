@@ -9,6 +9,417 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Move a data source to another workspace, with its views
+
+### Added
+
+**Move a data source, and everything built on it.** **Move to another workspace…** on a data
+source's **⋯** menu opens a guided move. Its views go with it — including those in the trash, and
+those with no source of their own that read it as the workspace's default — together with their
+history, its version history, open drafts and reviews, and its aggregation state and stats. Nothing
+is rebuilt. The steps:
+
+- **Destination** says, for each workspace you can see, whether you can move the source there now,
+  ask its admins, or why not.
+- **What moves** counts the views by visibility and shows the version history, then lists what to
+  resolve first (an aggregation run or a version-history job in progress, or a failed attempt to
+  turn on version control) and what to know (the workspace's last source leaving, its primary
+  source, views published to everyone, requests to publish, layout templates that stay behind,
+  open drafts whose owners can't reach the new workspace, a restricted source going to a
+  workspace open to everyone).
+- **Access** shows who keeps access, who gains it and who loses it. The new workspace's own
+  members, groups and identity-provider mappings decide who reads the moved views, so the people
+  and groups who read them only through the old workspace lose them — each listed with where their
+  access came from (the app, a group, or your identity provider).
+- **Confirm** asks why — the reason is shown in both workspaces' activity — and, when anyone loses
+  access, for **I understand … lose access**.
+
+**Nobody is left guessing.** Everyone who loses access gets an Inbox notice saying where the views
+went and how to get back in, the way the new workspace takes people: **Ask to join**, **Join** when
+it's open to everyone, or its admins when it's closed to requests. Both workspaces' admins are told who, the
+source's panel says how many, and the move records each person and group. Nothing is copied to
+keep the old audience reading: a copy would grow with people × views and would outlive an
+identity provider removing someone.
+
+**Ask the other workspace to take it.** When you administer only the workspace a source is in,
+the same steps end in **Send request**. The destination's admins hear in their Inbox and find it
+on **Workspaces → Requests** and as a banner on the workspace's **Data Sources** tab. Review shows
+a fresh picture of what would move, who would lose access, and what has changed since you asked. They **Accept and move** — refused if anything changed after they read it — or
+**Decline** with a reason you see. Requests expire after 14 days. You can cancel yours, and one is
+cancelled when its source is deleted or moved some other way. One that expires unanswered is
+recorded in both workspaces' activity, and you're told.
+
+**Undo, for a week.** A completed move can be undone for 7 days — the workspace, the primary
+source and the views, with the people who lost access told they have it back — while it is the
+source's latest move and nothing new has been built on it in its new workspace. The source's panel says where it came from,
+offers **Undo**, and lists each move under **Where it has lived**. Each moved view's activity says
+where it went.
+
+### Changed
+
+- **`POST /api/v1/admin/workspaces/{id}/data-sources/{ds}/move` moves a source that has views**,
+  which it used to refuse with a 409. For such a source it needs `workspace:admin` in both
+  workspaces (a source with nothing on it still needs `workspace:datasource:manage` in both). It
+  takes `previewToken` — required, with a 422 `preview_required`, when anyone would lose access —
+  and returns the move's record rather than the data source.
+- **A move re-files everything that named the old workspace**, including for a source with no
+  views: each moved view's activity and the aggregation state now go with the versioned graph,
+  which moves with its source since the release below. The graph moves first, so a refusal from
+  version control changes nothing.
+- **Open drafts and review requests no longer hold a move back**, as they did since the release
+  below: they go with the source, and the preview names any draft whose owner can't open the new
+  workspace. A move still waits while version control is busy with the source, or while a failed
+  attempt to turn it on waits to be resumed or cancelled — which the preview now says up front.
+- **Both workspaces' activity records a move**, as `workspace.data_source.moved`; it was filed
+  only under the destination. It names the versioned graph that moved (`graphId`), as
+  `workspace.datasource.moved` did (`graph_id`); those older events still show in history.
+- **`POST /api/v1/views/` checks the data source belongs to the view's workspace**, as the import
+  already did: a view naming a source in another workspace is refused with a 422.
+
+### Security
+
+- A move of a source with views fails closed like every `workspace:admin` route: a session whose
+  revocation can't be checked gets a 503. Answering, cancelling or undoing a transfer requires
+  `workspace:admin` somewhere before the transfer is looked up.
+- A preview, request or move naming a workspace you couldn't find answers 404, as for one that
+  doesn't exist; a preview would otherwise name its sources and people.
+- A view can't be created in the workspace its source is leaving: creating one holds the source's
+  row, so a concurrent move either takes the new view along or has finished and the view is
+  refused.
+- API keys can't reach any of these routes.
+- A restricted source going to a workspace open to everyone, where anyone who joins reads it, is
+  flagged in the preview, as opening a workspace that holds one is. It's a warning, not a refusal,
+  and part of what the preview's token covers: a destination that opens after you read the preview
+  sends you back to it.
+
+### Resilience
+
+- A retried move, request, answer or undo whose first try went through (its response lost) gets
+  that result for ten minutes, instead of an error; so does a second click queued behind the first.
+- The version store is written first and put back if the rest of a move fails. If putting it back
+  fails too, the reaper re-files the graph under its source's workspace — as it does for graphs
+  left behind by moves made before graphs moved with their sources. A source being moved is
+  skipped and looked at next time.
+- Answering a request and expiring it never race: whoever holds the request decides it, once.
+
+### Performance
+
+- A move writes each view's history in bulk and counts who loses access per person or group, never
+  per person per view. Measured on Postgres, 5,000 views move in 1.3 s and 50,000 in 9.5 s.
+- Moves, accepts and undos get two minutes (`HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS`, default 120)
+  rather than the 30-second default, and the browser waits 150 seconds for them
+  (`VITE_TIMEOUT_DATA_SOURCE_MOVE_MS`) so the server's answer always arrives. A source with more
+  than 50,000 views is refused up front.
+- Transfer lists return at most 200 rows.
+
+### Upgrading
+
+- **Run the upgrade job.** Migration `20261020_1000_ds_transfers` adds `data_source_transfers`,
+  the record of every move and request, with one open request per data source, and allows a view
+  activity entry to say `moved`. Downgrading removes the table and those entries.
+
+### Known limitations
+
+- Forks of a source's version history stay in the old workspace.
+- File uploads in progress for the source when it moves have to be started again.
+- API keys limited to the old workspace no longer reach the moved views; keys that name the source
+  or a view follow it.
+- A source with more than 50,000 views (trash included) can't be moved in one go.
+- A layout template shared only in the old workspace stays there: views that use it keep working,
+  but people in the new workspace can't open the template.
+- The picker on **Add Source** doesn't count views that read a source as the workspace's default,
+  so it may offer a move the server then refuses, saying why.
+
+---
+
+## [Unreleased] — Follow a workspace's graphs and their history from a script
+
+### Added
+
+**For integrators: a workspace's graphs, and which are versioned.**
+`GET /api/v1/admin/workspaces/{ws}/data-sources` takes `providerId` to list one provider's graphs,
+and `include=versioning` to add each one's version control:
+`{enabled, graphId, kind, mainHeadCommitSeq, mainHeadCommitId, mainHeadCommittedAt}`.
+`mainHeadCommitSeq` is a change watermark — a graph's history has something new only when it
+moved — so one call per workspace tells a script which histories to read. `enabled` stays `false`
+while version control is still being turned on, so a `graphId` it hands out never vanishes.
+
+**For integrators: a commit log you can walk end to end.**
+`GET /api/v1/{ws}/versioning/graphs/{graph_id}/commits` takes `before` and `after`, exclusive bounds
+on `commit_seq`, and answers `hasMore` and `nextBefore`. A walk never skips or repeats a commit
+while new ones land, and `after` fetches only what is new. Every field of a commit is now described
+in the API explorer.
+
+**Graph Metadata & History API**, a new page on the integrators' reading path: every field of both
+answers, every kind of commit, what a script can rely on, and a polling loop that keeps a copy in
+step.
+
+### Changed
+
+- The log of `main` stops at `main`'s head. It no longer shows the import commit of a "turn on
+  version control" that hasn't finished — or failed.
+- On the commit log, `before`/`after` with `offset`, or on a view's history across drafts, answer
+  `400`.
+- Data-source answers carry `versioning`, `null` unless asked for.
+- The `workspace.datasource.moved` event names the versioned graph that moved with the source
+  (`graph_id`).
+
+### Fixed
+
+- A graph in the trash still answered its routes by id — history, state, drafts and reviews, even
+  while its purge ran. It now answers `404` until its data source is restored.
+- Moving a versioned data source left its version history behind: the source read as external in
+  its new workspace, and deleting it later left its graph standing for good. The history now moves
+  with it. A move waits (`409`, with the reason) while version control is busy with the source,
+  while a failed attempt to turn it on waits to be resumed or cancelled, and while it holds open
+  drafts or review requests.
+
+### Security
+
+- After a move, a versioned data source's history, state, drafts and reviews stayed readable by
+  the members of its **old** workspace, through the versioning routes. They now answer only in the
+  workspace the source lives in.
+
+### Upgrading
+
+- Nothing to run. When the versioning worker's bootstrap lane starts, and every 15 minutes after
+  (`GRAPHVER_REAP_POLL_SECS`), its reaper files each graph that an earlier move left behind under
+  its data source's workspace — and puts it in the trash if its source is there.
+
+### Known limitations
+
+- No push notification of new commits yet: poll the data-source list and compare
+  `mainHeadCommitSeq`.
+- The list answers for one workspace at a time, and a key limited to particular data sources
+  can't call it; `GET /api/v1/{ws}/versioning/resolve?dataSourceId=` finds each source's graph.
+- The data-source list doesn't fill in its aggregation fields; a source's readiness
+  (`GET /api/v1/admin/data-sources/{id}/readiness`) has them.
+
+---
+
+## [Unreleased] — Access that looks after itself once it's granted
+
+### Added
+
+**Hear before your access ends, and ask to keep it.** Time-limited access to a workspace is
+announced in your Inbox before it ends — a week ahead for access granted for more than two weeks,
+two days ahead for shorter access, once per end date; a day or two of cover isn't announced. On
+**My access**, **Ask to keep it** beside the grant sends its admins and stewards a request tied to
+it; they choose how much longer (30 days unless they pick 7, 90 or no end) and the same grant is
+extended. An admin can also move a grant's end from the **Members** tab — **Change** beside its
+**Expires in …** badge — which answers such a request.
+
+**People hear about changes to their access.** Your Inbox tells you when someone adds you to a
+workspace (at which level, until when, and whether as an exception), removes you (and whether
+that leaves you any way in), or changes when your access ends.
+
+**Requests don't sit unanswered.** After three days a waiting request is brought up again with the
+workspace's admins and stewards; after a week it goes to the Org Admins. The **Requests** tab says
+**Waiting N days**, and **Sent to the Org Admins** once it has.
+
+**Open and closed workspaces.** A workspace's admins choose how people ask, under **How people get
+in → How people ask**: **Approvers decide** (as before), **Open to everyone** — anyone joins as a
+Viewer at once, and more is still asked for — or **Closed to requests**, where admins add people
+themselves. Find a workspace offers **Join** on open workspaces and says **Not taking requests** on
+closed ones; **Request access** starts with **Join now** or says who to ask. A joined grant reads
+**Joined** wherever access is listed. A workspace its identity provider controls can't be open.
+
+**Access reviews.** On the **Members** tab, an admin starts a review of the grants made in the
+workspace — people's and teams' — due in 7, 14 or 30 days, and keeps or removes each, seeing how
+it came about, when it ends and when the person last signed in. Removing takes the access away at
+once and tells the person why; people let in by the identity provider or an organization-wide role
+are counted, not reviewed. A review completes once everything is decided, downloads as a CSV, and
+one past its due date is flagged to the workspace's admins. Nothing is ever removed automatically.
+
+**Join a workspace, in Getting started.** Someone who can't create a workspace now starts with
+**Join a workspace** — Find a workspace while it's on, My access while it's off — ticked off once
+they're in one.
+
+### Changed
+
+- **Exceptions end on their own** once the identity provider grants the same access, at the
+  person's next sign-in. An exception for the role a group grants becomes that group's grant —
+  no gap — and one the groups' roles already cover is ended. The person and whoever granted it
+  hear about it, and a request to keep it closes as approved.
+- `GET /access-requests/requestable-roles` returns `{roles, requestPolicy, joinRole}` instead of a
+  bare list.
+- **Exceptions are the admins', and they always end.** Only a workspace's admins let someone in
+  around its identity provider — stewards point people to the group — and an exception needs an
+  end date, 90 days away at most. Keeping one going, from a request to keep it or with **Change**,
+  confirms it as an exception again with a new end; those requests, and their reminders, go to the
+  admins only.
+- **Letting someone in says what it opens.** Answering a request and **Add member** list the
+  workspace's data sources, restricted ones first: any role reads all of them. Choosing **Open to
+  everyone** says the same — a joiner reads restricted sources too — and, for a workspace hidden
+  from Find a workspace, that anyone with a link can still join. These warn; the admin decides.
+
+### Security
+
+- **Only a workspace's admins change whether a data source is restricted.** The mark is what
+  stops members publishing views over a source to everyone, but any member who could edit the
+  source could clear it, then publish. Changing it now needs `workspace:admin` (403 otherwise);
+  everything else about a source is still a member's to edit.
+
+### Fixed
+
+- An exception that had lapsed no longer keeps the identity provider's grant of the same role out
+  for good: the provider couldn't add its own binding while the exception's row held the role.
+
+### Upgrading
+
+- **Run the upgrade job.** Migration `20261019_1600_access_life` adds
+  `workspaces.request_policy` (every workspace starts as **Approvers decide**),
+  `role_bindings.expiry_reminded_at`, `access_requests.binding_id`, `reminded_at` and
+  `escalated_at`, and the `access_reviews` and `access_review_items` tables. It waits at most 5
+  seconds for a lock and can simply be run again.
+- The reminders run in the control plane (or the all-in-one process), hourly. Time-limited access
+  already ending within a week is announced on the first pass, and requests already waiting more
+  than three days — or a week — are brought up on it too.
+- Downgrading drops the access reviews and every workspace's request policy; requests to keep
+  access become ordinary requests for the same role.
+- Exceptions granted before this release keep the end they had, or none: find any without one
+  with an access review, or give it one with **Change**.
+
+### Known limitations
+
+- Reminders are Inbox messages only; nothing is emailed.
+- Requests waiting on the identity provider aren't brought up: IT has them.
+- In a workspace its identity provider controls, memberships of teams (groups managed in {brand})
+  bound there still aren't policed; an access review is the way to go through them.
+
+---
+
+## [Unreleased] — Find a workspace, ask to join it, and see how every grant came about
+
+### Added
+
+**Find a workspace.** A new tab on **Workspaces** lists your organization's workspaces: what each
+is for, how many people and data sources it has, who answers its requests, how people get in, and
+its admins' note for people asking — with search, a filter (**All**, **Not yours yet**, **Yours**,
+**Requested**) and a summary banner. Each card says where you stand: **Open**, **Waiting for
+approval**, **Waiting on your identity provider** or **Request access**. It sits behind a new
+switch, **Find a workspace** (`workspaceDirectoryEnabled`, **Administration → Features**), which is
+off until an administrator turns it on, and a workspace's admins can keep theirs out of it. Someone
+in no workspace who can't create one lands on it from **Workspaces**, and the Dashboard welcomes
+them with how to join one instead of onboarding written for administrators.
+
+**Ask to join, in one dialog.** **Request access** — on a directory card, on the page a link to a
+workspace you can't open shows, on the **Access denied** card and after your access is removed —
+opens a guided dialog: the level you need in plain words (**View**, **Contribute**, **Engineer the
+data** or a level your organization defined; ones you hold are marked), why (under the workspace's
+note), and what happens next. You hold one open request per workspace; asking again shows it.
+Follow it on **My access** — **Waiting for approval**, **Waiting on your identity provider** (with
+the group to ask IT for), **Approved** (what you were granted, by whom, and their note),
+**Declined** (with the reason) or **Withdrawn** — and withdraw it while it's open. Answers arrive in
+your Inbox, and an approval applies at once: your sessions are signed back in with the new access.
+
+**Workspace stewards.** A new built-in workspace role, **Workspace steward** (`workspace_steward`),
+is a member who also lets people in: they answer requests and add people as **Workspace viewer** or
+**Workspace member** from the **Members** tab. Its permission, `workspace:members:add`, can go on
+custom roles too, and `workspace:admin` implies it. Removing people, binding groups and changing
+how people get in stay with admins.
+
+**Answer requests in one place.** Approvers get a **Requests** tab on **Workspaces**, with a count,
+listing the open requests across every workspace they answer (**All** keeps the history); a
+workspace's **Members** tab shows its own above the members. New requests reach the workspace's
+admins and stewards in their Inbox, or the Org Admins when it has neither. **Review** offers what
+the workspace allows: **Grant a role** — what was asked for, or another level within what the
+approver may grant, with no end date or for 7, 30 or 90 days — or **Add to a team** whose every
+role the approver could grant. **Deny** takes a reason the requester sees. Nobody answers their own
+request.
+
+**Workspaces your identity provider controls.** On the new **How people get in** card (**Members**
+tab, admins only), a workspace can say its membership follows identity-provider groups. Its
+requests are then answered by **pointing to a group** that an access-mapping rule maps into the
+workspace: the requester is told which group to ask IT for, and the request closes itself —
+telling them and the approver — when a sign-in brings the access. Letting someone in without the
+group is an **exception**: granted for 30 days unless the approver chooses otherwise, and labelled
+wherever access is listed; **Add member** asks for it to be ticked too. The same card lists the
+workspace in Find a workspace or hides it, and holds the note for people asking.
+
+**How every grant came about.** **People with access**, **My access** and **Administration →
+Permissions → By user** mark each grant **Added directly**, **Approved request**, **Exception**,
+**Identity provider** (with the groups and provider), **Team** or **Organization-wide**, with who
+and when on hover. **People with access** also lists, and counts, the Org Admins and Super Admins
+who reach every workspace.
+
+**For integrators.** New: `GET /api/v1/workspace-directory` (behind the switch),
+`GET /api/v1/access-requests/requestable-roles?workspaceId=`,
+`POST /api/v1/me/access-requests/{id}/withdraw`,
+`GET /api/v1/admin/access-requests?status=open|all&workspaceId=`,
+`POST /api/v1/admin/access-requests/{id}/route` and
+`GET /api/v1/admin/workspaces/{id}/members/grant-options`.
+`POST /api/v1/admin/access-requests/{id}/approve` takes `role` or `groupId`, `expiresIn` or
+`expiresAt`, `exception` and `note`. Workspaces carry `directoryListed`, `accessMode` and
+`accessNote`; access requests carry the decision (`grantedRole`, `grantedGroup`, `idpGroup`,
+`idpProvider`, `idpException`, `accessExpiresAt`, `fulfilledAt`); access grants carry
+`provenance`. The activity log adds `rbac.access_request.withdrawn`, `.routed` and `.fulfilled`.
+
+### Changed
+
+- **The Members tab opens to stewards** (`workspace:members:add`), as do
+  `GET`/`POST /api/v1/admin/workspaces/{id}/members` and `/members/effective`. Revoking, changing an
+  end date and the revoke preview still need `workspace:admin`.
+- **Add member** picks people from the directory for anyone who isn't a Super Admin — the list used
+  to stay empty for them — and offers only the roles the caller may grant. Adding someone whose
+  earlier grant had ended gives it back, and in a workspace its identity provider controls, adding
+  a person needs `exception: true`.
+- **Approve** grants only what the approver may grant, refuses requests for roles that run the
+  workspace or let others in, and makes a lapsed grant current — it used to mark the request
+  approved and leave the person without access.
+- **A workspace's request list** (`GET /api/v1/admin/workspaces/{id}/access-requests`) returns open
+  requests by default — waiting for approval or on the identity provider — where it returned
+  pending ones.
+- **The Access denied card's request form** is the new dialog; the old one couldn't list roles for
+  most people.
+- **A requester sees a workspace's name** only if they can open it or it is listed in Find a
+  workspace while that is on — on the request, in the Inbox and on My access.
+
+### Fixed
+
+- The activity log names the workspace of an access request; it read a key the events never
+  carried.
+- Analytics' access-friction backlog counts requests waiting on the identity provider as open, and
+  leaves withdrawn ones out of the wait.
+- Deleting a workspace declines its open access requests ("The workspace was deleted") instead of
+  leaving them waiting.
+- My access no longer lists grants that have ended.
+- A link to a workspace you can't open says so, and offers **Request access**; the page used to
+  show its loading skeleton for good, and **Access revoked** could never appear either.
+- My access no longer flashes an **Access denied** card at people who can't read the permission
+  catalogue — most people — on every visit.
+
+### Upgrading
+
+- **Run the upgrade job.** Migration `20261019_1000_ws_access` adds `workspaces.directory_listed`,
+  `access_mode` and `access_note`; the decision columns and the `awaiting_idp` and `withdrawn`
+  statuses on `access_requests`; `access_request_id` on `role_bindings` and `group_members`, and
+  `role_bindings.idp_exception`; and the `workspace:members:add` permission (granted to Org Admin
+  and Super Admin too) with the **Workspace steward** role. Where one person has several pending
+  requests for the same workspace, the newest stays and the rest become **Withdrawn**, before an
+  index allows one open request each. It waits at most 5 seconds for a lock and can simply be run
+  again.
+- **Find a workspace is off.** Turn it on when you're ready for everyone who can sign in to see
+  every workspace's name, description and approvers — except those their admins hide. Hide
+  workspaces whose names are sensitive first.
+- Before switching a workspace to **Through your identity provider**, write an access-mapping rule
+  that reaches it; without one, every answer is an exception.
+- Downgrading turns requests waiting on the identity provider back into pending ones and withdrawn
+  ones into denied; the steward role is removed only when nothing is bound to it.
+
+### Known limitations
+
+- Exceptions don't end when the person later joins the group: remove them from **People with
+  access** once the group has caught up.
+- In a workspace its identity provider controls, memberships of teams (groups managed in {brand})
+  bound there aren't policed.
+- Pointing to a group needs an access-mapping rule for the workspace and a single sign-on sign-in;
+  the approver is warned about someone who has never signed in that way, not stopped.
+- Find a workspace lists every workspace that isn't hidden, to everyone who can sign in; it can't
+  be narrowed to some groups.
+
+---
+
 ## [Unreleased] — Layout templates: reuse a Context View's layers, for yourself, your team or everyone
 
 ### Added

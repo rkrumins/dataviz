@@ -69,6 +69,19 @@ def _summary_ws_expiry(p: dict) -> str:
     return f"Expiry updated → {new[:10]} ({p.get('role') or '?'} in {p.get('workspace_id') or '?'})"
 
 
+def _summary_ws_access(p: dict, what: str) -> str:
+    return f"{what} {p.get('role') or '?'} in {p.get('workspace_id') or '?'}"
+
+
+def _summary_access_review(verb: str):
+    def _build(p: dict) -> str:
+        ws = p.get("workspace_id") or "?"
+        if "kept" in p or "removed" in p:
+            return f"Access review of {ws} {verb}: {p.get('kept', 0)} kept, {p.get('removed', 0)} removed"
+        return f"Access review of {ws} {verb}"
+    return _build
+
+
 def _summary_role_lifecycle(verb: str):
     def _build(p: dict) -> str:
         return f"Role '{p.get('name') or '?'}' {verb}"
@@ -123,7 +136,9 @@ def _summary_identity(verb: str):
 
 def _summary_access_request(verb: str):
     def _build(p: dict) -> str:
-        ws = p.get("workspace_id") or "?"
+        # Requests name their workspace as the target; later events also
+        # carry it as ``workspace_id``.
+        ws = p.get("workspace_id") or p.get("target_id") or "?"
         return f"Access request {verb} for {ws}"
     return _build
 
@@ -447,6 +462,10 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "idp.provider.deleted": ("warning", _summary_idp_provider("deleted")),
     "sso.backchannel_host_withdrawn": ("warning", _summary_backchannel_host("withdrawn")),
     "rbac.access_request.denied": ("warning", _summary_access_request("denied")),
+    "rbac.access_request.escalated": (
+        "warning", _summary_access_request("still unanswered — sent to the Org Admins"),
+    ),
+    "rbac.workspace.access_review_cancelled": ("warning", _summary_access_review("cancelled")),
     "user.login_failed": ("warning", _summary_login_failed),
     "user.logged_out": ("warning", lambda p: f"User {p.get('user_id') or '?'} signed out"),
     "identity.api_key.revoked": ("warning", _summary_api_key_revoked),
@@ -455,6 +474,15 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     # ── info: binds / creates / updates
     "rbac.workspace.member_bound": ("info", _summary_ws_member_bound),
     "rbac.workspace.member_expiry_updated": ("info", _summary_ws_expiry),
+    "rbac.workspace.member_joined": ("info", lambda p: _summary_ws_access(p, "Joined as")),
+    "rbac.workspace.access_expiring": (
+        "info", lambda p: _summary_ws_access(p, "Told the person their access ends soon:"),
+    ),
+    "rbac.workspace.exception_retired": (
+        "info", lambda p: _summary_ws_access(p, "Exception ended — the identity provider grants"),
+    ),
+    "rbac.workspace.access_review_started": ("info", _summary_access_review("started")),
+    "rbac.workspace.access_review_completed": ("info", _summary_access_review("completed")),
     "rbac.view.grant_added": ("info", _summary_view_grant("added")),
     "rbac.role.created": ("info", _summary_role_lifecycle("created")),
     "rbac.role.updated": ("info", _summary_role_lifecycle("permissions updated")),
@@ -486,6 +514,13 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "user.approved": ("info", _summary_user_status("approved")),
     "user.reactivated": ("info", _summary_user_status("reactivated")),
     "rbac.access_request.approved": ("info", _summary_access_request("approved")),
+    "rbac.access_request.withdrawn": ("info", _summary_access_request("withdrawn")),
+    "rbac.access_request.routed": (
+        "info", _summary_access_request("pointed to the identity provider"),
+    ),
+    "rbac.access_request.fulfilled": (
+        "info", _summary_access_request("fulfilled through the identity provider"),
+    ),
     # Phase 9 — login / lifecycle events promoted to first-class.
     "user.logged_in": ("info", _summary_login),
     "rbac.workspace.created": ("info", _summary_workspace_lifecycle("created")),
@@ -612,6 +647,17 @@ def _summary_flag(p: dict) -> str:
     return f"Feature '{key}' set to {json.dumps(value)}" if value is not None else f"Feature '{key}' changed"
 
 
+def _transfer_summary(leaving: str, arriving: str) -> Callable[[dict], str]:
+    """A data-source transfer is recorded once in each workspace; the summary reads from the
+    side it is filed under. ``leaving`` / ``arriving`` hold ``{s}`` (the source) and ``{ws}``
+    (the other workspace)."""
+    def _build(p: dict) -> str:
+        from_side = bool(p.get("workspace_id")) and p.get("workspace_id") == _detail(p, "fromWorkspaceId")
+        other = _detail(p, "toWorkspaceName" if from_side else "fromWorkspaceName") or "another workspace"
+        return (leaving if from_side else arriving).format(s=_subject(p), ws=other)
+    return _build
+
+
 _EVENT_META.update({
     # ── operations: ingestion and aggregation, by a person
     "aggregation.job.triggered": ("info", _summary_job_triggered),
@@ -649,6 +695,20 @@ _EVENT_META.update({
     "workspace.data_source.restored": ("info", _envelope_summary("Restored data source {}")),
     "workspace.data_source.primary_set": ("info", _envelope_summary("Made {} the primary data source")),
     "workspace.data_source.projection_changed": ("info", _envelope_summary("Changed where {} keeps its rollups")),
+    "workspace.data_source.moved": ("info", _transfer_summary(
+        "Moved data source {s} to {ws}", "Moved data source {s} in from {ws}")),
+    "workspace.data_source.move_undone": ("info", _transfer_summary(
+        "Undid the move of {s}: it came back from {ws}", "Undid the move of {s}: it went back to {ws}")),
+    "workspace.data_source.transfer_requested": ("info", _transfer_summary(
+        "Asked {ws} to take data source {s}", "{ws} asked to move data source {s} here")),
+    "workspace.data_source.transfer_declined": ("info", _transfer_summary(
+        "{ws} declined data source {s}", "Declined data source {s} from {ws}")),
+    # Explicitly info: "cancelled" would otherwise read as a warning.
+    "workspace.data_source.transfer_cancelled": ("info", _transfer_summary(
+        "Cancelled the request to move {s} to {ws}", "The request to move {s} here from {ws} was cancelled")),
+    "workspace.data_source.transfer_expired": ("info", _transfer_summary(
+        "The request to move {s} to {ws} expired unanswered",
+        "The request to move {s} here from {ws} expired unanswered")),
     "workspace.versioning.enabled": ("info", _envelope_summary("Turned on version control for {}")),
     "workspace.versioning.retried": ("info", _envelope_summary("Retried turning on version control for {}")),
     "workspace.versioning.abandoned": ("warning", _envelope_summary("Abandoned turning on version control for {}")),
@@ -701,6 +761,12 @@ LABELS: dict[str, str] = {
     "workspace.data_source.restored": "Restored a data source",
     "workspace.data_source.primary_set": "Set the primary data source",
     "workspace.data_source.projection_changed": "Changed rollup placement",
+    "workspace.data_source.moved": "Moved a data source",
+    "workspace.data_source.move_undone": "Undid a data source move",
+    "workspace.data_source.transfer_requested": "Requested a data source transfer",
+    "workspace.data_source.transfer_declined": "Declined a data source transfer",
+    "workspace.data_source.transfer_cancelled": "Cancelled a data source transfer",
+    "workspace.data_source.transfer_expired": "A data source transfer expired",
     "workspace.datasource.moved": "Moved a data source",
     "workspace.versioning.enabled": "Turned on version control",
     "workspace.versioning.retried": "Retried version control",
@@ -724,6 +790,12 @@ LABELS: dict[str, str] = {
     "rbac.workspace.member_bound": "Granted workspace access",
     "rbac.workspace.member_revoked": "Revoked workspace access",
     "rbac.workspace.member_expiry_updated": "Changed access expiry",
+    "rbac.workspace.member_joined": "Joined an open workspace",
+    "rbac.workspace.access_expiring": "Told someone their access ends soon",
+    "rbac.workspace.exception_retired": "Ended an exception the identity provider covers",
+    "rbac.workspace.access_review_started": "Started an access review",
+    "rbac.workspace.access_review_completed": "Completed an access review",
+    "rbac.workspace.access_review_cancelled": "Cancelled an access review",
     "rbac.workspace.created": "Created a workspace",
     "rbac.workspace.updated": "Updated a workspace",
     "rbac.workspace.deleted": "Deleted a workspace",
@@ -733,6 +805,10 @@ LABELS: dict[str, str] = {
     "rbac.access_request.created": "Requested access",
     "rbac.access_request.approved": "Approved access",
     "rbac.access_request.denied": "Denied access",
+    "rbac.access_request.withdrawn": "Withdrew an access request",
+    "rbac.access_request.routed": "Pointed a request to the identity provider",
+    "rbac.access_request.fulfilled": "Access arrived through the identity provider",
+    "rbac.access_request.escalated": "Sent a waiting request to the Org Admins",
     "rbac.role.created": "Created a role",
     "rbac.role.updated": "Changed a role",
     "rbac.role.deleted": "Deleted a role",
@@ -836,6 +912,10 @@ _WORKSPACE_PREFIXES: tuple[str, ...] = (
     "rbac.workspace.member_bound",
     "rbac.workspace.member_revoked",
     "rbac.workspace.member_expiry_updated",
+    "rbac.workspace.member_joined",
+    "rbac.workspace.exception_retired",
+    "rbac.workspace.access_expiring",
+    "rbac.workspace.access_review_",
     "rbac.workspace.updated",
     "rbac.workspace.roles_cascaded",
     # Safe: a workspace admin already reaches every view in their workspace.

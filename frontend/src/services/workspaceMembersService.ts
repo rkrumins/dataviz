@@ -29,17 +29,40 @@ export interface WorkspaceMemberResponse {
      *  countdown badges and warn before access lapses. */
     expiresAt: string | null
     subject: MemberSubject
+    /** Granted around the identity provider: its end is moved only when
+     *  confirmed as an exception again, and never cleared. */
+    idpException?: boolean
 }
 
 /** One route by which a user holds a role in the workspace — a direct
  *  binding, or one inherited through a group. */
+/** How a grant came about. ``joined``: the person joined a workspace open
+ *  to everyone. */
+export type AccessOrigin = 'direct' | 'request' | 'exception' | 'joined' | 'idp' | 'team' | 'org_role'
+
+export interface AccessProvenance {
+    origin: AccessOrigin
+    /** The team or organization-wide role it came through. */
+    source: string | null
+    /** Who added or approved it, and when. */
+    by: string | null
+    at: string | null
+    /** The access request it answered. */
+    requestId: string | null
+    /** The identity provider's groups that grant it, and the provider. */
+    idpGroups: string[]
+    idpProvider: string | null
+}
+
 export interface WorkspaceAccessGrant {
     role: string
-    via: 'direct' | 'group'
+    /** ``org``: an organization-wide role that reaches every workspace. */
+    via: 'direct' | 'group' | 'org'
     bindingId: string
     groupId: string | null
     groupName: string | null
     expiresAt: string | null
+    provenance?: AccessProvenance | null
 }
 
 /** A person with effective access, flattened across their direct
@@ -66,6 +89,8 @@ export interface WorkspaceAccessResponse {
      *  these need not sum to ``totalUsers``. */
     directUsers: number
     viaGroupUsers: number
+    /** People who reach every workspace through an organization-wide role. */
+    orgWideUsers?: number
 }
 
 export interface WorkspaceMemberCreateRequest {
@@ -78,15 +103,41 @@ export interface WorkspaceMemberCreateRequest {
      *  both for a permanent binding. */
     expiresAt?: string | null
     expiresIn?: string | null
+    /** Confirms adding a person in the app to a workspace whose access its
+     *  identity provider decides — the grant is marked as an exception. */
+    exception?: boolean
 }
 
 export interface WorkspaceMemberExpiryUpdateRequest {
     expiresAt?: string | null
     expiresIn?: string | null
+    /** Confirms an exception to the identity provider stays one. */
+    exception?: boolean
 }
 
 
 // ── Service ──────────────────────────────────────────────────────────
+
+/** What the caller may hand out in a workspace, already narrowed to what
+ *  they could grant themselves. */
+export interface WorkspaceGrantOptions {
+    tier: 'admin' | 'steward'
+    accessMode: 'app' | 'idp'
+    roles: { name: string; description: string | null; isSystem: boolean }[]
+    /** App-managed teams bound here whose every role the caller could grant. */
+    groups: { id: string; name: string; memberCount: number; roles: string[] }[]
+    /** Identity-provider groups whose members reach the workspace. */
+    idpRoutes: {
+        idpGroup: string
+        provider: string | null
+        role: string | null
+        viaGroupId: string | null
+        viaGroupName: string | null
+    }[]
+    /** The data sources any role here reads — there are no per-source grants
+     *  inside a workspace. Absent on servers that predate it. */
+    dataSources?: { id: string; label: string | null; restricted: boolean }[]
+}
 
 function url(wsId: string, suffix: string = ''): string {
     return `/api/v1/admin/workspaces/${encodeURIComponent(wsId)}/members${suffix}`
@@ -103,6 +154,11 @@ export const workspaceMembersService = {
      *  group, with the route(s) that got them there. */
     listEffective(wsId: string): Promise<WorkspaceAccessResponse> {
         return authFetch<WorkspaceAccessResponse>(url(wsId, '/effective'))
+    },
+
+    /** The roles, teams and identity-provider groups the caller may grant here. */
+    grantOptions(wsId: string): Promise<WorkspaceGrantOptions> {
+        return authFetch<WorkspaceGrantOptions>(url(wsId, '/grant-options'))
     },
 
     create(

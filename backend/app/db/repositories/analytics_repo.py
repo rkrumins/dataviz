@@ -67,6 +67,7 @@ from backend.app.db.models import (
     view_is_live,
 )
 from backend.app.db.repositories import stats_repo
+from backend.app.db.repositories.access_request_repo import OPEN_STATUSES
 from backend.app.db.repositories.view_repo import resolve_user_ids
 
 if TYPE_CHECKING:  # pragma: no cover — annotation only
@@ -1809,8 +1810,9 @@ async def _access_friction(session: AsyncSession, w: Window, *, now: datetime) -
         .where(AccessRequestORM.created_at >= w.start)
     )).all()
     waits: list[float] = []
-    for created, resolved, _status in requests:
-        if not resolved:
+    for created, resolved, status in requests:
+        # Withdrawn: the person stopped waiting before anyone answered.
+        if not resolved or status == "withdrawn":
             continue
         started, finished = _parse(created), _parse(resolved)
         if started and finished and finished >= started:
@@ -1819,10 +1821,12 @@ async def _access_friction(session: AsyncSession, w: Window, *, now: datetime) -
     # Count and oldest in one aggregate. The backlog is unbounded by the window
     # by definition — a request pending since last year is exactly the one worth
     # reporting — so it is the one query here that must not read its rows back.
+    # Open includes a request waiting on the identity provider: that person
+    # still can't get in.
     pending_count, oldest_created = (await session.execute(
         select(func.count(), func.min(AccessRequestORM.created_at))
         .select_from(AccessRequestORM)
-        .where(AccessRequestORM.status == "pending")
+        .where(AccessRequestORM.status.in_(OPEN_STATUSES))
     )).one()
     oldest_started = _parse(oldest_created)
     oldest_pending = (

@@ -155,6 +155,7 @@ The API server: what it accepts and serves, and which part of the backend each p
 | `CHANGES_STREAM_MAXLEN` | `1000` | `backend/app/changes/registry.py` |
 | `CHANGES_VERSION_TTL_SECONDS` | `2592000` | `backend/app/changes/registry.py` |
 | `GZIP_COMPRESSLEVEL` | `1` | `backend/app/main.py` |
+| `HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS` | `120` | `backend/app/main.py` |
 | `HTTP_TIMEOUT_VIEW_TRANSFER_SECS` | `120` | `backend/app/main.py` |
 | `MAX_IMPORT_BODY_BYTES` | `104857600` | `backend/app/main.py` |
 | `MAX_REQUEST_BODY_BYTES` | `8388608` | `backend/app/main.py` |

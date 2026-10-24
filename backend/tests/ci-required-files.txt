@@ -13,6 +13,7 @@
 # Read by `.github/workflows/backend-tests.yml` and by
 # `tests/test_ci_required_list.py`, which fails if an entry stops existing or
 # if the workflow stops reading this file.
+tests/test_access_reviews.py
 tests/test_activity_capture_endpoints.py
 tests/test_activity_catalogue.py
 tests/test_activity_context.py
@@ -72,6 +73,9 @@ tests/test_configmap_matches_manifests.py
 tests/test_controlplane_loops_wiring.py
 tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
+tests/test_data_source_list_versioning.py
+tests/test_data_source_move.py
+tests/test_data_source_transfers.py
 tests/test_default_data_source_ids.py
 tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
@@ -163,6 +167,7 @@ tests/test_publish_view_library_script.py
 tests/test_purge_then_rebuild.py
 tests/test_raw_properties.py
 tests/test_read_pressure_yield.py
+tests/test_reaper_rehome.py
 tests/test_reconcile_detectors.py
 tests/test_reconcile_sweeper.py
 tests/test_request_body_limit.py
@@ -195,7 +200,9 @@ tests/test_typed_compiler.py
 tests/test_typed_patch_merge.py
 tests/test_upload_pins.py
 tests/test_versioned_branch_resolve_identities.py
+tests/test_versioning_commit_log_api.py
 tests/test_versioning_read_only_queries.py
+tests/test_versioning_trashed_graph.py
 tests/test_view_avatar_ids.py
 tests/test_view_bundle_schema.py
 tests/test_view_facets_live.py
@@ -219,4 +226,8 @@ tests/test_view_transfer_references.py
 tests/test_view_transfer_staging.py
 tests/test_view_versions.py
 tests/test_worker_lanes.py
+tests/test_workspace_access_hardening.py
+tests/test_workspace_access_lifecycle.py
+tests/test_workspace_access_requests.py
+tests/test_workspace_directory.py
 tests/test_workspace_summary.py

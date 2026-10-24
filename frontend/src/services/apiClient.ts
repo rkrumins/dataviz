@@ -18,7 +18,7 @@ import { readJsonLossless } from '@/lib/losslessJson'
  *  throws a readable Error, success hands back the Response. */
 async function checkedFetch(
     url: string,
-    init?: RequestInit & { silent403?: boolean },
+    init?: RequestInit & { silent403?: boolean; timeoutMs?: number },
 ): Promise<Response> {
     let res: Response
     try {
@@ -51,7 +51,7 @@ async function checkedFetch(
 
 export async function authFetch<T>(
     url: string,
-    init?: RequestInit & { silent403?: boolean },
+    init?: RequestInit & { silent403?: boolean; timeoutMs?: number },
 ): Promise<T> {
     const res = await checkedFetch(url, init)
     if (res.status === 204) return undefined as T

@@ -455,6 +455,37 @@
       "dependsOn": []
     },
     {
+      "key": "workspaceDirectoryEnabled",
+      "name": "Find a workspace",
+      "description": "Let everyone who can sign in browse the organization's workspaces \u2014 what each is for, who answers requests and how access works \u2014 and ask to join one.",
+      "category": "auth",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "On, every workspace's name and description is visible to everyone who can sign in, except the workspaces whose admins hide them in their access settings. Leave it off if the names of workspaces are themselves sensitive.",
+      "impactWhenOff": "The Find a workspace tab disappears and the server refuses the directory. People can still ask to join a workspace from a link someone shares with them, and approvers still answer every request. Nothing is deleted.",
+      "sortOrder": 6,
+      "deprecated": false,
+      "stage": "active",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "security",
+      "serverGates": [
+        "GET /workspace-directory \u2014 refused while off",
+        "POST /access-requests and GET /me/access-requests \u2014 name a workspace the person cannot open only while this is on and the workspace is listed"
+      ],
+      "uiSurfaces": [
+        "The Find a workspace tab on Workspaces, and its entry in search",
+        "The way in offered to someone with no workspace \u2014 on the Dashboard, Workspaces and My Access"
+      ],
+      "stillAllowed": [
+        "Asking to join from a link someone shared, and answering every request",
+        "Workspaces, their access settings and every request are kept"
+      ],
+      "dependsOn": []
+    },
+    {
       "key": "versioningEnabled",
       "name": "Version control",
       "description": "Drafts, reviews, publishing, history and rollback for data sources \u2014 the whole change-management workflow.",
@@ -1249,6 +1280,7 @@
     "apiKeyMaxLifetime": "none",
     "apiKeySsoSignInWindow": "30",
     "apiKeySsoRoundTripStepUp": false,
+    "workspaceDirectoryEnabled": false,
     "versioningEnabled": true,
     "traceEnabled": true,
     "graphExportEnabled": true,

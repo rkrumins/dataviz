@@ -6,6 +6,8 @@
 
 import { fetchWithTimeout } from './fetchWithTimeout'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
+import type { AccessRequestStatus, RequestPolicy, WorkspaceAccessMode } from './accessRequestsService'
+import type { DataSourceTransferResponse } from './dataSourceTransferService'
 
 const ADMIN_API = '/api/v1/admin/workspaces'
 
@@ -122,6 +124,45 @@ export interface WorkspaceUpdateRequest {
     nameProperty?: string
     /** The layout template new views here start from (workspace:admin); "" clears it. */
     defaultLayoutTemplateId?: string
+    /** Listed in Find a workspace (while the deployment's switch is on). */
+    directoryListed?: boolean
+    /** Who decides membership: approvers here, or the identity provider's groups. */
+    accessMode?: WorkspaceAccessMode
+    /** Shown to people asking to join; "" clears it. */
+    accessNote?: string
+    /** How it takes requests. Open needs access decided here, not by the
+     *  identity provider. */
+    requestPolicy?: RequestPolicy
+}
+
+/** Your open request on a Find a workspace entry. */
+export interface WorkspaceDirectoryRequest {
+    id: string
+    status: AccessRequestStatus
+    requestedRole: string
+    createdAt: string
+    idpGroup: string | null
+}
+
+/** A workspace in Find a workspace: what it is, who is in it and who answers
+ *  requests (ids — name them with the people lookup), how access works, and
+ *  where you stand. */
+export interface WorkspaceDirectoryEntry {
+    id: string
+    name: string
+    description: string | null
+    dataSourceCount: number
+    peopleCount: number
+    approverIds: string[]
+    approverCount: number
+    accessMode: WorkspaceAccessMode
+    accessNote: string | null
+    directoryListed: boolean
+    /** Absent on servers that predate it — read as 'approval'. */
+    requestPolicy?: RequestPolicy
+    canOpen: boolean
+    yourRoles: string[]
+    openRequest: WorkspaceDirectoryRequest | null
 }
 
 export interface WorkspaceResponse {
@@ -148,6 +189,12 @@ export interface WorkspaceResponse {
     nameProperty?: string | null
     /** The layout template a new view here starts from, if any. */
     defaultLayoutTemplateId?: string | null
+    /** Joining: listed in Find a workspace, who decides membership, and the
+     *  note shown to people asking. Absent on servers that predate them. */
+    directoryListed?: boolean
+    accessMode?: WorkspaceAccessMode
+    accessNote?: string | null
+    requestPolicy?: RequestPolicy
     /** Convenience: from primary data source (backward compat) */
     providerId?: string
     graphName?: string
@@ -340,6 +387,12 @@ export const workspaceService = {
         return request<WorkspaceSummaryTrend>(`${ADMIN_API}/summary/trend`)
     },
 
+    /** Find a workspace — refused while the deployment's switch is off. */
+    async directory(): Promise<WorkspaceDirectoryEntry[]> {
+        const body = await request<{ entries: WorkspaceDirectoryEntry[] }>('/api/v1/workspace-directory')
+        return body.entries
+    },
+
     /**
      * One page of workspaces, filtered + RBAC-scoped + counted server-side.
      *
@@ -472,15 +525,14 @@ export const workspaceService = {
     },
 
     /**
-     * Re-home a data source into another workspace.
-     *
-     * The server refuses (409) unless ZERO views are built on it — including
-     * trashed ones. That isn't caution: views.data_source_id is ON DELETE SET
-     * NULL, and a view left in workspace A pointing at a source now owned by
-     * workspace B would read B's data through A's RBAC check.
+     * Re-home a data source into another workspace — the quick pull used by the
+     * Add Data Source and Create Workspace wizards for a source nothing is built
+     * on. A source WITH views moves through the move wizard
+     * (`dataSourceTransferService`), which decides who keeps access; the server
+     * moves its views with it and needs admin rights in both workspaces for that.
      */
-    moveDataSource(workspaceId: string, dataSourceId: string, targetWorkspaceId: string): Promise<DataSourceResponse> {
-        return request<DataSourceResponse>(
+    moveDataSource(workspaceId: string, dataSourceId: string, targetWorkspaceId: string): Promise<DataSourceTransferResponse> {
+        return request<DataSourceTransferResponse>(
             `${ADMIN_API}/${workspaceId}/data-sources/${dataSourceId}/move`,
             { method: 'POST', body: JSON.stringify({ targetWorkspaceId }) },
         )

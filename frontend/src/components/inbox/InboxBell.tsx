@@ -18,17 +18,24 @@
  */
 import { useState } from 'react'
 import {
+    ArrowRightLeft,
     Bell,
     Building2,
+    CalendarClock,
     CheckCheck,
     CheckCircle2,
+    ClipboardCheck,
     Clock,
+    KeyRound,
     KeySquare,
     LayoutTemplate,
     Megaphone,
     Share2,
     ShieldAlert,
     Sparkles,
+    Undo2,
+    UserMinus,
+    UserPlus,
     XCircle,
     type LucideIcon,
 } from 'lucide-react'
@@ -93,6 +100,121 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: XCircle,
         icon: 'text-rose-500',
         tile: 'bg-rose-500/10',
+    },
+    // Asking to join a workspace: the ask reaches its approvers; the answer,
+    // a group to join at the identity provider, or the access arriving
+    // reaches the person who asked.
+    'access_request.submitted': {
+        Icon: UserPlus,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'access_request.approved': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'access_request.denied': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    'access_request.routed': {
+        Icon: KeyRound,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'access_request.fulfilled': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    // A request nobody has answered, brought up again — then to the Org Admins.
+    'access_request.reminder': {
+        Icon: Clock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'access_request.escalated': {
+        Icon: ShieldAlert,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    // Access once granted: added, removed, its end moved or near, an
+    // exception the identity provider took over, a review running late.
+    'workspace.member_added': {
+        Icon: UserPlus,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'workspace.member_removed': {
+        Icon: UserMinus,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    'workspace.access_end_changed': {
+        Icon: CalendarClock,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'access.expiring': {
+        Icon: CalendarClock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'access.exception_retired': {
+        Icon: KeyRound,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'access_review.overdue': {
+        Icon: ClipboardCheck,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    // Moving a data source between workspaces: the ask reaches the destination's
+    // admins; the answer reaches whoever asked, as does a request that lapsed;
+    // the move itself, and an undo, reach both workspaces' admins, the owners of
+    // the views that moved, and the people who lost access to them.
+    'data_source.transfer_requested': {
+        Icon: ArrowRightLeft,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'data_source.transfer_accepted': {
+        Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'data_source.transfer_declined': {
+        Icon: XCircle,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    'data_source.transfer_cancelled': {
+        Icon: XCircle,
+        icon: 'text-slate-500',
+        tile: 'bg-slate-500/10',
+    },
+    'data_source.moved': {
+        Icon: ArrowRightLeft,
+        icon: 'text-indigo-500',
+        tile: 'bg-indigo-500/10',
+    },
+    'data_source.move_undone': {
+        Icon: Undo2,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'data_source.access_lost': {
+        Icon: UserMinus,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'data_source.transfer_expired': {
+        Icon: Clock,
+        icon: 'text-slate-500',
+        tile: 'bg-slate-500/10',
     },
     'reconcile.suspended': {
         Icon: ShieldAlert,
