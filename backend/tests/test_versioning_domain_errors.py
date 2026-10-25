@@ -135,6 +135,50 @@ def test_writing_main_directly_needs_publish_held_by_the_person_or_the_keys_owne
     assert unknown.value.status_code == 503
 
 
+def test_a_service_account_reviewing_or_approving_is_403_person_required():
+    from backend.app.services.versioning.errors import PersonRequired
+    exc = PersonRequired("a service account cannot review a PR: name a person")
+    assert isinstance(exc, AccessDenied) and type(exc) in HTTP_MAPPED
+    err = _raised(exc)
+    assert err.status_code == 403
+    assert err.detail == {"type": "access_denied", "code": "person_required",
+                          "message": "a service account cannot review a PR: name a person"}
+
+
+def test_a_draft_shared_with_a_service_account_is_409_ineligible_member():
+    from backend.app.services.versioning.errors import ServiceAccountMember
+    exc = ServiceAccountMember("svc_0123456789ab")
+    assert isinstance(exc, IneligibleMember) and type(exc) in HTTP_MAPPED
+    err = _raised(exc)
+    assert err.status_code == 409
+    assert {k: err.detail[k] for k in ("type", "subjectId", "reason")} == {
+        "type": "ineligible_member", "subjectId": "svc_0123456789ab", "reason": "service_account"}
+    assert err.detail["message"] == (
+        "can't add svc_0123456789ab: a service account's access is the workspace roles given on "
+        "its own page, under Service accounts")
+
+
+@pytest.mark.asyncio
+async def test_a_service_account_is_refused_before_anything_is_read():
+    """Each refusal comes first: before the PR is locked, so before ``head_moved`` or
+    ``self_review`` could answer instead."""
+    from backend.app.services.versioning.errors import PersonRequired
+
+    def untouched():
+        raise AssertionError("refused before anything is read")
+
+    service = GraphVersioningService(session_factory=untouched)
+    with pytest.raises(PersonRequired):
+        await service.approve_pr(pr_id="pr_1", actor="svc_0123456789ab", expected_head_commit_id="c_1")
+    with pytest.raises(PersonRequired):
+        await service.update_pr(pr_id="pr_1", reviewers=["u_ada", "svc_0123456789ab"])
+    with pytest.raises(PersonRequired):
+        await service.open_pr(source_graph_id="g_fork", actor="u_ada", reviewers=["svc_0123456789ab"])
+    with pytest.raises(PersonRequired):
+        await service.open_draft_mr(graph_id="g1", branch_id="br_1", actor="u_ada",
+                                    reviewers=["svc_0123456789ab"])
+
+
 def test_approving_your_own_draft_or_review_is_403_self_review():
     exc = SelfReview("pr_1")
     assert isinstance(exc, AccessDenied) and isinstance(exc, HTTP_MAPPED)

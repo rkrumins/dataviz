@@ -69,10 +69,13 @@ the graph routes; everyone else edits a draft.
 
 - `workspace:datasource:publish` is separate from manage. `workspace_member` loses it;
   `workspace_publisher` carries it. API keys never publish or merge, and write `main` directly only
-  if their owner holds publish.
+  if their owner holds publish (for a service account's `nxsat_` key, the service account itself).
 - Each approval records the draft head it saw. A later content commit makes it stale (409
   `approval_required` with `pending` and `stale`); `POST …/approve` with `expectedHeadCommitId`
   answers 409 `head_moved`; authors and draft owners get 403 `self_review`.
+- A service account (#567) never reviews or approves (403 `person_required`), and is never a draft
+  member (409 `ineligible_member`); a manager of the service account that opened a review can't
+  approve it (403 `self_review`).
 - A member who loses access has their staged, uncommitted edits withdrawn at the next checkpoint.
   Groups are looked up only when a group row could raise the caller's role; an unreadable directory
   answers 503 `groups_unavailable`, never a false 403.
@@ -142,10 +145,11 @@ p95 under 3 s, zero lost acknowledged writes.
 
 ## 9. Rollout
 
-1. Migrations after `main`'s `20261020_1000_ds_transfers`: `20261017_1000_datasource_publish`, then eight
+1. Migrations after `main`'s `20261023_1200_service_accounts`: `20261017_1000_datasource_publish`, then eight
    `gv_` revisions to `20261018_1200_gv_lifecycle`. Each `gv_` one waits at most 5 s for a lock.
 2. With a separate `GRAPHVER_DB_URL`, start the versioning workers before the API pods.
-3. Grant `workspace_publisher` to people who land changes and to owners of keys that write `main`.
+3. Grant `workspace_publisher` to people who land changes and to owners of keys that write `main`
+   (for a service account's key, the service account, on its own page under Service accounts).
 4. Customer FalkorDB servers on the stock image need `RESULTSET_SIZE -1`.
 5. Every pod on this release before using projection moves or freeze: an older pod re-pins a moved
    graph and lets writes through a freeze.

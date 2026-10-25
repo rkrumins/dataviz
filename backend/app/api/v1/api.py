@@ -34,6 +34,7 @@ from .endpoints import (
     analytics,
     content_insights,
     api_keys,
+    service_accounts,
 )
 from backend.auth_service.api.router import router as auth_session_router
 
@@ -61,8 +62,10 @@ api_router.include_router(
 api_router.include_router(
     users.router, prefix="/users", tags=["users"],
 )
+# A service account is not a person: the routes about one 404 for it.
 api_router.include_router(
     users.admin_router, prefix="/admin/users", tags=["admin:users"],
+    dependencies=[Depends(service_accounts.people_only)],
 )
 # RBAC Phase 1: /me/permissions for FE permission hydration.
 api_router.include_router(
@@ -81,6 +84,19 @@ api_router.include_router(
 )
 api_router.include_router(
     api_keys.admin_users_router, prefix="/admin/users", tags=["admin:api-keys"],
+)
+# Service accounts: principals that never sign in, for integrations to run as.
+api_router.include_router(
+    service_accounts.admin_router, prefix="/admin/service-accounts",
+    tags=["admin:service-accounts"],
+)
+api_router.include_router(
+    service_accounts.me_router, prefix="/me/service-accounts", tags=["me:service-accounts"],
+)
+# A service account's keys: the same routes as a person's own, for its managers.
+api_router.include_router(
+    api_keys.router, prefix="/me/service-accounts/{account_id}/api-keys",
+    tags=["me:service-accounts"], dependencies=[Depends(api_keys.service_account_path)],
 )
 
 # ── Admin routers (workspace-centric) ───────────────────────────────
@@ -330,6 +346,7 @@ api_router.include_router(
     admin_user_identities.router,
     prefix="/admin/users/{user_id}/identities",
     tags=["admin:sso:identities"],
+    dependencies=[Depends(service_accounts.people_only)],
 )
 
 # SSO Phase 3 — self-service identity management.

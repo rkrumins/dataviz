@@ -19,8 +19,8 @@ security picture, see the [Security Overview](/docs/security-overview).
 
 ## TL;DR
 
-* Eight built-in roles: three platform roles (`super_admin`, `org_admin`, `org_auditor`)
-  and five workspace roles. Any account without a platform role is in the default `user`
+* Nine built-in roles: three platform roles (`super_admin`, `org_admin`, `org_auditor`)
+  and six workspace roles. Any account without a platform role is in the default `user`
   tier, which stores nothing and grants nothing.
 * Permissions are namespaced by category — `system:*` or `workspace:*`. The resolver only
   emits permissions whose category matches the binding's scope; cross-category ones are
@@ -49,8 +49,8 @@ security picture, see the [Security Overview](/docs/security-overview).
 platform role: no platform permissions, and no workspace access until a workspace binding
 grants it.
 
-All eight roles are stored once, at `scope_type='global'` with `scope_id=NULL`. The three
-platform roles are bound at global scope. The five workspace roles are templates you bind to a
+All nine roles are stored once, at `scope_type='global'` with `scope_id=NULL`. The three
+platform roles are bound at global scope. The six workspace roles are templates you bind to a
 specific workspace (`scope_type='workspace'`, `scope_id=<workspace id>`); bound at global
 scope they grant nothing, because the resolver's category filter drops every `workspace:*`
 permission from a global binding.
@@ -61,8 +61,8 @@ Exactly what `ROLE_GRANTS` in `backend/app/config/rbac_seed.py` stores for each 
 
 | Role | Count | Permissions granted |
 |---|---|---|
-| `super_admin` | 26 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
-| `org_admin` | 20 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `super_admin` | 27 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:service-accounts:manage`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `org_admin` | 21 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:service-accounts:manage`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
 | `org_auditor` | 4 | `system:analytics:read`, `system:audit:read`, `system:bindings:read`, `system:org-viewer` |
 | `workspace_admin` | 1 | `workspace:admin` |
 | `workspace_data_engineer` | 12 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
@@ -100,6 +100,7 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `system:groups:manage` | system | Create, edit, delete groups and manage their members. | `super_admin`, `org_admin` |
 | `system:org-admin` | system | Cross-workspace operator; implies every workspace permission. | `super_admin`, `org_admin` |
 | `system:org-viewer` | system | Read-only operator across every workspace in the tenancy. | `super_admin`, `org_auditor` |
+| `system:service-accounts:manage` | system | Create service accounts, choose who manages them, and grant them workspace roles. | `super_admin`, `org_admin` |
 | `system:templates:manage` | system | Curate the organization's layout templates and the built-in ones. | `super_admin`, `org_admin` |
 | `system:users:manage` | system | Create, approve, suspend, and change roles for users. | `super_admin` |
 | `system:workspaces:create` | system | Create new workspaces. | `super_admin`, `org_admin` |
@@ -124,7 +125,9 @@ Three of these are deliberately separate from `system:admin`'s everyday reach:
 `system:sso:hosts:manage` (an entry lets the service make requests to an internal address,
 which is a network decision, so only `super_admin` holds it by default), and
 `system:templates:manage` (curating the template library can be delegated to whoever owns the
-house style, without handing them the platform).
+house style, without handing them the platform). `system:service-accounts:manage` is kept apart
+from `system:users:manage` the same way: org admins look after the principals integrations run as
+without administering people.
 
 ### Which permissions open which screens
 
@@ -137,13 +140,14 @@ enforce, and the app shows or hides it to match:
 | **Ingestion** | Any of `system:admin`, `system:org-admin`, `workspace:provider:read`, `workspace:datasource:manage` (the workspace permissions in any one workspace) |
 | **Semantic Layers** | Any of `system:admin`, `system:org-admin`, `workspace:ontology:read` |
 | **Analytics** | Any of `system:analytics:read`, `system:admin`, `system:org-admin`, `system:audit:read`. When **Analytics for everyone** is on, everyone else gets a redacted version. |
-| **Administration** (entering it at all) | `system:admin`, `system:groups:manage` or `system:audit:read` |
+| **Administration** (entering it at all) | `system:admin`, `system:groups:manage`, `system:audit:read` or `system:service-accounts:manage` |
 | Administration → **Activity** and **Telemetry** | `system:audit:read` |
 | Administration → **Groups** | `system:groups:manage` |
+| Administration → **Service accounts** | `system:service-accounts:manage` |
 | Every other Administration page | `system:admin` |
 
 Entering **Administration** and opening one of its pages are separate checks: a page inside
-it needs its own permission as well as one of the three that open Administration.
+it needs its own permission as well as one of the four that open Administration.
 
 ### View visibility and sharing
 
@@ -526,6 +530,19 @@ of its data sources is.
   within that window. The cache never touches the owner's sessions: an earlier version
   registered it as one, which kept the owner's session index growing for as long as a key
   was busy.
+- **A service account's keys.** A service account (an id starting `svc_`) is resolved like a
+  person, but keeps only its direct workspace bindings: no groups and no global roles, so no
+  shortcut reaches its keys whatever a row says. It may hold any workspace role that neither
+  administers the workspace nor lets people in, and what is requestable is applied again at
+  resolution, so a role later widened to administer brings it none of that. Its managers make
+  keys that act as it, whatever they can reach themselves: appointing a manager delegates the
+  account's access, so it takes being able to grant each of the account's roles; and whoever
+  controls a managing team's membership controls that delegation, so adding someone to a team
+  that manages a service account takes `system:service-accounts:manage` as well as
+  `system:groups:manage`, and an access-request approval never adds anyone to one. Holding
+  Publisher (or Data Engineer), its keys write a versioned graph's `main` directly, since that
+  check reads the account's own roles; like every key, never publish, merge, revert, restore or
+  sync. See [Service Accounts](/guide/service-accounts).
 
 ## 403 body
 

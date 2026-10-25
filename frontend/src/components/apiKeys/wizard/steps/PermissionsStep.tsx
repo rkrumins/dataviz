@@ -13,6 +13,7 @@ import { FieldLabel, StepBlock, StepColumn, StepHero } from '@/components/admin/
 import { cn } from '@/lib/utils'
 import type { Level } from '@/services/apiKeyService'
 import { overreach } from '../../apiKeyFormat'
+import { useOwnerWords } from '../../keyClient'
 import type { ApiKeyWizardState } from '../useApiKeyWizard'
 
 const LEVELS: Record<'views' | 'data', { value: Level; label: string; says: string }[]> = {
@@ -30,6 +31,7 @@ const LEVELS: Record<'views' | 'data', { value: Level; label: string; says: stri
 
 export function PermissionsStep({ w }: { w: ApiKeyWizardState }) {
     const p = w.draft.permissions
+    const owner = useOwnerWords()
     const short = w.draft.resourceMode === 'items' ? overreach(p, w.draft.views, w.draft.dataSources) : []
     return (
         <StepColumn wide>
@@ -37,7 +39,7 @@ export function PermissionsStep({ w }: { w: ApiKeyWizardState }) {
                 pill="Permissions"
                 pillIcon={ShieldCheck}
                 title="What may it do there?"
-                subtitle="Each level says what a script holding the key can do. It never does more than you can."
+                subtitle={`Each level says what a script holding the key can do. It never does more than ${owner.object} can.`}
             />
 
             <StepBlock delay={0.04}>
@@ -86,8 +88,8 @@ export function PermissionsStep({ w }: { w: ApiKeyWizardState }) {
                     <p className="flex items-start gap-2.5 p-3.5 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] text-xs text-amber-800 dark:text-amber-200 leading-relaxed">
                         <TriangleAlert className="w-4 h-4 shrink-0 text-amber-500" aria-hidden />
                         <span>
-                            You can only read {short.map((s) => `“${s.name}”`).join(', ')} — the key will only
-                            read {short.length === 1 ? 'it' : 'them'} too. A key never reaches past you.
+                            {owner.subject} can only read {short.map((s) => `“${s.name}”`).join(', ')} — the key will only
+                            read {short.length === 1 ? 'it' : 'them'} too. A key never reaches past {owner.object}.
                         </span>
                     </p>
                 </StepBlock>

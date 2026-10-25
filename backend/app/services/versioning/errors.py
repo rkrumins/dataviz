@@ -90,6 +90,16 @@ class SelfReview(_HttpMapped, AccessDenied):
                          {"type": "access_denied", "code": "self_review", "prId": pr_id})
 
 
+class PersonRequired(_HttpMapped, AccessDenied):
+    """A service account named as a PR's reviewer, or approving one: its managers would review
+    through it, and reviewing is a person's call."""
+
+    status_code = 403
+
+    def __init__(self, message: str):
+        super().__init__(message, {"type": "access_denied", "code": "person_required"})
+
+
 class PublishRequired(_HttpMapped, AccessDenied):
     """A person without ``workspace:datasource:publish`` wrote a versioned graph's main directly
     (a graph route with no draft, or a bulk ingest), in person or with their API key."""
@@ -116,8 +126,9 @@ class GroupsUnavailable(_HttpMapped, RuntimeError):
 
 class IneligibleMember(_HttpMapped, RuntimeError):
     """Who was to be added to a draft cannot hold the role: the owner, an unknown user or
-    group, or a user without the workspace access the role needs. A RuntimeError, so no
-    ``except ValueError`` turns it into a 404."""
+    group, a user without the workspace access the role needs, or a service account (409,
+    :class:`ServiceAccountMember`). A RuntimeError, so no ``except ValueError`` turns it into a
+    404."""
 
     status_code = 422
     _MESSAGES = {
@@ -126,12 +137,24 @@ class IneligibleMember(_HttpMapped, RuntimeError):
         "unknown_group": "no such group",
         "no_read": "they can't read this workspace's data sources",
         "no_manage": "they can't edit this workspace's data sources, so they can only be a viewer",
+        "service_account": "a service account's access is the workspace roles given on its own "
+                           "page, under Service accounts",
     }
 
     def __init__(self, subject_id: str, reason: str):
         self.subject_id, self.reason = subject_id, reason
         super().__init__(f"can't add {subject_id}: {self._MESSAGES[reason]}",
                          {"type": "ineligible_member", "subjectId": subject_id, "reason": reason})
+
+
+class ServiceAccountMember(IneligibleMember):
+    """A draft shared with a service account. 409, as sharing a view, a template or a team with
+    one answers."""
+
+    status_code = 409
+
+    def __init__(self, subject_id: str):
+        super().__init__(subject_id, "service_account")
 
 
 class HeadMoved(_HttpMapped, RuntimeError):
@@ -299,7 +322,7 @@ class VersionConflict(_HttpMapped, RuntimeError):
 
 
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
-               GroupsUnavailable, IneligibleMember, HeadMoved, LockBusy, JobActive, CurationAtRisk,
-               MassDeleteBlocked, ForkLimit, NotAFork, LiveForks, ForkNotRestorable, GraphMoved,
-               ProjectionNotAdopted, ProjectionKeyInUse, ProjectionKeyInvalid, PublishRequired,
-               GraphNotWritable, VersionConflict)
+               PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
+               LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
+               ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionKeyInUse,
+               ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict)

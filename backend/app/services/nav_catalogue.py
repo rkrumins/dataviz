@@ -87,7 +87,9 @@ _SIDEBAR: dict[str, tuple[str, NavSpec]] = {
     # guard runs first. `system:audit:read` was missing, so the org_auditor role
     # — built to read the activity log — was refused at `/admin` before its own
     # section was ever consulted.
-    "admin":      ("Administration", NavSpecAnyPerm(perms=["system:admin", "system:groups:manage", "system:audit:read"])),
+    "admin":      ("Administration", NavSpecAnyPerm(perms=[
+        "system:admin", "system:groups:manage", "system:audit:read", "system:service-accounts:manage",
+    ])),
 }
 
 # Admin sub-nav. Keyed by the route segment (matches
@@ -114,6 +116,8 @@ _ADMIN_SECTIONS: dict[str, tuple[str, NavSpec]] = {
     # Auditors see every key; revoking one also needs system:users:manage,
     # which the page asks for at the button, as the server does.
     "api-keys":      ("API keys",        NavSpecPerm(perm="system:audit:read")),
+    # Super and org admins: the people who look after integrations.
+    "service-accounts": ("Service accounts", NavSpecPerm(perm="system:service-accounts:manage")),
 }
 
 

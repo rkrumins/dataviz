@@ -31,6 +31,7 @@ import { CloseConfirm } from '../CloseConfirm'
 import { RevealPanel } from '../RevealPanel'
 import { StepUpField } from '../StepUpField'
 import type { ApiKeyDraft, WizardStep } from '../apiKeyDraft'
+import { useKeyAccount } from '../keyClient'
 import { STEPS, useApiKeyWizard } from './useApiKeyWizard'
 import { PermissionsStep } from './steps/PermissionsStep'
 import { PurposeStep } from './steps/PurposeStep'
@@ -47,6 +48,7 @@ export function ApiKeyWizard({ options, resumed, onClose, onCreated }: {
     onCreated: () => void
 }) {
     const w = useApiKeyWizard({ options, resumed })
+    const account = useKeyAccount()
     const modalRef = useRef<HTMLDivElement>(null)
     const [direction, setDirection] = useState(1)
     const [confirm, setConfirm] = useState<'discard' | 'unstored' | null>(null)
@@ -118,7 +120,9 @@ export function ApiKeyWizard({ options, resumed, onClose, onCreated }: {
                             </div>
                             <div className="min-w-0">
                                 <h2 id="api-key-wizard-title" className="text-lg sm:text-xl font-bold text-ink truncate">
-                                    {succeeded ? 'Your new key' : 'Create an API key'}
+                                    {account
+                                        ? (succeeded ? `New key for “${account.name}”` : `Create a key for “${account.name}”`)
+                                        : (succeeded ? 'Your new key' : 'Create an API key')}
                                 </h2>
                                 <p className="text-xs sm:text-sm text-ink-muted truncate">
                                     {succeeded

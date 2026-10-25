@@ -26,9 +26,12 @@ from backend.app.auth.dependencies import get_current_user, get_permission_claim
 from backend.app.db.engine import get_db_session
 from backend.app.db.repositories import (
     binding_repo, group_repo, grant_repo, idp_group_mapping_repo, user_repo,
+    service_account_repo,
 )
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.revocation_service import revoke_subject_sessions
+from backend.app.services import service_account_standing
+from backend.common.service_accounts import is_service_account
 from backend.auth_service.interface import User
 from backend.common.display_name import resolve_display_name
 from backend.common.models.rbac import (
@@ -107,6 +110,15 @@ def _member_response(member_orm, identity: dict | None) -> GroupMemberResponse:
         deleted=bool(identity.get("deleted")),
         avatar_id=identity.get("avatar_id"),
     )
+
+
+async def _restand_service_accounts(session: AsyncSession, group_id: str) -> list[str]:
+    """A team that manages service accounts answers for them through its
+    members: when they change, bring those accounts up to date now. Returns
+    those accounts."""
+    managed = await service_account_repo.accounts_managed_by_team(session, group_id)
+    await service_account_standing.refresh(session, managed)
+    return managed
 
 
 async def _require_super_admin_for_super_admin_group(
@@ -235,6 +247,10 @@ async def delete_group(
     deleted = await group_repo.soft_delete_group(session, group_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Group not found")
+    managed = await _restand_service_accounts(session, group_id)
+    await service_account_standing.tell_keys_outlive(
+        session, managed, team=group_id, actor_id=admin.id,
+    )
 
     # Tear down every binding the group held — orphaned bindings would
     # otherwise leak access to ex-members through the resolver.
@@ -322,11 +338,35 @@ async def add_member(
     user = await user_repo.get_user_by_id(session, body.user_id)
     if user is None:
         raise HTTPException(status_code=404, detail="User not found")
+    if is_service_account(body.user_id):
+        # A team's members may answer for service accounts and carry its
+        # roles; a service account holds only roles given to it directly.
+        raise HTTPException(status_code=409, detail="A service account can't join a team")
     await _require_super_admin_for_super_admin_group(session, group_id, claims)
+    # Whoever joins a team that manages service accounts can act as them:
+    # putting someone there is looking after those accounts.
+    managed = await service_account_repo.accounts_managed_by_team(session, group_id)
+    if managed and not has_permission(claims, "system:service-accounts:manage"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "This team manages service accounts, so whoever joins it can act as them. "
+                "Adding someone takes the permission to look after service accounts."
+            ),
+        )
 
     member = await group_repo.add_member(
         session, group_id, body.user_id, added_by=admin.id,
     )
+    await _restand_service_accounts(session, group_id)
+    if managed:
+        group = await group_repo.get_group_by_id(session, group_id)
+        joined = await user_repo.get_identities_by_ids(session, [body.user_id])
+        await service_account_standing.tell_team_grew(
+            session, managed, team=group.name if group else group_id, member_id=body.user_id,
+            member_name=(joined.get(body.user_id) or {}).get("name") or body.user_id,
+            actor_id=admin.id,
+        )
 
     # The user just inherited every binding this group holds. Their
     # current JWT was issued BEFORE the membership existed, so its
@@ -387,6 +427,10 @@ async def remove_member(
             status_code=404,
             detail="Membership not found",
         )
+    managed = await _restand_service_accounts(session, group_id)
+    await service_account_standing.tell_keys_outlive(
+        session, managed, person=user_id, actor_id=admin.id,
+    )
 
     # The user just lost every binding inherited from this group.
     # Revoke their sessions so the next request re-resolves from DB

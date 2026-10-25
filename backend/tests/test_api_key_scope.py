@@ -36,6 +36,7 @@ from backend.app.services.permission_service import (
     key_scope_from_profile,
     resolve_for_api_key,
 )
+from tests.common.api_key_world import publisher_role
 
 OWNER = "usr_keyowner"
 
@@ -246,6 +247,52 @@ async def test_a_key_records_where_its_owner_may_publish_data_sources(db_session
     claims = await _claims(db_session, data="write", resources={"workspaces": ["ws_a"]})
     assert claims.key_scope.owner_publishes("ws_a")
     assert claims.key_scope.owner_publishes("ws_created_tomorrow")
+
+
+async def test_a_service_accounts_key_writes_main_only_where_the_account_itself_publishes(
+    db_session,
+):
+    """An ``nxsat_`` key's owner is the service account: what decides ``require_publish_for_main``
+    is the account's own workspace roles, never a team's, a platform role's, nor its manager's."""
+    from backend.app.api.v1.versioning_gate import require_publish_for_main
+    from backend.app.db.models import GroupMemberORM, GroupORM
+    from backend.app.db.repositories import service_account_repo
+    from backend.app.services.versioning.errors import PublishRequired
+
+    await _world(db_session)
+    await publisher_role(db_session)
+    db_session.add(WorkspaceORM(id="ws_d", name="ws_d"))
+    account = await service_account_repo.create(
+        db_session, name="Nightly sync", description=None, created_by=OWNER)
+    await service_account_repo.add_manager(db_session, account, user_id=OWNER, added_by=OWNER)
+    db_session.add(GroupORM(id="grp_pub", name="Publishers"))
+    await db_session.flush()
+    db_session.add(GroupMemberORM(group_id="grp_pub", user_id=account))   # never a team's roles
+    for subject_type, subject, role, scope_type, ws in (
+        ("user", account, "workspace_publisher", "workspace", "ws_a"),
+        ("user", account, "workspace_member", "workspace", "ws_b"),
+        ("user", account, "workspace_admin", "workspace", "ws_c"),     # admin is never requestable
+        ("group", "grp_pub", "workspace_publisher", "workspace", "ws_d"),
+        ("user", account, "super_admin", "global", None),              # nor a platform role
+        ("user", OWNER, "workspace_publisher", "workspace", "ws_b"),   # its manager publishes here
+    ):
+        db_session.add(RoleBindingORM(subject_type=subject_type, subject_id=subject,
+                                      role_name=role, scope_type=scope_type, scope_id=ws))
+    await db_session.commit()
+
+    claims = await resolve_for_api_key(db_session, account, key_scope_from_profile(
+        "apk_svc", kind="service", permissions={"views": "none", "data": "write"},
+        resources="all"))
+    scope = claims.key_scope
+    assert scope.owner_publishes("ws_a")
+    assert not scope.owner_publishes_everywhere
+    assert {ws for ws in ("ws_a", "ws_b", "ws_c", "ws_d") if scope.owner_publishes(ws)} == {"ws_a"}
+    assert not any(has_permission(claims, "workspace:datasource:publish", workspace_id=ws)
+                   for ws in ("ws_a", "ws_b", "ws_c", "ws_d"))     # the key itself never holds it
+
+    require_publish_for_main(claims, "ws_a")
+    with pytest.raises(PublishRequired):
+        require_publish_for_main(claims, "ws_b")
 
 
 async def test_a_key_on_selected_resources_takes_no_shortcut_from_its_owner(db_session):

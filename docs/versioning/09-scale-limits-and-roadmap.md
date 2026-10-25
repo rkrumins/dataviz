@@ -140,7 +140,8 @@ and [13](13-access-and-review.md)):
 - **`main`.** Publish, merge, revert, restore, sync and `/graph/resync` need
   `workspace:datasource:publish` on top of manage (403 `missing_permission`). A person's direct write
   to a versioned graph's `main` (the graph routes with no draft, and bulk ingest) needs it too (403
-  `publish_required`); an API key may do that only if the person who owns it holds publish.
+  `publish_required`); an API key may do that only if its owner (a person, or the service account
+  for an `nxsat_` key) holds publish.
 - **Reviews.** Approvals are bound to the draft head the reviewer saw; the author and the draft's
   owner cannot approve.
 

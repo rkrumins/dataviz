@@ -80,8 +80,9 @@ a refusal; the branch list instead leaves out the drafts only a group would show
 private removes its members, and sharing it again starts from none; an edit someone left staged and
 may no longer make (removed, un-shared, out of the group) is withdrawn at the next checkpoint, so
 the owner never commits or publishes it. Adding a member checks that they exist and can work in the
-workspace (**422 `ineligible_member`**), and `GET …/members` now gives each member's `name` and your
-own `myRole`.
+workspace (**422 `ineligible_member`**; a service account can't be added or given another role:
+**409 `ineligible_member`**, reason `service_account`, as its access is the workspace roles on its
+own page), and `GET …/members` now gives each member's `name` and your own `myRole`.
 
 **A draft is read only by the people it is for:** its owner, workspace managers, members of a
 shared draft, and the author and requested reviewers of any pull request raised from it, merged
@@ -109,18 +110,22 @@ recorded is no longer counted as approved. The approval check now runs before th
 and a merge large enough to run as a job is refused with `approval_required` before it is queued,
 instead of closing the draft as publishing until the job fails. A PR's author and its draft's owner
 can't approve it: **403 `access_denied`** with code `self_review`, and the review does not offer
-them Approve.
+them Approve. Nor can anyone who manages the service account that opened the PR or owns its draft
+(`self_review` too), and a service account never approves (**403 `access_denied`**, code
+`person_required`).
 
 **Reviewers can be asked when a draft goes for review, and after.** "Submit for review" has a
-reviewer picker listing the workspace members who can approve (`GET …/versioning/reviewers`).
-`PATCH …/merge-requests/{pr}` and `PATCH …/pulls/{pr}` take `reviewers` and re-judge the approval.
-The review shows each reviewer as approved, stale (the new `staleApprovedBy`) or still to approve,
-and offers Approve to the requested reviewers only. The server also records an approval from
-another manager who is neither the author nor the draft's owner, but only requested reviewers'
-approvals count toward the merge. Approving a merged or closed review, or changing its reviewers,
-answers 404. Two reviewers approving at the same moment are both recorded; before, one approval
-could overwrite the other. An approval or edit of a review that another change holds past
-`GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` answers **503 `lock_busy`**.
+reviewer picker listing the workspace members who can approve (`GET …/versioning/reviewers`), never
+a service account. `PATCH …/merge-requests/{pr}` and `PATCH …/pulls/{pr}` take `reviewers` and
+re-judge the approval. Naming a service account as a reviewer, when raising a review or in either
+PATCH, answers **403 `access_denied`**, code `person_required`. The review shows each reviewer as
+approved, stale (the new `staleApprovedBy`) or still to approve, and offers Approve to the requested
+reviewers only. The server also records an approval from another manager (a person) who is neither
+the author nor the draft's owner, but only requested reviewers' approvals count toward the merge.
+Approving a merged or closed review, or changing its reviewers, answers 404. Two reviewers approving
+at the same moment are both recorded; before, one approval could overwrite the other. An approval or
+edit of a review that another change holds past `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` answers **503
+`lock_busy`**.
 
 **The idle-draft sweep leaves drafts that are still in use.** After `GRAPHVER_DRAFT_TTL_DAYS` idle,
 a draft is abandoned only if it has no open review, no staged edits waiting for a checkpoint, and
@@ -172,7 +177,7 @@ and the projector carries them to FalkorDB; until it has, reads come from Postgr
 ### Upgrading
 
 - Run the migrations this release adds, in this order (the first follows
-  `20261020_1000_ds_transfers`; the head is `20261018_1200_gv_lifecycle`):
+  `20261023_1200_service_accounts`; the head is `20261018_1200_gv_lifecycle`):
   `20261017_1000_datasource_publish` on the management tables (the `workspace:datasource:publish`
   permission and the `workspace_publisher` role), then on the `graphver` schema
   `20261017_1500_gv_ps_keys` (one graph per FalkorDB key: a trashed graph that does not own a
@@ -216,9 +221,11 @@ and the projector carries them to FalkorDB; until it has, reads come from Postgr
   `POST /graph/edges`, `PATCH`/`DELETE /graph/edges/{id}`, `/graph/commands/batch`, `/graph/save` —
   and `POST …/bulk-ingest` answer **403** `{type: "access_denied", code: "publish_required",
   required: "workspace:datasource:publish"}` and write nothing. Edit in a draft (pass its
-  `branchId`) and publish it or send it for review. An API key follows the person who owns it:
-  existing keys owned by people without publish lose these direct writes to `main` and get the same
-  403. Grant the owner `workspace_publisher`, or have the script write to a draft. Drafts, and data
+  `branchId`) and publish it or send it for review. An API key follows its owner — the person, or
+  for a service account's `nxsat_…` key the service account, through its own workspace roles:
+  existing keys whose owner lacks publish lose these direct writes to `main` and get the same 403.
+  Grant the owner `workspace_publisher` (a service account gets it on its page under
+  **Administration → Service accounts**), or have the script write to a draft. Drafts, and data
   sources without version control, are unaffected.
 - A draft's maintainers can no longer change `isShared` (403 `not_draft_owner`); only its owner can.
 - Making a draft private now removes its members. Member rows left on a private draft by an earlier
@@ -473,6 +480,96 @@ grants can't be read.
   `allowMassDelete`.
 - A fork in the trash keeps its FalkorDB key until it is purged, and the topology page shows that
   key as unregistered meanwhile, as it does for a data source in the trash.
+
+---
+
+## [Unreleased] — Service accounts: integrations that outlive the person who set them up
+
+### Added
+
+**Service accounts.** An account nobody signs in as, for an integration to run as. Super and org
+admins create one under **Administration → Service accounts**, name its managers — people, or
+teams — and give it workspace roles: any that neither administers a workspace nor lets people in.
+Its managers make, rotate and revoke its keys from **Account → API keys → Service accounts you
+manage**, confirming it's them as for their own keys. A key (`nxsat_…`) acts as the account,
+reaches what the account's roles give it, and counts against the account's own limit of 25. An
+integration swaps its `nxpat_…` key for one and changes nothing else.
+
+**What happens when a manager leaves.**
+- **Teams as managers.** A team, ideally one your identity provider keeps, keeps an account
+  managed as people join and leave. Anyone in it can make keys that act as the account, which
+  the page says where you choose one — so only an administrator of service accounts adds
+  someone to a team that manages one, and its managers are told when someone joins.
+- **Hand-over.** Suspending someone on **Administration → Users** lists every service account
+  their leaving touches — those they manage themselves or through a team, and those they made a
+  key for that still works — flags those nobody else manages and the keys they made, hands their
+  own seats to a successor, and offers to revoke the keys they made, before suspending them.
+  **Administration → Service accounts → Hand over…** hands over on its own. Whenever someone who
+  made keys that still work stops answering for an account, those who still answer are told.
+- **A safety net.** When an account's last manager in good standing goes — suspended, removed,
+  out of their team, or no longer signing in — every super and org admin is told at once. Its
+  keys keep working for a grace period (**Keep a service account's keys working after its last
+  manager goes**: at once, 7, 14 or 30 days; 14 by default), the admins are reminded three days
+  before it ends — again if the grace period is lengthened, and once that the keys have paused if
+  it is shortened past the day — and then the keys pause (`401 api_key_unmanaged`) until a
+  manager is appointed. More than five accounts at once make one notice, not one each.
+- **A single-manager marker** on every account one person is all it depends on.
+
+A new permission, `system:service-accounts:manage`, granted to super and org admins. Someone
+who may manage users (a super admin) can make an account's keys without managing it; its
+managers are told when they do. `POST /admin/users/{id}/api-keys/revoke-made` (with
+`system:users:manage`) revokes the service account keys a person made.
+
+A new counter, `api_key_housekeeping_steps_total{step,outcome}`, says whether each step of the
+hourly API key pass completed; [Observability](/docs/observability) has an alert for the service
+account check not completing.
+
+### Changed
+
+- A key's notices — misuse, expiry reminders, an administrator revoking it, a key revoking
+  itself — go to those who answer for a service account's key: its own managers and whoever made
+  the key while they still can act for it; failing those, up to 25 members of its managing teams,
+  the most recently active first; or its administrators while nobody can act for it. So does
+  anything said to the account itself — a workspace removing its access or setting an end date
+  on it, that access about to end, a decision on a publication it asked for, an administrator
+  disabling or enabling it — naming the account.
+- The API explorer's API key scheme names both kinds of key, `nxpat_…` and `nxsat_…`.
+- People lists, pickers, the directory, the admin user search, people counts, analytics and
+  inboxes leave service accounts out; the routes about a person answer `404` for one. Where
+  access is listed — a workspace's members, everyone with access, access reviews, the activity
+  log — one is marked as a service account and links to its page.
+
+### Security
+
+- A service account never signs in: every sign-in path refuses it, an identity provider can't
+  link to one, and it can't join a team or a workspace's members directly. It holds only the
+  workspace roles given it on its own page: never a platform role, a team's roles, or a role
+  that administers a workspace — not even one widened to after it was given — and no view,
+  template or draft can be shared with it. A view it made is its own only while it holds a role
+  in that view's workspace.
+- A service account neither reviews nor approves a pull request, and nobody approves one opened
+  through an account they manage.
+- Appointing a manager, or handing an account over, takes being able to grant each of its roles:
+  a manager can do whatever the account can.
+- A service account key whose account record is missing is refused.
+
+### Upgrading
+
+- The upgrade job adds the `service_accounts` and `service_account_managers` tables and the new
+  permission (`20261023_1200_service_accounts`). Nothing else to run.
+- Secret scanning: widen the pattern to `nx[ps]at_[0-9A-Za-z]{38}` to find service account keys
+  too.
+
+### Known limitations
+
+- Service accounts can't be deleted: disable one, and revoke its keys.
+- Its standing is re-checked when its managers change and once an hour, so a manager who signs
+  in again after their sign-in window lapsed brings its keys back within the hour. The account's
+  page says what its keys do in the meantime.
+- No warning before a manager's own standing lapses; the alert comes when the account has nobody
+  left.
+- Auditors see service accounts' keys in the API keys inventory and the activity log, but not
+  the accounts' own page.
 
 ---
 

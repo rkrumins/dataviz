@@ -616,8 +616,9 @@ route gate. A person's direct write to a versioned graph's `main` — the graph 
 (`/graph/save`, `/graph/nodes/create`, `/graph/edges`, `/graph/commands/batch`) and `POST …/bulk-ingest`
 — gets **403** `{type: "access_denied", code: "publish_required", required:
 "workspace:datasource:publish"}` (`require_publish_for_main`, `backend/app/api/v1/versioning_gate.py`).
-An API key never holds publish: it writes `main` directly only if the person who owns it holds publish,
-and cannot call the publish, merge, revert, restore or sync routes at all (403 `api_key_not_allowed`).
+An API key never holds publish: it writes `main` directly only if its owner (the person, or the service
+account for an `nxsat_` key) holds publish, and cannot call the publish, merge, revert, restore or sync
+routes at all (403 `api_key_not_allowed`).
 `workspace_publisher`, `workspace_data_engineer` and the admins hold publish; `workspace_member` does
 not.
 

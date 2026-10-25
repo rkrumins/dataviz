@@ -1,7 +1,7 @@
 """ACCESS R0 — seed ``workspace:datasource:publish`` and ``workspace_publisher``.
 
 Revision ID: 20261017_1000_datasource_publish
-Revises: 20261020_1000_ds_transfers
+Revises: 20261023_1200_service_accounts
 Create Date: 2026-10-17 10:00
 
 Advancing a versioned data source's Published version — publishing a
@@ -48,7 +48,7 @@ import sqlalchemy as sa
 
 
 revision: str = "20261017_1000_datasource_publish"
-down_revision: Union[str, None] = "20261020_1000_ds_transfers"
+down_revision: Union[str, None] = "20261023_1200_service_accounts"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

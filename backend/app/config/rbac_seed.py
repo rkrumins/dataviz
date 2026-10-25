@@ -80,6 +80,13 @@ PERMISSIONS: tuple[dict[str, str | None], ...] = (
         "examples": "[\"Open any workspace and see its data sources, ontology, and views.\", \"Drill into a provider's status without being able to edit it.\"]",
     },
     {
+        "id": "system:service-accounts:manage",
+        "category": "system",
+        "description": "Create service accounts, choose who manages them, and grant them workspace roles.",
+        "long_description": "Service accounts are principals that never sign in: an integration acts as one through API keys its managers make. This lets you create, rename, disable and enable them, appoint and remove their managers \u2014 people or teams \u2014 hand a leaver's accounts over to a successor, and give them workspace roles, never one that administers a workspace or lets people in. Deliberately SEPARATE from system:users:manage, so integrations can be looked after without administering people.",
+        "examples": "[\"Create a service account for a scheduled job and make its team its manager.\", \"Hand someone's service accounts over to a colleague before they leave.\"]",
+    },
+    {
         "id": "system:templates:manage",
         "category": "system",
         "description": "Curate the organization's layout templates and the built-in ones.",
@@ -277,6 +284,7 @@ ROLE_GRANTS: tuple[tuple[str, str], ...] = (
     ("org_admin", "workspace:view:publish"),
     ("org_admin", "workspace:view:read"),
     ("org_admin", "system:analytics:read"),
+    ("org_admin", "system:service-accounts:manage"),
     ("org_admin", "system:templates:manage"),
     ("org_auditor", "system:analytics:read"),
     ("org_auditor", "system:audit:read"),
@@ -289,6 +297,7 @@ ROLE_GRANTS: tuple[tuple[str, str], ...] = (
     ("super_admin", "system:groups:manage"),
     ("super_admin", "system:org-admin"),
     ("super_admin", "system:org-viewer"),
+    ("super_admin", "system:service-accounts:manage"),
     # super_admin only, deliberately. org_admin runs the platform; this
     # one decides where the platform may send requests, which is a
     # network decision rather than an administrative one.

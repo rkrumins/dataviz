@@ -1,7 +1,8 @@
 """Asking for reviewers: who can be asked, and asking after a PR is open.
 
 ``GET …/reviewers`` lists the workspace's members who could approve (approve needs manage), bound
-directly or through a group, and never the caller, who is the author of the PR they are raising.
+directly or through a group, and never the caller, who is the author of the PR they are raising,
+nor a service account, which never reviews.
 Both PR PATCH routes take ``reviewers`` and hand them to ``update_pr``; a PATCH that leaves them
 out leaves them alone.
 """
@@ -56,7 +57,8 @@ async def test_both_pr_patch_routes_take_reviewers(test_client, svc, route):
 
 async def test_reviewer_candidates_are_the_members_who_can_approve(test_client, db_session, fake_user):
     db_session.add(WorkspaceORM(id="ws1", name="One"))
-    for uid, first in (("u_carol", "Carol"), ("u_dave", "Dave"), ("u_vic", "Vic"), ("u_sus", "Sus")):
+    for uid, first in (("u_carol", "Carol"), ("u_dave", "Dave"), ("u_vic", "Vic"), ("u_sus", "Sus"),
+                       ("svc_0123456789ab", "Nightly sync")):
         db_session.add(UserORM(id=uid, email=f"{uid}@example.com", password_hash="x",
                                first_name=first, last_name="X",
                                status="suspended" if uid == "u_sus" else "active"))
@@ -68,6 +70,7 @@ async def test_reviewer_candidates_are_the_members_who_can_approve(test_client, 
         ("group", "grp_eng", "workspace_admin"),        # admin implies manage
         ("user", "u_vic", "workspace_viewer"),          # read only: cannot approve
         ("user", "u_sus", "workspace_member"),          # suspended account
+        ("user", "svc_0123456789ab", "workspace_member"),   # a service account never reviews
         ("user", fake_user.id, "workspace_member"),     # the caller: the author
     ):
         db_session.add(RoleBindingORM(subject_type=subject_type, subject_id=subject_id,

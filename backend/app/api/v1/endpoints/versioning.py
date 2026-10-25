@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.raw_path_route import RawPathSegmentRoute
 from backend.common.property_patch import InvalidPatch, normalize_update
+from backend.common.service_accounts import is_service_account
 from backend.app.services.versioning.entity_audit import (
     HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
@@ -46,7 +47,8 @@ from backend.app.api.v1.versioning_gate import (SyncOverrides, require_publish_f
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import data_source_repo, group_repo, provider_repo, user_repo
+from backend.app.db.repositories import (data_source_repo, group_repo, provider_repo,
+                                         service_account_repo, user_repo)
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
@@ -64,7 +66,8 @@ from backend.app.services.permission_service import PermissionClaims, has_permis
 from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
-from backend.app.services.versioning.errors import HTTP_MAPPED, DraftNotReadable, IneligibleMember
+from backend.app.services.versioning.errors import (HTTP_MAPPED, DraftNotReadable, IneligibleMember,
+                                                   ServiceAccountMember)
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
@@ -1606,6 +1609,9 @@ async def add_branch_member(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
+        # Adding a member and changing its role are this one route.
+        if body.subject_type == "user" and is_service_account(body.subject_id):
+            raise ServiceAccountMember(body.subject_id)     # before anything is read
         return await svc.add_branch_member(
             graph_id=graph_id, branch_id=branch_id, subject_type=body.subject_type,
             subject_id=body.subject_id, role=body.role, actor=user.id,
@@ -3587,6 +3593,18 @@ async def diff_pull_request_children(
             containment_edge_types=cset, limit=limit, offset=offset)
 
 
+async def _not_their_own(session: AsyncSession, pr: dict, approver_id: str) -> None:
+    """Nobody approves what they opened, or what their draft proposes, through a service account
+    they manage: the approval would be of their own work (``self_review``, as for an author)."""
+    for principal in dict.fromkeys((pr.get("actor"), pr.get("source_branch_owner"))):
+        if is_service_account(principal) and await service_account_repo.is_manager(
+                session, principal, approver_id):
+            raise HTTPException(status_code=403, detail={
+                "type": "access_denied", "code": "self_review", "prId": pr.get("pr_id"),
+                "message": "You manage the service account that opened this, so someone else approves it",
+            })
+
+
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
 async def approve_pull_request(
     ws_id: str, pr_id: str,
@@ -3594,7 +3612,9 @@ async def approve_pull_request(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # a manager approves
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    await _not_their_own(session, _pr, user.id)
     with _domain_errors():
         return await svc.approve_pr(pr_id=pr_id, actor=user.id,
                                     expected_head_commit_id=body.expected_head_commit_id if body else None)
@@ -3646,7 +3666,8 @@ async def list_reviewer_candidates(
 ):
     """Who the caller can ask to review: the workspace's active members, bound directly or
     through a group, whose role here grants manage (approve needs it; workspace admin implies
-    it). Never the caller: they are the PR's author, and an author cannot approve."""
+    it). Never the caller: they are the PR's author, and an author cannot approve. Nor a service
+    account, which never reviews."""
     from backend.app.db.repositories import binding_repo, group_repo, permission_repo, user_repo
     bindings = await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id)
     role_perms = await permission_repo.get_role_permissions_for_roles(
@@ -3662,7 +3683,8 @@ async def list_reviewer_candidates(
     ids.discard(user.id)
     idents = await user_repo.get_identities_by_ids(session, sorted(ids))
     people = [{"user_id": uid, "display_name": i["name"] or None, "email": i["email"]}
-              for uid, i in idents.items() if i["status"] == "active" and not i["deleted"]]
+              for uid, i in idents.items()
+              if i["status"] == "active" and not i["deleted"] and not is_service_account(uid)]
     return sorted(people, key=lambda p: (p["display_name"] or p["user_id"]).lower())
 
 
@@ -3855,7 +3877,9 @@ async def approve_merge_request(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    await _not_their_own(session, _pr, user.id)
     with _domain_errors():
         return await svc.approve_pr(pr_id=pr_id, actor=user.id,
                                     expected_head_commit_id=body.expected_head_commit_id if body else None)

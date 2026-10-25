@@ -318,9 +318,9 @@ and background projection keeps running. The frontend reads the flag from the pu
   `workspace:datasource:publish`, or answers **403** `missing_permission`. So does
   a person's direct write to a versioned graph's `main` through the graph routes
   with no draft named, and bulk ingest: **403** `publish_required`. An API key
-  writes `main` directly only if the person who owns it holds publish, and cannot
-  call the publish, merge, revert, restore or sync routes at all (**403**
-  `api_key_not_allowed`). `workspace_publisher`, `workspace_data_engineer` and the
+  writes `main` directly only if its owner (a person, or a service account)
+  holds publish, and cannot call the publish, merge, revert, restore or sync
+  routes at all (**403** `api_key_not_allowed`). `workspace_publisher`, `workspace_data_engineer` and the
   admins hold publish; `workspace_member` does not. Admin's `system:admin`
   implies all.
 - **Drafts**: a private draft is written only by its owner (**403**

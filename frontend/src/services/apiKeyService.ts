@@ -1,5 +1,6 @@
 /**
- * API keys — your own (Account → API keys), and everyone's (Administration).
+ * API keys — your own (Account → API keys), a service account's you manage,
+ * and everyone's (Administration).
  *
  * Minting a key (create, rotate) can be refused for a reason the page acts
  * on rather than shows: the session has to prove it is really you first
@@ -309,56 +310,74 @@ function noteBody(note?: string): string {
     return JSON.stringify(note?.trim() ? { note: note.trim() } : {})
 }
 
+/**
+ * The calls about one owner's keys, under `base`: your own (`apiKeyService`),
+ * or a service account's you manage (`serviceAccountKeys`) — the same routes,
+ * answering the same way. Whoever mints confirms it is them either way.
+ */
+export function keyClient(base: string) {
+    return {
+        options(): Promise<ApiKeyOptions> {
+            return call(`${base}/options`)
+        },
+
+        /** Live keys and those ended in the last 90 days; `all` for every one. */
+        list(history?: 'all'): Promise<ApiKey[]> {
+            return call(history ? `${base}?history=all` : base)
+        },
+
+        get(id: string, signal?: AbortSignal): Promise<ApiKeyDetail> {
+            return call(`${base}/${encodeURIComponent(id)}`, { signal })
+        },
+
+        /** When and from where the key was last used, and nothing else: one read. */
+        lastUse(id: string, signal?: AbortSignal): Promise<ApiKeyLastUse> {
+            return call(`${base}/${encodeURIComponent(id)}/last-use`, { signal })
+        },
+
+        searchResources(
+            type: 'view' | 'data_source', q: string, workspaceId?: string,
+        ): Promise<PickerItem[]> {
+            const params = new URLSearchParams({ type, limit: '20' })
+            if (q.trim()) params.set('q', q.trim())
+            if (workspaceId) params.set('workspaceId', workspaceId)
+            return call(`${base}/resources?${params}`)
+        },
+
+        create(body: CreateApiKeyBody): Promise<CreatedApiKey> {
+            return call(base, { method: 'POST', body: JSON.stringify(body) })
+        },
+
+        preview(body: PreviewApiKeyBody, signal?: AbortSignal): Promise<ApiKeyPreview> {
+            return call(`${base}/preview`, { method: 'POST', body: JSON.stringify(body), signal })
+        },
+
+        /** Name and description only: what a key may do is fixed when it is made. */
+        update(id: string, body: UpdateApiKeyBody): Promise<ApiKey> {
+            return call(`${base}/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) })
+        },
+
+        rotate(id: string, body: RotateApiKeyBody): Promise<CreatedApiKey> {
+            return call(`${base}/${encodeURIComponent(id)}/rotate`, {
+                method: 'POST', body: JSON.stringify(body),
+            })
+        },
+
+        revoke(id: string): Promise<void> {
+            return call(`${base}/${encodeURIComponent(id)}`, { method: 'DELETE' })
+        },
+    }
+}
+
+export type KeyClient = ReturnType<typeof keyClient>
+
+/** A service account's keys, for one of its managers. */
+export function serviceAccountKeys(accountId: string): KeyClient {
+    return keyClient(`/api/v1/me/service-accounts/${encodeURIComponent(accountId)}/api-keys`)
+}
+
 export const apiKeyService = {
-    options(): Promise<ApiKeyOptions> {
-        return call(`${MINE}/options`)
-    },
-
-    /** Live keys and those ended in the last 90 days; `all` for every one. */
-    list(history?: 'all'): Promise<ApiKey[]> {
-        return call(history ? `${MINE}?history=all` : MINE)
-    },
-
-    get(id: string, signal?: AbortSignal): Promise<ApiKeyDetail> {
-        return call(`${MINE}/${encodeURIComponent(id)}`, { signal })
-    },
-
-    /** When and from where the key was last used, and nothing else: one read. */
-    lastUse(id: string, signal?: AbortSignal): Promise<ApiKeyLastUse> {
-        return call(`${MINE}/${encodeURIComponent(id)}/last-use`, { signal })
-    },
-
-    searchResources(
-        type: 'view' | 'data_source', q: string, workspaceId?: string,
-    ): Promise<PickerItem[]> {
-        const params = new URLSearchParams({ type, limit: '20' })
-        if (q.trim()) params.set('q', q.trim())
-        if (workspaceId) params.set('workspaceId', workspaceId)
-        return call(`${MINE}/resources?${params}`)
-    },
-
-    create(body: CreateApiKeyBody): Promise<CreatedApiKey> {
-        return call(MINE, { method: 'POST', body: JSON.stringify(body) })
-    },
-
-    preview(body: PreviewApiKeyBody, signal?: AbortSignal): Promise<ApiKeyPreview> {
-        return call(`${MINE}/preview`, { method: 'POST', body: JSON.stringify(body), signal })
-    },
-
-    /** Name and description only: what a key may do is fixed when it is made. */
-    update(id: string, body: UpdateApiKeyBody): Promise<ApiKey> {
-        return call(`${MINE}/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(body) })
-    },
-
-    rotate(id: string, body: RotateApiKeyBody): Promise<CreatedApiKey> {
-        return call(`${MINE}/${encodeURIComponent(id)}/rotate`, {
-            method: 'POST', body: JSON.stringify(body),
-        })
-    },
-
-    revoke(id: string): Promise<void> {
-        return call(`${MINE}/${encodeURIComponent(id)}`, { method: 'DELETE' })
-    },
+    ...keyClient(MINE),
 
     adminList(params: AdminKeyFilters & { limit?: number; offset?: number }): Promise<{ items: AdminApiKey[]; total: number }> {
         return call(`${ADMIN}?${query(params)}`)
@@ -379,6 +398,13 @@ export const apiKeyService = {
 
     adminRevokeAll(userId: string, note?: string): Promise<{ revoked: number }> {
         return call(`/api/v1/admin/users/${encodeURIComponent(userId)}/api-keys/revoke-all`, {
+            method: 'POST', body: noteBody(note),
+        })
+    },
+
+    /** The keys a person made for service accounts that still work. */
+    adminRevokeMade(userId: string, note?: string): Promise<{ revoked: number }> {
+        return call(`/api/v1/admin/users/${encodeURIComponent(userId)}/api-keys/revoke-made`, {
             method: 'POST', body: noteBody(note),
         })
     },

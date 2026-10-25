@@ -14,7 +14,8 @@ Within that:
   seeds a permission and a role; ``20261019_1600_access_life`` adds nullable
   columns and a constant default, swaps a CHECK and creates two empty
   tables; ``20261020_1000_ds_transfers`` adds an empty table with its indexes
-  and swaps ``view_activity_log``'s action CHECK), since on a database
+  and swaps ``view_activity_log``'s action CHECK; ``20261023_1200_service_accounts``
+  creates two empty tables and seeds a permission), since on a database
   upgrading through them the lock is also held while they run;
 * a revision that locks a table other requests use bounds how long it waits
   for that lock (``lock_timeout``), so a long-running reader makes the
@@ -43,6 +44,7 @@ _THEN = "20261018_1300_tpl_lifecycle"
 _THIRD = "20261019_1000_ws_access"
 _FOURTH = "20261019_1600_access_life"
 _FIFTH = "20261020_1000_ds_transfers"
+_SIXTH = "20261023_1200_service_accounts"
 #: Every revision that locks a table other requests use, and in which
 #: direction: ``users`` for the key's foreign key, ``user_identities``, and
 #: the ledger.
@@ -56,6 +58,7 @@ _ON_LIVE_TABLES = {
     f"{_THIRD}.py": ("upgrade", "downgrade"),
     f"{_FOURTH}.py": ("upgrade", "downgrade"),
     f"{_FIFTH}.py": ("upgrade", "downgrade"),
+    f"{_SIXTH}.py": ("upgrade", "downgrade"),
     # graphver.projection_state, which every projection pass writes.
     "20261017_1500_gv_ps_keys.py": ("upgrade", "downgrade"),
     "20261017_1550_gv_ps_fencing.py": ("upgrade", "downgrade"),
@@ -172,6 +175,7 @@ def test_the_chain_ends_at_the_ledger_revision():
     assert scripts.get_revision(_THIRD).down_revision == _THEN
     assert scripts.get_revision(_FOURTH).down_revision == _THIRD
     assert scripts.get_revision(_FIFTH).down_revision == _FOURTH
+    assert scripts.get_revision(_SIXTH).down_revision == _FIFTH
 
 
 @pytest.mark.parametrize("name", sorted(_ON_LIVE_TABLES))

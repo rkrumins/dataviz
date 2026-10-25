@@ -9,6 +9,7 @@
 import type { ApiKeyPermissions, Level, WorkspaceAccess } from '@/services/apiKeyService'
 import { RANK, fitExpiry, type ExpiryChoice } from './apiKeyFormat'
 import type { ApiKeyDraft, ResourceMode } from './apiKeyDraft'
+import { ownerWords, type OwnerWords } from './keyClient'
 
 export type PresetId = 'reporting' | 'loading' | 'publishing' | 'custom'
 
@@ -72,15 +73,16 @@ const CANNOT: Record<'views' | 'data', Record<Exclude<Level, 'none'>, string>> =
 }
 
 /**
- * Whether you can make this kind of key, and if not why. One workspace has to
- * give everything the preset asks for, because that is where its key works.
+ * Whether the keys' owner — you, or a service account — can have this kind of
+ * key, and if not why. One workspace has to give everything the preset asks
+ * for, because that is where its key works.
  */
 export function presetAvailability(
-    preset: Preset, workspaces: WorkspaceAccess[],
+    preset: Preset, workspaces: WorkspaceAccess[], owner: OwnerWords = ownerWords(null),
 ): { available: true; reason: null } | { available: false; reason: string } {
     if (preset.id === 'custom') return { available: true, reason: null }
     if (workspaces.length === 0) {
-        return { available: false, reason: 'You are not a member of any workspace yet.' }
+        return { available: false, reason: `${owner.subject} ${owner.is} not a member of any workspace yet.` }
     }
     const p = preset.permissions
     const fits = (w: WorkspaceAccess) => RANK[w.views] >= RANK[p.views]
@@ -89,15 +91,15 @@ export function presetAvailability(
     if (workspaces.some(fits)) return { available: true, reason: null }
 
     if (p.publish && !workspaces.some((w) => w.publish)) {
-        return { available: false, reason: 'You cannot publish views in any workspace.' }
+        return { available: false, reason: `${owner.subject} cannot publish views in any workspace.` }
     }
     for (const kind of ['views', 'data'] as const) {
         const level = p[kind]
         if (level !== 'none' && !workspaces.some((w) => RANK[w[kind]] >= RANK[level])) {
-            return { available: false, reason: `You cannot ${CANNOT[kind][level]} in any workspace.` }
+            return { available: false, reason: `${owner.subject} cannot ${CANNOT[kind][level]} in any workspace.` }
         }
     }
-    return { available: false, reason: 'No one workspace gives you everything this needs.' }
+    return { available: false, reason: `No one workspace gives ${owner.object} everything this needs.` }
 }
 
 /** What choosing a preset sets: its access, its reach and its lifetime. */

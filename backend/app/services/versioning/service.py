@@ -42,12 +42,14 @@ from sqlalchemy.orm import aliased
 from . import config, db, keymigrate
 from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_states
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
+from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
 from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, DraftNotReadable,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
-                     MainWriteForbidden, MassDeleteBlocked, NotAFork, NotDraftOwner, ProjectionKeyInUse,
-                     ProjectionKeyInvalid, ProjectionNotAdopted, SelfReview, VersionConflict)
+                     MainWriteForbidden, MassDeleteBlocked, NotAFork, NotDraftOwner, PersonRequired,
+                     ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted, SelfReview,
+                     VersionConflict)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -2222,7 +2224,10 @@ class GraphVersioningService:
         recording the current mergeability/conflict set (plan §12.5).
 
         ``reviewers`` makes approval a merge precondition: every listed reviewer
-        must :meth:`approve_pr` before the PR can merge (plan §17 #5)."""
+        must :meth:`approve_pr` before the PR can merge (plan §17 #5). A service account is never
+        a reviewer (:class:`PersonRequired`)."""
+        if any(is_service_account(r) for r in reviewers or ()):
+            raise PersonRequired("a service account cannot review a PR: name a person")
         async with self._session() as s:
             # FOR KEY SHARE (15 §8): a delete_fork holding the row sees this PR, or we see its
             # tombstone; the fork's own publishes do not wait.
@@ -2345,7 +2350,10 @@ class GraphVersioningService:
         branch has moved on since.
 
         The PR row is locked for the transaction, so a second reviewer approving at the same
-        moment waits and adds to this approval rather than writing over it."""
+        moment waits and adds to this approval rather than writing over it. A service account
+        never approves (:class:`PersonRequired`): its managers would approve through it."""
+        if is_service_account(actor):
+            raise PersonRequired("a service account cannot approve a PR: approving is a person's call")
         async with self._session() as s:
             pr = await self._lock_pr(s, pr_id)
             if pr is None:
@@ -2408,7 +2416,10 @@ class GraphVersioningService:
         """Edit a PR's human title + description, and who must review it. PATCH semantics: a
         field left ``None`` is untouched, an empty string (or list) clears it. New ``reviewers``
         re-judge ``approval_status`` from the approvals that still stand (:meth:`_approvals`);
-        a merged or closed PR's reviewers are settled."""
+        a merged or closed PR's reviewers are settled. A service account is never a reviewer
+        (:class:`PersonRequired`)."""
+        if any(is_service_account(r) for r in reviewers or ()):
+            raise PersonRequired("a service account cannot review a PR: name a person")
         async with self._session() as s:
             pr = await self._lock_pr(s, pr_id)
             if pr is None:
@@ -2646,7 +2657,10 @@ class GraphVersioningService:
         """Open a merge request from a per-user ``draft`` back to its own graph's
         ``main`` — the reviewed alternative to a bare :meth:`publish`. Records the
         current mergeability/conflict set + the ``title``/``description``;
-        ``reviewers`` makes approval a merge precondition (plan §17 #5)."""
+        ``reviewers`` makes approval a merge precondition (plan §17 #5). A service account is
+        never a reviewer (:class:`PersonRequired`)."""
+        if any(is_service_account(r) for r in reviewers or ()):
+            raise PersonRequired("a service account cannot review a PR: name a person")
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             draft = await s.get(BranchORM, branch_id)

@@ -308,12 +308,13 @@ def document(schema: dict, app) -> dict:
     schema.setdefault("components", {}).setdefault("securitySchemes", {})[SECURITY_SCHEME] = {
         "type": "http",
         "scheme": "bearer",
-        "bearerFormat": "nxpat_…",
+        "bearerFormat": "nxpat_… or nxsat_…",
         "description": (
-            "An API key created under Account → API keys, sent as "
-            "`Authorization: Bearer nxpat_…`. It acts as the person who created "
-            "it, limited to what the key allows. Only the operations marked "
-            "with this scheme accept one."
+            "An API key, sent as `Authorization: Bearer nxpat_…` — made under "
+            "Account → API keys — or `Bearer nxsat_…`, a service account's, made "
+            "by its managers. It acts as the person or service account it "
+            "belongs to, limited to what the key allows. Only the operations "
+            "marked with this scheme accept one."
         ),
     }
     paths = schema.get("paths", {})

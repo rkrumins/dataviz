@@ -76,6 +76,22 @@ describe('the inventory', () => {
         expect(lastList()).toMatchObject({ status: 'active', offset: 0, sort: 'created', order: 'desc' })
     })
 
+    it('marks a service account’s key, whose owner is no person', async () => {
+        svc.adminList.mockResolvedValue({
+            items: [KEY, adminKey({
+                id: 'apk_s', name: 'metadata sync', kind: 'service', prefix: 'nxsat_AbCdEfGh',
+                owner: { id: 'svc_sync', email: 'svc_sync@service-account.invalid', displayName: 'Metadata sync', avatarId: null, hasImage: false, deleted: false },
+            })],
+            total: 2,
+        })
+        renderPage()
+        const service = (await screen.findByRole('button', { name: 'metadata sync' })).closest('tr')!
+        expect(within(service).getByText('Service account')).toBeInTheDocument()
+        expect(within(service).queryByText('svc_sync@service-account.invalid')).not.toBeInTheDocument()
+        const person = screen.getByRole('button', { name: 'etl' }).closest('tr')!
+        expect(within(person).queryByText('Service account')).not.toBeInTheDocument()
+    })
+
     it('counts each status on its tab, from the stats', async () => {
         renderPage()
         const tabs = await screen.findByRole('tablist', { name: 'Status' })

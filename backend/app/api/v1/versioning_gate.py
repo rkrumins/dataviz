@@ -115,7 +115,8 @@ async def require_branch_scope(session: AsyncSession, svc, view: ViewORM, branch
 def require_publish_for_main(claims: PermissionClaims, ws_id: str) -> None:
     """403 ``publish_required`` when a person without ``workspace:datasource:publish`` writes a
     versioned graph's main directly: the graph routes with no draft, and bulk ingest. No API key can
-    hold publish, so a key passes only where the person who owns it holds it (``KeyScope``); an
+    hold publish, so a key passes only where the person or service account it belongs to holds it
+    (``KeyScope``; a service account's own workspace roles); an
     owner whose grants could not be read never got the key's claims (503 at authentication). A
     denial decided against a workspace map nothing could supply is a 503, as in ``requires()``."""
     key = claims.key_scope

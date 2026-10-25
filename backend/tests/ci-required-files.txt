@@ -220,6 +220,9 @@ tests/test_search_semantics.py
 tests/test_search_values.py
 tests/test_seed_memory.py
 tests/test_seed_templates.py
+tests/test_service_account_keys.py
+tests/test_service_account_lifecycle.py
+tests/test_service_accounts_api.py
 tests/test_shard_capacity.py
 tests/test_source_changed_signal.py
 tests/test_squash_plan_unit.py
@@ -264,6 +267,7 @@ tests/test_versioning_raw_path_route.py
 tests/test_versioning_read_only_queries.py
 tests/test_versioning_rollup_canonical.py
 tests/test_versioning_schema.py
+tests/test_versioning_service_accounts.py
 tests/test_versioning_single_writer.py
 tests/test_versioning_trashed_graph.py
 tests/test_view_avatar_ids.py

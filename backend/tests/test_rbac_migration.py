@@ -14,6 +14,7 @@ this layer; these tests are the cheapest possible canary for it.
 from __future__ import annotations
 
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -42,6 +43,9 @@ _TEMPLATES_MIGRATION_PATH = _VERSIONS_DIR / "20261018_1200_layout_templates.py"
 # Workspace access added workspace:members:add and the Workspace steward role
 # — answering access requests and adding people as viewers or members.
 _WS_ACCESS_MIGRATION_PATH = _VERSIONS_DIR / "20261019_1000_ws_access.py"
+# Service accounts added system:service-accounts:manage — creating them,
+# choosing their managers and granting their workspace roles.
+_SERVICE_ACCOUNTS_MIGRATION_PATH = _VERSIONS_DIR / "20261023_1200_service_accounts.py"
 
 
 def _load_migration(path: Path, name: str):
@@ -225,7 +229,7 @@ def test_datasource_publish_seed_convergence():
         _DATASOURCE_PUBLISH_MIGRATION_PATH, "_ds_publish_migration"
     )
     assert (mod.revision, mod.down_revision) == (
-        "20261017_1000_datasource_publish", "20261020_1000_ds_transfers",
+        "20261017_1000_datasource_publish", "20261023_1200_service_accounts",
     )
 
     # Permission row: the same text in both paths.
@@ -467,6 +471,33 @@ def test_members_add_permission_and_steward_reach_an_existing_database():
     member = SYSTEM_ROLE_DEFAULTS["workspace_member"].permissions
     assert SYSTEM_ROLE_DEFAULTS[role].permissions == member | {perm}
     assert perm in _WORKSPACE_CATEGORY_LEAVES
+
+
+def test_service_accounts_permission_reaches_an_existing_database():
+    """``system:service-accounts:manage`` is seeded by the migration AND
+    ``rbac_seed``, with the same text and grants, and "Reset to default"
+    restores it: fresh installs and migrated databases must agree on who looks
+    after service accounts. ``org_admin`` needs its row: ``system:org-admin``
+    passes workspace checks only, never a system one."""
+    from backend.app.config import rbac_seed
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+
+    perm = "system:service-accounts:manage"
+    assert _SERVICE_ACCOUNTS_MIGRATION_PATH.exists()
+    mod = _load_migration(_SERVICE_ACCOUNTS_MIGRATION_PATH, "_service_accounts_migration")
+    assert mod._PERMISSION == perm
+
+    seed_perm = next(p for p in rbac_seed.PERMISSIONS if p["id"] == perm)
+    assert seed_perm["category"] == "system"
+    assert (seed_perm["description"], seed_perm["long_description"]) == (
+        mod._DESCRIPTION, mod._LONG_DESCRIPTION,
+    )
+    assert json.loads(seed_perm["examples"]) == mod._EXAMPLES
+    migration_grants = set(mod._ROLE_PERMISSIONS)
+    assert migration_grants == {("org_admin", perm), ("super_admin", perm)}
+    assert {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm} == migration_grants
+    for role, _ in migration_grants:
+        assert perm in SYSTEM_ROLE_DEFAULTS[role].permissions, role
 
 
 def test_the_analytics_permission_is_offered_to_the_client():

@@ -7,6 +7,7 @@
  * list to hunt through.
  */
 import { jobHistoryPath } from '@/components/admin/job-history/shared'
+import { serviceAccountHref } from '@/lib/serviceAccounts'
 import type { ActivityEvent } from '@/services/activityService'
 
 export interface ActivityLink {
@@ -16,8 +17,9 @@ export interface ActivityLink {
 }
 
 /** A person's own access drawer on the user list — defined beside the chip
- *  that draws people, so every surface links a person the same way. */
-export { personHref } from '@/components/ui/PersonChip'
+ *  that draws people, so every surface links a person the same way; and
+ *  `accountHref`, which sends a service account to its own page instead. */
+export { accountHref, personHref } from '@/components/ui/PersonChip'
 
 const text = (value: unknown): string | null =>
     typeof value === 'string' && value ? value : null
@@ -56,6 +58,9 @@ export function activityLinks(event: ActivityEvent): ActivityLink[] {
             label: 'Open the group',
             href: `/admin/groups?group=${encodeURIComponent(target.id)}`,
         })
+    }
+    if (target.type === 'service_account' && target.id) {
+        links.push({ key: 'service-account', label: 'Open the service account', href: serviceAccountHref(target.id) })
     }
     if (target.type === 'view' && target.id) {
         links.push({ key: 'view', label: 'Open the view', href: `/views/${encodeURIComponent(target.id)}` })

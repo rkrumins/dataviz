@@ -25,8 +25,11 @@ from backend.app.db.engine import (
 )
 from backend.app.db.models import (
     IdpProviderReachabilityORM,
+    PermissionORM,
     ProviderORM,
     RoleBindingORM,
+    RoleORM,
+    RolePermissionORM,
     UserORM,
     ViewORM,
     WorkspaceDataSourceORM,
@@ -98,6 +101,18 @@ async def world(session) -> None:
         subject_type="user", subject_id=OWNER, role_name="editor",
     )
     await session.commit()
+
+
+async def publisher_role(session) -> None:
+    """Publisher as the seed defines it: the test catalogue predates it."""
+    session.add(PermissionORM(id="workspace:datasource:publish", description="", category="workspace"))
+    session.add(RoleORM(name="workspace_publisher", description="", scope_type="global",
+                        scope_id=None, is_system=True,
+                        created_at="2026-01-01", updated_at="2026-01-01"))
+    await session.flush()
+    for permission in ("workspace:datasource:read", "workspace:datasource:manage",
+                       "workspace:datasource:publish"):
+        session.add(RolePermissionORM(role_name="workspace_publisher", permission_id=permission))
 
 
 @dataclass(frozen=True)
