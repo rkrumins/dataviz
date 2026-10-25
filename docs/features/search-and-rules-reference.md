@@ -705,11 +705,6 @@ curl -s -b "$JAR" -o pii.csv \
 - **No data-source, workspace or organisation library.** Display rules and saved
   queries belong to one View. "Publish to a data source" is the fan-out above;
   there is no bulk endpoint, and a View created later doesn't inherit anything.
-- **No service accounts.** A script's API key acts as the person who made it,
-  and stops working when they leave.
-- **The publish script signs in with a password** (`publish_view_library.py`
-  takes no API key). Where password sign-in is off for single sign-on, only
-  system accounts can run it; use the endpoints with a key instead.
 - **Saved queries keep only the predicate** — not the scope mode, options,
   aggregations, sort or template inputs.
 - **"Mine" searches stay in one browser**: no API, no sync, not in any export.
