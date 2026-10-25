@@ -313,7 +313,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/NAVIGATING_LAYERS.md"
   },
   "requesting-access": {
-    "updated": "2026-10-19",
+    "updated": "2026-10-25",
     "path": "docs/guide/REQUESTING_ACCESS.md"
   },
   "creating-views": {
@@ -357,7 +357,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/ADMIN_SETUP.md"
   },
   "workspace-admin": {
-    "updated": "2026-10-24",
+    "updated": "2026-10-25",
     "path": "docs/guide/WORKSPACE_ADMIN.md"
   },
   "users-access": {
