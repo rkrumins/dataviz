@@ -12,6 +12,7 @@ import {
     Boxes,
     Cable,
     CircleOff,
+    Columns3,
     Crosshair,
     Equal,
     Flag,
@@ -207,6 +208,17 @@ export const FILTER_CATEGORIES: readonly FilterCategory[] = [
                     kind: 'descendantOf', urns: [],
                     uiScope: 'roots',
                 } as Predicate),
+            },
+            {
+                id: 'in-layer',
+                icon: Columns3, tone: 'structure',
+                label: 'In layer…',
+                description:
+                    'In one of this view\'s layers, the way the canvas places '
+                    + 'it: by hand, by the layer\'s rules, or with its container.',
+                countKey: 'layers',
+                action: 'emit',
+                build: () => ({ kind: 'layer', layerAssignment: '' }),
             },
             {
                 id: 'inside-subtree',

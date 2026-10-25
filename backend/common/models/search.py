@@ -33,7 +33,7 @@ Design notes
 """
 from typing import Annotated, Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from ..search_semantics import KEY_OPERATORS
 from .graph import GraphNode
@@ -386,9 +386,15 @@ class EntityTypePredicate(_Base):
 
 
 class LayerPredicate(_Base):
-    """Match the view's layer assignment (Source / Staging / Refinery / …)."""
+    """In one of the view's layers (Source / Staging / Refinery / …), as the
+    shared placement rule places entities there (the canvas's own with
+    ``placementContractEnabled`` on). ``layerAssignment`` names the layer by
+    id or by name; one the view doesn't have matches the stamp entities carry."""
     kind: Literal["layer"] = "layer"
     layer_assignment: str = Field(alias="layerAssignment", min_length=1)
+    #: Set by the search service, never sent: the view's placement and the
+    #: layer this names (``view_placement.LayerTarget``).
+    _placement: Any = PrivateAttr(default=None)
 
 
 # ---------------------------------------------------------------------------

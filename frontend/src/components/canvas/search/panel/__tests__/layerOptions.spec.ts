@@ -1,7 +1,8 @@
 /**
  * What the search offers from a view's own data: the entity types it holds
  * (most common first — "Everything of type …" always returns something) and
- * the layers a layer filter can match (``layerAssignment`` only).
+ * the layers a layer filter can name — the view's own, by name, in board
+ * order; the stamps entities carry where the view has none.
  */
 import { describe, expect, it } from 'vitest'
 
@@ -24,19 +25,30 @@ describe('entityTypesInView', () => {
 
 
 describe('layerOptions', () => {
-    const view = [{ id: 'layer-gold', name: 'Gold' }, { id: 'layer-raw', name: 'Raw' }]
+    const view = [{ id: 'layer-raw', name: 'Raw', order: 1 }, { id: 'layer-gold', name: 'Gold', order: 2 },
+                  { id: 'layer-src', name: ' Sources ', order: 0 }]
 
     const samples = (byKey: Record<string, unknown[]>) => (key: string) => byKey[key] ?? []
 
-    it("names the layers entities are assigned to from the view's layers", () => {
-        const got = layerOptions(view, samples({ layerAssignment: ['layer-raw', 'layer-gold', '', 'layer-raw'] }))
-        expect(got).toEqual([{ value: 'layer-gold', label: 'Gold' }, { value: 'layer-raw', label: 'Raw' }])
+    it("offers the view's layers by name, in board order, whatever entities are stamped with", () => {
+        const got = layerOptions(view, samples({ layerAssignment: ['layer-raw', 'bronze'] }))
+        expect(got).toEqual([{ value: 'Sources', label: 'Sources' }, { value: 'Raw', label: 'Raw' },
+                             { value: 'Gold', label: 'Gold' }])
+    })
+
+    it('offers a name two layers share by id, so a pick never names two', () => {
+        const got = layerOptions([{ id: 'a', name: 'Staging' }, { id: 'b', name: 'staging' }, { id: 'c' }],
+                                 samples({}))
+        expect(got).toEqual([{ value: 'a', label: 'Staging (a)' }, { value: 'b', label: 'staging (b)' },
+                             { value: 'c', label: 'c' }])
+    })
+
+    it('offers the stamps entities carry where the view has no layers', () => {
+        const got = layerOptions([], samples({ layerAssignment: ['layer-raw', 'layer-gold', '', 'layer-raw'] }))
+        expect(got).toEqual([{ value: 'layer-gold', label: 'layer-gold' }, { value: 'layer-raw', label: 'layer-raw' }])
     })
 
     it("never offers a user property that happens to be called 'layer'", () => {
-        // The layer filter matches layerAssignment alone: "In the gold layer"
-        // here would match nothing.
-        const got = layerOptions(view, samples({ layer: ['gold', 'silver'] }))
-        expect(got).toEqual([{ value: 'layer-gold', label: 'Gold' }, { value: 'layer-raw', label: 'Raw' }])
+        expect(layerOptions([], samples({ layer: ['gold', 'silver'] }))).toEqual([])
     })
 })

@@ -19,9 +19,11 @@ import uuid
 
 import pytest
 
+from backend.app.providers.falkordb_placement import glob_test, layer_test
 from backend.app.providers.falkordb_search.relevance import _Builder
-from backend.app.providers.falkordb_typed_ops import compile_comparison
-from backend.common.search_semantics import resolve_comparison
+from backend.app.providers.falkordb_typed_ops import compile_comparison, compile_key_comparison
+from backend.app.services.view_placement import LayerTarget, PlacementSpec
+from backend.common.search_semantics import resolve_comparison, resolve_key_comparison
 
 
 pytestmark = pytest.mark.skipif(
@@ -50,8 +52,11 @@ def graph():
     db = FalkorDB(host=os.getenv("FALKORDB_HOST", "localhost"),
                   port=int(os.getenv("FALKORDB_PORT", "6379")))
     g = db.select_graph(f"guard_{uuid.uuid4().hex[:8]}")
-    g.query("UNWIND range(0, size($vs) - 1) AS i CREATE (n:T {i: i}) SET n.v = $vs[i]",
-            {"vs": VALUES})
+    rows = [{"i": i, "v": v, "w": VALUES[(i + 3) % len(VALUES)]} for i, v in enumerate(VALUES)]
+    g.query("UNWIND $rows AS r CREATE (n:T {i: r.i}) SET n.v = r.v, n.w = r.w", {"rows": rows})
+    g.query("UNWIND $urns AS u CREATE (:Domain {urn: u, tags: '[]'})", {"urns": TEXTS[1:]})
+    g.query("MATCH (p:Domain {urn: 'Zoë1'}), (c:Domain) WHERE c.urn STARTS WITH 'Zoë2' "
+            "CREATE (p)-[:CONTAINS]->(c)")
     try:
         yield g
     finally:
@@ -87,6 +92,44 @@ def test_date_comparisons_never_crash(graph, op, value):
     test = compile_comparison("n.v", resolve_comparison(op, value), p.bind)
     _hammer(graph, f"MATCH (n:T) WHERE {test} RETURN n.i", p.params)
     _hammer(graph, f"MATCH (n:T) RETURN n.i, {test}", p.params)
+
+
+@pytest.mark.parametrize("op", ["eq", "lt", "gte"])
+def test_date_key_comparisons_never_crash(graph, op):
+    test = compile_key_comparison("n.v", "n.w", resolve_key_comparison(op, value_type="date"))
+    _hammer(graph, f"MATCH (n:T) WHERE {test} RETURN n.i", {})
+    _hammer(graph, f"MATCH (n:T) RETURN n.i, {test}", {})
+
+
+GLOBS = ["*é", "é*", "?é*", "*😀?", "*?*", "a*é*b", "u?:*", "*-?é-*", "??????????", "日*本"]
+
+
+@pytest.mark.parametrize("pattern", GLOBS)
+def test_globs_never_crash(graph, pattern):
+    """A glob reads text or null — the layer filter hands it ``toStringOrNull`` of the URN."""
+    p = _Params()
+    test = glob_test("toStringOrNull(n.v)", pattern, p.bind, "g")
+    _hammer(graph, f"MATCH (n:T) WHERE {test} RETURN n.i", p.params)
+    _hammer(graph, f"MATCH (n:T) RETURN n.i, coalesce({test}, false)", p.params)
+
+
+def test_the_layer_filter_never_crashes(graph):
+    """Rules on the URN glob and on a property comparison, read for an entity and its
+    ancestors."""
+    spec = PlacementSpec.from_config({"layout": {"referenceLayout": {"layers": [
+        {"id": "a", "name": "A", "order": 0, "rules": [
+            {"id": "g", "priority": 3, "urnPattern": "u?:*é*"},
+            {"id": "c", "priority": 2, "conditions": [
+                {"field": "name", "operator": "startsWith", "value": "日"}]},
+            {"id": "d", "priority": 1, "conditions": [
+                {"field": "urn", "operator": "endsWith", "value": "😀"}]}]},
+        {"id": "b", "name": "B", "order": 1, "entityTypes": ["Domain"]},
+    ], "assignments": {"Zoë3": {"layerId": "b", "inheritsChildren": True}}}}})
+    for layer_id in ("a", "b"):
+        p = _Params()
+        test = layer_test(LayerTarget(spec, layer_id, "d"), "n", name=lambda: "1", bind=p.bind,
+                          containment=["CONTAINS"])
+        _hammer(graph, f"MATCH (n:Domain) WITH n, {test} AS t WHERE t RETURN n.urn", p.params)
 
 
 @pytest.mark.parametrize("needle", ["é", "a", "😀", "本"])

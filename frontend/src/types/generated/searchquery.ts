@@ -1363,7 +1363,10 @@ export interface EntityTypePredicate {
     values: Values2
 }
 /**
- * Match the view's layer assignment (Source / Staging / Refinery / …).
+ * In one of the view's layers (Source / Staging / Refinery / …), as the
+ * shared placement rule places entities there (the canvas's own with
+ * ``placementContractEnabled`` on). ``layerAssignment`` names the layer by
+ * id or by name; one the view doesn't have matches the stamp entities carry.
  */
 export interface LayerPredicate {
     kind?: Kind11

@@ -109,8 +109,8 @@ const OWN_WORDS: readonly LeafKindMeta[] = [
     },
     {
         kind: 'layer',
-        label: 'Layer',
-        description: 'Pipeline layer (Source / Staging / Refinery / Report).',
+        label: 'In layer',
+        description: 'In one of the view\'s layers, the way the canvas places it.',
         icon: 'Layers',
         category: 'identity',
         makeEmpty: () => ({

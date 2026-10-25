@@ -68,6 +68,7 @@ from backend.app.providers.falkordb_provider import (
     _RESERVED_NODE_KEYS,
     platform_property_names,
 )
+from backend.app.providers.falkordb_placement import layer_test
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf
 from backend.app.providers.falkordb_typed_ops import compile_comparison, compile_key_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
@@ -626,6 +627,19 @@ class _Compiler:
         return f"NOT ({clause})" if e.op == "notIn" else clause
 
     def _visit_layer(self, l) -> str:
+        """In the layer the view's canvas places the entity in, when the
+        service resolved the filter against the view (``_placement``) — a
+        test that walks its ancestors, so only ever in a projection
+        (``_has_relation``). Otherwise the stamp the entity carries."""
+        target = getattr(l, "_placement", None)
+        if target is not None:
+            if self._containment_edge_types is None:
+                raise CompileError(
+                    "a layer filter requires the provider's containment edge types — "
+                    "ontology resolution must complete before search.")
+            return layer_test(target, self._var, name=self._name, bind=self._bind,
+                              containment=sorted(_sanitize_label(t)
+                                                 for t in self._containment_edge_types))
         pn = self._next()
         self.params[pn] = l.layer_assignment
         return f"{self._var}.layerAssignment = ${pn}"
@@ -1182,11 +1196,18 @@ _SIMPLE_KINDS = frozenset({"text", "property", "tag", "hasProperty", "entityType
 
 
 def _has_relation(p) -> bool:
-    """Whether ``p`` is evaluated in a projection — a relationship, or an
-    edge count (``_counts_edges``) — or is a group holding one."""
-    if p.kind == "related" or _counts_edges(p):
+    """Whether ``p`` is evaluated in a projection — a relationship, an edge
+    count (``_counts_edges``), a layer as the canvas places it
+    (``_places``) — or is a group holding one."""
+    if p.kind == "related" or _counts_edges(p) or _places(p):
         return True
     return p.kind == "group" and any(_has_relation(c) for c in p.children)
+
+
+def _places(p) -> bool:
+    """A layer filter resolved against the view: it reads the entity's
+    ancestors, which a clause's WHERE can't."""
+    return p.kind == "layer" and getattr(p, "_placement", None) is not None
 
 
 def _counts_edges(p) -> bool:
@@ -1206,7 +1227,7 @@ def _conjuncts(p) -> List[Any]:
 def _is_simple(p) -> bool:
     if p.kind == "group":
         return all(_is_simple(c) for c in p.children)
-    return p.kind in _SIMPLE_KINDS
+    return p.kind in _SIMPLE_KINDS and not _places(p)
 
 
 def _relation_cost(p) -> int:
@@ -1214,6 +1235,9 @@ def _relation_cost(p) -> int:
     it rejects."""
     if p.kind == "group":
         return sum(_relation_cost(c) for c in p.children)
+    if _places(p):
+        # Every ancestor, and every rule for each.
+        return _AXIS_COST["ancestor"] * 4
     if p.kind != "related":
         return 0
     lo, hi = p.hop_range()
@@ -1868,8 +1892,27 @@ def query_hash(query: SearchQuery) -> str:
     invalidation uses ``match_hash`` instead — a page-size change must
     not strand a walk mid-iteration.
     """
-    j = query.model_dump_json(by_alias=True)
+    j = query.model_dump_json(by_alias=True) + _placements_of(query.predicate)
     return hashlib.sha1(j.encode("utf-8")).hexdigest()[:12]
+
+
+def _placements_of(predicate) -> str:
+    """What the query's layer filters were resolved to — the view's placement
+    and the layer — which its JSON doesn't carry: a layout edit must never
+    hand back the matches of the old one."""
+    found = []
+
+    def walk(p) -> None:
+        if _places(p):
+            found.append(f"{p._placement.digest}:{p._placement.layer_id}")
+        for child in getattr(p, "children", None) or ():
+            walk(child)
+        for key in ("where", "source_where", "target_where"):
+            if getattr(p, key, None) is not None:
+                walk(getattr(p, key))
+
+    walk(predicate)
+    return "|".join(found)
 
 
 def match_hash(query: SearchQuery) -> str:
@@ -1895,7 +1938,7 @@ def match_hash(query: SearchQuery) -> str:
             "scope": True,
             "options": {"sort", "sort_dir", "sort_property", "candidate_cap"},
         },
-    )
+    ) + _placements_of(query.predicate)
     return hashlib.sha1(j.encode("utf-8")).hexdigest()[:12]
 
 

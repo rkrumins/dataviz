@@ -273,9 +273,6 @@ function renderEditor(ctx: EditorCtx): ReactNode {
         case 'tag':
             return <TagEditor {...ctx} value={value as TagPredicate} />
         case 'layer':
-            // Legacy LayerPredicate — kept for backward compatibility
-            // with saved queries / JSON pastes that still emit it.
-            // New queries use ``descendantOf`` instead (Root in view).
             return <LayerEditor {...ctx} value={value as LayerPredicate} />
         case 'descendantOf': {
             // Two distinct entry points produce DescendantOfPredicate
@@ -1139,10 +1136,10 @@ function getKindMeta(p: Predicate): KindMeta {
             description: 'Match nodes by their assigned tags.',
         }
         case 'layer': return {
-            icon: '⌬', label: 'Layer (legacy)',
+            icon: '⌬', label: 'In layer',
             description:
-                'Legacy layer-assignment filter. New queries should use '
-                + '"Root in view" instead — same intent, more reliable matching.',
+                'In one of this view\'s layers, the way the canvas places it: '
+                + 'by hand, by the layer\'s rules, or with its container.',
         }
         case 'hasProperty': return {
             icon: '⚑', label: 'Property is set',

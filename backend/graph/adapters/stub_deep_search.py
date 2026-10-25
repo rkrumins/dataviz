@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from backend.app.services.deep_search import CompileError
 from backend.app.services.deep_search.settings import get_deep_search_settings
+from backend.app.services.view_placement import NodeFacts, place_all
 from backend.common.search_semantics import (
     SemanticsError,
     element_texts,
@@ -129,6 +130,7 @@ class StubDeepSearchProvider:
                 self._children.setdefault(e["source"], []).append(e["target"])
                 self._parents.setdefault(e["target"], []).append(e["source"])
         self._by_urn: Dict[str, Dict[str, Any]] = {n["urn"]: n for n in self._nodes}
+        self._placed: Dict[int, Any] = {}
 
     # --- DeepSearchProvider Protocol -----------------------------------------
 
@@ -474,6 +476,24 @@ class StubDeepSearchProvider:
             types = {t for t in types if not is_derived_edge_type(t)}
         return {str(t).upper() for t in types}
 
+    def _layer_of(self, urn: str, target) -> Optional[str]:
+        """The layer the view's canvas draws ``urn`` in: ``place_all`` itself,
+        over every node and the containment between them, once per view."""
+        placed = self._placed.get(id(target.spec))
+        if placed is None:
+            facts = {n["urn"]: NodeFacts(
+                urn=n["urn"], entity_type=n.get("entityType") or "",
+                display_name=n.get("displayName") or None,
+                tags=frozenset(t for t in n.get("tags") or () if isinstance(t, str)),
+                properties={k: v for k, v in n.items() if k not in _NODE_FIELDS},
+                stamp=(n["layerAssignment"] if isinstance(n.get("layerAssignment"), str)
+                       and n["layerAssignment"] else None),
+            ) for n in self._nodes}
+            layers = {u: p.layer_id for u, p in place_all(target.spec, facts, self._parents).items()}
+            # The spec is kept with its answer, so its id can't be reused while cached.
+            placed = self._placed[id(target.spec)] = (target.spec, layers)
+        return placed[1].get(urn)
+
     def _ancestors(self, node: Dict[str, Any]) -> List[str]:
         """The fixture's ``ancestorUrns`` when it gives them, else every
         container above the node by its containment edges."""
@@ -765,6 +785,9 @@ def _matches(node: Dict[str, Any], predicate, graph=None) -> bool:
         raise CompileError(f"stub: unsupported entityType op {predicate.op!r}")
 
     if isinstance(predicate, LayerPredicate):
+        target = getattr(predicate, "_placement", None)
+        if target is not None and graph is not None:
+            return graph._layer_of(node["urn"], target) == target.layer_id
         return node.get("layerAssignment") == predicate.layer_assignment
 
     if isinstance(predicate, TextPredicate):

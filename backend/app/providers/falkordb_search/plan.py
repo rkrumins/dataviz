@@ -45,6 +45,7 @@ from typing import Any, Awaitable, Callable, Dict, FrozenSet, List, Optional, Se
 from backend.app.providers.falkordb_deep_search import (
     KEY_COMPARISON_NOTE,
     _build_within_hops_continuation,
+    _placements_of,
     _scope_urn_sets_with_depths,
     _sanitize_label,
     _searchable_labels,
@@ -187,10 +188,24 @@ class Context:
 # Planning
 # ---------------------------------------------------------------------------
 
+#: How many times more a layer filter as the canvas places costs an entity
+#: than most tests: it reads the entity's ancestors and each one's rules (a
+#: 50,000-node unit took 4.4 s on 200,000 catalog entities, a relationship's
+#: 0.7 s), so its units hold that many times fewer nodes.
+_LAYER_COST = 8
+
+
+def unit_width(width: int, predicate) -> int:
+    """The nodes a unit holds, so it ends in well under a second: ``width``,
+    or fewer for a query holding a layer filter as the canvas places it."""
+    return max(1_000, width // _LAYER_COST) if _placements_of(predicate) else width
+
+
 async def make_plan(provider, query, compiler, *, run: Run, width: int,
                     walk_max: int, timeout_s: float) -> Plan:
     """The units ``query`` reads. ``run(cypher, params)`` executes one
     statement under the caller's admission and budget."""
+    width = unit_width(width, query.predicate)
     labels = await _searchable_labels(provider, timeout_s=timeout_s)
     containment = _containment(provider)
     notes: List[str] = []

@@ -402,8 +402,8 @@ _COSTS: "OrderedDict[int, int]" = OrderedDict()
 def parse_cost(text: str) -> int:
     """Token reads FalkorDB's parser makes on ``text``, re-reads included.
     Remembered for the last few thousand texts, as engines send one statement
-    many times; names and literals don't change the cost, so statements that
-    differ only in them — one per label — share an answer."""
+    many times; names, literals and parameters don't change the cost, so
+    statements that differ only in them — one per label — share an answer."""
     key = hash(_LITERALS.sub("_", text))
     cost = _COSTS.get(key)
     if cost is None:
@@ -419,7 +419,7 @@ def parse_cost(text: str) -> int:
     return cost
 
 
-_LITERALS = re.compile(r"`(?:[^`]|``)*`|'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"")
+_LITERALS = re.compile(r"`(?:[^`]|``)*`|'(?:[^'\\]|\\.)*'|\"(?:[^\"\\]|\\.)*\"|\$\w+")
 
 
 # ---------------------------------------------------------------------------

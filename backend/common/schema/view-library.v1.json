@@ -791,7 +791,7 @@
       "type": "object"
     },
     "LayerPredicate": {
-      "description": "Match the view's layer assignment (Source / Staging / Refinery / …).",
+      "description": "In one of the view's layers (Source / Staging / Refinery / …), as the\nshared placement rule places entities there (the canvas's own with\n``placementContractEnabled`` on). ``layerAssignment`` names the layer by\nid or by name; one the view doesn't have matches the stamp entities carry.",
       "properties": {
         "kind": {
           "const": "layer",

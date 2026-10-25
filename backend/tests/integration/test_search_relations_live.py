@@ -668,3 +668,98 @@ async def test_a_type_the_data_source_lacks_is_refused(provider):
         assert "did you mean PRODUCES" in answer["errors"]["q"]
     with pytest.raises(CompileError, match="CONTAINS is a containment edge"):
         await provider.deep_search(_query(rel("upstream", edgeTypes=["CONTAINS"]), scope))
+
+
+# --- layers, as the view's canvas places entities -------------------------------
+
+#: Types by layer (domains cascade to what they hold, regions don't), a rule on a
+#: property that outranks the type rule, a URN glob, a hand-placed workspace that
+#: cascades — "shared" (21) is held by it and by a domain — and a fallback layer.
+LAYER_VIEW = {"content": {"entityScope": "all"}, "layout": {"referenceLayout": {"layers": [
+    {"id": "dom", "name": "Domains", "order": 0, "entityTypes": ["domain"]},
+    {"id": "geo", "name": "Places", "order": 1, "rules": [
+        {"id": "g", "entityTypes": ["region"], "inheritsFromParent": False}]},
+    {"id": "own", "name": "Owned by Alice", "order": 2, "rules": [
+        {"id": "o", "priority": 5, "conditions": [
+            {"field": "owner", "operator": "equals", "value": "alice"}]}]},
+    {"id": "data", "name": "Data", "order": 3, "entityTypes": ["dataset"]},
+    {"id": "stream", "name": "Streams", "order": 4, "rules": [{"id": "s", "urnPattern": "urn:2?"}]},
+    {"id": "bi", "name": "Reporting", "order": 5, "entityTypes": ["dashboard"]},
+    {"id": "rest", "name": "Everything else", "order": 6, "showUnassigned": True},
+], "assignments": {U(9): {"layerId": "bi", "inheritsChildren": True}}}}}
+
+
+def LAYER(value):
+    return {"kind": "layer", "layerAssignment": value}
+
+
+LAYER_CASES = [
+    *(LAYER(name) for name in ("Domains", "places", "Owned by Alice", "Data", "Streams",
+                               "Reporting", "Everything else", "rest", "no-such-layer")),
+    AND(TYPE("dataset"), LAYER("Reporting")),
+    NOT(LAYER("Data")),
+    OR(LAYER("Streams"), LAYER("Places")),
+    rel("downstream", LAYER("Reporting")),
+    rel("downstream", AND(TYPE("dashboard"), LAYER("Reporting")), maxHops=3),
+    rel("parent", LAYER("Domains")),
+    rel("child", LAYER("Owned by Alice"), quantifier="none"),
+    rel("child", LAYER("Everything else"), quantifier="all"),
+    rel("descendant", LAYER("Reporting")),
+    rel("ancestor", LAYER("Reporting")),
+    rel("child", LAYER("Data"), count={"op": "gte", "value": 2}),
+    AND(LAYER("Data"), rel("upstream", LAYER("Streams"))),
+]
+
+
+def _layered(predicate, scope):
+    """The query as the service hands it to an engine: its layer filters read
+    against the view (``_with_resolved_layers``)."""
+    from backend.app.services.advanced_search_service import _with_resolved_layers
+    from backend.app.services.view_scope import EffectiveViewScope, _placement_inputs
+
+    placement, layers, digest = _placement_inputs(LAYER_VIEW)
+    eff = EffectiveViewScope(
+        view_id="v", workspace_id="ws", data_source_id=None, canvas_kind="reference",
+        root_urns=(), entity_type_allow_list=frozenset(), layer_allow_list=frozenset(),
+        max_depth=12, scope_hash="h", placement=placement, layers=layers,
+        placement_digest=digest)
+    query = _query(predicate, scope)
+    return query.model_copy(update={"predicate": _with_resolved_layers(query.predicate, eff, [])})
+
+
+async def test_layers_are_telling():
+    """The view places entities in every layer, and the cases split them."""
+    stub = _stub()
+    scope = SCOPES["data_source"]
+    counts = []
+    for predicate in LAYER_CASES:
+        answer = await stub.deep_search_membership(
+            scope, [("q", _layered(predicate, scope).predicate)], ALL_URNS)
+        counts.append(len(answer["matches"]["q"]))
+    assert all(counts[:7]) and counts[8] == 0
+    assert sum(1 for c in counts if 0 < c < len(ALL_URNS)) >= len(LAYER_CASES) - 3
+
+
+@pytest.mark.parametrize("scope_name", list(SCOPES))
+async def test_layers_in_every_engine(provider, scope_name):
+    """The uncapped engine (search and count), the capped one and a rule's
+    membership place entities in layers exactly as the canvas does — the stub
+    answers with ``place_all`` itself."""
+    scope = SCOPES[scope_name]
+    stub = _stub()
+    context = SearchRunContext(data_version="relations-v1", scope_hash=f"h-layers-{scope_name}")
+    wrong = []
+    for i, predicate in enumerate(LAYER_CASES):
+        query = _layered(predicate, scope)
+        want = sorted((await stub.deep_search_membership(
+            scope, [("q", query.predicate)], ALL_URNS))["matches"]["q"])
+        page = await provider.deep_search_session(query, context=context)
+        count = await provider.deep_search_count(query, context=context)
+        capped = await provider.deep_search(query)
+        member = await provider.deep_search_membership(
+            scope, [("q", query.predicate)], ALL_URNS, context=SearchRunContext())
+        got = (sorted(h.node.urn for h in page.hits), count["count"],
+               sorted(h.node.urn for h in capped.hits), sorted(member["matches"].get("q", [])))
+        if got != (want, len(want), want, want) or member["errors"]:
+            wrong.append((i, predicate, (got, member["errors"]), want))
+    assert not wrong, _report(wrong)
