@@ -114,8 +114,8 @@ const DIRECTION_WORDS: Record<LinkDirection, string> = { out: 'outgoing', in: 'i
 export const RELATION_DEPTH_MAX = 3
 /** Lineage hops tested from every candidate (`DEEP_SEARCH_RELATION_MAX_HOPS`). */
 export const RELATION_MAX_HOPS = 3
-/** Lineage hops walked from entities a relationship names (as withinHops). */
-export const RELATION_NAMED_MAX_HOPS = 10
+/** Lineage hops walked from a relationship's far end (as withinHops). */
+export const RELATION_FAR_END_MAX_HOPS = 10
 /** How far up or down the tree an ancestor / descendant looks by default. */
 export const TREE_DEPTH_MAX = 20
 
@@ -129,35 +129,18 @@ export function hopRange(p: RelatedPredicate): [number, number] {
     return [lo, p.maxHops ?? TREE_DEPTH_MAX]
 }
 
-/** Whether its far end is named entities — an `is`, inside one, or an OR of
- *  those (the server's `anchor_groups`): walked from them, so lineage may go
- *  as far as within-hops does — at the top of the query. */
-export function namesItsFarEnd(p: RelatedPredicate): boolean {
-    return (p.quantifier ?? 'any') === 'any' && !p.count && namesEntities(p.where)
-}
-
-function namesEntities(p: Predicate | null | undefined): boolean {
-    if (!p) return false
-    if (p.kind === 'is') return true
-    if (p.kind === 'related') {
-        return p.axis === 'ancestor' && (p.quantifier ?? 'any') === 'any' && !p.count
-            && p.where?.kind === 'is'
-    }
-    if (p.kind === 'group') {
-        const op = p.op ?? 'and'
-        return op !== 'not' && (op === 'or' || p.children.length === 1)
-            && p.children.length > 0 && p.children.every(namesEntities)
-    }
-    return false
-}
-
-/** The most lineage hops this relationship may follow where it stands. */
+/** The most lineage hops this relationship may follow where it stands: at
+ *  the top of the query, asking for at least one relative, it is walked from
+ *  its far end — the entities it names, or those its condition matches (the
+ *  server's `anchor_groups`, `traced_from_far_end`) — as far as within-hops
+ *  goes; anywhere else, what every candidate tests itself. */
 export function maxHopsFor(p: RelatedPredicate, { topLevel, rule }: {
     topLevel: boolean
     rule: boolean
 }): number {
     if (rule) return 1
-    return topLevel && namesItsFarEnd(p) ? RELATION_NAMED_MAX_HOPS : RELATION_MAX_HOPS
+    const fromFarEnd = topLevel && (p.quantifier ?? 'any') === 'any' && !p.count
+    return fromFarEnd ? RELATION_FAR_END_MAX_HOPS : RELATION_MAX_HOPS
 }
 
 /** Its hops cut to what the server allows where it stands. */

@@ -43,6 +43,7 @@ from backend.app.providers.falkordb_deep_search import (
     _run_aggregation,
     decode_cursor,
     encode_cursor,
+    refuse_trace,
 )
 from backend.app.providers.falkordb_search.keys import build_sort_spec
 from backend.app.providers.falkordb_search.keys import SortKey, SortSpec
@@ -623,6 +624,16 @@ async def _compute_facets(provider, query: SearchQuery, specs, sid: str, store: 
     compiler = _build_compiler_for_provider(provider)
     where = compiler.compile(query.predicate)
     params: Dict[str, Any] = dict(compiler.params)
+    try:
+        refuse_trace(compiler)
+    except CompileError as exc:
+        # Expected, not a failure: the capped statements can't count a trace's matches.
+        try:
+            await store.save_facets(sid, {"error": _describe(exc), "refused": str(exc)},
+                                    settings.session_ttl_seconds)
+        except Exception as save_exc:             # noqa: BLE001
+            logger.warning("search session %s: facets not stored: %r", sid, save_exc)
+        return
     capped, uncapped = _candidate_prefixes(
         provider, query, compiler, where, params,
         _resolve_candidate_cap(query, settings),
@@ -680,8 +691,9 @@ async def _facet_models(query: SearchQuery, session: Session, store: SessionStor
     if capped and facets is None:
         return None, notes
     if isinstance(facets, dict):
-        # Why is in the server's log (``_compute_facets``), not on the page.
-        notes.append("facets could not be computed")
+        # Why is in the server's log (``_compute_facets``), not on the page —
+        # unless it is the query's own limit, said in the user's terms.
+        notes.append(facets.get("refused") or "facets could not be computed")
         facets = [[] for _ in capped]
     if len(capped) < len(specs) and session.status != COMPLETE:
         return None, notes

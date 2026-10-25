@@ -45,7 +45,7 @@ describe('rescueFixes', () => {
         const draft = all(type('dataset'), { kind: 'related', axis: 'downstream', maxHops: 1, where: type('dashboard') },
             tag('PII'))
         expect(fixes(draft, 1)).toEqual([
-            'hops: type:dataset AND feeds*..3(type:dashboard) AND tag:PII',
+            'hops: type:dataset AND feeds*..10(type:dashboard) AND tag:PII',
             'anyOf: type:dataset AND (feeds(type:dashboard) OR tag:PII)',
             'drop: type:dataset AND tag:PII',
         ])

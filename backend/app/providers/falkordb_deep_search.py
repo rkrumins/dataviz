@@ -92,6 +92,7 @@ from backend.common.search_semantics import (
 from backend.common.models.search import (
     LINEAGE_AXES,
     anchor_groups,
+    traced_from_far_end,
     AggregationSpec,
     AncestorRef,
     DegreePredicate,
@@ -284,6 +285,12 @@ class _Compiler:
         # A relationship whose far end is named and is lineage becomes a
         # withinHops continuation; off where those can't run (membership).
         self.anchor_lineage = True
+        # The lineage hops a candidate tests itself (``relation_max_hops``):
+        # a top-level relationship past them is traced from its far end —
+        # ``hoisted_trace``, the walk the uncapped engine plans by. None
+        # traces nothing: it is compiled as a candidate's own test.
+        self.trace_beyond: Optional[int] = None
+        self.hoisted_trace: Optional[Dict[str, Any]] = None
 
     def _next(self) -> str:
         n = self._param_counter
@@ -314,6 +321,9 @@ class _Compiler:
                 head.append(self._hoist_anchored(member))
                 if member.axis in LINEAGE_AXES:
                     continue    # the continuation is the whole test
+            elif self._traceable(member):
+                head.append(self._hoist_trace(member))
+                continue        # the walk is the whole test
             stages.append(member)
         for member in sorted(stages, key=_relation_cost):
             self.tail.append(self._projected_stage(member))
@@ -972,6 +982,36 @@ class _Compiler:
         self.hoisted_within_hops.append(entry)
         return "true"
 
+    def _traceable(self, p) -> bool:
+        """A top-level relationship traced from its far end
+        (``traced_from_far_end``): it goes past the hops a candidate tests
+        itself. Off where a trace can't run (membership) or none is set."""
+        return (self.anchor_lineage and self.trace_beyond is not None
+                and p.kind == "related" and traced_from_far_end(p, self.trace_beyond))
+
+    def _hoist_trace(self, p) -> str:
+        """The relationship as a walk out from the entities its far end
+        matches, to the candidates (``plan.trace_plan``): the far end's
+        condition on ``n``, the stages a scan of the data source filters by,
+        and the walk ``within_hops_walk`` follows. One a query (the service
+        refuses a second)."""
+        if self.hoisted_trace is not None:
+            raise CompileError("a query traces one relationship from its far end at most")
+        types = self._relation_edge_types(p)
+        if not types:
+            return "false"          # nothing to walk: no entity has a relative
+        lo, hi = p.hop_range()
+        self.hoisted_trace = {
+            "hops": hi, "min_hops": lo, "strict": True,
+            # The walk goes from the far end to the candidate.
+            "direction": {"upstream": "out", "downstream": "in", "neighbor": "both"}[p.axis],
+            "edge_types": types,
+            "edge_where": self._emit_edge_predicate_fragment(p.edge),
+            "far_end": self._path_end(p.where, "n") if p.where is not None else [],
+            "types": _required_types(p.where),
+        }
+        return "true"
+
     def _visit_related(self, p) -> str:
         """Whether the entity's relatives along ``p.axis`` meet ``p.where``:
         a pattern comprehension per entity, each relative tested in its
@@ -1222,6 +1262,18 @@ def _conjuncts(p) -> List[Any]:
     if p.kind == "group" and p.op == "and":
         return [m for c in p.children for m in _conjuncts(c)]
     return [p]
+
+
+def _required_types(where) -> Optional[List[str]]:
+    """The entity types, lowercased, that everything ``where`` matches has —
+    its top-level AND's type conditions, as ``_visit_entity_type`` reads
+    them (an entity's first label) — or None when it requires none."""
+    types: Optional[Set[str]] = None
+    for m in _conjuncts(where) if where is not None else ():
+        if m.kind == "entityType" and m.op == "in":
+            values = {str(v).lower() for v in m.values}
+            types = values if types is None else types & values
+    return sorted(types) if types is not None else None
 
 
 def _is_simple(p) -> bool:
@@ -1543,11 +1595,25 @@ def _build_compiler_for_provider(provider) -> _Compiler:
         containment = set(provider._get_containment_edge_types())
     except Exception:
         containment = None
-    return _Compiler(
+    compiler = _Compiler(
         lineage_edge_types=lineage,
         containment_edge_types=containment,
         edge_type_spellings=_edge_type_spellings(provider, lineage, containment),
     )
+    compiler.trace_beyond = get_deep_search_settings().relation_max_hops
+    return compiler
+
+
+def refuse_trace(compiler: _Compiler) -> None:
+    """A relationship traced from its far end runs only where a search is
+    planned by that walk (``plan.trace_plan``) — never in a capped
+    statement, which would leave its test out."""
+    if compiler.hoisted_trace is not None:
+        hops = compiler.trace_beyond
+        raise CompileError(
+            f"Following lineage more than {hops} hops works for a search that lists its "
+            f"matches, not for its group counts. Follow at most {hops}, or use Cypher "
+            "(Cypher tab → Edit and run).")
 
 
 def _edge_type_spellings(provider, *sets) -> Optional[Dict[str, List[str]]]:
@@ -2143,6 +2209,16 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     effective_candidate_cap = _resolve_candidate_cap(query, _s)
     notes: List[str] = []
     compiler = _build_compiler_for_provider(provider)
+    # The statement to read and copy tests each candidate itself, a relationship
+    # traced from its far end too; the engine's walk is said in a note.
+    compiler.trace_beyond = None
+    if any(m.kind == "related" and traced_from_far_end(m, _s.relation_max_hops)
+           for m in _conjuncts(query.predicate)):
+        notes.append(
+            f"A relationship follows lineage more than {_s.relation_max_hops} hops: the "
+            "engine finds what its far end matches across the data source and walks out "
+            "from there. The statement below tests each candidate itself, which can be "
+            "slow on a large graph.")
     where_fragment = compiler.compile(query.predicate)
     base_params: Dict[str, Any] = dict(compiler.params)
 
@@ -3073,6 +3149,7 @@ async def execute_deep_search(
     # 1. Compile predicate → Cypher WHERE fragment + scope/withinHops hoisting
     compiler = _build_compiler_for_provider(provider)
     where_fragment = compiler.compile(query.predicate)
+    refuse_trace(compiler)
     base_params: Dict[str, Any] = dict(compiler.params)
 
     # 1a. Path-mode short-circuit. When a PathPredicate is present, the

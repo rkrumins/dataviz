@@ -245,8 +245,15 @@ What they mean, for an entity *n* whose relatives along the axis are *R(n)*:
 `descendantOf` or `withinHops` does, and lineage may go up to 10 hops. Any
 other relationship is tested from each candidate — after the rest of the query
 has narrowed them — and lineage goes at most 3 hops
-(`DEEP_SEARCH_RELATION_MAX_HOPS`). The related entities may sit anywhere in the
-data source; the matches are always inside the View.
+(`DEEP_SEARCH_RELATION_MAX_HOPS`), with one exception: one relationship a query,
+in the top-level AND and asking for at least one relative, may follow lineage
+up to 10 hops to a far end that is a condition — "fed, within six hops, by an
+uncertified dataset". It is **traced from its far end**: what its condition
+matches is found across the data source, and one walk runs out from there. It
+is refused past 200,000 such matches or 500,000 entities reached, and it runs
+for a search that lists its matches, not for group counts. The related
+entities may sit anywhere in the data source; the matches are always inside
+the View.
 
 Code mode writes them as words — `parent(type:domain)`, `every
 child(description IS NOT EMPTY)`, `count(child(type:column)) > 100`,
@@ -325,6 +332,7 @@ P30D").
 | Relationships inside relationships (and path ends) | 3 deep | `DEEP_SEARCH_MAX_RELATION_DEPTH` |
 | Lineage hops a relationship tests from each candidate | 3 (at most 6) | `DEEP_SEARCH_RELATION_MAX_HOPS` |
 | Lineage hops when the far end is named (an `is`, in the top-level AND) | 10 | — |
+| Lineage hops traced from a far end that is a condition (at least one relative, in the top-level AND; one a query) | 10, from at most 200,000 matches reaching at most 500,000 entities | — |
 | Entities one reference names | 64 | — |
 | A query of only `text` with `target: "any"` | refused on a View that bounds neither its roots nor its entity types | — |
 
@@ -859,9 +867,11 @@ curl -s -b "$JAR" -o pii.csv \
   hop, `regex` or `fulltext` text, or `descendantOf` under `or` / `not`.
 - **Share links can't follow lineage or relationships**: `related`, `path` and
   `withinHops` answer `403` for them, as do rules that use them.
-- **Relationships tested from each candidate follow lineage 3 hops**; name the
-  far end (an `is`) to go up to 10. Complete end-to-end lineage is the Trace
-  feature's job.
+- **Relationships tested from each candidate follow lineage 3 hops**. Up to 10
+  goes for one in the top-level AND asking for at least one relative — walked
+  from the entities it names, or traced from what its condition matches (one a
+  query); "no", "every" and counts that deep are Cypher's (Cypher tab → Edit
+  and run). Complete end-to-end lineage is the Trace feature's job.
 - **Edge keys kept in the JSON take presence and equality only** (`isSet`,
   `isNotSet`, `eq`, `neq`, `in`, `notIn`). A key of a nested object reads as
   present when it is only nested.

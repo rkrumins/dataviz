@@ -607,9 +607,10 @@ or ``root`` relationship looks when it names no depth."""
 
 RELATION_ANCHORED_HOPS_MAX = 10
 """The lineage hops a relationship may follow at most — as far as
-``withinHops``. A relationship whose far end is a condition rather than
-named entities is held to ``DEEP_SEARCH_RELATION_MAX_HOPS`` (3) by the
-service: it is tested from every candidate."""
+``withinHops``. Past ``DEEP_SEARCH_RELATION_MAX_HOPS`` (3) the service
+lets only a relationship walked from its far end through
+(``anchor_groups``, ``traced_from_far_end``): a few hops are all that can
+be tested from every candidate."""
 
 
 class CountSpec(_Base):
@@ -769,6 +770,19 @@ def anchor_groups(where: Optional["Predicate"]) -> Optional[List[AnchorGroup]]:
             groups.extend(sub)
         return groups
     return None
+
+
+def traced_from_far_end(p: "RelatedPredicate", tested_hops: int) -> bool:
+    """Whether a lineage relationship in the top-level AND is traced from its
+    far end: what its condition matches is found across the data source and
+    walked out from, instead of every candidate testing its own routes. So
+    one that follows more than ``tested_hops`` (what a candidate tests
+    itself), asks for at least one relative and no count, and whose far end
+    isn't named entities (walked from them, ``anchor_groups``) — the
+    service's limits and the compiler both read it here."""
+    return (p.axis in LINEAGE_AXES and p.hop_range()[1] > tested_hops
+            and p.quantifier == "any" and p.count is None
+            and anchor_groups(p.where) is None)
 
 
 # ---------------------------------------------------------------------------

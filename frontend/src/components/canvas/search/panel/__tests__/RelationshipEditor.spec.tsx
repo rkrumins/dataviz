@@ -41,10 +41,10 @@ vi.mock('framer-motion', () => {
 
 const DOMAIN: Predicate = { kind: 'entityType', op: 'in', values: ['domain'] }
 
-function editor(value: RelatedPredicate, { depth = 0, rule = false, hideWhere = false } = {}) {
+function editor(value: RelatedPredicate, { depth = 0, rule = false, hideWhere = false, top = true } = {}) {
     const onChange = vi.fn()
     render(
-        <RelationContext.Provider value={{ depth, rule }}>
+        <RelationContext.Provider value={{ depth, rule, top }}>
             <RelationshipEditor
                 value={value}
                 onChange={onChange}
@@ -129,6 +129,12 @@ describe('RelationshipEditor', () => {
 
     it('keeps what still applies when the verb changes, within the server’s reach', async () => {
         const onChange = editor({ kind: 'related', axis: 'ancestor', maxHops: 15, where: DOMAIN })
+        await pick('How it is related', /^Is fed by/)
+        expect(onChange).toHaveBeenCalledWith({ kind: 'related', axis: 'upstream', maxHops: 10, where: DOMAIN })
+    })
+
+    it('reaches only what every candidate tests itself under “any of”', async () => {
+        const onChange = editor({ kind: 'related', axis: 'ancestor', maxHops: 15, where: DOMAIN }, { top: false })
         await pick('How it is related', /^Is fed by/)
         expect(onChange).toHaveBeenCalledWith({ kind: 'related', axis: 'upstream', maxHops: 3, where: DOMAIN })
     })
@@ -216,7 +222,9 @@ describe('RelationshipEditor', () => {
         const onChange = editor({ kind: 'related', axis: 'downstream', maxHops: 3 })
         await moreOptions()
         const steps = screen.getByRole('radiogroup', { name: 'How many steps' })
-        expect(within(steps).getAllByRole('radio').map((r) => r.textContent)).toEqual(['1 step', 'Up to 2', 'Up to 3'])
+        expect(within(steps).getAllByRole('radio').map((r) => r.textContent))
+            .toEqual(['1 step', 'Up to 2', 'Up to 3', 'Up to 5', 'Up to 10'])
+        expect(screen.queryByText(/for “at least one” at the top/)).not.toBeInTheDocument()
         expect(within(steps).getByRole('radio', { name: 'Up to 3' })).toBeChecked()
         await choose('How many steps', 'Up to 2')
         expect(onChange).toHaveBeenLastCalledWith({ kind: 'related', axis: 'downstream', maxHops: 2 })
@@ -224,6 +232,14 @@ describe('RelationshipEditor', () => {
         expect(onChange).toHaveBeenLastCalledWith({ kind: 'related', axis: 'downstream' })
         await userEvent.setup().click(screen.getByRole('button', { name: 'Custom range' }))
         expect(screen.getByLabelText('Fewest steps')).toHaveValue(1)
+    })
+
+    it('says where more steps are followed when it can’t follow them here', async () => {
+        editor({ kind: 'related', axis: 'downstream', quantifier: 'none', maxHops: 3 })
+        await moreOptions()
+        const steps = screen.getByRole('radiogroup', { name: 'How many steps' })
+        expect(within(steps).getAllByRole('radio').map((r) => r.textContent)).toEqual(['1 step', 'Up to 2', 'Up to 3'])
+        expect(screen.getByText('Up to 10 steps for “at least one” at the top of the search')).toBeInTheDocument()
     })
 
     it('looks any depth down the tree, or a number of levels', async () => {

@@ -25,6 +25,8 @@ from backend.app.providers.falkordb_deep_search import (
     _build_compiler_for_provider,
     _build_within_hops_continuation,
     _Compiler,
+    explain_deep_search,
+    refuse_trace,
     tail_clauses,
 )
 from backend.app.providers.falkordb_search import membership
@@ -157,10 +159,32 @@ class TestValidation:
             _validate_predicate(P(rel("upstream", rel("parent", rel("root",
                                                                      rel("child"))))))
 
-    def test_lineage_tested_from_every_candidate_goes_three_hops(self):
+    def test_lineage_past_three_hops_is_traced_at_the_top(self):
+        """Past the hops a candidate tests itself, a relationship is traced
+        from its far end: at least one relative, at the top of the query.
+        Anywhere else it is refused, pointing at Cypher."""
         _validate_predicate(P(rel("downstream", TYPE("dashboard"), maxHops=3)))
-        with pytest.raises(ValidationError, match="4 hops.*at most 3.*Name the far end"):
-            _validate_predicate(P(rel("downstream", TYPE("dashboard"), maxHops=4)))
+        _validate_predicate(P(rel("downstream", TYPE("dashboard"), maxHops=4)))
+        _validate_predicate(P(AND(TYPE("dataset"), rel("upstream", TYPE("topic"), maxHops=10))))
+        too_far = rel("downstream", TYPE("dashboard"), maxHops=4)
+        for raw in (OR(TYPE("dataset"), too_far),
+                    {"kind": "group", "op": "not", "children": [too_far]},
+                    {**too_far, "quantifier": "none"}, {**too_far, "quantifier": "all"},
+                    {**too_far, "count": {"op": "gte", "value": 2}},
+                    rel("parent", too_far)):
+            with pytest.raises(ValidationError, match=r"4 hops\. Following more than 3 works for "
+                                                       r"'at least one' at the top.*Cypher"):
+                _validate_predicate(P(raw))
+
+    def test_a_query_traces_one_relationship_at_most(self):
+        traced = rel("upstream", TYPE("topic"), maxHops=5)
+        _count_and_validate(_query(AND(traced, rel("downstream", TYPE("dashboard")))))
+        # Walked from the entities it names: not a trace.
+        _count_and_validate(_query(AND(traced, rel("downstream", IS("u"), maxHops=10))))
+        with pytest.raises(ValidationError, match="2 relationships in this query follow "
+                                                  "lineage more than 3 hops, and one may"):
+            _count_and_validate(_query(AND(traced, rel("downstream", TYPE("dashboard"),
+                                                       maxHops=6))))
 
     def test_lineage_walked_from_named_entities_goes_ten(self):
         _validate_predicate(P(AND(TYPE("dataset"), rel("upstream", IS("u"), maxHops=10))))
@@ -168,14 +192,17 @@ class TestValidation:
         for raw in (OR(TYPE("dataset"), rel("upstream", IS("u"), maxHops=10)),
                     rel("upstream", IS("u"), maxHops=10, quantifier="none"),
                     rel("parent", rel("upstream", IS("u"), maxHops=10))):
-            with pytest.raises(ValidationError, match="at most 3"):
+            with pytest.raises(ValidationError, match="Following more than 3 works"):
                 _validate_predicate(P(raw))
 
     def test_lineage_from_inside_named_entities_goes_ten_too(self):
         """What a container's lineage question asks: is it, or is inside it."""
         _validate_predicate(P(rel("upstream", OR(IS("ds"), rel("ancestor", IS("ds"))), maxHops=10)))
-        with pytest.raises(ValidationError, match="at most 3"):
-            _validate_predicate(P(rel("upstream", OR(IS("ds"), TYPE("t")), maxHops=4)))
+        # More than named entities: traced from what it matches instead.
+        _validate_predicate(P(rel("upstream", OR(IS("ds"), TYPE("t")), maxHops=4)))
+        with pytest.raises(ValidationError, match="Following more than 3 works"):
+            _validate_predicate(P(rel("upstream", OR(IS("ds"), TYPE("t")), maxHops=4,
+                                      quantifier="none")))
 
     def test_a_rule_follows_lineage_one_hop(self):
         _validate_predicate(P(rel("upstream", TYPE("topic"))), rule=True)
@@ -660,6 +687,155 @@ class TestReachPlan:
         assert plan.units == [] and "not in the graph" in notes[0]
 
 
+def _tracing() -> _Compiler:
+    c = _compiler()
+    c.trace_beyond = 3
+    return c
+
+
+class TestTrace:
+    """A relationship followed past the hops a candidate tests itself, asking
+    for at least one relative at the top of the query, is traced from its far
+    end: the head keeps every candidate and the walk is the whole test."""
+
+    def test_it_is_hoisted_with_its_far_end_and_its_walk(self):
+        c = _tracing()
+        far = AND(TYPE("topic"), rel("parent", TYPE("domain")))
+        head = c.compile(P(AND(TYPE("dataset"), rel("upstream", far, minHops=2, maxHops=6))))
+        assert head.startswith("toLower(labels(n)[0]) IN $p")
+        assert c.tail == [] and c.hoisted_within_hops == []
+        t = c.hoisted_trace
+        # From the far end to the candidate: what feeds it, followed forwards.
+        assert (t["hops"], t["min_hops"], t["direction"], t["edge_types"], t["types"]) == (
+            6, 2, "out", ["FLOWS_TO"], ["topic"])
+        # The far end's plain conditions in one stage, its relationship in the next.
+        assert len(t["far_end"]) == 2 and "labels(n)[0]" in t["far_end"][0]
+
+    def test_only_one_at_the_top_asking_for_a_relative_is_traced(self):
+        for raw in (rel("upstream", TYPE("topic"), maxHops=3),
+                    rel("upstream", IS("u"), maxHops=6),
+                    rel("upstream", TYPE("topic"), maxHops=6, quantifier="none"),
+                    OR(TYPE("dataset"), rel("upstream", TYPE("topic"), maxHops=6))):
+            c = _tracing()
+            c.compile(P(raw))
+            assert c.hoisted_trace is None, raw
+        # Not where a trace can't run (membership), nor without the limit.
+        c = _tracing()
+        c.anchor_lineage = False
+        c.compile(P(rel("upstream", TYPE("topic"), maxHops=6)))
+        assert c.hoisted_trace is None and c.tail
+        c = _compiler()
+        c.compile(P(rel("upstream", TYPE("topic"), maxHops=6)))
+        assert c.hoisted_trace is None and c.tail
+
+    def test_one_over_no_edges_relates_nothing(self):
+        c = _Compiler(lineage_edge_types=set(), containment_edge_types={"CONTAINS"})
+        c.trace_beyond = 3
+        assert c.compile(P(rel("upstream", TYPE("topic"), maxHops=6))) == "false"
+        assert c.hoisted_trace is None
+
+    def test_the_capped_engine_refuses_it(self):
+        c = _tracing()
+        c.compile(P(rel("upstream", TYPE("topic"), maxHops=6)))
+        with pytest.raises(CompileError, match="more than 3 hops works for a search that "
+                                               "lists its matches.*Cypher"):
+            refuse_trace(c)
+        refuse_trace(_compiler())
+
+    def test_explain_shows_each_candidate_testing_it_and_says_how_it_runs(self):
+        class _Provider:
+            _entity_type_levels = {"dataset": 0}
+
+            def _get_lineage_edge_types(self):
+                return {"FLOWS_TO"}
+
+            def _get_containment_edge_types(self):
+                return {"CONTAINS"}
+
+        result = explain_deep_search(_Provider(), _query(rel("upstream", TYPE("topic"),
+                                                             maxHops=6)))
+        assert "[:FLOWS_TO*1..6]" in result["hits_cypher"]
+        assert any("walks out from there" in n for n in result["notes"])
+
+
+class TestTracePlan:
+    """What the far end matches is found across the data source, a band of a
+    label at a time; one walk runs out from it; only what it reaches, in
+    scope, is read — and past a bound or out of time, it is refused."""
+
+    @staticmethod
+    def _run(seen, *, matched=(10, 11), reached=(20, 21, 22)):
+        async def run(cypher, params):
+            seen.append((cypher, params))
+            if cypher.startswith("CALL db.meta.stats()"):
+                return SimpleNamespace(result_set=[[{"Column": 4, "Dataset": 3, "Topic": 2}]])
+            if "AS first" in cypher:
+                return SimpleNamespace(result_set=[["Topic", 10]])
+            if "MATCH _whP0" in cypher:                             # the walk
+                return SimpleNamespace(result_set=[[list(reached)]])
+            if cypher.startswith("MATCH (n:"):                      # the far end's scan
+                return SimpleNamespace(result_set=[[list(matched)]])
+            if "labels(n)" in cypher:                               # the scope's check
+                return SimpleNamespace(result_set=[
+                    [20, "u20", ["Column"], []], [21, None, ["Column"], []],
+                    [22, "u22", ["_AggMeta"], []]])
+            raise AssertionError(cypher)
+        return run
+
+    @staticmethod
+    async def _plan(run, *, labels=("Column", "Dataset", "Topic"), notes=None):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+        c = _tracing()
+        c.compile(P(rel("upstream", TYPE("topic"), maxHops=6)))
+        return await plan_mod.reach_plan(run, SimpleNamespace(_entity_type_levels={"column": 1}),
+                                         _query({"kind": "all"}), c, list(labels),
+                                         ("CONTAINS",), width=2,
+                                         notes=[] if notes is None else notes)
+
+    async def test_it_reads_only_what_the_walk_from_the_far_end_reaches(self):
+        seen = []
+        plan = await self._plan(self._run(seen))
+        # 21 has no URN, 22 is bookkeeping: what the scope's own units skip.
+        # Every unit is the trace's answer, and the rest of the query applies.
+        assert [(u.kind, u.roots, u.satisfies) for u in plan.units] == [("ids", [20], None)]
+        scans = [cy for cy, _ in seen if cy.startswith("MATCH (n:") and "AS first" not in cy]
+        # Only the label the far end's type can hold; its condition on each.
+        assert scans and all(cy.startswith("MATCH (n:`Topic`)") for cy in scans)
+        assert all("toLower(labels(n)[0]) IN $p" in cy and cy.endswith("RETURN collect(ID(n))")
+                   for cy in scans)
+        walk, params = next((cy, p) for cy, p in seen if "MATCH _whP0" in cy)
+        assert params["_anchors"] == [10, 11]
+        assert "(anchor)-[:FLOWS_TO*1..6]->(n)" in walk and "ID(anchor) <> ID(n)" in walk
+
+    async def test_it_refuses_past_its_bounds(self, monkeypatch):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+        monkeypatch.setattr(plan_mod, "REACH_ANCHORS_MAX", 1)
+        with pytest.raises(CompileError, match="More than 1 entities match the far end this "
+                                               "search follows more than 3 hops to"):
+            await self._plan(self._run([]))
+        monkeypatch.setattr(plan_mod, "REACH_ANCHORS_MAX", 200_000)
+        monkeypatch.setattr(plan_mod, "REACH_MAX", 2)
+        with pytest.raises(CompileError, match="reaches more than 2 entities"):
+            await self._plan(self._run([]))
+
+    async def test_it_refuses_when_it_runs_out_of_time(self):
+        async def run(cypher, params):
+            if cypher.startswith("CALL db.meta.stats()"):
+                return SimpleNamespace(result_set=[[{"Topic": 2}]])
+            if "AS first" in cypher:
+                return SimpleNamespace(result_set=[["Topic", 10]])
+            raise Exception("Query timed out")
+
+        with pytest.raises(CompileError, match="took too long"):
+            await self._plan(run)
+
+    async def test_a_far_end_matching_nothing_reaches_nothing(self):
+        seen, notes = [], []
+        plan = await self._plan(self._run(seen, matched=()), notes=notes)
+        assert plan.units == [] and "nothing in the data source matches" in notes[0]
+        assert not any("MATCH _whP0" in cy for cy, _ in seen)
+
+
 class TestService:
     async def test_a_search_by_relationship_end_to_end(self):
         page, _ = await _service(_graph()).search(_query(AND(
@@ -674,9 +850,20 @@ class TestService:
         assert resolved.at == "$.children[0].where.refs[0]" and resolved.count == 1
 
     async def test_a_relationship_past_its_caps_is_a_400(self):
-        with pytest.raises(ValidationError, match="at most 3"):
+        with pytest.raises(ValidationError, match="Following more than 3 works"):
             await _service(_graph()).search(_query(AND(
-                rel("downstream", TYPE("dashboard"), maxHops=5))))
+                rel("downstream", TYPE("dashboard"), maxHops=5, quantifier="none"))))
+
+    async def test_a_relationship_past_three_hops_is_traced(self):
+        """events → orders → revenue, a → b → c → a, d1 → {d2, d3} → d4: fed by
+        a topic within five hops; fed, two to five hops back, by what is
+        itself fed — in the cycle only (events and d1 are fed by nothing)."""
+        page, _ = await _service(_graph()).search(_query(AND(
+            rel("upstream", TYPE("topic"), maxHops=5))))
+        assert sorted(h.node.urn for h in page.hits) == ["orders", "revenue"]
+        page, _ = await _service(_graph()).search(_query(AND(
+            rel("upstream", rel("upstream"), minHops=2, maxHops=5))))
+        assert sorted(h.node.urn for h in page.hits) == ["a", "b", "c"]
 
 
 # ---------------------------------------------------------------------------

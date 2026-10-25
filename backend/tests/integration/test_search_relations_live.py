@@ -615,6 +615,72 @@ async def test_the_deepest_nesting_parses_in_linear_time(provider, scope_name):
     assert max(parse_cost(q) for q in sent) < 200_000
 
 
+# --- traces -----------------------------------------------------------------
+
+#: Followed past the hops a candidate tests itself, asking for at least one
+#: relative at the top of the query: traced from the far end — what it matches
+#: found across the data source, and one walk out from it (``plan.trace_plan``).
+#: Through a filter, named types or every link; from a range of hops; to a far
+#: end that is itself a relationship or a count; beside a condition, another
+#: relationship and a walk from named entities; and one that reaches nothing.
+TRACES = [
+    rel("downstream", TYPE("dashboard"), maxHops=6),
+    rel("upstream", TYPE("dataJob"), maxHops=5),
+    rel("upstream", TYPE("topic"), minHops=2, maxHops=6),
+    rel("downstream", TYPE("dashboard"), maxHops=5, edge=CONFIDENT),
+    rel("downstream", TYPE("dashboard"), maxHops=4, edgeTypes=["flows_to"]),
+    rel("neighbor", TYPE("glossaryTerm"), maxHops=4, edgeClass="links"),
+    rel("downstream", rel("parent", TYPE("folder")), maxHops=5),
+    rel("upstream", AND(TYPE("dataset"), UNFED), maxHops=4),
+    rel("upstream", minHops=4, maxHops=6),
+    AND(TYPE("dataset"), rel("downstream", TYPE("dashboard"), maxHops=6),
+        rel("parent", TYPE("domain"))),
+    AND(rel("downstream", OR(TYPE("dashboard"), NAMED("PII")), maxHops=7),
+        rel("upstream", IS(22), maxHops=10)),
+]
+
+
+@pytest.mark.parametrize("scope_name", list(SCOPES))
+async def test_a_trace_answers_as_the_reference_does(provider, scope_name):
+    """The uncapped engine — a search and its count — finds what the reference
+    semantics do; the capped engine, which can't plan by the walk, refuses."""
+    from backend.app.services.deep_search import CompileError
+
+    scope = SCOPES[scope_name]
+    context = SearchRunContext(data_version="relations-v1", scope_hash=f"h-trace-{scope_name}")
+    expected = await _expected(scope, TRACES)
+    wrong = []
+    for i, predicate in enumerate(TRACES):
+        query = _query(predicate, scope)
+        _validate_predicate(query.predicate)        # within the service's caps
+        page = await provider.deep_search_session(query, context=context)
+        count = await provider.deep_search_count(query, context=context)
+        got = sorted(h.node.urn for h in page.hits)
+        if got != expected[i] or count["count"] != len(expected[i]):
+            wrong.append((i, predicate, (got, count["count"]), expected[i]))
+        with pytest.raises(CompileError, match="works for a search that lists its matches"):
+            await provider.deep_search(query)
+    assert not wrong, _report(wrong)
+    assert any(expected) and not all(expected)
+
+
+async def test_a_trace_past_its_bounds_is_refused(provider, monkeypatch):
+    from backend.app.providers.falkordb_search import plan as plan_mod
+    from backend.app.services.deep_search import CompileError
+
+    scope = SCOPES["data_source"]
+    context = SearchRunContext(data_version="relations-v1", scope_hash="h-trace-bounds")
+    monkeypatch.setattr(plan_mod, "REACH_ANCHORS_MAX", 3)
+    with pytest.raises(CompileError, match="More than 3 entities match the far end"):
+        await provider.deep_search_session(
+            _query(rel("upstream", TYPE("dataset"), maxHops=5), scope), context=context)
+    monkeypatch.setattr(plan_mod, "REACH_ANCHORS_MAX", 200_000)
+    monkeypatch.setattr(plan_mod, "REACH_MAX", 1)
+    with pytest.raises(CompileError, match="reaches more than 1 entities"):
+        await provider.deep_search_session(
+            _query(rel("downstream", TYPE("dashboard"), maxHops=5), scope), context=context)
+
+
 @pytest.mark.parametrize("scope_name", list(SCOPES))
 async def test_paths(provider, scope_name):
     """Every route, its edges' properties included — or, cut at maxPaths,

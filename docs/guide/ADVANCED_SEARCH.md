@@ -104,7 +104,7 @@ Ask on the query card — **Or ask in plain words…** under the filters in
 | `datasets tagged PII` · `#PII` · `PII columns` | Datasets with the tag · anything tagged · columns tagged |
 | `unused datasets` · `dead ends` · `sources` · `orphaned columns` | The lineage shape: nothing downstream · nothing upstream · no lineage at all |
 | `undocumented datasets` · `unowned datasets` | No `description` · no `owner` |
-| `datasets that feed dashboards` · `dashboards fed by datasets` | A relationship, up to 3 hops — `directly` for one hop, `within 2 hops` for two |
+| `datasets that feed dashboards` · `dashboards fed by datasets` | A relationship, up to 3 hops — `directly` for one hop, `within 6 hops` for six (10 at most) |
 | `datasets that feed no dashboards` · `only feed dashboards` · `feed at least 2 dashboards` | None of them · every one · a count |
 | `datasets in Snowflake` · `datasets inside "Sales Ops"` · `datasets in the gold layer` | Inside a container you name · in a layer |
 | `datasets owned by alice@corp` · `with more than 1M rows` · `updated in the last 7 days` | Property comparisons |
@@ -217,8 +217,8 @@ large View, where a heavy line can take a while to finish counting, you can
 turn them off under **Options → Live counts**: nothing is counted as you
 build, and **Counts off · Turn on** above the sentence brings them back. A
 line that can't be counted says why: **Counted once it is filled in**,
-**Routes are found when the search runs**, or **Too many hops to count —
-name the far end to go further**.
+**Routes are found when the search runs**, or **Too many steps to count —
+only “at least one” at the top of the search goes past 3**.
 
 ### When nothing matches
 
@@ -244,7 +244,8 @@ under **Add filter → Relationships**, then choose in the row:
 - **How many** — **Has a** (at least one matches), **Has no**, **Every** (every
   one matches — and there is one), or **Count** (at least, more than, exactly …
   *N* of them).
-- **How far** — for lineage, how many hops (1 to 3; up to 10 when the far end
+- **How far** — for lineage, how many hops: 1 to 3, or up to 10 for **Has a**
+  at the top of the search (one such relationship a search, unless its far end
   is an entity you name); for ancestors and descendants, how many levels.
 - **Through edges** — for lineage, only edges that meet a condition, such as
   `confidence` at least 0.8 or `mode` is `stream`. For a property an edge keeps
@@ -683,7 +684,7 @@ upstream*..2(ancestor(@"Country/United Kingdom"))
 | Filters directly inside one OR group | 24 |
 | *Inside Subtree*, *Within N hops*, *Path* | Only at the top level (not inside OR or NOT, nor in a relationship's condition); one *Path* per query |
 | Relationships inside relationships | 3 deep |
-| Lineage hops in a relationship | 3; 10 when its far end is an entity you name, at the top level |
+| Lineage hops in a relationship | 3; 10 for **Has a** at the top level — walked from the entities it names, or, one a search, traced from what its far end matches (at most 200,000 entities, reaching at most 500,000) |
 | Entities one name path names | 64 |
 | Routes a *Path* lists | 128 |
 | Saved searches per View | 500 (names unique in the View, up to 120 characters) |
@@ -709,7 +710,10 @@ upstream*..2(ancestor(@"Country/United Kingdom"))
 | "*…only allowed in the top-level AND group*" | *Inside Subtree*, *Within N hops* or *Path* sits inside an OR or NOT group | Move it to the top level of the query |
 | "*between needs a lower and an upper value*", "*give a duration like P30D*" | A value can't be compared the way the filter asks | Fix the value the message names |
 | "*… names no entity*" under **No matches**, or **not found** on a name | A name path is spelled differently, or starts below the top | Start at a top-level entity and name each container on the way down, or start with `**` |
-| "*… follows lineage 4 hops, tested from every candidate: at most 3*" | A relationship whose far end is a condition goes 3 hops | Name the far end (**Is a named entity…**) to go up to 10, or use fewer hops |
+| "*… follows lineage 4 hops. Following more than 3 works for 'at least one' at the top of the query…*" | The relationship asks for none, every one or a count, sits under an OR or NOT group, or is inside another condition | Ask for **Has a** at the top of the query, follow at most 3 hops, or write it in Cypher |
+| "*2 relationships in this query follow lineage more than 3 hops, and one may*" | Only one relationship a search is traced from what its far end matches | Follow the others at most 3 hops, or name their far ends (**Is a named entity…**) |
+| "*More than 200,000 entities match the far end…*", "*… reaches more than 500,000 entities*" | A relationship followed past 3 hops starts from everything its far end matches | Narrow the far end (a type, a tag, a container), or follow fewer hops |
+| "*Following lineage more than 3 hops works for a search that lists its matches, not for its group counts*" | Group counts (aggregations) can't follow a relationship that far | List the matches, or follow at most 3 hops |
 | "*This link can't follow lineage or relationships*" | You opened the View through a share link | Open it as a member of the workspace |
 | The count reads **N+** or the results say they stopped | The answer was still being counted when the time ran out | Run it again, or narrow it; **Load all** fetches every match |
 | **Save** offers only **Just me** | You can't edit this View | Ask someone who can, or share the search with them |

@@ -50,6 +50,7 @@ import {
     maxHopsFor,
     optionsSummary,
     RELATION_DEPTH_MAX,
+    RELATION_FAR_END_MAX_HOPS,
     TREE_DEPTH_MAX,
     throughOf,
     withinHopCap,
@@ -138,7 +139,7 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
     const through = throughOf(value)
     const lead: Lead = value.count ? 'count' : (value.quantifier ?? 'any')
     const [lo, hi] = hopRange(value)
-    const stands = { topLevel: ctx.depth === 0, rule: ctx.rule }
+    const stands = { topLevel: ctx.depth === 0 && ctx.top !== false, rule: ctx.rule }
     const hopCap = maxHopsFor(value, stands)
     const nested = useMemo(() => ({ ...ctx, depth: ctx.depth + 1 }), [ctx])
     const edgeCtx = useEdgeEditorContext(discovery, knownEntityTypes, discoveredLayers)
@@ -289,7 +290,7 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
                         <StepsField lineage={meta.lineage} lo={lo}
                                     hi={meta.lineage || value.maxHops ? hi : null}
                                     cap={meta.lineage ? hopCap : TREE_DEPTH_MAX}
-                                    named={value.axis !== 'neighbor'}
+                                    further={!ctx.rule}
                                     onChange={setHops} disabled={isRunning} />
                     )}
                     {meta.lineage && (
@@ -357,8 +358,9 @@ interface StepsProps {
     /** None for a tree axis looking any depth down or up. */
     hi: number | null
     cap: number
-    /** Whether naming the far end could let it go further. */
-    named: boolean
+    /** Whether it could go further elsewhere — as "at least one", at the
+     *  top of the query (a display rule's never does). */
+    further: boolean
     onChange: (min: number, max: number | null) => void
     disabled?: boolean
 }
@@ -366,7 +368,7 @@ interface StepsProps {
 /** How far: the usual reaches as one choice each — 1 step, up to 2, up to
  *  3… or any depth down the tree — and a range of your own a click away. */
 const StepsField: FC<StepsProps> = (props) => {
-    const { lineage, lo, hi, cap, named, onChange, disabled } = props
+    const { lineage, lo, hi, cap, further, onChange, disabled } = props
     const choices: SegmentedOption<string>[] = [
         ...(lineage ? [1, 2, 3, 5, 10] : [1, 2, 3]).filter((n) => n <= cap).map((n) => ({
             value: String(n), label: n > 1 ? `Up to ${n}` : lineage ? '1 step' : '1 level',
@@ -385,9 +387,9 @@ const StepsField: FC<StepsProps> = (props) => {
                     className="text-[10.5px] font-medium text-accent-lineage hover:underline">
                 {custom ? 'Usual reaches' : 'Custom range'}
             </button>
-            {lineage && !custom && cap < 10 && named && (
+            {lineage && !custom && cap < RELATION_FAR_END_MAX_HOPS && further && (
                 <span className="basis-full pl-[78px] text-[10.5px] text-ink-muted/80">
-                    Name the far end to go up to 10 steps
+                    Up to {RELATION_FAR_END_MAX_HOPS} steps for “at least one” at the top of the search
                 </span>
             )}
         </Option>
@@ -395,7 +397,7 @@ const StepsField: FC<StepsProps> = (props) => {
 }
 
 
-const HopsField: FC<StepsProps> = ({ lineage, lo, hi, cap, named, onChange, disabled }) => {
+const HopsField: FC<StepsProps> = ({ lineage, lo, hi, cap, further, onChange, disabled }) => {
     const clamp = (n: number) => Math.min(cap, Math.max(1, Math.round(n) || 1))
     const unit = lineage ? 'steps' : 'levels'
     return (
@@ -416,7 +418,8 @@ const HopsField: FC<StepsProps> = ({ lineage, lo, hi, cap, named, onChange, disa
                    className={cn(inputClass, 'w-16')} disabled={disabled} />
             {lineage && (
                 <span className="text-[10.5px] text-ink-muted/80">
-                    up to {cap}{cap < 10 && named ? ' (name the far end to go further)' : ''}
+                    up to {cap}{cap < RELATION_FAR_END_MAX_HOPS && further
+                        ? ` (${RELATION_FAR_END_MAX_HOPS} for “at least one” at the top of the search)` : ''}
                 </span>
             )}
         </span>

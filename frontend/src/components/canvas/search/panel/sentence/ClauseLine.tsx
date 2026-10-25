@@ -252,7 +252,10 @@ function RelationTokens({ line, tokenState }: {
     const relativeBlank = (relative.kind === 'names' && relative.refs.length === 0)
         || (relative.kind === 'types' && relative.types.length === 0)
 
-    const nested = useMemo(() => ({ ...relationCtx, depth: line.relationDepth }), [relationCtx, line.relationDepth])
+    // In the top-level AND: a listed clause, while the listed clauses all must hold.
+    const top = line.topIndex !== null && ctx.combine === 'and'
+    const nested = useMemo(() => ({ ...relationCtx, depth: line.relationDepth, top }),
+        [relationCtx, line.relationDepth, top])
     const relationEditor = (
         <RelationContext.Provider value={nested}>
             <RelationshipEditor value={p} hideWhere

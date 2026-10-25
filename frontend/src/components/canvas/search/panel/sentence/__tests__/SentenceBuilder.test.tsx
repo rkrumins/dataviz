@@ -56,8 +56,8 @@ function setup(initial: Predicate | null, wrapper?: ComponentType<{ children: Re
                              onCommit={(next) => { onCommit(next); setDraft(next) }} />
         )
     }
-    render(<Harness />, { wrapper })
-    return { onSeed, onCommit, onEditInCode }
+    const { unmount } = render(<Harness />, { wrapper })
+    return { onSeed, onCommit, onEditInCode, unmount }
 }
 
 
@@ -114,6 +114,21 @@ describe('SentenceBuilder', () => {
         expect(screen.getByRole('figure', { name: "The query's shape" })).toBeInTheDocument()
         fireEvent.click(screen.getByRole('button', { name: /^Change which relatives: chart/ }))
         expect(await screen.findByRole('dialog', { name: 'Which types' })).toBeInTheDocument()
+    })
+
+    it('follows lineage past 3 steps only while every listed clause must hold', async () => {
+        const feeds: Predicate = { kind: 'related', axis: 'downstream', maxHops: 3, where: type('chart') }
+        const steps = async () => {
+            fireEvent.click(screen.getByRole('button', { name: /^How far:/ }))
+            await userEvent.click(await screen.findByRole('button', { name: /More options/ }))
+            return within(screen.getByRole('radiogroup', { name: 'How many steps' }))
+                .getAllByRole('radio').map((r) => r.textContent)
+        }
+        const view = setup(all(type('dataset'), feeds, tag('PII')))
+        expect(await steps()).toEqual(['1 step', 'Up to 2', 'Up to 3', 'Up to 5', 'Up to 10'])
+        view.unmount()
+        setup(all(type('dataset'), any(feeds, tag('PII'))))
+        expect(await steps()).toEqual(['1 step', 'Up to 2', 'Up to 3'])
     })
 
     it('hands a condition no builder edits over to Code', async () => {

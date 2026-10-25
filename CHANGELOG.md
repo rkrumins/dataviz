@@ -216,8 +216,10 @@ rule in the governance pack.
 
 ### Known limitations
 
-- A relationship whose far end is a condition follows lineage at most 3 hops (10 when the far end
-  is an entity you name). Complete end-to-end lineage stays the Trace feature's job.
+- A relationship follows lineage at most 3 hops, except one at the top of the query asking for at
+  least one relative: it goes up to 10, walked from the entities it names, or — one a query —
+  traced from at most 200,000 entities its far end matches. Complete end-to-end lineage stays the
+  Trace feature's job.
 - An edge property users added takes presence and equality only, and a key of a nested object
   reads as present when it is only nested.
 - A relationship's condition tests a relative's native properties; a value kept as raw JSON

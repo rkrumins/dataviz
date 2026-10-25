@@ -55,6 +55,7 @@ from backend.app.providers.falkordb_deep_search import (
 )
 from backend.app.providers.falkordb_search.keys import SortSpec
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf, probe_condition
+from backend.app.services.deep_search import CompileError
 from backend.app.services.native_query.parse_cost import grouped
 
 #: Root sets up to this size clamp range units with an ``IN`` list. The
@@ -398,7 +399,11 @@ async def reach_plan(run: Run, provider, query, compiler, labels: Sequence[str],
 
     None — read the scope as usual — when there is no such walk, or it
     starts from more than ``REACH_ANCHORS_MAX`` entities, reaches more than
-    ``REACH_MAX`` or runs out of time."""
+    ``REACH_MAX`` or runs out of time. A relationship traced from its far
+    end plans the search instead (``trace_plan``)."""
+    if compiler.hoisted_trace is not None:
+        return await trace_plan(run, provider, query, compiler, labels, containment,
+                                width=width, notes=notes)
     entries = compiler.hoisted_within_hops
     if not entries or not entries[0]["edge_types"]:
         return None
@@ -422,6 +427,84 @@ async def reach_plan(run: Run, provider, query, compiler, labels: Sequence[str],
     return Plan([Unit("ids", roots=chunk, size=len(chunk), satisfies=0)
                  for chunk in (ids[i:i + width] for i in range(0, len(ids), max(1, width)))],
                 notes=notes)
+
+
+async def trace_plan(run: Run, provider, query, compiler, labels: Sequence[str],
+                     containment: Tuple[str, ...], *, width: int,
+                     notes: List[str]) -> Plan:
+    """Read only what the relationship traced from its far end reaches.
+
+    Past the hops a candidate tests itself, "fed within ten hops by an
+    uncertified dataset" can't be asked of every candidate: its routes
+    multiply with each hop. So the entities the far end matches are found
+    across the data source, a band of a label at a time; the walk runs once,
+    out from them (``_reached_ids`` — ``within_hops_walk``, as from named
+    entities); and the entities it reaches that are in scope become ``ids``
+    units, which are the relationship's whole test. There is no reading the
+    scope the usual way instead: past ``REACH_ANCHORS_MAX`` matches,
+    ``REACH_MAX`` entities reached or a statement's time, it is refused."""
+    trace, hops = compiler.hoisted_trace, compiler.trace_beyond
+    try:
+        anchors = await _far_end_ids(run, labels, trace, compiler.params, width)
+        if anchors is None:
+            raise CompileError(
+                f"More than {REACH_ANCHORS_MAX:,} entities match the far end this search "
+                f"follows more than {hops} hops to — narrow what it matches, or follow at "
+                f"most {hops} hops.")
+        reached = await _reached_ids(run, anchors, trace, compiler.params) if anchors else []
+        if reached is None:
+            raise CompileError(
+                f"Following more than {hops} hops from what this search's far end matches "
+                f"reaches more than {REACH_MAX:,} entities — narrow what it matches, or "
+                f"follow fewer hops.")
+        ids = await _in_scope(run, provider, query, compiler, labels, containment, reached)
+    except Exception as exc:                                  # noqa: BLE001
+        if not _timed_out(exc):
+            raise
+        raise CompileError(
+            f"Following more than {hops} hops from what this search's far end matches took "
+            "too long — narrow what it matches, or follow fewer hops.") from exc
+    if not anchors:
+        notes.append("nothing in the data source matches the far end the search follows "
+                     "lineage to, so nothing is related to it")
+    return Plan([Unit("ids", roots=chunk, size=len(chunk))
+                 for chunk in (ids[i:i + width] for i in range(0, len(ids), max(1, width)))],
+                notes=notes)
+
+
+async def _far_end_ids(run: Run, labels: Sequence[str], trace: Dict[str, Any],
+                       params: Dict[str, Any], width: int) -> Optional[List[int]]:
+    """The node IDs of every entity a traced relationship's far end
+    matches: under each label its condition can hold (``types``), in bands
+    of about ``width`` nodes — so no statement holds a query thread long.
+    None past ``REACH_ANCHORS_MAX``."""
+    wanted = set(trace.get("types") or ())
+    scanned = sorted(lbl for lbl in labels if not wanted or lbl.lower() in wanted)
+    stats = await _label_stats(run, scanned)
+    tail = tail_clauses(list(trace["far_end"]))
+    ids: set = set()
+    for unit in _range_units(scanned, stats, width):
+        conds: List[str] = []
+        bounds: Dict[str, Any] = {}
+        if unit.lo is not None:
+            conds.append("ID(n) >= $_lo")
+            bounds["_lo"] = unit.lo
+        if unit.hi is not None:
+            conds.append("ID(n) < $_hi")
+            bounds["_hi"] = unit.hi
+        if unit.exclude:
+            conds.append("NOT (" + " OR ".join(
+                f"n:`{_sanitize_label(lbl)}`" for lbl in unit.exclude) + ")")
+        conds.append("n.urn IS NOT NULL")
+        res = await run(
+            f"MATCH (n:`{_sanitize_label(unit.label or '')}`) WHERE {' AND '.join(conds)} "
+            f"{tail} WITH n LIMIT $_lim RETURN collect(ID(n))",
+            {**params, **bounds, "_lim": REACH_ANCHORS_MAX + 1 - len(ids)},
+        )
+        ids |= _collected(res)
+        if len(ids) > REACH_ANCHORS_MAX:
+            return None
+    return sorted(ids)
 
 
 def _timed_out(exc: BaseException) -> bool:

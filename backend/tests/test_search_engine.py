@@ -853,6 +853,27 @@ class TestFacets:
         # What the graph said stays in the server's log.
         assert not any("too slow" in n for n in notes)
 
+    async def test_a_trace_leaves_its_facets_empty_and_says_why(self):
+        """The capped statements can't count a relationship traced from its far
+        end, so its facets are refused, in the user's terms — never counted
+        without it."""
+        store = MemorySessionStore()
+        provider = SimpleNamespace(_get_lineage_edge_types=lambda: {"FLOWS_TO"},
+                                   _get_containment_edge_types=lambda: {"CONTAINS"})
+        query = _query({"kind": "related", "axis": "upstream", "maxHops": 6,
+                        "where": {"kind": "entityType", "values": ["topic"]}},
+                       results="both", aggregations=[{"by": "entityType"}])
+
+        async def run(cypher, params, timeout_s):
+            raise AssertionError(f"no facet statement runs: {cypher}")
+
+        await engine_mod._compute_facets(provider, query, query.options.aggregations, "s1",
+                                         store, run, 5.0, SimpleNamespace(session_ttl_seconds=60))
+        saved = await store.load_facets("s1")
+        models, notes = await engine_mod._facet_models(query, _session(), store, saved)
+        assert models == [[]]
+        assert notes == [saved["refused"]] and "lists its matches" in notes[0]
+
 
 class TestLeaseHandover:
     async def test_the_holder_carries_on_from_the_latest_commit(self, fresh_memory_store):

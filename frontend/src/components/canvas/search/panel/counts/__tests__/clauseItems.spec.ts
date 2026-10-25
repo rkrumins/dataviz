@@ -34,11 +34,13 @@ describe('whyUncountable', () => {
         expect(whyUncountable({ kind: 'path', sourceUrns: ['a'], targetUrns: ['b'] } as Predicate)).toBe('route')
     })
 
-    it('counts lineage as far as a search tests it, and further when the far end is named', () => {
+    it('counts lineage as far as a search follows it — past 3 hops, as "at least one" at the top', () => {
         expect(whyUncountable({ kind: 'related', axis: 'downstream', maxHops: 3 })).toBeNull()
-        expect(whyUncountable({ kind: 'related', axis: 'downstream', maxHops: 4 })).toBe('too-far')
+        expect(whyUncountable({ kind: 'related', axis: 'downstream', maxHops: 4 })).toBeNull()
         expect(whyUncountable({ kind: 'related', axis: 'downstream', maxHops: 8, where: named('Sales') })).toBeNull()
-        // A named far end walks further only at the top of the query.
+        expect(whyUncountable({ kind: 'related', axis: 'downstream', maxHops: 4, quantifier: 'none' }))
+            .toBe('too-far')
+        // Walked from its far end only at the top of the query.
         expect(whyUncountable(any({ kind: 'related', axis: 'downstream', maxHops: 8, where: named('Sales') }, tag('x'))))
             .toBe('too-far')
     })

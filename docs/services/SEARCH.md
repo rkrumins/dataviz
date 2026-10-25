@@ -153,7 +153,7 @@ settings object. Defaults:
 | `DEEP_SEARCH_MAX_LEAF_COUNT` | `64` | Max leaf predicates per query. |
 | `DEEP_SEARCH_MAX_OR_BRANCH` | `24` | Max branches in an OR group. |
 | `DEEP_SEARCH_MAX_RELATION_DEPTH` | `3` | How deep relationships nest inside one another (a path end's condition counts as one). |
-| `DEEP_SEARCH_RELATION_MAX_HOPS` | `3` | Lineage hops a relationship may follow when it is tested from every candidate (at most `6`). One whose far end is named entities — an `is`, in the top-level AND — is walked from them, up to 10 hops. |
+| `DEEP_SEARCH_RELATION_MAX_HOPS` | `3` | Lineage hops a relationship may follow when it is tested from every candidate (at most `6`). One in the top-level AND that asks for at least one relative is walked from its far end instead, up to 10 hops: from the entities it names (an `is`), or — one a query — from those its condition matches across the data source. |
 | `DEEP_SEARCH_CANDIDATE_CAP` | `10000` | Default per-query candidate cap. |
 | `DEEP_SEARCH_CANDIDATE_CAP_MAX` | `100000` | Hard ceiling on the candidate cap. |
 | `DEEP_SEARCH_SOFT_DEADLINE_MS` | `60000` | Not read: the default soft deadline is `options.softDeadlineMs` (`60000`), set per request. |
@@ -207,7 +207,13 @@ property.
   comparison in a relationship's edge filter, under 50 ms without
   (`docs/search-engine/S0_FINDINGS.md` §15).
   One whose far end is named is walked from those entities instead and costs
-  about what `withinHops` does.
+  about what `withinHops` does. Past `DEEP_SEARCH_RELATION_MAX_HOPS`, one whose
+  far end is a condition is traced (`plan.trace_plan`): what the condition
+  matches is found across the data source, a band of a label at a time, and
+  one walk runs out from it, its in-scope ends the only entities read. Past
+  200,000 matches, 500,000 entities reached or a statement's time it is
+  refused, never read the usual way; the capped engine (group counts) refuses
+  it too.
 - Edge user properties live in one JSON text per edge (ADR-026): a condition
   on such a key takes presence and equality only.
 - View scoping is mandatory — a search without a resolvable `scope.viewId`

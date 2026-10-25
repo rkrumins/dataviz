@@ -88,6 +88,7 @@ from backend.common.models.search import (
     TextPredicate,
     WithinHopsPredicate,
     export_columns,
+    traced_from_far_end,
 )
 from backend.common.search_semantics import SemanticsError, resolve_predicate
 
@@ -184,10 +185,12 @@ def _path_ends(predicate: PathPredicate):
 def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool,
                        relations: int, top: bool) -> int:
     """A relationship's caps: how deep relationships nest, how far lineage
-    goes — tested from every candidate, a few hops; walked from entities
-    its condition names (top level: ``anchor_groups`` — an ``is``, inside
-    one, or an OR of those), as far as withinHops; in a display rule, one —
-    and its edge filter's."""
+    goes — tested from every candidate, a few hops; in the top-level AND,
+    asking for at least one relative, walked from its far end as far as
+    withinHops: from the entities it names (``anchor_groups`` — an ``is``,
+    inside one, or an OR of those) or what its condition matches
+    (``traced_from_far_end``, once a query: ``_check_traces``); in a display
+    rule, one — and its edge filter's."""
     s = get_deep_search_settings()
     if relations + 1 > s.max_relation_depth:
         raise ValidationError(
@@ -199,16 +202,18 @@ def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool
         walks = "links" if p.edge_class == "links" or p.edge_types else "lineage"
         named = (top and p.quantifier == "any" and p.count is None
                  and anchor_groups(p.where) is not None)
+        traced = top and traced_from_far_end(p, s.relation_max_hops)
         if rule and hops > 1:
             raise ValidationError(
                 f"relationship at {path}: a rule follows {walks} one hop — it is "
                 "asked of every entity on the canvas"
             )
-        if hops > s.relation_max_hops and not named:
+        if hops > s.relation_max_hops and not (named or traced):
             raise ValidationError(
-                f"relationship at {path} follows {walks} {hops} hops, tested from every "
-                f"candidate: at most {s.relation_max_hops}. Name the far end (by name or "
-                "URN) to follow it further."
+                f"relationship at {path} follows {walks} {hops} hops. Following more than "
+                f"{s.relation_max_hops} works for 'at least one' at the top of the query; "
+                "for 'no', 'every' or a count that deep, use Cypher (Cypher tab → Edit "
+                "and run)."
             )
         rollups = [t for t in p.edge_types or () if is_derived_edge_type(t)]
         if rollups and hops > 1:
@@ -293,8 +298,30 @@ def _count_and_validate(query: SearchQuery) -> int:
         raise ValidationError(
             f"predicate has {leaves} leaves (max {max_leaves})"
         )
+    _check_traces(query.predicate)
     _reject_unsupported_sub_aggregation(query)
     return leaves
+
+
+def _check_traces(predicate) -> None:
+    """A query traces one relationship from its far end at most: the search
+    is planned from that walk (``plan.trace_plan``)."""
+    s = get_deep_search_settings()
+    traced = [m for m in _top_conjuncts(predicate) if isinstance(m, RelatedPredicate)
+              and traced_from_far_end(m, s.relation_max_hops)]
+    if len(traced) > 1:
+        raise ValidationError(
+            f"{len(traced)} relationships in this query follow lineage more than "
+            f"{s.relation_max_hops} hops, and one may. Follow the others at most "
+            f"{s.relation_max_hops}, or use Cypher (Cypher tab → Edit and run)."
+        )
+
+
+def _top_conjuncts(predicate) -> list:
+    """The members of the top-level AND, nested ANDs flattened."""
+    if isinstance(predicate, GroupPredicate) and predicate.op == "and":
+        return [m for child in predicate.children for m in _top_conjuncts(child)]
+    return [predicate]
 
 
 def _reject_unsupported_sub_aggregation(query: SearchQuery) -> None:
@@ -613,6 +640,7 @@ def _validate_items(items, *, rule: bool = True) -> None:
         if leaves > max_leaves:
             raise ValidationError(
                 f"$.items[{i}].predicate has {leaves} leaves (max {max_leaves})")
+        _check_traces(item.predicate)
 
 
 def _returns_hits(query: SearchQuery) -> bool:

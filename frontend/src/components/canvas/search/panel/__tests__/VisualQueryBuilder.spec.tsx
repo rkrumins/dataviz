@@ -11,7 +11,7 @@
  * popover renders and controlled inputs keep their keystrokes.
  */
 import React from 'react'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -166,6 +166,27 @@ describe('VisualQueryBuilder', () => {
 
         expect(screen.getByText('Every entity')).toBeInTheDocument()
         expect(screen.queryByText('unsupported')).not.toBeInTheDocument()
+    })
+
+    it('follows lineage past 3 steps only from the query’s top-level AND', async () => {
+        const feeds: Predicate = { kind: 'related', axis: 'downstream', maxHops: 3 }
+        const steps = async () => {
+            await userEvent.setup().click(screen.getByRole('button', { name: /More options/ }))
+            return within(screen.getByRole('radiogroup', { name: 'How many steps' }))
+                .getAllByRole('radio').map((r) => r.textContent)
+        }
+        const all: Predicate = { kind: 'group', op: 'and', children: [textPredicate, feeds] }
+        const { unmount } = render(<VisualQueryBuilder {...baseProps({ predicate: all })} />)
+        expect(await steps()).toEqual(['1 step', 'Up to 2', 'Up to 3', 'Up to 5', 'Up to 10'])
+        unmount()
+        for (const predicate of [
+            { kind: 'group', op: 'or', children: [textPredicate, feeds] },
+            { kind: 'group', op: 'and', children: [textPredicate, { kind: 'group', op: 'not', children: [feeds] }] },
+        ] as Predicate[]) {
+            const view = render(<VisualQueryBuilder {...baseProps({ predicate })} />)
+            expect(await steps()).toEqual(['1 step', 'Up to 2', 'Up to 3'])
+            view.unmount()
+        }
     })
 
     it('renders no bulk-select checkbox when row selection is disabled', () => {
