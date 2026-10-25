@@ -48,7 +48,8 @@ from backend.auth_service.cookies import clear_session_cookies
 from backend.auth_service.core.tokens import invite_expiry
 from backend.app.services.feature_flags import feature_flags
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import user_identity_repo, user_repo
+from backend.app.db.repositories import service_account_repo, user_identity_repo, user_repo
+from backend.app.services import service_account_standing
 from backend.common.display_name import resolve_display_name
 from backend.common.models.auth import (
     AccountActivityItem,
@@ -866,6 +867,15 @@ async def change_user_role(
 
 # ── Suspend ───────────────────────────────────────────────────────────
 
+async def _restand_service_accounts(session: AsyncSession, user_id: str) -> list[str]:
+    """Whether someone can still sign in decides whether the service accounts
+    they manage still have a manager: bring those up to date now, not at the
+    next hourly sweep. Returns those accounts."""
+    managed = await service_account_repo.managed_accounts(session, user_id)
+    await service_account_standing.refresh(session, managed)
+    return managed
+
+
 @admin_router.post("/{user_id}/suspend", status_code=status.HTTP_200_OK)
 async def suspend_user(
     user_id: str,
@@ -881,6 +891,10 @@ async def suspend_user(
         raise HTTPException(status_code=409, detail="User is already suspended")
 
     await user_repo.update_user_status(session, user_id, "suspended")
+    managed = await _restand_service_accounts(session, user_id)
+    await service_account_standing.tell_keys_outlive(
+        session, managed, person=user_id, actor_id=admin.id,
+    )
 
     # ``validate_session`` re-reads ``status`` per request, so a
     # suspension already bites on the next call. Revoke anyway, for the
@@ -1022,6 +1036,11 @@ async def set_system_account(
                     )
 
     await user_repo.set_system_account(session, user_id, body.is_system_account)
+    managed = await _restand_service_accounts(session, user_id)
+    if body.is_system_account:
+        await service_account_standing.tell_keys_outlive(
+            session, managed, person=user_id, actor_id=admin.id,
+        )
     await user_repo.create_outbox_event(
         session,
         event_type="user.system_account_changed",
@@ -1055,6 +1074,7 @@ async def reactivate_user(
         raise HTTPException(status_code=409, detail="User is already active")
 
     await user_repo.update_user_status(session, user_id, "active")
+    await _restand_service_accounts(session, user_id)
 
     # Phase 6: reactivation no longer auto-assigns a global role —
     # any previous role_bindings / user_roles rows survived the

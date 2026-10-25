@@ -25,6 +25,7 @@ import { Skeleton } from '@/components/ui/Skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/Tabs'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { MOTION } from '@/lib/motion'
+import { isServiceAccountId } from '@/lib/serviceAccounts'
 import { cn } from '@/lib/utils'
 import type { AdminApiKey, ApiKey, ApiKeyDetail, KeyRef } from '@/services/apiKeyService'
 import { AccessMatrix } from './AccessMatrix'
@@ -32,6 +33,7 @@ import { KeyChips } from './KeyCard'
 import { LifetimeBar } from './LifetimeBar'
 import { UsagePanel } from './UsagePanel'
 import { describeLastUsed, describeRevocation } from './apiKeyFormat'
+import { useOwnerWords } from './keyClient'
 import { KeyStatusBadge } from './parts'
 
 type Tab = 'overview' | 'access' | 'usage'
@@ -96,6 +98,7 @@ function DrawerBody({ apiKey, variant, load, onClose, actions, onOpenKey }: {
     actions?: React.ReactNode
     onOpenKey?: (ref: KeyRef) => void
 }) {
+    const keysOf = useOwnerWords()
     const [tab, setTab] = useState<Tab>('overview')
     const [detail, setDetail] = useState<ApiKeyDetail | null>(null)
     const [failed, setFailed] = useState<string | null>(null)
@@ -141,7 +144,10 @@ function DrawerBody({ apiKey, variant, load, onClose, actions, onOpenKey }: {
                 {variant === 'admin' && owner && (
                     <div className="mt-4 flex items-center gap-3 p-2.5 rounded-xl bg-black/[0.03] dark:bg-white/[0.04]">
                         <div className="min-w-0 flex-1">
-                            <PersonChip id={owner.id} person={owner} size="md" showEmail caption="Acts as them" />
+                            <PersonChip
+                                id={owner.id} person={owner} size="md" showEmail
+                                caption={isServiceAccountId(owner.id) ? 'Acts as the service account' : 'Acts as them'}
+                            />
                         </div>
                         {/* What was done with it, and what happened to it — refusals included. */}
                         <a
@@ -173,8 +179,8 @@ function DrawerBody({ apiKey, variant, load, onClose, actions, onOpenKey }: {
                     </TabsContent>
                     <TabsContent value="access">
                         <p className="text-xs text-ink-muted mb-4 leading-relaxed">
-                            What it can do right now: {variant === 'owner' ? 'your' : 'its owner’s'} access today,
-                            narrowed by the key. It changes as {variant === 'owner' ? 'yours' : 'theirs'} does.
+                            What it can do right now: {variant === 'owner' ? keysOf.possessive : 'its owner’s'} access today,
+                            narrowed by the key. It changes as {variant === 'owner' ? (keysOf.you ? 'yours' : 'the account’s') : 'theirs'} does.
                         </p>
                         {detail ? <AccessMatrix access={detail.effectiveAccess} /> : <Loading />}
                     </TabsContent>

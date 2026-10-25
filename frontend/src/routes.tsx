@@ -46,6 +46,7 @@ const AdminAnnouncements = lazyWithRetry(() => import('@/components/admin/AdminA
 const AdminSso = lazyWithRetry(() => import('@/components/admin/AdminSso').then(m => ({ default: m.AdminSso })))
 const AdminActivity = lazyWithRetry(() => import('@/components/admin/AdminActivity').then(m => ({ default: m.AdminActivity })))
 const AdminApiKeys = lazyWithRetry(() => import('@/components/admin/AdminApiKeys').then(m => ({ default: m.AdminApiKeys })))
+const AdminServiceAccounts = lazyWithRetry(() => import('@/components/admin/AdminServiceAccounts').then(m => ({ default: m.AdminServiceAccounts })))
 const AdminTelemetry = lazyWithRetry(() => import('@/components/admin/AdminTelemetry/index').then(m => ({ default: m.AdminTelemetry })))
 const IngestionPage = lazyWithRetry(() => import('@/pages/IngestionPage').then(m => ({ default: m.IngestionPage })))
 const DataSourceOverviewPage = lazyWithRetry(() => import('@/pages/DataSourceOverviewPage').then(m => ({ default: m.DataSourceOverviewPage })))
@@ -57,6 +58,7 @@ const OntologySchemaPage = lazyWithRetry(() => import('@/pages/OntologySchemaPag
 const MyAccessPage = lazyWithRetry(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
 const MyIdentitiesPage = lazyWithRetry(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
 const MyApiKeysPage = lazyWithRetry(() => import('@/pages/MyApiKeysPage').then(m => ({ default: m.MyApiKeysPage })))
+const ServiceAccountKeysPage = lazyWithRetry(() => import('@/pages/ServiceAccountKeysPage').then(m => ({ default: m.ServiceAccountKeysPage })))
 const AccountSettingsPage = lazyWithRetry(() => import('@/pages/AccountSettingsPage').then(m => ({ default: m.AccountSettingsPage })))
 const PreferencesPage = lazyWithRetry(() => import('@/pages/PreferencesPage').then(m => ({ default: m.PreferencesPage })))
 const PasswordChangeRequired = lazyWithRetry(() => import('@/pages/PasswordChangeRequired').then(m => ({ default: m.PasswordChangeRequired })))
@@ -220,6 +222,9 @@ export const router = createBrowserRouter([
       // the apiKeysEnabled switch: with keys off you can still see and revoke
       // yours — the page says so and offers nothing new.
       { path: 'me/api-keys', element: <Lazy><MyApiKeysPage /></Lazy> },
+      // A service account's keys, for its managers. The server decides who
+      // may see it: anyone else is told it does not exist.
+      { path: 'me/service-accounts/:accountId', element: <Lazy><ServiceAccountKeysPage /></Lazy> },
       // How the app works for you — kept in this browser, ungated like its siblings.
       { path: 'me/preferences', element: <Lazy><PreferencesPage /></Lazy> },
 
@@ -376,6 +381,14 @@ export const router = createBrowserRouter([
             element: (
               <RequireNav group="admin" sectionKey="api-keys">
                 <Lazy><AdminApiKeys /></Lazy>
+              </RequireNav>
+            ),
+          },
+          {
+            path: 'service-accounts',
+            element: (
+              <RequireNav group="admin" sectionKey="service-accounts">
+                <Lazy><AdminServiceAccounts /></Lazy>
               </RequireNav>
             ),
           },

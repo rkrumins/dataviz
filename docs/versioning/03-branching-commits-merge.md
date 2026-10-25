@@ -45,7 +45,7 @@ erDiagram
     }
     COMMIT {
         bigint commit_seq "monotonic per branch"
-        text kind "genesis|edit|checkpoint|squash_publish|import|sync|revert"
+        text kind "genesis|edit|checkpoint|pull|squash_publish|import|sync|revert|restore"
         json contributors "distinct actors (squash)"
         json source_commit_ids "drafts folded (squash)"
     }
@@ -56,13 +56,14 @@ erDiagram
 | kind | Written by | On branch |
 |------|-----------|-----------|
 | `genesis` | `create_graph`, `fork_graph` (fork point) | `main` |
-| `edit` | `apply_ops` (first commit on a branch) | any |
+| `edit` | `apply_ops` (a canvas save, each window of a file import, a write straight to `main`), and `checkpoint` for a branch's first commit | any |
 | `checkpoint` | `checkpoint` | draft |
 | `pull` | `rebase_draft` — records the upstream commits folded in (§3.7) | draft |
 | `squash_publish` | `publish` / `merge_mr` / `merge_pr` | `main` |
 | `import` | `bulk_ingest` / `enable_versioning` | `main` |
 | `sync` | `sync_ingest` (authoritative re-sync — see [10](10-authoritative-sources-datahub-openmetadata.md)) | `main` |
 | `revert` | `revert_commit` | `main` |
+| `restore` | `restore_to_commit` — `main` set back to an earlier commit's state, recording that commit in `source_commit_ids` | `main` |
 
 > **`ck_commits_kind` is WIDEN-ONLY.** Never drop a value from the allow-list: a kind already written to
 > a live table makes the constraint unaddable and wedges the whole upgrade chain. `pull` was added by
@@ -102,9 +103,9 @@ stateDiagram-v2
     merged --> [*]
     abandoned --> [*]
     note right of publishing
-        Auto-rebase-when-clean: a stale draft is
-        merged against CURRENT main in one step;
-        a real clash raises MergeConflict.
+        Require up to date: a draft behind main
+        is refused with NotUpToDate (409) until
+        it pulls the latest main.
     end note
 ```
 

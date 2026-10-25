@@ -468,6 +468,20 @@ async def test_sharing_with_a_group_reaches_its_members(test_client, db_session,
         assert (await test_client.get(f"{URL}/t_alice")).status_code == 404
 
 
+async def test_a_template_is_never_shared_with_a_service_account(test_client, db_session, library):
+    db_session.add(UserORM(
+        id="svc_0123456789ab", email="svc_0123456789ab@service-account.invalid", password_hash="x",
+        status="active", first_name="Metadata sync", last_name="",
+        created_at="2024-01-01T00:00:00Z", updated_at="2024-01-01T00:00:00Z",
+    ))
+    await db_session.flush()
+    with _as("alice"):
+        shared = await test_client.post(f"{URL}/t_alice/grants", json={
+            "subjectType": "user", "subjectId": "svc_0123456789ab", "role": "viewer",
+        })
+    assert shared.status_code == 409, shared.text
+
+
 async def test_every_change_is_recorded_as_the_person_who_made_it(test_client, db_session, library):
     with _as("alice"):
         tid = (await test_client.post(URL, json={"name": "Audit me", "layers": _layers("A")})).json()["id"]

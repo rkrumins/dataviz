@@ -12,9 +12,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ApiKeyWizard } from '../ApiKeyWizard'
 import { MyApiKeysPage } from '@/pages/MyApiKeysPage'
-import { freshDraft, parkDraft } from '../../apiKeyDraft'
+import { freshDraft, parkDraft, peekDraft } from '../../apiKeyDraft'
+import { KeyClientProvider } from '../../keyClient'
 import { apiKey, access, options as opts } from '../../__tests__/fixtures'
-import { ApiKeyError, type ApiKeyOptions, type ApiKeyPreview } from '@/services/apiKeyService'
+import { ApiKeyError, type ApiKeyOptions, type ApiKeyPreview, type KeyClient } from '@/services/apiKeyService'
 import { useAuthStore } from '@/store/auth'
 
 const svc = vi.hoisted(() => ({
@@ -32,6 +33,9 @@ const svc = vi.hoisted(() => ({
 vi.mock('@/services/apiKeyService', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/services/apiKeyService')>()),
     apiKeyService: svc,
+}))
+vi.mock('@/services/serviceAccountService', () => ({
+    serviceAccountService: { mine: () => Promise.resolve({ items: [], total: 0, graceDays: 14 }) },
 }))
 vi.mock('@/components/account/AccountShell', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/components/account/AccountShell')>()),
@@ -451,5 +455,67 @@ describe('closing early', () => {
         fireEvent.keyDown(document, { key: 'Escape' })
         await userEvent.click(await screen.findByRole('button', { name: 'Discard' }))
         expect(onClose).toHaveBeenCalled()
+    })
+})
+
+describe('for a service account', () => {
+    const ACCOUNT = { id: 'svc_sync', name: 'Metadata sync' }
+
+    function accountClient() {
+        return {
+            create: vi.fn().mockResolvedValue({ ...CREATED, token: 'nxsat_THE_TOKEN_VALUE' }),
+            preview: vi.fn().mockResolvedValue(PREVIEW),
+            searchResources: vi.fn().mockResolvedValue([]),
+            get: vi.fn(), lastUse: vi.fn().mockReturnValue(new Promise(() => {})), list: vi.fn(),
+            options: vi.fn(), revoke: vi.fn(), rotate: vi.fn(), update: vi.fn(),
+        }
+    }
+
+    async function accountWizard(client: ReturnType<typeof accountClient>, over: Partial<ApiKeyOptions> = {}) {
+        render(
+            <KeyClientProvider client={client as unknown as KeyClient} account={ACCOUNT}>
+                <ApiKeyWizard options={opts(over)} onClose={vi.fn()} onCreated={vi.fn()} />
+            </KeyClientProvider>,
+        )
+        await waitFor(() => expect(screen.getByRole('button', { name: 'Close the key wizard' })).toHaveFocus())
+        await userEvent.click(screen.getByRole('radio', { name: /^custom/i }))
+        await userEvent.type(screen.getByLabelText('Name'), 'nightly')
+        await userEvent.click(next())
+        await userEvent.click(await screen.findByRole('radio', { name: /everything “metadata sync” can access/i }))
+        await userEvent.click(next())
+        await screen.findByText('What may it do there?')
+        await userEvent.click(next())
+        await screen.findByText('How long, and from where?')
+        await userEvent.click(next())
+        await screen.findByText('Check it, then create it')
+    }
+
+    it('makes the key through the account, and says it acts as the account', async () => {
+        const client = accountClient()
+        await accountWizard(client)
+        expect(screen.getByRole('heading', { name: 'Create a key for “Metadata sync”' })).toBeInTheDocument()
+        expect(screen.getByText('Act as “Metadata sync” to read views')).toBeInTheDocument()
+        expect(screen.getByText('On everything “Metadata sync” can access, including what it gains later')).toBeInTheDocument()
+        await waitFor(() => expect(client.preview).toHaveBeenCalledTimes(1))
+        expect(screen.getByText('“Metadata sync”’s key 4 of 25')).toBeInTheDocument()
+
+        await userEvent.type(screen.getByLabelText('Your password'), 'pw')
+        await userEvent.click(screen.getByRole('button', { name: /^create key$/i }))
+        expect(await screen.findByRole('heading', { name: 'New key for “Metadata sync”' })).toBeInTheDocument()
+        expect(client.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'nightly', currentPassword: 'pw' }))
+        expect(svc.create).not.toHaveBeenCalled()
+        expect(svc.preview).not.toHaveBeenCalled()
+    })
+
+    it('parks what was chosen for the account alone across an identity-provider sign-in', async () => {
+        const client = accountClient()
+        client.create.mockRejectedValue(new ApiKeyError(403, 'Confirm it’s you', {
+            error: 'step_up_required', method: 'sso', loginUrl: '/api/v1/auth/okta/login?next=/me/service-accounts/svc_sync',
+        }))
+        await accountWizard(client, { stepUp: { method: 'sso', fresh: false } })
+        await userEvent.click(screen.getByRole('button', { name: /continue with your identity provider/i }))
+        await waitFor(() => expect(window.location.href).toContain('/api/v1/auth/okta/login'))
+        expect(peekDraft()).toBeNull()
+        expect(peekDraft(Date.now(), 'svc_sync')).toMatchObject({ name: 'nightly', step: 'review', principal: 'svc_sync' })
     })
 })

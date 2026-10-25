@@ -3516,9 +3516,9 @@ class RefreshTokenORM(Base):
 # is shown to its owner exactly once. Revoked and expired rows are kept:
 # the admin inventory and the audit trail both point at them.
 #
-# ``user_id`` is the principal the key acts as. Today that is always the
-# person who minted it (``kind = 'personal'``); service accounts will be
-# non-human principals minted by their managers, which is what
+# ``user_id`` is the principal the key acts as: the person who minted it
+# (``kind = 'personal'``), or a service account (``kind = 'service'``,
+# ``service_accounts``), whose keys its managers mint — which is what
 # ``created_by`` is for.
 
 class ApiKeyORM(Base):
@@ -3563,7 +3563,7 @@ class ApiKeyORM(Base):
 
     revoked_at = Column(Text, nullable=True)
     revoked_by = Column(Text, nullable=True)
-    revoked_reason = Column(Text, nullable=True)        # owner | admin | rotated | self
+    revoked_reason = Column(Text, nullable=True)        # owner | admin | rotated | self | manager
     # What an administrator told the owner when revoking it, if anything.
     revoked_note = Column(Text, nullable=True)
     # The key this one replaced, when minted by a rotation.
@@ -3610,6 +3610,61 @@ class ApiKeyUsageORM(Base):
     errors = Column(Integer, nullable=False, default=0, server_default="0")
 
     __table_args__ = (Index("idx_api_key_usage_day", "day"),)
+
+
+# ------------------------------------------------------------------ #
+# service_accounts  (principals that never sign in)                    #
+# ------------------------------------------------------------------ #
+#
+# A service account is a ``users`` row whose id starts ``svc_``
+# (``backend/common/service_accounts.py``): its name is its first name, its
+# address is unroutable, it has no password and no identity, and it holds
+# only direct workspace role bindings. This row holds what a person's does
+# not; the account's keys work while it has a manager in good standing, or
+# for a grace period after its last one went.
+
+class ServiceAccountORM(Base):
+    __tablename__ = "service_accounts"
+
+    user_id = Column(
+        Text, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True,
+    )
+    description = Column(Text, nullable=True)
+    created_by = Column(Text, nullable=True)
+    # When it was first found with no manager in good standing — kept by the
+    # routes that change who manages it and by the hourly sweep; NULL while it
+    # has one. Its keys pause once this is older than the grace period.
+    unmanaged_since = Column(Text, nullable=True)
+    # When the administrators were told its keys pause soon. Cleared with
+    # ``unmanaged_since``.
+    pause_reminded_at = Column(Text, nullable=True)
+
+
+class ServiceAccountManagerORM(Base):
+    """A person, or a team (a group), who answers for a service account and
+    may make its keys. A team stays in good standing while any member is."""
+    __tablename__ = "service_account_managers"
+
+    id = Column(Text, primary_key=True, default=lambda: f"sam_{uuid.uuid4().hex[:12]}")
+    service_account_id = Column(
+        Text, ForeignKey("service_accounts.user_id", ondelete="CASCADE"), nullable=False,
+    )
+    user_id = Column(Text, ForeignKey("users.id", ondelete="CASCADE"), nullable=True)
+    group_id = Column(Text, ForeignKey("groups.id", ondelete="CASCADE"), nullable=True)
+    added_by = Column(Text, nullable=True)
+    added_at = Column(Text, nullable=False, default=_now)
+
+    __table_args__ = (
+        CheckConstraint(
+            "(user_id IS NULL) <> (group_id IS NULL)",
+            name="ck_service_account_managers_subject",
+        ),
+        # NULLs are distinct, so a person and a team never collide.
+        UniqueConstraint("service_account_id", "user_id", name="uq_service_account_managers_user"),
+        UniqueConstraint("service_account_id", "group_id", name="uq_service_account_managers_group"),
+        Index("idx_service_account_managers_user", "user_id"),
+        Index("idx_service_account_managers_group", "group_id"),
+    )
 
 
 # ------------------------------------------------------------------ #

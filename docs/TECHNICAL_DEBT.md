@@ -504,22 +504,6 @@ issue with no owner is a decision nobody made.
 that lets an outside party claim an inside identity. The rest are product
 decisions; make them explicitly.
 
-### 2.10 No service accounts
-
-**Evidence:** every API key belongs to a person — `kind` is always `personal`
-(`backend/app/api/v1/endpoints/api_keys.py`, `create_my_api_key`), and there is
-no principal that is not a person to own one.
-
-An integration therefore runs as someone. When they leave, their keys pause at
-the end of the sign-in window or stop at suspension, and the integration stops
-with them; handing it over means a new key from someone else.
-
-**Recommendation.** Service accounts on the key machinery, as
-[ADR-027](DECISIONS.md#adr-027-personal-api-keys-scoped-per-resource) lays out:
-a principal that never signs in, bound with ordinary role bindings, whose keys
-(`nxsat_`) stay valid while it is enabled and has an active manager. Not urgent
-until a team needs an integration to outlive a person.
-
 ---
 
 ## 3. Low — track, or deliberately accept
@@ -784,7 +768,7 @@ that encode calendar time rather than order.
 | 10 | §2.3 invalidation listeners, then §3.3 | Three call sites; then the legacy registry can go |
 | 11 | §2.4 one image build on `main` | Needs the operator's registry answer first |
 | 12 | §2.7 partition-key decision | The one item with a deadline: the first large tenant |
-| 13 | §2.2, §2.5, §2.6, §2.9, §2.10, §3.x | Individually cheap or not yet urgent |
+| 13 | §2.2, §2.5, §2.6, §2.9, §3.x | Individually cheap or not yet urgent |
 
 Running alongside, not in the queue: §4. It is a habit rather than a task.
 
@@ -846,7 +830,8 @@ memory. Delete an entry when it stops being interesting.
 | **Ontology cache staleness (MEDIUM)** | A Redis generation counter, `ontgen:{ws}:{ds}`, is bumped by every mutation that can change resolution and invalidates every pod on its next lookup; the 300 s TTL is now a backstop. | `backend/app/services/resolved_ontology_cache.py:15` |
 | **Stats poller: no service boundary, no graceful shutdown (MEDIUM)** | Its own service on every target, with SIGTERM/SIGINT handlers and a 60 s drain; stale stats surface as `lagging` or `unreachable` on `/health`. **Residual:** the compose service sets no `stop_grace_period`, so Docker kills it at 10 s, before the drain can finish. | `backend/insights_service/__main__.py:263`; `backend/app/services/stats_cache.py:133` |
 | **Feature flags read from the database per request (LOW)** | A 30 s per-process cache. Cross-process notice is part of §2.3. | `backend/app/services/feature_flags.py:25` |
-| **No API tokens (MEDIUM)** | Personal API keys: made under Account → API keys after a fresh sign-in, limited to chosen workspaces, views and data sources and to read or read & write, shown once and stored hashed, checked with their owner on every request, paused when an owner who signs in through an identity provider stops doing so, and audited. Service accounts are still open: §2.10. | `backend/app/auth/api_key_auth.py`; [ADR-027](DECISIONS.md#adr-027-personal-api-keys-scoped-per-resource) |
+| **No API tokens (MEDIUM)** | Personal API keys: made under Account → API keys after a fresh sign-in, limited to chosen workspaces, views and data sources and to read or read & write, shown once and stored hashed, checked with their owner on every request, paused when an owner who signs in through an identity provider stops doing so, and audited. | `backend/app/auth/api_key_auth.py`; [ADR-027](DECISIONS.md#adr-027-personal-api-keys-scoped-per-resource) |
+| **No service accounts (MEDIUM)** | Service accounts: principals that never sign in, with their own workspace roles, whose keys (`nxsat_`) their managers — people or teams — make. Their keys work while someone in good standing manages them and pause after a grace period when nobody does; leavers are handed over at suspension, and administrators are told when an account loses its last manager. | `backend/app/api/v1/endpoints/service_accounts.py`; `backend/app/services/service_account_standing.py`; [ADR-028](DECISIONS.md#adr-028-service-accounts-answer-to-their-managers) |
 | **Control-plane scheduler doubles graph reads under HA (LOW)** | The scheduler no longer reads graphs; drift probes and the reconcile sweep moved to single-flight owners (a Redis claim and a Postgres advisory lock). **Residual:** with two replicas, a retry may be counted twice. | `backend/app/services/aggregation/scheduler.py:4`; `.../reconcile_sweeper.py:906` |
 
 ---

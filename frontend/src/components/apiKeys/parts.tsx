@@ -22,7 +22,7 @@ function statusTone(key: Pick<ApiKey, 'status' | 'revokedReason'>): BadgeTone {
 }
 
 export function KeyStatusBadge({ apiKey, short }: {
-    apiKey: Pick<ApiKey, 'status' | 'revokedReason'>
+    apiKey: Pick<ApiKey, 'status' | 'revokedReason'> & { kind?: string }
     /** "Paused" rather than "Paused — sign in to resume", where the page says the rest. */
     short?: boolean
 }) {

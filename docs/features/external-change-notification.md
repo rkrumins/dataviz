@@ -73,7 +73,7 @@ All body fields are optional; an empty body gets the defaults.
 | `scope` | `auto`, `read-caches`, `rollups`, `full`, `clear` | `auto` | `auto` runs the change gate and rebuilds only if something actually moved. This is the one you want. |
 | `force` | boolean | `false` | Overrides the change gate. **Only affects `auto`.** See the warning below. |
 | `reason` | string | — | Free text, recorded in the audit trail. |
-| `wait` | `none`, `complete` | `none` | `complete` blocks (bounded) on the queued rebuild so you can refresh-then-read synchronously. |
+| `wait` | `none`, `complete` | `none` | `complete` blocks (bounded, 60 seconds) on the queued rebuild so you can refresh-then-read synchronously. Through the API this route is cut off after 30 seconds (`HTTP_TIMEOUT_DEFAULT_SECS`), so a longer rebuild answers `504` while it carries on: poll `GET …/readiness` instead. |
 
 Response:
 
@@ -107,8 +107,11 @@ wired to it need not migrate, but new integrations should use `refresh`.
 ### Authentication
 
 The route requires `workspace:datasource:manage` on the workspace that owns the
-data source. A connector authenticates with an **API key** made by someone who
-holds that, with **Data: read & write** on the data source or its workspace
+data source. A connector authenticates with an **API key** with **Data: read &
+write** on the data source or its workspace — best a
+[service account](/guide/service-accounts)'s (`nxsat_…`), whose Workspace member
+or Data engineer role there holds that permission, so the connector outlives
+whoever set it up; or a personal key (`nxpat_…`) of someone who holds it
 ([API Keys](/guide/api-keys)):
 
 ```http
@@ -120,7 +123,8 @@ Content-Type: application/json
 ```
 
 No cookies and no CSRF header. The key may signal only the data sources it was
-limited to, and the signal is recorded as the person who made the key.
+limited to, and the signal is recorded as whoever the key acts as: the person who
+made a personal key, or the service account.
 
 Your options:
 
@@ -190,8 +194,8 @@ never implemented**. It is described in the plan and may look real in design
 documents. It does not exist:
 
 - `POST /api/v1/ingest/source-changed` and its `:batch` twin
-- Per-tenant ingest keys (`sk_…`, an `ingest_api_keys` table) — a personal API
-  key on `refresh` takes their place
+- Per-tenant ingest keys (`sk_…`, an `ingest_api_keys` table) — an API key on
+  `refresh`, a service account's for a connector, takes their place
 - `changeToken` de-duplication for exact-once client retries
 - Global or per-workspace rebuild budgets (an API key is rate-limited per key,
   not per rebuild)

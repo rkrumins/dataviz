@@ -36,7 +36,7 @@ import type { ActivityEvent, ActivityScope } from '@/services/activityService'
 
 import { ActivityDetails } from './ActivityDetails'
 import { CATEGORY_META, actorName, reasonExpected } from './activityMeta'
-import { activityLinks, personHref } from './activityLinks'
+import { accountHref, activityLinks } from './activityLinks'
 
 const SECTION = 'text-[10px] font-bold uppercase tracking-[0.14em] text-ink-muted'
 
@@ -301,12 +301,13 @@ export function ActivityEventDrawer({ scope, eventId, onClose, onOpen, step }: {
                                         <IdField
                                             label="Actor id"
                                             value={event.actor?.id}
-                                            href={event.actor?.id && event.actorKind === 'user' ? personHref(event.actor.id) : undefined}
+                                            href={event.actor?.id && (event.actorKind === 'user' || event.actorKind === 'service')
+                                                ? accountHref(event.actor.id) : undefined}
                                         />
                                         <IdField
                                             label="Subject id"
                                             value={event.subject?.id}
-                                            href={event.subject?.id ? personHref(event.subject.id) : undefined}
+                                            href={event.subject?.id ? accountHref(event.subject.id) : undefined}
                                         />
                                         <IdField label="Target id" value={event.target?.id} />
                                         <IdField label="Workspace id" value={event.workspaceId} />

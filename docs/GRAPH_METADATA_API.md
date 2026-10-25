@@ -122,7 +122,7 @@ The route sits under `/admin/` for historical reasons; it needs only read access
 | `workspaceId` | The workspace it is in — the one you asked about. |
 | `providerId` | The provider the graph lives on (`prov_…`). |
 | `graphName` | The graph's name on that provider. Unique per workspace and provider. |
-| `label` | The name people see: the label given to it, else its catalog entry's name, else `graphName`. |
+| `label` | The name people see: the label given to it, else the graph's name on its provider. |
 | `catalogItemId` | The catalog entry it was attached from (`cat_…`), or `null`. |
 | `ontologyId` | The semantic layer that types its entities and relationships, or `null` for the system defaults. |
 | `isPrimary` | Whether it is the workspace's primary data source — the one a route reads when it names no data source. |
@@ -148,14 +148,15 @@ The route sits under `/admin/` for historical reasons; it needs only read access
 | `kind` | Where the graph's content comes from — below. |
 | `mainHeadCommitSeq` | The sequence number of the newest commit on `main`: the graph's current revision. **This is your change watermark** — the history has something new exactly when it moved. |
 | `mainHeadCommitId` | That commit's id. |
-| `mainHeadCommittedAt` | When it landed, ISO-8601 in UTC: when the graph last changed. |
+| `mainHeadCommittedAt` | When it landed, ISO-8601 in UTC: when the graph last changed. Both are `null` in the rare case the head commit can't be read. |
 
 | `kind` | Meaning |
 |---|---|
 | `manual` | Copied from an existing graph when version control was turned on, then curated in {brand}. |
-| `authoritative` | Seeded and refreshed from an external system of record, with curation layered on top. |
-| `hybrid` | Both. |
 | `blank` | Built from scratch in {brand}: its first commits are people's, not an import. |
+| `authoritative`, `hybrid` | Reserved for a graph seeded and refreshed from an external system of record. The version store accepts them, but nothing in {brand} sets them today. |
+
+A fork takes its parent's `kind`.
 
 ---
 
@@ -173,7 +174,7 @@ Newest first. Without parameters you get the newest 100 commits of `main`.
 | `before` | a `commit_seq` | Only commits with a lower sequence number. Pass the previous page's `nextBefore` to get the next page. |
 | `after` | a `commit_seq` | Only commits with a higher sequence number — usually the newest one you already have. |
 | `offset` | default 0 | Skips that many commits. Kept for older callers; it shifts as commits land, so page with `before` instead. It can't be combined with `before` or `after`. |
-| `branchId` | a branch id | A draft's own commits instead of `main`'s. You can read your own drafts, drafts shared with you, drafts whose review you take part in, and every draft if you manage the workspace's data. |
+| `branchId` | a branch id | A draft's own commits instead of `main`'s. You can read your own drafts, drafts shared with you, drafts whose review you take part in, and every draft if you manage the workspace's data — with a key, only if the key itself has **Data: read & write**. |
 | `originatingViewId`, `publishedOnly` | a view id, `true` | One view's history: with `publishedOnly=true`, the `main` commits it published plus the graph-wide ones it shares; without it, every draft commit attributed to the view across branches. That second history spans branches, so it pages by `offset` only. |
 
 ```bash
@@ -223,28 +224,28 @@ The fields of a commit use the names the version store keeps them under, in snak
 | Field | What it means |
 |---|---|
 | `commit_id` | The commit's id (`cmt_…`). Unique, and never reused: key your copy on it. |
-| `commit_seq` | Its place on its branch. On `main` it is the graph's revision number: the genesis commit is 1, and each commit is one more than the one before. Drafts number their own commits from 1. |
+| `commit_seq` | Its place on its branch. On `main` it is the graph's revision number: the genesis commit is 1 — for a fork, the parent's revision it forked at — and each commit is one more than the one before. Drafts number their own commits from 1. |
 | `parent_commit_id` | The commit before it on the same branch; `null` for the first. |
 | `kind` | What made it — below. |
 | `message` | What its author said it was for. May be empty for a machine's commits. |
-| `actor` | Who made it: a user id (`usr_…`; its name is in `userNames`), or a system actor such as `system` for a change {brand} made itself. |
-| `contributors` | For a publish or a merged review, everyone whose draft commits it folds in. Otherwise `null`. |
-| `source_branch_id`, `source_commit_count` | For a publish or merged review: the draft it came from and how many of the draft's commits it folds in. |
+| `actor` | Who made it: a person (`usr_…`) or a [service account](/guide/service-accounts) (`svc_…`), whose name is in `userNames`; or a system actor such as `system` for a change {brand} made itself. |
+| `contributors` | For a publish or a merged review — a fork's included — or a `pull`, everyone whose commits it folds in. Otherwise `null`. |
+| `source_branch_id`, `source_commit_count` | For a publish or merged review: the draft it came from — for a fork's review, the fork's `main` — and how many of its commits it folds in. For a `pull`: `main`, and how many of its commits came in. A fork's `genesis` names the parent graph's `main`. |
 | `originating_view_id` | The view it was made from, when it was made from one. |
-| `merkle_root` | A fingerprint of the graph's content at this commit. May be `null` at first and filled in shortly after the commit lands — the only field of a commit that ever changes. |
+| `merkle_root` | A fingerprint of the graph's content at this commit, on `main`, set when the commit lands. `null` on a draft's commits, and on the import that turned version control on for a graph of more than a million entities (`GRAPHVER_BOOTSTRAP_MERKLE_MAX`). |
 | `stats` | How much it changed — its shape depends on `kind`, below. |
 | `created_at` | When it landed, ISO-8601 in UTC. |
 
 | `kind` | On | What it records |
 |---|---|---|
 | `genesis` | `main` | The empty start of a graph, commit 1 — or, for a fork, the point it was forked from. `stats`: `{"nodes": 0, "edges": 0}`, or `{}` for a fork. |
-| `import` | `main` | A bulk load straight onto `main`: turning version control on copies the existing graph in as commit 2, and the bulk-ingest route adds one. `stats`: `{"nodes", "edges"}` loaded. A file import goes through a draft instead, and lands as `squash_publish`. |
-| `sync` | `main` | A refresh from an external system of record, merged in without overwriting people's edits. |
+| `import` | `main` | A bulk load straight onto `main`: turning version control on copies the existing graph in as commit 2 (its `created_at` is when the copy began, not when it finished), and the bulk-ingest route adds one. `stats`: `{"nodes", "edges"}` loaded. A file import goes through a draft instead, and lands as `squash_publish`. |
+| `sync` | `main` | A refresh from an external system of record. People's edits to other fields survive; a field both sides changed is refused for a decision (`strategy=merge`, the default) or takes the external value (`strategy=external_wins`). |
 | `squash_publish` | `main` | A draft published, or a review request merged: the draft's commits folded into one. |
 | `revert` | `main` | One earlier commit undone, as a new commit. |
 | `restore` | `main` | `main` set back to an earlier commit's state, as a new commit. Nothing before it is removed. |
-| `edit` | any branch | Changes applied directly: on a draft, an edit saved from the canvas; on `main`, a change written straight through to it. |
-| `checkpoint` | drafts | A draft's saved point, folding the changes staged since the last one. |
+| `edit` | any branch | Changes applied directly: on a draft, an edit saved from the canvas, each window of a file import (message `import`), or a new draft's first saved point; on `main`, a change written straight through to it. |
+| `checkpoint` | drafts | A draft's saved point, folding the changes staged since the last one. A new draft's first one is an `edit`. |
 | `pull` | drafts | `main`'s newer commits brought into a draft. Its `stats` also carry `rebased`, `from_seq` and `to_seq`: how the draft's own edits were rewritten, and the window of `main` it took in. |
 
 Unless a row above says otherwise, `stats` is `{"create", "update", "delete"}`: how many nodes and
@@ -272,8 +273,8 @@ What a commit changed, entity by entity, is at `GET …/graphs/{graph_id}/commit
   page: new ones arrive above the page you started from, and `after` collects them next time.
 - **Only landed commits.** The log of `main` stops at its head, so every commit it shows is part
   of the published graph and keeps its place.
-- **Commits don't change**, apart from a `merkle_root` being filled in once. Nothing is removed
-  from `main`: undoing a change — `revert`, `restore` — adds a commit.
+- **Commits don't change.** Nothing is removed from `main`: undoing a change — `revert`,
+  `restore` — adds a commit.
 - **The head tells you everything changed.** `mainHeadCommitSeq` moves exactly when a commit lands on
   `main`, so comparing it with the number you stored is a complete test for "anything new?".
 - **A fork's history starts at its fork point.** Its log holds only its own commits; what came
@@ -362,9 +363,11 @@ nothing more. Honour `Retry-After` on a `429` or `503` —
 
 | You see | It means | What to do |
 |---|---|---|
-| The source is gone from the list | It was deleted (it sits in the trash for a while, then is removed) — or moved to another workspace | Look for its `id` in your other workspaces: a moved source keeps its `id` and its `graphId`, and its history carries on there. Otherwise treat it as deleted |
-| `versioning.enabled` turned `false` | Version control was turned off for it | Its history is no longer served; keep or discard your copy |
-| History routes answer `404` for a `graphId` you hold | The graph was deleted, or is no longer in this workspace | As above |
+| The source is gone from the list | It was deleted — it sits in the trash for 30 days (`GRAPHVER_PURGE_GRACE_DAYS`), when it can be restored with its history, then is removed — or moved to another workspace | Look for its `id` in your other workspaces: a moved source keeps its `id` and its `graphId`, and its history carries on there. A move can be undone for 7 days; forks of its graph stay in the old workspace. A key limited to the old workspace no longer reaches it, while one limited to the data source itself follows it, if whoever it acts as can read it there. Otherwise treat it as deleted, until it comes back |
+| History routes answer `404` for a `graphId` you hold | The graph is in the trash or was deleted, or is no longer in this workspace | As above |
+
+No route turns version control off, so `versioning.enabled` doesn't go back to `false` while the
+source is listed.
 
 ---
 
@@ -376,9 +379,16 @@ nothing more. Honour `Retry-After` on a `429` or `503` —
 | Read a graph's commits | `workspace:datasource:read` in the workspace | The key must cover the graph's data source, or its workspace, with **Data: read** |
 
 A read-only key is enough for both. A key limited to particular data sources can't list the
-workspace; it can read the history of the sources it covers, finding each one's graph with
-`GET /api/v1/{ws_id}/versioning/resolve?dataSourceId={ds_id}` (a `404` there means version control
-isn't on for it). How to create and limit a key is in [API Keys](/guide/api-keys).
+workspace's data sources; it finds the ones it covers in `GET /api/v1/admin/workspaces/{ws_id}`,
+which shows it only those, and reads their history, finding each one's graph with
+`GET /api/v1/{ws_id}/versioning/resolve?dataSourceId={ds_id}`. There, a `404` means version
+control isn't on; a `bootstrap` object means it is still being turned on — the graph is versioned
+only once `bootstrap` is `null` — and `mainHeadCommitSeq` is the same watermark as the list's.
+How to create and limit a key is in [API Keys](/guide/api-keys).
+
+For a scheduled job, make the key on a [service account](/guide/service-accounts) rather than
+your own: it keeps working when you leave, and reaches only what the account's roles give it. Its
+key is `nxsat_…` and is used exactly as above.
 
 ---
 
@@ -390,6 +400,7 @@ isn't on for it). How to create and limit a key is in [API Keys](/guide/api-keys
 | `401` | Not signed in, or the key isn't accepted | See [When a key is refused](/guide/api-keys#when-a-key-is-refused) |
 | `403` `missing_permission` | You can't read this workspace's data sources | Ask for access to the workspace |
 | `403` `api_key_out_of_scope` | The key doesn't cover the whole workspace (the list) or the graph's data source (the history) | Use a key that does |
+| `403` with `"type": "access_denied"` | `branchId` names a draft you can't read | Read your own drafts, those shared with you, or — managing the data — any |
 | `404` | The workspace or graph doesn't exist, isn't in the workspace you named, or the graph was deleted | Check the ids — a graph in another workspace answers `404`, never `403` |
 | `422` | A parameter out of range: a `limit` above 500, a negative `before`, `include` other than `versioning` | Fix the request |
 | `503` `DB_UNAVAILABLE` | The version store can't be read right now (`include=versioning` only) | Wait `Retry-After` seconds and ask again. Leave out `include=versioning` to list the sources without it |

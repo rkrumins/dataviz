@@ -145,10 +145,10 @@ export const docPersonas: DocPersona[] = [
     icon: Code2,
     tagline: 'Script {brand} through its API',
     intro:
-      'Sign in from a script, find the endpoint you need, follow the API’s conventions, and automate the jobs people script most.',
+      'Get a key, make your first calls and handle every answer, then follow the API’s conventions and automate the jobs people script most.',
     sectionId: 'reference',
-    startSlug: 'api-guide',
-    path: ['api-guide', 'graph-metadata-api', 'feature-search-and-rules-reference', 'versioning-api-reference', 'versioning-import-export', 'feature-view-portability', 'api-features'],
+    startSlug: 'integration-quickstart',
+    path: ['integration-quickstart', 'api-guide', 'key-management-api', 'graph-metadata-api', 'feature-search-and-rules-reference', 'versioning-api-reference', 'versioning-import-export', 'feature-view-portability', 'api-features'],
     accent: {
       gradient: 'from-violet-500 to-purple-600',
       text: 'text-violet-600 dark:text-violet-400',
@@ -228,8 +228,8 @@ export const docKeyJourneys: DocKeyJourney[] = [
   },
   {
     title: 'Script the API',
-    outcome: 'Sign in from a script, find endpoints, and automate common jobs',
-    slug: 'api-guide',
+    outcome: 'Get a key, make your first calls, and handle every answer',
+    slug: 'integration-quickstart',
     icon: Code2,
   },
   {
@@ -356,11 +356,25 @@ export const docEntries: DocEntry[] = [
 
   // Backend, API & Frontend
   {
+    slug: 'integration-quickstart',
+    section: 'reference',
+    title: 'Integration Quickstart',
+    description: 'Choose a credential, make a key, make your first calls and handle every answer — Integrators start here',
+    importFn: () => import('@docs/INTEGRATION_QUICKSTART.md?raw'),
+  },
+  {
     slug: 'api-guide',
     section: 'reference',
     title: 'API Guide',
-    description: 'Sign in from a script, find endpoints, and automate common jobs — Integrators start here',
+    description: 'Sign in from a script, find endpoints, follow the conventions, and automate common jobs',
     importFn: () => import('@docs/API_GUIDE.md?raw'),
+  },
+  {
+    slug: 'key-management-api',
+    section: 'reference',
+    title: 'Key Management API',
+    description: 'Describe, make, rotate and revoke API keys — yours, a service account’s or anyone’s — with every field and refusal',
+    importFn: () => import('@docs/KEY_MANAGEMENT_API.md?raw'),
   },
   {
     slug: 'graph-metadata-api',

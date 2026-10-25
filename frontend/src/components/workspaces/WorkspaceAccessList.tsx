@@ -28,6 +28,8 @@ import { ProvenanceChip } from '@/components/access/ProvenanceChip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { UserAvatar } from '@/components/ui/UserAvatar'
+import { ServiceAccountBadge } from '@/components/serviceAccounts/parts'
+import { isServiceAccountId } from '@/lib/serviceAccounts'
 import { cn } from '@/lib/utils'
 import { roleVisualFor, isBuiltinRole } from '@/lib/roleVisual'
 
@@ -154,6 +156,7 @@ function AccessRow({ user }: { user: WorkspaceAccessUser }) {
                                 Deleted
                             </span>
                         )}
+                        {isServiceAccountId(user.userId) && <ServiceAccountBadge />}
                         {!user.deleted && user.status && user.status !== 'active' && (
                             <span className="shrink-0 px-1.5 py-0.5 rounded text-[9px] font-semibold uppercase tracking-wide bg-amber-500/15 text-amber-600 dark:text-amber-400">
                                 {user.status}
@@ -285,9 +288,10 @@ export function WorkspaceAccessList({ workspaceId }: { workspaceId: string }) {
                 <div className="flex-1 min-w-0">
                     <h3 className="text-base font-bold text-ink">Everyone with access</h3>
                     <p className="text-sm text-ink-secondary leading-relaxed mt-0.5">
-                        Every person who can reach this workspace, resolved across direct
-                        bindings, every group and organization-wide roles. Expand a row to
-                        see the exact route for each role they hold — and how it came about.
+                        Every person — and every service account — who can reach this workspace,
+                        resolved across direct bindings, every group and organization-wide roles.
+                        Expand a row to see the exact route for each role they hold — and how it
+                        came about.
                     </p>
                 </div>
                 <button

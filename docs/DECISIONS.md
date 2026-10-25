@@ -803,7 +803,7 @@ Full design record: [Property storage](/docs/property-storage).
 
 ## ADR-027: Personal API keys scoped per resource
 
-**Status:** Accepted — amends [ADR-024](#adr-024-cookie-sessions-with-csrf-double-submit-not-bearer-tokens) for clients that are not a browser.
+**Status:** Accepted — amends [ADR-024](#adr-024-cookie-sessions-with-csrf-double-submit-not-bearer-tokens) for clients that are not a browser; extended by [ADR-028](#adr-028-service-accounts-answer-to-their-managers).
 **Date:** 2026-10-12
 **Context:** A script could only sign in with a password and keep a cookie session (ADR-024). Most people sign in through an identity provider and have no password, so they could not automate at all; those who could handed a script their whole account, revocable only by changing the password. Access is also not only per workspace: a workspace viewer can be an editor of one view through a grant, so a token scoped by workspace role alone would either grant too much or shut that person out of the view they edit.
 
@@ -841,6 +841,42 @@ Details: [API Keys](/guide/api-keys), the [Security Overview](/docs/security-ove
 
 ---
 
+## ADR-028: Service accounts answer to their managers
+
+**Status:** Accepted — extends [ADR-027](#adr-027-personal-api-keys-scoped-per-resource).
+**Date:** 2026-10-23
+**Context:** Every API key acted as a person (ADR-027), so an integration ran as whoever set it up: its keys paused at the end of that person's sign-in window and stopped when they were suspended, and the integration stopped with them. A team running a scheduled job needs a principal that outlives any one of its members — without becoming a credential nobody answers for, which is what a shared "robot" person account turns into.
+
+**Decision:**
+- **A principal that never signs in.** A service account is a `users` row whose id starts `svc_`, with an unroutable `<id>@service-account.invalid` address and no usable password. Everything keyed on a user — role bindings, claims, the key machinery, audit, inventory, `/api-keys/self` — works unchanged, and the prefix lets pure code tell it apart. Every sign-in path refuses it (the session backstop in `_mint_recorded_refresh`), an identity provider cannot link to it, and it is left out of people lists, pickers, the directory, analytics and inboxes. The routes about a person answer `404` for one.
+- **Its own roles, and only those.** It holds workspace roles given on its own page — any that neither administers a workspace nor lets people in — never a platform role or a team's roles: `permission_service.resolve` keeps only its direct workspace bindings, whatever else a row might say, and drops from them what `is_requestable` refuses, so a role later widened to administer brings it none of that. Nothing else is shared with it — a view, a template or a draft answer `409` — a view it made is its own only while it holds a role in that view's workspace, and in a workspace whose identity provider decides access its role is not an exception and doesn't end: the provider doesn't know the account, so the role is the administrator's decision.
+- **Managers answer for it.** One or more people or teams (`service_account_managers`, exactly one of `user_id` or `group_id`). A manager — or a member of a managing team — may make, rotate, rename and revoke its keys, confirming it is them as for their own; a key records them as its maker and acts as the account. Appointing a manager delegates the account's access: they may do whatever it can, even where they cannot, so appointing one — or handing an account over — takes being able to grant each of its roles (`can_grant`). Whoever controls a managing team's membership controls that too, so adding someone to such a team takes `system:service-accounts:manage` — an access-request approval never does — and its managers are told; a team the identity provider keeps follows the provider. Holders of `system:users:manage` may act for any account without managing it, and its managers are told. It neither reviews nor approves a pull request, nor does anyone approve one opened through an account they manage — its managers would be approving through it. What is said to it (`notify`) reaches its direct managers and, about a key, the key's maker while they can act for it; failing those, up to 25 members of its managing teams, the most recently active first; and while nobody can act for it, its administrators — naming it.
+- **Keys work while it is enabled and someone in good standing manages it.** A person is in good standing when the rule a personal key applies to its owner passes (`person_refusal`): active, not break-glass, and able to sign in now. A team is, when it is live and one of its members is. The request path reads one stored fact, `service_accounts.unmanaged_since`, set when the account is first found with no such manager — and refuses a key whose account row is missing: the routes that change who manages an account recompute it at once, and the hourly API key housekeeping sweep catches what changes with time alone. Each recomputation locks the accounts' rows first, in one order, before it reads who manages them, so two at once can't leave a managed account marked unmanaged. The sweep checks standing first, each of its steps committed and counted on its own (`api_key_housekeeping_steps_total`), so a failing reminder can't stop the check that pauses keys. Keys keep working for a grace period after that (`serviceAccountUnmanagedGrace`, 14 days by default), then answer `401 api_key_unmanaged`, shown as paused, until a manager is appointed. A disabled account's keys answer `api_key_owner_inactive`.
+- **Leaving is planned for.** The users page's suspend dialog lists every account a person's leaving touches — the seats they hold themselves, which it hands to a successor first; those they manage through a team, which keeps its seat; and those they made a key for that still works — and offers to revoke the keys they made, which they may have kept (`POST /admin/users/{id}/api-keys/revoke-made`). Whenever someone who made keys that still work stops answering for an account, those who still answer are told. When an account loses its last manager, every super and org admin is told once — in one notice when more than five go at once — and reminded three days before its keys pause, again if the grace period moves the day. The admin list marks accounts that depend on a single person.
+- **Administered apart from people.** `system:service-accounts:manage`, granted to super and org admins, creates accounts, appoints managers and grants roles. It makes no keys itself: an administrator who wants one must first appoint themselves a manager, which the activity log records.
+
+**Reasoning:** Building the account on the existing principal model means every control on keys — scope, fence, claims, audit, rate limits — applies to it with no new path to get wrong. Tying its keys to living management rather than to a creator is what makes it outlive people without becoming ownerless: a team synced from the identity provider keeps it managed as people come and go, and the grace period turns the one failure left — a leaver nobody handed over — into an alert with time to act rather than a stopped integration. Keeping the request path to one stored column keeps a key check one cheap query.
+
+**Trade-offs:**
+- (+) An integration's key no longer depends on one person's employment.
+- (+) No new authorization model: a service account is a principal with bindings, and its keys are ADR-027 keys.
+- (+) Nobody needs to remember an account: losing its last manager is noticed, announced and bounded in time.
+- (-) A managing team's members can all act as the account; the team's membership is part of the account's security, which is why adding to it takes the service account administrators' permission.
+- (-) Standing is recomputed on change and hourly, so a lapse that comes with time alone — and a manager signing in again after one — takes up to an hour to reach the keys.
+- (-) Good standing is defined twice, in Python for a key's owner and in SQL for managers; a parity test across the full matrix of facts keeps them equal.
+- (-) Accounts are disabled rather than deleted, so they accumulate.
+
+**Alternatives considered:**
+- A robot person account shared by a team — a password or identity nobody owns, and no record of who acted.
+- Keys that never pause for want of a manager — an integration nobody answers for keeps its access indefinitely.
+- Requiring two managers — burdens every account to guard against a case the grace period and alerts already cover.
+- Reassigning a leaver's accounts automatically — guesses at a successor nobody chose.
+- OAuth client credentials — still available later; the bearer format leaves room, and an account would be its client.
+
+Details: [Service Accounts](/guide/service-accounts), [API Keys](/guide/api-keys), the [Security Overview](/docs/security-overview#api-keys) and [RBAC](/docs/rbac).
+
+---
+
 ## Decision Summary
 
 | # | Decision | Status | Risk Level |
@@ -871,7 +907,8 @@ Details: [API Keys](/guide/api-keys), the [Security Overview](/docs/security-ove
 | 024 | Cookie sessions with CSRF double-submit | Accepted (amended by ADR-027) | Low |
 | 025 | PostgreSQL-only management DB, schema owned by an upgrade job | Accepted | Low |
 | 026 | Property storage in a PostgreSQL side index | Accepted, partly built (slice A only) | Medium (not wired in) |
-| 027 | Personal API keys scoped per resource | Accepted | Medium (surface registry upkeep) |
+| 027 | Personal API keys scoped per resource | Accepted (extended by ADR-028) | Medium (surface registry upkeep) |
+| 028 | Service accounts answer to their managers | Accepted | Medium (team membership is part of an account's security) |
 
 ---
 
@@ -880,7 +917,7 @@ Details: [API Keys](/guide/api-keys), the [Security Overview](/docs/security-ove
 - [Architecture](/docs/architecture) — where these decisions show up in the running system
 - [Data Architecture](/docs/data-architecture) — the stores, schemas and Redis roles behind ADR-017 to ADR-022 and ADR-025
 - [Versioning: Overview & Architecture](/docs/versioning-overview) — the full design behind ADR-023
-- [Security Overview](/docs/security-overview) — the controls ADR-024 and ADR-027 are part of
+- [Security Overview](/docs/security-overview) — the controls ADR-024, ADR-027 and ADR-028 are part of
 - [Property storage](/docs/property-storage) — the design record behind ADR-026
 - [Migrations](/docs/migrations) — how the upgrade job in ADR-025 builds and changes the schema
 - [Services Overview](/docs/services-overview) — the process roles referenced by ADR-017 and ADR-019

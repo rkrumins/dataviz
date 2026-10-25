@@ -191,8 +191,12 @@ export function KeyCard({ apiKey: key, resume, onOpen, onRotate, onEdit, onRevok
                 {key.status === 'paused' && (
                     <p className="mt-3 flex items-start gap-2 text-xs text-amber-700 dark:text-amber-300">
                         <PauseCircle className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden />
-                        Paused until you sign in through {resume?.provider ?? 'your identity provider'} again — nothing
-                        was revoked. Calls made with it are refused until then.
+                        {key.kind === 'service'
+                            ? 'Paused while nobody manages its service account — nothing was revoked. Calls made with it are refused until an administrator appoints a manager.'
+                            : <>
+                                Paused until you sign in through {resume?.provider ?? 'your identity provider'} again — nothing
+                                was revoked. Calls made with it are refused until then.
+                            </>}
                     </p>
                 )}
             </div>

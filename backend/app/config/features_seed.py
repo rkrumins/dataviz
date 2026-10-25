@@ -542,6 +542,39 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "deprecated": False,
     },
     {
+        "key": "serviceAccountUnmanagedGrace",
+        "name": "Keep a service account's keys working after its last manager goes",
+        "description": (
+            "A service account's API keys work while someone in good standing manages it. When "
+            "its last manager goes — suspended, removed, or no longer signing in — its keys keep "
+            "working for this long, so whatever uses them keeps running while an administrator "
+            "appoints a successor. Administrators are told at once, and again three days before "
+            "the keys pause."
+        ),
+        "impact_when_off": (
+            "With 'Pause at once', an integration stops as soon as its service account has no "
+            "manager left, until an administrator appoints one. A longer period keeps it running "
+            "longer while nobody answers for it."
+        ),
+        "category_id": "auth",
+        "type": "string",
+        "default_value": json.dumps("14"),
+        "options": json.dumps([
+            {"id": "0", "label": "Pause at once"},
+            {"id": "7", "label": "For 7 days"},
+            {"id": "14", "label": "For 14 days"},
+            {"id": "30", "label": "For 30 days"},
+        ]),
+        "help_url": None,
+        "admin_hint": (
+            "Teams as managers, and handing over when someone leaves, keep most accounts from ever "
+            "reaching this. The period is the safety net for a leaver nobody handed over — someone "
+            "removed only in your identity provider, say."
+        ),
+        "sort_order": 7,
+        "deprecated": False,
+    },
+    {
         "key": "workspaceDirectoryEnabled",
         "name": "Find a workspace",
         "description": (

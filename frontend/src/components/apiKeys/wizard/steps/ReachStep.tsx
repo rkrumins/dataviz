@@ -3,8 +3,8 @@
  *
  * Three answers, from narrow to broad, and the narrow one is recommended
  * because it is what limits a leaked copy: particular views and data sources
- * stay the same set, while a whole workspace — or everything you can access —
- * grows with whatever is added to it later.
+ * stay the same set, while a whole workspace — or everything the keys' owner
+ * can access — grows with whatever is added to it later.
  */
 import { CheckCircle2, Crosshair, Globe, LayoutGrid, Target, TriangleAlert } from 'lucide-react'
 
@@ -12,6 +12,7 @@ import { StepBlock, StepColumn, StepHero } from '@/components/admin/InviteWizard
 import { cn } from '@/lib/utils'
 import type { ApiKeyOptions } from '@/services/apiKeyService'
 import type { ResourceMode } from '../../apiKeyDraft'
+import { useOwnerWords } from '../../keyClient'
 import { ResourcePicker, WorkspacePicker } from '../../pickers'
 import type { ApiKeyWizardState } from '../useApiKeyWizard'
 
@@ -37,6 +38,11 @@ const MODES: { value: ResourceMode; label: string; hint: string; icon: typeof Gl
 
 export function ReachStep({ w, options }: { w: ApiKeyWizardState; options: ApiKeyOptions }) {
     const mode = w.draft.resourceMode
+    const owner = useOwnerWords()
+    // A service account's keys reach what the account reaches, not you.
+    const modes = owner.you ? MODES : MODES.map((m) => (m.value === 'all'
+        ? { ...m, label: `Everything ${owner.object} can access`, hint: 'Every workspace it is in, now and later.' }
+        : m))
     return (
         <StepColumn wide>
             <StepHero
@@ -48,7 +54,7 @@ export function ReachStep({ w, options }: { w: ApiKeyWizardState; options: ApiKe
 
             <StepBlock delay={0.04}>
                 <div role="radiogroup" aria-label="What it can reach" className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    {MODES.map((m) => {
+                    {modes.map((m) => {
                         const Icon = m.icon
                         const on = mode === m.value
                         return (
@@ -120,8 +126,8 @@ export function ReachStep({ w, options }: { w: ApiKeyWizardState; options: ApiKe
                 {mode === 'all' && (
                     <p className="flex items-start gap-3 p-4 rounded-2xl border border-amber-500/25 bg-amber-500/[0.06] text-sm text-amber-800 dark:text-amber-200 leading-relaxed">
                         <TriangleAlert className="w-5 h-5 shrink-0 text-amber-500" aria-hidden />
-                        A copy of this key could reach everything you can — in every workspace, today and as your
-                        access grows. Choose it only for a tool that really needs all of it.
+                        A copy of this key could reach everything {owner.object} can — in every workspace, today and
+                        as {owner.possessive} access grows. Choose it only for a tool that really needs all of it.
                     </p>
                 )}
             </StepBlock>
