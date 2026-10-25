@@ -25,6 +25,7 @@ import json as _json
 import logging
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -144,6 +145,12 @@ async def get_source_freshness(
 
 # ── POST /data-sources/{ds_id}/refresh — unified refresh verb ───────
 
+# ``"wait": "complete"`` holds the control plane's answer while the queued rebuild runs, up to
+# 60s (``_REFRESH_WAIT_TIMEOUT_S``): the proxied call outlasts the client's 30s by a margin and
+# still ends inside the route's 90s deadline (``HTTP_TIMEOUT_AGGREGATION_SECS``).
+_WAIT_COMPLETE_TIMEOUT = httpx.Timeout(75.0, connect=5.0)
+
+
 @router.post(
     "/data-sources/{ds_id}/refresh",
     response_model=RefreshResponse,
@@ -172,6 +179,7 @@ async def refresh_data_source(
         return await _proxy(
             "POST", f"/aggregation/data-sources/{ds_id}/refresh", request,
             body=_json.dumps(forwarded).encode(),
+            timeout=_WAIT_COMPLETE_TIMEOUT if forwarded.get("wait") == "complete" else None,
         )
     from backend.app.services.aggregation.service import NotFoundError
 

@@ -103,7 +103,7 @@ What every trace endpoint shares:
 
 Every request passes through this stack, outermost first, as registered in `backend/app/main.py` (pinned by `backend/tests/test_middleware_order.py`):
 
-1. **Timeout** (`_TimeoutMiddleware`) — until startup finishes, answers everything but the health probes with `503` and `Retry-After`; afterwards gives each path a deadline and answers `504` when it passes: 30 seconds by default; 120 for graph and trace routes, `/versioning/`, view transfer and moving a data source; 90 for the rolled-up edge reads (`/graph/edges/aggregated`, `/graph/edges/between`). Streaming paths are exempt.
+1. **Timeout** (`_TimeoutMiddleware`) — until startup finishes, answers everything but the health probes with `503` and `Retry-After`; afterwards gives each path a deadline and answers `504` when it passes: 30 seconds by default; 120 for graph and trace routes, `/versioning/`, view transfer and moving a data source; 90 for the rolled-up edge reads (`/graph/edges/aggregated`, `/graph/edges/between`) and a data source's refresh. Streaming paths are exempt.
 2. **Body size** (`_BodySizeLimitMiddleware`) — refuses an oversized body with `413` before anything parses it: `MAX_REQUEST_BODY_BYTES` (8 MiB by default), or `MAX_IMPORT_BODY_BYTES` (100 MiB) on the bulk-import, `/versioning/` and view-file routes and `/graph/save`.
 3. **Security headers** (`SecurityHeadersMiddleware`) — `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`, a Content Security Policy, and HSTS on HTTPS.
 4. **Host allowlist** (`_TrustedHostMiddleware`) — only when `ALLOWED_HOSTS` is set; another `Host` answers `400`.

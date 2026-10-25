@@ -2820,9 +2820,13 @@ class _TimeoutMiddleware:
         # Accepting a request or undoing a move does the same work. Below nginx's
         # proxy_read_timeout (180s), as for versioning.
         move_secs = float(os.getenv("HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS", "120"))
+        # A data source's refresh may wait for the rebuild it queued (``"wait": "complete"``, up
+        # to 60s, then the control plane's answer): the aggregation tier covers that.
+        refresh_secs = float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "90"))
         # Tiers a prefix can't name, because the part that decides sits mid-path.
         self._pattern_tiers: list[tuple[re.Pattern, float]] = [
             (re.compile(r"^/api/v1/admin/workspaces/[^/]+/data-sources/[^/]+/move$"), move_secs),
+            (re.compile(r"^/api/v1/admin/data-sources/[^/]+/refresh$"), refresh_secs),
         ]
         # Trace routes get their own (longer) tier ahead of the generic
         # /graph/ tier so the prefix-longest-wins lookup picks them up.

@@ -73,7 +73,7 @@ All body fields are optional; an empty body gets the defaults.
 | `scope` | `auto`, `read-caches`, `rollups`, `full`, `clear` | `auto` | `auto` runs the change gate and rebuilds only if something actually moved. This is the one you want. |
 | `force` | boolean | `false` | Overrides the change gate. **Only affects `auto`.** See the warning below. |
 | `reason` | string | — | Free text, recorded in the audit trail. |
-| `wait` | `none`, `complete` | `none` | `complete` blocks (bounded, 60 seconds) on the queued rebuild so you can refresh-then-read synchronously. Through the API this route is cut off after 30 seconds (`HTTP_TIMEOUT_DEFAULT_SECS`), so a longer rebuild answers `504` while it carries on: poll `GET …/readiness` instead. |
+| `wait` | `none`, `complete` | `none` | `complete` blocks (bounded, 60 seconds) on the queued rebuild so you can refresh-then-read synchronously. `actions` then ends with how it finished (`job:completed`, `job:failed`, `job:cancelled`), or `job:timeout` if it is still running. |
 
 Response:
 

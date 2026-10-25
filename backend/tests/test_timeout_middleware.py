@@ -507,6 +507,21 @@ def test_moving_a_data_source_gets_two_minutes(monkeypatch, path, expected):
     assert _TimeoutMiddleware(_instant_app())._resolve_timeout(path) == expected
 
 
+@pytest.mark.parametrize("path, expected", [
+    ("/api/v1/admin/data-sources/ds_1/refresh", 90.0),
+    # Its neighbours keep the default.
+    ("/api/v1/admin/data-sources/ds_1/freshness", 30.0),
+    ("/api/v1/admin/data-sources/ds_1/readiness", 30.0),
+    ("/api/v1/admin/providers/prov_1/refresh", 30.0),
+])
+def test_a_data_sources_refresh_may_wait_for_its_rebuild(monkeypatch, path, expected):
+    """``"wait": "complete"`` holds the answer while the queued rebuild runs, up to 60s: under
+    the 30s default every such refresh was cut off with a 504 before its answer came."""
+    monkeypatch.delenv("HTTP_TIMEOUT_AGGREGATION_SECS", raising=False)
+    monkeypatch.delenv("HTTP_TIMEOUT_DEFAULT_SECS", raising=False)
+    assert _TimeoutMiddleware(_instant_app())._resolve_timeout(path) == expected
+
+
 def test_every_provider_budget_sits_under_its_http_tier(monkeypatch):
     """The provider's per-query deadlines must fire BEFORE the HTTP tier
     around them: the provider's timeout is structured (504 PROVIDER_TIMEOUT,

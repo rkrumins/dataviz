@@ -438,8 +438,8 @@ There is no single paging scheme; each route documents its own in the explorer.
 
 Streamed exports and stored exports' downloads have no time limit. Files larger than 100 MB go
 in parts — see [Bulk import and export graph data](#bulk-import-and-export-graph-data). A data
-source's refresh signal is one of the 30-second routes — see
-[Tell the platform a data source changed](#tell-the-platform-a-data-source-changed).
+source's refresh signal gets 90 s (`HTTP_TIMEOUT_AGGREGATION_SECS`), time to wait for its
+rebuild — see [Tell the platform a data source changed](#tell-the-platform-a-data-source-changed).
 
 ## Recipes
 
@@ -479,9 +479,10 @@ rebuild to start the moment your load finishes.
    api GET "/api/v1/admin/data-sources/$DS/readiness" | jq '{aggregationStatus, isReady, driftState}'
    ```
 
-> **Warning:** Don't ask the signal to `"wait": "complete"`. It waits up to 60 seconds for the
-> rebuild, but the request is cut off after 30 (`HTTP_TIMEOUT_DEFAULT_SECS`), so a longer rebuild
-> answers `504` while it carries on. Poll `/readiness` as in step 3 instead.
+> **Note:** To read the rebuilt graph straight after the signal, send `"wait": "complete"`
+> instead of polling. The answer waits up to 60 seconds for the rebuild, and `actions` then ends
+> with how it finished — `job:completed`, `job:failed` or `job:cancelled` — or with `job:timeout`
+> if it is still running; then poll `/readiness` as in step 3.
 
 Name the run in `X-Request-ID` to find it in the activity log later
 ([Request ids, reasons and response headers](#request-ids-reasons-and-response-headers)). Leave
