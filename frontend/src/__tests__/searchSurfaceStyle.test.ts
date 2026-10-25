@@ -23,6 +23,7 @@ const SCOPE = [
     'components/canvas/search/panel/ask',
     'components/canvas/search/panel/rescue',
     'components/canvas/search/panel/results',
+    'components/canvas/search/studio',
     'components/canvas/search/panel/counts',
     'components/canvas/search/panel/vocabulary',
 ]

@@ -34,16 +34,19 @@
  * the lineage canvas spotlights matches and shows enriched badges.
  */
 import { motion, AnimatePresence } from 'framer-motion'
-import { BookOpen, SlidersHorizontal, Sparkles, X } from 'lucide-react'
+import { BookOpen, Maximize2, SlidersHorizontal, Sparkles, X } from 'lucide-react'
 import {
     type FC,
     useCallback,
     useEffect,
+    useLayoutEffect,
     useMemo,
     useRef,
     useState,
 } from 'react'
 
+import { IconButton } from '@/components/ui/Button'
+import { Segmented } from '@/components/ui/Segmented'
 import { cn } from '@/lib/utils'
 import { rememberUrnLabels } from '@/lib/urnLabels'
 import {
@@ -53,6 +56,7 @@ import {
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useFeature } from '@/store/features'
+import { usePersonaMode } from '@/store/persona'
 import {
     DEFAULT_DRAFT_OPTIONS,
     readPersistedCanvasFilterMode,
@@ -88,6 +92,9 @@ import { useViewSearchSessionOptional } from './session/ViewSearchSessionContext
 import { hasReportableView } from './session/useViewSearchSessionController'
 import { SEARCH_OPTIONS } from './searchOptions'
 import { usePendingSearchRun } from './usePendingSearchRun'
+import { ResultsTable } from './studio/ResultsTable'
+import { SchemaInspector } from './studio/SchemaInspector'
+import { SearchStudio } from './studio/SearchStudio'
 import {
     defaultInputs,
     type SearchTemplate,
@@ -447,6 +454,16 @@ function PanelInner({
     // canvas reveal is reserved for this explicit handler so the user
     // controls when the canvas pans/expands. No-op when there's no
     // focused match or no matching hit in the current page.
+    // Reveal and Frame go to the canvas, so Search Studio steps aside first.
+    const revealNode = useMemo(() => onRevealNode && ((urn: string, path: AncestorRef[]) => {
+        useSearchStore.getState().setStudioOpen(false)
+        onRevealNode(urn, path)
+    }), [onRevealNode])
+    const frameMatches = useMemo(() => onFrameMatches && ((urns: string[]) => {
+        useSearchStore.getState().setStudioOpen(false)
+        onFrameMatches(urns)
+    }), [onFrameMatches])
+
     const revealFocusedOnCanvas = useCallback(() => {
         if (!onRevealNode) return
         const { orderedMatchUrns, focusedMatchIndex } = useSearchStore.getState()
@@ -455,8 +472,8 @@ function PanelInner({
         if (!urn) return
         const hits = view.kind === 'results' ? (view.result.hits ?? []) : []
         const hit = hits.find((h) => h.node.urn === urn)
-        onRevealNode(urn, hit?.ancestorPath ?? [])
-    }, [onRevealNode, view])
+        revealNode?.(urn, hit?.ancestorPath ?? [])
+    }, [onRevealNode, revealNode, view])
 
     // Panel-level keyboard handler. J/↓ → next match, K/↑ → prev,
     // Enter → reveal the focused match on the canvas (the deliberate
@@ -465,6 +482,23 @@ function PanelInner({
     // text input so the user can still type in the query card / row
     // filter without triggering these shortcuts.
     const panelRef = useRef<HTMLDivElement>(null)
+
+    // Search Studio: the same panel opened out over its canvas.
+    const studioOpen = useSearchStore((s) => s.studioOpen)
+    const setStudioOpen = useSearchStore((s) => s.setStudioOpen)
+    const persona = usePersonaMode()
+    const expandRef = useRef<HTMLButtonElement>(null)
+    const [studioHost, setStudioHost] = useState<Element | null>(null)
+    const [studioView, setStudioView] = useState<'table' | 'cards'>('table')
+    useLayoutEffect(() => {
+        if (studioOpen) setStudioHost(panelRef.current?.closest('[data-panel="search-map-panel"]')?.parentElement ?? null)
+    }, [studioOpen])
+    const closeStudio = useCallback(() => {
+        setStudioOpen(false)
+        requestAnimationFrame(() => expandRef.current?.focus())
+    }, [setStudioOpen])
+    // The Studio is this panel's: it doesn't outlive it.
+    useEffect(() => () => setStudioOpen(false), [setStudioOpen])
     const handlePanelKeyDown = useCallback((e: React.KeyboardEvent) => {
         const target = e.target as HTMLElement | null
         if (target && (
@@ -472,6 +506,8 @@ function PanelInner({
             || target.tagName === 'TEXTAREA'
             || target.isContentEditable
         )) return
+        // Search Studio and the popovers are portaled: their keys are theirs.
+        if (!panelRef.current?.contains(target)) return
         switch (e.key) {
             case 'j':
             case 'J':
@@ -486,14 +522,84 @@ function PanelInner({
                 stepFocus('prev')
                 return
             case 'Enter': {
+                // Enter on a button presses it.
+                if (target?.closest('button, a[href]')) return
                 e.preventDefault()
                 revealFocusedOnCanvas()
                 return
             }
+            case 'e':
+            case 'E':
+                if (e.metaKey || e.ctrlKey || e.altKey) return
+                e.preventDefault()
+                setStudioOpen(true)
+                return
             default:
                 return
         }
-    }, [stepFocus, revealFocusedOnCanvas])
+    }, [stepFocus, revealFocusedOnCanvas, setStudioOpen])
+
+    // The panel's parts, laid out in its column — or, opened out, in
+    // Search Studio. Never both: there is one query card.
+    const queryCard = (
+        <QueryCard
+            viewId={viewId}
+            isRunning={view.kind === 'running'}
+            runState={runState}
+            onRun={handleRun}
+            onOpenAdvanced={() => {
+                setStudioOpen(false)
+                openAdvanced('options')
+            }}
+        />
+    )
+    const matchBar = (
+        <MatchBar
+            count={resultsCount}
+            elapsedMs={elapsedMs}
+            isRunning={view.kind === 'running'}
+            errorMessage={view.kind === 'error' ? view.message : null}
+            truncated={truncated}
+            countIsExact={countIsExact}
+            deadlineExceeded={deadlineExceeded}
+            candidateCount={candidateCount}
+            scanning={view.kind === 'results'
+                && view.result.status === 'running'}
+            progress={view.kind === 'results'
+                ? view.result.progress ?? null
+                : null}
+            onFrame={canFrame
+                ? () => frameMatches?.(frameTargetUrns)
+                : undefined}
+            onShowFocusedOnCanvas={onRevealNode
+                ? revealFocusedOnCanvas
+                : undefined}
+            onClear={view.kind === 'results' || view.kind === 'error'
+                ? handleClear
+                : undefined}
+            onExport={canExport ? () => setExportOpen(true) : undefined}
+            unit={view.kind === 'results' && view.result.paths ? 'path' : 'match'}
+            viewId={viewId}
+        />
+    )
+    const resultsPane = (
+        <ResultsPane
+            view={view}
+            viewId={viewId}
+            onScopeToGroup={handleScopeToGroup}
+            onReveal={revealNode}
+            onOpen={onOpenNode}
+            onLoadMore={loadMore}
+            isLoadingMore={isLoadingMore}
+            onLoadAll={loadAll}
+            isLoadingAll={isLoadingAll}
+            onCancelLoadAll={cancelLoadAll}
+            draft={draftPredicate}
+            onRefine={handleRefine}
+        />
+    )
+    // A table only for rows: not routes, not nothing.
+    const tableHits = view.kind === 'results' && !view.result.paths ? view.result.hits ?? [] : []
 
     return (
         <div
@@ -533,6 +639,8 @@ function PanelInner({
                                 else viewSession.refine()
                             }
                             : undefined}
+                        onExpand={() => setStudioOpen(true)}
+                        expandRef={expandRef}
                     />
                 </div>
             </LibraryPopover>
@@ -559,21 +667,21 @@ function PanelInner({
                     initialTab={advancedTab}
                     onClose={() => setAdvancedOpen(false)}
                 />
+            ) : studioOpen ? (
+                <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+                    <p className="text-sm text-ink-muted">Search Studio is open over the canvas.</p>
+                    <button type="button" onClick={closeStudio}
+                            className="rounded-lg border border-glass-border px-3 py-1.5 text-sm text-ink hover:border-accent-lineage/40">
+                        Back to the panel
+                    </button>
+                </div>
             ) : (
                 <>
                     <div className={cn(
                         'flex-1 min-h-0 overflow-y-auto custom-scrollbar',
                         'px-3 py-3 flex flex-col gap-3',
                     )}>
-                        {refineOpen && (
-                            <QueryCard
-                                viewId={viewId}
-                                isRunning={view.kind === 'running'}
-                                runState={runState}
-                                onRun={handleRun}
-                                onOpenAdvanced={() => openAdvanced('options')}
-                            />
-                        )}
+                        {refineOpen && queryCard}
 
                         {showResultsSection && (
                             <div className="flex flex-col gap-2">
@@ -582,59 +690,64 @@ function PanelInner({
                                     a new question is still one line away. */}
                                 {!refineOpen && <ResultsAskBar viewId={viewId} onRun={handleRun} />}
                                 {!sentenceShowing && <QuerySentence draftPredicate={draftPredicate} />}
-                                <MatchBar
-                                    count={resultsCount}
-                                    elapsedMs={elapsedMs}
-                                    isRunning={view.kind === 'running'}
-                                    errorMessage={view.kind === 'error' ? view.message : null}
-                                    truncated={truncated}
-                                    countIsExact={countIsExact}
-                                    deadlineExceeded={deadlineExceeded}
-                                    candidateCount={candidateCount}
-                                    scanning={view.kind === 'results'
-                                        && view.result.status === 'running'}
-                                    progress={view.kind === 'results'
-                                        ? view.result.progress ?? null
-                                        : null}
-                                    onFrame={canFrame
-                                        ? () => onFrameMatches?.(frameTargetUrns)
-                                        : undefined}
-                                    onShowFocusedOnCanvas={onRevealNode
-                                        ? revealFocusedOnCanvas
-                                        : undefined}
-                                    onClear={view.kind === 'results' || view.kind === 'error'
-                                        ? handleClear
-                                        : undefined}
-                                    onExport={canExport ? () => setExportOpen(true) : undefined}
-                                    unit={view.kind === 'results' && view.result.paths ? 'path' : 'match'}
-                                    viewId={viewId}
-                                />
-                                <ResultsPane
-                                    view={view}
-                                    viewId={viewId}
-                                    onScopeToGroup={handleScopeToGroup}
-                                    onReveal={onRevealNode}
-                                    onOpen={onOpenNode}
-                                    onLoadMore={loadMore}
-                                    isLoadingMore={isLoadingMore}
-                                    onLoadAll={loadAll}
-                                    isLoadingAll={isLoadingAll}
-                                    onCancelLoadAll={cancelLoadAll}
-                                    draft={draftPredicate}
-                                    onRefine={handleRefine}
-                                />
-                                {exportOpen && view.kind === 'results' && (
-                                    <ExportMatchesDialog
-                                        viewId={viewId}
-                                        query={view.query}
-                                        matchCount={countIsExact ? resultsCount : null}
-                                        onClose={() => setExportOpen(false)}
-                                    />
-                                )}
+                                {matchBar}
+                                {resultsPane}
                             </div>
                         )}
                     </div>
                 </>
+            )}
+            {exportOpen && view.kind === 'results' && (
+                <ExportMatchesDialog
+                    viewId={viewId}
+                    query={view.query}
+                    matchCount={countIsExact ? resultsCount : null}
+                    onClose={() => setExportOpen(false)}
+                />
+            )}
+            {studioOpen && !advancedOpen && (
+                <SearchStudio
+                    host={studioHost}
+                    onClose={closeStudio}
+                    builder={queryCard}
+                    results={(
+                        <>
+                            {showResultsSection && matchBar}
+                            {tableHits.length > 0 && (
+                                <Segmented size="sm" className="self-start" label="How to show the results"
+                                           value={studioView} onChange={setStudioView}
+                                           options={[{ value: 'table', label: 'Table' }, { value: 'cards', label: 'Cards' }]} />
+                            )}
+                            {view.kind === 'idle' ? (
+                                <p className="text-sm text-ink-muted">
+                                    Ask a question, or build one — what it finds shows here.
+                                </p>
+                            ) : tableHits.length > 0 && studioView === 'table' && view.kind === 'results' ? (
+                                <ResultsTable
+                                    hits={tableHits}
+                                    query={view.query.predicate}
+                                    draft={draftPredicate}
+                                    onRefine={handleRefine}
+                                    onReveal={revealNode}
+                                    onOpen={onOpenNode}
+                                    onLookInside={(a) => handleScopeToGroup({ ancestorUrn: a.urn,
+                                        ancestorDisplayName: a.displayName, ancestorEntityType: a.entityType })}
+                                    onFrame={frameMatches}
+                                    canLoadMore={!!view.result.cursor}
+                                    isLoadingMore={isLoadingMore}
+                                    onLoadMore={loadMore}
+                                />
+                            ) : (
+                                <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">{resultsPane}</div>
+                            )}
+                        </>
+                    )}
+                    inspector={(
+                        <SchemaInspector viewId={viewId} draft={draftPredicate} onRefine={handleRefine}
+                                         mode={editorMode}
+                                         initialTab={persona === 'technical' ? 'properties' : 'types'} />
+                    )}
+                />
             )}
         </div>
     )
@@ -659,9 +772,12 @@ function PanelInner({
  */
 function CompactHeader({
     onClose, onOpenLibrary, libraryOpen, onOpenOptions, optionsDeltaCount,
-    refineOpen, onToggleRefine,
+    refineOpen, onToggleRefine, onExpand, expandRef,
 }: {
     onClose: () => void
+    /** Open the panel out into Search Studio. */
+    onExpand: () => void
+    expandRef: React.Ref<HTMLButtonElement>
     onOpenLibrary: () => void
     libraryOpen: boolean
     onOpenOptions: () => void
@@ -723,6 +839,9 @@ function CompactHeader({
                     onClick={onOpenOptions}
                     badge={optionsDeltaCount > 0 ? optionsDeltaCount : undefined}
                 />
+                <IconButton ref={expandRef} icon={Maximize2} label="Open Search Studio" shortcut="E"
+                            detail="The query, its results as a table, and what the view holds — side by side"
+                            onClick={onExpand} className="hidden sm:inline-flex" />
                 <button
                     type="button"
                     onClick={onClose}

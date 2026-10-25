@@ -8,7 +8,7 @@ import { describe, expect, it } from 'vitest'
 import type { Predicate } from '@/types/search'
 
 import {
-    buildSentence, getAt, insertAt, listedClauses, parentOf, pathKey, setAt, type SentenceLine,
+    andWith, buildSentence, getAt, insertAt, listedClauses, parentOf, pathKey, setAt, type SentenceLine,
 } from '../clauseModel'
 
 
@@ -169,5 +169,12 @@ describe('clauseModel — edits', () => {
         expect(parentOf([{ child: 2 }, { where: true }, { child: 1 }]))
             .toEqual({ into: [{ child: 2 }, { where: true }], index: 1 })
         expect(parentOf([{ child: 2 }, { where: true }])).toBeNull()
+    })
+
+    it('adds a condition every match must meet, whatever joins the query\'s own', () => {
+        expect(andWith(null, tag('x'))).toEqual(tag('x'))
+        expect(andWith(type('dataset'), tag('x'))).toEqual(all(type('dataset'), tag('x')))
+        expect(andWith(all(type('dataset'), tag('a')), tag('x'))).toEqual(all(type('dataset'), tag('a'), tag('x')))
+        expect(andWith(any(tag('a'), tag('b')), tag('x'))).toEqual(all(any(tag('a'), tag('b')), tag('x')))
     })
 })

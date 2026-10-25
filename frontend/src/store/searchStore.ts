@@ -313,6 +313,10 @@ interface SearchStoreState {
      * the original Advanced Search.
      */
     canvasFilterMode: CanvasFilterMode
+
+    /** Search Studio — the panel's full-width workspace over the canvas —
+     *  is open. The panel's one query card lives there while it is. */
+    studioOpen: boolean
 }
 
 
@@ -407,6 +411,7 @@ interface SearchStoreActions {
      *  the "open in Advanced Search + run" bridge used by the Property
      *  Manager. The caller also opens the panel. */
     requestSearchRun: (predicate: Predicate) => void
+    setStudioOpen: (open: boolean) => void
     /** Atomic read-and-clear of the pending run predicate (panel-side). */
     consumePendingRun: () => Predicate | null
     /** Persist the scope mode chosen by the user in the panel header.
@@ -659,6 +664,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     // is active at store-create time — callers (SearchMapPanel mount)
     // hydrate the right value via setCanvasFilterMode.
     canvasFilterMode: 'highlight',
+    studioOpen: false,
 
     setResult: ({ viewId, matchUrns, ancestorPaths, ancestorCounts, queryHash }) => {
         const next = new Set<string>()
@@ -882,6 +888,10 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         // edit/undo it), then flag the panel to run it.
         get().commitDraft(predicate)
         set({ pendingRunPredicate: predicate })
+    },
+
+    setStudioOpen: (open) => {
+        set({ studioOpen: open })
     },
 
     consumePendingRun: () => {

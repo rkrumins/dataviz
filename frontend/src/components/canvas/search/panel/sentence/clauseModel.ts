@@ -297,6 +297,15 @@ export function withCombine(draft: Predicate | null, op: 'and' | 'or'): Predicat
 }
 
 
+/** ``draft`` AND ``p`` — one more condition every match must meet,
+ *  whatever the draft's own top-level operator. */
+export function andWith(draft: Predicate | null, p: Predicate): Predicate {
+    if (!draft) return p
+    const children = draft.kind === 'group' && draft.op === 'and' ? draft.children : [draft]
+    return { kind: 'group', op: 'and', children: [...children, p] }
+}
+
+
 /** ``draft`` finding ``types``: its subject replaced, dropped (none),
  *  or put first — clauses combined by any stay so, after it. */
 export function withSubject(draft: Predicate | null, types: string[]): Predicate | null {
