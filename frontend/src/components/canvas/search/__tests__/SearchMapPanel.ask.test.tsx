@@ -4,6 +4,7 @@
  * applied there runs at once — there is no card to auto-run it.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ViewSearchSessionContext } from '@/components/canvas/search/session/ViewSearchSessionContext'
@@ -39,6 +40,7 @@ function renderPanel(session: ViewSearchSession) {
                                 onClear={session.clearQuery} />
             </ViewSearchSessionContext.Provider>
         </ProviderOverride>,
+        { wrapper: MemoryRouter },
     )
 }
 

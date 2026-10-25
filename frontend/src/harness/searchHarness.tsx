@@ -19,6 +19,7 @@
  *   persona    `technical` for the Technical persona (default business)
  *   width      the panel's width in px (default 480)
  *   latency    ms every request waits, to see the loading states
+ *   intro      show the first-run tip pointing at Search Studio
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MotionGlobalConfig } from 'framer-motion'
@@ -27,6 +28,7 @@ import { createRoot } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
 
 import '../styles/globals.css'
+import { SEARCH_INTRO_KEY } from '../components/canvas/search/panel/guidance/searchIntro'
 import { SearchMapPanel } from '../components/canvas/search/SearchMapPanel'
 import { ProviderOverride } from '../providers/GraphProviderContext'
 import { RemoteGraphProvider } from '../providers/RemoteGraphProvider'
@@ -46,6 +48,7 @@ const dark = params.get('theme') === 'dark'
 const persona = params.get('persona') === 'technical' ? 'technical' : 'business'
 const width = Number(params.get('width') ?? 480)
 const latency = Number(params.get('latency') ?? 0)
+const intro = params.has('intro')
 
 
 // Every animation lands on its end state at once: a screenshot taken on
@@ -57,6 +60,8 @@ try {
     localStorage.setItem('advanced-search:panel-width', String(width))
     if (fixture.editorMode) localStorage.setItem('synodic.advancedSearch.editorMode', fixture.editorMode)
     else localStorage.removeItem('synodic.advancedSearch.editorMode')
+    if (intro) localStorage.removeItem(SEARCH_INTRO_KEY)
+    else localStorage.setItem(SEARCH_INTRO_KEY, '1')
 } catch { /* a private window: the panel's defaults apply */ }
 
 usePersonaStore.setState({ mode: persona })

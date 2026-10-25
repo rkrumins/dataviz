@@ -5,6 +5,7 @@
  * use), and the routes say plainly they can't be exported.
  */
 import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 
 import { ProviderOverride } from '@/providers/GraphProviderContext'
@@ -58,6 +59,7 @@ function renderPaths(result: Record<string, unknown>) {
                 session={stubAdvanced({ view })}
             />
         </ProviderOverride>,
+        { wrapper: MemoryRouter },
     )
 }
 

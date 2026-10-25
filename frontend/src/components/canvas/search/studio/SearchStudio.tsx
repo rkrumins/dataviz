@@ -18,6 +18,7 @@ import { Database, Minimize2, Sparkles } from 'lucide-react'
 import { type ReactNode, useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 
+import { DocsLink } from '@/components/help/DocsLink'
 import { IconButton } from '@/components/ui/Button'
 import { Segmented } from '@/components/ui/Segmented'
 import { keyboardScopeProps } from '@/lib/keyboardScope'
@@ -104,6 +105,7 @@ export function SearchStudio({ host, onClose, builder, results, inspector }: Sea
                     <Segmented options={PANES} value={tab} onChange={setTab} label="Which pane" size="sm" />
                 )}
                 <div className="ml-auto flex items-center gap-1.5">
+                    <DocsLink slug="advanced-search" newTab label="Guide" className="mr-1.5 text-xs" />
                     {layout === 'two' && (
                         <IconButton icon={Database} label={drawer ? 'Hide the inspector' : 'Show what the view holds'}
                                     active={drawer} onClick={() => setDrawer(!drawer)} />

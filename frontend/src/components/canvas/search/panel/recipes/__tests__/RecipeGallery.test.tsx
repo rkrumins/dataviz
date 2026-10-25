@@ -4,6 +4,7 @@
  * runs, one with something to fill in opens the Sentence view there.
  */
 import { fireEvent, render, screen, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -35,7 +36,7 @@ function withCounts(count: number) {
         return (
             <ProviderOverride value={{ provider, isLoading: false, error: null, scopeKind: 'ready',
                 workspaceId: 'ws', dataSourceId: null, providerReady: true, providerVersion: 1 } as never}>
-                {children}
+                <MemoryRouter>{children}</MemoryRouter>
             </ProviderOverride>
         )
     }

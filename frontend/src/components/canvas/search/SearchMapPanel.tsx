@@ -93,6 +93,7 @@ import { hasReportableView } from './session/useViewSearchSessionController'
 import { SEARCH_OPTIONS } from './searchOptions'
 import { usePendingSearchRun } from './usePendingSearchRun'
 import type { Recipe } from './panel/recipes/recipes'
+import { SearchCoachmark } from './panel/guidance/SearchCoachmark'
 import { ViewRecipes } from './panel/recipes/ViewRecipes'
 import { ResultsTable } from './studio/ResultsTable'
 import { SchemaInspector } from './studio/SchemaInspector'
@@ -489,7 +490,13 @@ function PanelInner({
     const studioOpen = useSearchStore((s) => s.studioOpen)
     const setStudioOpen = useSearchStore((s) => s.setStudioOpen)
     const persona = usePersonaMode()
-    const expandRef = useRef<HTMLButtonElement>(null)
+    const expandRef = useRef<HTMLButtonElement | null>(null)
+    // The first-run tip points at it, so it is state as well as a ref.
+    const [expandEl, setExpandEl] = useState<HTMLButtonElement | null>(null)
+    const expandRefs = useCallback((el: HTMLButtonElement | null) => {
+        expandRef.current = el
+        setExpandEl(el)
+    }, [])
     const [studioHost, setStudioHost] = useState<Element | null>(null)
     const [studioView, setStudioView] = useState<'table' | 'cards'>('table')
     useLayoutEffect(() => {
@@ -644,10 +651,11 @@ function PanelInner({
                             }
                             : undefined}
                         onExpand={() => setStudioOpen(true)}
-                        expandRef={expandRef}
+                        expandRef={expandRefs}
                     />
                 </div>
             </LibraryPopover>
+            <SearchCoachmark anchor={expandEl} />
 
             {saveTarget && (
                 <SaveQueryDialog
@@ -831,7 +839,7 @@ function CompactHeader({
                 )}
                 <ToolbarChip
                     label="Library"
-                    title="Saved queries, recent runs, and templates"
+                    title="Saved queries, recent runs and recipes"
                     Icon={BookOpen}
                     active={libraryOpen}
                     onClick={onOpenLibrary}

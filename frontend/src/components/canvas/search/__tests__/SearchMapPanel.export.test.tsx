@@ -4,6 +4,7 @@
  * where exporting is turned off — opening the export of exactly that search.
  */
 import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -57,6 +58,7 @@ function renderPanel(result: Record<string, unknown>) {
                 session={stubAdvanced({ view: resultsView(result) })}
             />
         </ProviderOverride>,
+        { wrapper: MemoryRouter },
     )
 }
 

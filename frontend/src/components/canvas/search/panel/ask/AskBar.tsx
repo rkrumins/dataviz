@@ -16,13 +16,14 @@
  */
 import * as Popover from '@radix-ui/react-popover'
 import { CheckCircle2, ChevronDown, CornerDownLeft, Loader2, Sparkles, X } from 'lucide-react'
-import { useCallback, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Skeleton } from '@/components/ui/Skeleton'
 import { cn } from '@/lib/utils'
 import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { usePersonaMode } from '@/store/persona'
+import { useSearchStore } from '@/store/searchStore'
 import type { NodeRef, Predicate } from '@/types/search'
 
 import type { CountState } from '../counts/useCounts'
@@ -62,6 +63,12 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
     const typeName = useTypeName()
     const hero = variant === 'hero'
     const asking = question.trim().length > 0
+
+    // "Ask about this view", chosen from outside the panel, lands here.
+    const askFocus = useSearchStore((s) => s.pendingAskFocus)
+    useEffect(() => {
+        if (askFocus && useSearchStore.getState().consumeAskFocus()) inputRef.current?.focus()
+    }, [askFocus])
 
     const preview = useAskPreview(viewId, question, vocabulary, picks, draft)
     const { interpretation, result } = preview

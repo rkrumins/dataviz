@@ -44,6 +44,7 @@ import {
 } from './clauseModel'
 import { ClauseLine, type LineCount } from './ClauseLine'
 import { SentenceContext, type SentenceContextValue } from './sentenceContext'
+import { useAnnouncement } from './useAnnouncement'
 
 
 export interface SentenceBuilderProps {
@@ -209,6 +210,12 @@ export function SentenceBuilder({
     const map = useMemo(() => layoutQueryMap(sentence), [sentence])
     // Where the matches run out, and the way back — before anything runs.
     const rescue = useRescue(viewId, predicate, counts)
+    // Said once the counts settle, for anyone not watching them.
+    const total = counts.status === 'done' ? counts.total : null
+    const announcement = useAnnouncement(!total ? ''
+        : total.complete && total.count === 0 && rescue.line
+            ? `Nothing matches: the matches run out at “${rescue.line}”.`
+            : `${total.count.toLocaleString()}${total.complete ? '' : ' or more'} ${total.count === 1 ? 'match' : 'matches'}.`)
 
     return (
         <SentenceContext.Provider value={ctx}>
@@ -229,6 +236,7 @@ export function SentenceBuilder({
                         </div>
                     ))}
                 </div>
+                <p aria-live="polite" className="sr-only">{announcement}</p>
             </div>
         </SentenceContext.Provider>
     )

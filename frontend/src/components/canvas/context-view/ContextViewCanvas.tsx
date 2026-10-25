@@ -118,7 +118,7 @@ import { getEdgeTypeDefinition, getEdgeTypeFromSchema, type EdgeTypeDefinition }
 // UX-first interaction components
 import { CanvasContextMenu, type ContextMenuAction } from '../CanvasContextMenu'
 import { InlineNodeEditor } from '../InlineNodeEditor'
-import { CommandPalette } from '../CommandPalette'
+import { CommandPalette, type CommandItem } from '../CommandPalette'
 import { useEdgeConnect } from '../edge-create/useEdgeConnect'
 import { ConnectionDragLayer } from '../edge-create/ConnectionDragLayer'
 import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
@@ -1913,6 +1913,38 @@ export function ContextViewCanvas({
     revealHit: revealHitForSearch,
     prefetchHit: prefetchSearchHitSpine,
   })
+  // Search, from the command palette: a question in plain words, or the
+  // panel opened out into Search Studio.
+  const { closeCommandPalette } = interactions
+  const { openPanel: openSearchPanel } = search
+  const searchCommands = useMemo<CommandItem[]>(() => [
+    {
+      id: 'search:ask',
+      label: 'Ask about this view',
+      description: 'A question in plain words — see what it reads as before it runs',
+      icon: 'Sparkles',
+      category: 'action',
+      keywords: ['search', 'find', 'query', 'question'],
+      onSelect: () => {
+        closeCommandPalette()
+        openSearchPanel()
+        useSearchStore.getState().requestAskFocus()
+      },
+    },
+    {
+      id: 'search:studio',
+      label: 'Open Search Studio',
+      description: 'The search opened out over the canvas, with room to work',
+      icon: 'Maximize2',
+      category: 'action',
+      keywords: ['search', 'expand', 'table', 'results', 'recipes'],
+      onSelect: () => {
+        closeCommandPalette()
+        openSearchPanel()
+        useSearchStore.getState().setStudioOpen(true)
+      },
+    },
+  ], [closeCommandPalette, openSearchPanel])
   // Side panels (EntityDrawer, EdgeDetailPanel, Advanced Search, the
   // hierarchy builder/build rails) are OVERLAYS that reserve canvas space
   // via padding — a change that does NOT resize the observed node cards,
@@ -7282,6 +7314,7 @@ export function ContextViewCanvas({
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
+        commands={searchCommands}
         onCreateEntity={canEditGraph ? (typeId) => {
           interactions.closeCommandPalette()
           useHierarchyBuilderStore.getState().open({ initialTypeId: typeId })

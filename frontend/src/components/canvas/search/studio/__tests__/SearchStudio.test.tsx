@@ -4,6 +4,7 @@
  * canvas behind out of reach until Esc brings the panel back.
  */
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -40,7 +41,7 @@ function withProvider(extra: Record<string, unknown> = {}) {
         return (
             <ProviderOverride value={{ provider, isLoading: false, error: null, scopeKind: 'ready',
                 workspaceId: 'ws', dataSourceId: null, providerReady: true, providerVersion: 1 } as never}>
-                {children}
+                <MemoryRouter>{children}</MemoryRouter>
             </ProviderOverride>
         )
     }

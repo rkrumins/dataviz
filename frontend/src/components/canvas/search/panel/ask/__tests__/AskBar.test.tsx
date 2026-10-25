@@ -4,7 +4,7 @@
  * its names point at — and applies it on Enter: once, replacing the query
  * or adding to it. Earlier questions come back with ↑; Esc clears.
  */
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -128,5 +128,15 @@ describe('AskBar', () => {
         expect(input).toHaveValue('unused datasets')
         fireEvent.keyDown(input, { key: 'Escape' })
         expect(input).toHaveValue('')
+    })
+
+    it('takes focus when asked to from outside the panel, once', () => {
+        useSearchStore.getState().requestAskFocus()
+        const { input } = setup()
+        expect(input).toHaveFocus()
+        expect(useSearchStore.getState().pendingAskFocus).toBe(false)
+        input.blur()
+        act(() => useSearchStore.getState().requestAskFocus())
+        expect(input).toHaveFocus()
     })
 })

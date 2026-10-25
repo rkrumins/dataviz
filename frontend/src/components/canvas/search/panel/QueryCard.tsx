@@ -46,6 +46,7 @@ import {
     useState,
 } from 'react'
 
+import { DocsLink } from '@/components/help/DocsLink'
 import { Segmented } from '@/components/ui/Segmented'
 import { cn } from '@/lib/utils'
 import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
@@ -701,8 +702,11 @@ function PremiumEmptyHero({
                         <Sparkles className="w-5 h-5 text-accent-lineage" />
                     </div>
                     <div className="flex-1 min-w-0">
-                        <div className="text-[15px] font-display font-semibold text-ink leading-tight tracking-tight">
-                            Search this view
+                        <div className="flex items-baseline justify-between gap-2">
+                            <div className="text-[15px] font-display font-semibold text-ink leading-tight tracking-tight">
+                                Search this view
+                            </div>
+                            <DocsLink slug="advanced-search" newTab label="Guide" className="text-xs font-medium" />
                         </div>
                         <p className="mt-1 text-[12px] text-ink-muted leading-snug">
                             Ask in plain words — what it is, how it connects,

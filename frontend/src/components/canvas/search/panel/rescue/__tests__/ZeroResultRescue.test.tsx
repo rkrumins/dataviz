@@ -73,6 +73,8 @@ describe('the rescue', () => {
         }
         render(<Harness />, { wrapper })
         expect(await screen.findByRole('status')).toHaveTextContent('Nothing matches from here')
+        // And says so, for anyone not watching the counts.
+        expect(await screen.findByText(/^Nothing matches: the matches run out at “/)).toHaveAttribute('aria-live', 'polite')
         fireEvent.click(await screen.findByRole('button', { name: /Without this line/ }))
         expect(onCommit).toHaveBeenCalledWith(all(type('dataset'), tag('Certified')))
     })
