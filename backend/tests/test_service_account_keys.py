@@ -271,7 +271,7 @@ async def test_a_super_admin_makes_a_key_without_managing_and_the_managers_are_t
 
     [note] = await _notes(db_session, "service_account_key_created")
     assert (note.user_id, note.actor_id, note.link) == (
-        OWNER, ROOT, f"/me/service-accounts/{account}",
+        OWNER, ROOT, f"/service-accounts/{account}",
     )
     assert "“Metadata sync”" in note.title and key["prefix"] in note.body
 
@@ -428,7 +428,7 @@ async def test_a_super_admin_revoking_tells_the_managers(client, db_session, acc
     await db_session.refresh(row)
     assert (row.revoked_by, row.revoked_reason) == (ROOT, "admin")
     [note] = await _notes(db_session, "api_key_revoked_by_admin")
-    assert (note.user_id, note.link) == (OWNER, f"/me/service-accounts/{account}")
+    assert (note.user_id, note.link) == (OWNER, f"/service-accounts/{account}")
     assert note.title == "An administrator revoked one of “Metadata sync”’s API keys"
 
 
@@ -458,7 +458,7 @@ async def test_misuse_of_an_accounts_key_is_told_to_its_managers(client, db_sess
     assert refused.status_code == 401
 
     [note] = await _notes(db_session, "api_key_misuse")
-    assert (note.user_id, note.link) == (OWNER, f"/me/service-accounts/{account}")
+    assert (note.user_id, note.link) == (OWNER, f"/service-accounts/{account}")
     assert note.body.startswith("“Metadata sync”’s key “ci key”")
 
 
@@ -478,7 +478,7 @@ async def test_an_administrator_revoking_an_accounts_keys_tells_its_managers(
     assert everything.json() == {"revoked": 1}
 
     notes = await _notes(db_session, "api_key_revoked_by_admin")
-    assert [(n.user_id, n.link) for n in notes] == [(OWNER, f"/me/service-accounts/{account}")] * 2
+    assert [(n.user_id, n.link) for n in notes] == [(OWNER, f"/service-accounts/{account}")] * 2
     assert {n.title for n in notes} == {
         "An administrator revoked one of “Metadata sync”’s API keys",
         "An administrator revoked “Metadata sync”’s API keys",
@@ -494,7 +494,7 @@ async def test_expiry_reminders_go_to_the_managers_or_with_none_left_to_the_admi
     await db_session.commit()
     assert await api_key_housekeeping.remind_once(db_session) == 1
     [note] = await _notes(db_session, "api_key_expiring")
-    assert (note.user_id, note.link) == (OWNER, f"/me/service-accounts/{account}")
+    assert (note.user_id, note.link) == (OWNER, f"/service-accounts/{account}")
     assert note.body.startswith("“Metadata sync”’s key “first”")
 
     # Its only manager leaves: the administrators answer for it now.
@@ -506,7 +506,7 @@ async def test_expiry_reminders_go_to_the_managers_or_with_none_left_to_the_admi
     await db_session.commit()
     assert await api_key_housekeeping.remind_once(db_session) == 1
     told = [n for n in await _notes(db_session, "api_key_expiring") if n.resource_id == second.id]
-    assert [(n.user_id, n.link) for n in told] == [(ROOT, f"/admin/service-accounts?account={account}")]
+    assert [(n.user_id, n.link) for n in told] == [(ROOT, f"/service-accounts/{account}")]
 
 
 async def test_a_persons_own_key_notices_read_as_before(client, db_session):

@@ -363,6 +363,26 @@ async def resolve(
         bindings = [
             b for b in bindings if b.scope_type == "workspace" and b.subject_type == "user"
         ]
+    return await _fold(session, bindings, sid=sid, service=service)
+
+
+async def resolve_group(session: AsyncSession, group_id: str) -> PermissionClaims:
+    """What a team's own bindings grant: what every one of its members holds
+    through it, whatever else they hold. Expired grants count for nothing, as
+    for a person."""
+    now = datetime.now(timezone.utc)
+    bindings = [
+        b for b in await binding_repo.list_for_subject(session, subject_type="group", subject_id=group_id)
+        if not binding_repo._is_expired(b.expires_at, now=now)
+    ]
+    return await _fold(session, bindings, sid=new_session_id())
+
+
+async def _fold(
+    session: AsyncSession, bindings: list[RoleBindingORM], *, sid: str, service: bool = False,
+) -> PermissionClaims:
+    """Bindings folded into claims, by the invariants ``resolve`` describes."""
+    if service:
         # And never more than it could be given: a role it holds that is later
         # widened to administer a workspace or let people in brings it none of that.
         from backend.app.services.workspace_access import is_requestable
