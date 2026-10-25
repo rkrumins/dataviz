@@ -882,9 +882,8 @@ doesn't know it.
   requestable (422), within the caller's ceiling (403), and in an `idp`
   workspace `workspace:admin` only (403), never as an exception. `GET
   …/members/service-accounts?q=` (`workspace:members:add`) finds up to 20
-  enabled accounts by name or purpose, each with its `description`,
-  `managers` and the `roles` it holds there; `grant-options` marks each role
-  `requestable`.
+  enabled accounts by name or purpose, each with its `description` and
+  `managers`; `grant-options` marks each role `requestable`.
 * The admins and stewards of a workspace it holds a role in read the account
   (`GET /admin/service-accounts/{id}`) — its roles in the workspaces they can
   open — to know whose it is.

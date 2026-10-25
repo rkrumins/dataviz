@@ -61,7 +61,6 @@ beforeEach(() => {
             { type: 'user', name: 'Ada Lovelace', fromIdp: false },
             { type: 'group', name: 'Data platform', fromIdp: true },
         ],
-        roles: [],
     }])
     useAuthStore.setState({ permissions: { sid: 's', global: ['system:admin'], ws: {} } } as never)
 })

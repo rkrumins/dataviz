@@ -147,14 +147,12 @@ function url(wsId: string, suffix: string = ''): string {
 }
 
 
-/** A service account that may be added here: what it is for, who manages it,
- *  and the roles it holds here already. */
+/** A service account that may be added here: what it is for, and who manages it. */
 export interface ServiceAccountCandidate {
     id: string
     name: string
     description: string | null
     managers: AccessRequestManager[]
-    roles: string[]
 }
 
 export const workspaceMembersService = {

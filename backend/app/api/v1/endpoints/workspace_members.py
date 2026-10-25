@@ -387,16 +387,11 @@ async def list_service_account_candidates(
     session: AsyncSession = Depends(get_db_session),
 ) -> list[WorkspaceServiceAccountCandidate]:
     """Enabled service accounts matching ``q`` (name or what it is for), to
-    add here like a person: what each is for, who manages it — a team the
-    identity provider keeps, marked — and the roles it holds here already."""
+    add here like a person: what each is for, and who manages it — a team the
+    identity provider keeps, marked."""
     await _ensure_workspace_exists(session, ws_id)
     rows, _total = await service_account_repo.list_page(session, q=q, status="active", limit=20)
-    ids = [user.id for user, _account in rows]
-    managed_by = await service_account_repo.manager_names(session, ids)
-    held: dict[str, list[str]] = {}
-    for b in await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id):
-        if b.subject_type == "user" and b.subject_id in managed_by:
-            held.setdefault(b.subject_id, []).append(b.role_name)
+    managed_by = await service_account_repo.manager_names(session, [user.id for user, _account in rows])
     return [
         WorkspaceServiceAccountCandidate(
             id=user.id, name=user.first_name, description=account.description,
@@ -404,7 +399,6 @@ async def list_service_account_candidates(
                 AccessRequestManager(type=kind, name=name, from_idp=from_idp)
                 for kind, name, from_idp in managed_by[user.id]
             ],
-            roles=sorted(held.get(user.id, [])),
         )
         for user, account in rows
     ]

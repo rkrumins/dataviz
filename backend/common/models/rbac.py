@@ -766,13 +766,12 @@ class WorkspaceGrantOptions(BaseModel):
 
 class WorkspaceServiceAccountCandidate(BaseModel):
     """A service account that may be added to a workspace: what it is for,
-    who manages it, and the roles it holds there already."""
+    and who manages it."""
     model_config = ConfigDict(populate_by_name=True)
     id: str
     name: str
     description: Optional[str] = None
     managers: list[AccessRequestManager] = Field(default_factory=list)
-    roles: list[str] = Field(default_factory=list)
 
 
 class WorkspaceDirectoryRequest(BaseModel):

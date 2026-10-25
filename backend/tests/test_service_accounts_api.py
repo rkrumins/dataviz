@@ -514,9 +514,7 @@ async def test_a_workspace_adds_it_as_it_adds_a_person(test_client, db_session, 
     svc = (await _create(test_client))["id"]
     with claims(ws_perms=STEWARD):
         found = (await test_client.get(f"{MEMBERS}/service-accounts", params={"q": "metadata"})).json()
-        assert [(c["id"], [m["name"] for m in c["managers"]], c["roles"]) for c in found] == [
-            (svc, ["Ada P"], []),
-        ]
+        assert [(c["id"], [m["name"] for m in c["managers"]]) for c in found] == [(svc, ["Ada P"])]
         options = (await test_client.get(f"{MEMBERS}/grant-options")).json()
         assert {r["name"]: r["requestable"] for r in options["roles"]} == {
             "workspace_member": True, "workspace_viewer": True,
@@ -525,7 +523,8 @@ async def test_a_workspace_adds_it_as_it_adds_a_person(test_client, db_session, 
             "subjectType": "user", "subjectId": svc, "role": "workspace_viewer",
         })
         assert added.status_code == 201, added.text
-        assert (await test_client.get(f"{MEMBERS}/service-accounts")).json()[0]["roles"] == ["workspace_viewer"]
+        members = (await test_client.get(MEMBERS)).json()
+        assert [m["role"] for m in members if m["subject"]["id"] == svc] == ["workspace_viewer"]
     # Never a role that administers the workspace or lets people in.
     with claims("system:org-admin"):
         refused = await test_client.post(MEMBERS, json={
