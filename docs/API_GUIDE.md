@@ -397,11 +397,6 @@ There is no single paging scheme; each route documents its own in the explorer.
   `{items, total, hasMore, nextOffset}`; the versioning lists answer a plain array — stop
   when a page comes back shorter than `limit`. `GET /api/v1/admin/workspaces` sends the total
   in `X-Total-Count` when you pass `limit`.
-- **One exception today:** a graph's branches (`GET …/graphs/{graph_id}/branches`), read by
-  someone who doesn't manage the graph. Others' private drafts are left out after the page is
-  read, so a page can come back short — or empty — before the end, and drafts shared with you
-  through a team aren't listed. Ask for the most (`limit=500`), and advance `offset` by `limit`,
-  not by the rows that came back.
 - **Cursors** on long or changing lists: search hands back `cursor`; an entity's history and a
   graph's commit log hand back `nextBefore` with `hasMore`. Send the value back as-is, and keep
   going while `hasMore` is `true` — a page can be short and still have more. A commit log also
@@ -426,10 +421,8 @@ There is no single paging scheme; each route documents its own in the explorer.
   with the change in the activity log.
 - **Answers carry** `X-Request-ID` and `X-Process-Time`; `X-API-Key-Expires-At` with a key that
   expires, below `400`; `X-Total-Count` on some lists; and `Retry-After` when it matters.
-- **A browser app on another origin** (one in `CORS_ALLOWED_ORIGINS`) can read only a few of
-  them — `Retry-After` and `Content-Disposition` among them, but not `X-Total-Count`,
-  `X-Request-ID` or `X-API-Key-Expires-At`. Use the body (`total`, `hasMore`) and
-  `/api-keys/self` instead.
+- **A browser app on another origin** (one in `CORS_ALLOWED_ORIGINS`) can read all of them but
+  `X-Process-Time`.
 
 ### Size and time limits
 
@@ -443,8 +436,8 @@ There is no single paging scheme; each route documents its own in the explorer.
 
 Streamed exports and stored exports' downloads have no time limit. Files larger than 100 MB go
 in parts — see [Bulk import and export graph data](#bulk-import-and-export-graph-data). A data
-source's refresh signal is one of the 30-second routes — see
-[Tell the platform a data source changed](#tell-the-platform-a-data-source-changed).
+source's refresh signal gets 90 s (`HTTP_TIMEOUT_AGGREGATION_SECS`), time to wait for its
+rebuild — see [Tell the platform a data source changed](#tell-the-platform-a-data-source-changed).
 
 ## Recipes
 
@@ -484,9 +477,10 @@ rebuild to start the moment your load finishes.
    api GET "/api/v1/admin/data-sources/$DS/readiness" | jq '{aggregationStatus, isReady, driftState}'
    ```
 
-> **Warning:** Don't ask the signal to `"wait": "complete"`. It waits up to 60 seconds for the
-> rebuild, but the request is cut off after 30 (`HTTP_TIMEOUT_DEFAULT_SECS`), so a longer rebuild
-> answers `504` while it carries on. Poll `/readiness` as in step 3 instead.
+> **Note:** To read the rebuilt graph straight after the signal, send `"wait": "complete"`
+> instead of polling. The answer waits up to 60 seconds for the rebuild, and `actions` then ends
+> with how it finished — `job:completed`, `job:failed` or `job:cancelled` — or with `job:timeout`
+> if it is still running; then poll `/readiness` as in step 3.
 
 Name the run in `X-Request-ID` to find it in the activity log later
 ([Request ids, reasons and response headers](#request-ids-reasons-and-response-headers)). Leave
@@ -742,9 +736,9 @@ publish.
    in that view's layout, so it needs edit access to the view too — with a key, **Views: read &
    write**.
 
-   > **Warning:** Don't send an `idempotencyKey` you have sent before on this graph. Today the
-   > answer is a `503`, and the draft the request opened stays behind, empty. Leave it out, or
-   > make each one unique.
+   An `idempotencyKey` makes the request safe to send again: the same key from you answers with
+   the import it started — and if the first request failed before its file arrived, takes this
+   one's file and starts it. A key you used for an export answers `409 idempotency_key_reused`.
 3. For a larger file — up to 10 GiB as NDJSON, CSV or TSV; JSON and Excel files stay at
    100 MB — send it in parts instead. Ask for an upload, send each part (numbered from `0`),
    then complete it:

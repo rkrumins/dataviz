@@ -32,6 +32,7 @@ from typing import Any, Dict, List, Literal, Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.raw_path_route import RawPathSegmentRoute
@@ -44,7 +45,7 @@ from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import data_source_repo, service_account_repo
+from backend.app.db.repositories import data_source_repo, service_account_repo, user_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
@@ -111,11 +112,18 @@ async def viewer_ctx(
     ws_id: str,
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
 ) -> Viewer:
     """Who is asking, for scoping draft/PR reads: the caller's id + whether they hold
-    ``datasource:manage`` in this workspace (managers see everything). Cheap — claims come from
-    the token; no DB hit. Endpoints still keep their ``requires(_READ)`` gate for the baseline."""
-    return Viewer(actor=user.id, can_manage=has_permission(claims, _MANAGE, workspace_id=ws_id))
+    ``datasource:manage`` in this workspace (managers see everything) and, for someone who
+    doesn't, the teams they're in, since a draft can be shared with a team. Managers, and service
+    accounts — in no team — cost no query. Endpoints still keep their ``requires(_READ)`` gate
+    for the baseline."""
+    can_manage = has_permission(claims, _MANAGE, workspace_id=ws_id)
+    groups: tuple = ()
+    if not can_manage and not is_service_account(user.id):
+        groups = tuple(await user_repo.get_groups_for_user(session, user.id))
+    return Viewer(actor=user.id, can_manage=can_manage, groups=groups)
 
 
 # --------------------------------------------------------------------------- #
@@ -2572,6 +2580,28 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
     return {"added": len(new_entries)}
 
 
+def _callers_key(user: User, key: Optional[str]) -> Optional[str]:
+    """An ``idempotencyKey`` as stored: its sender's, so two callers who choose the same key never
+    share a job, and one never learns of the other's."""
+    return f"{user.id}:{key}" if key else None
+
+
+async def _job_for_key(ie, graph_id: str, key: Optional[str], job_type: str) -> Optional[dict]:
+    """The job this caller's key already started on the graph, or ``None``. A key that started the
+    other kind of job names a different request: 409."""
+    job = await ie.find_job(graph_id=graph_id, idempotency_key=key) if key else None
+    if job is not None and job.get("jobType") != job_type:
+        raise HTTPException(status_code=409, detail={
+            "type": "idempotency_key_reused",
+            "message": "This idempotencyKey started another kind of job on this graph. Send a new one."})
+    return job
+
+
+def _never_started(job: dict) -> bool:
+    """Created, but never queued: the request that created it failed before it could start it."""
+    return job.get("status") == "pending" and job.get("phase") is None
+
+
 async def _check_import_view(session, ws_id: str, view_id: Optional[str], user, claims) -> None:
     """An import that names a view places the entities it creates in that view's layout
     (``_write_view_import_assignments``) — a write to the view. So the view must be one of this
@@ -2609,7 +2639,9 @@ async def create_import(
     reconcile_mode: str = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$"),
     branch_id: Optional[str] = Query(None, alias="branchId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
-    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
+    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey", description=(
+        "Makes the request safe to send again: the same key, from the same caller, answers "
+        "with the job it started")),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -2627,16 +2659,30 @@ async def create_import(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     await _check_import_view(session, ws_id, view_id, user, claims)
-    with _domain_errors():
-        created = await ie.create_import_job(
-            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
-            actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
-            branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
-            idempotency_key=idempotency_key)
-    await ie.store.put_stream(created["source_uri"], request.stream())
-    status = await ie.start_import(created["job_id"])
-    return {"jobId": created["job_id"], "branchId": created["branch_id"],
-            "sourceUri": created["source_uri"], "status": status}
+    key = _callers_key(user, idempotency_key)
+    job = await _job_for_key(ie, graph_id, key, "ingest")
+    if job is None:
+        try:
+            with _domain_errors():
+                created = await ie.create_import_job(
+                    workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+                    actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
+                    branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
+                    idempotency_key=key)
+        except IntegrityError:
+            # A request with the same key got there first: answer with its job.
+            job = await _job_for_key(ie, graph_id, key, "ingest")
+            if job is None:
+                raise
+        else:
+            job = {"jobId": created["job_id"], "branchId": created["branch_id"],
+                   "sourceUri": created["source_uri"], "status": "pending", "phase": None}
+    status = job["status"]
+    if _never_started(job):
+        await ie.store.put_stream(job["sourceUri"], request.stream())
+        status = await ie.start_import(job["jobId"])
+    return {"jobId": job["jobId"], "branchId": job["branchId"], "sourceUri": job["sourceUri"],
+            "status": status}
 
 
 # Resumable uploads: a file of up to IMPORT_MAX_BYTES arrives in parts, then becomes an import
@@ -2838,7 +2884,9 @@ async def create_export(
     props: Optional[str] = Query(None, description="Comma-separated property names to add as empty columns to fill"),
     ids: Optional[str] = Query(None, description="Comma-separated entity_id/urn set — export only these entities"),
     types: Optional[str] = Query(None, description="Comma-separated entity types — export only these"),
-    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
+    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey", description=(
+        "Makes the request safe to send again: the same key, from the same caller, answers "
+        "with the job it started")),
     filename: Optional[str] = Query(None, description="The download's name, without its extension"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -2861,15 +2909,29 @@ async def create_export(
     _split = lambda v: [x.strip() for x in (v or "").split(",") if x.strip()]  # noqa: E731
     await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
                                user=user, claims=claims, session=session, svc=svc)
-    with _domain_errors():
-        created = await ie.create_export_job(
-            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
-            actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
-            branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
-            select_ids=_split(ids), select_types=_split(types), idempotency_key=idempotency_key,
-            file_name=download_name(filename, format) if filename else None)
-    status = await ie.start_export(created["job_id"])
-    return {"jobId": created["job_id"], "resultUri": created["result_uri"], "status": status}
+    key = _callers_key(user, idempotency_key)
+    job = await _job_for_key(ie, graph_id, key, "export")
+    if job is None:
+        try:
+            with _domain_errors():
+                created = await ie.create_export_job(
+                    workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+                    actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
+                    branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
+                    select_ids=_split(ids), select_types=_split(types), idempotency_key=key,
+                    file_name=download_name(filename, format) if filename else None)
+        except IntegrityError:
+            # A request with the same key got there first: answer with its job.
+            job = await _job_for_key(ie, graph_id, key, "export")
+            if job is None:
+                raise
+        else:
+            job = {"jobId": created["job_id"], "resultUri": created["result_uri"],
+                   "status": "pending", "phase": None}
+    status = job["status"]
+    if _never_started(job):
+        status = await ie.start_export(job["jobId"])
+    return {"jobId": job["jobId"], "resultUri": job["resultUri"], "status": status}
 
 
 # Streamed exports. The export dialog asks for a plan (what the export holds, so an empty one is

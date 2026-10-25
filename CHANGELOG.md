@@ -168,6 +168,33 @@ governance pack.
 - Native queries use the data source's existing login; the engines' read-only modes keep them
   read-only, not the login's privileges.
 
+## [Unreleased] — Fixes for integrations
+
+### Fixed
+
+- **An import or export sent again with its `idempotencyKey` answers with the job it started.** A
+  key already used on the graph answered `503` and left an empty "Import" draft behind. A key is
+  now its sender's own: sent again, it answers `202` with that job, starting it if its file never
+  arrived, and a key that started the other kind of job answers `409 idempotency_key_reused`.
+- **A graph's branch list pages correctly for someone who doesn't manage it.** Drafts they couldn't
+  see were dropped after the page was cut, so a page could come back short, or empty, before the
+  end. Drafts shared with a team they are in are now listed and readable, and a draft whose sharing
+  is turned off is neither.
+- **A data source's refresh can wait for its rebuild.** `"wait": "complete"` waits up to 60
+  seconds, but the request was cut off after 30 and answered `504`. A refresh now has 90 seconds
+  (`HTTP_TIMEOUT_AGGREGATION_SECS`).
+- **A browser app on another origin can read `X-Total-Count`, `X-Request-ID` and
+  `X-API-Key-Expires-At`.**
+- **The view library publish script says why a key stopped.** A paused service account key waits
+  for its account to have a manager again, not for a sign-in, and a key refused for the caller's
+  address says so.
+
+### Upgrading
+
+- An `idempotencyKey` sent before the upgrade isn't recognised after it: sent again, it starts a
+  new job.
+
+---
 
 ## [Unreleased] — Service accounts: integrations that outlive the person who set them up
 

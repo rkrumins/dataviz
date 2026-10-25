@@ -161,9 +161,9 @@ api POST "/api/v1/admin/data-sources/$DS/refresh" \
   -d '{"scope": "auto", "reason": "nightly load finished"}'
 ```
 
-Then poll `GET /api/v1/admin/data-sources/$DS/readiness` until `aggregationStatus` is `ready`.
-Don't ask the refresh to `"wait": "complete"`: the request is cut off after 30 seconds, so a
-longer rebuild answers `504`. More: [Tell the platform a data source changed](/docs/api-guide#tell-the-platform-a-data-source-changed).
+Then poll `GET /api/v1/admin/data-sources/$DS/readiness` until `aggregationStatus` is `ready` —
+or send `"wait": "complete"` with the refresh, and its answer waits up to 60 seconds for the
+rebuild. More: [Tell the platform a data source changed](/docs/api-guide#tell-the-platform-a-data-source-changed).
 
 Searches and traces are reads made with `POST`: a read-only key may make them. Their requests are
 in the [search reference](/docs/feature-search-and-rules-reference) and the [API
@@ -221,8 +221,6 @@ def call(method, path, **kwargs):
 - [ ] It sends **`X-Request-ID`** (up to 128 letters, digits and `._:-`; kept and sent back) and,
       for changes, **`X-Activity-Reason`** (percent-encoded, up to 500 characters; shown in the
       activity log).
-- [ ] A **browser app on another origin** can't read `X-Total-Count`, `X-Request-ID` or
-      `X-API-Key-Expires-At`: use the body (`total`, `hasMore`) and `/api-keys/self` instead.
 
 ## What a key can't call
 
