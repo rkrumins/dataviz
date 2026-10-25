@@ -3071,8 +3071,13 @@ app.add_middleware(
     #
     # The view-file export (``/views/transfer/export``) names its download and proves its
     # content in headers: the filename, and the hashes the Export dialog shows.
+    #
+    # A list's full size (``X-Total-Count``), the id to quote about a request
+    # (``X-Request-ID``) and when the calling key expires (``X-API-Key-Expires-At``):
+    # a page calling the API from another origin reads them as the app does.
     expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After", "Content-Disposition",
-                    "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version"],
+                    "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version",
+                    "X-Total-Count", "X-Request-ID", "X-API-Key-Expires-At"],
 )
 
 # GZip compression for responses > 1 KB. WS1.4: compresslevel=1 (was 6, was

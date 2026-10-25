@@ -421,10 +421,8 @@ There is no single paging scheme; each route documents its own in the explorer.
   with the change in the activity log.
 - **Answers carry** `X-Request-ID` and `X-Process-Time`; `X-API-Key-Expires-At` with a key that
   expires, below `400`; `X-Total-Count` on some lists; and `Retry-After` when it matters.
-- **A browser app on another origin** (one in `CORS_ALLOWED_ORIGINS`) can read only a few of
-  them — `Retry-After` and `Content-Disposition` among them, but not `X-Total-Count`,
-  `X-Request-ID` or `X-API-Key-Expires-At`. Use the body (`total`, `hasMore`) and
-  `/api-keys/self` instead.
+- **A browser app on another origin** (one in `CORS_ALLOWED_ORIGINS`) can read all of them but
+  `X-Process-Time`.
 
 ### Size and time limits
 

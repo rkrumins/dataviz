@@ -71,6 +71,7 @@ tests/test_cleanup_graph_indices.py
 tests/test_concurrency_tuning_doc.py
 tests/test_configmap_matches_manifests.py
 tests/test_controlplane_loops_wiring.py
+tests/test_cors_expose_headers.py
 tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
 tests/test_data_source_list_versioning.py

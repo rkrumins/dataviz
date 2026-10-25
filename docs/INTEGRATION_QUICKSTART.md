@@ -221,8 +221,6 @@ def call(method, path, **kwargs):
 - [ ] It sends **`X-Request-ID`** (up to 128 letters, digits and `._:-`; kept and sent back) and,
       for changes, **`X-Activity-Reason`** (percent-encoded, up to 500 characters; shown in the
       activity log).
-- [ ] A **browser app on another origin** can't read `X-Total-Count`, `X-Request-ID` or
-      `X-API-Key-Expires-At`: use the body (`total`, `hasMore`) and `/api-keys/self` instead.
 
 ## What a key can't call
 
