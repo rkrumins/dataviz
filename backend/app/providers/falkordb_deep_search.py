@@ -71,6 +71,7 @@ from backend.app.providers.falkordb_provider import (
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf
 from backend.app.providers.falkordb_typed_ops import compile_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
+from backend.app.services.native_query.parse_cost import grouped
 from backend.common.derived_artifacts import is_derived_label
 from backend.common.search_semantics import (
     SemanticsError,
@@ -248,6 +249,12 @@ class _Compiler:
         self._param_counter += 1
         return f"p{n}"
 
+    def _name(self) -> str:
+        """A suffix no other comprehension in the statement uses — from the
+        parameter counter, which a membership statement's rules share: a
+        name used twice makes the second list come back empty."""
+        return self._next()[1:]
+
     def compile(self, predicate) -> str:
         return self._visit(predicate, in_or=False, at_top_and=True)
 
@@ -313,7 +320,9 @@ class _Compiler:
             if len(g.children) != 1:
                 raise CompileError("NOT group must have exactly one child")
             inner = self._visit(g.children[0], in_or=in_or, at_top_and=False)
-            return f"NOT ({inner})"
+            if not at_top_and and g.children[0].kind == "group":
+                return self._filtered(inner, negate=True)
+            return f"NOT {grouped(inner)}"
         sep = " AND " if g.op == "and" else " OR "
         child_in_or = in_or or g.op == "or"
         child_at_top_and = at_top_and and g.op == "and"
@@ -323,7 +332,19 @@ class _Compiler:
         ]
         if not parts:
             return "true"
+        if not at_top_and and any(c.kind == "group" for c in g.children):
+            return self._filtered(sep.join(parts))
         return "(" + sep.join(parts) + ")"
+
+    def _filtered(self, condition: str, *, negate: bool = False) -> str:
+        """A group nested in another, holding one, in a WHERE: the WHERE of a
+        comprehension over one item, which FalkorDB's filter tree still reads
+        and short-circuits. FalkorDB parses an operand with no operator after
+        it twice (``native_query.parse_cost``), so a group written plain would
+        double the time to parse the statement per level of nesting, and one
+        followed by ``= true`` would lose the short-circuit, a fivefold cost on
+        the rows it filters."""
+        return f"ANY(_xg{self._name()} IN [0] WHERE {condition}) = {str(not negate).lower()}"
 
     def _visit_text(self, t) -> str:
         if t.match == "fulltext":
@@ -1024,7 +1045,7 @@ def _maybe_add_visible_urns_clause(
     base_params["_visibleUrns"] = list(visible_urns)
     clause = "n.urn IN $_visibleUrns"
     if where_fragment and where_fragment != "true":
-        return f"({clause}) AND ({where_fragment})", True
+        return f"{grouped(clause)} AND {grouped(where_fragment)}", True
     return clause, True
 
 

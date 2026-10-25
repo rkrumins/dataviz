@@ -9,6 +9,27 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Search can't crash or stall FalkorDB
+
+### Fixed
+
+- A date comparison (`updated > 2024-05-01`, *in the last 30 days*) could crash FalkorDB, and with it
+  every user's queries, when it met a short text with an accented letter or an emoji (`Zoë1`):
+  FalkorDB 4.18 reads past the end of such a text when a slice starts at or past its last
+  character. The comparison now reads those positions from the text padded with zeros, which never
+  starts past the end and decides exactly the same.
+- A deeply nested search could hold a FalkorDB thread for seconds before running at all. Its parser
+  reads a condition with nothing after it twice, so each level of nesting doubled the time to parse
+  the statement — four times over for a NOT — and no timeout bounds that time. Five NOTs inside each
+  other took over a second a statement, and over five seconds in a display rule's membership.
+  - Nested conditions are now written so the time to parse grows with the size of the search, not
+    its depth. Groups at the top of a search, and groups of plain conditions, are written as before.
+  - A View's display rules are split across statements, so none takes long to parse.
+  - A statement FalkorDB would still take over half a second to parse is refused in plain words
+    instead of sent.
+
+---
+
 ## [Unreleased] — Service accounts: their managers run them
 
 ### Added

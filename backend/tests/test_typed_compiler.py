@@ -77,6 +77,14 @@ class TestEverySafetyRule:
             assert f"{fn}(n.`k`" not in where
         assert not re.search(r"n\.`k` (CONTAINS|STARTS WITH|ENDS WITH)", where)
 
+    def test_no_slice_starts_past_the_end(self, op, value, value_type):
+        """FalkorDB 4.18 can crash slicing a text with accented letters from at
+        or past its last character, so a slice starts at 0 or reads from the
+        text padded with zeros (``padded``) — never from a bare text."""
+        where, _ = _compile(op, value, value_type)
+        for m in re.finditer(r"substring\(((?:[^(),]|\([^()]*\))*), ([1-9]\d*)", where):
+            assert m.group(1).endswith("+ '0000000000'"), m.group(0)
+
     def test_every_bound_variable_is_private(self, op, value, value_type):
         where, _ = _compile(op, value, value_type)
         for var in re.findall(r"(?:\[|ANY\(|ALL\()\s*(\w+) IN ", where):
@@ -176,7 +184,7 @@ class TestBranchPerKind:
     def test_dates_check_the_cheap_things_first(self):
         where, _ = _compile("gt", "2024-05-01", "date")
         branch = where.split(" OR (typeOf(n.`k`) = 'List'")[0]
-        dashes = branch.index("substring(toStringOrNull(n.`k`), 4, 1) = '-'")
+        dashes = branch.index("substring(toStringOrNull(n.`k`) + '0000000000', 4, 1) = '-'")
         test = branch.index("> $p0")
         digits = branch.index("toStringOrNull(toIntegerOrNull(")
         assert dashes < test < digits
