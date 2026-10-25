@@ -696,7 +696,7 @@ Timeouts, circuit breakers, per-workspace fair share and other safety limits.
 | `FALKORDB_TOP_LEVEL_COUNT_TIMEOUT` | `5` | /nodes/top-level count (best-effort; miss => totalCount null) | `backend/app/config/resilience.py` |
 | `FALKORDB_TOP_LEVEL_QUERY_TIMEOUT` | `60` | /nodes/top-level page query | `backend/app/config/resilience.py` |
 | `FALKORDB_WRITE_TIMEOUT` | `15` | default per-query write deadline | `backend/app/config/resilience.py` |
-| `HTTP_TIMEOUT_AGGREGATION_SECS` | `90` | /edges/aggregated + /edges/between + /aggregation/\* (must exceed FALKORDB_EDGES_BETWEEN_TIMEOUT=80) | `backend/app/config/resilience.py`, `backend/app/main.py` |
+| `HTTP_TIMEOUT_AGGREGATION_SECS` | `90` | /edges/aggregated + /edges/between + /aggregation/\* + a data source's refresh (must exceed FALKORDB_EDGES_BETWEEN_TIMEOUT=80) | `backend/app/config/resilience.py`, `backend/app/main.py` |
 | `HTTP_TIMEOUT_DEFAULT_SECS` | `30` | fallback for any other endpoint | `backend/app/config/resilience.py`, `backend/app/main.py` |
 | `HTTP_TIMEOUT_GRAPH_SECS` | `120` | generic /graph/\* routes, incl. advanced search (100s request cap) | `backend/app/config/resilience.py`, `backend/app/main.py` |
 | `HTTP_TIMEOUT_TRACE_SECS` | `120` | ASGI middleware budget for trace routes | `backend/app/config/resilience.py`, `backend/app/main.py` |

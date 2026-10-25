@@ -89,13 +89,17 @@ def _get_proxy_client() -> httpx.AsyncClient:
     return _httpx_client
 
 
-async def _proxy(method: str, path: str, request: Request, body: bytes | None = None) -> Response:
+async def _proxy(
+    method: str, path: str, request: Request, body: bytes | None = None,
+    timeout: httpx.Timeout | None = None,
+) -> Response:
     """Forward a request to the Control Plane and return its response.
 
     The request's activity context goes with it — who is acting (from the
     authenticated session, never from the client), the reason they gave and
     the correlation id — so the control plane attributes what it records to
-    the person, not to the web tier calling on their behalf.
+    the person, not to the web tier calling on their behalf. ``timeout``
+    replaces the client's 30s for a call that waits longer by design.
     """
     client = _get_proxy_client()
     try:
@@ -109,6 +113,7 @@ async def _proxy(method: str, path: str, request: Request, body: bytes | None = 
             str(url),
             content=body,
             headers=headers,
+            timeout=timeout if timeout is not None else httpx.USE_CLIENT_DEFAULT,
         )
         return Response(
             content=resp.content,
