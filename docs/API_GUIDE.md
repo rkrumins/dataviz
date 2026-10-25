@@ -893,7 +893,7 @@ in [Single Sign-On](/guide/sso-setup).
 | `401` `api_keys_disabled` | An administrator switched API keys off | Ask them; until then, a person signs in with a password |
 | `403` `api_key_not_allowed` | The route can't be called with a key — people and access, sharing, settings and switches, layout templates, saved filters, importing a view file | A person signs in with a password for it; a service account can't |
 | `403` `api_key_cannot_publish` | A key without **Publish** tried to create a view straight onto the enterprise tier | Create it private or workspace-wide, or use a key that may publish |
-| `403` `missing_permission` | Whoever the request acts as — you, or the service account — lacks the permission named in `permission` | Ask a workspace admin for a role that holds it; a service account's roles are on its page |
+| `403` `missing_permission` | The request needs the permission named in `permission`: whoever it acts as — you, or the service account — lacks it, or the key wasn't given it | Use a key that allows it, or ask a workspace admin for a role that holds it; a service account's roles are on its page |
 | `403` with `"type": "access_denied"` on a pull request | A service account can't approve one or be named its reviewer, and nobody approves one opened through a service account they manage | A person who doesn't manage the account reviews and approves it |
 | `403` `api_key_out_of_scope` | The request reaches past what the key was limited to — or a key limited to data sources didn't name one | Pass `?dataSourceId=`, or use a key that reaches it |
 | `403` `api_key_read_only` | A read-only key asked to change something | Use a key with read & write |

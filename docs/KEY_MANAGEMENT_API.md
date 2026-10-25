@@ -210,9 +210,9 @@ make a new key and revoke the old.
 
 ### Limits
 
-- **25 active keys** for each person and each service account. Paused and expired-but-renewable
-  keys count; revoked ones don't. A new key, a renewal, or a rotation that keeps the old key working
-  for a while, past that, answers `409 too_many_api_keys`.
+- **25 active keys** for each person and each service account: those still in date, paused ones
+  included; expired and revoked ones don't count. A new key, a renewal, or a rotation that keeps
+  the old key working for a while, past that, answers `409 too_many_api_keys`.
 - **5 keys made or rotated a minute**, and 30 previews, from each address on each API server. Past
   that, `429` with `{"error": "Rate limit exceeded: …"}` and no `Retry-After`: wait a minute.
 

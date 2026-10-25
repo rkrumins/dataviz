@@ -94,6 +94,10 @@ You turn what you've found into views other people use. Your path:
    search with a coloured chip.
 4. [The Semantic Layer](/guide/semantic-layer) — shape what your data means.
 
+Scripting your work? [API Keys](/guide/api-keys) lets a script call the API as
+you, and the [Integration Quickstart](/docs/integration-quickstart) walks it
+through its first calls.
+
 ### Versioning & Change Control — change data safely
 
 You change a graph's data, or review other people's changes. Your path:
@@ -119,6 +123,10 @@ You connect data, manage people and keep {brand} healthy. Your path:
 4. [Feature Switches](/guide/feature-switches) — turn capabilities on and off.
 5. [The Admin Console](/guide/governance-ops) — health, branding,
    announcements and the audit log.
+
+An integration that must keep running whoever set it up runs as a
+[service account](/guide/service-accounts), which you create and give
+managers.
 
 ---
 
@@ -161,6 +169,8 @@ The sidebar groups the guide into six sections, in this order.
   shared between views.
 - [The Semantic Layer](/guide/semantic-layer) — entity types, relationship
   types and their versions.
+- [API Keys](/guide/api-keys) — let a script or service call the API as you,
+  limited to what you choose.
 
 ### Versioning & Change Control
 
@@ -207,6 +217,7 @@ The sidebar groups the guide into six sections, in this order.
 > **Note:** Engineers, operators and integrators have their own
 > **Documentation**, separate from this guide. Open it from **Documentation**
 > at the bottom of the sidebar, or start at the [Overview](/docs/overview).
+> Integrators start at the [Integration Quickstart](/docs/integration-quickstart).
 
 ---
 

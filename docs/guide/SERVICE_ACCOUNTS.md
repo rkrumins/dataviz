@@ -16,9 +16,9 @@ it up, and goes on running when they move on.
 
 - An administrator **creates** it, names at least one **manager** — a person
   or a team — and gives it **workspace roles**.
-- Its managers **make, rotate and revoke its keys**, each confirming it's them
-  exactly as for their own keys. A key is recorded as made by the person, and
-  acts as the account.
+- Its managers — or a super admin — **make, rotate and revoke its keys**, each
+  confirming it's them exactly as for their own keys. A key is recorded as
+  made by the person, and acts as the account.
 - A key reaches what the **account's** roles give it — never what the person
   who made it can reach — and counts against the account's own limit of 25.
 - Its keys work while the account is **enabled** and someone **in good
@@ -29,7 +29,7 @@ it up, and goes on running when they move on.
 | --- | --- | --- |
 | Acts as | You | The service account |
 | Reaches | What you can | What the account's roles give it |
-| Made by | You | Its managers |
+| Made by | You | Its managers, or a super admin |
 | Pauses when | You stop signing in through your identity provider | Nobody has managed the account for longer than the grace period |
 | Stops when | Your account is suspended or deleted | The account is disabled |
 
@@ -44,7 +44,9 @@ password sign-in is on. A team is, when it has at least one such member.
 
 Service accounts are looked after under **Administration → Service accounts**
 by super admins and org admins (the permission is
-`system:service-accounts:manage`). The list says how each one stands, most
+`system:service-accounts:manage`). Looking after accounts doesn't make their
+keys: that takes managing the account, or `system:users:manage` (a super
+admin). The list says how each one stands, most
 pressing first: **Needs a manager**, with the day its keys pause; **Single
 manager**, when one person is all it depends on; **Disabled**.
 
@@ -53,8 +55,9 @@ manager**, when one person is all it depends on; **Disabled**.
 Choose **Create service account**, give it a name and say what it is for,
 and choose at least one manager. Then open it and give it roles: pick a
 workspace and a role. A service account can hold any workspace role that
-neither administers the workspace nor lets people in — Viewer or Editor, say,
-but never Admin or Steward — and never a platform role or a place in a team.
+neither administers the workspace nor lets people in — Workspace viewer to
+read, Workspace member or Data engineer to change data, but never Workspace
+admin or Workspace steward — and never a platform role or a place in a team.
 Its keys pick a new role up within half a minute.
 
 Those roles are all it has. Nothing else can be shared with it — a view, a
@@ -160,9 +163,19 @@ Three things keep an integration from stopping because its person left.
 
 ## For integrators
 
+To get one, ask a super admin or org admin to create it — named for what it
+does — with you, or better your team, as its manager, and to give it a role in
+each workspace it works in. Then make its key under **Account → API keys →
+Service accounts you manage**.
+
 Swap `Authorization: Bearer nxpat_…` for `Authorization: Bearer nxsat_…` and
 change nothing else: the same routes answer the same way.
-`GET /api/v1/api-keys/self` shows `"kind": "service"`.
+`GET /api/v1/api-keys/self` shows `"kind": "service"`, and `"status": "paused"`
+while the account has had no manager for longer than the grace period. A
+service account has no password, so the few routes a key can't call need a
+person. Its first calls, and every answer it can get, are in the
+[Integration Quickstart](/docs/integration-quickstart); managing its keys from
+a script, in the [Key Management API](/docs/key-management-api).
 
 Two refusals say something particular about a service account:
 
@@ -176,7 +189,7 @@ Secret scanners find both kinds with `nx[ps]at_[0-9A-Za-z]{38}`.
 A service account's key can't review or approve a pull request: approving is
 a person's call, and its managers would otherwise approve through it. For the
 same reason, nobody approves a pull request opened through an account they
-manage.
+manage. Both answer `403` with `"type": "access_denied"`.
 
 ---
 
@@ -191,6 +204,8 @@ with the account as what it was done to.
 
 ## Where to next
 
+- [Integration Quickstart](/docs/integration-quickstart) — an integration's
+  first calls with the account's key, and every answer it can get.
 - [API Keys](/guide/api-keys) — making, rotating and revoking keys, and what
   a key may call.
 - [Users & Access](/guide/users-access) — roles, teams, and offboarding.
