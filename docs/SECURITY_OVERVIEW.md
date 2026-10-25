@@ -394,7 +394,9 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   as, which every sign-in path refuses and no identity provider can link to. It holds only the
   workspace roles given on its own page — never a platform role, a team's roles, or one that
   administers a workspace. Its managers, people or members of managing teams, make its keys
-  after the same step-up and are recorded as having made them. So can a holder of
+  after the same step-up and are recorded as having made them. They run the account too, but
+  never give it a role, and may appoint a manager only who would gain nothing they couldn't
+  grant; one an administrator disabled stays disabled until an administrator enables it. So can a holder of
   `system:users:manage` (a super admin) while their session is known to be alive, and the
   account's managers are told; `system:service-accounts:manage` alone makes no keys. Its keys stop while it is
   disabled (`api_key_owner_inactive`) and pause once nobody in good standing has managed it for

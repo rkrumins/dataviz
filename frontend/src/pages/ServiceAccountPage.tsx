@@ -1,21 +1,24 @@
 /**
- * ServiceAccountKeysPage — a service account's keys, for one of its managers.
+ * ServiceAccountPage — one service account: how it stands, who manages it,
+ * where it has a role, and its keys.
+ *
+ * Its managers run it here: they rename it, disable and enable it, appoint and
+ * remove its managers, take away roles it no longer needs, and make its keys.
+ * The administrators of service accounts can do all of that and give it
+ * roles; someone who may make any account's keys sees it for those. What each
+ * may do is the server's `can`, and the page offers nothing more.
  *
  * The keys act as the account, never as you: they reach what the account's
  * own roles give it, count against its own limit, and keep working when you
- * leave, as long as someone still manages it. You make, rotate and revoke
- * them here, confirming it's you exactly as for your own.
- *
- * Above them, what keeps them working: whether the account is enabled, who
- * manages it and whether they can act now, and where it has a role. While
- * nobody manages it, its keys work until the grace period ends and then
- * pause — the page says which, and until when. Who manages it, and its
- * roles, are an administrator's to change.
+ * leave, as long as someone still manages it. While nobody manages it, its
+ * keys work until the grace period ends and then pause — the page says which,
+ * and until when.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import { useParams } from 'react-router-dom'
+import { useNavigate, useParams } from 'react-router-dom'
 import {
-    AlertCircle, ArrowLeft, Bot, Code2, History, KeySquare, Plus, RefreshCw, ShieldAlert, Users,
+    AlertCircle, ArrowLeft, Bot, Code2, ExternalLink, History, KeySquare, Plus, Power, RefreshCw, ShieldAlert,
+    Trash2, Users, X,
 } from 'lucide-react'
 
 import { AccountCard, AccountShell } from '@/components/account/AccountShell'
@@ -29,30 +32,65 @@ import { clearDraft, peekDraft, type ApiKeyDraft } from '@/components/apiKeys/ap
 import { isLive, isRenewable, stepUpUnavailable } from '@/components/apiKeys/apiKeyFormat'
 import { KeyClientProvider, useKeyClient } from '@/components/apiKeys/keyClient'
 import { ApiKeyWizard } from '@/components/apiKeys/wizard/ApiKeyWizard'
-import { ManagerRow, StandingChip, standingOf } from '@/components/serviceAccounts/parts'
+import { RoleGrant } from '@/components/serviceAccounts/RoleGrant'
+import { SubjectPicker, subjectKey } from '@/components/serviceAccounts/SubjectPicker'
+import { ManagerRow, StandingChip, TeamNote, standingOf } from '@/components/serviceAccounts/parts'
 import { Button, IconButton } from '@/components/ui/Button'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { roleVisualFor } from '@/lib/roleVisual'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { serviceAccountKeys, type ApiKey, type ApiKeyOptions, type KeyRef } from '@/services/apiKeyService'
-import { serviceAccountService, type ServiceAccountDetail } from '@/services/serviceAccountService'
+import {
+    serviceAccountService, type ServiceAccountDetail, type ServiceAccountManager,
+} from '@/services/serviceAccountService'
+import { usePermission } from '@/store/auth'
 import { useFeature } from '@/store/features'
 
-export function ServiceAccountKeysPage() {
+const message = (err: unknown, fallback: string) => (err instanceof Error && err.message ? err.message : fallback)
+
+export function ServiceAccountPage() {
     const { accountId = '' } = useParams()
+    const navigate = useNavigate()
+    const { notify } = useAppNotifications()
+    const central = usePermission('system:service-accounts:manage')
     const [account, setAccount] = useState<ServiceAccountDetail | null>(null)
     const [error, setError] = useState<string | null>(null)
-    useDocumentTitle(account ? `${account.name} · API keys` : 'Service account')
+    const [busy, setBusy] = useState(false)
+    useDocumentTitle(account ? account.name : 'Service account')
 
+    const load = useCallback(() => serviceAccountService.get(accountId), [accountId])
     useEffect(() => {
         let live = true
-        serviceAccountService.mineGet(accountId)
+        load()
             .then((found) => { if (live) { setAccount(found); setError(null) } })
             .catch((err: unknown) => {
-                if (live) setError(err instanceof Error ? err.message : 'This service account could not be loaded.')
+                if (live) setError(message(err, 'This service account could not be loaded.'))
             })
         return () => { live = false }
-    }, [accountId])
+    }, [load])
+
+    /** Run a change; the account as it now stands comes back with most of them. */
+    const change = useCallback(async (fn: () => Promise<unknown>, done: string) => {
+        setBusy(true)
+        try {
+            const after = await fn()
+            const now = after && typeof after === 'object' && 'can' in after ? after as ServiceAccountDetail : await load()
+            notify('success', done)
+            if (!now.can.view) {
+                // They stepped down: it is no longer theirs to see.
+                navigate('/me/api-keys')
+                return true
+            }
+            setAccount(now)
+            return true
+        } catch (err) {
+            notify('error', message(err, 'That change could not be made.'))
+            return false
+        } finally {
+            setBusy(false)
+        }
+    }, [load, navigate, notify])
 
     const client = useMemo(() => serviceAccountKeys(accountId), [accountId])
     const name = account?.name ?? null
@@ -61,10 +99,13 @@ export function ServiceAccountKeysPage() {
     return (
         <AccountShell
             title={account?.name ?? 'Service account'}
-            blurb="Keys that let an integration act as this service account — not as you."
+            blurb="An account an integration runs as — with keys that act as it, not as you."
         >
-            <a href="/me/api-keys" className="inline-flex items-center gap-1.5 w-fit text-xs font-medium text-ink-secondary hover:text-ink">
-                <ArrowLeft className="w-3.5 h-3.5" aria-hidden /> API keys
+            <a
+                href={central ? '/admin/service-accounts' : '/me/api-keys'}
+                className="inline-flex items-center gap-1.5 w-fit text-xs font-medium text-ink-secondary hover:text-ink"
+            >
+                <ArrowLeft className="w-3.5 h-3.5" aria-hidden /> {central ? 'Service accounts' : 'API keys'}
             </a>
             {error && (
                 <Banner tone="danger" icon={AlertCircle} title="This service account could not be opened">
@@ -72,10 +113,16 @@ export function ServiceAccountKeysPage() {
                 </Banner>
             )}
             {account && keyAccount && (
-                <KeyClientProvider client={client} account={keyAccount}>
-                    <AboutAccount account={account} />
-                    <AccountKeys account={account} />
-                </KeyClientProvider>
+                <>
+                    <AboutAccount account={account} central={central} busy={busy} change={change} />
+                    {account.can.keys ? (
+                        <KeyClientProvider client={client} account={keyAccount}>
+                            <AccountKeys account={account} />
+                        </KeyClientProvider>
+                    ) : (
+                        <KeysSummary account={account} />
+                    )}
+                </>
             )}
             {!account && !error && (
                 <div className="space-y-3" aria-busy="true">
@@ -88,48 +135,206 @@ export function ServiceAccountKeysPage() {
     )
 }
 
-/** What keeps its keys working: its standing, who manages it, where it has a role. */
-function AboutAccount({ account }: { account: ServiceAccountDetail }) {
+type Change = (fn: () => Promise<unknown>, done: string) => Promise<boolean>
+
+/** What keeps its keys working — its standing, who manages it, where it has a
+ *  role — and, for whoever may, the means to change each. */
+function AboutAccount({ account, central, busy, change }: {
+    account: ServiceAccountDetail
+    /** An administrator of service accounts: may leave it with no manager. */
+    central: boolean
+    busy: boolean
+    change: Change
+}) {
+    const { can } = account
     const standing = standingOf(account)
+    const [editing, setEditing] = useState(false)
+    const [name, setName] = useState('')
+    const [description, setDescription] = useState('')
+    const [removingLast, setRemovingLast] = useState(false)
+    const last = account.managers.length === 1
+    const teams = account.managers.filter((m) => m.type === 'group').map((m) => m.name)
+
+    const removeManager = (m: ServiceAccountManager) => {
+        if (last && !removingLast) { setRemovingLast(true); return }
+        setRemovingLast(false)
+        void change(() => serviceAccountService.removeManager(account.id, m), `${m.name} no longer manages it`)
+    }
+
     return (
         <AccountCard
             icon={Bot}
             title="About this service account"
-            blurb={account.description ?? 'An integration acts as this account through the keys below.'}
+            blurb={account.description ?? 'An integration acts as this account through its keys.'}
         >
             <div className="flex flex-wrap items-center gap-2">
                 <StandingChip account={account} />
                 <span className="text-xs text-ink-muted">{standing.detail}</span>
             </div>
+            {editing ? (
+                <div className="mt-3 space-y-2">
+                    <input
+                        aria-label="Name"
+                        value={name}
+                        maxLength={80}
+                        onChange={(e) => setName(e.target.value)}
+                        className="w-full h-9 px-3 rounded-xl border border-black/[0.08] dark:border-white/[0.10] bg-canvas text-sm text-ink outline-none focus:border-indigo-500"
+                    />
+                    <textarea
+                        aria-label="What it is for"
+                        value={description}
+                        maxLength={500}
+                        rows={2}
+                        onChange={(e) => setDescription(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl border border-black/[0.08] dark:border-white/[0.10] bg-canvas text-sm text-ink outline-none focus:border-indigo-500 resize-none"
+                    />
+                    <div className="flex gap-2 justify-end">
+                        <Button variant="ghost" size="sm" onClick={() => setEditing(false)}>Cancel</Button>
+                        <Button
+                            variant="primary"
+                            size="sm"
+                            disabled={busy || !name.trim()}
+                            onClick={() => void change(
+                                () => serviceAccountService.update(account.id, { name: name.trim(), description: description.trim() || null }),
+                                'Saved',
+                            ).then((ok) => { if (ok) setEditing(false) })}
+                        >
+                            Save
+                        </Button>
+                    </div>
+                </div>
+            ) : (can.edit || can.disable || can.enable) && (
+                <div className="mt-2 -ml-2 flex flex-wrap items-center gap-1">
+                    {can.edit && (
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            onClick={() => { setName(account.name); setDescription(account.description ?? ''); setEditing(true) }}
+                        >
+                            Rename or describe
+                        </Button>
+                    )}
+                    {account.status === 'active' && can.disable && (
+                        <HoverTip label="Stop every key it holds, at once" detail="Nothing is revoked: enabling it brings them back.">
+                            <Button
+                                variant="ghost"
+                                size="sm"
+                                leftIcon={Power}
+                                disabled={busy}
+                                className="hover:text-rose-600 dark:hover:text-rose-400"
+                                onClick={() => void change(() => serviceAccountService.disable(account.id), `“${account.name}” disabled — its keys stopped working`)}
+                            >
+                                Disable
+                            </Button>
+                        </HoverTip>
+                    )}
+                    {account.status !== 'active' && can.enable && (
+                        <Button
+                            variant="secondary"
+                            size="sm"
+                            leftIcon={Power}
+                            disabled={busy}
+                            onClick={() => void change(() => serviceAccountService.enable(account.id), `“${account.name}” enabled`)}
+                        >
+                            Enable
+                        </Button>
+                    )}
+                </div>
+            )}
 
             <h3 className="mt-5 mb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Managed by</h3>
             <ul className="divide-y divide-black/[0.06] dark:divide-white/[0.07]" aria-label="Managers">
-                {account.managers.map((m) => <ManagerRow key={`${m.type}:${m.id}`} manager={m} />)}
+                {account.managers.map((m) => (
+                    <ManagerRow
+                        key={`${m.type}:${m.id}`}
+                        manager={m}
+                        action={can.managers && (last && !central ? (
+                            <HoverTip label="Its last manager" detail="Appoint another first: nobody would answer for it, and its keys would pause.">
+                                <IconButton icon={Trash2} variant="danger" label={`Stop ${m.name} managing it`} disabled />
+                            </HoverTip>
+                        ) : (
+                            <IconButton
+                                icon={Trash2}
+                                variant="danger"
+                                label={removingLast ? `Remove ${m.name}, the last manager?` : `Stop ${m.name} managing it`}
+                                detail={removingLast ? 'Nobody would manage it: its keys keep working for the grace period, then pause.' : undefined}
+                                disabled={busy}
+                                onClick={() => removeManager(m)}
+                            />
+                        ))}
+                    />
+                ))}
             </ul>
-            {account.managers.some((m) => m.type === 'group') && (
+            {removingLast && (
+                <p role="status" className="mt-2 text-xs text-amber-700 dark:text-amber-300">
+                    That is its last manager: removing them leaves nobody answering for it, and its keys pause
+                    after the grace period. Press remove again to go ahead.
+                </p>
+            )}
+            {teams.length > 0 && (can.managers ? <TeamNote teams={teams} account={`“${account.name}”`} /> : (
                 <p className="mt-1 flex items-start gap-1.5 text-xs text-ink-muted">
                     <Users className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden />
                     Everyone in a managing team can make keys that act as this account.
                 </p>
+            ))}
+            {can.managers && (
+                <div className="mt-3">
+                    <SubjectPicker
+                        label="Add a manager"
+                        exclude={account.managers.map(subjectKey)}
+                        onPick={(s) => void change(() => serviceAccountService.addManager(account.id, s), `${s.name} now manages it`)}
+                    />
+                    <p className="mt-1.5 text-xs text-ink-muted">
+                        A manager can do whatever it can, so you can appoint someone only if they already reach
+                        what it reaches, or you could give them that yourself.
+                    </p>
+                </div>
             )}
 
             <h3 className="mt-5 mb-2 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Where it has a role</h3>
             {account.roles.length === 0 ? (
-                <p className="text-xs text-ink-muted">
+                <p className="text-xs text-ink-muted mb-3">
                     No roles yet: its keys reach nothing until an administrator gives it one.
                 </p>
             ) : (
-                <ul className="flex flex-wrap gap-2" aria-label="Roles">
+                <ul className="flex flex-wrap gap-2 mb-3" aria-label="Roles">
                     {account.roles.map((r) => (
-                        <li key={r.bindingId} className="px-2.5 py-1 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] text-xs text-ink-secondary">
-                            <span className="font-semibold text-ink">{r.workspaceName ?? r.workspaceId}</span> · {r.role}
+                        <li key={r.bindingId} className="inline-flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] text-xs text-ink-secondary">
+                            <span><span className="font-semibold text-ink">{r.workspaceName ?? r.workspaceId}</span> · {roleVisualFor(r.role).label}</span>
+                            {can.revoke && (
+                                <IconButton
+                                    icon={X}
+                                    label={`Take away its role in ${r.workspaceName ?? r.workspaceId}`}
+                                    disabled={busy}
+                                    onClick={() => void change(() => serviceAccountService.revokeRole(account.id, r.bindingId), 'Role taken away')}
+                                />
+                            )}
                         </li>
                     ))}
                 </ul>
             )}
-            <p className="mt-4 text-xs text-ink-muted">
-                Who manages it, and where it has a role, are changed by an administrator.
-            </p>
+            {can.grant && (
+                <RoleGrant busy={busy} onGrant={(workspaceId, role) => change(() => serviceAccountService.grantRole(account.id, { workspaceId, role }), 'Role given')} />
+            )}
+        </AccountCard>
+    )
+}
+
+/** For someone who may see the account but not make its keys. */
+function KeysSummary({ account }: { account: ServiceAccountDetail }) {
+    const canSeeKeys = usePermission('system:audit:read')
+    return (
+        <AccountCard icon={KeySquare} title="Its keys" blurb="Made by its managers. They act as the account, never as whoever made them.">
+            <div className="flex flex-wrap items-center gap-3">
+                <span className="min-w-0 flex-1 text-sm text-ink">
+                    {account.liveKeys} live key{account.liveKeys === 1 ? '' : 's'}.
+                </span>
+                {canSeeKeys && (
+                    <a href={`/admin/api-keys?ownerId=${encodeURIComponent(account.id)}`} className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">
+                        See them <ExternalLink className="w-3 h-3" aria-hidden />
+                    </a>
+                )}
+            </div>
         </AccountCard>
     )
 }
@@ -217,8 +422,8 @@ function AccountKeys({ account }: { account: ServiceAccountDetail }) {
             )}
             {account.status !== 'active' && (
                 <Banner tone="warn" icon={ShieldAlert} title="This service account is disabled">
-                    Its keys don’t work, and none can be made or rotated, until an administrator enables it.
-                    You can still revoke them.
+                    Its keys don’t work, and none can be made or rotated, until
+                    {account.adminHold ? ' an administrator enables it' : ' it is enabled'}. You can still revoke them.
                 </Banner>
             )}
 

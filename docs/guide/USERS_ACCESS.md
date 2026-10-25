@@ -279,10 +279,11 @@ that access on their next request.
 > Admin, so an **Org Admin** who tries is told only a Super Admin can.
 
 > **Note:** A group that manages a [service account](/guide/service-accounts)
-> lets everyone in it make keys that act as the account. Adding someone to it
-> takes the permission to look after service accounts as well, and the
-> account's managers are told; approving an access request never adds anyone
-> to such a group.
+> lets everyone in it make keys that act as the account. So adding someone to
+> it is held to the rule for appointing a manager: for each of the account's
+> roles, they hold as much there already, or you could grant it there. The
+> account's managers are told, and approving an access request never adds
+> anyone to such a group.
 
 > **Tip:** Prefer groups over individuals for anything beyond a handful of
 > people. It keeps access auditable and easy to change. You can also attach
