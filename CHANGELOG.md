@@ -9,9 +9,49 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
-## [Unreleased] — Ask the graph: relationships, names, routes and your own Cypher in Advanced Search
+## [Unreleased] — Ask the graph: plain words, Search Studio, relationships, names, routes and your own Cypher
 
 ### Added
+
+**Ask in plain words.** The query card opens on **Ask in plain words…**: "datasets that feed finance
+dashboards", "unowned datasets", "datasets in Snowflake updated in the last 7 days". Before anything
+changes it reads the question back — what it reads as, and how many that finds — offers the other
+readings of a word that has several, lets you pick among entities sharing a name, and says which
+words it searched for by name. It is rule-based, reading the View's own types, tags, properties and
+layers: nothing is sent to an AI service. **Enter** runs it; starting with "and" adds to the query.
+
+**A query as a sentence, with its map.** The new **Sentence** mode reads the query the way you'd say
+it — *Find* **datasets** *that* **feed** **a dashboard** — every word a token you click to change,
+with a map of the query's shape whenever it has a relationship or a route. **Form**, the cards, is
+a click away; Business starts in Sentence, Technical in Form.
+
+**Counts as you build.** Each Sentence line says how many still match once it is added, and the map,
+the Ask preview, recipes and type chips carry counts too — all before anything runs.
+`POST /search/counts` takes `purpose: "search"` to count a search's conditions, lineage of more than
+one hop included; rules keep their one-hop limit.
+
+**When nothing matches.** The Sentence line where the matches run out is marked before anything
+runs, with up to three fixes, each counted, one click to apply. An empty answer leads with the same,
+whichever builder you use.
+
+**Refine from the answer.** Chips over the results narrow the query to one type, or leave one out,
+each counted; a match's breadcrumb narrows to inside a container; a match says why it matched. Rows
+take their icons and colours from the ontology.
+
+**Search Studio.** The panel opens out over the canvas (**Open Search Studio**, `E`, or the command
+palette): the query; the matches as a table, whose picked rows can be framed on the canvas, kept as
+the only ones, left out or copied; and the View's types, tags and properties, counted exactly, a
+click adding one to the query.
+
+**Recipes.** Ready-made questions by intent — impact, root cause, governance and PII, documentation
+gaps, ownership, cleanup, discovery — in the View's own words, each counted, and offered only when
+the View holds what they name: on the empty query card, in **Library → Recipes** and in an idle
+Studio. One with something to fill in opens at it.
+
+**Guidance.** A first-run tip points at Search Studio, and the guide is a click away. The command
+palette gains **Ask about this view** and **Open Search Studio**. The panel's edge resizes from the
+keyboard, and the Sentence builder tells screen readers its settled total, or where the matches run
+out.
 
 **Search by relationships.** Advanced Search finds entities by the entities related to them: up
 the containment tree (a parent, any ancestor, the top-level container), down it (children, any
@@ -71,10 +111,8 @@ when the share turns on **Query data**. Writes, `LOAD CSV`, other databases, plu
 are refused before the query runs; rows, time and size are capped; every run is recorded in the
 activity log. The **Native read-only queries** switch turns it off. `POST /search/native`.
 
-**Templates and examples.** Four templates (*Everything inside a named container*, *What feeds a
-kind of entity*, *Everything that feeds a named entity*, *Entities holding something tagged*),
-four example queries in `docs/examples/search-and-rules/queries/`, and a **Holds PII** rule in the
-governance pack.
+**Examples.** Four example queries in `docs/examples/search-and-rules/queries/`, and a **Holds PII**
+rule in the governance pack.
 
 ### Changed
 
@@ -86,7 +124,13 @@ governance pack.
 - New settings: `DEEP_SEARCH_MAX_RELATION_DEPTH` (3) and `DEEP_SEARCH_RELATION_MAX_HOPS` (3).
 - An empty query card lists every filter under the search field; the **All filters** link, which
   opened the drawer's options instead, is gone.
-- The query card reopens on the mode you used last — Visual, Code or Cypher.
+- The query card reopens on the mode you used last — Sentence, Form, Code or Cypher.
+- **Library → Templates** is now **Recipes**, and recipes replace the empty card's example cards.
+- Over an answer that stopped short, Business reads what it means in plain words, with the engine's
+  account behind **Why?**. The Cypher tab folds its cap, parameters and notes under **Engine
+  details**, open for Technical.
+- Type chips over the results change the query; they used to filter only the rows already loaded.
+- **Enter** on a button in the search panel presses it; it used to reveal the current match.
 - Relationship sentences say the edges a relationship walks after its condition: "has a target that
   has an ancestor that is Tableau, through edges where logic is Direct Query".
 - The drawer keeps Options and JSON; the compiled Cypher moved to the Cypher tab.
@@ -159,6 +203,11 @@ governance pack.
   plan.
 - **How it matches** draws routes up to 4 hops, and routes a path lists stop at 128.
 - Share links can't use relationships, paths or *Within N hops*.
+- Counts as you build need a FalkorDB data source; on other engines, and through a share link, the
+  numbers don't appear until the query runs.
+- Ask reads the phrasings its rules know; other words are searched for by name, and it says which.
+- The Sentence view hands *Within N hops* and *Number of edges* to Code mode, and Form's **Group as**
+  for several selected rows stays in Form.
 - A native query reads the whole data source, not only the View, including internal bookkeeping
   such as rollup edges. A share's **Query data** stays on until someone turns it off, even if the
   person who turned it on later loses their own access.

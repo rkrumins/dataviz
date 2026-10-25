@@ -297,7 +297,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "advanced-search": {
-    "updated": "2026-10-24",
+    "updated": "2026-10-25",
     "path": "docs/guide/ADVANCED_SEARCH.md"
   },
   "lineage-lens": {
