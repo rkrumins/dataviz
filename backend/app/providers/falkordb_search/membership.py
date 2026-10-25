@@ -37,7 +37,9 @@ from backend.app.providers.falkordb_search.raw_properties import (
     RawLeaf, answered, empty_params, evaluate_rows, graph_raw_labels, probe_condition,
 )
 from backend.app.services.deep_search import CompileError
-from backend.app.services.native_query.parse_cost import grouped, operand
+from backend.app.services.native_query.parse_cost import (
+    MAX_PARSE_COST, grouped, operand, parse_cost,
+)
 from backend.common.models.search import SearchScope
 
 
@@ -89,28 +91,33 @@ async def evaluate_membership(
                      for i, d in enumerate(depths))
            if depths else "[]")
     width = max(1, len(depths))
+    chunks = _chunks(columns)
+    # A statement after the first reads no ancestors again: empty lists, each named.
+    blank = ", ".join(f"[] AS _ma{i}" for i in range(width))
     rows: Dict[str, Tuple[Set[str], Dict[int, Set[str]], List[bool]]] = {}
     for label, label_urns in by_label.items():
         lists = (await _raw_answers(run, label, label_urns, raw_leaves)
                  if label in raw_labels else empty_params(raw_leaves))
-        flags = ", ".join(
-            f"{operand(f'ANY(_mz IN [0] WHERE {answered(where, raw_leaves, lists)})')} AS m{i}"
-            for i, (_, where) in enumerate(columns))
-        res = await run(
-            f"MATCH (n:`{_sanitize_label(label)}`) WHERE n.urn IN $_urns "
-            f"RETURN n.urn, labels(n), {anc}, {flags}",
-            {**params, **lists, "_urns": label_urns},
-        )
-        for row in res.result_set or []:
-            urn, node_labels, values = row[0], row[1], row[2 + width:]
-            ancestors = {d: {a for a in row[2 + i] or [] if a} for i, d in enumerate(depths)}
-            seen = rows.get(urn)
-            if seen is None:
-                rows[urn] = ({str(x).lower() for x in node_labels or []},
-                             ancestors, [bool(v) for v in values])
-            else:           # a node read under two labels: the same answer
-                for d, found in ancestors.items():
-                    seen[1].setdefault(d, set()).update(found)
+        for n, chunk in enumerate(chunks):
+            flags = ", ".join(
+                f"{operand(f'ANY(_mz IN [0] WHERE {answered(columns[i][1], raw_leaves, lists)})')} "
+                f"AS m{i}" for i in chunk)
+            res = await run(
+                f"MATCH (n:`{_sanitize_label(label)}`) WHERE n.urn IN $_urns "
+                f"RETURN n.urn, labels(n), {anc if n == 0 else blank}, {flags}",
+                {**params, **lists, "_urns": label_urns},
+            )
+            for row in res.result_set or []:
+                urn, node_labels, values = row[0], row[1], row[2 + width:]
+                seen = rows.get(urn)
+                if seen is None:
+                    seen = rows[urn] = ({str(x).lower() for x in node_labels or []}, {},
+                                        [False] * len(columns))
+                # A node read under two labels: the same answer, its ancestors once more.
+                for i, d in enumerate(depths):
+                    seen[1].setdefault(d, set()).update(a for a in row[2 + i] or [] if a)
+                for i, value in zip(chunk, values):
+                    seen[2][i] = bool(value)
 
     for urn in urns:
         found = rows.get(urn)
@@ -140,6 +147,27 @@ async def _raw_answers(run, label: str, urns: List[str], leaves: Sequence[RawLea
     res = await run(f"MATCH (n:`{_sanitize_label(label)}`) WHERE n.urn IN $_urns AND {cond} "
                     "RETURN ID(n), n.propertiesRaw", {**params, "_urns": urns})
     return evaluate_rows(res.result_set or [], leaves)
+
+
+#: What one membership statement may cost FalkorDB to parse (``parse_cost``): a quarter of
+#: what the provider refuses. Rules past it go in a statement of their own, so a view's many
+#: rules never make one statement that holds a FalkorDB thread for long.
+_STATEMENT_COST = MAX_PARSE_COST // 4
+
+
+def _chunks(columns: Sequence[Tuple[str, str]]) -> List[List[int]]:
+    """The rules' columns by statement, in order, each statement's under ``_STATEMENT_COST``
+    — a rule over it on its own still gets one."""
+    out: List[List[int]] = [[]]
+    cost = 0
+    for i, (_, where) in enumerate(columns):
+        each = parse_cost(f"RETURN ANY(_mz IN [0] WHERE {where}) = true AS m{i}")
+        if out[-1] and cost + each > _STATEMENT_COST:
+            out.append([])
+            cost = 0
+        out[-1].append(i)
+        cost += each
+    return out
 
 
 def _compile(provider, items, errors, *, raw: bool = False

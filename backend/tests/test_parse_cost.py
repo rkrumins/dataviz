@@ -132,6 +132,19 @@ class TestGuards:
         linear = nest(lambda e: f"({e}) = false", 11, "n.x = 1").replace("MATCH (x)", "MATCH (n)")
         assert check(linear, engine=FALKORDB)
 
+    def test_a_views_many_rules_go_in_statements_under_the_budget(self, monkeypatch):
+        """Rule membership answers every rule in one statement per label — split where the
+        rules' columns would cost FalkorDB more than a quarter of the budget to parse."""
+        from backend.app.providers.falkordb_search import membership
+
+        columns = [(str(i), f"x.owner = $p{i}") for i in range(10)]
+        each = parse_cost("RETURN ANY(_mz IN [0] WHERE x.owner = $p0) = true AS m0")
+        monkeypatch.setattr(membership, "_STATEMENT_COST", 3 * each)
+        chunks = membership._chunks(columns)
+        assert [i for chunk in chunks for i in chunk] == list(range(10))
+        assert [len(chunk) for chunk in chunks] == [3, 3, 3, 1]
+        assert membership._chunks(columns[:1]) == [[0]]
+
     def test_the_provider_refuses_a_statement_over_the_budget(self):
         with pytest.raises(CompileError, match="nests too deeply"):
             _refuse_slow_parse(nest(lambda e: f"NOT ({e})", 11))
