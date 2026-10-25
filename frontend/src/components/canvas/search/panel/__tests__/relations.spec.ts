@@ -6,12 +6,16 @@ import type { Predicate, RelatedPredicate } from '@/types/search'
 import {
     formatNamePath,
     hopRange,
+    linkDirection,
+    linkVerb,
     maxHopsFor,
     newRelation,
     parseNamePath,
     pathCandidates,
     refLabel,
     relationDepth,
+    throughOf,
+    withinHopCap,
 } from '../relations'
 
 
@@ -52,6 +56,38 @@ describe('relations — hops', () => {
         expect(far({ kind: 'group', op: 'or', children: [is, { kind: 'entityType', op: 'in', values: ['x'] }] })).toBe(3)
         expect(far({ kind: 'related', axis: 'parent', where: is })).toBe(3)
         expect(far({ kind: 'related', axis: 'ancestor', quantifier: 'none', where: is })).toBe(3)
+    })
+})
+
+
+describe('relations — connections', () => {
+    it.each<[Partial<RelatedPredicate>, ReturnType<typeof linkVerb>, ReturnType<typeof throughOf>]>([
+        [{ axis: 'downstream' }, 'feeds', 'lineage'],
+        [{ axis: 'upstream' }, 'fedBy', 'lineage'],
+        [{ axis: 'neighbor' }, 'linked', 'lineage'],
+        [{ axis: 'downstream', edgeClass: 'links' }, 'linked', 'links'],
+        [{ axis: 'upstream', edgeTypes: ['PRODUCES'] }, 'linked', 'types'],
+        [{ axis: 'upstream', edgeTypes: [] }, 'linked', 'types'],
+    ])('reads %j as a verb and the edges it walks', (over, verb, through) => {
+        expect(linkVerb(rel(over))).toBe(verb)
+        expect(throughOf(rel(over))).toBe(through)
+    })
+
+    it('has no link verb for the tree, and follows a link the way its axis does', () => {
+        expect(linkVerb(rel({ axis: 'ancestor' }))).toBeNull()
+        expect(['downstream', 'upstream', 'neighbor'].map((a) => linkDirection(a as RelatedPredicate['axis'])))
+            .toEqual(['out', 'in', 'both'])
+    })
+
+    it('cuts hops to what the server allows where the relationship stands', () => {
+        expect(withinHopCap(rel({ axis: 'downstream', maxHops: 8 }), { topLevel: true, rule: false }))
+            .toEqual({ kind: 'related', axis: 'downstream', maxHops: 3 })
+        expect(withinHopCap(rel({ axis: 'downstream', minHops: 2, maxHops: 3 }), { topLevel: true, rule: true }))
+            .toEqual({ kind: 'related', axis: 'downstream' })
+        const named = rel({ axis: 'upstream', maxHops: 8, where: { kind: 'is', refs: [{ urn: 'u' }] } })
+        expect(withinHopCap(named, { topLevel: true, rule: false })).toEqual(named)
+        expect(withinHopCap(rel({ axis: 'ancestor', maxHops: 15 }), { topLevel: true, rule: true }))
+            .toEqual(rel({ axis: 'ancestor', maxHops: 15 }))
     })
 })
 

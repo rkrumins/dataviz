@@ -28,6 +28,7 @@ import { type FC, type ReactNode, memo, useEffect, useMemo, useState } from 'rea
 import { formatUrnLabel } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
 import type {
+    DegreePredicate,
     DescendantOfPredicate,
     EntityTypePredicate,
     GroupPredicate,
@@ -45,6 +46,7 @@ import type {
     TextTarget,
 } from '@/types/search'
 
+import { useEntityTypes } from '@/store/schema'
 import { useSearchStore } from '@/store/searchStore'
 
 import { UnifiedPicker } from '../builder/editors/UnifiedPicker'
@@ -62,11 +64,13 @@ import { useValueSuggestions } from '../typed/useValueSuggestions'
 import { parseDuration, recode, valueProblem } from '../typed/valueCodec'
 import { TYPE_META, VALUE_TYPES, type ValueType, observeType } from '../typed/valueTypes'
 
+import { EdgeCountEditor, EdgeSetField } from './EdgeShapeEditors'
 import { NodeRefList } from './NodeRefPicker'
 import { OperatorMenu } from './OperatorMenu'
 import { PathEditor } from './PathEditor'
 import { RelationshipEditor } from './RelationshipEditor'
 import { axisMeta } from './relations'
+import { shapeLabel } from './vocabulary/edgeWords'
 import { RowCard } from './builder-atoms/RowCard'
 import { RowMenu } from './builder-atoms/RowMenu'
 import { RowSelectionCheckbox } from './builder-atoms/RowSelectionCheckbox'
@@ -325,15 +329,18 @@ function renderEditor(ctx: EditorCtx): ReactNode {
         case 'isRoot':
         case 'hasIncoming':
         case 'hasOutgoing':
+            // The header names the shape; the body picks the edges it counts.
+            return <EdgeSetField value={value} onChange={ctx.onChange} disabled={ctx.isRunning} />
+        case 'degree':
+            return <EdgeCountEditor value={value as DegreePredicate} onChange={ctx.onChange}
+                                    disabled={ctx.isRunning} />
         case 'all':
-            // Boolean rows: the header label + description already
-            // says everything. No editor body needed.
+            // The header label + description already says everything.
             return null
         case 'withinHops':
-        case 'degree':
-            // No visual editor — these predicate kinds are Code-only.
-            // Saved queries that still contain them render this banner;
-            // editing happens via the JSON view in the Advanced drawer.
+            // No visual editor — Code-only. Saved queries that still
+            // contain it render this banner; editing happens via the JSON
+            // view in the Advanced drawer.
             return <CodeOnlyHint onOpen={ctx.onOpenAdvanced} />
         case 'group': {
             const g = value as GroupPredicate
@@ -514,6 +521,11 @@ const ENTITY_TYPE_OP_OPTIONS: { value: 'in' | 'notIn'; label: string }[] = [
 function EntityTypeEditor({
     value, onChange, knownEntityTypes, autoFocus,
 }: Omit<EditorCtx, 'value'> & { value: EntityTypePredicate }) {
+    // Each type by the name the ontology gives it, not its id.
+    const entityTypes = useEntityTypes()
+    const options = useMemo(() => knownEntityTypes.map((t) => ({
+        value: t, label: entityTypes.find((e) => e.id === t)?.name || t,
+    })), [knownEntityTypes, entityTypes])
     return (
         <div className="flex flex-col gap-3">
             <Field label="Match">
@@ -529,7 +541,7 @@ function EntityTypeEditor({
                     multiple
                     value={value.values}
                     onChange={(next) => onChange({ ...value, values: next })}
-                    options={knownEntityTypes.map((t) => ({ value: t }))}
+                    options={options}
                     placeholder="pick one or more entity types…"
                     emptyHint="No entity types in schema."
                     autoFocus={autoFocus}
@@ -1100,24 +1112,24 @@ function getKindMeta(p: Predicate): KindMeta {
                 + 'contains, greater than, between, within the last, is empty and more.',
         }
         case 'isOrphan': return {
-            icon: '⊘', label: 'No lineage edges',
-            description: 'Disconnected nodes — no upstream producers, no downstream consumers.',
+            icon: '⊘', label: shapeLabel('isOrphan', p),
+            description: 'No edges of these, in or out.',
         }
         case 'isLeaf': return {
-            icon: '↓', label: 'No downstream lineage',
-            description: 'Nodes with no outgoing lineage edges — terminal data products.',
+            icon: '↓', label: shapeLabel('isLeaf', p),
+            description: 'No outgoing edges of these — nothing leaves it.',
         }
         case 'isRoot': return {
-            icon: '↑', label: 'No upstream lineage',
-            description: 'Nodes with no incoming lineage edges — sources of truth.',
+            icon: '↑', label: shapeLabel('isRoot', p),
+            description: 'No incoming edges of these — nothing points to it.',
         }
         case 'hasIncoming': return {
-            icon: '⇣', label: 'Has upstream lineage',
-            description: 'At least one incoming lineage edge.',
+            icon: '⇣', label: shapeLabel('hasIncoming', p),
+            description: 'At least one incoming edge of these.',
         }
         case 'hasOutgoing': return {
-            icon: '⇡', label: 'Has downstream lineage',
-            description: 'At least one outgoing lineage edge.',
+            icon: '⇡', label: shapeLabel('hasOutgoing', p),
+            description: 'At least one outgoing edge of these.',
         }
         case 'descendantOf': {
             // Two entry points, two vocabularies. 'any' is the row the
@@ -1160,7 +1172,7 @@ function getKindMeta(p: Predicate): KindMeta {
         }
         case 'degree': return {
             icon: '#', label: 'Number of edges',
-            description: 'Entities with more, fewer or exactly N edges of a class.',
+            description: 'How many edges it has — which way, and through which edges.',
         }
         case 'all': return {
             icon: '∗', label: 'Every entity',
@@ -1171,12 +1183,13 @@ function getKindMeta(p: Predicate): KindMeta {
             description: 'One entity — or several — by its path of names, or by URN.',
         }
         case 'related': {
-            const meta = axisMeta(p.axis)
+            // The body leads with the verb; the header says what kind it is.
+            const link = axisMeta(p.axis).lineage
             return {
-                icon: meta.lineage ? '⇄' : '⊶',
-                label: `Relationship: ${meta.label.toLowerCase()}`,
-                description: meta.lineage
-                    ? 'A condition on the entities it is linked to by lineage.'
+                icon: link ? '⇄' : '⊶',
+                label: link ? 'Connection' : 'Hierarchy',
+                description: link
+                    ? 'A condition on what it is connected to — steps and edges under More options.'
                     : 'A condition on its containers or what it contains.',
             }
         }
@@ -1236,7 +1249,14 @@ function isIncomplete(p: Predicate): boolean {
                 || [p.sourceWhere, p.targetWhere].some((w) => !!w && hasIncompleteLeaf(w))
         case 'is':           return !p.refs.length || p.refs.some((r) => !r.urn && !r.path?.length)
         // A relationship with no condition is complete: any relative will do.
-        case 'related':      return !!p.where && hasIncompleteLeaf(p.where)
+        case 'related':      return p.edgeTypes?.length === 0 || (!!p.where && hasIncompleteLeaf(p.where))
+        // Edge types to pick, not picked yet.
+        case 'isOrphan':
+        case 'isLeaf':
+        case 'isRoot':
+        case 'hasIncoming':
+        case 'hasOutgoing':
+        case 'degree':       return p.edgeTypes?.length === 0
         default:             return false
     }
 }

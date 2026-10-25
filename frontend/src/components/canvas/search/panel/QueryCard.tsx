@@ -190,22 +190,20 @@ export const QueryCard: FC<QueryCardProps> = ({
     const [mode, setMode] = useEditorMode()
 
     /**
-     * Code-only palette entries (withinHops, degree) hand off to the
-     * main panel's Code view rather than the AdvancedDrawer JSON tab.
-     * Seed a stub predicate of the chosen kind into the draft
-     * (preserving existing work via AND-wrap), then flip the local
-     * mode to 'code' so the user lands directly in the DSL editor.
+     * Code-only palette entries (withinHops) hand off to the main panel's
+     * Code view rather than the AdvancedDrawer JSON tab. Seed a stub
+     * predicate into the draft (preserving existing work via AND-wrap),
+     * then flip the local mode to 'code' so the user lands directly in
+     * the DSL editor.
      */
-    const handleOpenCode = useCallback((kind: CodeKind) => {
-        const stub: Predicate = kind === 'degree'
-            ? { kind: 'degree', direction: 'both', op: 'gte', value: 1, edgeClass: 'lineage' }
-            : ({
-                kind: 'withinHops',
-                urns: [],
-                hops: 2,
-                direction: 'both',
-                edgeClass: 'lineage',
-            } as unknown as Predicate)
+    const handleOpenCode = useCallback((_kind: CodeKind) => {
+        const stub = {
+            kind: 'withinHops',
+            urns: [],
+            hops: 2,
+            direction: 'both',
+            edgeClass: 'lineage',
+        } as unknown as Predicate
         const current = useSearchStore.getState().draftPredicate
         let next: Predicate
         if (!current) {

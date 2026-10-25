@@ -1,22 +1,26 @@
 /**
- * RelationshipEditor — the body of a relationship row: which relatives
- * (parent, any ancestor, top-level container, child, any descendant,
- * sources, targets, either), how many must match (any / none / every one
- * / a count), how far (hops along lineage, levels up or down the tree),
- * through which edges, and the relative's own conditions — edited by the
- * same VisualQueryBuilder as the query itself, so a condition on a
- * relative can be anything a query can, relationships included.
+ * RelationshipEditor — the body of a relationship row, read as what the
+ * entity does to its relatives: a verb (is inside, contains, feeds, is fed
+ * by, is linked to), how many of them must match (at least one, none, only
+ * these, a number) and the conditions they meet — edited by the same
+ * VisualQueryBuilder as the query itself, so a relative's condition can be
+ * anything a query can, relationships included.
  *
- *   HAS A ▾  PARENT ▾
- *   WHERE THE PARENT…
+ *   [Feeds ▾] [at least one ▾]  entity that…
  *   ┌─ nested builder ───────────────────────────────┐
- *   │  Entity type is in [domain]                     │
+ *   │  Entity type is in [dashboard]                  │
  *   └─────────────────────────────────────────────────┘
+ *   1–3 steps · lineage                  More options ▾
  *
- * ``RelationContext`` (relationContext.ts) carries what a row can't know
- * on its own; ``RelationProvider`` sets it for a builder.
+ * More options: how many steps (or levels), through which edges — lineage,
+ * every link, or edge types picked by name — which way a link is followed,
+ * and conditions every edge walked must meet. Picking every link or edge
+ * types turns Feeds / Is fed by into Is linked to, outgoing or incoming:
+ * feeding is what lineage does. ``RelationContext`` (relationContext.ts)
+ * carries what a row can't know on its own; ``RelationProvider`` sets it.
  */
-import { type FC, type ReactNode, useContext, useMemo } from 'react'
+import { ChevronDown } from 'lucide-react'
+import { type FC, type ReactNode, useContext, useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import type { EdgePredicateNode, Predicate, RelatedPredicate } from '@/types/search'
@@ -24,6 +28,7 @@ import type { EdgePredicateNode, Predicate, RelatedPredicate } from '@/types/sea
 import { EdgePredicateEditor } from '../builder/editors/EdgePredicateEditor'
 import { inputClass } from '../typed/fieldStyles'
 
+import { EdgeSetPicker } from './EdgeSetPicker'
 import { OperatorMenu } from './OperatorMenu'
 import type { LayerOption } from './layerOptions'
 import {
@@ -35,12 +40,21 @@ import {
 import {
     AXES,
     axisMeta,
+    DIRECTION_AXIS,
     hopRange,
+    linkDirection,
+    linkVerb,
     maxHopsFor,
+    optionsSummary,
     RELATION_DEPTH_MAX,
     TREE_DEPTH_MAX,
+    throughOf,
+    withinHopCap,
+    type LinkDirection,
     type RelationAxis,
+    type Through,
 } from './relations'
+import { DEGREE_DIRECTION_OPTIONS, EDGE_SET_OPTIONS } from './vocabulary/edgeWords'
 import { VisualQueryBuilder } from './VisualQueryBuilder'
 
 
@@ -59,10 +73,10 @@ export const RelationProvider: FC<{
 type Lead = 'any' | 'none' | 'all' | 'count'
 
 const LEAD_OPTIONS: { value: Lead; label: string; description: string }[] = [
-    { value: 'any', label: 'Has a', description: 'At least one relative matches' },
-    { value: 'none', label: 'Has no', description: 'No relative matches' },
-    { value: 'all', label: 'Every', description: 'Every relative matches — and there is one' },
-    { value: 'count', label: 'Count', description: 'How many relatives match' },
+    { value: 'any', label: 'at least one', description: 'At least one of them matches' },
+    { value: 'none', label: 'no', description: 'None of them matches' },
+    { value: 'all', label: 'only', description: 'Every one of them matches — and there is one' },
+    { value: 'count', label: 'a number of', description: 'How many of them match' },
 ]
 
 type CountOp = NonNullable<NonNullable<RelatedPredicate['count']>['op']>
@@ -76,7 +90,13 @@ const COUNT_OPTIONS: { value: CountOp; label: string }[] = [
     { value: 'neq', label: 'other than' },
 ]
 
-const AXIS_OPTIONS = AXES.map((a) => ({ value: a.axis, label: a.label, description: a.description }))
+const VERB_OPTIONS = AXES.map((a) => ({
+    value: a.axis, label: a.label, description: a.description,
+    group: a.group === 'hierarchy' ? 'In the hierarchy' : 'Connected',
+}))
+
+const THROUGH_OPTIONS = EDGE_SET_OPTIONS.filter((o) =>
+    o.value === 'lineage' || o.value === 'links' || o.value === 'types') as { value: Through; label: string; description: string }[]
 
 
 export interface RelationshipEditorProps {
@@ -98,56 +118,76 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
 }) => {
     const ctx = useContext(RelationContext)
     const meta = axisMeta(value.axis)
+    const link = linkVerb(value)
+    const through = throughOf(value)
     const lead: Lead = value.count ? 'count' : (value.quantifier ?? 'any')
     const [lo, hi] = hopRange(value)
-    const hopCap = maxHopsFor(value, { topLevel: ctx.depth === 0, rule: ctx.rule })
+    const stands = { topLevel: ctx.depth === 0, rule: ctx.rule }
+    const hopCap = maxHopsFor(value, stands)
     const nested = useMemo(() => ({ ...ctx, depth: ctx.depth + 1 }), [ctx])
     const edgeCtx = useEdgeEditorContext(discovery, knownEntityTypes, discoveredLayers)
+    // Open on what still needs saying: edge types to pick.
+    const [open, setOpen] = useState(() => value.edgeTypes?.length === 0)
+    // "Is linked to" stands for every link: lineage either way included.
+    const verb: RelationAxis = link === 'linked' ? 'neighbor' : value.axis
 
     const setLead = (next: Lead) => {
         const { count: _c, quantifier: _q, ...rest } = value
         if (next === 'count') onChange({ ...rest, count: { op: 'gte', value: 1 } })
         else onChange(next === 'any' ? rest : { ...rest, quantifier: next })
     }
-    /** Lineage hops cut to what the server allows where it stands. */
-    const withinCap = (p: RelatedPredicate): RelatedPredicate => {
-        if (!axisMeta(p.axis).lineage) return p
-        const cap = maxHopsFor(p, { topLevel: ctx.depth === 0, rule: ctx.rule })
-        const min = Math.min(p.minHops ?? 1, cap)
-        const max = p.maxHops && Math.min(p.maxHops, cap)
-        return { ...p, minHops: min > 1 ? min : undefined, maxHops: max && max > 1 ? max : undefined }
-    }
-    const setAxis = (axis: RelationAxis) => {
+    const setVerb = (axis: RelationAxis) => {
+        if (axis === verb) return
         const target = axisMeta(axis)
-        const { minHops: _lo, maxHops: _hi, edge: _e, edgeTypes: _t, ...rest } = value
-        // Hops, edge types and the edge filter belong to the axes that
-        // take them; a change of axis keeps them only where they still apply.
-        onChange(withinCap({
-            ...rest, axis,
-            ...(target.hops ? { minHops: value.minHops, maxHops: value.maxHops } : {}),
-            ...(target.lineage ? { edge: value.edge, edgeTypes: value.edgeTypes } : {}),
-        } as RelatedPredicate))
+        const { minHops: _lo, maxHops: _hi, edge: _e, edgeTypes: _t, edgeClass: _c, ...rest } = value
+        // Hops and the edge filter belong to the axes that take them; a
+        // change of verb keeps them only where they still apply.
+        const kept = {
+            ...(target.hops && value.minHops ? { minHops: value.minHops } : {}),
+            ...(target.hops && value.maxHops ? { maxHops: value.maxHops } : {}),
+            ...(target.lineage && value.edge ? { edge: value.edge } : {}),
+        }
+        // Is linked to: either way, through every link.
+        const next = axis === 'neighbor'
+            ? { ...rest, ...kept, axis, edgeClass: 'links' as const }
+            : { ...rest, ...kept, axis }
+        onChange(withinHopCap(next as RelatedPredicate, stands))
     }
-    const setHops = (min: number, max: number | null) => onChange({
-        ...value,
-        minHops: min > 1 ? min : undefined,
-        maxHops: max === null || (meta.lineage && max === min && min === 1) ? undefined : max,
-    })
+    const setThrough = (next: Through) => {
+        const { edgeTypes: _t, edgeClass: _c, ...rest } = value
+        onChange(next === 'lineage' ? rest
+            : next === 'links' ? { ...rest, edgeClass: 'links' } : { ...rest, edgeTypes: [] })
+        if (next === 'types') setOpen(true)
+    }
+    const setDirection = (direction: LinkDirection) =>
+        onChange(withinHopCap({ ...value, axis: DIRECTION_AXIS[direction] }, stands))
+    const setHops = (min: number, max: number | null) => {
+        const { minHops: _lo, maxHops: _hi, ...rest } = value
+        const most = max === null || (meta.lineage && max === min && min === 1) ? undefined : max
+        onChange({ ...rest, ...(min > 1 ? { minHops: min } : {}), ...(most ? { maxHops: most } : {}) })
+    }
     const setWhere = (where: Predicate | null) => {
         const { where: _w, ...rest } = value
         // Naming the far end lets lineage go further; unnaming it, less.
-        onChange(withinCap(where ? { ...rest, where } : rest))
+        onChange(withinHopCap(where ? { ...rest, where } : rest, stands))
     }
     const setEdge = (edge: EdgePredicateNode | null) => {
         const { edge: _e, ...rest } = value
         onChange(edge ? { ...rest, edge } : rest)
     }
 
+    const container = value.axis === 'parent' || value.axis === 'ancestor' || value.axis === 'root'
+    const several = lead === 'all' || (lead === 'count' && value.count?.value !== 1)
+    const relative = container ? (several ? 'containers' : 'container') : (several ? 'entities' : 'entity')
+    const summary = optionsSummary(value)
+
     return (
         <div className="flex flex-col gap-3">
             <div className="flex flex-wrap items-center gap-1.5">
+                <OperatorMenu value={verb} onChange={setVerb} options={VERB_OPTIONS}
+                              ariaLabel="How it is related" disabled={isRunning} />
                 <OperatorMenu value={lead} onChange={setLead} options={LEAD_OPTIONS}
-                              ariaLabel="How many relatives" disabled={isRunning} />
+                              ariaLabel="How many of them" disabled={isRunning} />
                 {value.count && (
                     <>
                         <OperatorMenu value={value.count.op ?? 'gte'}
@@ -163,31 +203,10 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
                                className={cn(inputClass, 'w-20')} disabled={isRunning} />
                     </>
                 )}
-                <OperatorMenu value={value.axis} onChange={setAxis} options={AXIS_OPTIONS}
-                              ariaLabel="Which relatives" disabled={isRunning} />
+                {!hideWhere && <span className="text-[11.5px] text-ink-muted">{relative} that…</span>}
             </div>
 
-            {meta.hops && (
-                <HopsField axis={value.axis} lineage={meta.lineage} lo={lo}
-                           hi={meta.lineage || value.maxHops ? hi : null}
-                           cap={meta.lineage ? hopCap : TREE_DEPTH_MAX}
-                           onChange={setHops} disabled={isRunning} />
-            )}
-
-            {meta.lineage && (
-                <div className="flex flex-col gap-1.5">
-                    <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-ink-muted">
-                        Through edges
-                    </span>
-                    <EdgePredicateEditor value={value.edge ?? null} onChange={setEdge} ctx={edgeCtx}
-                                         edgeTypeHint={value.edgeTypes ?? undefined} />
-                </div>
-            )}
-
             {!hideWhere && <div className="flex flex-col gap-1.5">
-                <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-ink-muted">
-                    {lead === 'all' ? `Every ${meta.noun}…` : `Where the ${meta.noun}…`}
-                </span>
                 {ctx.depth + 1 < RELATION_DEPTH_MAX || !containsRelation(value.where) ? (
                     <div className="rounded-lg border border-glass-border/70 bg-canvas-base/30 p-2">
                         <RelationContext.Provider value={nested}>
@@ -210,13 +229,61 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
                 )}
                 {!value.where && (
                     <p className="text-[10.5px] text-ink-muted/80">
-                        No condition: any {meta.noun} will do.
+                        No condition: any {container ? 'container' : 'entity'} will do.
                     </p>
                 )}
             </div>}
+
+            {summary && (
+                <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
+                        className="flex items-center gap-1.5 self-start text-[11px] text-ink-muted hover:text-ink">
+                    <span>{summary}</span>
+                    <span className="text-accent-lineage">{open ? 'Fewer options' : 'More options'}</span>
+                    <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
+                </button>
+            )}
+
+            {summary && open && (
+                <div className="flex flex-col gap-3 rounded-lg border border-glass-border/60 p-2.5">
+                    {meta.hops && (
+                        <HopsField lineage={meta.lineage} lo={lo}
+                                   hi={meta.lineage || value.maxHops ? hi : null}
+                                   cap={meta.lineage ? hopCap : TREE_DEPTH_MAX}
+                                   named={value.axis !== 'neighbor'}
+                                   onChange={setHops} disabled={isRunning} />
+                    )}
+                    {meta.lineage && (
+                        <>
+                            <Option label="Through">
+                                <OperatorMenu value={through} onChange={setThrough} options={THROUGH_OPTIONS}
+                                              ariaLabel="Through which edges" disabled={isRunning} />
+                            </Option>
+                            {through === 'types' && (
+                                <EdgeSetPicker value={value.edgeTypes ?? []} links disabled={isRunning}
+                                               onChange={(edgeTypes) => onChange({ ...value, edgeTypes })} />
+                            )}
+                            {through !== 'lineage' && (
+                                <Option label="Direction">
+                                    <OperatorMenu value={linkDirection(value.axis)} onChange={setDirection}
+                                                  options={DEGREE_DIRECTION_OPTIONS} ariaLabel="Which way"
+                                                  disabled={isRunning} />
+                                </Option>
+                            )}
+                            <div className="flex flex-col gap-1.5">
+                                <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-ink-muted">
+                                    Only follow edges where…
+                                </span>
+                                <EdgePredicateEditor value={value.edge ?? null} onChange={setEdge} ctx={edgeCtx}
+                                                     edgeTypeHint={value.edgeTypes ?? undefined} />
+                            </div>
+                        </>
+                    )}
+                </div>
+            )}
         </div>
     )
 }
+
 
 
 function containsRelation(p: Predicate | null | undefined): boolean {
@@ -226,31 +293,40 @@ function containsRelation(p: Predicate | null | undefined): boolean {
 }
 
 
+const Option: FC<{ label: string; children: ReactNode }> = ({ label, children }) => (
+    <div className="flex flex-wrap items-center gap-1.5">
+        <span className="w-[72px] text-[10px] font-mono uppercase tracking-[0.14em] text-ink-muted">
+            {label}
+        </span>
+        {children}
+    </div>
+)
+
+
 const HopsField: FC<{
-    axis: RelationAxis
     lineage: boolean
     lo: number
     /** None for a tree axis looking any depth down or up. */
     hi: number | null
     cap: number
+    /** Whether naming the far end could let it go further. */
+    named: boolean
     onChange: (min: number, max: number | null) => void
     disabled?: boolean
-}> = ({ axis, lineage, lo, hi, cap, onChange, disabled }) => {
+}> = ({ lineage, lo, hi, cap, named, onChange, disabled }) => {
     const clamp = (n: number) => Math.min(cap, Math.max(1, Math.round(n) || 1))
+    const unit = lineage ? 'steps' : 'levels'
     return (
-        <div className="flex flex-wrap items-center gap-1.5 text-[11.5px] text-ink-muted">
-            <span className="text-[10px] font-mono uppercase tracking-[0.14em]">
-                {lineage ? 'Hops' : 'Levels'}
-            </span>
-            <input type="number" min={1} max={cap} value={lo} aria-label={`Fewest ${lineage ? 'hops' : 'levels'}`}
+        <Option label={lineage ? 'Steps' : 'Levels'}>
+            <input type="number" min={1} max={cap} value={lo} aria-label={`Fewest ${unit}`}
                    onChange={(e) => {
                        const min = clamp(Number(e.target.value))
                        onChange(min, hi === null ? null : Math.max(min, hi))
                    }}
                    className={cn(inputClass, 'w-16')} disabled={disabled} />
-            <span>to</span>
+            <span className="text-[11.5px] text-ink-muted">to</span>
             <input type="number" min={lo} max={cap} value={hi ?? ''} placeholder={lineage ? '' : 'any'}
-                   aria-label={`Most ${lineage ? 'hops' : 'levels'}`}
+                   aria-label={`Most ${unit}`}
                    onChange={(e) => {
                        const raw = e.target.value
                        onChange(lo, raw === '' && !lineage ? null : Math.max(lo, clamp(Number(raw))))
@@ -258,9 +334,9 @@ const HopsField: FC<{
                    className={cn(inputClass, 'w-16')} disabled={disabled} />
             {lineage && (
                 <span className="text-[10.5px] text-ink-muted/80">
-                    up to {cap}{cap < 10 && axis !== 'neighbor' ? ' (name the far end to go further)' : ''}
+                    up to {cap}{cap < 10 && named ? ' (name the far end to go further)' : ''}
                 </span>
             )}
-        </div>
+        </Option>
     )
 }

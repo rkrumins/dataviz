@@ -10,6 +10,8 @@ import {
     ArrowUpToLine,
     Asterisk,
     Boxes,
+    Cable,
+    CircleOff,
     Crosshair,
     Equal,
     Flag,
@@ -20,9 +22,12 @@ import {
     Hash,
     KeyRound,
     Layers,
+    Link2,
+    Link2Off,
     ListTree,
     Milestone,
     Network,
+    PackageSearch,
     Parentheses,
     Radar,
     Route,
@@ -36,13 +41,27 @@ import {
 
 import type { EdgeClass, Predicate } from '@/types/search'
 
-import { newRelation, RELATION_DEPTH_MAX } from '../relations'
+import { newRelation, RELATION_DEPTH_MAX, RELATION_MAX_HOPS } from '../relations'
 
 
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
 
 /** The condition kinds with no visual editor: authored in Code. */
-export type CodeKind = 'withinHops' | 'degree'
+export type CodeKind = 'withinHops'
+
+/** Where a condition is being added: a display rule follows lineage one
+ *  step, a search up to three. */
+export interface BuildContext {
+    rule?: boolean
+}
+
+const ANY_TYPE: Predicate = { kind: 'entityType', op: 'in', values: [] }
+
+/** Lineage along ``axis`` to a type to pick: 1–3 steps, as the canvas and
+ *  Ask read "feeds" — one in a display rule. */
+function lineageTo(axis: 'upstream' | 'downstream', { rule = false }: BuildContext = {}): Predicate {
+    return { kind: 'related', axis, ...(rule ? {} : { maxHops: RELATION_MAX_HOPS }), where: ANY_TYPE }
+}
 
 /**
  * Per-category icon accents, so the categories read apart at a glance —
@@ -104,7 +123,7 @@ export interface FilterKind {
      *  - ``code``: hand off to Code mode with a stub of ``codeKind``.
      */
     action: 'emit' | 'advanced' | 'code'
-    build?: () => Predicate
+    build?: (where?: BuildContext) => Predicate
     codeKind?: CodeKind
     /** The plain words people use for it — what the Ask bar reads as it. */
     examples?: readonly string[]
@@ -303,6 +322,30 @@ export const FILTER_CATEGORIES: readonly FilterCategory[] = [
                 }),
                 examples: ['has downstream', 'with downstream', 'with consumers'],
             },
+            {
+                id: 'no-links',
+                icon: Link2Off, tone: 'lineage-missing',
+                label: 'No links at all',
+                description: 'Nothing links to it or from it — no lineage, tag, glossary term or other link',
+                action: 'emit',
+                build: () => ({ kind: 'isOrphan', edgeClass: 'links' }),
+            },
+            {
+                id: 'no-edges',
+                icon: CircleOff, tone: 'lineage-missing',
+                label: 'No edges at all',
+                description: 'No edge of any kind, the hierarchy’s included — entirely on its own',
+                action: 'emit',
+                build: () => ({ kind: 'isOrphan', edgeClass: 'any' }),
+            },
+            {
+                id: 'degree',
+                icon: GitBranchPlus, tone: 'lineage-present',
+                label: 'Number of edges…',
+                description: 'More, fewer or exactly so many edges — which way, and through which edges',
+                action: 'emit',
+                build: () => ({ kind: 'degree', direction: 'both', op: 'gt', value: 5, edgeClass: 'links' }),
+            },
         ],
     },
     {
@@ -311,10 +354,10 @@ export const FILTER_CATEGORIES: readonly FilterCategory[] = [
             {
                 id: 'rel-parent',
                 icon: ArrowUpToLine, tone: 'structure',
-                label: 'Parent is…',
-                description: 'A condition on the container one level up — "datasets whose parent is a domain"',
+                label: 'Is directly inside…',
+                description: 'A condition on its container, one level up — "datasets directly inside a domain"',
                 action: 'emit',
-                build: () => newRelation('parent', { kind: 'entityType', op: 'in', values: [] }),
+                build: () => newRelation('parent', ANY_TYPE),
             },
             {
                 id: 'rel-root',
@@ -330,34 +373,66 @@ export const FILTER_CATEGORIES: readonly FilterCategory[] = [
             {
                 id: 'rel-ancestor',
                 icon: ListTree, tone: 'structure',
-                label: 'Any container above it…',
-                description: 'A condition on any ancestor — "inside anything with region = EMEA"',
+                label: 'Is inside…',
+                description: 'A condition on any container above it — "inside anything with region = EMEA"',
                 action: 'emit',
                 build: () => newRelation('ancestor', { kind: 'property', key: '', op: 'eq', value: '' }),
             },
             {
                 id: 'rel-child',
                 icon: FolderTree, tone: 'structure',
-                label: 'Contains…',
-                description: 'A condition on what it contains — "tables with a PII column"; every one, none, or how many',
+                label: 'Directly contains…',
+                description: 'A condition on what it holds, one level down — "tables with a PII column"; every one, none, or how many',
                 action: 'emit',
-                build: () => newRelation('child', { kind: 'entityType', op: 'in', values: [] }),
+                build: () => newRelation('child', ANY_TYPE),
             },
             {
-                id: 'rel-upstream',
-                icon: GitMerge, tone: 'lineage-present',
-                label: 'Fed by…',
-                description: 'A condition on its sources, one hop or several, through edges you choose',
+                id: 'rel-descendant',
+                icon: PackageSearch, tone: 'structure',
+                label: 'Contains, at any depth…',
+                description: 'A condition on anything inside it — "domains holding a dataset with no owner"',
                 action: 'emit',
-                build: () => newRelation('upstream', { kind: 'entityType', op: 'in', values: [] }),
+                build: () => newRelation('descendant', ANY_TYPE),
             },
             {
                 id: 'rel-downstream',
                 icon: Workflow, tone: 'lineage-present',
                 label: 'Feeds…',
-                description: 'A condition on its targets — "feeds a dashboard within 3 hops"',
+                description: 'A condition on what it feeds, through lineage — "feeds a dashboard within 3 steps"',
                 action: 'emit',
-                build: () => newRelation('downstream', { kind: 'entityType', op: 'in', values: [] }),
+                build: (where) => lineageTo('downstream', where),
+            },
+            {
+                id: 'rel-upstream',
+                icon: GitMerge, tone: 'lineage-present',
+                label: 'Is fed by…',
+                description: 'A condition on what feeds it, through lineage — one step or several',
+                action: 'emit',
+                build: (where) => lineageTo('upstream', where),
+            },
+            {
+                id: 'rel-linked',
+                icon: Link2, tone: 'lineage-present',
+                label: 'Is linked to…',
+                description: 'A condition on anything it is linked to — a tag, a glossary term, a job — any edge type, either way',
+                action: 'emit',
+                build: () => ({ kind: 'related', axis: 'neighbor', edgeClass: 'links', where: ANY_TYPE }),
+            },
+            {
+                id: 'rel-edge-type',
+                icon: Cable, tone: 'lineage-present',
+                label: 'Connected through an edge type…',
+                description: 'Linked through edge types you pick by name — "produced by a job", "defined by a glossary term"',
+                action: 'emit',
+                build: () => ({ kind: 'related', axis: 'neighbor', edgeTypes: [], where: ANY_TYPE }),
+            },
+            {
+                id: 'rel-inside-feeds',
+                icon: Workflow, tone: 'structure',
+                label: 'Something inside it feeds…',
+                description: 'A container whose contents feed something — "schemas with a table that feeds a Finance dashboard"',
+                action: 'emit',
+                build: (where) => newRelation('descendant', lineageTo('downstream', where)),
             },
             {
                 id: 'is-named',
@@ -404,17 +479,6 @@ export const FILTER_CATEGORIES: readonly FilterCategory[] = [
                     + 'urns and hops.',
                 action: 'code',
                 codeKind: 'withinHops',
-            },
-            {
-                id: 'degree',
-                icon: GitBranchPlus, tone: 'group',
-                label: 'Number of edges…',
-                description:
-                    'Entities with more, fewer or exactly N edges — Code only. '
-                    + 'Opens the JSON editor with a stub; fill in '
-                    + 'direction, op and value.',
-                action: 'code',
-                codeKind: 'degree',
             },
             {
                 id: 'all',
@@ -488,6 +552,8 @@ export function availableCategories({ relationDepth, rule, canCode, canAdvanced 
                 if (relationDepth > 0 && SCOPE_ENTRIES.has(e.id)) return false
                 if (rule && e.id === 'path') return false
                 if (relationDepth >= RELATION_DEPTH_MAX && e.id.startsWith('rel-')) return false
+                // Two relationships deep: one more level than a single one.
+                if (relationDepth >= RELATION_DEPTH_MAX - 1 && e.id === 'rel-inside-feeds') return false
                 if (e.action === 'code') return canCode
                 if (e.action === 'advanced') return canAdvanced
                 return true

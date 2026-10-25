@@ -98,22 +98,43 @@ describe('VisualQueryBuilder', () => {
         expect(onCommit).toHaveBeenCalledTimes(1)
     })
 
-    const degree = {
-        kind: 'degree', direction: 'both', op: 'gte', value: 3, edgeClass: 'lineage',
+    const near = {
+        kind: 'withinHops', urns: ['urn:x'], hops: 2, direction: 'both',
     } as Predicate
 
-    it('shows a degree condition as one edited in Code, never as unsupported', async () => {
+    it('shows a condition only Code edits as such, never as unsupported', async () => {
         const onOpenAdvanced = vi.fn()
-        render(<VisualQueryBuilder {...baseProps({ predicate: degree, onOpenAdvanced })} />)
+        render(<VisualQueryBuilder {...baseProps({ predicate: near, onOpenAdvanced })} />)
 
-        expect(screen.getByText('Number of edges')).toBeInTheDocument()
+        expect(screen.getByText('Within N hops')).toBeInTheDocument()
         expect(screen.queryByText('unsupported')).not.toBeInTheDocument()
         await userEvent.setup().click(screen.getByRole('button', { name: /Open in Code/ }))
         expect(onOpenAdvanced).toHaveBeenCalled()
     })
 
+    it('edits an edge count in the Form: how many, which way, through which edges', () => {
+        render(<VisualQueryBuilder {...baseProps({ predicate: {
+            kind: 'degree', direction: 'out', op: 'gte', value: 3, edgeClass: 'links',
+        } as Predicate })} />)
+
+        expect(screen.getByText('Number of edges')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'How many edges' })).toHaveTextContent('at least')
+        expect(screen.getByLabelText('Number of edges')).toHaveValue(3)
+        expect(screen.getByRole('button', { name: 'Which way' })).toHaveTextContent('Outgoing')
+        expect(screen.getByRole('button', { name: 'Through which edges' })).toHaveTextContent('Any link')
+    })
+
+    it('names a graph shape for the edges it counts', () => {
+        render(<VisualQueryBuilder {...baseProps({ predicate: {
+            kind: 'isRoot', edgeClass: 'links',
+        } as Predicate })} />)
+
+        expect(screen.getByText('Nothing links into it')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Through which edges' })).toHaveTextContent('Any link')
+    })
+
     it('offers no hand-off where there is no Code mode, and says where it is edited', () => {
-        render(<VisualQueryBuilder {...baseProps({ predicate: degree })} />)
+        render(<VisualQueryBuilder {...baseProps({ predicate: near })} />)
 
         expect(screen.getByText(/edited as JSON in Advanced Search/)).toBeInTheDocument()
         expect(screen.queryByRole('button', { name: /Open in Code/ })).not.toBeInTheDocument()

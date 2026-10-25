@@ -19,7 +19,9 @@ import type {
 
 import { arityOf, isNegative, operatorLabel, predicateType } from '../../typed/operators'
 import { describeDuration } from '../../typed/valueCodec'
-import { axisMeta, hopRange, refLabel } from '../relations'
+import { axisMeta, hopRange, linkDirection, refLabel, throughOf, type LinkDirection } from '../relations'
+
+import { degreePhrase, edgeSetPhrase, shapePhrase } from './edgeWords'
 
 
 /** The part of a condition a segment sets — what its token edits. */
@@ -141,11 +143,12 @@ export function leafSegments(p: Predicate, many = false): Segment[] {
         }
         case 'property':
             return propertySegments(p)
-        case 'isRoot':      return [txt(`${v.has} no upstream lineage`, 'phrase')]
-        case 'isLeaf':      return [txt(`${v.has} no downstream lineage`, 'phrase')]
-        case 'isOrphan':    return [txt(`${v.has} no lineage edges`, 'phrase')]
-        case 'hasIncoming': return [txt(`${v.has} upstream lineage`, 'phrase')]
-        case 'hasOutgoing': return [txt(`${v.has} downstream lineage`, 'phrase')]
+        case 'isRoot':
+        case 'isLeaf':
+        case 'isOrphan':
+        case 'hasIncoming':
+        case 'hasOutgoing':
+            return [txt(shapePhrase(p.kind, p, many), 'phrase')]
         case 'descendantOf': {
             const anchors = named(p.urns, p.refs)
             return anchors.length === 1
@@ -182,7 +185,7 @@ export function leafSegments(p: Predicate, many = false): Segment[] {
         case 'related':
             return relationSegments(p, many)
         case 'degree':
-            return [txt(`${v.has} ${p.direction ?? 'any'} edges ${p.op} ${p.value}`, 'phrase')]
+            return [txt(`${v.has} ${degreePhrase(p)}`, 'phrase')]
         case 'all':
             return [txt('every entity is included', 'phrase')]
         case 'group':
@@ -282,6 +285,15 @@ export function viaSegments(p: RelatedPredicate): Segment[] {
     return [txt(`${p.where ? ',' : ''} through edges where `), ...edgeSegments(p.edge)]
 }
 
+/** The edges a relationship walks, edge types named: "through Produces
+ *  edges where mode is stream". The Sentence's edge token reads the edge
+ *  condition alone (``viaSegments``). */
+function walkedSegments(p: RelatedPredicate): Segment[] {
+    if (!p.edgeTypes?.length) return viaSegments(p)
+    const lead = `${p.where ? ',' : ''} through ${edgeSetPhrase(p)}`
+    return p.edge ? [txt(`${lead} where `), ...edgeSegments(p.edge)] : [txt(lead)]
+}
+
 /** "has a parent where type is domain", "has a parent that is Finance",
  *  "has no source within 3 hops", "has children, every one where …",
  *  "has more than 100 children that have …" — the relative named for
@@ -291,7 +303,7 @@ function relationSegments(p: RelatedPredicate, many: boolean): Segment[] {
     const v = many ? MANY : ONE
     const meta = axisMeta(p.axis)
     const reach = reachSegments(p)
-    const via = viaSegments(p)
+    const via = walkedSegments(p)
     const cond = (several = false): Segment[] => p.where
         ? [txt(' '), { t: 'cond', predicate: p.where, many: several, lead: 'connector' }] : []
     if (p.count) {
@@ -317,25 +329,22 @@ function relationSegments(p: RelatedPredicate, many: boolean): Segment[] {
 }
 
 
-/** Each axis as a verb, describing one entity and several: what the
- *  Sentence builder reads a relationship as — "datasets that **feed** a
- *  dashboard", never "have a target that is a dashboard". */
-const AXIS_VERB: Record<string, [one: string, many: string]> = {
-    parent: ['is directly inside', 'are directly inside'],
-    ancestor: ['is inside', 'are inside'],
-    root: ['sits under', 'sit under'],
-    child: ['directly contains', 'directly contain'],
-    descendant: ['contains', 'contain'],
-    upstream: ['is fed by', 'are fed by'],
-    downstream: ['feeds', 'feed'],
-    neighbor: ['is linked to', 'are linked to'],
+/** A link through every link or named edge types, as a verb: feeding is
+ *  what lineage does, so it "links to" rather than "feeds". */
+const LINK_VERB: Record<LinkDirection, [one: string, many: string]> = {
+    out: ['links to', 'link to'],
+    in: ['is linked from', 'are linked from'],
+    both: ['is linked to', 'are linked to'],
 }
 
 /** A relationship's verb phrase with its quantifier: "feed", "feed no",
  *  "only feed", "are only fed by", "feed at least" — the relative (and,
- *  for a count, its number) follows. */
+ *  for a count, its number) follows. Each axis reads as a verb
+ *  (``AxisMeta.verb``): "datasets that **feed** a dashboard", never "have
+ *  a target that is a dashboard". */
 export function relationVerb(p: RelatedPredicate, many = true): string {
-    const [one, several] = AXIS_VERB[p.axis] ?? AXIS_VERB.parent
+    const [one, several] = throughOf(p) === 'lineage' ? axisMeta(p.axis).verb
+        : LINK_VERB[linkDirection(p.axis)]
     const verb = many ? several : one
     if (p.count) return `${verb} ${COUNT_WORDS[p.count.op ?? 'gte']}`
     if (p.quantifier === 'none') return `${verb} no`

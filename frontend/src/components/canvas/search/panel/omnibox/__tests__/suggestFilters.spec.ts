@@ -168,6 +168,43 @@ describe('suggestFilters', () => {
         )
     })
 
+    it('finds a relationship by what a user would call it, built as the palette builds it', () => {
+        const sections = suggestFilters({ ...BASE, query: 'feeds' })
+        const section = sections.find((s) => s.group === 'relationship')!
+        expect(section.heading).toBe('Relationships')
+        const feeds = section.items.find((i) => i.id === 'rel:rel-downstream')!
+        expect(feeds.title).toBe('Feeds…')
+        expect(feeds.predicate).toMatchObject({ kind: 'related', axis: 'downstream', maxHops: 3 })
+        expect(feeds.complete).toBe(false)
+    })
+
+    it('offers an edge type by its name or its id, to pick what is at its other end', () => {
+        const edgeTypes = [{ id: 'PRODUCES', name: 'Produces' }, { id: 'DEFINED_BY', name: 'Defined by' }]
+        for (const query of ['produces', 'defined by', 'DEFINED_BY']) {
+            const hit = flat(suggestFilters({ ...BASE, edgeTypes, query })).find((i) => i.id.startsWith('edge:'))
+            expect(hit, query).toBeDefined()
+            expect(hit!.predicate).toMatchObject({ kind: 'related', axis: 'neighbor' })
+        }
+        const produces = flat(suggestFilters({ ...BASE, edgeTypes, query: 'produces' }))
+            .find((i) => i.id === 'edge:PRODUCES')!
+        expect(produces.title).toBe('Connected through Produces…')
+        expect(produces.predicate).toMatchObject({ edgeTypes: ['PRODUCES'] })
+    })
+
+    it('finds every link and every edge as shapes too', () => {
+        const noLinks = flat(suggestFilters({ ...BASE, query: 'unlinked' })).find((i) => i.id.startsWith('shape:'))
+        expect(noLinks!.predicate).toEqual({ kind: 'isOrphan', edgeClass: 'links' })
+        const noEdges = flat(suggestFilters({ ...BASE, query: 'standalone' })).find((i) => i.id.startsWith('shape:'))
+        expect(noEdges!.predicate).toEqual({ kind: 'isOrphan', edgeClass: 'any' })
+    })
+
+    it('lists the relationships, and the edge types, on their own tile', () => {
+        const sections = suggestFilters({ ...BASE, activeGroup: 'relationship',
+            edgeTypes: [{ id: 'PRODUCES', name: 'Produces' }] })
+        expect(ids(sections)).toEqual(expect.arrayContaining([
+            'rel:rel-parent', 'rel:rel-descendant', 'rel:rel-linked', 'edge:PRODUCES']))
+    })
+
     it('marks a value-less filter as incomplete so the caller can focus it', () => {
         const sections = suggestFilters({ ...BASE, activeGroup: 'text' })
         const nameRow = flat(sections).find((i) => i.id === 'text:name')

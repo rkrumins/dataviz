@@ -118,7 +118,7 @@ describe('SentenceBuilder', () => {
 
     it('hands a condition no builder edits over to Code', async () => {
         const { onEditInCode } = setup({ kind: 'degree', direction: 'out', op: 'gt', value: 3 } as Predicate)
-        fireEvent.click(screen.getAllByRole('button', { name: /out edges gt 3/ })[0])
+        fireEvent.click(screen.getAllByRole('button', { name: /more than 3 outgoing lineage edges/ })[0])
         await userEvent.click(await screen.findByRole('button', { name: 'Edit in Code' }))
         expect(onEditInCode).toHaveBeenCalled()
     })

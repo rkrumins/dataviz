@@ -30,6 +30,27 @@ for (const edge of HARNESS_EDGES) {
     IN.set(edge.target, [...(IN.get(edge.target) ?? []), edge])
 }
 
+/** The lineage types; containment is the tree (``parent``), not an edge. */
+const LINEAGE = new Set(['TRANSFORMS', 'PRODUCES', 'CONSUMES'])
+
+interface EdgeSet { edgeClass?: string | null; edgeTypes?: string[] | null }
+
+/** Whether ``edge`` is one of the edges a condition counts or walks. */
+function edgeIn(edge: HarnessEdge, p: EdgeSet): boolean {
+    if (p.edgeTypes) return p.edgeTypes.some((t) => t.toUpperCase() === edge.type.toUpperCase())
+    if (p.edgeClass === 'links' || p.edgeClass === 'any') return true
+    return p.edgeClass !== 'containment' && LINEAGE.has(edge.type)
+}
+
+/** How many of a condition's edges an entity has, in, out or both. */
+function edgeCount(e: HarnessEntity, p: EdgeSet, direction: 'in' | 'out' | 'both'): number {
+    const tree = !p.edgeTypes && (p.edgeClass === 'containment' || p.edgeClass === 'any')
+    const inn = (IN.get(e.urn) ?? []).filter((x) => edgeIn(x, p)).length + (tree && e.parent ? 1 : 0)
+    const out = (OUT.get(e.urn) ?? []).filter((x) => edgeIn(x, p)).length
+        + (tree ? CHILDREN.get(e.urn)?.length ?? 0 : 0)
+    return direction === 'in' ? inn : direction === 'out' ? out : inn + out
+}
+
 /** Root first, the entity's parent last. */
 function ancestors(e: HarnessEntity): HarnessEntity[] {
     const out: HarnessEntity[] = []
@@ -159,11 +180,11 @@ function relatives(e: HarnessEntity, p: RelatedPredicate): HarnessEntity[] {
         case 'descendant': return descendants(e)
         default: {
             const hi = p.maxHops ?? lo
+            const walked = (x: HarnessEdge) => edgeIn(x, { edgeClass: p.edgeClass ?? 'lineage', edgeTypes: p.edgeTypes })
+                && edgeMatches(x, p.edge)
             const step = (urn: string): string[] => {
-                const out = p.axis === 'upstream' ? [] : (OUT.get(urn) ?? [])
-                    .filter((x) => edgeMatches(x, p.edge)).map((x) => x.target)
-                const inn = p.axis === 'downstream' ? [] : (IN.get(urn) ?? [])
-                    .filter((x) => edgeMatches(x, p.edge)).map((x) => x.source)
+                const out = p.axis === 'upstream' ? [] : (OUT.get(urn) ?? []).filter(walked).map((x) => x.target)
+                const inn = p.axis === 'downstream' ? [] : (IN.get(urn) ?? []).filter(walked).map((x) => x.source)
                 return [...out, ...inn]
             }
             const found = new Set<string>()
@@ -242,22 +263,19 @@ export function matches(e: HarnessEntity, p: Predicate): boolean {
                 default: return good.length > 0
             }
         }
-        case 'isRoot': return !(IN.get(e.urn)?.length)
-        case 'isLeaf': return !(OUT.get(e.urn)?.length)
-        case 'isOrphan': return !(IN.get(e.urn)?.length) && !(OUT.get(e.urn)?.length)
-        case 'hasIncoming': return !!IN.get(e.urn)?.length
-        case 'hasOutgoing': return !!OUT.get(e.urn)?.length
+        case 'isRoot': return edgeCount(e, p, 'in') === 0
+        case 'isLeaf': return edgeCount(e, p, 'out') === 0
+        case 'isOrphan': return edgeCount(e, p, 'both') === 0
+        case 'hasIncoming': return edgeCount(e, p, 'in') > 0
+        case 'hasOutgoing': return edgeCount(e, p, 'out') > 0
         case 'withinHops': {
             const anchors = resolveAll(p.urns, p.refs)
             const axis = p.direction === 'in' ? 'downstream' : p.direction === 'out' ? 'upstream' : 'neighbor'
             return relatives(e, { kind: 'related', axis, maxHops: p.hops } as RelatedPredicate)
                 .some((r) => anchors.has(r.urn))
         }
-        case 'degree': {
-            const n = (p.direction === 'in' ? 0 : OUT.get(e.urn)?.length ?? 0)
-                + (p.direction === 'out' ? 0 : IN.get(e.urn)?.length ?? 0)
-            return countOk(n, p.op ?? 'gte', p.value)
-        }
+        case 'degree':
+            return countOk(edgeCount(e, p, p.direction ?? 'both'), p.op ?? 'gte', p.value)
         default: return false
     }
 }
@@ -352,12 +370,15 @@ function discover() {
         for (const t of e.tags) tagValues[t] = (tagValues[t] ?? 0) + 1
     }
     for (const l of Object.values(labels)) l.keys.sort()
-    return {
-        labels, tagValues, elapsedMs: 3,
-        edges: { TRANSFORMS: { sampled: HARNESS_EDGES.length, keys: ['logic', 'mode'],
-            valueSamplesByKey: { logic: ['Direct Query', 'Extract'], mode: ['batch', 'stream'] },
-            storedAs: { logic: 'native', mode: 'json' } } },
+    const edges: Record<string, { sampled: number; keys: string[]; valueSamplesByKey: Record<string, unknown[]>;
+        storedAs: Record<string, string> }> = {}
+    for (const edge of HARNESS_EDGES) {
+        (edges[edge.type] ??= { sampled: 0, keys: [], valueSamplesByKey: {}, storedAs: {} }).sampled += 1
     }
+    edges.TRANSFORMS = { ...edges.TRANSFORMS, keys: ['logic', 'mode'],
+        valueSamplesByKey: { logic: ['Direct Query', 'Extract'], mode: ['batch', 'stream'] },
+        storedAs: { logic: 'native', mode: 'json' } }
+    return { labels, tagValues, elapsedMs: 3, edges }
 }
 
 function values(key: string, q: string, limit: number) {

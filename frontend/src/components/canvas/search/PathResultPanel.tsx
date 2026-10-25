@@ -14,6 +14,7 @@ import { type FC, useMemo } from 'react'
 
 import { cn } from '@/lib/utils'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
+import { useRelationshipTypes } from '@/store/schema'
 import type { AncestorRef, PathHit } from '@/types/search'
 
 
@@ -98,6 +99,10 @@ function PathCard({
     path: PathHit
     onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
 }) {
+    // This app's word for an edge type, else the ontology's own name.
+    const relationshipTypes = useRelationshipTypes()
+    const named = (id: string) => edgeTypeCopy(id)?.label
+        ?? relationshipTypes.find((rt) => rt.id.toUpperCase() === id.toUpperCase())?.name ?? id
     return (
         <div className={cn(
             "rounded-xl border border-glass-border/70 bg-canvas-elevated/40",
@@ -112,7 +117,7 @@ function PathCard({
                     <>
                         <span className="text-ink-muted/50">·</span>
                         <span className="font-mono truncate">
-                            {uniqueEdgeTypes(path).map(t => edgeTypeCopy(t)?.label ?? t).join(' → ')}
+                            {uniqueEdgeTypes(path).map(named).join(' → ')}
                         </span>
                     </>
                 )}
@@ -127,7 +132,7 @@ function PathCard({
                             onClick={onReveal ? () => onReveal(node.urn, []) : undefined}
                         />
                         {i < path.edges.length && (
-                            <EdgeArrow edgeType={path.edges[i]?.edgeType ?? ''} />
+                            <EdgeArrow label={named(path.edges[i]?.edgeType ?? '')} />
                         )}
                     </div>
                 ))}
@@ -168,11 +173,11 @@ function NodeChip({
 }
 
 
-function EdgeArrow({ edgeType }: { edgeType: string }) {
+function EdgeArrow({ label }: { label: string }) {
     return (
         <div className="flex flex-col items-center px-0.5">
             <span className="text-[8px] font-mono text-ink-muted leading-none">
-                {edgeTypeCopy(edgeType)?.label ?? edgeType}
+                {label}
             </span>
             <ArrowRight className="w-3 h-3 text-ink-muted" strokeWidth={2} />
         </div>

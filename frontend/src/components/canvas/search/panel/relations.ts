@@ -15,21 +15,29 @@ import type { NodeRef, Predicate, RelatedPredicate } from '@/types/search'
 
 import { formatUrnLabel } from '@/lib/urnLabels'
 
+import { edgeSetPhrase } from './vocabulary/edgeWords'
+
 
 export type RelationAxis = RelatedPredicate['axis']
 export type Quantifier = NonNullable<RelatedPredicate['quantifier']>
 
 export interface AxisMeta {
     axis: RelationAxis
-    /** Menu label. */
+    /** The Form's verb for it — what the entity does to its relative,
+     *  "Feeds", "Is inside" — never "has a target". */
     label: string
+    /** The verb as a sentence reads it, describing one entity and several. */
+    verb: [one: string, many: string]
+    /** Its section of the verb menu: the containment tree, or connections. */
+    group: 'hierarchy' | 'connected'
     /** What the relative is called, singular and plural: "parent",
      *  "parents"; for lineage, "source" — never in/out, so the direction
      *  can't be misread. */
     noun: string
     plural: string
-    /** Lineage axes walk edges, so take hops, edge types and an edge
-     *  filter; containment axes walk the tree. */
+    /** Link axes walk edges — lineage, unless edge types or every link are
+     *  chosen — so take hops, edge types and an edge filter; containment
+     *  axes walk the tree. */
     lineage: boolean
     /** Whether a hop range applies (one-step axes and `root` take none). */
     hops: boolean
@@ -37,24 +45,30 @@ export interface AxisMeta {
 }
 
 export const AXES: AxisMeta[] = [
-    { axis: 'parent', label: 'Parent', noun: 'parent', plural: 'parents', lineage: false,
-      hops: false, description: 'The container one level up' },
-    { axis: 'ancestor', label: 'Any ancestor', noun: 'ancestor', plural: 'ancestors',
-      lineage: false, hops: true, description: 'Any container above it' },
-    { axis: 'root', label: 'Top-level container', noun: 'top-level container',
-      plural: 'top-level containers', lineage: false, hops: false,
-      description: 'The container at the top of its tree' },
-    { axis: 'child', label: 'Child', noun: 'child', plural: 'children', lineage: false,
-      hops: false, description: 'What it contains directly' },
-    { axis: 'descendant', label: 'Any descendant', noun: 'descendant', plural: 'descendants',
-      lineage: false, hops: true, description: 'Anything inside it, at any depth' },
-    { axis: 'upstream', label: 'Source (upstream)', noun: 'source', plural: 'sources',
-      lineage: true, hops: true, description: 'What feeds it, through lineage' },
-    { axis: 'downstream', label: 'Target (downstream)', noun: 'target', plural: 'targets',
-      lineage: true, hops: true, description: 'What it feeds, through lineage' },
-    { axis: 'neighbor', label: 'Linked either way', noun: 'linked entity',
-      plural: 'linked entities', lineage: true, hops: true,
-      description: 'What feeds it or what it feeds' },
+    { axis: 'parent', label: 'Is directly inside', verb: ['is directly inside', 'are directly inside'],
+      group: 'hierarchy', noun: 'parent', plural: 'parents', lineage: false, hops: false,
+      description: 'Its container, one level up' },
+    { axis: 'ancestor', label: 'Is inside', verb: ['is inside', 'are inside'], group: 'hierarchy',
+      noun: 'ancestor', plural: 'ancestors', lineage: false, hops: true,
+      description: 'Any container above it' },
+    { axis: 'root', label: 'Sits under', verb: ['sits under', 'sit under'], group: 'hierarchy',
+      noun: 'top-level container', plural: 'top-level containers', lineage: false, hops: false,
+      description: 'Its top-level container — the one at the top of its tree' },
+    { axis: 'child', label: 'Directly contains', verb: ['directly contains', 'directly contain'],
+      group: 'hierarchy', noun: 'child', plural: 'children', lineage: false, hops: false,
+      description: 'What it holds, one level down' },
+    { axis: 'descendant', label: 'Contains', verb: ['contains', 'contain'], group: 'hierarchy',
+      noun: 'descendant', plural: 'descendants', lineage: false, hops: true,
+      description: 'Anything inside it, at any depth' },
+    { axis: 'downstream', label: 'Feeds', verb: ['feeds', 'feed'], group: 'connected',
+      noun: 'target', plural: 'targets', lineage: true, hops: true,
+      description: 'What it feeds, through lineage' },
+    { axis: 'upstream', label: 'Is fed by', verb: ['is fed by', 'are fed by'], group: 'connected',
+      noun: 'source', plural: 'sources', lineage: true, hops: true,
+      description: 'What feeds it, through lineage' },
+    { axis: 'neighbor', label: 'Is linked to', verb: ['is linked to', 'are linked to'],
+      group: 'connected', noun: 'linked entity', plural: 'linked entities', lineage: true,
+      hops: true, description: 'Anything it is linked to — any edge type, either way' },
 ]
 
 const BY_AXIS: Record<string, AxisMeta> = Object.fromEntries(AXES.map((a) => [a.axis, a]))
@@ -62,6 +76,39 @@ const BY_AXIS: Record<string, AxisMeta> = Object.fromEntries(AXES.map((a) => [a.
 export function axisMeta(axis: RelationAxis): AxisMeta {
     return BY_AXIS[axis] ?? AXES[0]
 }
+
+/** Which edges a link relationship walks: lineage (the default), every
+ *  link — any edge but the hierarchy's — or the edge types it names. */
+export type Through = 'lineage' | 'links' | 'types'
+
+export function throughOf(p: RelatedPredicate): Through {
+    if (p.edgeTypes) return 'types'
+    return p.edgeClass === 'links' ? 'links' : 'lineage'
+}
+
+/** How a link relationship reads: lineage forwards (feeds), backwards (is
+ *  fed by), or a link — lineage either way, every link or named edge
+ *  types, whose direction is said apart. None for the tree's axes. */
+export type LinkVerb = 'feeds' | 'fedBy' | 'linked'
+
+export function linkVerb(p: RelatedPredicate): LinkVerb | null {
+    if (!axisMeta(p.axis).lineage) return null
+    if (throughOf(p) !== 'lineage' || p.axis === 'neighbor') return 'linked'
+    return p.axis === 'downstream' ? 'feeds' : 'fedBy'
+}
+
+/** Which way a link is followed from the entity — its axis. */
+export type LinkDirection = 'out' | 'in' | 'both'
+
+export const DIRECTION_AXIS: Record<LinkDirection, RelationAxis> = {
+    out: 'downstream', in: 'upstream', both: 'neighbor',
+}
+
+export function linkDirection(axis: RelationAxis): LinkDirection {
+    return axis === 'downstream' ? 'out' : axis === 'upstream' ? 'in' : 'both'
+}
+
+const DIRECTION_WORDS: Record<LinkDirection, string> = { out: 'outgoing', in: 'incoming', both: 'either way' }
 
 /** How deep relationships nest (`DEEP_SEARCH_MAX_RELATION_DEPTH`). */
 export const RELATION_DEPTH_MAX = 3
@@ -111,6 +158,39 @@ export function maxHopsFor(p: RelatedPredicate, { topLevel, rule }: {
 }): number {
     if (rule) return 1
     return topLevel && namesItsFarEnd(p) ? RELATION_NAMED_MAX_HOPS : RELATION_MAX_HOPS
+}
+
+/** Its hops cut to what the server allows where it stands. */
+export function withinHopCap(p: RelatedPredicate, where: {
+    topLevel: boolean
+    rule: boolean
+}): RelatedPredicate {
+    if (!axisMeta(p.axis).lineage) return p
+    const cap = maxHopsFor(p, where)
+    const min = Math.min(p.minHops ?? 1, cap)
+    const max = p.maxHops && Math.min(p.maxHops, cap)
+    const { minHops: _lo, maxHops: _hi, ...rest } = p
+    return { ...rest, ...(min > 1 ? { minHops: min } : {}), ...(max && max > 1 ? { maxHops: max } : {}) }
+}
+
+/** What a relationship's More options hold, in a few words: "1–3 steps ·
+ *  lineage", "1 step · Produces edges · outgoing", "2–4 levels". None for
+ *  one step of the tree, which has no options. */
+export function optionsSummary(p: RelatedPredicate): string | null {
+    const meta = axisMeta(p.axis)
+    const [lo, hi] = hopRange(p)
+    if (meta.lineage) {
+        const through = throughOf(p)
+        return [
+            lo === hi ? `${hi} step${hi === 1 ? '' : 's'}` : `${lo}–${hi} steps`,
+            through === 'lineage' ? 'lineage' : edgeSetPhrase(p),
+            ...(through !== 'lineage' ? [DIRECTION_WORDS[linkDirection(p.axis)]] : []),
+            ...(p.edge ? ['only edges that meet conditions'] : []),
+        ].join(' · ')
+    }
+    if (!meta.hops) return null
+    if (!p.maxHops) return lo > 1 ? `${lo} levels down or more` : 'any depth'
+    return lo === hi ? `${hi} level${hi === 1 ? '' : 's'}` : `${lo}–${hi} levels`
 }
 
 /** A new relationship along ``axis``: no condition yet (any relative). */

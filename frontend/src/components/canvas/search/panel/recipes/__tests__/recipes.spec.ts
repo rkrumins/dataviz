@@ -43,11 +43,13 @@ describe('recipesFor', () => {
             'owned-by': 'Everything one person owns',
             'sensitive-unowned': 'PII or GDPR data without an owner',
             'no-lineage': 'Datasets with no lineage at all',
+            'no-links': 'Datasets nothing links to',
             'dead-ends': 'Datasets nothing reads from',
             'deprecated-in-use': 'Tagged Deprecated, but still feeding something',
             'all-of-type': 'All datasets',
             'by-name': 'Find something by name',
             'inside-one': 'Everything inside one container',
+            'linked-to-one': 'Everything linked to one entity',
             'in-layer': 'Everything in the Raw layer',
             tagged: 'Everything tagged Certified',
         })
@@ -55,8 +57,8 @@ describe('recipesFor', () => {
 
     it('offers only what the view can answer', () => {
         expect(Object.keys(titles({ types: ['chart'], tags: [], keys: [], layers: [] }))).toEqual([
-            'feeds-from-one', 'feeding-one', 'lineage-starts', 'route', 'no-lineage', 'dead-ends',
-            'all-of-type', 'by-name', 'inside-one',
+            'feeds-from-one', 'feeding-one', 'lineage-starts', 'route', 'no-lineage', 'no-links', 'dead-ends',
+            'all-of-type', 'by-name', 'inside-one', 'linked-to-one',
         ])
         expect(titles({ types: ['chart'], tags: [], keys: [], layers: [] })['all-of-type']).toBe('All charts')
     })
@@ -70,6 +72,12 @@ describe('recipesFor', () => {
         expect(by.unclassified).toEqual({ kind: 'group', op: 'and', children: [
             { kind: 'entityType', op: 'in', values: ['dataset'] }, { kind: 'tag', op: 'notHas', values: ['PII', 'GDPR'] },
         ] })
+        // Every link, either way: lineage, tags, terms and the rest.
+        expect(by['no-links']).toEqual({ kind: 'group', op: 'and', children: [
+            { kind: 'entityType', op: 'in', values: ['dataset'] }, { kind: 'isOrphan', edgeClass: 'links' },
+        ] })
+        expect(by['linked-to-one']).toEqual({ kind: 'related', axis: 'neighbor', edgeClass: 'links',
+            where: { kind: 'is', refs: [] } })
         // An owner by another name is still the owner.
         const other = recipesFor({ ...FULL, keys: ['dataOwner'] }, typeName).find((r) => r.id === 'unowned')
         expect(other?.predicate).toEqual({ kind: 'group', op: 'and', children: [

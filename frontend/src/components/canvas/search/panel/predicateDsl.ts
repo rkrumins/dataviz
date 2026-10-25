@@ -328,7 +328,8 @@ function meaning(p: Predicate): string {
             const [lo, hi] = hopRange(p)
             return stable(['related', p.axis, p.count ? null : (p.quantifier ?? 'any'),
                 p.count ? [p.count.op ?? 'gte', p.count.value] : null, lo, hi,
-                p.edgeTypes ?? null, p.edge ? treeMeaning(fromEdge(p.edge)) : null,
+                p.edgeTypes ?? null, p.edgeClass === 'links' ? 'links' : null,
+                p.edge ? treeMeaning(fromEdge(p.edge)) : null,
                 p.where ? treeMeaning(p.where) : null])
         }
         case 'is':

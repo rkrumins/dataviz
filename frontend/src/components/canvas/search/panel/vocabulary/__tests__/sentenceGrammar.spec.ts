@@ -116,6 +116,11 @@ describe('relationVerb — a relationship read as a verb', () => {
         [{ quantifier: 'none' }, true, 'feed no'],
         [{ quantifier: 'all', where: { kind: 'isLeaf' } }, true, 'only feed'],
         [{ axis: 'upstream', quantifier: 'all', where: { kind: 'isLeaf' } }, true, 'are only fed by'],
+        // Every link, or edge types named: feeding is what lineage does.
+        [{ edgeClass: 'links' }, true, 'link to'],
+        [{ axis: 'upstream', edgeTypes: ['PRODUCES'] }, false, 'is linked from'],
+        [{ axis: 'neighbor', edgeClass: 'links', quantifier: 'none' }, true, 'are linked to no'],
+        [{ axis: 'neighbor' }, false, 'is linked to'],
         // "every" means nothing without a condition on the relatives.
         [{ quantifier: 'all' }, true, 'feed'],
         [{ count: { op: 'gte', value: 2 } }, true, 'feed at least'],

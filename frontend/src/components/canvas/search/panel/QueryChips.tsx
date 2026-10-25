@@ -20,7 +20,8 @@ import type { NodeRef, Predicate } from '@/types/search'
 import { arityOf } from '../typed/operators'
 import { describeDuration } from '../typed/valueCodec'
 
-import { axisMeta, hopRange, refLabel } from './relations'
+import { axisMeta, hopRange, refLabel, throughOf } from './relations'
+import { degreePhrase, edgeSetPhrase, shapeLabel } from './vocabulary/edgeWords'
 
 
 export interface QueryChipsProps {
@@ -137,30 +138,22 @@ function describePredicate(p: Predicate): Chip {
             return { icon: 'Layers', label: `layer = ${p.layerAssignment}` }
 
         case 'isOrphan':
-            return { icon: 'Unplug', label: 'no edges' }
+            return { icon: 'Unplug', label: shapeLabel(p.kind, p).toLowerCase() }
 
         case 'isLeaf':
-            return { icon: 'CircleArrowRight', label: 'dead-end' }
+            return { icon: 'CircleArrowRight', label: shapeLabel(p.kind, p).toLowerCase() }
 
         case 'isRoot':
-            return { icon: 'CircleArrowLeft', label: 'source' }
+            return { icon: 'CircleArrowLeft', label: shapeLabel(p.kind, p).toLowerCase() }
 
         case 'hasIncoming':
-            return { icon: 'ArrowDownToLine', label: 'has incoming' }
+            return { icon: 'ArrowDownToLine', label: shapeLabel(p.kind, p).toLowerCase() }
 
         case 'hasOutgoing':
-            return { icon: 'ArrowUpFromLine', label: 'has outgoing' }
+            return { icon: 'ArrowUpFromLine', label: shapeLabel(p.kind, p).toLowerCase() }
 
-        case 'degree': {
-            const opLabel = (p.op && DEGREE_OP_LABEL[p.op]) || p.op || '='
-            const dir = p.direction === 'both' || !p.direction
-                ? 'edges'
-                : `${p.direction} edges`
-            return {
-                icon: 'GitBranchPlus',
-                label: `${dir} ${opLabel} ${p.value}`,
-            }
-        }
+        case 'degree':
+            return { icon: 'GitBranchPlus', label: degreePhrase(p) }
 
         case 'descendantOf': {
             const anchors = named(p.urns, p.refs)
@@ -205,9 +198,10 @@ function describePredicate(p: Predicate): Chip {
             const lead = p.quantifier === 'none' ? 'no '
                 : p.quantifier === 'all' ? 'every ' : count
             const noun = count && p.count?.value !== 1 ? meta.plural : meta.noun
+            const via = meta.lineage && throughOf(p) !== 'lineage' ? ` via ${edgeSetPhrase(p)}` : ''
             return {
                 icon: meta.lineage ? 'Workflow' : 'Network',
-                label: `${lead}${noun}${hops}${p.where ? `: ${describePredicate(p.where).label}` : ''}`,
+                label: `${lead}${noun}${hops}${via}${p.where ? `: ${describePredicate(p.where).label}` : ''}`,
             }
         }
 

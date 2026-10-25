@@ -64,7 +64,8 @@ describe('filterKinds — what can be added where', () => {
         expect(ids(availableCategories({ ...everywhere, rule: true }))).not.toContain('path')
         const noCode = ids(availableCategories({ ...everywhere, canCode: false }))
         expect(noCode).not.toContain('within-hops')
-        expect(noCode).not.toContain('degree')
+        // An edge count is built in the Form.
+        expect(noCode).toContain('degree')
     })
 
     it('drops a category left with nothing in it', () => {

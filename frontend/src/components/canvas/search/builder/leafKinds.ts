@@ -201,9 +201,9 @@ const OWN_WORDS: readonly LeafKindMeta[] = [
         makeEmpty: () => ({
             kind: 'degree',
             direction: 'both',
-            op: 'eq',
-            value: 0,
-            edgeClass: DEFAULT_EDGE_CLASS,
+            op: 'gt',
+            value: 5,
+            edgeClass: 'links',
         }),
     },
 

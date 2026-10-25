@@ -574,6 +574,7 @@ describe('predicateDsl — relationships and names', () => {
     it.each<[string, Predicate]>([
         ['a relationship through named edge types', { kind: 'related', axis: 'upstream',
             edgeTypes: ['FEEDS'] }],
+        ['a relationship through every link', { kind: 'related', axis: 'neighbor', edgeClass: 'links' }],
         ['a reference narrowed by type', { kind: 'is', refs: [{ path: ['Sales'], entityType: 'domain' }] }],
         ['a case-insensitive reference', { kind: 'is', refs: [{ path: ['sales'], caseSensitive: false }] }],
         ['several references', { kind: 'is', refs: [{ path: ['a'] }, { path: ['b'] }] }],

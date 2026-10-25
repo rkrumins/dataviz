@@ -1,11 +1,13 @@
 /**
  * The catalog the search harness answers from: a small but honest data
  * estate — platforms, containers, datasets and their columns, dashboards
- * and charts — with containment, column- and table-level lineage, tags
- * and the properties people search by (owner, description, row counts,
- * data types). Shaped so every search state is reachable: PII columns,
- * a dead end, an orphan, undocumented and unowned datasets, a name that is
- * both a container and a tag ("Finance"), and lineage several hops deep.
+ * and charts, the jobs that write them and the glossary that defines them
+ * — with containment, column- and table-level lineage, links that are not
+ * lineage (Defined by), tags and the properties people search by (owner,
+ * description, row counts, data types). Shaped so every search state is
+ * reachable: PII columns, a dead end, an orphan, undocumented and unowned
+ * datasets, a name that is both a container and a tag ("Finance"), lineage
+ * several hops deep, and a glossary term nothing is defined by.
  */
 import type { Predicate } from '@/types/search'
 
@@ -37,6 +39,23 @@ export const ENTITY_TYPES: ReadonlyArray<{
     { id: 'schemaField', name: 'Column', pluralName: 'Columns', icon: 'Columns3', color: '#0ea5e9' },
     { id: 'dashboard', name: 'Dashboard', pluralName: 'Dashboards', icon: 'LayoutDashboard', color: '#f59e0b' },
     { id: 'chart', name: 'Chart', pluralName: 'Charts', icon: 'BarChart3', color: '#f97316' },
+    { id: 'dataJob', name: 'Data job', pluralName: 'Data jobs', icon: 'Workflow', color: '#14b8a6' },
+    { id: 'glossaryTerm', name: 'Glossary term', pluralName: 'Glossary terms', icon: 'BookOpen', color: '#ec4899' },
+]
+
+/** The relationship types the ontology declares, as the edge-type picker
+ *  lists them. */
+export const RELATIONSHIP_TYPES: ReadonlyArray<{
+    id: string; name: string; sourceTypes: string[]; targetTypes: string[]
+    isLineage?: boolean; isContainment?: boolean; category: string
+}> = [
+    { id: 'CONTAINS', name: 'Contains', sourceTypes: [], targetTypes: [], isContainment: true, category: 'structural' },
+    { id: 'TRANSFORMS', name: 'Transforms', sourceTypes: ['dataset', 'schemaField'],
+      targetTypes: ['dataset', 'schemaField', 'dashboard', 'chart'], isLineage: true, category: 'flow' },
+    { id: 'PRODUCES', name: 'Produces', sourceTypes: ['dataJob'], targetTypes: ['dataset'], isLineage: true, category: 'flow' },
+    { id: 'CONSUMES', name: 'Consumes', sourceTypes: ['dataJob'], targetTypes: ['dataset'], isLineage: true, category: 'flow' },
+    { id: 'DEFINED_BY', name: 'Defined by', sourceTypes: [], targetTypes: ['glossaryTerm'], category: 'metadata' },
+    { id: 'TAGGED_WITH', name: 'Tagged with', sourceTypes: [], targetTypes: ['tag'], category: 'metadata' },
 ]
 
 export const LAYERS: ReadonlyArray<{ id: string; name: string }> = [
@@ -61,6 +80,10 @@ function add(entityType: string, displayName: string, parent: string | null,
 
 function feeds(source: string, target: string, properties: Record<string, unknown> = {}) {
     edges.push({ source, target, type: 'TRANSFORMS', properties })
+}
+
+function link(type: string, source: string, target: string) {
+    edges.push({ source, target, type, properties: {} })
 }
 
 
@@ -201,6 +224,25 @@ feeds(factOrders.order_key, revenueDaily.orders)
 feeds(cleanOrders.channel, factOrders.channel)
 feeds(dimCustomer.customer_key, churnScores.customer_key)
 
+// -- Airflow: the jobs that write the tables ------------------------------
+const airflow = add('dataPlatform', 'Airflow', null, { properties: { vendor: 'Apache' } })
+const loadOrders = add('dataJob', 'load_orders', airflow, { properties: { owner: 'ingest@corp', schedule: 'hourly' } })
+const buildFactOrders = add('dataJob', 'build_fact_orders', airflow,
+    { properties: { owner: 'finance-data@corp', schedule: 'daily' } })
+link('PRODUCES', loadOrders, rawOrders.$)
+link('CONSUMES', buildFactOrders, cleanOrders.$)
+link('PRODUCES', buildFactOrders, factOrders.$)
+
+// -- The glossary: what the data means -------------------------------------
+const glossary = add('container', 'Business Glossary', null)
+const customerTerm = add('glossaryTerm', 'Customer', glossary,
+    { description: 'A person or company that buys from us.' })
+const revenueTerm = add('glossaryTerm', 'Revenue', glossary, { description: 'Income from orders, net of refunds.' })
+add('glossaryTerm', 'Churn', glossary, { description: 'A customer who stops buying.' })
+for (const defined of [rawCustomers.$, cleanCustomers.$, dimCustomer.$]) link('DEFINED_BY', defined, customerTerm)
+link('DEFINED_BY', revenueDaily.$, revenueTerm)
+link('DEFINED_BY', factOrders.amount_usd, revenueTerm)
+
 export const HARNESS_ENTITIES: readonly HarnessEntity[] = entities
 export const HARNESS_EDGES: readonly HarnessEdge[] = edges
 export const HARNESS_VIEW_ID = 'view-harness'
@@ -218,14 +260,13 @@ export interface SearchFixture {
 
 const type = (...values: string[]): Predicate => ({ kind: 'entityType', op: 'in', values })
 
-const formDraft: Predicate = {
-    kind: 'group', op: 'and', children: [
-        type('dataset'),
-        { kind: 'related', axis: 'downstream', maxHops: 3,
-            where: { kind: 'group', op: 'and', children: [type('chart'),
-                { kind: 'related', axis: 'ancestor', where: { kind: 'is', refs: [{ path: ['**', 'Finance'] }] } }] } },
-    ],
+const feedsFinanceChart: Predicate = {
+    kind: 'related', axis: 'downstream', maxHops: 3,
+    where: { kind: 'group', op: 'and', children: [type('chart'),
+        { kind: 'related', axis: 'ancestor', where: { kind: 'is', refs: [{ path: ['**', 'Finance'] }] } }] },
 }
+
+const formDraft: Predicate = { kind: 'group', op: 'and', children: [type('dataset'), feedsFinanceChart] }
 
 export const SEARCH_FIXTURES: Record<string, SearchFixture> = {
     empty: { draft: null, note: 'The empty panel: where everyone starts.' },
@@ -264,6 +305,38 @@ export const SEARCH_FIXTURES: Record<string, SearchFixture> = {
         draft: { kind: 'group', op: 'or', children: [
             { kind: 'tag', op: 'hasAny', values: ['PII'] },
             { kind: 'tag', op: 'hasAny', values: ['Certified'] },
+        ] },
+    },
+    connection: {
+        editorMode: 'form',
+        note: 'Connections: datasets a job writes, through Produces edges, that feed a Finance chart within 3 steps.',
+        draft: { kind: 'group', op: 'and', children: [
+            type('dataset'),
+            { kind: 'related', axis: 'upstream', edgeTypes: ['PRODUCES'], where: type('dataJob') },
+            feedsFinanceChart,
+        ] },
+    },
+    edgeTypes: {
+        editorMode: 'form',
+        note: 'Connected through an edge type: the picker, each type with what it connects.',
+        draft: { kind: 'related', axis: 'neighbor', edgeTypes: [], where: type('glossaryTerm') },
+    },
+    edgeCount: {
+        editorMode: 'form',
+        note: 'Edges counted: jobs with more than one outgoing link that produce something.',
+        draft: { kind: 'group', op: 'and', children: [
+            type('dataJob'),
+            { kind: 'degree', direction: 'out', op: 'gt', value: 1, edgeClass: 'links' },
+            { kind: 'hasOutgoing', edgeTypes: ['PRODUCES'] },
+        ] },
+    },
+    sentenceLinks: {
+        editorMode: 'sentence',
+        note: 'Every link, read as a sentence: datasets linked to a glossary term, and terms nothing links into.',
+        draft: { kind: 'group', op: 'or', children: [
+            { kind: 'group', op: 'and', children: [type('dataset'),
+                { kind: 'related', axis: 'neighbor', edgeClass: 'links', where: type('glossaryTerm') }] },
+            { kind: 'group', op: 'and', children: [type('glossaryTerm'), { kind: 'isRoot', edgeClass: 'links' }] },
         ] },
     },
     sentenceAny: {

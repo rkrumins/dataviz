@@ -225,6 +225,17 @@ const RECIPES: readonly RecipeDef[] = [
         }),
     },
     {
+        id: 'no-links', intent: 'cleanup', icon: 'Link2Off',
+        make: (r, name) => {
+            const shape: Predicate = { kind: 'isOrphan', edgeClass: 'links' }
+            return {
+                title: r.data ? `${cap(name(r.data, true))} nothing links to` : 'Entities nothing links to',
+                description: 'No lineage, tag, glossary term or any other link, either way: the most cut off.',
+                predicate: r.data ? and(typeIs(r.data), shape) : shape,
+            }
+        },
+    },
+    {
         id: 'dead-ends', intent: 'cleanup', icon: 'ArrowDownToLine',
         make: (r, name) => {
             const shape: Predicate[] = [{ kind: 'hasIncoming', ...LINEAGE }, { kind: 'isLeaf', ...LINEAGE }]
@@ -271,6 +282,14 @@ const RECIPES: readonly RecipeDef[] = [
             title: 'Everything inside one container',
             description: 'Pick a container, a database or a folder, to see what it holds.',
             predicate: related('ancestor', named()),
+        }),
+    },
+    {
+        id: 'linked-to-one', intent: 'discovery', icon: 'Link2', blank: true,
+        make: () => ({
+            title: 'Everything linked to one entity',
+            description: 'Pick an entity — a tag, a glossary term, a job — to see what it is linked to, either way.',
+            predicate: { kind: 'related', axis: 'neighbor', edgeClass: 'links', where: named() },
         }),
     },
     {

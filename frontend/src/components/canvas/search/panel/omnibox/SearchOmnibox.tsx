@@ -34,10 +34,13 @@ import { type FC, useCallback, useMemo, useRef, useState } from 'react'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { HighlightedText } from '@/components/ui/HighlightedText'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { cn } from '@/lib/utils'
+import { useContainmentEdgeTypes, useRelationshipTypes } from '@/store/schema'
 import type { Predicate } from '@/types/search'
 
 import type { LayerOption } from '../layerOptions'
+import { edgeTypeName } from '../vocabulary/edgeWords'
 
 import {
     BROWSE_FACETS,
@@ -79,11 +82,20 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
     const [activeGroup, setActiveGroup] = useState<SuggestionGroup | null>(null)
     const [focused, setFocused] = useState(false)
     const inputRef = useRef<HTMLInputElement>(null)
+    // The edge types a connection can walk: every one but the hierarchy's.
+    const relationshipTypes = useRelationshipTypes()
+    const containment = useContainmentEdgeTypes()
+    const edgeTypes = useMemo(() => {
+        const contains = new Set(containment.map((t) => t.toUpperCase()))
+        return relationshipTypes
+            .filter((rt) => !rt.isContainment && !contains.has(rt.id.toUpperCase()))
+            .map((rt) => ({ id: rt.id, name: edgeTypeCopy(rt.id)?.label ?? (rt.name || edgeTypeName(rt.id)) }))
+    }, [relationshipTypes, containment])
 
     const sections = useMemo(() => suggestFilters({
         query, entityTypes, tagValues, propertyKeys, valueSamples,
-        layers, activeGroup,
-    }), [query, entityTypes, tagValues, propertyKeys, valueSamples, layers, activeGroup])
+        layers, edgeTypes, activeGroup,
+    }), [query, entityTypes, tagValues, propertyKeys, valueSamples, layers, edgeTypes, activeGroup])
 
     const handleSelect = useCallback((item: FilterSuggestion) => {
         onAdd(item.predicate, item.complete)
