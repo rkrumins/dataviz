@@ -12,11 +12,13 @@ import { KeyDialog } from '@/components/apiKeys/KeyDialog'
 import { Button } from '@/components/ui/Button'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
+import { WORKSPACE_DIRECTORY_FEATURE } from '@/hooks/useWorkspaceAccess'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { cn } from '@/lib/utils'
 import { accessRequestsService, type RequestOptions } from '@/services/accessRequestsService'
 import type { ServiceAccountDetail } from '@/services/serviceAccountService'
 import { workspaceService } from '@/services/workspaceService'
+import { useFeature } from '@/store/features'
 
 /** How many workspaces the picker offers at once; more are found by name. */
 const WORKSPACES_SHOWN = 20
@@ -35,6 +37,7 @@ export function RequestForAccount({ account, onClose, onSent }: {
     const [mine, setMine] = useState<Place[] | null>(null)
     // Find a workspace, while the deployment has it on: workspaces you are
     // not in yet. Read once; filtered here.
+    const directoryOn = useFeature(WORKSPACE_DIRECTORY_FEATURE)
     const [listed, setListed] = useState<Place[]>([])
     const [workspace, setWorkspace] = useState<Place | null>(null)
     const [options, setOptions] = useState<{ workspaceId: string; options: RequestOptions | null } | null>(null)
@@ -50,12 +53,13 @@ export function RequestForAccount({ account, onClose, onSent }: {
         return () => { live = false }
     }, [search])
     useEffect(() => {
+        if (!directoryOn) return
         let live = true
         workspaceService.directory()
             .then((entries) => { if (live) setListed(entries.map((e) => ({ id: e.id, name: e.name }))) })
-            .catch(() => { /* Find a workspace is switched off: your own workspaces only. */ })
+            .catch(() => { /* Unreadable: your own workspaces only. */ })
         return () => { live = false }
-    }, [])
+    }, [directoryOn])
 
     const offered = useMemo(() => {
         const q = search.toLowerCase()

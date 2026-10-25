@@ -23,7 +23,7 @@ const { sa, client, keysOf, notify, feature, perms, searchDirectory, listPage, r
             get: vi.fn(), update: vi.fn(), disable: vi.fn(), enable: vi.fn(), addManager: vi.fn(),
             removeManager: vi.fn(), grantRole: vi.fn(), revokeRole: vi.fn(),
         },
-        client, keysOf: vi.fn(() => client), notify: vi.fn(), feature: { on: true },
+        client, keysOf: vi.fn(() => client), notify: vi.fn(), feature: { on: true, directory: false },
         perms: new Set<string>(),
         searchDirectory: vi.fn(), listPage: vi.fn(), requestableRoles: vi.fn(), directory: vi.fn(),
         ar: { submit: vi.fn(), extend: vi.fn(), withdraw: vi.fn() },
@@ -49,7 +49,9 @@ vi.mock('@/components/account/AccountShell', async (importOriginal) => ({
 }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 vi.mock('@/lib/useDocumentTitle', () => ({ useDocumentTitle: () => {} }))
-vi.mock('@/store/features', () => ({ useFeature: () => feature.on }))
+vi.mock('@/store/features', () => ({
+    useFeature: (name: string) => (name === 'workspaceDirectoryEnabled' ? feature.directory : feature.on),
+}))
 vi.mock('@/store/auth', () => ({ usePermission: (perm: string) => perms.has(perm) }))
 
 /** What one of its managers may do. */
@@ -100,6 +102,7 @@ beforeEach(() => {
     vi.clearAllMocks()
     sessionStorage.clear()
     feature.on = true
+    feature.directory = false
     perms.clear()
     sa.get.mockResolvedValue(account())
     client.list.mockResolvedValue([KEY])
@@ -252,6 +255,26 @@ describe('its access', () => {
             justification: 'Nightly sync of Sales graphs', serviceAccountId: 'svc_sync',
         }))
         await waitFor(() => expect(sa.get).toHaveBeenCalledTimes(2))       // read again, with the request
+    })
+
+    it('offers what Find a workspace lists only while it is on', async () => {
+        listPage.mockResolvedValue({ items: [{ id: 'ws_sales', name: 'Sales' }], totalCount: 1 })
+        directory.mockResolvedValue([{ id: 'ws_fin', name: 'Finance' }])
+        const { unmount } = renderPage()
+        const ask = async () => {
+            const about = await screen.findByRole('region', { name: 'About this service account' })
+            await userEvent.click(within(about).getByRole('button', { name: /ask a workspace for access/i }))
+            const dialog = await screen.findByRole('dialog', { name: 'Ask for access for “Metadata sync”' })
+            await within(dialog).findByRole('option', { name: 'Sales' })
+            return dialog
+        }
+        expect(within(await ask()).queryByRole('option', { name: 'Finance' })).not.toBeInTheDocument()
+        expect(directory).not.toHaveBeenCalled()
+        unmount()
+
+        feature.directory = true
+        renderPage()
+        expect(await within(await ask()).findByRole('option', { name: 'Finance' })).toBeInTheDocument()
     })
 
     it('says a workspace that takes no requests must add it', async () => {
