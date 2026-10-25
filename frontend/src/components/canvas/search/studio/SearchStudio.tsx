@@ -6,7 +6,8 @@
  * It covers the region the panel and its canvas share — portaled, so no
  * clipped or blurred column holds it, and opaque, so the canvas behind is
  * neither seen nor reachable (it is made inert), and the canvas's shortcuts
- * leave the keys typed in it alone. It fades in and simply unmounts: there
+ * leave the keys typed in it alone. The app around it stays in reach, so it
+ * is a dialog but not a modal one. It fades in and simply unmounts: there
  * is no exit to strand it. Esc closes it unless a popover is open; the
  * panel keeps the one query card while it is.
  *
@@ -62,37 +63,49 @@ export function SearchStudio({ host, onClose, builder, results, inspector }: Sea
         return () => host.removeAttribute('inert')
     }, [host])
 
-    // The question first.
+    // Focus moves into it: to the field an empty card starts in, else the
+    // top; Tab goes on from there.
     useEffect(() => {
-        const frame = requestAnimationFrame(() => rootRef.current
-            ?.querySelector<HTMLInputElement>('input[aria-label="Ask about this view"]')?.focus())
+        const frame = requestAnimationFrame(() => {
+            if (!rootRef.current?.contains(document.activeElement)) rootRef.current?.focus()
+        })
         return () => cancelAnimationFrame(frame)
     }, [])
 
-    const onKeyDown = (e: React.KeyboardEvent) => {
-        if (e.key !== 'Escape' || e.defaultPrevented) return
-        // Esc is a popover's first.
-        if (document.querySelector('[data-radix-popper-content-wrapper], [data-floating-layer]')) return
-        e.preventDefault()
-        // The press closed the Studio: the canvas behind must not take it too.
-        e.stopPropagation()
-        onClose()
-    }
+    // Esc closes it: pressed in it, or with focus fallen to the page when
+    // the control that held it went away. A popover's Esc is its own, and
+    // the canvas behind doesn't take the press too.
+    useEffect(() => {
+        const onKey = (e: KeyboardEvent) => {
+            if (e.key !== 'Escape') return
+            const at = document.activeElement
+            const fallen = !at || at === document.body
+            // Focus elsewhere in the app: not its press. A control in it
+            // that took the press keeps it — the canvas's keys mark every
+            // Esc they see, so only a press from inside is read that way.
+            if (!fallen && (!rootRef.current?.contains(at) || e.defaultPrevented)) return
+            if (document.querySelector('[data-radix-popper-content-wrapper], [data-floating-layer]')) return
+            e.preventDefault()
+            e.stopPropagation()
+            onClose()
+        }
+        document.addEventListener('keydown', onKey)
+        return () => document.removeEventListener('keydown', onKey)
+    }, [onClose])
 
     const section = 'flex min-h-0 flex-col gap-3 p-4'
     return createPortal(
         <motion.div
             ref={rootRef}
             role="dialog"
-            aria-modal="true"
             aria-label="Search Studio"
+            tabIndex={-1}
             data-search-studio=""
             {...keyboardScopeProps('search-studio')}
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             transition={MOTION.fadeIn}
-            onKeyDown={onKeyDown}
-            className="fixed z-40 flex flex-col bg-canvas-base text-ink shadow-2xl"
+            className="fixed z-40 flex flex-col bg-canvas-base text-ink shadow-2xl outline-none"
             style={rect ? { top: rect.top, left: rect.left, width: rect.width, height: rect.height }
                 : { top: 0, left: 0, right: 0, bottom: 0 }}
         >

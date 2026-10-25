@@ -16,6 +16,7 @@ import type { SearchCountsRequest } from '@/types/search'
 import { stubAdvanced, stubSession } from '@/test/stubSearchSession'
 
 import { SearchMapPanel } from '../../../SearchMapPanel'
+import { EDITOR_MODE_KEY } from '../../builderMode'
 import { RecipeGallery } from '../RecipeGallery'
 import { recipesFor } from '../recipes'
 
@@ -103,7 +104,18 @@ describe('SearchMapPanel — starting from a recipe', () => {
         expect(advanced.runPredicate).toHaveBeenCalledWith(starts, expect.anything())
     })
 
-    it('opens a recipe with something to fill in at its blank, in the Sentence view', async () => {
+    it('leaves a recipe with something to fill in as an empty field in the Form cards', () => {
+        const advanced = renderPanel()
+        fireEvent.click(screen.getByRole('button', { name: /^All \d+/ }))
+        fireEvent.click(screen.getByRole('button', { name: /Find something by name/ }))
+        expect(advanced.runPredicate).not.toHaveBeenCalled()
+        expect(screen.getByRole('radio', { name: 'Form' })).toHaveAttribute('aria-checked', 'true')
+        expect(useSearchStore.getState().draftPredicate).toMatchObject({ kind: 'text', value: '', target: 'name' })
+        expect(useSearchStore.getState().pendingOpenBlank).toBe(false)
+    })
+
+    it('opens it at its blank for someone building in the Sentence view', async () => {
+        localStorage.setItem(EDITOR_MODE_KEY, 'sentence')
         const advanced = renderPanel()
         fireEvent.click(screen.getByRole('button', { name: /^All \d+/ }))
         fireEvent.click(screen.getByRole('button', { name: /Find something by name/ }))

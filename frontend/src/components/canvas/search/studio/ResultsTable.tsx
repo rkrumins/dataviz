@@ -1,8 +1,9 @@
 /**
  * ResultsTable — the matches as a table, for the room Search Studio has:
  * one row each, in the server's order, more loaded as the end comes into
- * view. Rows can be picked and acted on together — framed on the canvas,
- * kept as the only ones, left out, or copied by name.
+ * view, with chips to narrow it by type as the cards have. Rows can be
+ * picked and acted on together — framed on the canvas, kept as the only
+ * ones, left out, or copied by name.
  */
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { Copy, ExternalLink, Filter, Focus, Sparkles, X } from 'lucide-react'
@@ -14,6 +15,8 @@ import { useEntityTypeLabel, useEntityVisual } from '@/hooks/useEntityVisual'
 import { cn } from '@/lib/utils'
 import type { AncestorRef, Predicate, SearchHit } from '@/types/search'
 
+import { FacetChips } from '../panel/results/FacetChips'
+import { useTypeFacet } from '../panel/results/useTypeFacet'
 import { whyItMatched } from '../panel/results/whyItMatched'
 import { andWith, buildSentence } from '../panel/sentence/clauseModel'
 import { lineText } from '../panel/sentence/lineWords'
@@ -22,8 +25,9 @@ import { matchedFieldLabel } from '../SearchHitRow'
 
 
 const ROW_PX = 36
-/** "Keep only these" names entities one by one — past this, narrow first. */
-export const KEEP_MAX = 200
+/** "Keep only these" names entities one by one, and one condition names at
+ *  most this many (the server's limit) — past it, narrow first. */
+export const KEEP_MAX = 64
 const COLUMNS = 'grid-cols-[28px_minmax(10rem,2fr)_7rem_minmax(9rem,2fr)_minmax(8rem,1.4fr)_4.5rem]'
 
 
@@ -40,11 +44,15 @@ export interface ResultsTableProps {
     canLoadMore: boolean
     isLoadingMore: boolean
     onLoadMore?: () => void
+    /** The view, to count each type when not every match is loaded. */
+    viewId?: string | null
+    /** How many match in all, when known. */
+    total?: number | null
 }
 
 
 export function ResultsTable({ hits, query, draft, onRefine, onReveal, onOpen, onLookInside, onFrame,
-    canLoadMore, isLoadingMore, onLoadMore }: ResultsTableProps) {
+    canLoadMore, isLoadingMore, onLoadMore, viewId = null, total = null }: ResultsTableProps) {
     const scrollRef = useRef<HTMLDivElement>(null)
     const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set())
     const virtualizer = useVirtualizer({
@@ -76,9 +84,15 @@ export function ResultsTable({ hits, query, draft, onRefine, onReveal, onOpen, o
     const allPicked = hits.length > 0 && picked.size === hits.length
     const pickedHits = useMemo(() => hits.filter((h) => picked.has(h.node.urn)), [hits, picked])
     const named = pickedHits.slice(0, KEEP_MAX).map((h) => ({ urn: h.node.urn }))
+    const facets = useTypeFacet(viewId, query, hits, total)
 
     return (
         <div className="flex min-h-0 flex-1 flex-col rounded-xl border border-glass-border bg-canvas-elevated/40">
+            {facets.length >= 2 && (
+                <div className="border-b border-glass-border px-1 pb-1.5">
+                    <FacetChips facets={facets} draft={draft} onRefine={onRefine} />
+                </div>
+            )}
             <div role="row" className={cn('grid items-center gap-2 border-b border-glass-border px-2 py-1.5',
                 'text-2xs font-semibold uppercase tracking-wider text-ink-muted', COLUMNS)}>
                 <input type="checkbox" aria-label="Pick every loaded row" checked={allPicked}

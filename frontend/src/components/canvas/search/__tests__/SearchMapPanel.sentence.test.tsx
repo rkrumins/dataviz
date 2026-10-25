@@ -1,7 +1,7 @@
 /**
- * The query card opens in the persona's editor — Sentence for Business,
- * Form for Technical — and while the Sentence shows the query, the
- * one-line statement above the results would only repeat it.
+ * The query card opens in the Form cards, for everyone, as it always has;
+ * the Sentence is a click away, and while it shows the query the one-line
+ * statement above the results would only repeat it.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
@@ -58,18 +58,18 @@ describe('SearchMapPanel — Sentence and Form', () => {
         useSearchStore.getState().commitDraft({ kind: 'tag', op: 'hasAny', values: ['PII'] })
     })
 
-    it('opens Business in the Sentence, which states the query on its own', () => {
+    it('opens in the Form cards, with the query in one line beside them', () => {
         renderPanel(answered(true))
-        expect(screen.getByRole('radio', { name: 'Sentence' })).toBeChecked()
-        expect(screen.getByRole('list', { name: 'The query, as a sentence' })).toBeInTheDocument()
-        expect(oneLine()).not.toBeInTheDocument()
-    })
-
-    it('states the query in one line again beside the Form cards', () => {
-        renderPanel(answered(true))
-        fireEvent.click(screen.getByRole('radio', { name: 'Form' }))
+        expect(screen.getByRole('radio', { name: 'Form' })).toBeChecked()
         expect(screen.queryByRole('list', { name: 'The query, as a sentence' })).not.toBeInTheDocument()
         expect(oneLine()).toBeInTheDocument()
+    })
+
+    it('reads it as a sentence a click away, which states the query on its own', () => {
+        renderPanel(answered(true))
+        fireEvent.click(screen.getByRole('radio', { name: 'Sentence' }))
+        expect(screen.getByRole('list', { name: 'The query, as a sentence' })).toBeInTheDocument()
+        expect(oneLine()).not.toBeInTheDocument()
     })
 
     it('states it in one line with the builder folded away', () => {
@@ -77,7 +77,7 @@ describe('SearchMapPanel — Sentence and Form', () => {
         expect(oneLine()).toBeInTheDocument()
     })
 
-    it('opens Technical in the Form cards', () => {
+    it('opens Technical in the Form cards too', () => {
         usePersonaStore.setState({ mode: 'technical' })
         renderPanel(answered(true))
         expect(screen.getByRole('radio', { name: 'Form' })).toBeChecked()

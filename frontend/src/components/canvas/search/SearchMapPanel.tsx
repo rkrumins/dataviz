@@ -98,6 +98,12 @@ import { ViewRecipes } from './panel/recipes/ViewRecipes'
 import { ResultsTable } from './studio/ResultsTable'
 import { SchemaInspector } from './studio/SchemaInspector'
 import { SearchStudio } from './studio/SearchStudio'
+import { useHostRect } from './studio/useHostRect'
+
+
+/** The header width its toolbar needs with every chip labelled — with the
+ *  Refine chip, and without it. */
+const LABELLED_WIDTH = { withRefine: 570, without: 480 }
 
 
 export interface SearchMapPanelProps {
@@ -751,6 +757,8 @@ function PanelInner({
                                     canLoadMore={!!view.result.cursor}
                                     isLoadingMore={isLoadingMore}
                                     onLoadMore={loadMore}
+                                    viewId={viewId}
+                                    total={view.result.totalCount ?? view.result.candidateCount ?? null}
                                 />
                             ) : (
                                 <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">{resultsPane}</div>
@@ -802,9 +810,16 @@ function CompactHeader({
      *  nothing to toggle it to. */
     onToggleRefine?: () => void
 }) {
+    // Narrower than the whole toolbar needs, its chips keep only their
+    // icons — and at the narrowest the toolbar takes a second row — so
+    // Close and the Studio's button stay in reach.
+    const [headerEl, setHeaderEl] = useState<HTMLDivElement | null>(null)
+    const headerWidth = useHostRect(headerEl)?.width ?? 0
+    const iconOnly = headerWidth > 0
+        && headerWidth < (onToggleRefine ? LABELLED_WIDTH.withRefine : LABELLED_WIDTH.without)
     return (
-        <div className={cn(
-            'flex items-center gap-2 px-4 py-3',
+        <div ref={setHeaderEl} className={cn(
+            'flex flex-wrap items-center gap-x-1.5 gap-y-2 px-3.5 py-3',
             'border-b border-glass-border/60 bg-canvas-elevated/60',
         )}>
             <div className="flex items-center gap-2 min-w-0 shrink-0">
@@ -825,7 +840,7 @@ function CompactHeader({
                     <ScopeModePicker />
                 </div>
             </div>
-            <div className="ml-auto flex items-center gap-1">
+            <div className="ml-auto flex items-center gap-0.5">
                 {onToggleRefine && (
                     <ToolbarChip
                         label="Refine"
@@ -835,6 +850,7 @@ function CompactHeader({
                         Icon={Sparkles}
                         active={refineOpen}
                         onClick={onToggleRefine}
+                        iconOnly={iconOnly}
                     />
                 )}
                 <ToolbarChip
@@ -843,6 +859,7 @@ function CompactHeader({
                     Icon={BookOpen}
                     active={libraryOpen}
                     onClick={onOpenLibrary}
+                    iconOnly={iconOnly}
                 />
                 <ToolbarChip
                     label="Options"
@@ -853,6 +870,7 @@ function CompactHeader({
                     active={false}
                     onClick={onOpenOptions}
                     badge={optionsDeltaCount > 0 ? optionsDeltaCount : undefined}
+                    iconOnly={iconOnly}
                 />
                 <IconButton ref={expandRef} icon={Maximize2} label="Open Search Studio" shortcut="E"
                             detail="The query, its results as a table, and what the view holds — side by side"
@@ -862,7 +880,7 @@ function CompactHeader({
                     onClick={onClose}
                     title="Close"
                     className={cn(
-                        'inline-flex items-center justify-center w-7 h-7 rounded-md ml-1',
+                        'inline-flex items-center justify-center w-7 h-7 rounded-md ml-0.5',
                         'text-ink-muted hover:text-ink hover:bg-glass/40 transition-colors',
                     )}
                 >
@@ -882,7 +900,7 @@ function CompactHeader({
  * non-default-count indicator.
  */
 function ToolbarChip({
-    label, title, Icon, active, onClick, badge,
+    label, title, Icon, active, onClick, badge, iconOnly = false,
 }: {
     label: string
     title: string
@@ -890,6 +908,9 @@ function ToolbarChip({
     active: boolean
     onClick: () => void
     badge?: number
+    /** Only the icon, where the toolbar is short of room; the label stays
+     *  its name. */
+    iconOnly?: boolean
 }) {
     return (
         <button
@@ -897,8 +918,10 @@ function ToolbarChip({
             onClick={onClick}
             title={title}
             aria-pressed={active}
+            aria-label={iconOnly ? label : undefined}
             className={cn(
-                'inline-flex items-center gap-1.5 h-7 px-2 rounded-md',
+                'inline-flex items-center gap-1.5 h-7 rounded-md',
+                iconOnly ? 'px-1.5' : 'px-2',
                 'text-[11.5px] font-medium transition-colors relative',
                 active
                     ? 'bg-accent-lineage/20 text-accent-lineage'
@@ -906,7 +929,7 @@ function ToolbarChip({
             )}
         >
             <Icon className="w-3.5 h-3.5" />
-            <span>{label}</span>
+            {!iconOnly && <span>{label}</span>}
             {badge !== undefined && (
                 <span className={cn(
                     'inline-flex items-center justify-center min-w-[14px] h-[14px] px-1',

@@ -13,8 +13,8 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Added
 
-**Ask in plain words.** The query card opens on **Ask in plain words…**: "datasets that feed finance
-dashboards", "unowned datasets", "datasets in Snowflake updated in the last 7 days". Before anything
+**Ask in plain words.** Beside its filters, the query card takes a question in plain words: "datasets
+that feed finance dashboards", "unowned datasets", "datasets in Snowflake updated in the last 7 days". Before anything
 changes it reads the question back — what it reads as, and how many that finds — offers the other
 readings of a word that has several, lets you pick among entities sharing a name, and says which
 words it searched for by name. It is rule-based, reading the View's own types, tags, properties and
@@ -22,8 +22,8 @@ layers: nothing is sent to an AI service. **Enter** runs it; starting with "and"
 
 **A query as a sentence, with its map.** The new **Sentence** mode reads the query the way you'd say
 it — *Find* **datasets** *that* **feed** **a dashboard** — every word a token you click to change,
-with a map of the query's shape whenever it has a relationship or a route. **Form**, the cards, is
-a click away; Business starts in Sentence, Technical in Form.
+with a map of the query's shape whenever it has a relationship or a route. The card still opens on
+**Form**, the filter cards, for everyone; Sentence is the guided alternative, a click away.
 
 **Counts as you build.** Each Sentence line says how many still match once it is added, and the map,
 the Ask preview, recipes and type chips carry counts too — all before anything runs.
@@ -124,7 +124,8 @@ rule in the governance pack.
 - New settings: `DEEP_SEARCH_MAX_RELATION_DEPTH` (3) and `DEEP_SEARCH_RELATION_MAX_HOPS` (3).
 - An empty query card lists every filter under the search field; the **All filters** link, which
   opened the drawer's options instead, is gone.
-- The query card reopens on the mode you used last — Sentence, Form, Code or Cypher.
+- The query card reopens on the mode you used last — Form, Sentence, Code or Cypher — and opens in
+  Form until you choose another.
 - **Library → Templates** is now **Recipes**, and recipes replace the empty card's example cards.
 - Over an answer that stopped short, Business reads what it means in plain words, with the engine's
   account behind **Why?**. The Cypher tab folds its cap, parameters and notes under **Engine
@@ -142,6 +143,8 @@ rule in the governance pack.
 
 ### Fixed
 
+- With results showing, the search panel's header pushed **Close** past the panel's edge at its usual
+  width. Its chips now shrink to icons when room runs short, and take a second row at the narrowest.
 - A path with an edge filter on a value (`confidence >= 0.8`) failed: the filter's parameters were
   never sent with it.
 - On the capped engine (aggregate-only searches, facets), *Within N hops* was applied after the

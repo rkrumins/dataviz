@@ -18,24 +18,25 @@ ask, narrow the results, act on the matches, and save the searches you reuse.
 ## Get started in 5 minutes
 
 1. **Open a View** and press `⌘⇧F` / `Ctrl+Shift+F`. The **Advanced Search**
-   panel opens beside the canvas.
-2. **Ask in plain words** — type `datasets that feed dashboards` into **Ask in
-   plain words…**. Before anything runs, it says how it **reads** your words
-   and how many entities that finds.
-3. **Press Enter.** The matches light up on the canvas and are listed, grouped
-   by layer; collapsed containers show how many matches they hold.
-4. **Read the query as a sentence** — *Find* **datasets** *that* **feed** **a
-   dashboard**. Click any highlighted word to change it; the number beside
-   each line says how many still match once that line is added.
-5. **Narrow from the answer** — a type chip keeps one type, a breadcrumb looks
+   panel opens beside the canvas, ready for filters.
+2. **Add a filter** — type `dataset` into **Search by name, tag, type,
+   property…** and pick **Everything of type dataset**, or choose **Add filter
+   → Tags & properties → Tag is…** and pick `PII`. Each filter is a card, and
+   the matches light up on the canvas as you edit.
+3. **Add another** the same way. Filters join with **AND**; click it between
+   two cards to match any of them instead.
+4. **Narrow from the answer** — a type chip keeps one type, a breadcrumb looks
    inside a container. **Isolate** in the match bar shows only the matches and
    their containers; **Highlight** goes back.
-6. **Choose Save**, name it "Datasets feeding dashboards", and pick **Everyone
-   on this view** (or **Just me**). It's now one click away in the **Library**.
+5. **Choose Save**, name it "Customer PII", and pick **Everyone on this view**
+   (or **Just me**). It's now one click away in the **Library**.
 
-That's the whole loop: ask, refine, act on the canvas, keep. Not sure what to
-ask? The empty panel starts you with **recipes** — ready-made questions, each
-with how many it finds in this View. For one word, the header's **Search this
+That's the whole loop: filter, refine, act on the canvas, keep. Two more ways
+in sit beside the filters: **Or ask in plain words…** — `datasets that feed
+dashboards` reads back what it understood, and how many it finds, before
+anything runs — and the **Sentence** view, which reads the query the way you'd
+say it. Not sure where to start? The empty panel offers **recipes**, each with
+how many it finds in this View. For one word, the header's **Search this
 view…** box (press `/`) is quicker: see [The search box](#the-search-box).
 
 ---
@@ -95,8 +96,8 @@ server works out the View's boundary itself, whatever the browser sends.
 
 ### Ask in plain words
 
-**Ask in plain words…** sits at the top of the query card. Type a question the
-way you'd say it:
+Ask on the query card — **Or ask in plain words…** under the filters in
+**Form**, at the top in **Sentence**. Type a question the way you'd say it:
 
 | You ask | It reads as |
 | --- | --- |
@@ -125,11 +126,13 @@ an answer, with the builder folded away, the same bar sits above the results.
 
 ### Building a query
 
-An empty query card offers three ways in: the **Ask** bar, **Add filter** with
-every filter grouped as below, and **recipes** to start from (see
-[Recipes gallery](#recipes-gallery)). Pick a filter and it becomes part of the
-query; add more later with **+ and…** in **Sentence** or **Add filter** in
-**Form**:
+An empty query card opens on filters: **Search by name, tag, type,
+property…** suggests filters from this View's own data — its types, tags,
+properties and their values — and **Add filter** lists every filter, grouped as
+below. Pick one and it becomes a filter card. Beneath them, **Or ask in plain
+words…** and the **recipes** (see [Recipes gallery](#recipes-gallery)) are two
+more ways to start. Add more later with the same field under the cards, or
+**+ and…** in **Sentence**:
 
 | Category | Filters |
 | --- | --- |
@@ -173,9 +176,10 @@ ignoring case unless you tick **Match case**.
 
 ### Build it as a sentence
 
-The query card shows the same query four ways — **Sentence**, **Form**,
+The query card shows the same query four ways — **Form**, **Sentence**,
 **Code** and **Cypher** — and you can switch at any time; the card remembers
-your choice. Business starts in **Sentence**, Technical in **Form**.
+your choice. It opens in **Form**, the filter cards; **Sentence** is the guided
+alternative.
 
 **Sentence** reads the query the way you'd say it: *Find* **datasets** *that
 are tagged* **#PII** *and* **feed** **a dashboard**. Every highlighted word is
@@ -470,7 +474,7 @@ save or turn into a rule.
 - **The query** — the same card: Ask, Sentence and map, Form, Code or Cypher.
 - **The results** — the match bar, and the matches as a **Table** (name, type,
   where, matched because) or as **Cards**. Tick rows to act on them together:
-  **Frame on canvas**, **Keep only these** (up to 200), **Leave these out**, or
+  **Frame on canvas**, **Keep only these** (up to 64), **Leave these out**, or
   **Copy names**. A row's **Reveal** shows it on the canvas.
 - **What the view holds** — its **Types**, **Tags** and **Properties** (with
   their commonest values), each counted exactly. Click one to add it to the
@@ -688,7 +692,7 @@ upstream*..2(ancestor(@"Country/United Kingdom"))
 | Your own Cypher: query and answer | 20,000 characters; an answer of up to 8 MiB, each text value up to 2,000 characters and each list or map up to 100 entries |
 | Counts as you build | FalkorDB data sources; not for a *Path*, or a filter not yet filled in |
 | **Narrow to** chips | The 12 commonest types, counted when not every match is loaded |
-| **Keep only these** (Search Studio) | 200 rows |
+| **Keep only these** (Search Studio) | 64 rows |
 
 ---
 

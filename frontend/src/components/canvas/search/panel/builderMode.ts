@@ -1,25 +1,21 @@
 /**
- * builderMode — which editor the query card opens in: Sentence (the guided
- * builder), Form (the cards), Code or Cypher.
+ * builderMode — which editor the query card opens in: Form (the filter
+ * cards, the way a query has always been built here), Sentence (the guided
+ * builder, a click away), Code or Cypher.
  *
- * A person's own choice is remembered in this browser. Until they make one
- * the persona picks: Business starts in Sentence, Technical in Form — the
- * dense cards a technical user already knows. The card remounts each time
- * the Advanced drawer closes, so the choice has to outlive it.
+ * A person's own choice is remembered in this browser; until they make
+ * one, the card opens in Form. The card remounts each time the Advanced
+ * drawer closes, so the choice has to outlive it.
  */
 import { useCallback, useSyncExternalStore } from 'react'
-
-import { usePersonaMode, type PersonaMode } from '@/store/persona'
 
 
 export type EditorMode = 'sentence' | 'form' | 'code' | 'cypher'
 
 export const EDITOR_MODE_KEY = 'synodic.advancedSearch.editorMode'
 
-/** The editor a persona starts in. */
-export function defaultEditorMode(persona: PersonaMode): EditorMode {
-    return persona === 'technical' ? 'form' : 'sentence'
-}
+/** The editor the card opens in until a person chooses another. */
+const DEFAULT_EDITOR_MODE: EditorMode = 'form'
 
 const isMode = (v: string | null): v is EditorMode =>
     v === 'sentence' || v === 'form' || v === 'code' || v === 'cypher'
@@ -35,8 +31,8 @@ const subscribe = (fn: () => void) => {
 let unsaved: EditorMode | null = null
 
 /** The editor this browser last chose, or null for none. "Visual" — the
- *  card builder's name before Sentence existed — was the default rather
- *  than a choice, so it reads as none. */
+ *  cards' name before Sentence existed — was the default rather than a
+ *  choice, so it reads as none: the cards again. */
 function savedEditorMode(): EditorMode | null {
     try {
         const saved = localStorage.getItem(EDITOR_MODE_KEY)
@@ -46,14 +42,13 @@ function savedEditorMode(): EditorMode | null {
     }
 }
 
-/** The editor to open in — the one this browser last chose, or the
- *  persona's — and how to choose another. */
+/** The editor to open in — the one this browser last chose, or Form —
+ *  and how to choose another. */
 export function useEditorMode(): [EditorMode, (next: EditorMode) => void] {
-    const persona = usePersonaMode()
     const saved = useSyncExternalStore(subscribe, savedEditorMode, () => null)
     const update = useCallback((next: EditorMode) => {
         try { localStorage.setItem(EDITOR_MODE_KEY, next) } catch { unsaved = next }
         listeners.forEach((fn) => fn())
     }, [])
-    return [saved ?? defaultEditorMode(persona), update]
+    return [saved ?? DEFAULT_EDITOR_MODE, update]
 }

@@ -111,11 +111,12 @@ export interface QueryCardProps {
 }
 
 
-/** Sentence (guided) and Form (the cards) build a query by pointing; Code
- *  and Cypher by typing. All four edit the same draft. */
+/** Form (the filter cards, where the card starts) and Sentence (guided)
+ *  build a query by pointing; Code and Cypher by typing. All four edit the
+ *  same draft. */
 const EDITOR_MODES: { value: EditorMode; label: string; icon: typeof Code2 }[] = [
-    { value: 'sentence', label: 'Sentence', icon: Sparkles },
     { value: 'form', label: 'Form', icon: LayoutList },
+    { value: 'sentence', label: 'Sentence', icon: Sparkles },
     { value: 'code', label: 'Code', icon: Code2 },
     { value: 'cypher', label: 'Cypher', icon: Terminal },
 ]
@@ -403,10 +404,10 @@ export const QueryCard: FC<QueryCardProps> = ({
     const isEmptyVisual = pointing && conditions.length === 0
     const showHeader = !isEmptyVisual
 
-    // The Ask bar leads every pointing editor: the empty card's front
-    // door, then a compact bar above the Sentence or the cards. The
-    // omnibox stays the compact "add another filter" bar beneath Form's
-    // rows.
+    // Form is built from filters, as it always was: the empty card opens
+    // on "add a filter" (the omnibox), which stays beneath the rows after,
+    // with the Ask bar a step below as the other way in. Sentence leads
+    // with the Ask bar.
     const askBar = (variant: 'hero' | 'compact') => (
         <AskBar viewId={viewId} vocabulary={askVocabulary} draft={draftPredicate} onAsk={handleAsk}
                 presentTypes={presentEntityTypes} variant={variant} disabled={isRunning} />
@@ -414,7 +415,7 @@ export const QueryCard: FC<QueryCardProps> = ({
 
     const omnibox = (
         <SearchOmnibox
-            variant="inline"
+            variant={isEmptyVisual ? 'hero' : 'inline'}
             onAdd={handleAddFromOmnibox}
             entityTypes={presentEntityTypes}
             tagValues={discovery.tagValues}
@@ -507,7 +508,9 @@ export const QueryCard: FC<QueryCardProps> = ({
                 {pointing ? (
                     isEmptyVisual ? (
                         <PremiumEmptyHero
-                            ask={askBar('hero')}
+                            byFilters={mode === 'form'}
+                            entry={mode === 'form' ? omnibox : askBar('hero')}
+                            orAsk={mode === 'form' ? askBar('compact') : null}
                             palette={
                                 <AddFilterPalette
                                     counts={paletteCounts}
@@ -559,7 +562,6 @@ export const QueryCard: FC<QueryCardProps> = ({
                         </RelationProvider>
                     ) : (
                         <>
-                            {askBar('compact')}
                             <RelationProvider viewId={viewId} edges={edgeDiscovery}>
                                 <VisualQueryBuilder
                                     predicate={draftPredicate}
@@ -588,6 +590,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                 you add the 2nd filter as well as the 1st,
                                 so there's one thing to learn. */}
                             {omnibox}
+                            {askBar('compact')}
                         </>
                     )
                 ) : mode === 'code' ? (
@@ -654,17 +657,22 @@ export const QueryCard: FC<QueryCardProps> = ({
 /**
  * Owns the whole card surface when the draft is empty. Replaces the
  * dense "QUERY · empty" + dormant controls header with a confident
- * onboarding hero: a refined intro, the Ask bar, recipes to start from
- * (in the view's own words, each with how many it finds), and a quiet
- * footer for power users who'd rather paste DSL.
+ * onboarding hero: a refined intro, the way in — "add a filter" in Form,
+ * the Ask bar in Sentence — recipes to start from (in the view's own
+ * words, each with how many it finds), and a quiet footer for power users
+ * who'd rather paste DSL.
  */
 function PremiumEmptyHero({
-    ask, palette, recipes, onUseCodeMode,
+    byFilters, entry, orAsk, palette, recipes, onUseCodeMode,
     discoveredEntityTypes, discoveredTags, discoveredLayers,
     discoveryLoading, discoveryError, propertyKeyCount,
 }: {
-    /** The Ask bar: a question in plain words is the way in. */
-    ask: ReactNode
+    /** Built from filters (Form), or asked in plain words (Sentence). */
+    byFilters: boolean
+    /** The way in: "add a filter", or the Ask bar. */
+    entry: ReactNode
+    /** In Form, the Ask bar as the other way in. */
+    orAsk: ReactNode
     /** Every kind of filter, by category — the "+ Add filter" palette. */
     palette: ReactNode
     /** Recipes to start from. */
@@ -709,20 +717,23 @@ function PremiumEmptyHero({
                             <DocsLink slug="advanced-search" newTab label="Guide" className="text-xs font-medium" />
                         </div>
                         <p className="mt-1 text-[12px] text-ink-muted leading-snug">
-                            Ask in plain words — what it is, how it connects,
-                            what it's tagged — and see what it reads as before
-                            anything changes. Or browse every kind of condition.
+                            {byFilters
+                                ? 'Add filters — what it is, how it connects, what it\'s tagged — '
+                                    + 'and see what matches as you go. Or ask in plain words.'
+                                : 'Ask in plain words — what it is, how it connects, what it\'s tagged — '
+                                    + 'and see what it reads as before anything changes. Or browse every kind of condition.'}
                         </p>
                     </div>
                 </div>
             </div>
 
-            {/* The Ask bar is the entry point: a question read against
-                the view's own types, tags, properties, values and
-                layers, shown back before it is applied. */}
+            {/* The way in — "add a filter" in Form, a question in plain
+                words in Sentence — then every kind of filter. In Form the
+                Ask bar follows, as the other way in. */}
             <div className="relative px-5 pb-3 flex flex-col gap-2">
-                {ask}
+                {entry}
                 <div>{palette}</div>
+                {orAsk}
             </div>
 
             {/* Recipes — questions people come here with, ready to run

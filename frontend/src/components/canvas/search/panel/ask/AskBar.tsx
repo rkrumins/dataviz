@@ -130,7 +130,8 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                     autoFocus={hero}
                     aria-label="Ask about this view"
                     placeholder={hero ? 'Ask in plain words…'
-                        : 'Ask to change the query — start with “and” to add to it'}
+                        : !draft ? 'Or ask in plain words…'
+                            : 'Ask to change the query — start with “and” to add to it'}
                     className={cn('min-w-0 flex-1 bg-transparent text-ink outline-none placeholder:text-ink-muted/80',
                         hero ? 'text-base' : 'text-sm')}
                 />

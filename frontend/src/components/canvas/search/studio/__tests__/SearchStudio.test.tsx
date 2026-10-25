@@ -18,7 +18,7 @@ import type { Predicate, SearchHit } from '@/types/search'
 import { stubAdvanced, stubSession } from '@/test/stubSearchSession'
 
 import { SearchMapPanel } from '../../SearchMapPanel'
-import { ResultsTable } from '../ResultsTable'
+import { KEEP_MAX, ResultsTable } from '../ResultsTable'
 import { SchemaInspector } from '../SchemaInspector'
 
 
@@ -77,7 +77,7 @@ describe('Search Studio', () => {
         expect(within(studio).getByRole('radiogroup', { name: 'How to build the query' })).toBeInTheDocument()
         expect(within(studio).getByRole('rowgroup', { name: 'Matches' })).toBeInTheDocument()
         expect(container).toHaveAttribute('inert')
-        await waitFor(() => expect(document.activeElement).toHaveAttribute('aria-label', 'Ask about this view'))
+        await waitFor(() => expect(document.activeElement).toBe(studio))
 
         fireEvent.keyDown(studio, { key: 'Escape' })
         expect(screen.queryByRole('dialog', { name: 'Search Studio' })).not.toBeInTheDocument()
@@ -110,6 +110,31 @@ describe('Search Studio', () => {
         expect(useSearchStore.getState().studioOpen).toBe(false)
     })
 
+    it('opens an empty query at the field to add a filter', async () => {
+        useSearchStore.getState().clear()
+        renderPanel(stubSession({ refineOpen: true, advanced: stubAdvanced() }))
+        fireEvent.click(screen.getByRole('button', { name: 'Open Search Studio' }))
+        const studio = screen.getByRole('dialog', { name: 'Search Studio' })
+        const field = within(studio).getByPlaceholderText('Search by name, tag, type, property…')
+        await waitFor(() => expect(document.activeElement).toBe(field))
+        await new Promise((r) => requestAnimationFrame(r))
+        expect(document.activeElement).toBe(field)
+    })
+
+    it('closes on Esc with focus fallen to the page, not from a field elsewhere', () => {
+        const outside = document.createElement('input')
+        document.body.appendChild(outside)
+        renderPanel(stubSession({ refineOpen: true, advanced: stubAdvanced({ view: RESULTS }) }))
+        fireEvent.click(screen.getByRole('button', { name: 'Open Search Studio' }))
+        outside.focus()
+        fireEvent.keyDown(outside, { key: 'Escape' })
+        expect(screen.getByRole('dialog', { name: 'Search Studio' })).toBeInTheDocument()
+        outside.blur()
+        fireEvent.keyDown(document.body, { key: 'Escape' })
+        expect(screen.queryByRole('dialog', { name: 'Search Studio' })).not.toBeInTheDocument()
+        outside.remove()
+    })
+
     it('opens on E from the panel, never while a field is being typed in', () => {
         renderPanel(stubSession({ refineOpen: true, advanced: stubAdvanced({ view: RESULTS }) }))
         fireEvent.keyDown(screen.getByRole('textbox', { name: 'Ask about this view' }), { key: 'e' })
@@ -140,6 +165,29 @@ describe('ResultsTable', () => {
         fireEvent.click(screen.getByRole('button', { name: /Leave these out/ }))
         expect(onRefine).toHaveBeenLastCalledWith({ kind: 'group', op: 'and', children: [
             draft, { kind: 'group', op: 'not', children: [{ kind: 'is', refs: [{ urn: 'a' }] }] }] })
+    })
+
+    it('keeps at most as many as one condition can name', () => {
+        const onRefine = vi.fn()
+        const many = Array.from({ length: KEEP_MAX + 6 }, (_, i) => hit(`u${i}`, `table ${i}`))
+        render(<ResultsTable hits={many} query={draft} draft={draft} onRefine={onRefine} onLookInside={vi.fn()}
+                             canLoadMore={false} isLoadingMore={false} />)
+        fireEvent.click(screen.getByRole('checkbox', { name: 'Pick every loaded row' }))
+        fireEvent.click(screen.getByRole('button', { name: `Keep only the first ${KEEP_MAX}` }))
+        const kept = onRefine.mock.calls.at(-1)?.[0].children[1]
+        expect(kept.refs).toHaveLength(KEEP_MAX)
+        expect(KEEP_MAX).toBe(64)
+    })
+
+    it('narrows to a type, as the cards do, when the matches come in several', () => {
+        const onRefine = vi.fn()
+        const chart = { ...hit('c', 'revenue'), node: { ...hit('c', 'revenue').node, entityType: 'chart' } } as SearchHit
+        render(<ResultsTable hits={[hit('a', 'orders'), hit('b', 'customers'), chart]} query={draft} draft={draft}
+                             onRefine={onRefine} onLookInside={vi.fn()} canLoadMore={false} isLoadingMore={false}
+                             total={3} />)
+        fireEvent.click(screen.getByRole('button', { name: 'Narrow to chart: 1' }))
+        expect(onRefine).toHaveBeenLastCalledWith({ kind: 'group', op: 'and', children: [
+            { kind: 'entityType', op: 'in', values: ['chart'] }, draft] })
     })
 
     it('looks inside a row\'s container', () => {
