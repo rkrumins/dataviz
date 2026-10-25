@@ -159,6 +159,10 @@ export interface ViewSearchSessionOptions {
      *  set, a hit's column is placed by it rather than by ``layers`` and
      *  ``assignments``. */
     placementSpec?: CompiledPlacementSpec | null
+    /** Whether the view holds only what it places (``deriveEntityScope``):
+     *  a hit nothing places is then not on the canvas. Unsaid, any
+     *  assignment makes it so. */
+    curated?: boolean
     /**
      * Walk a hit onto the canvas: prime its spine, expand each level and
      * select it. Passed IN rather than built here because it needs the
@@ -268,7 +272,7 @@ export interface ViewSearchSession {
 
 
 export function useViewSearchSessionController(
-    { viewId, layers, assignments, placementSpec, revealHit, prefetchHit }: ViewSearchSessionOptions,
+    { viewId, layers, assignments, placementSpec, curated, revealHit, prefetchHit }: ViewSearchSessionOptions,
 ): ViewSearchSession {
     const advanced = useAdvancedSearch(viewId, { clearOnUnmount: false })
     const [quick, setQuickState] = useState<QuickQuery>(DEFAULT_QUICK)
@@ -396,7 +400,7 @@ export function useViewSearchSessionController(
 
     // Hoisted: `resolveHitLayer`'s only O(assignments) step, paid once per
     // result page instead of once per hit.
-    const hasAssignments = useMemo(() => Object.keys(assignments).length > 0, [assignments])
+    const isCurated = useMemo(() => curated ?? Object.keys(assignments).length > 0, [curated, assignments])
     const resolveLayer = useCallback((hit: SearchHit) => (placementSpec ? placeHit(
         hit.node,
         hit.ancestorPath ?? [],
@@ -406,8 +410,8 @@ export function useViewSearchSessionController(
         hit.ancestorPath ?? [],
         assignments,
         layers,
-        hasAssignments,
-    )), [assignments, layers, hasAssignments, placementSpec])
+        isCurated,
+    )), [assignments, layers, isCurated, placementSpec])
 
     // The columns' slice. Every scoped field collapses to a constant
     // while the search is view-wide, so this whole object keeps its

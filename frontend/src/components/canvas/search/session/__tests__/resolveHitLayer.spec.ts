@@ -64,6 +64,23 @@ describe('resolveHitLayer', () => {
         expect(resolveHitLayer(hit, ancestorPath, {}, layers)).toBe('L1')
     })
 
+    it('a view set to hold everything falls back for an unplaced hit, whatever it places by hand', () => {
+        const hit = { urn: 'hit-5', entityType: 'dataset' }
+        const ancestorPath: AncestorRef[] = [ancestor('root-other', 'domain')]
+        const assignments: Record<string, LayerAssignmentEntry> = { 'unrelated-urn': entry('L1') }
+        const layers = [layer('L1'), layer('L2', ['domain'])]
+        expect(resolveHitLayer(hit, ancestorPath, assignments, layers, false)).toBe('L2')
+        expect(resolveHitLayer(hit, ancestorPath, assignments, layers, true)).toBeNull()
+    })
+
+    it('a layer saved without its entity types claims none, and the rest still place', () => {
+        const hit = { urn: 'hit-6', entityType: 'dataset' }
+        const ancestorPath: AncestorRef[] = [ancestor('root', 'domain')]
+        const bare = { id: 'L0', name: 'L0', order: 0 } as unknown as ViewLayerConfig
+        expect(resolveHitLayer(hit, ancestorPath, {}, [bare, layer('L1', ['domain'])])).toBe('L1')
+        expect(resolveHitLayer(hit, ancestorPath, {}, [bare])).toBeNull()
+    })
+
     it('a curated view (non-empty assignments) with nothing matching the hit\'s chain resolves to null', () => {
         const hit = { urn: 'hit-4', entityType: 'dataset' }
         const ancestorPath: AncestorRef[] = [ancestor('root-other', 'domain')]

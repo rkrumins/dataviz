@@ -9,6 +9,20 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Search in Views with layers and hand placements
+
+### Fixed
+
+- A View crashed ("This view encountered an error") as soon as search results arrived if one of its
+  layers had been saved without its entity types, as a View written through the API can be. Such a
+  layer now claims no type, and the rest place as before.
+- In a View set to hold every entity of its types, search looked only inside the entities placed by
+  hand, and with *One placement rule for every view surface* off the panel filed every other match
+  under **Not on this canvas**. Hand placements now bound search only in a curated View: one set to
+  hold every entity searches all of them, and places a match by its type.
+
+---
+
 ## [Unreleased] — Service accounts: their managers run them
 
 ### Added

@@ -1908,6 +1908,7 @@ export function ContextViewCanvas({
     layers: sortedLayers,
     assignments: activeReferenceLayout.assignments,
     placementSpec,
+    curated: activeEntityScope === 'curated',
     revealHit: revealHitForSearch,
     prefetchHit: prefetchSearchHitSpine,
   })

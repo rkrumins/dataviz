@@ -299,6 +299,26 @@ class TestCollectReferenceRoots:
         assert types == frozenset({"Table", "View"})
         assert layers == frozenset({"source", "staging"})
 
+    def test_placements_bound_a_curated_view_only(self):
+        """A view set to hold every entity of its types searches them all: its
+        hand placements say where entities sit, not which ones it holds."""
+        layout = {
+            "referenceLayout": {
+                "layers": [{"id": "source", "entityTypes": ["Table"]}],
+                "assignments": {"urn:domain:Customers": {"layerId": "source"}},
+            },
+        }
+        everything = {"layout": layout, "content": {"entityScope": "all"}}
+        roots, types, layers = _collect_reference_roots(everything)
+        assert roots == []
+        assert types == frozenset({"Table"})
+        assert layers == frozenset({"source"})
+
+        curated = {"layout": layout, "content": {"entityScope": "curated"}}
+        assert _collect_reference_roots(curated)[0] == ["urn:domain:Customers"]
+        # Unsaid, placements make the view curated (``derive_entity_scope``).
+        assert _collect_reference_roots({"layout": layout})[0] == ["urn:domain:Customers"]
+
     def test_nested_location_wins_over_legacy_top_level(self):
         """When both the canonical nested location and the legacy top-level
         `referenceLayout` are present, the nested one wins (parser contract)."""

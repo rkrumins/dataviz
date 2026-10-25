@@ -64,7 +64,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories.view_repo import effective_view_config
-from backend.app.services.layout_config import parse_reference_layout
+from backend.app.services.layout_config import derive_entity_scope, parse_reference_layout
 from backend.common.models.search import SearchScope
 
 logger = logging.getLogger(__name__)
@@ -184,7 +184,9 @@ def _collect_reference_roots(
     which up-converts legacy per-layer ``entityAssignments`` (and the
     top-level ``referenceLayout`` spelling this module's rows use) into a
     flattened ``assignments`` map. Root URNs are the assignment keys that
-    carry a ``layerId`` (a real placement, not a UI-only entry).
+    carry a ``layerId`` (a real placement, not a UI-only entry) — in a
+    curated view only: a view whose ``entityScope`` is ``all`` holds every
+    entity of its types, and its placements only say where they sit.
 
     Returns ``(root_urns, entity_type_allow_list, layer_allow_list)``.
     """
@@ -203,7 +205,7 @@ def _collect_reference_roots(
     root_urns = [
         urn for urn, assignment in layout.assignments.items()
         if isinstance(assignment, dict) and assignment.get("layerId")
-    ]
+    ] if derive_entity_scope(config) == "curated" else []
     return root_urns, frozenset(entity_types), frozenset(layer_ids)
 
 

@@ -9,12 +9,11 @@
  * walk continues toward the hit.
  *
  * When nothing in the chain matches:
- *   - a curated view (``assignments`` non-empty) resolves to ``null``
- *     — the hit renders in the panel's "Not on this canvas" group.
- *   - an open view (``assignments`` empty) falls back to the layer
- *     whose ``entityTypes`` includes the TOP-LEVEL node's type (the
- *     root of ``ancestorPath``, or the hit itself when it has no
- *     ancestors).
+ *   - a curated view (one that holds only what it places) resolves to
+ *     ``null`` — the hit renders in the panel's "Not on this canvas" group.
+ *   - an open view falls back to the layer whose ``entityTypes`` includes
+ *     the TOP-LEVEL node's type (the root of ``ancestorPath``, or the hit
+ *     itself when it has no ancestors).
  */
 import {
     factsFromGraphNode,
@@ -29,19 +28,20 @@ import type { AncestorRef } from '@/types/search'
 
 
 /**
- * @param hasAssignments - whether ``assignments`` has any entry, which is
- *   what tells a curated view from an open one. Derived here when the
- *   caller doesn't say, but a caller resolving a whole result page should:
- *   this is the only O(assignments) step in an otherwise O(path) walk, and
- *   at a thousand hits over a five-thousand-entry map it is the whole cost
- *   of the grouping.
+ * @param curated - whether the view holds only what it places
+ *   (``deriveEntityScope``): a view set to hold every entity of its types
+ *   is open, whatever it places by hand. Unsaid, any assignment makes it
+ *   curated, as ``deriveEntityScope`` reads a view that doesn't say — but a
+ *   caller resolving a whole result page should say: this is the only
+ *   O(assignments) step in an otherwise O(path) walk, and at a thousand hits
+ *   over a five-thousand-entry map it is the whole cost of the grouping.
  */
 export function resolveHitLayer(
     hit: { urn: string; entityType: string },
     ancestorPath: ReadonlyArray<AncestorRef>,
     assignments: Record<string, LayerAssignmentEntry>,
     layers: ViewLayerConfig[],
-    hasAssignments: boolean = Object.keys(assignments).length > 0,
+    curated: boolean = Object.keys(assignments).length > 0,
 ): string | null {
     const chain = [...ancestorPath, hit]
     for (let i = 0; i < chain.length; i++) {
@@ -52,10 +52,11 @@ export function resolveHitLayer(
         return entry.layerId
     }
 
-    if (hasAssignments) return null
+    if (curated) return null
 
     const topLevel = ancestorPath[0] ?? hit
-    const fallback = layers.find((l) => l.entityTypes.includes(topLevel.entityType))
+    // A layer saved without its types (written through the API) claims none.
+    const fallback = layers.find((l) => (l.entityTypes ?? []).includes(topLevel.entityType))
     return fallback ? fallback.id : null
 }
 
