@@ -2846,9 +2846,13 @@ class _TimeoutMiddleware:
         # Accepting a request or undoing a move does the same work. Below nginx's
         # proxy_read_timeout (180s), as for versioning.
         move_secs = float(os.getenv("HTTP_TIMEOUT_DATA_SOURCE_MOVE_SECS", "120"))
+        # A data source's refresh may wait for the rebuild it queued (``"wait": "complete"``, up
+        # to 60s, then the control plane's answer): the aggregation tier covers that.
+        refresh_secs = float(os.getenv("HTTP_TIMEOUT_AGGREGATION_SECS", "90"))
         # Tiers a prefix can't name, because the part that decides sits mid-path.
         self._pattern_tiers: list[tuple[re.Pattern, float]] = [
             (re.compile(r"^/api/v1/admin/workspaces/[^/]+/data-sources/[^/]+/move$"), move_secs),
+            (re.compile(r"^/api/v1/admin/data-sources/[^/]+/refresh$"), refresh_secs),
         ]
         # Trace routes get their own (longer) tier ahead of the generic
         # /graph/ tier so the prefix-longest-wins lookup picks them up.
@@ -3095,8 +3099,13 @@ app.add_middleware(
     # The view-file export (``/views/transfer/export``) names its download and proves its
     # content in headers: the filename, and the hashes the Export dialog shows.
     # ``X-Next-Cursor`` pages the versioning branch list, whose body stays a bare list.
+    #
+    # A list's full size (``X-Total-Count``), the id to quote about a request
+    # (``X-Request-ID``) and when the calling key expires (``X-API-Key-Expires-At``):
+    # a page calling the API from another origin reads them as the app does.
     expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After", "Content-Disposition",
-                    "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version", "X-Next-Cursor"],
+                    "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version", "X-Next-Cursor",
+                    "X-Total-Count", "X-Request-ID", "X-API-Key-Expires-At"],
 )
 
 # GZip compression for responses > 1 KB. WS1.4: compresslevel=1 (was 6, was

@@ -269,6 +269,20 @@ An import that names a view (`viewId`) places the entities it creates in that vi
 write to the view — so the view must be in the workspace, not deleted, and editable by the caller
 (`_check_import_view`): with an API key, one with **Views: read & write**.
 
+An `idempotencyKey` makes `POST …/imports` and `POST …/exports` safe to send again. The route stores
+it as its sender's (`<user id>:<key>`), and `ix_jobs_idem_active` keeps one job per key on a graph,
+finished or not: the same key from the same caller answers with the job it started (`_job_for_key`),
+and a key that started the other kind of job is `409 idempotency_key_reused`. An import still
+storing its file (pending, with no phase) is answered as it is, and nothing of the second request
+is stored. An import whose request broke off before its file was stored is failed there and then,
+keyed or not (`_abandon_unqueued`), so its draft takes the next import at once; the same key sent
+again takes it back (`reclaim_import`) under the rules a new import meets — the graph still in the
+workspace and writable, the draft open and still the caller's to edit, no other import running on
+it, the view it places into still editable — then stores this request's file and starts it. An
+export never queued is started. Two requests racing with one key both get the winner's job; the
+loser's draft never exists (it is opened in the job's transaction, which the refused insert rolls
+back).
+
 ---
 
 ## 4. Identity & idempotency (a round-trip is a no-op)
@@ -685,14 +699,6 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
 - **`auto_publish` and a custom draft `name`** exist on `JobORM` / `create_import_job`
   (`service.py:75-77`) but the `create_import` endpoint doesn't expose them — imports always flow
   through the manual review/publish path (the draft is named "Import").
-- **`idempotency_key` on an import or export job is unique per graph, and only an import honours it
-  as a retry.** `ix_jobs_idem_active` covers every job, finished or not. An import sent a key it has
-  already seen answers with the import it created, with no second draft or job. An export sent a key
-  already used on the graph — by an import or an export — fails the insert, and the answer is `503`.
-  Imports and exports share the keys, so give each export its own, and never send an import a key an
-  export used. Job-level idempotency for exports is a designed follow-up (the ndjson
-  `bulk-ingest`/`sync` paths dedup at the service level, separately; see
-  [10 — Authoritative Sources](10-authoritative-sources-datahub-openmetadata.md)).
 - **`INLINE_IMPORT_MAX` (5,000) two-tier threshold** exists in config as the intended
   "stage small imports client-side, run large ones async" split, but the endpoint currently always
   dispatches the async worker.

@@ -222,8 +222,9 @@ full-reseed progress bar (`progress_done`/`progress_total`, `models.py:238-242`)
 retry, monotonic sequence). `job_type ∈ ingest|projection|rebuild|export` (`ck_jobs_type`,
 `models.py:322-324`). The branch's **import/export** vertical extends it with full traceability +
 parameters + artifact URIs + a `summary` JSONB tally (`models.py:285-305`) — see
-[08 · Import/Export](08-import-export.md). A **partial unique** index `ix_jobs_idem_active` enforces
-one active job per `(graph_id, idempotency_key)` (`models.py:311-317`).
+[08 · Import/Export](08-import-export.md). A **partial unique** index `ix_jobs_idem_active` keeps
+one job per `(graph_id, idempotency_key)` among the jobs that have a key, finished or not
+(`models.py:378-384`).
 
 ### `import_rows` — transient staging for an async import
 `models.py:328-355`. The uploaded file is parsed **once** into cursor-ordered rows

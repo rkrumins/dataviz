@@ -430,16 +430,25 @@ def bootstrap_unfinished(graph_id) -> tuple:
 class Viewer:
     """Who is asking — used to scope draft/PR reads. ``can_manage`` is workspace
     ``datasource:manage`` (managers see everything). Supplied only from the HTTP layer;
-    when a read is called without a Viewer (internal callers / tests) no scoping is applied."""
+    when a read is called without a Viewer (internal callers / tests) no scoping is applied.
+    ``groups``: the actor's teams, when the caller already has them; used as given. Left empty, as
+    every route leaves it (``viewer_ctx`` reads no teams), the service looks them up itself
+    (:func:`_load_actor_groups`, which leaves a deleted team out), only when a team's row could
+    decide. A manager's draft reads never need them, and a service account's lookup costs no query;
+    a manager's own ``my_role`` on a team-shared draft can still look theirs up, once per page."""
     actor: str
     can_manage: bool = False
+    groups: Tuple[str, ...] = ()
 
 
 async def _load_actor_groups(actor: str) -> Tuple[str, ...]:
     """The live group ids *actor* belongs to, from the management DB (READONLY pool, so it never waits
     on a second WEB-pool connection while the request holds one). A deleted group keeps its member
     rows and the drafts' rows for it, so it is left out here. A failed lookup is
-    :class:`GroupsUnavailable`, never "no groups": that would refuse a member."""
+    :class:`GroupsUnavailable`, never "no groups": that would refuse a member. A service account
+    is in no team: ``()``, with no query."""
+    if is_service_account(actor):
+        return ()
     from backend.app.db.engine import get_readonly_session
     from backend.app.db.models import GroupMemberORM, GroupORM
     try:
@@ -5304,7 +5313,9 @@ class GraphVersioningService:
         branches :meth:`_branch_readable` lets them read, filtered here in SQL before the LIMIT so
         others' private drafts can't crowd theirs off a page. With a ``viewer`` each row carries
         ``my_role``: theirs on it, as :meth:`my_branch_role` answers (``None`` on ``main``), so a
-        client offers changes only on the drafts that take them. ``ValueError`` on a malformed cursor."""
+        client offers changes only on the drafts that take them. ``ValueError`` on a malformed cursor.
+        Every page but the last is full. The viewer's teams are ``viewer.groups`` when given, else
+        looked up only when a team's row could decide."""
         rank = case((BranchORM.kind == "main", 0), else_=1)       # main first
         stmt = select(BranchORM).where(BranchORM.graph_id == graph_id)
         if originating_view_id is not None:
@@ -5318,14 +5329,14 @@ class GraphVersioningService:
                 and_(rank == int(after_rank),
                      tuple_(BranchORM.created_at, BranchORM.id) < tuple_(after_at, after_id))))
         async with self._session() as s:
-            groups = None
+            groups = set(viewer.groups) if viewer is not None and viewer.groups else None
             if viewer is not None and not viewer.can_manage:
                 actor = viewer.actor
                 member = and_(BranchMemberORM.subject_type == "user", BranchMemberORM.subject_id == actor)
-                # A member through a group reads the draft too. Their groups are looked up once, and
-                # only when a shared draft of the graph has a group row; a failed lookup keeps their
-                # own rows, as in _my_roles.
-                if await s.scalar(select(BranchMemberORM.branch_id).join(
+                # A member through a group reads the draft too. Their groups are the viewer's when
+                # given, else looked up once, and only when a shared draft of the graph has a group
+                # row; a failed lookup keeps their own rows, as in _my_roles.
+                if groups is None and await s.scalar(select(BranchMemberORM.branch_id).join(
                         BranchORM, BranchORM.id == BranchMemberORM.branch_id).where(
                         BranchORM.graph_id == graph_id, BranchORM.is_shared,
                         BranchMemberORM.subject_type == "group").limit(1)):
@@ -5679,7 +5690,8 @@ class GraphVersioningService:
             return True
         if viewer.can_manage or branch.owner == viewer.actor:
             return True
-        if branch.is_shared and await self._branch_role(s, branch, viewer.actor, need="viewer") is not None:
+        if branch.is_shared and await self._branch_role(s, branch, viewer.actor, viewer.groups,
+                                                        need="viewer") is not None:
             return True
         return await self._is_pr_participant_for_branch(s, branch.id, viewer.actor)
 

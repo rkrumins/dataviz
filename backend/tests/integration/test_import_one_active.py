@@ -8,9 +8,10 @@ unbuilt; the index settles them too.
 
 A job nothing will run does not hold the draft: the refusal applies the transfer lane's reaper
 rules to that job first (never queued for an hour, or queued past the queue timeout), and a job
-whose upload broke off inside the request is failed there and then. A running job whose worker
-went quiet still holds it: it is taken over and resumed, not dead. A publish does not wait on a job
-nothing will run either.
+whose upload broke off inside the request is failed there and then, keyed or not; the same key sent
+again takes it back under the rules a new import meets. A running job whose worker went quiet still
+holds it: it is taken over and resumed, not dead. A publish does not wait on a job nothing will run
+either.
 
 Retrying a failed import is held to the same rule, under the draft's lock, without the index too.
 """
@@ -26,6 +27,7 @@ from backend.app.api.v1.endpoints.versioning import _domain_errors, create_impor
 from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.errors import JobActive
+from backend.app.services.versioning.import_export.runner import JobReaper
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.job_lease import QUEUED
 from backend.app.services.versioning.models import BranchORM, JobORM
@@ -207,6 +209,111 @@ async def _a_broken_upload_lets_go(svc, ie, root):
     assert (await _create(ie, gid, draft))["branch_id"] == draft
 
 
+def _post(ie, gid, body, draft, key, actor):
+    return create_import("ws1", gid, body, format="ndjson", reconcile_mode="upsert", branch_id=draft,
+                         view_id=None, idempotency_key=key, user=type("U", (), {"id": actor})(),
+                         claims=None, meta={"data_source_id": gid}, ie=ie, session=None)
+
+
+async def _the_job_on(draft):
+    async with db.graphver_session() as s:
+        (job_id,) = (await s.execute(select(JobORM.id).where(JobORM.branch_id == draft))).scalars()
+    return job_id
+
+
+async def _a_keyed_broken_upload_is_taken_back(svc, ie, root):
+    gid = await _graph(svc)
+    ie = ImportExportService(versioning=svc, store=LocalFsObjectStore(root))
+    draft = await svc.open_draft(graph_id=gid, owner="u")
+    with pytest.raises(ConnectionResetError):
+        await _post(ie, gid, _CutOff(), draft, "nightly-1", "u")
+    job = await ie.get_job(await _the_job_on(draft))
+    assert (job["status"], job["errorMessage"]) == ("failed", config.JOB_NEVER_QUEUED)
+    other = await _create(ie, gid, draft)                    # the draft took the next import at once
+
+    with pytest.raises(HTTPException) as exc:                # sent again while that one runs
+        await _post(ie, gid, _Body(), draft, "nightly-1", "u")
+    assert exc.value.status_code == 409
+    assert (exc.value.detail["type"], exc.value.detail["jobId"]) == ("job_active", other["job_id"])
+    assert not (await ie.store.stat(job["sourceUri"])).exists, "nothing stored for it"
+
+    await _set(other["job_id"], status="completed")
+    again = await _post(ie, gid, _Body(), draft, "nightly-1", "u")
+    assert (again["jobId"], again["status"]) == (job["jobId"], "pending")
+    assert (await ie.get_job(job["jobId"]))["phase"] == QUEUED
+    stored = b"".join([c async for c in ie.store.open_stream(job["sourceUri"])])
+    assert stored == b'{"kind": "node", "urn": "urn:a"}\n', "this request's file"
+
+
+async def _a_taken_back_import_meets_the_drafts_access(svc, ie, root):
+    gid = await _graph(svc)
+    ie = ImportExportService(versioning=svc, store=LocalFsObjectStore(root))
+    draft = await svc.open_draft(graph_id=gid, owner="alice")
+    await svc.add_branch_member(graph_id=gid, branch_id=draft, subject_type="user", subject_id="bob",
+                                role="editor", actor="alice")
+    with pytest.raises(ConnectionResetError):
+        await _post(ie, gid, _CutOff(), draft, "nightly-1", "bob")
+    job_id = await _the_job_on(draft)
+    await svc.update_branch(graph_id=gid, branch_id=draft, actor="alice", is_shared=False)
+
+    with pytest.raises(HTTPException) as exc:                # what a new import from bob gets
+        await _post(ie, gid, _Body(), draft, "nightly-1", "bob")
+    assert (exc.value.status_code, exc.value.detail["code"]) == (403, "not_draft_owner")
+    job = await ie.get_job(job_id)
+    assert (job["status"], job["errorMessage"]) == ("failed", config.JOB_NEVER_QUEUED)
+    assert not (await ie.store.stat(job["sourceUri"])).exists
+
+
+async def _move(gid, workspace_id):
+    async with db.graphver_session() as s:
+        await s.execute(update(models.GraphORM).where(models.GraphORM.id == gid)
+                        .values(workspace_id=workspace_id))
+
+
+async def _a_taken_back_import_meets_a_new_imports_rules(svc, ie, root):
+    """Since the upload broke off, its draft was abandoned, its graph frozen, or its graph moved to
+    another workspace: the retry is refused as a new import would be, and nothing is stored."""
+    ie = ImportExportService(versioning=svc, store=LocalFsObjectStore(root))
+    for change, status, kind in (
+            (lambda gid, draft: svc.abandon_draft(graph_id=gid, branch_id=draft, actor="u"),
+             409, "branch_closed"),
+            (lambda gid, draft: svc.set_frozen(graph_id=gid, frozen=True, expected_rev=0),
+             409, "graph_not_writable"),
+            (lambda gid, draft: _move(gid, "ws2"), 404, None)):
+        gid = await _graph(svc)
+        draft = await svc.open_draft(graph_id=gid, owner="u")
+        with pytest.raises(ConnectionResetError):
+            await _post(ie, gid, _CutOff(), draft, "nightly-1", "u")
+        job_id = await _the_job_on(draft)
+        await change(gid, draft)
+
+        with pytest.raises(HTTPException) as exc:
+            await _post(ie, gid, _Body(), draft, "nightly-1", "u")
+        assert exc.value.status_code == status, exc.value.detail
+        assert kind is None or exc.value.detail["type"] == kind
+        job = await ie.get_job(job_id)
+        assert (job["status"], job["errorMessage"]) == ("failed", config.JOB_NEVER_QUEUED)
+        assert not (await ie.store.stat(job["sourceUri"])).exists
+
+
+async def _one_request_takes_it_back(svc, ie):
+    gid = await _graph(svc)
+    first = await _create(ie, gid)
+    job_id = first["job_id"]
+    await ie.abandon_unqueued(job_id)
+    await _set(job_id, created_at=_ago(2 * 3600))
+    async with db.graphver_session() as s:      # holds the draft: both get past the peek and wait on it
+        await svc._lock_branch(s, gid, first["branch_id"])
+        both = [asyncio.create_task(ie.reclaim_import(job_id, actor="u", workspace_id="ws1"))
+                for _ in range(2)]
+        await asyncio.sleep(0.5)
+        assert not any(t.done() for t in both), "both wait on the draft"
+    assert sorted(await asyncio.gather(*both)) == [False, True], "taken back once"
+    job = await ie.get_job(job_id)
+    assert (job["status"], job["phase"], job["errorMessage"]) == ("pending", None, None)
+    assert not any((await JobReaper().run_once(job_id=job_id)).values()), "its hour starts again"
+
+
 async def _no_publish_while_importing(svc, ie):
     gid = await _graph(svc)
     first = await _create(ie, gid)
@@ -305,6 +412,22 @@ def test_a_publish_never_waits_on_an_import_nothing_will_run():
 
 def test_an_import_whose_upload_broke_off_frees_the_draft_at_once(tmp_path):
     _e2e(lambda svc, ie: _a_broken_upload_lets_go(svc, ie, tmp_path))
+
+
+def test_a_keyed_upload_that_broke_off_frees_the_draft_and_its_retry_takes_it_back(tmp_path):
+    _e2e(lambda svc, ie: _a_keyed_broken_upload_is_taken_back(svc, ie, tmp_path))
+
+
+def test_a_taken_back_import_is_held_to_the_drafts_access_now(tmp_path):
+    _e2e(lambda svc, ie: _a_taken_back_import_meets_the_drafts_access(svc, ie, tmp_path))
+
+
+def test_a_taken_back_import_is_held_to_a_new_imports_rules(tmp_path):
+    _e2e(lambda svc, ie: _a_taken_back_import_meets_a_new_imports_rules(svc, ie, tmp_path))
+
+
+def test_only_one_request_takes_an_import_back():
+    _e2e(_one_request_takes_it_back)
 
 
 def test_a_draft_is_not_published_while_its_import_runs():

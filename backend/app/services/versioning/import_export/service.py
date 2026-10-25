@@ -50,6 +50,13 @@ def _silent_secs(row: JobORM) -> float:
     return (datetime.now(timezone.utc) - last).total_seconds()
 
 
+def _never_arrived(row) -> bool:
+    """An import whose file never arrived: failed with no phase as JOB_NEVER_QUEUED — its request
+    broke off before storing it, or the reaper failed it once that request had gone."""
+    return (row is not None and row.job_type == "ingest" and row.status == "failed"
+            and row.current_phase is None and row.error_message == config.JOB_NEVER_QUEUED)
+
+
 class ImportExportService:
     def __init__(
         self,
@@ -117,6 +124,10 @@ class ImportExportService:
         A supplied branch must be an open draft of this graph: main is :class:`MainWriteForbidden`,
         a closed draft :class:`BranchNotOpen`, someone else's private draft :class:`NotDraftOwner`,
         any other branch ``ValueError``.
+
+        An ``idempotency_key`` already taken on the graph (by any job, finished or not:
+        ``ix_jobs_idem_active``) raises ``IntegrityError``; the draft this call would have opened
+        goes with the refused insert, and the caller answers with that key's job (:meth:`find_job`).
 
         One import at a time per draft: while one is pending or running it is :class:`JobActive`.
         It is checked under the draft's lock, so the rule holds where a worker start has not built
@@ -218,6 +229,36 @@ class ImportExportService:
                 JobORM.id == job_id, JobORM.status == "pending", JobORM.current_phase.is_(None))
                 .values(status="failed", error_message=config.JOB_NEVER_QUEUED,
                         completed_at=now, updated_at=now))
+
+    async def reclaim_import(self, job_id: str, *, actor: str, workspace_id: str) -> bool:
+        """Take back an import whose file never arrived, for its idempotency key sent again: pending
+        once more with no phase, so only the request that took it back stores its file and queues
+        it, and the reaper's hour starts again. Held to what creating it is held to
+        (:meth:`create_import_job`): the graph still in ``workspace_id`` and writable, the draft
+        open and still the caller's to edit, and no other import pending or running on it
+        (:class:`JobActive`). False when another request took it back first."""
+        async with db.graphver_session() as s:
+            peek = await s.get(JobORM, job_id)
+            if not _never_arrived(peek):
+                return False
+            await self._svc._lock_lifecycle(s, peek.graph_id, shared=True)
+            await self._lock_in_workspace(s, peek.graph_id, workspace_id)
+            await self._svc._assert_writable(s, peek.graph_id)
+            branch = await self._svc._lock_branch(s, peek.graph_id, peek.branch_id)
+            # the draft's lock before the job row's, as requeue_failed takes them
+            row = await s.get(JobORM, job_id, with_for_update=True, populate_existing=True)
+            if not _never_arrived(row):
+                return False
+            self._svc._require_open(branch)
+            await self._svc._require_edit(s, branch, actor, ())
+            active = await self._import_on(s, branch.id, None)
+            if active is not None:
+                raise JobActive(active, f"Another import is running on this draft (job {active}). "
+                                        "Send this one again once it has finished.")
+            now = _now()
+            row.status, row.error_message, row.completed_at = "pending", None, None
+            row.created_at = row.updated_at = now   # never_runs() counts a phase-less job's hour from created_at
+        return True
 
     async def start_import(self, job_id: str) -> str:
         """Queue the import once its file is stored. Returns the status to report."""

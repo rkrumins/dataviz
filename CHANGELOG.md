@@ -330,8 +330,8 @@ and the projector carries them to FalkorDB; until it has, reads come from Postgr
   publish, sync or bulk ingest does not hold a job start up.
 - An import with no `branchId` opens its draft only when the import is accepted, so a refused one
   leaves no empty draft; the package import (`/packages/{id}/data`) opens its draft the same way.
-  `POST …/imports` with an `idempotencyKey` it has already seen answers with the import it created,
-  with no second draft or job.
+  `POST …/imports` sent again with your own `idempotencyKey` answers with the import it started,
+  with no second draft or job (see *Fixes for integrations*).
 - Scripts that save or import into drafts: expect **409 `branch_closed`** `{status, branchId}` for a
   merged, abandoned or publishing draft, **409 `main_write_forbidden`** for `main` (by name or id)
   on `POST /graph/changes`, an import, or a view route's `branchId`, and 404 for an import onto
@@ -480,6 +480,34 @@ grants can't be read.
   `allowMassDelete`.
 - A fork in the trash keeps its FalkorDB key until it is purged, and the topology page shows that
   key as unregistered meanwhile, as it does for a data source in the trash.
+
+---
+
+## [Unreleased] — Fixes for integrations
+
+### Fixed
+
+- **An import or export sent again with its `idempotencyKey` answers with the job it started.** A
+  key already used on the graph answered `503` and left an empty "Import" draft behind. A key is
+  now its sender's own: sent again, it answers `202` with that job, starting it if its file never
+  arrived, and a key that started the other kind of job answers `409 idempotency_key_reused`.
+- **A graph's branch list pages correctly for someone who doesn't manage it.** Drafts they couldn't
+  see were dropped after the page was cut, so a page could come back short, or empty, before the
+  end. Drafts shared with a team they are in are now listed and readable, and a draft whose sharing
+  is turned off is neither, to anyone not reviewing a pull request raised from it.
+- **A data source's refresh can wait for its rebuild.** `"wait": "complete"` waits up to 60
+  seconds, but the request was cut off after 30 and answered `504`. A refresh now has 90 seconds
+  (`HTTP_TIMEOUT_AGGREGATION_SECS`).
+- **A browser app on another origin can read `X-Total-Count`, `X-Request-ID` and
+  `X-API-Key-Expires-At`.**
+- **The view library publish script says why a key stopped.** A paused service account key waits
+  for its account to have a manager again, not for a sign-in, and a key refused for the caller's
+  address says so.
+
+### Upgrading
+
+- An `idempotencyKey` sent before the upgrade isn't recognised after it: sent again, it starts a
+  new job.
 
 ---
 

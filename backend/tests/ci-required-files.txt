@@ -75,6 +75,7 @@ tests/test_cleanup_graph_indices.py
 tests/test_concurrency_tuning_doc.py
 tests/test_configmap_matches_manifests.py
 tests/test_controlplane_loops_wiring.py
+tests/test_cors_expose_headers.py
 tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
 tests/test_data_source_list_versioning.py
@@ -124,6 +125,7 @@ tests/test_graph_store_topology.py
 tests/test_heal_native_leftovers.py
 tests/test_helm_worker_lanes.py
 tests/test_housekeeping_loops.py
+tests/test_import_export_idempotency.py
 tests/test_import_formats.py
 tests/test_import_job_liveness.py
 tests/test_import_replace.py
@@ -203,6 +205,7 @@ tests/test_reaper_rehome.py
 tests/test_reconcile_detectors.py
 tests/test_reconcile_edge_check.py
 tests/test_reconcile_sweeper.py
+tests/test_refresh_wait_deadline.py
 tests/test_request_body_limit.py
 tests/test_rollup_health.py
 tests/test_rollup_rebuild_hook_proxy.py
@@ -270,6 +273,7 @@ tests/test_versioning_schema.py
 tests/test_versioning_service_accounts.py
 tests/test_versioning_single_writer.py
 tests/test_versioning_trashed_graph.py
+tests/test_versioning_viewer_ctx.py
 tests/test_view_avatar_ids.py
 tests/test_view_branch_scope.py
 tests/test_view_bundle_schema.py

@@ -123,7 +123,9 @@ async def viewer_ctx(
 ) -> Viewer:
     """Who is asking, for scoping draft/PR reads: the caller's id + whether they hold
     ``datasource:manage`` in this workspace (managers see everything). Cheap — claims come from
-    the token; no DB hit. Endpoints still keep their ``requires(_READ)`` gate for the baseline."""
+    the token; no DB hit. Teams aren't read here: the service looks them up when a team's row
+    could decide (``_load_actor_groups``). Endpoints still keep their ``requires(_READ)`` gate
+    for the baseline."""
     return Viewer(actor=user.id, can_manage=has_permission(claims, _MANAGE, workspace_id=ws_id))
 
 
@@ -2776,6 +2778,34 @@ async def _write_view_import_assignments(ws, ds, view_id, created_nodes, batch_e
     return {"added": len(new_entries)}
 
 
+def _callers_key(user: User, key: Optional[str]) -> Optional[str]:
+    """An ``idempotencyKey`` as stored: its sender's, so two callers who choose the same key never
+    share a job, and one never learns of the other's."""
+    return f"{user.id}:{key}" if key else None
+
+
+async def _job_for_key(ie, graph_id: str, key: Optional[str], job_type: str) -> Optional[dict]:
+    """The job this caller's key already started on the graph, or ``None``. A key that started the
+    other kind of job names a different request: 409."""
+    job = await ie.find_job(graph_id=graph_id, idempotency_key=key) if key else None
+    if job is not None and job.get("jobType") != job_type:
+        raise HTTPException(status_code=409, detail={
+            "type": "idempotency_key_reused",
+            "message": "This idempotencyKey started another kind of job on this graph. Send a new one."})
+    return job
+
+
+def _never_started(job: dict) -> bool:
+    """Created, but never queued: the request that created it failed before it could start it."""
+    return job.get("status") == "pending" and job.get("phase") is None
+
+
+def _never_arrived(job: dict) -> bool:
+    """An import whose file never arrived (its request broke off, or the reaper failed it)."""
+    return (job.get("status") == "failed" and job.get("phase") is None
+            and job.get("errorMessage") == vconfig.JOB_NEVER_QUEUED)
+
+
 async def _check_import_view(session, ws_id: str, view_id: Optional[str], user, claims) -> None:
     """An import that names a view places the entities it creates in that view's layout
     (``_write_view_import_assignments``) — a write to the view. So the view must be one of this
@@ -2813,7 +2843,9 @@ async def create_import(
     reconcile_mode: str = Query("upsert", alias="reconcileMode", pattern="^(upsert|replace)$"),
     branch_id: Optional[str] = Query(None, alias="branchId"),
     view_id: Optional[str] = Query(None, alias="viewId"),
-    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
+    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey", description=(
+        "Makes the request safe to send again: the same key, from the same caller, answers "
+        "with the job it started")),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
     meta: dict = Depends(graph_in_workspace),
@@ -2831,29 +2863,48 @@ async def create_import(
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     await _check_import_view(session, ws_id, view_id, user, claims)
-    with _domain_errors():
-        # A repeated idempotencyKey is answered with the import it created: no second draft or job.
-        job = idempotency_key and await ie.find_job(graph_id=graph_id, idempotency_key=idempotency_key)
-        if not job:
-            try:
+    key = _callers_key(user, idempotency_key)
+    job = await _job_for_key(ie, graph_id, key, "ingest")
+    if job is None:
+        try:
+            with _domain_errors():
                 created = await ie.create_import_job(
                     workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
                     actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
                     branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
-                    idempotency_key=idempotency_key)
-            except IntegrityError:              # the same key, sent twice at once
-                job = await ie.find_job(graph_id=graph_id, idempotency_key=idempotency_key)
-    if job:
-        return {"jobId": job["jobId"], "branchId": job["branchId"], "sourceUri": job["sourceUri"],
-                "status": job["status"]}
+                    idempotency_key=key)
+        except IntegrityError:
+            # A request with the same key got there first: answer with its job.
+            job = await _job_for_key(ie, graph_id, key, "ingest")
+            if job is None:
+                raise
+        else:
+            return await _store_and_start(ie, request, created["job_id"], created["branch_id"],
+                                          created["source_uri"])
+    if _never_arrived(job):
+        # Its request broke off before storing the file: this one's file is taken, once the job is
+        # taken back under the rules a new import meets (the view it places into included).
+        await _check_import_view(session, ws_id, job.get("scopeViewId"), user, claims)
+        with _domain_errors():
+            if await ie.reclaim_import(job["jobId"], actor=user.id, workspace_id=ws_id):
+                return await _store_and_start(ie, request, job["jobId"], job["branchId"], job["sourceUri"])
+        job = await ie.find_job(graph_id=graph_id, idempotency_key=key)     # another request took it back
+    # Still storing its file, queued, running or finished: answered as it is.
+    return {"jobId": job["jobId"], "branchId": job["branchId"], "sourceUri": job["sourceUri"],
+            "status": job["status"]}
+
+
+async def _store_and_start(ie, request: Request, job_id: str, branch_id: str, source_uri: str) -> dict:
+    """Store the request's body as import ``job_id``'s file and queue it. A request that breaks off
+    first fails the job there and then (:func:`_abandon_unqueued`): its draft takes the next import
+    now, and the same key sent again takes the job back."""
     try:
-        await ie.store.put_stream(created["source_uri"], request.stream())
-        status = await ie.start_import(created["job_id"])
+        await ie.store.put_stream(source_uri, request.stream())
+        status = await ie.start_import(job_id)
     except BaseException:
-        await _abandon_unqueued(ie, created["job_id"])
+        await _abandon_unqueued(ie, job_id)
         raise
-    return {"jobId": created["job_id"], "branchId": created["branch_id"],
-            "sourceUri": created["source_uri"], "status": status}
+    return {"jobId": job_id, "branchId": branch_id, "sourceUri": source_uri, "status": status}
 
 
 async def _abandon_unqueued(ie, job_id: str) -> None:
@@ -3097,7 +3148,9 @@ async def create_export(
     props: Optional[str] = Query(None, description="Comma-separated property names to add as empty columns to fill"),
     ids: Optional[str] = Query(None, description="Comma-separated entity_id/urn set — export only these entities"),
     types: Optional[str] = Query(None, description="Comma-separated entity types — export only these"),
-    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
+    idempotency_key: Optional[str] = Query(None, alias="idempotencyKey", description=(
+        "Makes the request safe to send again: the same key, from the same caller, answers "
+        "with the job it started")),
     filename: Optional[str] = Query(None, description="The download's name, without its extension"),
     user: User = Depends(requires(_READ, workspace="ws_id")),
     claims: PermissionClaims = Depends(get_permission_claims),
@@ -3120,15 +3173,29 @@ async def create_export(
     _split = lambda v: [x.strip() for x in (v or "").split(",") if x.strip()]  # noqa: E731
     await _check_export_access(ws_id, graph_id, meta, branch_id=branch_id, view_id=view_id, viewer=viewer,
                                user=user, claims=claims, session=session, svc=svc)
-    with _domain_errors():
-        created = await ie.create_export_job(
-            workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
-            actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
-            branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
-            select_ids=_split(ids), select_types=_split(types), idempotency_key=idempotency_key,
-            file_name=download_name(filename, format) if filename else None)
-    status = await ie.start_export(created["job_id"])
-    return {"jobId": created["job_id"], "resultUri": created["result_uri"], "status": status}
+    key = _callers_key(user, idempotency_key)
+    job = await _job_for_key(ie, graph_id, key, "export")
+    if job is None:
+        try:
+            with _domain_errors():
+                created = await ie.create_export_job(
+                    workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
+                    actor=user.id, export_format=format, as_of_seq=as_of_seq, scope_view_id=view_id,
+                    branch_id=branch_id, provider_id=meta.get("provider_id"), extra_props=_split(props),
+                    select_ids=_split(ids), select_types=_split(types), idempotency_key=key,
+                    file_name=download_name(filename, format) if filename else None)
+        except IntegrityError:
+            # A request with the same key got there first: answer with its job.
+            job = await _job_for_key(ie, graph_id, key, "export")
+            if job is None:
+                raise
+        else:
+            job = {"jobId": created["job_id"], "resultUri": created["result_uri"],
+                   "status": "pending", "phase": None}
+    status = job["status"]
+    if _never_started(job):
+        status = await ie.start_export(job["jobId"])
+    return {"jobId": job["jobId"], "resultUri": job["resultUri"], "status": status}
 
 
 # Streamed exports. The export dialog asks for a plan (what the export holds, so an empty one is

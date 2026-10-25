@@ -312,9 +312,9 @@ def document(schema: dict, app) -> dict:
         "description": (
             "An API key, sent as `Authorization: Bearer nxpat_…` — made under "
             "Account → API keys — or `Bearer nxsat_…`, a service account's, made "
-            "by its managers. It acts as the person or service account it "
-            "belongs to, limited to what the key allows. Only the operations "
-            "marked with this scheme accept one."
+            "by its managers or an administrator with `system:users:manage`. It "
+            "acts as the person or service account it belongs to, limited to what "
+            "the key allows. Only the operations marked with this scheme accept one."
         ),
     }
     paths = schema.get("paths", {})
