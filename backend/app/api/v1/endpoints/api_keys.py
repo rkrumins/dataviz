@@ -42,7 +42,6 @@ from slowapi.util import get_remote_address
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.api.v1.endpoints.service_accounts import MINT_ANY
 from backend.app.auth import api_key_auth, api_key_surface
 from backend.app.auth.api_key_auth import (
     DEFAULT_SERVICE_ACCOUNT_GRACE_DAYS,
@@ -89,6 +88,7 @@ from backend.app.services import (
 )
 from backend.app.services.feature_flags import feature_flags
 from backend.app.services.permission_service import PermissionClaims, has_permission
+from backend.app.services.service_account_access import MINT_ANY
 from backend.auth_service.cookies import read_access_cookie
 from backend.auth_service.core import api_keys
 from backend.auth_service.core.config import RATELIMIT_LOGIN_PER_ACCOUNT

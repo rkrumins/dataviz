@@ -481,7 +481,8 @@ async def test_its_managers_cant_leave_it_with_none(test_client, people):
     with claims():
         last = await test_client.delete(f"{BASE}/{svc}/managers/users/{ADMIN}")
         assert last.status_code == 409, last.text
-        assert (await test_client.delete(f"{BASE}/{svc}/managers/users/usr_bea")).status_code == 404
+        not_a_manager = await test_client.delete(f"{BASE}/{svc}/managers/users/usr_bea")
+        assert not_a_manager.status_code == 404
         assert (await test_client.put(f"{BASE}/{svc}/managers/users/usr_ada")).status_code == 200
         stepped_down = await test_client.delete(f"{BASE}/{svc}/managers/users/{ADMIN}")
         assert stepped_down.status_code == 200, stepped_down.text

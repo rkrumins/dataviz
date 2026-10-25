@@ -39,7 +39,7 @@ from backend.app.db.repositories import (
 )
 from backend.app.services import service_account_access, service_account_standing, workspace_access
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services.service_account_access import MANAGE, MINT_ANY  # noqa: F401 — read as service_accounts.MINT_ANY
+from backend.app.services.service_account_access import MANAGE
 from backend.auth_service.interface import User
 from backend.common.display_name import resolve_display_name
 from backend.common.service_accounts import is_service_account
