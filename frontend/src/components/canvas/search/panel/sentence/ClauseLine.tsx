@@ -248,6 +248,9 @@ function RelationTokens({ line, tokenState }: {
     const relative = line.relative
     const relativeColor = useEntityVisual(relative.kind === 'types' ? relative.types[0] ?? '' : '').color
     const { verb, relative: relativeLabel, reach, via: viaText } = relationWords(line, typeName)
+    // Named or typed, but not yet: a gap to fill.
+    const relativeBlank = (relative.kind === 'names' && relative.refs.length === 0)
+        || (relative.kind === 'types' && relative.types.length === 0)
 
     const nested = useMemo(() => ({ ...relationCtx, depth: line.relationDepth }), [relationCtx, line.relationDepth])
     const relationEditor = (
@@ -269,7 +272,7 @@ function RelationTokens({ line, tokenState }: {
                 {verb}
             </Token>
             <Token {...tokenState('rel')}
-                   tone={relative.kind === 'types' ? 'entity' : relative.kind === 'names' ? 'value' : 'gap'}
+                   tone={relativeBlank ? 'gap' : relative.kind === 'types' ? 'entity' : relative.kind === 'names' ? 'value' : 'gap'}
                    color={relative.kind === 'types' ? relativeColor : undefined}
                    icon={relative.kind === 'types' && relative.types[0] ? <TypeIcon type={relative.types[0]} /> : undefined}
                    ariaLabel={`Which relatives: ${relativeLabel}`}

@@ -8,7 +8,8 @@ import { describe, expect, it } from 'vitest'
 import type { Predicate } from '@/types/search'
 
 import {
-    andWith, buildSentence, getAt, insertAt, listedClauses, parentOf, pathKey, setAt, type SentenceLine,
+    andWith, buildSentence, firstBlankToken, getAt, insertAt, listedClauses, parentOf, pathKey, setAt,
+    type SentenceLine,
 } from '../clauseModel'
 
 
@@ -169,6 +170,19 @@ describe('clauseModel — edits', () => {
         expect(parentOf([{ child: 2 }, { where: true }, { child: 1 }]))
             .toEqual({ into: [{ child: 2 }, { where: true }], index: 1 })
         expect(parentOf([{ child: 2 }, { where: true }])).toBeNull()
+    })
+
+    it('finds the first thing still to fill in: a value, or the relative a relationship names', () => {
+        const blankName: Predicate = { kind: 'related', axis: 'upstream', maxHops: 3, where: { kind: 'is', refs: [] } }
+        const at = (p: Predicate) => {
+            const sentence = buildSentence(p)
+            const key = firstBlankToken(sentence)
+            return key && sentence.lines.find((l) => key.startsWith(`${l.key}:`))?.kind + key.slice(key.indexOf(':'))
+        }
+        expect(at(blankName)).toBe('relation:rel')
+        expect(at(all(type('dataset'), { kind: 'text', value: '', target: 'name' } as Predicate))).toBe('clause:0')
+        expect(at(all(type('dataset'), { kind: 'related', axis: 'downstream', where: type() }))).toBe('relation:rel')
+        expect(firstBlankToken(buildSentence(draft))).toBeNull()
     })
 
     it('adds a condition every match must meet, whatever joins the query\'s own', () => {

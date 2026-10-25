@@ -317,6 +317,10 @@ interface SearchStoreState {
     /** Search Studio — the panel's full-width workspace over the canvas —
      *  is open. The panel's one query card lives there while it is. */
     studioOpen: boolean
+
+    /** A recipe with something to fill in was just picked: the Sentence
+     *  builder opens there once it shows it. */
+    pendingOpenBlank: boolean
 }
 
 
@@ -412,6 +416,9 @@ interface SearchStoreActions {
      *  Manager. The caller also opens the panel. */
     requestSearchRun: (predicate: Predicate) => void
     setStudioOpen: (open: boolean) => void
+    requestOpenBlank: () => void
+    /** Atomic read-and-clear of the request to open what to fill in. */
+    consumeOpenBlank: () => boolean
     /** Atomic read-and-clear of the pending run predicate (panel-side). */
     consumePendingRun: () => Predicate | null
     /** Persist the scope mode chosen by the user in the panel header.
@@ -665,6 +672,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     // hydrate the right value via setCanvasFilterMode.
     canvasFilterMode: 'highlight',
     studioOpen: false,
+    pendingOpenBlank: false,
 
     setResult: ({ viewId, matchUrns, ancestorPaths, ancestorCounts, queryHash }) => {
         const next = new Set<string>()
@@ -892,6 +900,16 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
 
     setStudioOpen: (open) => {
         set({ studioOpen: open })
+    },
+
+    requestOpenBlank: () => {
+        set({ pendingOpenBlank: true })
+    },
+
+    consumeOpenBlank: () => {
+        const pending = get().pendingOpenBlank
+        if (pending) set({ pendingOpenBlank: false })
+        return pending
     },
 
     consumePendingRun: () => {

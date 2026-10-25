@@ -11,14 +11,13 @@
  *                for everyone who can open the view. Someone who can
  *                edit the view saves and removes them (and shares one
  *                of their own from Mine).
- *   Templates  — built-in starter queries. The "Featured" subset
- *                (previously "Quick starts") shows as chips at the top;
- *                the full TemplatePicker sits below.
+ *   Recipes    — ready-made questions, by what someone sets out to do,
+ *                in the view's own words and each with how many it finds.
  *
  * A single text input filters across all three tabs simultaneously so
  * the user can ask "do I have anything saved about PII?" without
  * remembering whether they saved it themselves, a teammate did, or
- * it's a built-in template.
+ * it's a recipe.
  *
  * A footer takes the view's whole library — its saved queries and its
  * display rules — to a file, and (for someone who can edit the view)
@@ -36,7 +35,6 @@ import { type FC, type KeyboardEvent, type ReactNode, useMemo, useState } from '
 import { LibraryImportDialog } from '@/components/canvas/property-manager/LibraryImportDialog'
 import { saveLibraryFile } from '@/components/canvas/property-manager/libraryFile'
 import { useAppNotifications } from '@/components/ui/notifications'
-import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
 import {
     exportViewLibrary,
@@ -46,15 +44,12 @@ import {
 import type { RecentQueryEntry } from '@/store/searchStore'
 import { useLibraryCanEdit, useSavedViewQueries, useViewLibraryStore } from '@/store/viewLibraryStore'
 
-import { TemplatePicker } from '../TemplatePicker'
 import { stringifyPredicate } from './predicateDsl'
-import {
-    featuredTemplates,
-    type SearchTemplate,
-} from '../searchTemplates'
+import type { Recipe } from './recipes/recipes'
+import { ViewRecipes } from './recipes/ViewRecipes'
 
 
-type LibraryTab = 'mine' | 'shared' | 'templates'
+type LibraryTab = 'mine' | 'shared' | 'recipes'
 
 // The popover and the import dialog are portals, and React bubbles a
 // portal's key presses through its React parents — up to SearchMapPanel,
@@ -73,8 +68,10 @@ export interface LibraryPopoverProps {
     onOpenChange: (open: boolean) => void
     /** Per-view recent queries (already filtered + sorted by store). */
     recentQueries: ReadonlyArray<RecentQueryEntry>
-    /** Seed the QueryCard from a template. Closes the popover. */
-    onSeedTemplate: (template: SearchTemplate) => void
+    /** The view the recipes are for. */
+    viewId: string
+    /** Start from a recipe. Closes the popover. */
+    onPickRecipe: (recipe: Recipe) => void
     /** Load a saved/recent query into the QueryCard. Closes the popover. */
     onLoadRecent: (entry: RecentQueryEntry) => void
     /** Toggle the pin state of a recent entry. */
@@ -90,26 +87,24 @@ export interface LibraryPopoverProps {
     /** Load one of the view's saved queries into the QueryCard. Closes
      *  the popover. */
     onLoadSaved: (query: SavedViewQuery) => void
-    /** Whether the active draft has filters — affects template-seed
-     *  copy ("template will REPLACE current filters"). */
+    /** Whether the active draft has filters — a recipe replaces them,
+     *  and the Recipes tab says so. */
     activeDraft: boolean
 }
 
 
 export const LibraryPopover: FC<LibraryPopoverProps> = ({
     children, open, onOpenChange,
-    recentQueries, onSeedTemplate, onLoadRecent, onTogglePinRecent,
+    viewId, recentQueries, onPickRecipe, onLoadRecent, onTogglePinRecent,
     onRemoveRecent, onSaveAs, onLoadSaved, activeDraft,
 }) => {
     const savedQueries = useSavedViewQueries()
     // Open on what the view keeps, then on the user's own; fall back to
-    // Templates on a first session so the popover isn't empty.
+    // Recipes on a first session so the popover isn't empty.
     const [tab, setTab] = useState<LibraryTab>(
-        savedQueries.length > 0 ? 'shared' : recentQueries.length > 0 ? 'mine' : 'templates',
+        savedQueries.length > 0 ? 'shared' : recentQueries.length > 0 ? 'mine' : 'recipes',
     )
     const [filter, setFilter] = useState('')
-
-    const featured = useMemo(() => featuredTemplates(), [])
 
     // The view's library as a file — the pack the Property Manager
     // exports and imports. The import dialog lives outside the popover,
@@ -195,13 +190,16 @@ export const LibraryPopover: FC<LibraryPopoverProps> = ({
                                 onLoad={(q) => { onLoadSaved(q); onOpenChange(false) }}
                             />
                         )}
-                        {tab === 'templates' && (
-                            <TemplatesTab
-                                featured={featured}
-                                filter={filter}
-                                activeDraft={activeDraft}
-                                onSeed={(t) => { onSeedTemplate(t); onOpenChange(false) }}
-                            />
+                        {tab === 'recipes' && (
+                            <div className="flex flex-col gap-2">
+                                {activeDraft && (
+                                    <p className="px-1 text-2xs text-ink-muted">
+                                        Picking a recipe replaces your current query.
+                                    </p>
+                                )}
+                                <ViewRecipes viewId={viewId} filter={filter}
+                                             onPick={(r) => { onPickRecipe(r); onOpenChange(false) }} />
+                            </div>
                         )}
                     </div>
                     {libraryViewId && (
@@ -366,8 +364,8 @@ function Tabs({
                 This view
                 {sharedCount > 0 && <CountPill value={sharedCount} />}
             </TabButton>
-            <TabButton active={tab === 'templates'} onClick={() => onChange('templates')}>
-                Templates
+            <TabButton active={tab === 'recipes'} onClick={() => onChange('recipes')}>
+                Recipes
             </TabButton>
         </div>
     )
@@ -722,101 +720,6 @@ function SavedRow({
                     )}
                 </div>
             )}
-        </div>
-    )
-}
-
-
-// ---------------------------------------------------------------------------
-// Templates tab
-// ---------------------------------------------------------------------------
-
-function TemplatesTab({
-    featured, filter, activeDraft, onSeed,
-}: {
-    featured: ReadonlyArray<SearchTemplate>
-    filter: string
-    activeDraft: boolean
-    onSeed: (template: SearchTemplate) => void
-}) {
-    const filteredFeatured = useMemo(() => {
-        const q = filter.trim().toLowerCase()
-        if (!q) return featured
-        return featured.filter((t) => {
-            const haystack = `${t.label} ${t.chipLabel ?? ''} ${t.description ?? ''}`.toLowerCase()
-            return haystack.includes(q)
-        })
-    }, [featured, filter])
-
-    return (
-        <div className="flex flex-col gap-3">
-            {/* Featured (formerly "Quick starts") — now visually grouped
-                under the same heading as the rest of the browse list so
-                it doesn't feel like a separate, half-integrated thing. */}
-            <section className="space-y-2">
-                <SectionHeading label="Featured" />
-                {filteredFeatured.length === 0 ? (
-                    <div className="text-center text-[11.5px] text-ink-muted italic py-3">
-                        No featured templates match "{filter}".
-                    </div>
-                ) : (
-                    <div className="flex flex-wrap gap-1.5">
-                        {filteredFeatured.map((t) => (
-                            <FeaturedChip
-                                key={t.id}
-                                template={t}
-                                onClick={() => onSeed(t)}
-                            />
-                        ))}
-                    </div>
-                )}
-                {activeDraft && (
-                    <p className="text-[10.5px] text-ink-muted/70 leading-snug">
-                        Picking a template replaces your current filters.
-                    </p>
-                )}
-            </section>
-
-            <section className="space-y-2">
-                <SectionHeading label="All templates" />
-                <TemplatePicker onPick={onSeed} />
-            </section>
-        </div>
-    )
-}
-
-
-function FeaturedChip({
-    template, onClick,
-}: {
-    template: SearchTemplate
-    onClick: () => void
-}) {
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            title={template.description}
-            className={cn(
-                'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl',
-                'text-[11.5px] font-medium',
-                'bg-canvas-base/50 border border-glass-border',
-                'text-ink-secondary hover:text-ink hover:border-accent-lineage/40',
-                'hover:bg-accent-lineage/10 transition-all',
-                'active:scale-95',
-            )}
-        >
-            <DynamicIcon name={template.icon} className="w-3.5 h-3.5 text-accent-lineage" />
-            {template.chipLabel ?? template.label}
-        </button>
-    )
-}
-
-
-function SectionHeading({ label }: { label: string }) {
-    return (
-        <div className="text-[10px] font-semibold uppercase tracking-[0.1em] text-ink-muted/80">
-            {label}
         </div>
     )
 }

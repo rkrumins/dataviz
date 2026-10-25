@@ -15,6 +15,7 @@
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
+import { useSearchStore } from '@/store/searchStore'
 import type { NodeRef, Predicate } from '@/types/search'
 
 import type { ValueSuggester } from '../../builder/useDiscovery'
@@ -29,6 +30,7 @@ import type { CodeKind } from '../vocabulary/filterKinds'
 import {
     buildSentence,
     duplicateAt,
+    firstBlankToken,
     getAt,
     insertAt,
     listedClauses,
@@ -154,6 +156,18 @@ export function SentenceBuilder({
         const t = setTimeout(() => setOpenToken(`${line.key}:${suffix}`), 30)
         return () => clearTimeout(t)
     }, [sentence, predicate])
+
+    // A recipe with something to fill in opens there. Taken when it
+    // opens, so a re-run effect can't spend the request on nothing.
+    useEffect(() => {
+        if (!useSearchStore.getState().pendingOpenBlank) return
+        const key = firstBlankToken(sentence)
+        if (!key) return
+        const t = setTimeout(() => {
+            if (useSearchStore.getState().consumeOpenBlank()) setOpenToken(key)
+        }, 30)
+        return () => clearTimeout(t)
+    }, [sentence])
 
     // Each line's count: how many match once it is added (in an all-of
     // query), or alone (any-of). The subject line shows its own total.

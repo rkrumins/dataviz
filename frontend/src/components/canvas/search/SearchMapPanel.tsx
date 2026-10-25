@@ -92,13 +92,11 @@ import { useViewSearchSessionOptional } from './session/ViewSearchSessionContext
 import { hasReportableView } from './session/useViewSearchSessionController'
 import { SEARCH_OPTIONS } from './searchOptions'
 import { usePendingSearchRun } from './usePendingSearchRun'
+import type { Recipe } from './panel/recipes/recipes'
+import { ViewRecipes } from './panel/recipes/ViewRecipes'
 import { ResultsTable } from './studio/ResultsTable'
 import { SchemaInspector } from './studio/SchemaInspector'
 import { SearchStudio } from './studio/SearchStudio'
-import {
-    defaultInputs,
-    type SearchTemplate,
-} from './searchTemplates'
 
 
 export interface SearchMapPanelProps {
@@ -230,7 +228,7 @@ function PanelInner({
     const refineOpen = viewSession ? viewSession.refineOpen : true
     // The Sentence builder already reads as the query, so the one-line
     // statement above the results would repeat it.
-    const [editorMode] = useEditorMode()
+    const [editorMode, setEditorMode] = useEditorMode()
     const sentenceShowing = refineOpen && editorMode === 'sentence'
     const { loadAll, isLoadingAll, cancelLoadAll } = useLoadAll(session)
 
@@ -350,20 +348,24 @@ function PanelInner({
     }, [onClear, cancel, resetTemplate, clearStore])
 
     /**
-     * Seed-from-template: rather than calling runTemplate (which would
-     * REPLACE the canonical state with the template's full SearchQuery
-     * including its aggregations), we just compile the template's
-     * predicate and seed the draft. The QueryCard's debounced auto-run
-     * then fires with the user's hits-only options — so the result is
-     * an editable set of filter rows the user can refine.
+     * Start from a recipe. One ready to run runs now, as a change made
+     * from the results does. One with something to fill in opens the
+     * builder on it: in the Sentence view at its first blank — unless
+     * this person builds in Form, where the blank is an empty field.
      */
-    const handleSeedTemplate = useCallback((template: SearchTemplate) => {
-        const built = template.build(defaultInputs(template))
-        if (built.predicate) {
-            commitDraft(built.predicate)
-        }
+    const handlePickRecipe = useCallback((recipe: Recipe) => {
         setLibraryOpen(false)
-    }, [commitDraft])
+        if (!recipe.blank) {
+            handleRefine(recipe.predicate)
+            return
+        }
+        commitDraft(recipe.predicate)
+        viewSession?.refine()
+        if (editorMode !== 'form') {
+            setEditorMode('sentence')
+            useSearchStore.getState().requestOpenBlank()
+        }
+    }, [handleRefine, commitDraft, viewSession, editorMode, setEditorMode])
 
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
         commitDraft(entry.predicate)
@@ -551,6 +553,7 @@ function PanelInner({
                 setStudioOpen(false)
                 openAdvanced('options')
             }}
+            onPickRecipe={handlePickRecipe}
         />
     )
     const matchBar = (
@@ -612,7 +615,8 @@ function PanelInner({
                 open={libraryOpen}
                 onOpenChange={setLibraryOpen}
                 recentQueries={recentQueries}
-                onSeedTemplate={handleSeedTemplate}
+                viewId={viewId}
+                onPickRecipe={handlePickRecipe}
                 onLoadRecent={handleLoadRecent}
                 onTogglePinRecent={togglePinRecent}
                 onRemoveRecent={removeRecent}
@@ -719,9 +723,12 @@ function PanelInner({
                                            options={[{ value: 'table', label: 'Table' }, { value: 'cards', label: 'Cards' }]} />
                             )}
                             {view.kind === 'idle' ? (
-                                <p className="text-sm text-ink-muted">
-                                    Ask a question, or build one — what it finds shows here.
-                                </p>
+                                <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto custom-scrollbar">
+                                    <p className="px-1 text-sm text-ink-muted">
+                                        Ask a question, build one, or start from a recipe — what it finds shows here.
+                                    </p>
+                                    <ViewRecipes viewId={viewId} onPick={handlePickRecipe} />
+                                </div>
                             ) : tableHits.length > 0 && studioView === 'table' && view.kind === 'results' ? (
                                 <ResultsTable
                                     hits={tableHits}

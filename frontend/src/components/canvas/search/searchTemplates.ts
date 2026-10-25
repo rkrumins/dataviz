@@ -71,11 +71,7 @@ export interface TemplateContext {
     knownEntityTypes: string[]
 }
 
-/** Section taxonomy. The picker groups templates by this field rather
- *  than maintaining a hardcoded ID list — adding a template only
- *  requires setting ``section`` on the new entry, never touching
- *  TemplatePicker. New section ids: register display metadata in
- *  ``SECTION_META`` in TemplatePicker.tsx. */
+/** Section taxonomy: what kind of question a template answers. */
 export type TemplateSection =
     | 'overview'    // counts and distributions
     | 'find'        // locate specific entities
@@ -95,18 +91,6 @@ export interface SearchTemplate {
     /** Which section the picker groups this template under. */
     section: TemplateSection
     inputs: TemplateInput[]
-    /**
-     * Surfaced as a one-click chip on the AskBar. Only set this for templates
-     * that can run with their default inputs — featured chips submit directly
-     * without showing a form, so any required field needs a usable default.
-     */
-    featured?: boolean
-    /**
-     * Short label used on the AskBar chip when ``featured`` is true. Falls
-     * back to ``label`` if omitted. Chips are tight on space — prefer
-     * 1-3 words.
-     */
-    chipLabel?: string
     /** Compile the filled inputs into a scope-less search request. The
      *  ``useAdvancedSearch`` hook stamps ``scope.viewId`` on top so the
      *  backend's ViewScopeResolver can enforce view boundaries. */
@@ -122,8 +106,6 @@ export const TEMPLATES: SearchTemplate[] = [
         description: 'Count every node in scope, grouped by what kind of entity it is.',
         icon: 'PieChart',
         section: 'overview',
-        featured: true,
-        chipLabel: 'Overview',
         inputs: [],
         build: () => ({
             predicate: { kind: 'hasProperty', key: 'urn' },
@@ -169,8 +151,6 @@ export const TEMPLATES: SearchTemplate[] = [
         description: 'List every node of a chosen type — datasets, containers, etc.',
         icon: 'List',
         section: 'find',
-        featured: true,
-        chipLabel: 'All datasets',
         inputs: [
             {
                 name: 'entityType',
@@ -343,8 +323,6 @@ export const TEMPLATES: SearchTemplate[] = [
         description: 'All nodes tagged with a value, rolled up by domain.',
         icon: 'Tag',
         section: 'find',
-        featured: true,
-        chipLabel: 'PII tagged',
         inputs: [
             {
                 name: 'tag',
@@ -415,8 +393,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'Lineage edges are resolved from the ontology of the data source.',
         icon: 'CircleOff',
         section: 'lineage',
-        featured: true,
-        chipLabel: 'No lineage',
         inputs: [
             {
                 name: 'entityType',
@@ -454,8 +430,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'Lineage edges are resolved from the ontology.',
         icon: 'CornerDownRight',
         section: 'lineage',
-        featured: true,
-        chipLabel: 'No downstream',
         inputs: [],
         build: () => ({
             predicate: { kind: 'isLeaf', edgeClass: 'lineage' },
@@ -475,8 +449,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'Lineage edges are resolved from the ontology.',
         icon: 'CornerLeftUp',
         section: 'lineage',
-        featured: true,
-        chipLabel: 'No upstream',
         inputs: [],
         build: () => ({
             predicate: { kind: 'isRoot', edgeClass: 'lineage' },
@@ -735,8 +707,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'so you can see which business areas hold sensitive data.',
         icon: 'ShieldAlert',
         section: 'governance',
-        featured: true,
-        chipLabel: 'PII spread',
         inputs: [
             {
                 name: 'tags',
@@ -868,8 +838,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'domain. Drives the ownership-gap report.',
         icon: 'UserX',
         section: 'governance',
-        featured: true,
-        chipLabel: 'No owner',
         inputs: [
             {
                 name: 'ownerKey',
@@ -916,8 +884,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'by domain so you can see which areas have incomplete lineage.',
         icon: 'Unplug',
         section: 'lineage',
-        featured: true,
-        chipLabel: 'Lineage gaps',
         inputs: [],
         build: () => ({
             predicate: {
@@ -1089,8 +1055,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'disconnected data.',
         icon: 'Disc',
         section: 'discovery',
-        featured: true,
-        chipLabel: 'Orphans by layer',
         inputs: [],
         build: () => ({
             predicate: {
@@ -1144,11 +1108,6 @@ export function findTemplate(id: string): SearchTemplate {
     const t = TEMPLATES.find((t) => t.id === id)
     if (!t) throw new Error(`Unknown template: ${id}`)
     return t
-}
-
-/** Templates surfaced as one-click chips on the AskBar. Order is preserved. */
-export function featuredTemplates(): readonly SearchTemplate[] {
-    return TEMPLATES.filter((t) => t.featured === true)
 }
 
 /** Initial input values for a template (driven by per-input defaults). */

@@ -82,10 +82,11 @@ export function relationWords(line: Extract<SentenceLine, { kind: 'relation' }>,
     if (relative.kind === 'types') {
         const names = relative.types.map((t) => typeName(t, several))
         const list = names.join(' or ')
-        label = several || p.quantifier === 'none' ? list : `${/^[aeiou]/i.test(names[0] ?? '') ? 'an' : 'a'} ${list}`
+        label = !list ? 'pick…'
+            : several || p.quantifier === 'none' ? list : `${/^[aeiou]/i.test(names[0] ?? '') ? 'an' : 'a'} ${list}`
     } else if (relative.kind === 'names') {
         const names = relative.refs.map(refName).join(', ')
-        label = relative.orInside ? `${names} or anything inside it` : names
+        label = !names ? 'pick…' : relative.orInside ? `${names} or anything inside it` : names
     } else {
         label = p.count ? (p.count.value === 1 ? 'entity' : 'entities')
             : p.quantifier === 'none' ? 'nothing' : 'something'

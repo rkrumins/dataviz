@@ -26,16 +26,10 @@ import {
     Loader2,
     AlertCircle,
     Sparkles,
-    ArrowRight,
     Play,
     Zap,
     Hand,
-    Search,
     Terminal,
-    Box,
-    Tag as TagIcon,
-    Layers,
-    ArrowDownToLine,
     FileCode,
     Save as SaveIcon,
     SquarePen,
@@ -89,6 +83,9 @@ import { buildRunnablePredicate } from './runnablePredicate'
 import { SearchOmnibox } from './omnibox/SearchOmnibox'
 import { SaveQueryDialog } from './SaveQueryDialog'
 import { RelationProvider } from './RelationshipEditor'
+import { RecipeGallery } from './recipes/RecipeGallery'
+import type { Recipe } from './recipes/recipes'
+import { useRecipes } from './recipes/useRecipes'
 import { SentenceBuilder } from './sentence/SentenceBuilder'
 import { VisualQueryBuilder } from './VisualQueryBuilder'
 
@@ -107,6 +104,9 @@ export interface QueryCardProps {
     onRun: (predicate: Predicate, options?: SearchQuery['options']) => void
     /** Open Advanced drawer (for OR/NOT/path authoring). */
     onOpenAdvanced: () => void
+    /** Start from a recipe: one ready to run runs; one with something to
+     *  fill in opens for it. */
+    onPickRecipe: (recipe: Recipe) => void
 }
 
 
@@ -121,7 +121,7 @@ const EDITOR_MODES: { value: EditorMode; label: string; icon: typeof Code2 }[] =
 
 
 export const QueryCard: FC<QueryCardProps> = ({
-    viewId, isRunning, runState, onRun, onOpenAdvanced,
+    viewId, isRunning, runState, onRun, onOpenAdvanced, onPickRecipe,
 }) => {
     const draftPredicate = useDraftPredicate()
     const seedDraftPredicate = useSearchStore((s) => s.seedDraftPredicate)
@@ -153,7 +153,7 @@ export const QueryCard: FC<QueryCardProps> = ({
     }), [discovery.edgeTypes, discovery.keysByEdgeType, discovery.getEdgeValueSamples,
         discovery.edgeKeyStoredAs])
     const knownEntityTypes = useEntityTypeNames()
-    // What the omnibox and the first-run examples offer: the types this
+    // What the omnibox, the Ask examples and the recipes offer: the types this
     // view's data holds, most common first — every "Everything of type …"
     // returns something. The ontology's full list until discovery answers.
     const presentEntityTypes = useMemo(
@@ -165,6 +165,8 @@ export const QueryCard: FC<QueryCardProps> = ({
     // reference-layout config, or else the view's configured layers.
     const discoveredLayers = useViewLayerOptions(discovery.getValueSamples)
     const askVocabulary = useAskVocabulary(discovery, discoveredLayers)
+    const recipes = useRecipes(presentEntityTypes, discovery.tagValues, discovery.allKeys, discoveredLayers)
+    const inStudio = useSearchStore((s) => s.studioOpen)
     // What Code mode's editor completes from: the view's own types, tags,
     // layers and keys, values and names from the server as they're typed.
     const provider = useGraphProviderIfAvailable()
@@ -516,7 +518,11 @@ export const QueryCard: FC<QueryCardProps> = ({
                                     disabled={isRunning}
                                 />
                             }
-                            onSeed={(p) => commitDraft(p)}
+                            // Search Studio shows every recipe beside the card.
+                            recipes={inStudio ? null : (
+                                <RecipeGallery viewId={viewId} recipes={recipes} variant="starters"
+                                               onPick={onPickRecipe} />
+                            )}
                             onUseCodeMode={() => setMode('code')}
                             discoveredEntityTypes={presentEntityTypes}
                             discoveredTags={discovery.tagValues}
@@ -647,16 +653,12 @@ export const QueryCard: FC<QueryCardProps> = ({
 /**
  * Owns the whole card surface when the draft is empty. Replaces the
  * dense "QUERY · empty" + dormant controls header with a confident
- * onboarding hero: a refined intro, a short stack of concrete example
- * queries (each one explains exactly what it does), and a quiet
+ * onboarding hero: a refined intro, the Ask bar, recipes to start from
+ * (in the view's own words, each with how many it finds), and a quiet
  * footer for power users who'd rather paste DSL.
- *
- * Examples are dynamic — they reference real entity types / tags /
- * layers discovered in the active view so a first-time user sees a
- * working query against THEIR data, not a placeholder.
  */
 function PremiumEmptyHero({
-    ask, palette, onSeed, onUseCodeMode,
+    ask, palette, recipes, onUseCodeMode,
     discoveredEntityTypes, discoveredTags, discoveredLayers,
     discoveryLoading, discoveryError, propertyKeyCount,
 }: {
@@ -664,7 +666,8 @@ function PremiumEmptyHero({
     ask: ReactNode
     /** Every kind of filter, by category — the "+ Add filter" palette. */
     palette: ReactNode
-    onSeed: (p: Predicate) => void
+    /** Recipes to start from. */
+    recipes: ReactNode
     onUseCodeMode: () => void
     discoveredEntityTypes: string[]
     discoveredTags: string[]
@@ -673,91 +676,6 @@ function PremiumEmptyHero({
     discoveryError: Error | null
     propertyKeyCount: number
 }) {
-    type Example = {
-        icon: typeof Search
-        accent: string
-        title: string
-        description: string
-        chips: string[]
-        predicate: Predicate
-    }
-
-    const examples: Example[] = []
-
-    // 1) Search by name — always available, the most universal entry point
-    examples.push({
-        icon: Search,
-        accent: 'text-accent-lineage',
-        title: 'Search by name',
-        description:
-            'Type a word and we surface every node whose display name contains it — try ' +
-            '"account" or "customer" to see how it works.',
-        chips: ['name contains "…"'],
-        predicate: {
-            kind: 'text', value: '', target: 'name',
-            match: 'substring', caseSensitive: false, boost: 1,
-        },
-    })
-
-    // 2) Browse one entity type — when the view has at least one type
-    const primaryType = discoveredEntityTypes.find(
-        (t) => /dataset|table|object/i.test(t),
-    ) ?? discoveredEntityTypes[0]
-    if (primaryType) {
-        examples.push({
-            icon: Box,
-            accent: 'text-cyan-300',
-            title: `Browse all ${primaryType}s`,
-            description:
-                `Open one drawer of the filing cabinet — every ${primaryType} in this view, ` +
-                'unfiltered. Pair with a name filter later to narrow.',
-            chips: [`type: ${primaryType}`],
-            predicate: { kind: 'entityType', op: 'in', values: [primaryType] },
-        })
-    }
-
-    // 3) Where is this tag used — only meaningful when tags exist
-    if (discoveredTags.length > 0) {
-        const tag = discoveredTags[0]
-        examples.push({
-            icon: TagIcon,
-            accent: 'text-fuchsia-300',
-            title: `Trace the "${tag}" tag`,
-            description:
-                `Find every node carrying the ${tag} tag — great for compliance audits or ` +
-                'understanding where a label has spread across the graph.',
-            chips: [`tag: ${tag}`],
-            predicate: { kind: 'tag', op: 'hasAny', values: [tag] },
-        })
-    }
-
-    // 4) Dead-ends — graph-shape, always available
-    examples.push({
-        icon: ArrowDownToLine,
-        accent: 'text-amber-300',
-        title: 'Find dead-ends',
-        description:
-            'Terminal nodes nothing reads from downstream — usually final reports, ' +
-            'one-off exports, or candidates for cleanup.',
-        chips: ['no downstream'],
-        predicate: { kind: 'isLeaf', edgeClass: 'lineage' },
-    })
-
-    // 5) Browse a layer — only when the view has layers configured
-    if (discoveredLayers.length > 0) {
-        const layer = discoveredLayers[0]
-        examples.push({
-            icon: Layers,
-            accent: 'text-emerald-300',
-            title: `Browse the ${layer.label} layer`,
-            description:
-                `Everything this view assigns to the ${layer.label} layer — useful for ` +
-                'understanding the shape of one stage of your pipeline.',
-            chips: [`layer: ${layer.label}`],
-            predicate: { kind: 'layer', layerAssignment: layer.value },
-        })
-    }
-
     return (
         <motion.div
             initial={{ opacity: 0, y: 6 }}
@@ -803,17 +721,10 @@ function PremiumEmptyHero({
                 <div>{palette}</div>
             </div>
 
-            {/* Examples — the teaching surface. The Ask bar above is
-                the fast path; these explain, in a sentence each, what a
-                query of that shape actually does. Recents live in the
-                header's Library. */}
-            <div className="relative px-3 pb-3">
-                <div className="flex flex-col gap-1.5">
-                    {examples.slice(0, 3).map((ex, i) => (
-                        <ExampleCard key={i} index={i} example={ex} onSeed={onSeed} />
-                    ))}
-                </div>
-            </div>
+            {/* Recipes — questions people come here with, ready to run
+                against this view. The Ask bar above is the fast path;
+                recents live in the header's Library. */}
+            {recipes && <div className="relative px-3 pb-3">{recipes}</div>}
 
             {/* Footer — discovery telemetry + DSL escape hatch */}
             <div className={cn(
@@ -843,82 +754,6 @@ function PremiumEmptyHero({
         </motion.div>
     )
 }
-
-
-function ExampleCard({
-    index, example, onSeed,
-}: {
-    index: number
-    example: {
-        icon: typeof Search
-        accent: string
-        title: string
-        description: string
-        chips: string[]
-        predicate: Predicate
-    }
-    onSeed: (p: Predicate) => void
-}) {
-    const Icon = example.icon
-    return (
-        <motion.button
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.18, delay: 0.04 * index }}
-            type="button"
-            onClick={() => onSeed(example.predicate)}
-            className={cn(
-                'group/ex relative rounded-xl p-3 text-left',
-                'bg-canvas-base/40 hover:bg-canvas-base/70',
-                'border border-glass-border/60 hover:border-accent-lineage/50',
-                'transition-all duration-150',
-                'hover:shadow-[0_4px_20px_-8px_rgba(45,150,255,0.35)]',
-            )}
-        >
-            <div className="flex items-start gap-2.5">
-                <div className={cn(
-                    'w-8 h-8 rounded-xl flex items-center justify-center shrink-0',
-                    'bg-glass/30 group-hover/ex:bg-glass/50 transition-colors',
-                )}>
-                    <Icon className={cn('w-3.5 h-3.5', example.accent)} />
-                </div>
-                <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                        <span className="text-[12.5px] font-semibold text-ink">
-                            {example.title}
-                        </span>
-                        <ArrowRight className={cn(
-                            'w-3.5 h-3.5 text-ink-muted/60 shrink-0',
-                            'opacity-0 group-hover/ex:opacity-100 transition-all',
-                            'group-hover/ex:text-accent-lineage',
-                            '-translate-x-1 group-hover/ex:translate-x-0',
-                        )} />
-                    </div>
-                    <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">
-                        {example.description}
-                    </p>
-                    <div className="mt-1.5 flex flex-wrap gap-1">
-                        {example.chips.map((chip, ci) => (
-                            <span
-                                key={ci}
-                                className={cn(
-                                    'inline-flex items-center px-1.5 py-0.5 rounded',
-                                    'text-[10px] font-mono',
-                                    'bg-accent-lineage/10 text-accent-lineage/90',
-                                    'border border-accent-lineage/15',
-                                )}
-                            >
-                                {chip}
-                            </span>
-                        ))}
-                    </div>
-                </div>
-            </div>
-        </motion.button>
-    )
-}
-
-
 
 
 function EmptyDiscoveryHint({

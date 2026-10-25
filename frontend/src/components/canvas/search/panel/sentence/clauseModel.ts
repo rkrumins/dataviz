@@ -14,6 +14,7 @@
  */
 import type { GroupPredicate, NodeRef, Predicate, RelatedPredicate } from '@/types/search'
 
+import { isRowIncomplete } from '../ConditionRow'
 import { RELATION_DEPTH_MAX } from '../relations'
 import { connector, isOrInside } from '../vocabulary/sentenceGrammar'
 
@@ -294,6 +295,20 @@ export function withCombine(draft: Predicate | null, op: 'and' | 'or'): Predicat
     return { kind: 'group', op: 'and', children: [
         subject.predicate, ...(op === 'or' ? [{ kind: 'group', op: 'or', children: list } as Predicate] : list),
     ] }
+}
+
+
+/** The token of the first thing still to fill in — a clause's value, or
+ *  the relative a relationship names — or null when nothing is. */
+export function firstBlankToken(sentence: Sentence): string | null {
+    for (const line of sentence.lines) {
+        if (line.kind === 'clause' && isRowIncomplete(line.predicate)) return `${line.key}:0`
+        if (line.kind !== 'relation') continue
+        const r = line.relative
+        if ((r.kind === 'types' && r.types.length === 0)
+            || (r.kind === 'names' && isRowIncomplete({ kind: 'is', refs: r.refs }))) return `${line.key}:rel`
+    }
+    return null
 }
 
 

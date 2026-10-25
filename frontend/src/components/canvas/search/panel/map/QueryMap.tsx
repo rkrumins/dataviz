@@ -126,7 +126,7 @@ function MapNodeButton({ node, count, onOpen }: {
     const typeName = useTypeName()
     const visual = useEntityVisual(node.types[0] ?? '')
     const typed = node.types.length > 0
-    const label = node.kind === 'named' ? node.names.join(', ')
+    const label = node.kind === 'named' ? node.names.join(', ') || 'pick…'
         : typed ? node.types.map((t) => typeName(t, node.kind === 'subject' || node.several)).join(' or ')
             : 'Anything'
     const chips = node.chips.length > 1 && node.chipsJoin === 'or'
