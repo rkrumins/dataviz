@@ -114,6 +114,7 @@ tests/test_graph_store_topology.py
 tests/test_heal_native_leftovers.py
 tests/test_helm_worker_lanes.py
 tests/test_housekeeping_loops.py
+tests/test_import_export_idempotency.py
 tests/test_import_formats.py
 tests/test_import_job_liveness.py
 tests/test_import_resolve.py

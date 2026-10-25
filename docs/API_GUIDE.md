@@ -742,9 +742,9 @@ publish.
    in that view's layout, so it needs edit access to the view too — with a key, **Views: read &
    write**.
 
-   > **Warning:** Don't send an `idempotencyKey` you have sent before on this graph. Today the
-   > answer is a `503`, and the draft the request opened stays behind, empty. Leave it out, or
-   > make each one unique.
+   An `idempotencyKey` makes the request safe to send again: the same key from you answers with
+   the import it started — and if the first request failed before its file arrived, takes this
+   one's file and starts it. A key you used for an export answers `409 idempotency_key_reused`.
 3. For a larger file — up to 10 GiB as NDJSON, CSV or TSV; JSON and Excel files stay at
    100 MB — send it in parts instead. Ask for an upload, send each part (numbered from `0`),
    then complete it:
