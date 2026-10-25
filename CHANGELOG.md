@@ -262,7 +262,8 @@ step.
   its new workspace, and deleting it later left its graph standing for good. The history now moves
   with it. A move waits (`409`, with the reason) while version control is busy with the source,
   while a failed attempt to turn it on waits to be resumed or cancelled, and while it holds open
-  drafts or review requests.
+  drafts or review requests. (The move entry above lifted that last condition: open drafts and
+  review requests now go with the source.)
 
 ### Security
 
