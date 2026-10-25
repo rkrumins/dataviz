@@ -19,7 +19,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DATA_ARCHITECTURE.md"
   },
   "decisions": {
-    "updated": "2026-10-24",
+    "updated": "2026-10-25",
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
