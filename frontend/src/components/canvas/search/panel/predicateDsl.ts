@@ -26,6 +26,8 @@
  *   type IN (dataset, schemaField) → entityType IN [dataset, schemaField]
  *   tag:PII                        → tag hasAny [PII]
  *   tag:PII,GDPR                   → tag hasAny [PII, GDPR]
+ *   tag:"PII data"                 → a quoted value is one value, spaces,
+ *                                    commas and all (type: and layer: too)
  *   layer:Source                   → layer = "Source"
  *   layer="Source"                 → layer = "Source"
  *   hasProperty:pii_class          → hasProperty key=pii_class
@@ -461,24 +463,30 @@ function stable(v: unknown): string {
 }
 
 
+/** ``tag:a,b`` — or, a value that must be quoted, ``tag:"PII data"``, and
+ *  several with one of those, ``tag IN ("PII data", GDPR)``. */
+function listedValues(field: 'type' | 'tag', values: string[]): string {
+    if (!values.some(needsQuotes)) return `${field}:${values.join(',')}`
+    if (values.length === 1) return `${field}:"${values[0]}"`
+    return `${field} IN (${values.map((v) => (needsQuotes(v) ? `"${v}"` : v)).join(', ')})`
+}
+
+
 /** The one way the words write a condition that isn't text, or null. */
 function spelling(c: Predicate): string | null {
     switch (c.kind) {
         case 'entityType': {
-            const verb = c.op === 'notIn' ? 'type NOT IN' : 'type:'
-            if (verb.endsWith(':')) return `type:${c.values.join(',')}`
-            return `${verb} (${c.values.join(', ')})`
+            if (c.op !== 'notIn') return listedValues('type', c.values)
+            return `type NOT IN (${c.values.join(', ')})`
         }
         case 'tag': {
             const op = c.op
             if (op === 'hasAll') return `tag ALL (${c.values.join(', ')})`
             if (op === 'notHas') return `tag NOT IN (${c.values.join(', ')})`
-            return `tag:${c.values.join(',')}`
+            return listedValues('tag', c.values)
         }
         case 'layer':
-            return needsQuotes(c.layerAssignment)
-                ? `layer="${c.layerAssignment}"`
-                : `layer:${c.layerAssignment}`
+            return `layer:${needsQuotes(c.layerAssignment) ? `"${c.layerAssignment}"` : c.layerAssignment}`
         case 'hasProperty': {
             const name = c.keyMatch === 'prefix' ? `${c.key}*`
                 : c.keyMatch === 'contains' ? `*${c.key}*` : c.key
@@ -1113,12 +1121,20 @@ class Parser {
             }
         }
 
-        // 5) `prefix:value` (single token containing a colon)
+        // 5) `prefix:value` (single token containing a colon), or
+        // `prefix:"a value"` — quoted right after the colon, kept whole
         if (t.kind === TokenKind.Word && t.text.includes(':')) {
-            const prefixed = matchPrefixedToken(t.text)
+            const next = this.peek()
+            const quoted = t.text.endsWith(':') && next?.kind === TokenKind.Quoted && next.from === t.to
+                ? next : null
+            const prefixed = matchPrefixedToken(t.text, quoted?.text)
             if (prefixed) {
                 t.role = 'prefixed'
-                this.recognized.push(t.text)
+                if (quoted) {
+                    this.consume()
+                    quoted.role = 'prefixed'
+                }
+                this.recognized.push(quoted ? `${t.text}${quoted.raw}` : t.text)
                 return prefixed
             }
         }
@@ -1500,20 +1516,22 @@ function matchBooleanToken(text: string): Predicate | null {
 }
 
 
-function matchPrefixedToken(token: string): Predicate | null {
+/** ``prefix:value`` as a condition; ``quoted``, the value given in quotes
+ *  after the colon — one value, whatever it holds. */
+function matchPrefixedToken(token: string, quoted?: string): Predicate | null {
     const idx = token.indexOf(':')
     if (idx <= 0) return null
     const prefix = token.slice(0, idx).toLowerCase()
-    const raw = token.slice(idx + 1)
-    const value = stripQuotes(raw)
+    const value = quoted ?? stripQuotes(token.slice(idx + 1))
     if (!value) return null
+    const values = quoted !== undefined ? [quoted] : splitCsv(value)
     switch (prefix) {
         case 'type':
         case 'entitytype':
-            return { kind: 'entityType', op: 'in', values: splitCsv(value) }
+            return { kind: 'entityType', op: 'in', values }
         case 'tag':
         case 'tags':
-            return { kind: 'tag', op: 'hasAny', values: splitCsv(value) }
+            return { kind: 'tag', op: 'hasAny', values }
         case 'layer':
             return { kind: 'layer', layerAssignment: value }
         case 'hasproperty':
@@ -1542,7 +1560,7 @@ function matchPrefixedToken(token: string): Predicate | null {
                 kind: 'property',
                 key: prefix,
                 op: 'eq',
-                value: coerceScalar(value, /*wasQuoted*/ false),
+                value: coerceScalar(value, /*wasQuoted*/ quoted !== undefined),
             }
     }
 }

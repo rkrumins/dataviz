@@ -257,6 +257,37 @@ describe('predicateComposition — wrap / duplicate / root NOT', () => {
 // came back as the number 15.
 // ---------------------------------------------------------------------------
 
+describe('predicateDsl — a quoted value after a prefix', () => {
+    it.each<[string, Predicate, string]>([
+        ['tag:"PII data"', { kind: 'tag', op: 'hasAny', values: ['PII data'] }, 'tag:"PII data"'],
+        ['tag:"a, b"', { kind: 'tag', op: 'hasAny', values: ['a, b'] }, 'tag:"a, b"'],
+        ['type:"data set"', { kind: 'entityType', op: 'in', values: ['data set'] }, 'type:"data set"'],
+        ['layer:"Reporting layer"', { kind: 'layer', layerAssignment: 'Reporting layer' }, 'layer:"Reporting layer"'],
+        ['layer:"Reporting"', { kind: 'layer', layerAssignment: 'Reporting' }, 'layer:Reporting'],
+        ['code:"007"', { kind: 'property', key: 'code', op: 'eq', value: '007' } as Predicate, 'code = "007"'],
+    ])('reads %s as one value and writes it back', (text, predicate, written) => {
+        expect(parsePredicate(text).predicate).toEqual(predicate)
+        expect(stringifyPredicate(predicate)).toBe(written)
+        expect(parsePredicate(written).predicate).toEqual(predicate)
+    })
+
+    it('writes several values, one of them quoted, in the IN form', () => {
+        const p: Predicate = { kind: 'tag', op: 'hasAny', values: ['PII data', 'GDPR'] }
+        expect(stringifyPredicate(p)).toBe('tag IN ("PII data", GDPR)')
+        expect(parsePredicate(stringifyPredicate(p)).predicate).toEqual(p)
+    })
+
+    it('reads one inside a relationship, and only right after the colon', () => {
+        expect(parsePredicate('feeds*..3(layer:"Reporting layer")').predicate).toEqual({
+            kind: 'related', axis: 'downstream', maxHops: 3,
+            where: { kind: 'layer', layerAssignment: 'Reporting layer' },
+        })
+        // A space after the colon leaves the words a name search, as before.
+        expect(parsePredicate('layer: "x"').predicate).toMatchObject({ kind: 'group', op: 'and' })
+    })
+})
+
+
 describe('predicateDsl — property operators round-trip', () => {
     const prop = (op: string, value: unknown, key = 'owner'): Predicate =>
         ({ kind: 'property', key, op, value } as Predicate)
