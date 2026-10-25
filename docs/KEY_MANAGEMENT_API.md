@@ -237,29 +237,35 @@ accounts (`system:service-accounts:manage`) doesn't make keys on its own.
 | Route | Answers |
 |---|---|
 | `GET /api/v1/me/service-accounts?limit=&offset=` | The accounts you manage, yourself or through a team, by name: `{items, total, graceDays}` (`limit` up to 200) |
-| `GET /api/v1/me/service-accounts/{account_id}` | One of them — or, holding `system:users:manage`, any — with its `roles` and `liveKeys` |
+| `GET /api/v1/me/service-accounts/{account_id}` | One of them — or any, for an administrator of service accounts or anyone holding `system:users:manage` — with its `roles`, `liveKeys` and `can` |
 
-Each account: `id`, `name`, `description`, `status` (`active` or `disabled`), `managers` (people and
-teams, each with `inGoodStanding`), `managed` (someone can act for it now), `singleManager`,
-`unmanagedSince` and `pausesAt` (when nobody has, and when its keys pause).
+Each account: `id`, `name`, `description`, `status` (`active` or `disabled`), `adminHold` (an
+administrator disabled it), `managers` (people and teams, each with `inGoodStanding`), `managed`
+(someone can act for it now), `singleManager`, `unmanagedSince` and `pausesAt` (when nobody has, and
+when its keys pause). One account also says what you may do with it: `can`, with `view`, `edit`,
+`disable`, `enable`, `managers`, `keys`, `grant` and `revoke`, each `true` or `false`.
 
-**Setting accounts up** is for administrators of service accounts
-(`system:service-accounts:manage`), under `/api/v1/admin/service-accounts`:
+**Running an account** is for its managers and the administrators of service accounts
+(`system:service-accounts:manage`); **setting accounts up** is for the administrators alone. Both
+are under `/api/v1/admin/service-accounts`:
 
-| Route | Does |
-|---|---|
-| `GET ?q=&status=&managedBy=&limit=&offset=` | Every account; `managedBy` lists what a person's leaving touches |
-| `POST` | Create one: `{name, description, managers: [{type: "user"\|"group", id}]}` |
-| `GET`, `PATCH /{id}` | Read, rename or describe one |
-| `POST /{id}/disable`, `/{id}/enable` | Stop every key it holds, or let them work again |
-| `PUT`, `DELETE /{id}/managers/{users\|groups}/{subject_id}` | Appoint or remove a manager |
-| `POST /{id}/roles`, `DELETE /{id}/roles/{binding_id}` | Give it a workspace role (`{workspaceId, role}`), or take one away |
-| `POST /hand-over` | Move a person's manager seats to a successor: `{fromUserId, to: {type, id}}`, and `accountIds` to move only some |
+| Route | Who | Does |
+|---|---|---|
+| `GET ?q=&status=&managedBy=&limit=&offset=` | Administrators | Every account; `managedBy` lists what a person's leaving touches |
+| `POST` | Administrators | Create one: `{name, description, managers: [{type: "user"\|"group", id}]}` |
+| `GET`, `PATCH /{id}` | Managers, administrators | Read one, with `can`; rename or describe it. `GET` also answers anyone holding `system:users:manage` |
+| `POST /{id}/disable`, `/{id}/enable` | Managers, administrators | Stop every key it holds, or let them work again. An administrator's disable holds it (`adminHold`): then only an administrator enables it |
+| `PUT`, `DELETE /{id}/managers/{users\|groups}/{subject_id}` | Managers, administrators | Appoint or remove a manager. Its managers can't remove the last one: `409` |
+| `POST /{id}/roles` | Administrators | Give it a workspace role: `{workspaceId, role}` |
+| `DELETE /{id}/roles/{binding_id}` | Managers, administrators | Take a role away |
+| `POST /hand-over` | Administrators | Move a person's manager seats to a successor: `{fromUserId, to: {type, id}}`, and `accountIds` to move only some |
 
+To anyone else the account doesn't exist: `404`. Someone who can see it but not do that gets `403`.
 They answer `409` for a manager who isn't an active person or is a break-glass account, `422` for a
 role that administers a workspace or lets people in, and `403` when you couldn't grant that role
-yourself — or, appointing a manager, any of the account's roles: a manager can do whatever the
-account can. The rules behind them: [Service Accounts](/guide/service-accounts).
+yourself — or, appointing a manager or adding someone to a team that manages the account, when they
+would gain one of its roles that you couldn't grant them: a manager can do whatever the account can.
+The rules behind them: [Service Accounts](/guide/service-accounts).
 
 ---
 

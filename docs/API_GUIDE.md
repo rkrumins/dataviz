@@ -882,7 +882,7 @@ in [Single Sign-On](/guide/sso-setup).
 | `401` `api_key_expired`, `api_key_revoked` or `invalid_api_key` | The key is past its expiry, revoked, or not copied in full | Find it on **Account → API keys** by its first characters: rotate an expired key, create a new one for a revoked key |
 | `401` `owner_reauth_required` | The key is paused: its owner hasn't signed in through the identity provider for a while | Sign in to the app once; the key resumes |
 | `401` `api_key_unmanaged` | A service account's key is paused: nobody has managed the account for longer than the grace period | Ask an administrator to appoint a manager; the key resumes at once |
-| `401` `api_key_owner_inactive` | The person the key acts as is suspended, or the service account is disabled | Ask an administrator to reactivate them, or to enable the account |
+| `401` `api_key_owner_inactive` | The person the key acts as is suspended, or the service account is disabled | Ask an administrator to reactivate them; ask the account's managers to enable it — or an administrator, if one disabled it |
 | `401` `api_key_ip_not_allowed` | The request came from an address outside the key's networks | Run it from one of them. Behind a proxy, the deployment must trust the proxy's address: [Network limits behind a proxy](/guide/api-keys#network-limits-behind-a-proxy) |
 | `401` `api_keys_disabled` | An administrator switched API keys off | Ask them; until then, a person signs in with a password |
 | `403` `api_key_not_allowed` | The route can't be called with a key — people and access, sharing, settings and switches, layout templates, saved filters, importing a view file | A person signs in with a password for it; a service account can't |
