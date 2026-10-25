@@ -19,7 +19,7 @@
  * feeding is what lineage does. ``RelationContext`` (relationContext.ts)
  * carries what a row can't know on its own; ``RelationProvider`` sets it.
  */
-import { ArrowLeft, ArrowLeftRight, ArrowRight, Cable, ChevronDown, Link2, SlidersHorizontal, Workflow } from 'lucide-react'
+import { ArrowLeft, ArrowLeftRight, ArrowRight, Cable, ChevronDown, Link2, Plus, SlidersHorizontal, Workflow } from 'lucide-react'
 import { type FC, type ReactNode, useContext, useMemo, useState } from 'react'
 
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
@@ -32,6 +32,7 @@ import { inputClass } from '../typed/fieldStyles'
 import { EdgeSetPicker } from './EdgeSetPicker'
 import { OperatorMenu } from './OperatorMenu'
 import { RelationDiagram } from './RelationDiagram'
+import { TypePicker } from './sentence/editors'
 import type { LayerOption } from './layerOptions'
 import {
     RelationContext,
@@ -143,6 +144,7 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
     const edgeCtx = useEdgeEditorContext(discovery, knownEntityTypes, discoveredLayers)
     // Open on what still needs saying: edge types to pick.
     const [open, setOpen] = useState(() => value.edgeTypes?.length === 0)
+    const [builder, setBuilder] = useState(false)
     // "Is linked to" stands for every link: lineage either way included.
     const verb: RelationAxis = link === 'linked' ? 'neighbor' : value.axis
 
@@ -191,6 +193,9 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
         onChange(edge ? { ...rest, edge } : rest)
     }
 
+    // A relative named by its types alone takes one picker; anything more,
+    // or asked for, the full builder.
+    const typesOnly = builder ? null : onlyTypes(value.where as Predicate | undefined)
     const container = value.axis === 'parent' || value.axis === 'ancestor' || value.axis === 'root'
     const several = lead === 'all' || (lead === 'count' && value.count?.value !== 1)
     const relative = container ? (several ? 'containers' : 'container') : (several ? 'entities' : 'entity')
@@ -219,10 +224,27 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
                                className={cn(inputClass, 'w-20')} disabled={isRunning} />
                     </>
                 )}
-                {!hideWhere && <span className="text-[11.5px] text-ink-muted">{relative} that…</span>}
+                {!hideWhere && (
+                    <span className="text-[11.5px] text-ink-muted">{relative} {typesOnly ? 'of type' : 'that…'}</span>
+                )}
             </div>
 
-            {!hideWhere && <div className="flex flex-col gap-1.5">
+            {!hideWhere && typesOnly && (
+                <div className="flex flex-col gap-1.5">
+                    <TypePicker value={typesOnly} types={knownEntityTypes}
+                                placeholder={`Any ${container ? 'container' : 'entity'} — pick types to narrow…`}
+                                onChange={(types) => setWhere(types.length
+                                    ? { kind: 'entityType', op: 'in', values: types } : null)} />
+                    <button type="button" onClick={() => setBuilder(true)} disabled={isRunning}
+                            title="A tag, a property, what they connect to…"
+                            className="inline-flex items-center gap-1 self-start rounded-md text-[11px] font-medium text-accent-lineage hover:underline">
+                        <Plus className="h-3 w-3" aria-hidden />
+                        Add a condition on them
+                    </button>
+                </div>
+            )}
+
+            {!hideWhere && !typesOnly && <div className="flex flex-col gap-1.5">
                 {ctx.depth + 1 < RELATION_DEPTH_MAX || !containsRelation(value.where) ? (
                     <div className="rounded-lg border border-glass-border/70 bg-canvas-base/30 p-2">
                         <RelationContext.Provider value={nested}>
@@ -302,6 +324,14 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
     )
 }
 
+
+
+/** The entity types a relative's condition names when that is all it
+ *  says — none for no condition — else null. */
+function onlyTypes(where: Predicate | undefined): string[] | null {
+    if (!where) return []
+    return where.kind === 'entityType' && (where.op ?? 'in') === 'in' ? where.values : null
+}
 
 
 function containsRelation(p: Predicate | null | undefined): boolean {

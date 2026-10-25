@@ -95,14 +95,29 @@ describe('RelationshipEditor', () => {
         editor({ kind: 'related', axis: 'parent', where: DOMAIN })
         expect(screen.getByRole('button', { name: 'How it is related' })).toHaveTextContent('Is directly inside')
         expect(screen.getByRole('button', { name: 'How many of them' })).toHaveTextContent('at least one')
-        expect(screen.getByText('container that…')).toBeInTheDocument()
-        // In the picture, and in the relative's own condition.
+        expect(screen.getByText('container of type')).toBeInTheDocument()
+        // In the picture, and in the picker naming the relatives' types.
         expect(screen.getAllByText('domain')).toHaveLength(2)
     })
 
-    it('says that no condition means any relative', () => {
+    it('says that no type means any relative', () => {
         editor({ kind: 'related', axis: 'child' })
-        expect(screen.getByText(/No condition: any entity will do/)).toBeInTheDocument()
+        expect(screen.getByPlaceholderText('Any entity — pick types to narrow…')).toBeInTheDocument()
+    })
+
+    it('names the relatives by their types in one picker, the full builder a click away', async () => {
+        editor({ kind: 'related', axis: 'child', where: DOMAIN })
+        expect(screen.queryByRole('button', { name: /Add filter/ })).not.toBeInTheDocument()
+        await userEvent.setup().click(screen.getByRole('button', { name: /Add a condition on them/ }))
+        expect(screen.getByText('entity that…')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /Add filter/ })).toBeInTheDocument()
+    })
+
+    it('keeps the full builder for a relative with more to say than its types', () => {
+        editor({ kind: 'related', axis: 'child', where: { kind: 'group', op: 'and', children: [
+            DOMAIN, { kind: 'tag', op: 'hasAny', values: ['PII'] }] } })
+        expect(screen.getByText('entity that…')).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /Add a condition on them/ })).not.toBeInTheDocument()
     })
 
     it('turns the relationship into a count', async () => {

@@ -24,12 +24,13 @@ export function TypeIcon({ type, className }: { type: string; className?: string
 }
 
 
-export function TypePicker({ value, onChange, types, autoFocus }: {
+export function TypePicker({ value, onChange, types, autoFocus, placeholder = 'Pick one or more types…' }: {
     value: readonly string[]
     onChange: (next: string[]) => void
     /** The types to offer, most common first. */
     types: readonly string[]
     autoFocus?: boolean
+    placeholder?: string
 }) {
     const typeName = useTypeName()
     const options = useMemo<PickerOption[]>(() => types.map((t) => ({
@@ -38,7 +39,7 @@ export function TypePicker({ value, onChange, types, autoFocus }: {
     })), [types, typeName])
     return (
         <UnifiedPicker multiple portal value={value} onChange={onChange} options={options}
-                       placeholder="Pick one or more types…" autoFocus={autoFocus} allowFreeText={false} />
+                       placeholder={placeholder} autoFocus={autoFocus} allowFreeText={false} />
     )
 }
 
