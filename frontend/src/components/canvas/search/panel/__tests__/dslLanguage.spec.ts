@@ -83,6 +83,7 @@ describe('dslLanguage — what the cursor is in the middle of', () => {
         ['noIncoming[|', { kind: 'edgeType', from: 11, text: '', taken: [], connection: false }],
         ['edges[|', { kind: 'edgeType', from: 6, text: '', taken: [], connection: false }],
         ['foo[ba|', { kind: 'term', from: 0, text: 'foo[ba' }],
+        ['freshness > {sl|', { kind: 'keyRef', from: 13, text: 'sl' }],
     ])('reads %s', (doc, expected) => {
         const [text, pos] = cursor(doc)
         expect(completionContextAt(text, pos)).toEqual(expected)
@@ -112,6 +113,12 @@ describe('dslLanguage — completion', () => {
             'PRODUCES', 'DEFINED_BY', 'CONTAINS'])
         // After a name: other names only.
         expect(labels(await complete('incoming[PRODUCES, |'))).toEqual(['DEFINED_BY'])
+    })
+
+    it('offers another property inside the braces after a comparison', async () => {
+        const r = await complete('freshness > {|')
+        expect(labels(r)).toEqual(['owner', 'Asset Owner'])
+        expect(r?.options[0].detail).toBe('another property')
     })
 
     it('offers edge fields inside .via(', async () => {

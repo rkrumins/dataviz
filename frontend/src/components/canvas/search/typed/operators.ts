@@ -44,6 +44,10 @@ const NUMBER_TEXT = /^\s*[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\s*$/
 const DATE_TEXT = /^\s*\d{4}-\d{2}-\d{2}(?:[T ].*)?$/
 const ORDER_OPS = new Set<PropertyOperator>(['gt', 'gte', 'lt', 'lte', 'between'])
 
+/** The operators that compare a property with another property of the same
+ *  entity (``search_semantics.KEY_OPERATORS``). */
+export const KEY_OPS: readonly PropertyOperator[] = ['eq', 'neq', 'gt', 'gte', 'lt', 'lte']
+
 /** What `valueType: 'auto'` compares as — the value decides. Mirrors the
  *  backend's `_resolve_type`: text stays text for equality (exact for any
  *  integer); only the order operators read numeric or ISO-date text as a
@@ -66,9 +70,14 @@ export function autoTypeOf(op: PropertyOperator, value: unknown): ValueType {
 
 /** The type a predicate compares as: its declared type, or — for one
  *  written before types — what its value makes it. */
-export function predicateType(p: { op?: PropertyOperator; value?: unknown; valueType?: string }): ValueType {
+export function predicateType(p: {
+    op?: PropertyOperator; value?: unknown; valueType?: string; valueKey?: string | null
+}): ValueType {
     const declared = p.valueType
     if (declared && declared !== 'auto') return declared as ValueType
+    // Against another property there is no value to read: an order compares
+    // as numbers, equality as text (``resolve_key_comparison``).
+    if (p.valueKey != null) return ORDER_OPS.has(p.op ?? 'eq') ? 'number' : 'string'
     return autoTypeOf(p.op ?? 'eq', p.value)
 }
 

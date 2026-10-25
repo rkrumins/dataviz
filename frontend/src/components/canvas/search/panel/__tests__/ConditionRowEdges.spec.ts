@@ -20,6 +20,9 @@ describe('ConditionRow — edge types to pick', () => {
         [{ kind: 'isRoot', edgeClass: 'any' }, false],
         [{ kind: 'degree', direction: 'in', op: 'gt', value: 2, edgeTypes: [] }, true],
         [{ kind: 'degree', direction: 'in', op: 'gt', value: 2, edgeTypes: ['DEFINED_BY'] }, false],
+        // Another property to compare with, not picked yet.
+        [{ kind: 'property', key: 'freshnessHours', op: 'gt', valueKey: '' }, true],
+        [{ kind: 'property', key: 'freshnessHours', op: 'gt', valueKey: 'slaHours' }, false],
     ])('%j is incomplete: %s', (p, incomplete) => {
         expect(isRowIncomplete(p)).toBe(incomplete)
     })

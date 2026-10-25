@@ -577,8 +577,6 @@ describe('predicateDsl — relationships and names', () => {
             edgeTypes: [] }],
         ['a relationship naming both edge types and a class', { kind: 'related', axis: 'upstream',
             edgeTypes: ['FEEDS'], edgeClass: 'links' }],
-        ['a property compared with another', { kind: 'property', key: 'freshnessHours', op: 'gt',
-            valueKey: 'slaHours' }],
         ['a reference narrowed by type', { kind: 'is', refs: [{ path: ['Sales'], entityType: 'domain' }] }],
         ['a case-insensitive reference', { kind: 'is', refs: [{ path: ['sales'], caseSensitive: false }] }],
         ['several references', { kind: 'is', refs: [{ path: ['a'] }, { path: ['b'] }] }],
@@ -809,6 +807,49 @@ describe('predicateDsl — connections, edge types and edge counts', () => {
             expect(text).not.toContain('{')
             expect(parse(text)).toEqual(p)
         }), { numRuns: 300 })
+    })
+})
+
+
+describe('predicateDsl — one property against another', () => {
+    const parse = (text: string) => parsePredicate(text).predicate
+    const keyed = (over: Partial<PropertyPredicate>): Predicate =>
+        ({ kind: 'property', key: 'freshnessHours', op: 'gt', valueKey: 'slaHours', ...over } as Predicate)
+
+    it.each<[string, Predicate]>([
+        ['freshnessHours > {slaHours}', keyed({})],
+        ['freshnessHours <= {slaHours}', keyed({ op: 'lte' })],
+        ['owner = {steward} MATCH CASE', keyed({ key: 'owner', op: 'eq', valueKey: 'steward', caseSensitive: true })],
+        ['updatedAt >= {reviewedAt} AS DATE', keyed({ key: 'updatedAt', op: 'gte', valueKey: 'reviewedAt',
+            valueType: 'date' })],
+        // The type is written only where it isn't the one a key comparison takes anyway.
+        ['freshnessHours > {slaHours} AS TEXT', keyed({ valueType: 'string' })],
+        ['"Asset Owner" != {Steward Name}', keyed({ key: 'Asset Owner', op: 'neq', valueKey: 'Steward Name' })],
+    ])('reads and writes %s', (text, p) => {
+        expect(parse(text)).toEqual(p)
+        expect(stringifyPredicate(p)).toBe(text)
+    })
+
+    it('leaves out a type the comparison takes anyway', () => {
+        expect(stringifyPredicate(keyed({ valueType: 'number' }))).toBe('freshnessHours > {slaHours}')
+        expect(stringifyPredicate(keyed({ op: 'eq', valueType: 'string' }))).toBe('freshnessHours = {slaHours}')
+    })
+
+    it.each([
+        ['freshnessHours != {slaHours} INCLUDING MISSING', /needs both/],
+        ['{slaHours}', /compares a property with another/],
+        ['type:dataset AND {slaHours}', /freshnessHours > \{slaHours\}/],
+    ])('refuses %s', (text, why) => {
+        expect(parsePredicate(text).error).toMatch(why)
+    })
+
+    it('still reads braces holding a quote or a colon as a condition written as JSON', () => {
+        expect(parse('{"kind": "all"}')).toEqual({ kind: 'all' })
+    })
+
+    it('says what each part was read as', () => {
+        expect(parsePredicate('freshnessHours > {slaHours}').tokens.map((t) => `${t.text}:${t.role}`))
+            .toEqual(['freshnessHours:field', '>:operator', '{slaHours}:field'])
     })
 })
 

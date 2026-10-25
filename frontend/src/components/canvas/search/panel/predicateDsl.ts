@@ -47,6 +47,8 @@
  *   notes IS EMPTY / IS NOT EMPTY  → property notes isEmpty / isNotEmpty
  *   updated WITHIN LAST 30 DAYS    → property updated withinLast "P30D"
  *   updated WITHIN LAST PT12H      → any ISO 8601 duration
+ *   freshnessHours > {slaHours}    → compared with another property of the
+ *                                    same entity (=, !=, <, <=, >, >=)
  *   has:owner* / has:*owner*       → hasProperty by name: starts with / contains
  *
  * A comparison may end with suffixes that keep a row's meaning exactly:
@@ -135,7 +137,7 @@ import type {
 } from '@/types/search'
 import { OPERATOR_TABLE } from '@/types/generated/searchOperators'
 
-import { arityOf, autoTypeOf, isNegative, predicateType } from '../typed/operators'
+import { arityOf, isNegative, predicateType } from '../typed/operators'
 import { type DurationUnit, parseDuration, toDuration } from '../typed/valueCodec'
 import type { ValueType } from '../typed/valueTypes'
 
@@ -484,6 +486,7 @@ function spelling(c: Predicate): string | null {
         }
         case 'property': {
             const key = needsQuotes(c.key) ? `"${c.key}"` : c.key
+            if (c.valueKey != null) return `${key} ${PROP_OP_STR[c.op ?? 'eq']} {${c.valueKey}}${formatSuffixes(c)}`
             return `${key} ${formatComparison(c)}${formatSuffixes(c)}`
         }
         case 'isRoot': case 'isLeaf': case 'isOrphan': case 'hasIncoming': case 'hasOutgoing':
@@ -534,6 +537,7 @@ const enum TokenKind {
     Json = 'json',           // {…}: a condition written as its own JSON
     Ref = 'ref',             // @"…": an entity named by its path
     Call = 'call',           // parent( / count( / .via( — the paren consumed
+    KeyRef = 'keyref',       // {slaHours}: another property of the same entity
 }
 
 interface Token {
@@ -553,6 +557,7 @@ const LEXICAL_ROLE: Record<TokenKind, DslRole> = {
     [TokenKind.LParen]: 'punct', [TokenKind.RParen]: 'punct', [TokenKind.Comma]: 'punct',
     [TokenKind.AndKw]: 'keyword', [TokenKind.OrKw]: 'keyword', [TokenKind.NotKw]: 'keyword',
     [TokenKind.Json]: 'json', [TokenKind.Ref]: 'ref', [TokenKind.Call]: 'function',
+    [TokenKind.KeyRef]: 'field',
 }
 
 
@@ -597,6 +602,13 @@ function lex(input: string): Token[] {
             continue
         }
         if (ch === '{') {
+            // {slaHours}: another property — a name, no quote or colon in it.
+            const key = /^\{([^{}":]+)\}/.exec(input.slice(i))
+            if (key && key[1].trim()) {
+                out.push({ kind: TokenKind.KeyRef, text: key[1].trim(), raw: key[0], from: i, to: i + key[0].length })
+                i += key[0].length
+                continue
+            }
             // A condition as JSON: to its matching brace, strings and all.
             const end = jsonEnd(input, i)
             const text = input.slice(i, end)
@@ -954,6 +966,9 @@ class Parser {
     parsePredicateToken(): Predicate {
         const t = this.consume()
 
+        if (t.kind === TokenKind.KeyRef) {
+            this.fail(`{${t.text}} compares a property with another: freshnessHours > {slaHours}`, t)
+        }
         // Relationships, counts and entities by name.
         if (t.kind === TokenKind.Call) return this.parseCall(t)
         if (t.kind === TokenKind.Ref) {
@@ -1063,6 +1078,18 @@ class Parser {
                 if (propOp) {
                     this.consume()  // op
                     const valT = this.peek()
+                    if (valT?.kind === TokenKind.KeyRef) {
+                        this.consume()
+                        t.role = 'field'
+                        opT.role = 'operator'
+                        this.recognized.push(`${t.text} ${opT.text} ${valT.raw}`)
+                        const compared = this.consumeSuffixes({ kind: 'property', key: t.text, op: propOp,
+                                                                valueKey: valT.text })
+                        if (compared.includeMissing) {
+                            this.fail('Comparing two properties needs both: INCLUDING MISSING doesn\'t apply', valT)
+                        }
+                        return compared
+                    }
                     if (!valT || (valT.kind !== TokenKind.Word && valT.kind !== TokenKind.Quoted)) {
                         this.fail(`Expected a value after ${t.raw} ${opT.raw}`, valT ?? opT)
                     }
@@ -1649,7 +1676,7 @@ function formatSuffixes(c: PropertyPredicate): string {
     const parts: string[] = []
     const type = c.valueType
     if (type && type !== 'auto' && OPERATOR_TABLE[op].types.length > 1
-        && type !== autoTypeOf(op, c.value)) {
+        && type !== predicateType({ op, value: c.value, valueKey: c.valueKey })) {
         parts.push(`AS ${TYPE_WORD[type]}`)
     }
     if (c.caseSensitive && arityOf(op) !== 'none') parts.push('MATCH CASE')

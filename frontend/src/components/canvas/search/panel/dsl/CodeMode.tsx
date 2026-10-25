@@ -163,6 +163,7 @@ function exampleGroups(v: DslVocabulary): { task: string; items: [string, string
     const otherType = v.entityTypes.find((t) => t !== type) ?? 'dashboard'
     const tag = v.tags.find((t) => /^[\w.-]+$/.test(t)) ?? 'PII'
     const key = v.propertyKeys.find((k) => /^[A-Za-z_][\w.-]*$/.test(k)) ?? 'owner'
+    const otherKey = v.propertyKeys.find((k) => k !== key && /^[A-Za-z_][\w.-]*$/.test(k)) ?? 'steward'
     const edgeType = v.edgeTypes?.find((t) => !t.containment && /^[\w.-]+$/.test(t.id))?.id ?? 'PRODUCES'
     return [
         { task: 'Find by name or type', items: [
@@ -174,6 +175,7 @@ function exampleGroups(v: DslVocabulary): { task: string; items: [string, string
             [`${key} IS SET`, `has a ${key}`],
             [`${key} = "value"`, `${key} is exactly "value"`],
             ['updated WITHIN LAST 30 DAYS', 'a date in the last 30 days'],
+            [`${key} != {${otherKey}}`, `${key} differs from its own ${otherKey}`],
         ] },
         { task: 'Follow lineage', items: [
             [`fedBy(type:${type})`, `something feeding it is a ${type}`],

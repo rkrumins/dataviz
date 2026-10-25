@@ -22,9 +22,10 @@
  * UnifiedPicker (used for multi-value editors — tags, types, property
  * values) is invoked with ``portal={true}`` for the same reason.
  */
-import { ExternalLink, X } from 'lucide-react'
+import { ExternalLink, KeyRound, Type, X } from 'lucide-react'
 import { type FC, type ReactNode, memo, useEffect, useMemo, useState } from 'react'
 
+import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { formatUrnLabel } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
 import type {
@@ -57,7 +58,9 @@ import {
     autoTypeOf,
     comparesAs,
     isNegative,
+    KEY_OPS,
     operatorsFor,
+    predicateType,
 } from '../typed/operators'
 import { TypedValueEditor } from '../typed/TypedValueEditor'
 import { useValueSuggestions } from '../typed/useValueSuggestions'
@@ -788,11 +791,19 @@ const TYPE_OPTIONS = VALUE_TYPES.map((t) => ({
     value: t, label: TYPE_META[t].label, description: TYPE_META[t].description,
 }))
 
+const COMPARE_WITH: SegmentedOption<'value' | 'key'>[] = [
+    { value: 'value', label: 'A value', icon: Type },
+    { value: 'key', label: 'Another property', icon: KeyRound },
+]
+
 
 /** One property compared to a value — typed. The row compares as a TYPE
  *  (text, number, true/false, date): guessed from the property's values,
  *  overridable, and stamped on the predicate so a saved query keeps its
- *  meaning. The operator menu, the value editor and the checks follow it. */
+ *  meaning. The operator menu, the value editor and the checks follow it.
+ *  Or compared with another property of the same entity ("freshness hours
+ *  is greater than SLA hours"): =, ≠ and the orders, an order as numbers
+ *  and equality as text unless the type says otherwise. */
 function PropertyEditor({
     value, onChange, discovery, activeEntityTypes, autoFocus, onSubmit,
 }: Omit<EditorCtx, 'value'> & { value: PropertyPredicate }) {
@@ -801,13 +812,15 @@ function PropertyEditor({
     const samples = value.key ? discovery.getValueSamples(value.key) : []
     const observed = observeType(samples)
     const declared = value.valueType && value.valueType !== 'auto' ? value.valueType : null
+    // Compared with another property of the same entity rather than a value.
+    const versusKey = value.valueKey != null
     // A row from before types runs as its value decides — show that.
-    const type: ValueType = declared
-        ?? (valueProblem(op, 'auto', value.value) === null && arityOf(op) !== 'none'
+    const type: ValueType = declared ?? (versusKey ? predicateType(value)
+        : valueProblem(op, 'auto', value.value) === null && arityOf(op) !== 'none'
             ? autoTypeOf(op, value.value) : observed.type)
     const kind = comparesAs(op, type)
     const arity = arityOf(op)
-    const problem = value.key.trim() ? valueProblem(op, type, value.value) : null
+    const problem = value.key.trim() && !versusKey ? valueProblem(op, type, value.value) : null
     // The most common values across the whole view, for what is typed —
     // the discovery sample alone showed a handful.
     const [valueQuery, setValueQuery] = useState('')
@@ -820,8 +833,18 @@ function PropertyEditor({
     const retype = (patch: Partial<PropertyPredicate>, nextType: ValueType, list: boolean) => {
         const keep = operatorsFor(nextType, { list }).some((o) => o.value === op)
         const nextOp: PropertyOp = keep ? op : 'eq'
+        if (versusKey) {
+            update({ ...patch, op: KEY_OPS.includes(nextOp) ? nextOp : 'eq' }, nextType)
+            return
+        }
         update({ ...patch, op: nextOp, value: reshapeValue(recode(value.value, nextType), op, nextOp) }, nextType)
     }
+    const compareWith = (target: 'value' | 'key') => {
+        const { value: _v, valueKey: _k, includeMissing: _m, ...rest } = value
+        onChange(target === 'key' ? { ...rest, valueKey: '' } : rest)
+    }
+    const opChoices = operatorsFor(type, { list: observed.list, current: op })
+        .filter((o) => !versusKey || KEY_OPS.includes(o.value))
 
     return (
         <div className="flex flex-col gap-3">
@@ -844,13 +867,32 @@ function PropertyEditor({
                 <Field label="Operator">
                     <OperatorMenu
                         value={op}
-                        onChange={(v) => update({ op: v, value: reshapeValue(value.value, op, v) })}
-                        options={operatorsFor(type, { list: observed.list, current: op })}
+                        onChange={(v) => update(versusKey ? { op: v } : { op: v, value: reshapeValue(value.value, op, v) })}
+                        options={opChoices}
                         ariaLabel="Property operator"
                     />
                 </Field>
             </div>
-            {arity !== 'none' && (
+            {KEY_OPS.includes(op) && (
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-ink-muted">Compare with</span>
+                    <Segmented options={COMPARE_WITH} value={versusKey ? 'key' : 'value'}
+                               onChange={compareWith} label="Compare with" />
+                </div>
+            )}
+            {versusKey ? (
+                <Field label="Other property">
+                    <UnifiedPicker
+                        value={value.valueKey ?? ''}
+                        onChange={(next) => update({ valueKey: next })}
+                        options={keys.filter((k) => k !== value.key).map((k) => ({ value: k }))}
+                        placeholder="the property to compare with…"
+                        emptyHint="No other property keys discovered."
+                        mono
+                        portal
+                    />
+                </Field>
+            ) : arity !== 'none' && (
                 <Field label={arity === 'many' ? 'Values' : arity === 'pair' ? 'Range'
                     : arity === 'duration' ? 'Within the last' : 'Value'}>
                     <TypedValueEditor
@@ -882,7 +924,7 @@ function PropertyEditor({
                         Match case
                     </CheckToggle>
                 )}
-                {isNegative(op) && (
+                {isNegative(op) && !versusKey && (
                     <CheckToggle
                         checked={!!value.includeMissing}
                         onChange={(on) => update({ includeMissing: on })}
@@ -1240,7 +1282,8 @@ function isIncomplete(p: Predicate): boolean {
         case 'tag':          return p.values.length === 0
         case 'layer':        return !p.layerAssignment.trim()
         case 'hasProperty':  return !p.key.trim()
-        case 'property':     return !p.key.trim() || valueProblem(p.op ?? 'eq', p.valueType ?? 'auto', p.value) !== null
+        case 'property':     return !p.key.trim() || (p.valueKey != null ? !p.valueKey.trim()
+            : valueProblem(p.op ?? 'eq', p.valueType ?? 'auto', p.value) !== null)
         case 'descendantOf': return !p.urns?.length && !p.refs?.length
         case 'withinHops':   return !p.urns?.length && !p.refs?.length
         case 'path':

@@ -206,7 +206,10 @@ function propertySegments(p: PropertyPredicate): Segment[] {
     const arity = arityOf(op)
     const type = predicateType(p)
     const out: Segment[] = [val(p.key, true, 'key'), txt(' '), txt(operatorLabel(op, type), 'phrase')]
-    if (arity === 'duration') {
+    if (p.valueKey != null) {
+        // Another property of the same entity: said here, edited in the Form.
+        out.push(txt(' its '), p.valueKey ? val(p.valueKey, true) : txt('…'))
+    } else if (arity === 'duration') {
         out.push(txt(' '), val(describeDuration(p.value) ?? '…', false, 'value'))
     } else if (arity !== 'none') {
         out.push(txt(' '), ...valueSegments(p.value, op === 'between',

@@ -92,6 +92,8 @@ interface DatasetSpec {
     owner?: string
     description?: string
     rowCount: number
+    /** What a check expects it to hold — some rows fall short of theirs. */
+    expectedRowCount?: number
     tags?: string[]
     columns: Array<[name: string, dataType: string, tags?: string[]]>
 }
@@ -105,6 +107,7 @@ function dataset(container: string, layer: string, spec: DatasetSpec): Record<st
         properties: {
             ...(spec.owner ? { owner: spec.owner } : {}),
             rowCount: spec.rowCount,
+            ...(spec.expectedRowCount ? { expectedRowCount: spec.expectedRowCount } : {}),
             ...(spec.description ? { description: spec.description } : {}),
         },
     })
@@ -127,6 +130,7 @@ const silver = add('container', 'SILVER', snowflake, { layerAssignment: 'silver'
 const gold = add('container', 'GOLD', snowflake, { layerAssignment: 'gold' })
 
 const rawOrders = dataset(raw, 'raw', { name: 'raw_orders', owner: 'ingest@corp', rowCount: 4_812_330,
+    expectedRowCount: 5_000_000,
     description: 'Orders as the shop writes them, one row per order.',
     columns: [['order_id', 'bigint'], ['customer_id', 'bigint'], ['amount', 'decimal(15,2)'],
         ['currency', 'string'], ['ordered_at', 'timestamp']] })
@@ -141,6 +145,7 @@ dataset(raw, 'raw', { name: 'legacy_orders_backup', rowCount: 1_204_000, tags: [
     columns: [['order_id', 'bigint'], ['payload', 'string']] })
 
 const cleanOrders = dataset(silver, 'silver', { name: 'clean_orders', owner: 'alice@corp', rowCount: 4_790_112,
+    expectedRowCount: 4_700_000,
     description: 'Orders, deduplicated and converted to US dollars.',
     columns: [['order_id', 'bigint'], ['customer_id', 'bigint'], ['amount_usd', 'decimal(15,2)'],
         ['ordered_at', 'timestamp'], ['channel', 'string']] })
@@ -314,6 +319,14 @@ export const SEARCH_FIXTURES: Record<string, SearchFixture> = {
             type('dataset'),
             { kind: 'related', axis: 'upstream', edgeTypes: ['PRODUCES'], where: type('dataJob') },
             feedsFinanceChart,
+        ] },
+    },
+    compareKeys: {
+        editorMode: 'form',
+        note: 'One property against another of the same entity: datasets short of their expected row count.',
+        draft: { kind: 'group', op: 'and', children: [
+            type('dataset'),
+            { kind: 'property', key: 'rowCount', op: 'lt', valueKey: 'expectedRowCount' } as Predicate,
         ] },
     },
     code: {

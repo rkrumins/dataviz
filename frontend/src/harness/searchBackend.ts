@@ -245,6 +245,11 @@ export function matches(e: HarnessEntity, p: Predicate): boolean {
         }
         case 'property': {
             const actual = propertyOf(e, p.key)
+            if (p.valueKey != null) {
+                // Another property of the same entity: both must be set.
+                const other = propertyOf(e, p.valueKey)
+                return actual != null && other != null && compare(actual, p.op ?? 'eq', other)
+            }
             const ok = compare(actual, p.op ?? 'eq', p.value)
             return ok || (!!p.includeMissing && (actual === undefined || actual === null))
         }

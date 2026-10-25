@@ -51,6 +51,14 @@ describe('sentenceGrammar — the parts a token edits', () => {
         expect(slots(segs)).toEqual([['key', 'rowCount'], ['phrase', 'is greater than'], ['value', '100']])
     })
 
+    it('compares with another property of the same entity, edited in the Form', () => {
+        const segs = leafSegments({ kind: 'property', key: 'freshnessHours', op: 'gt',
+            valueKey: 'slaHours' } as Predicate)
+        expect(words(segs)).toBe('"freshnessHours" is greater than its "slaHours"')
+        // The other property is said, not a token of its own.
+        expect(slots(segs)).toEqual([['key', 'freshnessHours'], ['phrase', 'is greater than']])
+    })
+
     it('leaves a gap where a value is still to be picked', () => {
         const segs = leafSegments({ kind: 'property', key: 'owner', op: 'eq', value: '' } as Predicate)
         expect(slots(segs)).toContainEqual(['value', '…'])

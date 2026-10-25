@@ -135,6 +135,7 @@ export type DslCompletionContext =
     | { kind: 'value'; key: string; from: number; text: string; quoted: boolean }
     | { kind: 'edgeKey'; from: number; text: string }
     | { kind: 'edgeType'; from: number; text: string; taken: string[]; connection: boolean }
+    | { kind: 'keyRef'; from: number; text: string }
     | { kind: 'term'; from: number; text: string }
 
 const PREFIXES: Record<string, 'type' | 'tag' | 'layer' | 'has'> = {
@@ -152,6 +153,10 @@ export function completionContextAt(doc: string, pos: number): DslCompletionCont
     // Inside @"… not yet closed: an entity, by name.
     const ref = /@(["'])([^"']*)$/.exec(before)
     if (ref) return { kind: 'name', from: pos - ref[2].length, text: ref[2] }
+
+    // After a comparison, inside {… not yet closed: another property.
+    const keyRef = /(?:=|<|>)\s*\{([^{}":]*)$/.exec(before)
+    if (keyRef) return { kind: 'keyRef', from: pos - keyRef[1].length, text: keyRef[1] }
 
     // Inside outgoing[… not yet closed: edge types — a connection's never
     // the hierarchy's.
@@ -319,6 +324,13 @@ export function dslCompletionSource(vocabulary: () => DslVocabulary): Completion
                     validFor: /^[\w.-]*$/,
                 }
             }
+            case 'keyRef':
+                return {
+                    from: at.from,
+                    options: vocab.propertyKeys.filter((k) => !/[{}":]/.test(k)).slice(0, MAX_OPTIONS)
+                        .map((k) => ({ label: k, detail: 'another property', type: 'property' })),
+                    validFor: /^[^{}":]*$/,
+                }
             case 'edgeKey':
                 if (!at.text && !context.explicit) return null
                 return {

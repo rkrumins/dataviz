@@ -100,9 +100,11 @@ function describePredicate(p: Predicate): Chip {
         case 'property': {
             const op = p.op ?? 'eq'
             const arity = arityOf(op)
-            const value = arity === 'none' ? ''
-                : arity === 'duration' ? ` ${describeDuration(p.value) ?? '…'}`
-                    : ` ${valueLabel(p.value)}`
+            // Another property bare; a value is quoted when it is text.
+            const value = p.valueKey != null ? ` ${p.valueKey || '…'}`
+                : arity === 'none' ? ''
+                    : arity === 'duration' ? ` ${describeDuration(p.value) ?? '…'}`
+                        : ` ${valueLabel(p.value)}`
             return {
                 icon: 'SlidersHorizontal',
                 label: `${p.key} ${PROP_OP_LABEL[op] ?? op}${value}`,

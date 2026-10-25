@@ -124,6 +124,27 @@ describe('VisualQueryBuilder', () => {
         expect(screen.getByRole('button', { name: 'Through which edges' })).toHaveTextContent('Any link')
     })
 
+    it('compares a property with another of the same entity', () => {
+        render(<VisualQueryBuilder {...baseProps({ predicate: {
+            kind: 'property', key: 'freshnessHours', op: 'gt', valueKey: 'slaHours',
+        } as Predicate })} />)
+        expect(screen.getByRole('radio', { name: 'Another property' })).toBeChecked()
+        expect(screen.getByText('Other property')).toBeInTheDocument()
+        expect(screen.getByText('slaHours')).toBeInTheDocument()
+        expect(screen.queryByText(/Include entities without/)).not.toBeInTheDocument()
+    })
+
+    it('turns a comparison with a value into one with another property', async () => {
+        const onSeed = vi.fn()
+        render(<VisualQueryBuilder {...baseProps({ onSeed, predicate: {
+            kind: 'property', key: 'rows', op: 'gt', value: 5, valueType: 'number',
+        } as Predicate })} />)
+        await userEvent.setup().click(screen.getByRole('radio', { name: 'Another property' }))
+        expect(onSeed).toHaveBeenLastCalledWith(expect.objectContaining({
+            kind: 'property', key: 'rows', op: 'gt', valueKey: '' }))
+        expect(onSeed.mock.lastCall?.[0]).not.toHaveProperty('value')
+    })
+
     it('names a graph shape for the edges it counts', () => {
         render(<VisualQueryBuilder {...baseProps({ predicate: {
             kind: 'isRoot', edgeClass: 'links',
