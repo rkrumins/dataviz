@@ -71,6 +71,7 @@ from backend.app.providers.falkordb_provider import (
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf
 from backend.app.providers.falkordb_typed_ops import compile_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
+from backend.app.services.native_query.parse_cost import grouped, negated, operand
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
 from backend.common.edge_properties import (
     EDGE_NATIVE_KEYS,
@@ -264,6 +265,12 @@ class _Compiler:
         # rule's membership column — where a pattern predicate fails, so
         # degree counts with a comprehension instead.
         self.projected = False
+        # Inside an expression rather than a WHERE — a relationship's test of
+        # each relative — where FalkorDB short-circuits nothing, so a group's
+        # members are written as operands it parses once (``parse_cost``). In
+        # a WHERE, whose filter tree short-circuits AND, OR and NOT, a group
+        # stays plain unless it sits in another and holds one (``_filtered``).
+        self.expression = False
         # A relationship whose far end is named and is lineage becomes a
         # withinHops continuation; off where those can't run (membership).
         self.anchor_lineage = True
@@ -385,7 +392,13 @@ class _Compiler:
             if len(g.children) != 1:
                 raise CompileError("NOT group must have exactly one child")
             inner = self._visit(g.children[0], in_or=in_or, at_top_and=False)
-            return f"NOT ({inner})"
+            if self.expression or g.children[0].kind == "related":
+                # A relationship's test is a function the filter tree reads
+                # whole either way.
+                return negated(inner)
+            if not at_top_and and g.children[0].kind == "group":
+                return self._filtered(inner, negate=True)
+            return f"NOT {grouped(inner)}"
         sep = " AND " if g.op == "and" else " OR "
         child_in_or = in_or or g.op == "or"
         child_at_top_and = at_top_and and g.op == "and"
@@ -395,7 +408,19 @@ class _Compiler:
         ]
         if not parts:
             return "true"
+        if self.expression:
+            return "(" + sep.join(operand(part) for part in parts) + ")"
+        if not at_top_and and any(c.kind == "group" for c in g.children):
+            return self._filtered(sep.join(parts))
         return "(" + sep.join(parts) + ")"
+
+    def _filtered(self, condition: str, *, negate: bool = False) -> str:
+        """A group nested in another, holding one, in a WHERE: the WHERE of a
+        comprehension over one item, which FalkorDB's filter tree still reads
+        and short-circuits — an operand written plain would double its parse
+        time per level of nesting, and one followed by ``= true`` would lose
+        the short-circuit, a fivefold cost on the rows it filters."""
+        return f"ANY(_xg{self._name()} IN [0] WHERE {condition}) = {str(not negate).lower()}"
 
     def _visit_text(self, t) -> str:
         if t.match == "fulltext":
@@ -782,7 +807,7 @@ class _Compiler:
                                        key=_relation_cost)]
         finally:
             self._var, self.raw_leaves, self.projected = saved
-        plain = [c for c in plain if c != "true"]
+        plain = [operand(c) for c in plain if c != "true"]
         stages = ["(" + " AND ".join(plain) + ")"] if plain else []
         return stages + related
 
@@ -947,16 +972,25 @@ class _Compiler:
         # ancestors are top-level containers is said in the projection.
         top = f"size([({r})<-[:{rel}]-(_xy{k}) | 1]) = 0" if p.axis == "root" else None
 
+        # A test that holds more than plain conditions — another relationship,
+        # a group around one — nests: FalkorDB parses an operand with no
+        # operator after it twice (``parse_cost``), so the list, the CASE and
+        # the fold around such a test get one, ``+ []``, ``+ 0``, ``= true``,
+        # or the time to parse doubles with every level of nesting.
+        nests = test is not None
+        after = " + []" if nests else ""
+
         def listed(projection: str) -> str:
-            return f"[{pattern} WHERE {' AND '.join(where)} | {projection}]"
+            return f"[{pattern} WHERE {' AND '.join(where)} | {projection}]{after}"
 
         if p.count is not None:
             meets = " AND ".join(t for t in (top, test) if t)
-            each = f"CASE WHEN {meets} THEN ID({r}) END" if meets else f"ID({r})"
+            each = (f"CASE WHEN {meets} THEN ID({r}) END{' + 0' if nests else ''}" if meets
+                    else f"ID({r})")
             # Distinct relatives: a diamond reaches one by two routes.
             return (f"size(reduce(_xa{k} = [], _xi{k} IN {listed(each)} | CASE WHEN "
                     f"_xi{k} IS NULL OR _xi{k} IN _xa{k} THEN _xa{k} ELSE _xa{k} + [_xi{k}] "
-                    f"END)) {_OP_SYMBOL[p.count.op]} {self._bind(int(p.count.value))}")
+                    f"END){after}) {_OP_SYMBOL[p.count.op]} {self._bind(int(p.count.value))}")
         if p.quantifier == "all" and p.where is not None:
             # Folded to null for no relatives, else whether every one meets
             # it: a reduce, not ALL over a bound list — one list function
@@ -969,10 +1003,13 @@ class _Compiler:
             else:
                 each = test or "true"
                 fold = f"CASE WHEN _xa{k} IS NULL THEN _xb{k} ELSE _xa{k} AND _xb{k} END"
-            return f"coalesce(reduce(_xa{k} = null, _xb{k} IN {listed(each)} | {fold}), false)"
+            folded = f"reduce(_xa{k} = null, _xb{k} IN {listed(operand(each) if nests else each)} | {fold})"
+            return f"coalesce({operand(folded) if nests else folded}, false)"
         meets = " AND ".join(t for t in (top, test) if t) or "true"
         found = f"ANY(_xb{k} IN {listed(meets)} WHERE _xb{k})"
-        return f"NOT {found}" if p.quantifier == "none" else found
+        if p.quantifier == "none":
+            return negated(found) if nests else f"NOT {found}"
+        return found
 
     def _relative_tests(self, p, r: str, k: str) -> Tuple[List[str], Optional[str]]:
         """``p.where`` on the relative ``r``: its simple tests, which the
@@ -988,24 +1025,26 @@ class _Compiler:
         else:
             simple = [m for m in members if _is_simple(m)]
             rest = [m for m in members if not _is_simple(m)]
-        saved = (self._var, self.raw_leaves)
+        saved = (self._var, self.raw_leaves, self.expression)
         # Native values only: the raw-property probe answers for a unit's
         # own entities, not for their relatives.
         self._var, self.raw_leaves = r, None
         try:
+            self.expression = False         # the comprehension's WHERE
             filters = [self._visit(m, in_or=False, at_top_and=False) for m in simple]
+            self.expression = True          # its projection
             tests = [self._visit(m, in_or=False, at_top_and=False) for m in rest]
         finally:
-            self._var, self.raw_leaves = saved
+            self._var, self.raw_leaves, self.expression = saved
         filters = [f for f in filters if f != "true"]
-        tests = [t for t in tests if t != "true"]
+        tests = [operand(t) for t in tests if t != "true"]
         if not tests:
             return filters, None
         # Never null: FalkorDB leaves out of the list a relative whose
         # projection is null, and "every one" would pass it by rather than
         # fail it. Not wrapped to short-circuit: what is costly in it, a
         # nested relationship's list, is built whatever comes before.
-        return filters, f"coalesce({' AND '.join(tests)}, false)"
+        return filters, operand(f"coalesce({' AND '.join(tests)}, false)")
 
     # ---- Edge-predicate compilation (inside PathPredicate / WithinHops) ----
 
@@ -1166,7 +1205,7 @@ def tail_clauses(tail: List[str], carry: str = "n", alias: str = "_xt") -> str:
     for the next (S0_FINDINGS §15). ``carry``: what each WITH keeps."""
     if not tail:
         return ""
-    stages = " ".join(f"WITH {carry}, {t} AS {alias}{i} WHERE {alias}{i}"
+    stages = " ".join(f"WITH {carry}, {operand(t)} AS {alias}{i} WHERE {alias}{i}"
                       for i, t in enumerate(tail))
     return f"{stages} WITH {carry}"
 
@@ -1465,7 +1504,7 @@ def _maybe_add_visible_urns_clause(
     base_params["_visibleUrns"] = list(visible_urns)
     clause = "n.urn IN $_visibleUrns"
     if where_fragment and where_fragment != "true":
-        return f"({clause}) AND ({where_fragment})", True
+        return f"{grouped(clause)} AND {grouped(where_fragment)}", True
     return clause, True
 
 

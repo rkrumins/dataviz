@@ -48,6 +48,7 @@ from backend.app.providers.falkordb_deep_search import (
     _tier_ceiling,
 )
 from backend.app.providers.falkordb_typed_ops import text_of
+from backend.app.services.native_query.parse_cost import once
 from backend.common.models.search import GroupPredicate, PropertyPredicate, SearchQuery
 from backend.common.search_semantics import fold_case
 
@@ -222,7 +223,9 @@ class _Builder:
         if len(exprs) == 1:
             return exprs[0]
         m, s = self.var("m"), self.var("s")
-        return (f"reduce({m} = 0.0, {s} IN [{', '.join(exprs)}] | "
+        # ``+ 0.0`` after each, which FalkorDB would otherwise parse twice
+        # (``parse_cost``) — once more for every maximum it sits in.
+        return (f"reduce({m} = 0.0, {s} IN [{', '.join(once(e, '+ 0.0') for e in exprs)}] | "
                 f"CASE WHEN {s} > {m} THEN {s} ELSE {m} END)")
 
     def field_term(self, texts: str, is_list: bool, needle: str, mode: str, *,
@@ -231,7 +234,7 @@ class _Builder:
             return self._tier(texts, needle, mode, weight, ceiling, case_sensitive)
         h, m, s = self.var("h"), self.var("m"), self.var("s")
         tier = self._tier(h, needle, mode, weight, ceiling, case_sensitive)
-        return (f"reduce({m} = 0.0, {s} IN [{h} IN {texts} | {tier}] | "
+        return (f"reduce({m} = 0.0, {s} IN [{h} IN {once(texts, '+ []')} | {tier}] + [] | "
                 f"CASE WHEN {s} > {m} THEN {s} ELSE {m} END)")
 
     def _tier(self, text: str, needle: str, mode: str, weight: float,
@@ -250,7 +253,7 @@ class _Builder:
             f"WHEN {tests[t]} THEN {float(min(_TIER_VALUE[t], ceiling) * weight)}"
             for t in _MODE_TIERS.get(mode, ("exact",))
         )
-        return f"[{h} IN [{haystack}] | CASE {branches} ELSE 0.0 END][0]"
+        return f"[{h} IN [{haystack}] | CASE {branches} ELSE 0.0 END + 0.0][0]"
 
     def _word(self, h: str, needle: str) -> str:
         """Some occurrence of the needle follows a non-word character.

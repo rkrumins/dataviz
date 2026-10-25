@@ -82,6 +82,7 @@ a label, a map key) is left alone. It refuses, naming the position:
 | A namespaced function outside the built-ins | FalkorDB: `vec.*`, `string.*`, `list.*`. Neo4j: the temporal and spatial namespaces and `vector.similarity.*`. This keeps out `apoc.*`, `gds.*` and every plugin |
 | A `$parameter` | A native query carries its values in its text |
 | FalkorDB: `substring()` started anywhere but 0 | FalkorDB 4.18 reads past the end of a text with accented letters or emoji when a slice starts at or past its last character, and that can crash the server for everyone. `left(text, n)` and `right(text, n)` are safe: `substring(text, a, b)` is `left(right(text, size(text) - a), b)` |
+| FalkorDB: a query it would take over half a second just to parse | FalkorDB's parser reads a nested part with nothing after it twice, so each level of brackets, function calls or `NOT` around a condition doubles the time to parse — `NOT (` four times over — and nothing bounds that time: twelve `NOT (` inside each other take over a minute. Put an operator after the nested part and it is read once: `(a OR b) = true` for `(a OR b)`, `x = false` for `NOT (x)` |
 | More than one statement | One statement per run |
 | A carriage return, vertical tab, form feed, NEL or Unicode line or paragraph separator | Engines disagree on where a `//` comment ends at these, so text one engine runs as code must never be a comment to the guard. `\r\n` and `\r` are turned into `\n` first, and anything else is refused |
 

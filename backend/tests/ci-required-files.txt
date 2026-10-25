@@ -157,6 +157,7 @@ tests/test_outbox_relay.py
 tests/test_package_ndjson_cursor.py
 tests/test_package_new_source_api.py
 tests/test_package_seed_rows.py
+tests/test_parse_cost.py
 tests/test_placement_conformance.py
 tests/test_placement_dry_run.py
 tests/test_placement_legacy_parity.py
