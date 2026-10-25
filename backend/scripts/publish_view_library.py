@@ -158,7 +158,10 @@ _KEY_STATUS = {
     "paused": "is paused until its owner signs in again",
     "expired": "has expired",
     "owner_inactive": "belongs to an account that isn't active",
+    "ip_not_allowed": "can't be used from this address",
 }
+# A service account's key pauses when nobody answers for the account, not for a sign-in.
+_SERVICE_KEY_STATUS = {**_KEY_STATUS, "paused": "is paused until its service account has a manager again"}
 
 
 def check_key(api: Api) -> None:
@@ -167,7 +170,8 @@ def check_key(api: Api) -> None:
     key = api.call("GET", "/api/v1/api-keys/self") or {}
     status = key.get("status")
     if status != "active":
-        raise PublishError(f"API key “{key.get('name')}” {_KEY_STATUS.get(status, f'is {status}')}")
+        says = _SERVICE_KEY_STATUS if key.get("kind") == "service" else _KEY_STATUS
+        raise PublishError(f"API key “{key.get('name')}” {says.get(status, f'is {status}')}")
 
 
 def views_of_data_source(api: Api, data_source_id: str) -> List[Dict[str, str]]:
