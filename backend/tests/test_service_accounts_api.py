@@ -40,6 +40,7 @@ from backend.app.services import workspace_access
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.versioning.service import AccessDenied, GraphVersioningService
 from backend.auth_service.core import api_keys
+from tests.common.workspace_access_world import seed_steward_catalogue
 
 BASE = "/api/v1/admin/service-accounts"
 ADMIN = "usr_test000000"  # the test client's own user
@@ -557,6 +558,47 @@ async def test_where_the_identity_provider_decides_only_admins_add_it(test_clien
         select(RoleBindingORM).where(RoleBindingORM.subject_id == svc)
     )).scalar_one()
     assert (binding.idp_exception, binding.expires_at) == (False, None)
+
+
+async def test_where_the_identity_provider_decides_only_admins_approve_it(test_client, db_session, people):
+    """A steward there points people to the provider's groups. A service
+    account has none, so a request for one is the admins' to approve, and
+    not as an exception."""
+    await seed_steward_catalogue(db_session)
+    svc = (await _create(test_client))["id"]
+    (await db_session.get(WorkspaceORM, "ws_x")).access_mode = "idp"
+    request = AccessRequestORM(
+        requester_id=svc, requested_by="usr_ada", target_type="workspace", target_id="ws_x",
+        requested_role="workspace_viewer", status="pending",
+    )
+    db_session.add(request)
+    # Answers read who you are from the database: here, Sales's steward.
+    for binding in (await db_session.execute(
+        select(RoleBindingORM).where(RoleBindingORM.subject_id == ADMIN)
+    )).scalars():
+        await db_session.delete(binding)
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id=ADMIN, role_name="workspace_steward",
+        scope_type="workspace", scope_id="ws_x",
+    ))
+    await db_session.commit()
+    approve = f"/api/v1/admin/access-requests/{request.id}/approve"
+    refused = await test_client.post(approve, json={})
+    assert (refused.status_code, refused.json()["detail"]) == (403, (
+        "Its identity provider decides who is in this workspace, so only its admins give a "
+        "service account access here"
+    ))
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id=ADMIN, role_name="workspace_admin",
+        scope_type="workspace", scope_id="ws_x",
+    ))
+    await db_session.commit()
+    approved = await test_client.post(approve, json={})
+    assert approved.status_code == 200, approved.text
+    granted = (await db_session.execute(
+        select(RoleBindingORM).where(RoleBindingORM.subject_id == svc)
+    )).scalar_one()
+    assert (granted.role_name, granted.idp_exception, granted.expires_at) == ("workspace_viewer", False, None)
 
 
 async def test_its_managers_ask_a_workspace_for_it(test_client, db_session, people):
