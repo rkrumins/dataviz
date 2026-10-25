@@ -1173,7 +1173,7 @@ class _Principal:
     @property
     def next_path(self) -> str:
         """The page a sign-in to confirm it's you comes back to."""
-        return _STEP_UP_NEXT if self.account is None else f"/me/service-accounts/{self.account.id}"
+        return _STEP_UP_NEXT if self.account is None else service_account_standing.account_link(self.account.id)
 
     @property
     def who(self) -> str:
@@ -1228,7 +1228,8 @@ def _unless_disabled(principal: _Principal) -> None:
                 "error": "service_account_disabled",
                 "message": (
                     "This service account is disabled, so its keys don't work and none can be "
-                    "made or rotated. An administrator can enable it."
+                    "made or rotated. Its managers can enable it, unless an administrator "
+                    "disabled it."
                 ),
             },
         )
