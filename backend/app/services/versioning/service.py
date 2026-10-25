@@ -31,8 +31,8 @@ from datetime import datetime, timedelta, timezone
 from typing import (Any, Awaitable, Callable, Collection, Dict, List, Mapping, NamedTuple, Optional,
                     Sequence, Tuple)
 
-from sqlalchemy import (Boolean, Text, TextClause, any_, bindparam, insert, select, func, delete, null,
-                        text, update, or_, tuple_)
+from sqlalchemy import (Boolean, Text, TextClause, and_, any_, bindparam, insert, select, func, delete,
+                        null, text, update, or_, tuple_)
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
@@ -406,9 +406,11 @@ _EMPTY_INCOMING: Dict[str, object] = {
 class Viewer:
     """Who is asking — used to scope draft/PR reads. ``can_manage`` is workspace
     ``datasource:manage`` (managers see everything). Supplied only from the HTTP layer;
-    when a read is called without a Viewer (internal callers / tests) no scoping is applied."""
+    when a read is called without a Viewer (internal callers / tests) no scoping is applied.
+    ``groups``: the teams the actor is in, for a draft shared with a team."""
     actor: str
     can_manage: bool = False
+    groups: Tuple[str, ...] = ()
 
 
 class GraphVersioningService:
@@ -4580,25 +4582,31 @@ class GraphVersioningService:
         ``originating_view_id`` narrows to that view's own branches (``main`` carries no
         view, so it drops out of a view-scoped slice). With a ``viewer`` who isn't a
         manager, only ``main`` + the caller's own or shared drafts are returned — others'
-        private drafts aren't browsable (so the switcher won't list them)."""
+        private drafts aren't browsable (so the switcher won't list them). They are left out
+        before the page is cut, so a page is full until the list ends."""
         async with self._session() as s:
             stmt = select(BranchORM).where(BranchORM.graph_id == graph_id)
             if originating_view_id is not None:
                 stmt = stmt.where(BranchORM.originating_view_id == originating_view_id)
+            if viewer is not None and not viewer.can_manage:
+                stmt = stmt.where(self._listable(viewer))
             rows = (await s.execute(
                 stmt.order_by(BranchORM.created_at).limit(limit).offset(offset)
             )).scalars().all()
-            if viewer is not None and not viewer.can_manage:
-                member_ids = set((await s.execute(
-                    select(BranchMemberORM.branch_id)
-                    .join(BranchORM, BranchORM.id == BranchMemberORM.branch_id)
-                    .where(BranchORM.graph_id == graph_id,
-                           BranchMemberORM.subject_type == "user",
-                           BranchMemberORM.subject_id == viewer.actor)
-                )).scalars().all())
-                rows = [b for b in rows
-                        if b.kind == "main" or b.owner == viewer.actor or b.id in member_ids]
             return [self._branch_meta(b) for b in rows]
+
+    @staticmethod
+    def _listable(viewer: "Viewer"):
+        """The branches a non-manager may list, as a condition on ``BranchORM``: ``main``, their own
+        drafts, and the shared drafts they are a member of, themselves or through a team — the
+        rule :meth:`_branch_readable` applies to one draft."""
+        whom = and_(BranchMemberORM.subject_type == "user", BranchMemberORM.subject_id == viewer.actor)
+        if viewer.groups:
+            whom = or_(whom, and_(BranchMemberORM.subject_type == "group",
+                                  BranchMemberORM.subject_id.in_(viewer.groups)))
+        member = select(BranchMemberORM.branch_id).where(BranchMemberORM.branch_id == BranchORM.id, whom)
+        return or_(BranchORM.kind == "main", BranchORM.owner == viewer.actor,
+                   and_(BranchORM.is_shared.is_(True), member.exists()))
 
     async def get_pr(self, pr_id: str) -> Optional[dict]:
         async with self._session() as s:
@@ -4830,7 +4838,7 @@ class GraphVersioningService:
             return True
         if viewer.can_manage or branch.owner == viewer.actor:
             return True
-        if branch.is_shared and await self._branch_role(s, branch, viewer.actor) is not None:
+        if branch.is_shared and await self._branch_role(s, branch, viewer.actor, viewer.groups) is not None:
             return True
         return await self._is_pr_participant_for_branch(s, branch.id, viewer.actor)
 

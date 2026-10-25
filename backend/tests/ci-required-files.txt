@@ -207,6 +207,7 @@ tests/test_versioned_branch_resolve_identities.py
 tests/test_versioning_commit_log_api.py
 tests/test_versioning_read_only_queries.py
 tests/test_versioning_trashed_graph.py
+tests/test_versioning_viewer_ctx.py
 tests/test_view_avatar_ids.py
 tests/test_view_bundle_schema.py
 tests/test_view_facets_live.py

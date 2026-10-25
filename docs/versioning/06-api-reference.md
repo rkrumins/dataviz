@@ -180,7 +180,7 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 
 | Method · Path | Gate | Purpose / key fields |
 |---|---|---|
-| `GET …/branches` | `_READ` | `?limit(100, max 500)&offset&viewId` → `[BranchResponse]`. Graph-wide by default; `viewId` narrows to that view's drafts (**branch-per-view**). Without `_MANAGE` you see `main`, your own drafts, and the shared drafts you are a member of yourself — not those shared with a team you're in. Those others' drafts are dropped after the page is read, so a page can come back short, or empty, before the end: advance `offset` by `limit` |
+| `GET …/branches` | `_READ` | `?limit(100, max 500)&offset&viewId` → `[BranchResponse]`. Graph-wide by default; `viewId` narrows to that view's drafts (**branch-per-view**). Without `_MANAGE` you see `main`, your own drafts, and the shared drafts you are a member of, yourself or through a team. Others' drafts are left out before the page is cut, so a page is full until the list ends |
 | `POST …/branches` | `_MANAGE` | `{name?, originatingViewId?, shared?}` → **201** `{branchId}` |
 | `GET …/branches/{bid}/members` | `_READ` | A shared draft's collaborators: `{members: […]}` |
 | `POST …/branches/{bid}/members` | `_MANAGE` | Add one: `{subjectType: "user" \| "group", subjectId, role: "viewer" \| "editor" \| "maintainer"}` |

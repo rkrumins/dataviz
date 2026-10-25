@@ -397,11 +397,6 @@ There is no single paging scheme; each route documents its own in the explorer.
   `{items, total, hasMore, nextOffset}`; the versioning lists answer a plain array — stop
   when a page comes back shorter than `limit`. `GET /api/v1/admin/workspaces` sends the total
   in `X-Total-Count` when you pass `limit`.
-- **One exception today:** a graph's branches (`GET …/graphs/{graph_id}/branches`), read by
-  someone who doesn't manage the graph. Others' private drafts are left out after the page is
-  read, so a page can come back short — or empty — before the end, and drafts shared with you
-  through a team aren't listed. Ask for the most (`limit=500`), and advance `offset` by `limit`,
-  not by the rows that came back.
 - **Cursors** on long or changing lists: search hands back `cursor`; an entity's history and a
   graph's commit log hand back `nextBefore` with `hasMore`. Send the value back as-is, and keep
   going while `hasMore` is `true` — a page can be short and still have more. A commit log also

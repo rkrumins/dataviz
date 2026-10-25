@@ -82,6 +82,34 @@ async def _run() -> None:
     with pytest.raises(AccessDenied):                       # …but bob still cannot
         await svc.commit_log(graph_id=gid, branch_id=dA, viewer=bob)
 
+    # ── drafts shared with bob, himself or through a team, among alice's private ones ──
+    for i in range(3):
+        await svc.open_draft(graph_id=gid, owner="alice", name=f"private-{i}")
+    for_bob = await svc.open_draft(graph_id=gid, owner="alice", name="for-bob")
+    await svc.add_branch_member(graph_id=gid, branch_id=for_bob, subject_type="user", subject_id="bob",
+                                role="viewer", actor="alice")
+    for_team = await svc.open_draft(graph_id=gid, owner="alice", name="for-team")
+    await svc.add_branch_member(graph_id=gid, branch_id=for_team, subject_type="group", subject_id="grp_data",
+                                role="viewer", actor="alice")
+    bob_in_team = Viewer("bob", False, ("grp_data",))
+
+    # ── a page is full until the list ends: others' drafts are left out before it is cut ──
+    pages = [[b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=bob_in_team, limit=1, offset=o)]
+             for o in range(4)]
+    assert pages == [[main], [for_bob], [for_team], []]
+    assert for_team not in [b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=bob)]
+
+    # ── reading agrees with the list: a team's member reads its draft, others don't ──
+    assert await svc.commit_log(graph_id=gid, branch_id=for_team, viewer=bob_in_team) == []
+    with pytest.raises(AccessDenied):
+        await svc.commit_log(graph_id=gid, branch_id=for_team, viewer=bob)
+
+    # ── unshared, a draft is neither listed nor readable, though its member row stays ──
+    await svc.update_branch(graph_id=gid, branch_id=for_bob, actor="alice", is_shared=False)
+    assert for_bob not in [b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=bob)]
+    with pytest.raises(AccessDenied):
+        await svc.commit_log(graph_id=gid, branch_id=for_bob, viewer=bob)
+
     await db.dispose_engine()
 
 

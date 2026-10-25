@@ -45,7 +45,7 @@ from backend.app.api.v1.capability_gate import require_ds_read_or_view
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import data_source_repo, service_account_repo
+from backend.app.db.repositories import data_source_repo, service_account_repo, user_repo
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
@@ -112,11 +112,18 @@ async def viewer_ctx(
     ws_id: str,
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
 ) -> Viewer:
     """Who is asking, for scoping draft/PR reads: the caller's id + whether they hold
-    ``datasource:manage`` in this workspace (managers see everything). Cheap — claims come from
-    the token; no DB hit. Endpoints still keep their ``requires(_READ)`` gate for the baseline."""
-    return Viewer(actor=user.id, can_manage=has_permission(claims, _MANAGE, workspace_id=ws_id))
+    ``datasource:manage`` in this workspace (managers see everything) and, for someone who
+    doesn't, the teams they're in, since a draft can be shared with a team. Managers, and service
+    accounts — in no team — cost no query. Endpoints still keep their ``requires(_READ)`` gate
+    for the baseline."""
+    can_manage = has_permission(claims, _MANAGE, workspace_id=ws_id)
+    groups: tuple = ()
+    if not can_manage and not is_service_account(user.id):
+        groups = tuple(await user_repo.get_groups_for_user(session, user.id))
+    return Viewer(actor=user.id, can_manage=can_manage, groups=groups)
 
 
 # --------------------------------------------------------------------------- #
