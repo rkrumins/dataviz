@@ -16,7 +16,8 @@ Within that:
   tables; ``20261020_1000_ds_transfers`` adds an empty table with its indexes
   and swaps ``view_activity_log``'s action CHECK; ``20261023_1200_service_accounts``
   creates two empty tables and seeds a permission; ``20261025_1200_sa_admin_hold``
-  adds a column with a constant default and holds the few disabled accounts), since on a database
+  adds a column with a constant default and holds the few disabled accounts;
+  ``20261025_1400_sa_requests`` adds a nullable column), since on a database
   upgrading through them the lock is also held while they run;
 * a revision that locks a table other requests use bounds how long it waits
   for that lock (``lock_timeout``), so a long-running reader makes the
@@ -46,7 +47,8 @@ _AFTER = "20261019_1000_ws_access"
 _LATER = "20261019_1600_access_life"
 _RECENT = "20261020_1000_ds_transfers"
 _NEWER = "20261023_1200_service_accounts"
-_HEAD = "20261025_1200_sa_admin_hold"
+_HOLD = "20261025_1200_sa_admin_hold"
+_HEAD = "20261025_1400_sa_requests"
 #: Every revision that locks a table other requests use, and in which
 #: direction: ``users`` for the key's foreign key, ``user_identities``, and
 #: the ledger.
@@ -61,6 +63,7 @@ _ON_LIVE_TABLES = {
     f"{_LATER}.py": ("upgrade", "downgrade"),
     f"{_RECENT}.py": ("upgrade", "downgrade"),
     f"{_NEWER}.py": ("upgrade", "downgrade"),
+    f"{_HOLD}.py": ("upgrade", "downgrade"),
     f"{_HEAD}.py": ("upgrade", "downgrade"),
 }
 
@@ -142,7 +145,8 @@ def test_the_chain_ends_five_cheap_revisions_after_the_ledger_revision():
     config.set_main_option("script_location", str(_VERSIONS.parent))
     script = ScriptDirectory.from_config(config)
     assert script.get_heads() == [_HEAD]
-    assert script.get_revision(_HEAD).down_revision == _NEWER
+    assert script.get_revision(_HEAD).down_revision == _HOLD
+    assert script.get_revision(_HOLD).down_revision == _NEWER
     assert script.get_revision(_NEWER).down_revision == _RECENT
     assert script.get_revision(_RECENT).down_revision == _LATER
     assert script.get_revision(_LATER).down_revision == _AFTER

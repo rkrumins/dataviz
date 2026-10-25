@@ -523,6 +523,33 @@ async def remove_manager(
     return bool(result.rowcount)
 
 
+async def manager_names(
+    session: AsyncSession, account_ids: Iterable[str],
+) -> dict[str, list[tuple[str, str, bool]]]:
+    """Per account, who manages it, by name — ``(type, name, from_idp)``,
+    people then teams; a team's ``from_idp`` when the identity provider keeps
+    its members."""
+    wanted = sorted(set(account_ids))
+    out: dict[str, list[tuple[str, str, bool]]] = {a: [] for a in wanted}
+    if not wanted:
+        return out
+    for account_id, display, first, last in (await session.execute(
+        select(ServiceAccountManagerORM.service_account_id, UserORM.display_name, UserORM.first_name, UserORM.last_name)
+        .join(UserORM, UserORM.id == ServiceAccountManagerORM.user_id)
+        .where(ServiceAccountManagerORM.service_account_id.in_(wanted))
+        .order_by(func.lower(UserORM.first_name), UserORM.id)
+    )).all():
+        out[account_id].append(("user", resolve_display_name(display, first, last), False))
+    for account_id, name, source in (await session.execute(
+        select(ServiceAccountManagerORM.service_account_id, GroupORM.name, GroupORM.source)
+        .join(GroupORM, GroupORM.id == ServiceAccountManagerORM.group_id)
+        .where(ServiceAccountManagerORM.service_account_id.in_(wanted), GroupORM.deleted_at.is_(None))
+        .order_by(func.lower(GroupORM.name), GroupORM.id)
+    )).all():
+        out[account_id].append(("group", name, (source or "local") != "local"))
+    return out
+
+
 async def seat_holders(session: AsyncSession, account_id: str) -> set[tuple[Optional[str], Optional[str]]]:
     """Who holds a seat on the account: ``(person, None)`` or ``(None, team)``."""
     return {

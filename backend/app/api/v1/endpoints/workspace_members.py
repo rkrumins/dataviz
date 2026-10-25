@@ -10,6 +10,7 @@ a time as Viewer or Member (``workspace_access`` holds the ceilings).
 
   GET    /admin/workspaces/{ws_id}/members                list bindings + roles
   GET    /admin/workspaces/{ws_id}/members/grant-options  what the caller may grant
+  GET    /admin/workspaces/{ws_id}/members/service-accounts  service accounts to add
   POST   /admin/workspaces/{ws_id}/members                create binding
   PUT    /admin/workspaces/{ws_id}/members/{binding}/expiry  move its end date
   DELETE /admin/workspaces/{ws_id}/members/{binding}      revoke binding
@@ -22,7 +23,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,6 +39,7 @@ from backend.app.db.repositories import (
     group_repo,
     notification_repo,
     role_repo,
+    service_account_repo,
     user_repo,
 )
 from backend.app.services import workspace_access
@@ -44,6 +48,7 @@ from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     AccessProvenance,
+    AccessRequestManager,
     ImpactPreviewResponse,
     ImpactPreviewUser,
     RequestableRole,
@@ -58,6 +63,7 @@ from backend.common.models.rbac import (
     WorkspaceMemberExpiryUpdateRequest,
     WorkspaceMemberResponse,
     WorkspaceMemberSubject,
+    WorkspaceServiceAccountCandidate,
 )
 
 
@@ -340,7 +346,10 @@ async def get_grant_options(
         .order_by(WorkspaceDataSourceORM.label)
     )).scalars().all()
     roles = [
-        RequestableRole(name=r.name, description=r.description, is_system=r.is_system)
+        RequestableRole(
+            name=r.name, description=r.description, is_system=r.is_system,
+            requestable=workspace_access.is_requestable(perms),
+        )
         for r, perms in await workspace_access.workspace_roles(session, ws_id)
         if workspace_access.can_grant(claims, ws_id, r.name, perms)
     ]
@@ -364,6 +373,41 @@ async def get_grant_options(
             WorkspaceGrantSource(id=d.id, label=d.label, restricted=bool(d.is_restricted)) for d in sources
         ],
     )
+
+
+@router.get(
+    "/service-accounts",
+    response_model=list[WorkspaceServiceAccountCandidate],
+    response_model_by_alias=True,
+)
+async def list_service_account_candidates(
+    ws_id: str,
+    q: Optional[str] = Query(None, max_length=200),
+    _user: User = Depends(requires(workspace_access.MEMBERS_ADD, workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[WorkspaceServiceAccountCandidate]:
+    """Enabled service accounts matching ``q`` (name or what it is for), to
+    add here like a person: what each is for, who manages it — a team the
+    identity provider keeps, marked — and the roles it holds here already."""
+    await _ensure_workspace_exists(session, ws_id)
+    rows, _total = await service_account_repo.list_page(session, q=q, status="active", limit=20)
+    ids = [user.id for user, _account in rows]
+    managed_by = await service_account_repo.manager_names(session, ids)
+    held: dict[str, list[str]] = {}
+    for b in await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id):
+        if b.subject_type == "user" and b.subject_id in managed_by:
+            held.setdefault(b.subject_id, []).append(b.role_name)
+    return [
+        WorkspaceServiceAccountCandidate(
+            id=user.id, name=user.first_name, description=account.description,
+            managers=[
+                AccessRequestManager(type=kind, name=name, from_idp=from_idp)
+                for kind, name, from_idp in managed_by[user.id]
+            ],
+            roles=sorted(held.get(user.id, [])),
+        )
+        for user, account in rows
+    ]
 
 
 @router.post(
@@ -394,14 +438,12 @@ async def create_member_binding(
         )
 
     # Subject must exist before we bind it.
+    account = body.subject_type == "user" and is_service_account(body.subject_id)
     if body.subject_type == "user":
         if await user_repo.get_user_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="User not found")
-        if is_service_account(body.subject_id):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="A service account's roles are given on its own page, under Service accounts",
-            )
+        if account and await service_account_repo.get(session, body.subject_id) is None:
+            raise HTTPException(status_code=404, detail="Service account not found")
     elif body.subject_type == "group":
         if await group_repo.get_group_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="Group not found")
@@ -435,12 +477,34 @@ async def create_member_binding(
         )
 
     perms = (await role_repo.role_names_with_permissions(session, [body.role])).get(body.role, [])
+    if account:
+        # Only a workspace role that neither administers it nor lets people
+        # in — as anywhere a service account is given one.
+        defined = {r.name for r, _p in await workspace_access.workspace_roles(session, ws_id)}
+        if body.role not in defined or not workspace_access.is_requestable(perms):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "A service account can hold a workspace role that neither administers the "
+                    "workspace nor lets people in"
+                ),
+            )
+        if (ws.access_mode or "app") == "idp" and workspace_access.tier(claims, ws_id) != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Its identity provider decides who is in this workspace, so only its admins give "
+                    "a service account access here"
+                ),
+            )
     if not workspace_access.can_grant(claims, ws_id, body.role, perms):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=workspace_access.ceiling_refusal(claims, ws_id, body.role),
         )
-    exception = (ws.access_mode or "app") == "idp" and body.subject_type == "user"
+    # The identity provider doesn't know a service account: its role here is
+    # the admins' decision, never an exception.
+    exception = (ws.access_mode or "app") == "idp" and body.subject_type == "user" and not account
     if exception and not body.exception:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

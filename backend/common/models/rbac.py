@@ -569,6 +569,23 @@ class AccessRequestGroupRef(BaseModel):
     name: Optional[str] = None
 
 
+class AccessRequestManager(BaseModel):
+    """Someone who answers for a service account: a person, or a team —
+    and whether the identity provider keeps that team's members."""
+    model_config = ConfigDict(populate_by_name=True)
+    type: str  # 'user' | 'group'
+    name: str
+    from_idp: bool = Field(default=False, alias="fromIdp")
+
+
+class AccessRequestServiceAccount(BaseModel):
+    """A request for a service account: what it is for and who answers for
+    it — whoever approves lets them act in the workspace through it."""
+    model_config = ConfigDict(populate_by_name=True)
+    description: Optional[str] = None
+    managers: list[AccessRequestManager] = Field(default_factory=list)
+
+
 class AccessRequestResponse(BaseModel):
     """Wire shape returned by every access-request endpoint.
 
@@ -608,15 +625,21 @@ class AccessRequestResponse(BaseModel):
     # on to the Org Admins.
     reminded_at: Optional[str] = Field(default=None, alias="remindedAt")
     escalated_at: Optional[str] = Field(default=None, alias="escalatedAt")
+    # A request for a service account: the account is the requester; this is
+    # what it is for and who manages it, and the person who asked.
+    service_account: Optional[AccessRequestServiceAccount] = Field(default=None, alias="serviceAccount")
+    requested_by: Optional[AccessRequestRequester] = Field(default=None, alias="requestedBy")
 
 
 class AccessRequestCreate(BaseModel):
-    """Body for ``POST /api/v1/access-requests`` — submit a new ask."""
+    """Body for ``POST /api/v1/access-requests`` — submit a new ask, for
+    yourself or, as one of its managers, for a service account."""
     model_config = ConfigDict(populate_by_name=True)
     target_type: str = Field(alias="targetType")  # only 'workspace' for now
     target_id: str = Field(alias="targetId")
     requested_role: str = Field(alias="requestedRole")
     justification: Optional[str] = Field(default=None, max_length=1000)
+    service_account_id: Optional[str] = Field(default=None, alias="serviceAccountId", max_length=64)
 
 
 class AccessExtensionCreate(BaseModel):
@@ -676,11 +699,14 @@ class AccessRequestRoute(BaseModel):
 
 
 class RequestableRole(BaseModel):
-    """A role someone may ask for, or an approver may grant, in a workspace."""
+    """A role someone may ask for, or an approver may grant, in a workspace.
+    ``requestable``: it neither administers the workspace nor lets people
+    in, so it may be asked for — and a service account may hold it."""
     model_config = ConfigDict(populate_by_name=True)
     name: str
     description: Optional[str] = None
     is_system: bool = Field(default=False, alias="isSystem")
+    requestable: bool = True
 
 
 class RequestOptions(BaseModel):
@@ -736,6 +762,17 @@ class WorkspaceGrantOptions(BaseModel):
     groups: list[WorkspaceGrantGroup] = Field(default_factory=list)
     idp_routes: list[WorkspaceIdpRoute] = Field(default_factory=list, alias="idpRoutes")
     data_sources: list[WorkspaceGrantSource] = Field(default_factory=list, alias="dataSources")
+
+
+class WorkspaceServiceAccountCandidate(BaseModel):
+    """A service account that may be added to a workspace: what it is for,
+    who manages it, and the roles it holds there already."""
+    model_config = ConfigDict(populate_by_name=True)
+    id: str
+    name: str
+    description: Optional[str] = None
+    managers: list[AccessRequestManager] = Field(default_factory=list)
+    roles: list[str] = Field(default_factory=list)
 
 
 class WorkspaceDirectoryRequest(BaseModel):

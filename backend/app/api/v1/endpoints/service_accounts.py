@@ -29,6 +29,7 @@ from backend.app.auth.dependencies import get_current_user, get_permission_claim
 from backend.app.db.engine import get_db_session
 from backend.app.db.models import RoleBindingORM, WorkspaceORM
 from backend.app.db.repositories import (
+    access_request_repo,
     api_key_repo,
     binding_repo,
     group_repo,
@@ -53,7 +54,10 @@ me_router = APIRouter()
 #: surface (``scripts/export_pentest_surface.py``); the rule is
 #: ``service_account_access``.
 _GATES = {
-    "view": "manages it, or system:service-accounts:manage or system:users:manage (in handler)",
+    "view": (
+        "manages it, an admin or steward of a workspace it is in, or "
+        "system:service-accounts:manage or system:users:manage (in handler)"
+    ),
     "enable": "manages it unless an administrator holds it, or system:service-accounts:manage (in handler)",
     "grant": "system:service-accounts:manage (in handler)",
 }
@@ -131,6 +135,21 @@ class RoleOut(_Model):
     workspace_name: Optional[str] = Field(None, alias="workspaceName")
     role: str
     granted_at: Optional[str] = Field(None, alias="grantedAt")
+    #: When it ends; ``None`` while it lasts until taken away.
+    expires_at: Optional[str] = Field(None, alias="expiresAt")
+
+
+class RequestOut(_Model):
+    """An open request for the account's access, waiting on a workspace."""
+    id: str
+    workspace_id: str = Field(alias="workspaceId")
+    workspace_name: Optional[str] = Field(None, alias="workspaceName")
+    role: str
+    created_at: str = Field(alias="createdAt")
+    #: Who asked for it, by name.
+    requested_by: Optional[str] = Field(None, alias="requestedBy")
+    #: A request to keep this role, which ends soon.
+    binding_id: Optional[str] = Field(None, alias="bindingId")
 
 
 class ServiceAccountOut(_Model):
@@ -164,10 +183,13 @@ class AccountCan(_Model):
     keys: bool
     grant: bool
     revoke: bool
+    request: bool
 
 
 class ServiceAccountDetail(ServiceAccountOut):
     roles: List[RoleOut]
+    #: Requests for its access still waiting on a workspace.
+    requests: List[RequestOut]
     live_keys: int = Field(alias="liveKeys")
     #: What the caller may do with it.
     can: AccountCan
@@ -197,6 +219,8 @@ class RoleRequest(_Model):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
     workspace_id: str = Field(..., alias="workspaceId", min_length=1, max_length=64)
     role: str = Field(..., min_length=1, max_length=64)
+    #: When the role ends; left out, it lasts until taken away.
+    expires_at: Optional[str] = Field(None, alias="expiresAt", max_length=40)
 
 
 class HandOverRequest(_Model):
@@ -289,17 +313,32 @@ async def _detail(
     [base], _ = await _accounts_out(session, [found])
     can = await service_account_access.decide(session, user_id, claims, found)
     bindings = await _roles(session, account_id)
+    asked = await access_request_repo.list_for_requester(session, requester_id=account_id, status="open")
+    if not (can.edit or can.keys):
+        # Seen from a workspace it is in: only the workspaces the caller can
+        # open, and nothing it has asked for.
+        bindings = [b for b in bindings if workspace_access.can_open(claims, b.scope_id)]
+        asked = []
     names = await user_repo.get_workspace_names_by_ids(
-        session, sorted({b.scope_id for b in bindings if b.scope_id}),
+        session, sorted({b.scope_id for b in bindings} | {r.target_id for r in asked}),
     )
+    askers = await user_repo.get_identities_by_ids(session, sorted({r.requested_by for r in asked if r.requested_by}))
     return ServiceAccountDetail(
         **base.model_dump(),
         roles=[
             RoleOut(
                 binding_id=b.id, workspace_id=b.scope_id, workspace_name=names.get(b.scope_id),
-                role=b.role_name, granted_at=b.granted_at,
+                role=b.role_name, granted_at=b.granted_at, expires_at=b.expires_at,
             )
             for b in sorted(bindings, key=lambda b: ((names.get(b.scope_id) or "").lower(), b.role_name))
+        ],
+        requests=[
+            RequestOut(
+                id=r.id, workspace_id=r.target_id, workspace_name=names.get(r.target_id),
+                role=r.requested_role, created_at=r.created_at, binding_id=r.binding_id,
+                requested_by=(askers.get(r.requested_by) or {}).get("name") if r.requested_by else None,
+            )
+            for r in asked
         ],
         live_keys=await api_key_repo.count_active_for_user(session, account_id),
         can=AccountCan(**asdict(can)),
@@ -667,8 +706,9 @@ async def grant_role(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Give the account a role in a workspace: one that neither administers
-    the workspace nor lets people in, and that you could grant there. Its
-    keys pick it up within half a minute."""
+    the workspace nor lets people in, and that you could grant there — until
+    ``expiresAt``, or until taken away. Its keys pick it up within half a
+    minute."""
     workspace = await session.get(WorkspaceORM, body.workspace_id)
     if workspace is None or workspace.deleted_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
@@ -689,7 +729,7 @@ async def grant_role(
         )
     binding, outcome = await workspace_access.grant_role(
         session, subject_type="user", subject_id=account_id, role=body.role,
-        ws_id=workspace.id, granted_by=actor.id,
+        ws_id=workspace.id, granted_by=actor.id, expires_at=body.expires_at,
     )
     if outcome == "existing":
         raise HTTPException(
@@ -706,7 +746,7 @@ async def grant_role(
             "subject_id": account_id,
             "role": body.role,
             "actor_id": actor.id,
-            "expires_at": None,
+            "expires_at": binding.expires_at,
             "sessions_revoked": 0,
             "idp_exception": False,
             "reactivated": outcome == "reactivated",
@@ -714,7 +754,7 @@ async def grant_role(
     )
     return RoleOut(
         binding_id=binding.id, workspace_id=workspace.id, workspace_name=workspace.name,
-        role=binding.role_name, granted_at=binding.granted_at,
+        role=binding.role_name, granted_at=binding.granted_at, expires_at=binding.expires_at,
     )
 
 

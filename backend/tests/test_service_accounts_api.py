@@ -5,9 +5,11 @@ accounts, give them workspace roles, and hand a leaver's accounts over to a
 successor. Each account's managers run it too: they rename it, disable and
 enable it — unless an administrator holds it disabled — appoint and remove its
 managers, and take its roles away. Nobody may make someone able to act as an
-account who would gain what the appointer couldn't grant. A service account is
-never a person: it is left out of every list of people, refused by the routes
-about one, and can't join a team or a workspace's members by the side door.
+account who would gain what the appointer couldn't grant. A workspace lets an
+account in as it does a person: its admins and stewards add it, or answer a
+request one of its managers makes for it. A service account is never a
+person: it is left out of every list of people, refused by the routes about
+one, and can't join a team.
 """
 from __future__ import annotations
 
@@ -21,6 +23,7 @@ from sqlalchemy import select
 from backend.app.api.v1.endpoints import versioning
 from backend.app.auth.dependencies import get_permission_claims
 from backend.app.db.models import (
+    AccessRequestORM,
     GroupMemberORM,
     GroupORM,
     NotificationORM,
@@ -342,7 +345,7 @@ async def test_its_managers_run_it_without_administering_service_accounts(
         assert detail.status_code == 200, detail.text
         assert detail.json()["can"] == {
             "view": True, "edit": True, "disable": True, "enable": True, "managers": True,
-            "keys": True, "grant": False, "revoke": True,
+            "keys": True, "grant": False, "revoke": True, "request": True,
         }
         assert (await test_client.get(f"/api/v1/me/service-accounts/{svc}")).json()["can"] == detail.json()["can"]
         renamed = await test_client.patch(f"{BASE}/{svc}", json={"name": "Nightly sync"})
@@ -487,6 +490,225 @@ async def test_its_managers_cant_leave_it_with_none(test_client, people):
         assert stepped_down.status_code == 200, stepped_down.text
         # Having stepped down, they no longer see it.
         assert stepped_down.json()["can"]["view"] is False
+        assert (await test_client.get(f"{BASE}/{svc}")).status_code == 404
+
+
+# ── A workspace lets it in ──────────────────────────────────────────
+
+MEMBERS = "/api/v1/admin/workspaces/ws_x/members"
+REQUESTS = "/api/v1/access-requests"
+STEWARD = {"ws_x": ("workspace:members:add",)}
+
+
+async def _approver(db_session, user_id: str = "usr_bea") -> None:
+    """Someone who answers Sales's requests, so there is someone to tell."""
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id=user_id, role_name="workspace_admin",
+        scope_type="workspace", scope_id="ws_x",
+    ))
+    await db_session.commit()
+
+
+async def test_a_workspace_adds_it_as_it_adds_a_person(test_client, db_session, people):
+    svc = (await _create(test_client))["id"]
+    with claims(ws_perms=STEWARD):
+        found = (await test_client.get(f"{MEMBERS}/service-accounts", params={"q": "metadata"})).json()
+        assert [(c["id"], [m["name"] for m in c["managers"]], c["roles"]) for c in found] == [
+            (svc, ["Ada P"], []),
+        ]
+        options = (await test_client.get(f"{MEMBERS}/grant-options")).json()
+        assert {r["name"]: r["requestable"] for r in options["roles"]} == {
+            "workspace_member": True, "workspace_viewer": True,
+        }
+        added = await test_client.post(MEMBERS, json={
+            "subjectType": "user", "subjectId": svc, "role": "workspace_viewer",
+        })
+        assert added.status_code == 201, added.text
+        assert (await test_client.get(f"{MEMBERS}/service-accounts")).json()[0]["roles"] == ["workspace_viewer"]
+    # Never a role that administers the workspace or lets people in.
+    with claims("system:org-admin"):
+        refused = await test_client.post(MEMBERS, json={
+            "subjectType": "user", "subjectId": svc, "role": "workspace_admin",
+        })
+        assert refused.status_code == 422, refused.text
+    # Its managers hear, naming it.
+    assert [(uid, title) for uid, title, _ in await _told(db_session, "workspace.member_added")] == [
+        ("usr_ada", "For “Metadata sync”: You were added to Sales"),
+    ]
+
+
+async def test_where_the_identity_provider_decides_only_admins_add_it(test_client, db_session, people):
+    """The provider doesn't know a service account: its role there is the
+    admins' decision — not a steward's, and never an exception that ends."""
+    svc = (await _create(test_client))["id"]
+    (await db_session.get(WorkspaceORM, "ws_x")).access_mode = "idp"
+    await db_session.commit()
+    with claims(ws_perms=STEWARD):
+        refused = await test_client.post(MEMBERS, json={
+            "subjectType": "user", "subjectId": svc, "role": "workspace_viewer",
+        })
+    assert refused.status_code == 403, refused.text
+    with claims("system:org-admin"):
+        added = await test_client.post(MEMBERS, json={
+            "subjectType": "user", "subjectId": svc, "role": "workspace_viewer",
+        })
+    assert added.status_code == 201, added.text
+    binding = (await db_session.execute(
+        select(RoleBindingORM).where(RoleBindingORM.subject_id == svc)
+    )).scalar_one()
+    assert (binding.idp_exception, binding.expires_at) == (False, None)
+
+
+async def test_its_managers_ask_a_workspace_for_it(test_client, db_session, people):
+    await _approver(db_session)
+    svc = await _managed_by_me(test_client, "usr_ada")
+    ask = {"targetType": "workspace", "targetId": "ws_x", "requestedRole": "workspace_member"}
+    with claims():
+        asked = await test_client.post(REQUESTS, json={**ask, "serviceAccountId": svc})
+        assert asked.status_code == 201, asked.text
+        detail = (await test_client.get(f"{BASE}/{svc}")).json()
+    body = asked.json()
+    assert (body["requester"]["id"], body["requestedBy"]["id"]) == (svc, ADMIN)
+    assert body["serviceAccount"]["description"] == "Reads graph metadata on a schedule"
+    assert [m["name"] for m in body["serviceAccount"]["managers"]] == ["Ada P", "Test User"]
+    assert [(r["workspaceName"], r["role"], r["requestedBy"]) for r in detail["requests"]] == [
+        ("Sales", "workspace_member", "Test User"),
+    ]
+    row = await db_session.get(AccessRequestORM, body["id"])
+    assert (row.requester_id, row.requested_by) == (svc, ADMIN)
+    assert [(uid, title) for uid, title, _ in await _told(db_session, "access_request.submitted")] == [
+        ("usr_bea", "Test User asked for “Metadata sync” to join Sales"),
+    ]
+    # The one who asked doesn't answer it, nor does anyone who manages it.
+    refused = await test_client.post(f"/api/v1/admin/access-requests/{body['id']}/approve", json={})
+    assert (refused.status_code, refused.json()["detail"]) == (
+        403, "You can't answer a request for a service account you manage, or one you asked for",
+    )
+    # Its managers may take it back.
+    with claims():
+        withdrawn = await test_client.post(f"/api/v1/me/access-requests/{body['id']}/withdraw")
+    assert withdrawn.json()["status"] == "withdrawn"
+
+
+async def test_a_workspace_answers_a_request_for_it_with_a_role(test_client, db_session, people):
+    """Approved by someone who neither manages it nor asked: a role, never a
+    team or the identity provider's group."""
+    await _approver(db_session)
+    svc = (await _create(test_client))["id"]
+    rows = [
+        AccessRequestORM(
+            requester_id=svc, requested_by="usr_ada", target_type="workspace", target_id="ws_x",
+            requested_role="workspace_member", status="pending",
+        ),
+    ]
+    db_session.add_all(rows)
+    await db_session.commit()
+    request_id = rows[0].id
+    assert (await test_client.post(f"/api/v1/admin/access-requests/{request_id}/approve", json={
+        "groupId": "grp_ops",
+    })).status_code == 422
+    assert (await test_client.post(f"/api/v1/admin/access-requests/{request_id}/route", json={
+        "idpGroup": "sales-readers",
+    })).status_code == 409
+    approved = await test_client.post(f"/api/v1/admin/access-requests/{request_id}/approve", json={
+        "expiresIn": "30d",
+    })
+    assert approved.status_code == 200, approved.text
+    binding = (await db_session.execute(
+        select(RoleBindingORM).where(RoleBindingORM.subject_id == svc)
+    )).scalar_one()
+    assert (binding.role_name, binding.expires_at is not None, binding.idp_exception) == (
+        "workspace_member", True, False,
+    )
+    assert [(uid, title) for uid, title, _ in await _told(db_session, "access_request.approved")] == [
+        ("usr_ada", "For “Metadata sync”: You can now open Sales"),
+    ]
+
+    # Its managers ask to keep it before it ends.
+    svc_mine = await _managed_by_me(test_client, name="Nightly export")
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id=svc_mine, role_name="workspace_viewer",
+        scope_type="workspace", scope_id="ws_x", expires_at="2099-01-01T00:00:00+00:00",
+    ))
+    await db_session.commit()
+    mine = (await db_session.execute(
+        select(RoleBindingORM).where(RoleBindingORM.subject_id == svc_mine)
+    )).scalar_one()
+    with claims():
+        kept = await test_client.post(f"{REQUESTS}/extend", json={"bindingId": mine.id})
+    assert kept.status_code == 201, kept.text
+    assert (kept.json()["requester"]["id"], kept.json()["requestedBy"]["id"]) == (svc_mine, ADMIN)
+
+
+async def test_only_its_managers_ask_for_it(test_client, db_session, people):
+    """Someone who neither manages an account nor administers service
+    accounts can't ask for it, or ask to keep its access: to them it
+    doesn't exist."""
+    svc = (await _create(test_client))["id"]
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id=svc, role_name="workspace_viewer",
+        scope_type="workspace", scope_id="ws_x", expires_at="2099-01-01T00:00:00+00:00",
+    ))
+    # Requests read who you are from the database: here, nobody special.
+    for binding in (await db_session.execute(
+        select(RoleBindingORM).where(RoleBindingORM.subject_id == ADMIN)
+    )).scalars():
+        await db_session.delete(binding)
+    await db_session.commit()
+    binding = (await db_session.execute(
+        select(RoleBindingORM).where(RoleBindingORM.subject_id == svc)
+    )).scalar_one()
+    asked = await test_client.post(REQUESTS, json={
+        "targetType": "workspace", "targetId": "ws_x", "requestedRole": "workspace_member",
+        "serviceAccountId": svc,
+    })
+    assert asked.status_code == 404, asked.text
+    kept = await test_client.post(f"{REQUESTS}/extend", json={"bindingId": binding.id})
+    assert kept.status_code == 404, kept.text
+
+
+async def test_a_workspace_closed_to_requests_adds_it_itself(test_client, db_session, people):
+    svc = await _managed_by_me(test_client)
+    (await db_session.get(WorkspaceORM, "ws_x")).request_policy = "closed"
+    await db_session.commit()
+    with claims():
+        refused = await test_client.post(REQUESTS, json={
+            "targetType": "workspace", "targetId": "ws_x", "requestedRole": "workspace_viewer",
+            "serviceAccountId": svc,
+        })
+    assert refused.status_code == 403
+    assert refused.json()["detail"]["message"] == "This workspace isn't taking requests. Ask its admins to add it."
+
+
+async def test_an_administrator_gives_it_a_role_until_a_date(test_client, people):
+    svc = (await _create(test_client))["id"]
+    granted = await test_client.post(f"{BASE}/{svc}/roles", json={
+        "workspaceId": "ws_x", "role": "workspace_viewer", "expiresAt": "2099-01-01T00:00:00+00:00",
+    })
+    assert granted.status_code == 201, granted.text
+    assert granted.json()["expiresAt"] == "2099-01-01T00:00:00+00:00"
+    assert (await test_client.get(f"{BASE}/{svc}")).json()["roles"][0]["expiresAt"] == "2099-01-01T00:00:00+00:00"
+
+
+async def test_a_workspace_it_is_in_sees_whose_it_is(test_client, db_session, people):
+    """Its admins and stewards see it — who manages it, what it is for — but
+    nothing of the other workspaces it is in, and they run nothing."""
+    svc = (await _create(test_client))["id"]
+    db_session.add(WorkspaceORM(id="ws_y", name="Finance"))
+    for ws in ("ws_x", "ws_y"):
+        db_session.add(RoleBindingORM(
+            subject_type="user", subject_id=svc, role_name="workspace_viewer",
+            scope_type="workspace", scope_id=ws,
+        ))
+    await db_session.commit()
+    with claims(ws_perms=STEWARD):
+        seen = await test_client.get(f"{BASE}/{svc}")
+        assert seen.status_code == 200, seen.text
+        assert {k for k, v in seen.json()["can"].items() if v} == {"view"}
+        assert [r["workspaceName"] for r in seen.json()["roles"]] == ["Sales"]
+        assert seen.json()["requests"] == []
+        assert (await test_client.post(f"{BASE}/{svc}/disable")).status_code == 403
+    with claims(ws_perms={"ws_y": ("workspace:view:read",)}):
         assert (await test_client.get(f"{BASE}/{svc}")).status_code == 404
 
 
@@ -720,10 +942,6 @@ async def test_a_service_account_is_not_one_of_the_people(test_client, db_sessio
 
     joined = await test_client.post("/api/v1/admin/groups/grp_ops/members", json={"userId": svc})
     assert joined.status_code == 409
-    bound = await test_client.post("/api/v1/admin/workspaces/ws_x/members", json={
-        "subjectType": "user", "subjectId": svc, "role": "workspace_viewer",
-    })
-    assert bound.status_code == 409
 
 
 async def test_nothing_is_shared_with_a_service_account(test_client, db_session, people):

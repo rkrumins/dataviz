@@ -974,9 +974,11 @@ _ACTOR_KEYS: tuple[str, ...] = (
     "regenerated_by", "invited_by", "merged_by", "closed_by", "actor",
 )
 
-#: Event types that name their actor under a key of their own.
-_ACTOR_KEY_BY_TYPE: dict[str, str] = {
-    "rbac.access_request.created": "requester_id",
+#: Event types that name their actor under keys of their own, in the order
+#: they are trusted: a request for a service account is the account's, made
+#: by whoever asked for it.
+_ACTOR_KEY_BY_TYPE: dict[str, tuple[str, ...]] = {
+    "rbac.access_request.created": ("requested_by", "requester_id"),
 }
 
 #: Events a person does to THEMSELVES: with no explicit actor, it is them.
@@ -1075,9 +1077,10 @@ def _str(value: Any, limit: int = 256) -> Optional[str]:
 
 
 def _actor(event_type: str, p: dict) -> Optional[str]:
-    own_key = _ACTOR_KEY_BY_TYPE.get(event_type)
-    if own_key and _str(p.get(own_key), 128):
-        return _str(p.get(own_key), 128)
+    for key in _ACTOR_KEY_BY_TYPE.get(event_type, ()):
+        found = _str(p.get(key), 128)
+        if found:
+            return found
     for key in _ACTOR_KEYS:
         found = _str(p.get(key), 128)
         if found:

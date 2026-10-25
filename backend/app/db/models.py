@@ -3139,6 +3139,9 @@ class AccessRequestORM(Base):
     # on to the Org Admins.
     reminded_at = Column(Text, nullable=True)
     escalated_at = Column(Text, nullable=True)
+    # A request for a service account: the person who asked for it, one of its
+    # managers. ``requester_id`` is the account, the one the request grants to.
+    requested_by = Column(Text, nullable=True)
 
     __table_args__ = (
         Index(

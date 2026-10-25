@@ -52,16 +52,28 @@ class Can:
     grant: bool = False
     #: Take its roles away.
     revoke: bool = False
+    #: Ask a workspace for access for it, or to keep access that is ending.
+    request: bool = False
 
 
-def _can(*, central: bool, manager: bool, mint_any: bool, held: bool) -> Can:
+def _can(
+    *, central: bool, manager: bool, mint_any: bool, held: bool, in_my_workspace: bool = False,
+) -> Can:
     if not (central or manager or mint_any):
-        return Can()
+        # The admins and stewards of a workspace it holds a role in see it,
+        # to know whose integration it is.
+        return Can(view=in_my_workspace)
     runs = central or manager
     return Can(
         view=True, edit=runs, disable=runs, enable=central or (manager and not held),
-        managers=runs, keys=manager or mint_any, grant=central, revoke=runs,
+        managers=runs, keys=manager or mint_any, grant=central, revoke=runs, request=runs,
     )
+
+
+async def _in_my_workspace(session: AsyncSession, claims: PermissionClaims, account_id: str) -> bool:
+    """Whether the account holds a role in a workspace whose people the
+    caller lets in."""
+    return any(workspace_access.tier(claims, b.scope_id) for b in await _roles_of(session, [account_id]))
 
 
 async def decide(
@@ -71,13 +83,17 @@ async def decide(
     """Its managers — themselves or through a team — run it; the
     administrators of service accounts can do all they can, and give it roles;
     someone who may make any account's keys (``system:users:manage``) sees it
-    for that."""
+    for that; and the admins and stewards of a workspace it holds a role in
+    see it."""
     user, row = account
-    return _can(
+    facts = dict(
         central=has_permission(claims, MANAGE),
         manager=await service_account_repo.is_manager(session, user.id, user_id),
         mint_any=has_permission(claims, MINT_ANY), held=row.admin_hold,
     )
+    if not any((facts["central"], facts["manager"], facts["mint_any"])):
+        facts["in_my_workspace"] = await _in_my_workspace(session, claims, user.id)
+    return _can(**facts)
 
 
 _REFUSED = {
@@ -102,6 +118,8 @@ async def require(
         mint_any=has_permission(claims, MINT_ANY), held=found[1].admin_hold,
     )
     central = has_permission(claims, MANAGE)
+    if not (central or facts["manager"] or facts["mint_any"]):
+        facts["in_my_workspace"] = await _in_my_workspace(session, claims, account_id)
     can = _can(central=central, **facts)
     if not can.view:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service account not found")

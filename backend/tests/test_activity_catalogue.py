@@ -149,6 +149,9 @@ def test_a_moved_source_is_filed_under_where_it_went():
 @pytest.mark.parametrize("event_type, payload, actor, kind, subject", [
     # The requester IS the actor of a request — under a key of its own.
     ("rbac.access_request.created", {"requester_id": "usr_r"}, "usr_r", "user", "usr_r"),
+    # One for a service account is the account's, asked for by its manager.
+    ("rbac.access_request.created", {"requester_id": "svc_0123456789ab", "requested_by": "usr_r"},
+     "usr_r", "user", "svc_0123456789ab"),
     # An admin editing someone's identity is not that person editing it.
     ("user.identity_updated", {"user_id": "usr_2", "updated_by": "usr_admin"}, "usr_admin", "user", "usr_2"),
     ("user.logged_in", {"user_id": "usr_1"}, "usr_1", "user", "usr_1"),
