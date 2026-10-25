@@ -121,6 +121,16 @@ governance pack.
   FalkorDB 4.18 reads past the end of such a text when a slice starts at or past its last
   character. The comparison now reads its positions from the text padded with zeros, which never
   starts past the end and decides exactly the same.
+- A deeply nested search could hold FalkorDB for seconds before running at all: its parser reads a
+  condition with nothing after it twice, so each level of nesting doubled the time to parse the
+  statement — four times over for a NOT — and no timeout bounds that time. Five NOTs inside each
+  other took over a second a statement, twenty for a count; three relationships inside each other
+  with NOTs between them, as long. The compiler now writes nested conditions so the time grows with
+  the size of the search, not its depth: a relationship's test of each relative carries an
+  operator after it (`= true`, `+ []`), and a group nested in another that holds one is a
+  one-item comprehension's `WHERE`, which FalkorDB's filter still short-circuits. Groups at the
+  top of a search, and groups of plain conditions, are written as before. A statement FalkorDB
+  would still take over half a second to parse is refused in plain words instead of sent.
 
 ### Security
 
@@ -138,6 +148,9 @@ governance pack.
 - On FalkorDB, a native query may start `substring()` only at 0: started anywhere else it can crash
   the server on accented text, so one person's query could stop everyone's. `left()` and `right()`
   do the same job safely, and the refusal says how.
+- On FalkorDB, a native query nested so deeply that FalkorDB would take over half a second just to
+  parse it is refused: twelve `NOT (` inside each other took it over a minute, a thread no one else
+  could use meanwhile. The refusal says how to write the same query to parse at once.
 
 ### Upgrading
 
