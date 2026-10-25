@@ -163,6 +163,11 @@ rule in the governance pack.
   tag.
 - The compiled Cypher the panel showed could differ from what a search ran (its candidate cap,
   `LIMIT`, scope and incomplete rows), and a late answer could replace a newer one.
+- A date comparison (`updated > 2024-05-01`, *in the last 30 days*) could crash FalkorDB, and with it
+  every user's queries, when it met a short text with an accented letter or an emoji (`Zoë1`):
+  FalkorDB 4.18 reads past the end of such a text when a slice starts at or past its last
+  character. The comparison now reads its positions from the text padded with zeros, which never
+  starts past the end and decides exactly the same.
 
 ### Security
 
@@ -177,6 +182,9 @@ rule in the governance pack.
   View's visibility or to drafts, and a run's activity record is committed before any row is
   returned — no record, no rows. See
   [Native read-only queries: security](docs/NATIVE_QUERIES.md).
+- On FalkorDB, a native query may start `substring()` only at 0: started anywhere else it can crash
+  the server on accented text, so one person's query could stop everyone's. `left()` and `right()`
+  do the same job safely, and the refusal says how.
 
 ### Upgrading
 

@@ -16,6 +16,7 @@ would happily run as a read but must never run for a person here:
 * a namespaced function outside the engine's built-in namespaces, which
   keeps out ``apoc.*``, ``gds.*`` and every plugin;
 * a ``$parameter`` — a native query carries its values in its text;
+* on FalkorDB, ``substring`` started anywhere but 0 (``_check_substring``);
 * a line break an engine might read differently from the guard — so where a
   ``//`` comment ends is never in doubt (``normalized`` turns ``\r\n`` and
   ``\r`` into ``\n`` first: Neo4j ends a comment at a lone ``\r``, FalkorDB
@@ -153,6 +154,8 @@ def check(text: str, *, engine: str) -> List[Token]:
         if word == "CALL":
             _check_call(tokens, i, engine)
     _check_functions(tokens, engine)
+    if engine == FALKORDB:
+        _check_substring(tokens)
     return tokens
 
 
@@ -200,6 +203,48 @@ def _check_functions(tokens: List[Token], engine: str) -> None:
                 f"engine's built-in functions are allowed.",
                 position=token.start,
             )
+
+
+def _check_substring(tokens: List[Token]) -> None:
+    """Refuse ``substring`` started anywhere but 0. FalkorDB 4.18 reads beyond
+    the end of a text with accented letters or emoji asked to start at or
+    past its last character, and that read can bring the server down for
+    every user. ``left`` and ``right`` don't, and say the same."""
+    for i, token in enumerate(tokens):
+        if token.kind not in (WORD, BACKTICK) or _unquoted(token).lower() != "substring":
+            continue
+        before = tokens[i - 1] if i > 0 else None
+        if before is not None and before.kind == PUNCT and before.text == ".":
+            continue                            # a property, or a namespace's own function
+        if not (i + 1 < len(tokens) and tokens[i + 1].kind == PUNCT and tokens[i + 1].text == "("):
+            continue
+        start = _argument(tokens, i + 1, 1)
+        if start is not None and [t.text for t in start] != ["0"]:
+            raise NativeQueryRefused(
+                "substring() may only start at 0 in a native query: started anywhere else, "
+                "FalkorDB can crash on text with accented letters or emoji. Use left(text, n) "
+                "and right(text, n): substring(text, a, b) is left(right(text, size(text) - a), b).",
+                position=token.start,
+            )
+
+
+def _argument(tokens: List[Token], opening: int, n: int):
+    """The tokens of argument ``n`` (from 0) of the call whose ``(`` is at
+    ``opening``; None when it has fewer."""
+    args: List[List[Token]] = [[]]
+    depth = 0
+    for token in tokens[opening + 1:]:
+        if token.kind == PUNCT and token.text in "([{":
+            depth += 1
+        elif token.kind == PUNCT and token.text in ")]}":
+            if depth == 0:
+                break
+            depth -= 1
+        elif depth == 0 and token.kind == PUNCT and token.text == ",":
+            args.append([])
+            continue
+        args[-1].append(token)
+    return args[n] if n < len(args) else None
 
 
 def _dotted(tokens: List[Token], i: int) -> Tuple[List[str], int]:

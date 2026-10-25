@@ -81,6 +81,7 @@ a label, a map key) is left alone. It refuses, naming the position:
 | `CALL` of anything but the engine's read procedures | FalkorDB: `db.labels`, `db.relationshipTypes`, `db.propertyKeys`, `db.indexes`, `db.constraints`, and the `db.idx.fulltext.*` / `db.idx.vector.*` queries. Neo4j: `db.labels`, `db.relationshipTypes`, `db.propertyKeys`, `db.schema.visualization`, `db.schema.nodeTypeProperties`, `db.schema.relTypeProperties`, and the `db.index.fulltext.*` / `db.index.vector.*` queries |
 | A namespaced function outside the built-ins | FalkorDB: `vec.*`, `string.*`, `list.*`. Neo4j: the temporal and spatial namespaces and `vector.similarity.*`. This keeps out `apoc.*`, `gds.*` and every plugin |
 | A `$parameter` | A native query carries its values in its text |
+| FalkorDB: `substring()` started anywhere but 0 | FalkorDB 4.18 reads past the end of a text with accented letters or emoji when a slice starts at or past its last character, and that can crash the server for everyone. `left(text, n)` and `right(text, n)` are safe: `substring(text, a, b)` is `left(right(text, size(text) - a), b)` |
 | More than one statement | One statement per run |
 | A carriage return, vertical tab, form feed, NEL or Unicode line or paragraph separator | Engines disagree on where a `//` comment ends at these, so text one engine runs as code must never be a comment to the guard. `\r\n` and `\r` are turned into `\n` first, and anything else is refused |
 
