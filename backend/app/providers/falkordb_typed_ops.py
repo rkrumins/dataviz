@@ -91,10 +91,26 @@ _BOOLEAN = ("CASE typeOf(_e) WHEN 'Boolean' THEN _e "
 _DATE_TEXT = ("CASE WHEN typeOf(_e) IN ['String', 'Date', 'Datetime'] "
               "THEN toStringOrNull(_e) END")
 
+
+def padded(text: str) -> str:
+    """The text with ten zeros after it, for reading characters by position.
+
+    FalkorDB's ``substring`` reads beyond the end of a multi-byte string
+    asked to start past its last character, and that read can crash the
+    server (4.18). Read from here, no slice up to ten characters in starts
+    past the end. The date shape below reads its dashes and the digits
+    after them this way, and the zeros change nothing it decides: a text
+    too short for a dash fails either way, and zeros after the digits of a
+    text that has both dashes are still digits. A slice from 0 is always
+    safe, so a date's key is cut from the text itself."""
+    return f"{text} + '0000000000'"
+
+
 # "YYYY-MM-DD…": dashes where ISO puts them and eight digits around them
 # that print back as themselves (FalkorDB has no regex).
-_DIGITS = "substring(_s, 0, 4) + substring(_s, 5, 2) + substring(_s, 8, 2)"
-_ISO_DAY_SHAPE = (f"substring(_s, 4, 1) = '-' AND substring(_s, 7, 1) = '-' "
+_DIGITS = (f"substring(_s, 0, 4) + substring({padded('_s')}, 5, 2) "
+           f"+ substring({padded('_s')}, 8, 2)")
+_ISO_DAY_SHAPE = (f"substring({padded('_s')}, 4, 1) = '-' AND substring({padded('_s')}, 7, 1) = '-' "
                   f"AND toStringOrNull(toIntegerOrNull({_DIGITS})) = {_DIGITS}")
 
 _SECOND_TEMPLATE = "0000-00-00T00:00:00"
@@ -222,7 +238,8 @@ def _scalar_branches(col: str, cmp: Comparison, test) -> list:
             f"(typeOf({col}) = 'String' AND {parsed} IS NOT NULL AND {test(parsed)})",
         ]
     text = f"toStringOrNull({col})"
-    digits = f"substring({text}, 0, 4) + substring({text}, 5, 2) + substring({text}, 8, 2)"
+    digits = (f"substring({text}, 0, 4) + substring({padded(text)}, 5, 2) "
+              f"+ substring({padded(text)}, 8, 2)")
     if cmp.grain == "day":
         key = f"substring({text}, 0, 10)"
     else:
@@ -234,7 +251,7 @@ def _scalar_branches(col: str, cmp: Comparison, test) -> list:
     # every entity before the digits are checked.
     return [
         f"(typeOf({col}) IN ['String', 'Date', 'Datetime'] "
-        f"AND substring({text}, 4, 1) = '-' AND substring({text}, 7, 1) = '-' "
+        f"AND substring({padded(text)}, 4, 1) = '-' AND substring({padded(text)}, 7, 1) = '-' "
         f"AND {test(key)} AND toStringOrNull(toIntegerOrNull({digits})) = {digits})",
     ]
 

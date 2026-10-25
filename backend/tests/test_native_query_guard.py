@@ -256,3 +256,32 @@ def test_a_keyword_counts_only_where_a_keyword_stands():
         refused = refusal(bare)
         assert isinstance(refused, NativeQueryRefused)
         assert refused.position == len("MATCH (n) ")
+
+
+@pytest.mark.parametrize("query", [
+    "MATCH (n) RETURN substring(n.name, 1)",
+    "MATCH (n) RETURN substring(n.name, 2, 3)",
+    "MATCH (n) RETURN SUBSTRING(n.name, size(n.name) - 1, 1)",
+    "MATCH (n) RETURN substring(substring(n.name, 0, 5), 1)",
+    "MATCH (n) RETURN `substring`(n.name, 1)",
+])
+def test_substring_from_anywhere_but_0_is_refused_on_falkordb(query):
+    """It can crash FalkorDB 4.18 on accented text, for everyone; the refusal
+    says what to write instead, where the call is."""
+    refused = refusal(query, FALKORDB)
+    assert isinstance(refused, NativeQueryRefused)
+    assert "left(right(text, size(text) - a), b)" in str(refused)
+    assert query[refused.position:].lower().lstrip("`").startswith("substring")
+    assert check(query, engine=NEO4J)
+
+
+@pytest.mark.parametrize("query", [
+    "MATCH (n) RETURN substring(n.description, 0, 100)",
+    "MATCH (n) RETURN substring(n.name, 0)",
+    "MATCH (n) RETURN left(n.name, 3), right(n.name, 3)",
+    "MATCH (n) RETURN n.substring, 'substring(x, 1)' // substring(n.name, 1)",
+    "MATCH (n) RETURN {substring: 1} AS m",
+    "MATCH (n) RETURN substring(n.name, 0, size(n.name) - 1)",
+])
+def test_substring_from_0_and_lookalikes_run_on_falkordb(query):
+    assert check(query, engine=FALKORDB)
