@@ -55,8 +55,8 @@ describe('EdgeSetPicker', () => {
         expect(rows()).toEqual([
             'Feeds raw',
             'ProducesData job → Dataset',
-            'Containsnone in this data source yet',
-            'Defined byDataset → Glossary term · none in this data source yet',
+            'Defined byDataset → Glossary termnone here yet',
+            'Containsnone here yet',
         ])
     })
 
@@ -79,6 +79,21 @@ describe('EdgeSetPicker', () => {
         seed(Array.from({ length: 8 }, (_, i) => ({ id: `T${i}`, name: `Type ${i}` })))
         picker([])
         await userEvent.setup().type(screen.getByLabelText('Find an edge type'), 'defined')
-        expect(rows()).toEqual(['Defined byDataset → Glossary term · none in this data source yet'])
+        expect(rows()).toEqual(['Defined byDataset → Glossary termnone here yet'])
+    })
+
+    it('groups the types by what kind of edge they are, and counts the ones picked', () => {
+        useSchemaStore.setState({ schema: {
+            ...useSchemaStore.getState().schema,
+            relationshipTypes: [
+                { id: 'PRODUCES', name: 'Produces', sourceTypes: ['dataJob'], targetTypes: ['dataset'],
+                    category: 'flow' },
+                { id: 'DEFINED_BY', name: 'Defined by', sourceTypes: [], targetTypes: [], category: 'metadata' },
+            ],
+        } as unknown as typeof before })
+        picker(['DEFINED_BY'], { seen: [] })
+        const group = screen.getByRole('group', { name: 'Edge types' })
+        expect(group).toHaveTextContent(/^Data flow.*Produces.*Metadata.*Defined by/)
+        expect(screen.getByText('1 picked')).toBeInTheDocument()
     })
 })

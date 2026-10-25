@@ -5,12 +5,14 @@
  * which edges:
  *
  *   THROUGH  [Lineage ▾]
- *   [more than ▾] [5]  [Either way ▾]  edges through  [Any link ▾]
+ *   [more than ▾] [5]  edges through  [Any link ▾]  [→ Outgoing | ← Incoming | ↔ Either way]
  *
  * Picking "These edge types…" opens the picker under the row.
  */
+import { ArrowLeft, ArrowLeftRight, ArrowRight } from 'lucide-react'
 import type { FC, ReactNode } from 'react'
 
+import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { cn } from '@/lib/utils'
 import type {
     DegreePredicate,
@@ -27,7 +29,6 @@ import { inputClass } from '../typed/fieldStyles'
 import { EdgeSetPicker } from './EdgeSetPicker'
 import { OperatorMenu } from './OperatorMenu'
 import {
-    DEGREE_DIRECTION_OPTIONS,
     DEGREE_OP_WORDS,
     EDGE_SET_OPTIONS,
     edgeSetOf,
@@ -41,15 +42,24 @@ type Counted = IsRootPredicate | IsLeafPredicate | IsOrphanPredicate | HasIncomi
 const OP_OPTIONS = (Object.keys(DEGREE_OP_WORDS) as Array<keyof typeof DEGREE_OP_WORDS>)
     .map((value) => ({ value, label: DEGREE_OP_WORDS[value] }))
 
+type Direction = NonNullable<DegreePredicate['direction']>
 
-/** ``lead``, then which edges are counted — and, for edge types, the
- *  picker under them. */
+const DIRECTION_CHOICES: SegmentedOption<Direction>[] = [
+    { value: 'out', label: 'Outgoing', icon: ArrowRight },
+    { value: 'in', label: 'Incoming', icon: ArrowLeft },
+    { value: 'both', label: 'Either way', icon: ArrowLeftRight },
+]
+
+
+/** ``lead``, then which edges are counted, then ``trail`` — and, for edge
+ *  types, the picker under them. */
 const Counting: FC<{
     value: Counted
     onChange: (next: Predicate) => void
     disabled?: boolean
     lead: ReactNode
-}> = ({ value, onChange, disabled, lead }) => {
+    trail?: ReactNode
+}> = ({ value, onChange, disabled, lead, trail }) => {
     const set = edgeSetOf(value)
     return (
         <div className="flex flex-col gap-1.5">
@@ -57,6 +67,7 @@ const Counting: FC<{
                 {lead}
                 <OperatorMenu value={set} onChange={(next) => onChange(withEdgeSet(value, next))}
                               options={EDGE_SET_OPTIONS} ariaLabel="Through which edges" disabled={disabled} />
+                {trail}
             </div>
             {set === 'types' && (
                 <EdgeSetPicker value={value.edgeTypes ?? []} disabled={disabled}
@@ -90,8 +101,10 @@ export const EdgeCountEditor: FC<{
         <input type="number" min={0} value={value.value} aria-label="Number of edges"
                onChange={(e) => onChange({ ...value, value: Math.max(0, Math.round(Number(e.target.value)) || 0) })}
                className={cn(inputClass, 'w-20')} disabled={disabled} />
-        <OperatorMenu value={value.direction ?? 'both'} onChange={(direction) => onChange({ ...value, direction })}
-                      options={DEGREE_DIRECTION_OPTIONS} ariaLabel="Which way" disabled={disabled} />
         <span>edges through</span>
-    </>} />
+    </>} trail={
+        <Segmented options={disabled ? DIRECTION_CHOICES.map((o) => ({ ...o, disabled: true })) : DIRECTION_CHOICES}
+                   value={value.direction ?? 'both'} onChange={(direction) => onChange({ ...value, direction })}
+                   label="Which way" />
+    } />
 )

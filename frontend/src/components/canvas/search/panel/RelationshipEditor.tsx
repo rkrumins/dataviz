@@ -19,9 +19,10 @@
  * feeding is what lineage does. ``RelationContext`` (relationContext.ts)
  * carries what a row can't know on its own; ``RelationProvider`` sets it.
  */
-import { ChevronDown } from 'lucide-react'
+import { ArrowLeft, ArrowLeftRight, ArrowRight, Cable, ChevronDown, Link2, SlidersHorizontal, Workflow } from 'lucide-react'
 import { type FC, type ReactNode, useContext, useMemo, useState } from 'react'
 
+import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { cn } from '@/lib/utils'
 import type { EdgePredicateNode, Predicate, RelatedPredicate } from '@/types/search'
 
@@ -30,6 +31,7 @@ import { inputClass } from '../typed/fieldStyles'
 
 import { EdgeSetPicker } from './EdgeSetPicker'
 import { OperatorMenu } from './OperatorMenu'
+import { RelationDiagram } from './RelationDiagram'
 import type { LayerOption } from './layerOptions'
 import {
     RelationContext,
@@ -54,7 +56,6 @@ import {
     type RelationAxis,
     type Through,
 } from './relations'
-import { DEGREE_DIRECTION_OPTIONS, EDGE_SET_OPTIONS } from './vocabulary/edgeWords'
 import { VisualQueryBuilder } from './VisualQueryBuilder'
 
 
@@ -95,8 +96,22 @@ const VERB_OPTIONS = AXES.map((a) => ({
     group: a.group === 'hierarchy' ? 'In the hierarchy' : 'Connected',
 }))
 
-const THROUGH_OPTIONS = EDGE_SET_OPTIONS.filter((o) =>
-    o.value === 'lineage' || o.value === 'links' || o.value === 'types') as { value: Through; label: string; description: string }[]
+const THROUGH_CHOICES: SegmentedOption<Through>[] = [
+    { value: 'lineage', label: 'Lineage', icon: Workflow },
+    { value: 'links', label: 'Any link', icon: Link2 },
+    { value: 'types', label: 'Edge types', icon: Cable },
+]
+
+const DIRECTION_CHOICES: SegmentedOption<LinkDirection>[] = [
+    { value: 'out', label: 'Outgoing', icon: ArrowRight },
+    { value: 'in', label: 'Incoming', icon: ArrowLeft },
+    { value: 'both', label: 'Either way', icon: ArrowLeftRight },
+]
+
+/** Choices a running search can't change. */
+function held<T extends string>(options: SegmentedOption<T>[], disabled: boolean): SegmentedOption<T>[] {
+    return disabled ? options.map((o) => ({ ...o, disabled: true })) : options
+}
 
 
 export interface RelationshipEditorProps {
@@ -183,6 +198,7 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
 
     return (
         <div className="flex flex-col gap-3">
+            {!hideWhere && <RelationDiagram value={value} onEdit={summary ? () => setOpen(true) : undefined} />}
             <div className="flex flex-wrap items-center gap-1.5">
                 <OperatorMenu value={verb} onChange={setVerb} options={VERB_OPTIONS}
                               ariaLabel="How it is related" disabled={isRunning} />
@@ -236,27 +252,29 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
 
             {summary && (
                 <button type="button" onClick={() => setOpen((o) => !o)} aria-expanded={open}
-                        className="flex items-center gap-1.5 self-start text-[11px] text-ink-muted hover:text-ink">
-                    <span>{summary}</span>
-                    <span className="text-accent-lineage">{open ? 'Fewer options' : 'More options'}</span>
+                        className="flex items-center gap-1.5 self-start rounded-md text-[11px] text-ink-muted hover:text-ink">
+                    {/* The picture says the rest; the Sentence's popup has none. */}
+                    {hideWhere ? <span>{summary}</span>
+                        : <SlidersHorizontal className="h-3 w-3 text-accent-lineage" aria-hidden />}
+                    <span className="font-medium text-accent-lineage">{open ? 'Fewer options' : 'More options'}</span>
                     <ChevronDown className={cn('w-3 h-3 transition-transform', open && 'rotate-180')} />
                 </button>
             )}
 
             {summary && open && (
-                <div className="flex flex-col gap-3 rounded-lg border border-glass-border/60 p-2.5">
+                <div className="flex flex-col gap-3 rounded-xl border border-glass-border/60 bg-canvas-base/40 p-3">
                     {meta.hops && (
-                        <HopsField lineage={meta.lineage} lo={lo}
-                                   hi={meta.lineage || value.maxHops ? hi : null}
-                                   cap={meta.lineage ? hopCap : TREE_DEPTH_MAX}
-                                   named={value.axis !== 'neighbor'}
-                                   onChange={setHops} disabled={isRunning} />
+                        <StepsField lineage={meta.lineage} lo={lo}
+                                    hi={meta.lineage || value.maxHops ? hi : null}
+                                    cap={meta.lineage ? hopCap : TREE_DEPTH_MAX}
+                                    named={value.axis !== 'neighbor'}
+                                    onChange={setHops} disabled={isRunning} />
                     )}
                     {meta.lineage && (
                         <>
                             <Option label="Through">
-                                <OperatorMenu value={through} onChange={setThrough} options={THROUGH_OPTIONS}
-                                              ariaLabel="Through which edges" disabled={isRunning} />
+                                <Segmented options={held(THROUGH_CHOICES, isRunning)} value={through}
+                                           onChange={setThrough} label="Through which edges" />
                             </Option>
                             {through === 'types' && (
                                 <EdgeSetPicker value={value.edgeTypes ?? []} links disabled={isRunning}
@@ -264,9 +282,9 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
                             )}
                             {through !== 'lineage' && (
                                 <Option label="Direction">
-                                    <OperatorMenu value={linkDirection(value.axis)} onChange={setDirection}
-                                                  options={DEGREE_DIRECTION_OPTIONS} ariaLabel="Which way"
-                                                  disabled={isRunning} />
+                                    <Segmented options={held(DIRECTION_CHOICES, isRunning)}
+                                               value={linkDirection(value.axis)} onChange={setDirection}
+                                               label="Which way" />
                                 </Option>
                             )}
                             <div className="flex flex-col gap-1.5">
@@ -303,7 +321,7 @@ const Option: FC<{ label: string; children: ReactNode }> = ({ label, children })
 )
 
 
-const HopsField: FC<{
+interface StepsProps {
     lineage: boolean
     lo: number
     /** None for a tree axis looking any depth down or up. */
@@ -313,11 +331,45 @@ const HopsField: FC<{
     named: boolean
     onChange: (min: number, max: number | null) => void
     disabled?: boolean
-}> = ({ lineage, lo, hi, cap, named, onChange, disabled }) => {
+}
+
+/** How far: the usual reaches as one choice each — 1 step, up to 2, up to
+ *  3… or any depth down the tree — and a range of your own a click away. */
+const StepsField: FC<StepsProps> = (props) => {
+    const { lineage, lo, hi, cap, named, onChange, disabled } = props
+    const choices: SegmentedOption<string>[] = [
+        ...(lineage ? [1, 2, 3, 5, 10] : [1, 2, 3]).filter((n) => n <= cap).map((n) => ({
+            value: String(n), label: n > 1 ? `Up to ${n}` : lineage ? '1 step' : '1 level',
+        })),
+        ...(lineage ? [] : [{ value: 'any', label: 'Any depth' }]),
+    ]
+    const current = lo === 1 ? (hi === null ? 'any' : String(hi)) : ''
+    const [custom, setCustom] = useState(() => !choices.some((c) => c.value === current))
+    return (
+        <Option label={lineage ? 'Steps' : 'Levels'}>
+            {custom ? <HopsField {...props} />
+                : <Segmented options={held(choices, !!disabled)} value={current}
+                             onChange={(v) => onChange(1, v === 'any' ? null : Number(v))}
+                             label={lineage ? 'How many steps' : 'How many levels'} />}
+            <button type="button" onClick={() => setCustom(!custom)} disabled={disabled}
+                    className="text-[10.5px] font-medium text-accent-lineage hover:underline">
+                {custom ? 'Usual reaches' : 'Custom range'}
+            </button>
+            {lineage && !custom && cap < 10 && named && (
+                <span className="basis-full pl-[78px] text-[10.5px] text-ink-muted/80">
+                    Name the far end to go up to 10 steps
+                </span>
+            )}
+        </Option>
+    )
+}
+
+
+const HopsField: FC<StepsProps> = ({ lineage, lo, hi, cap, named, onChange, disabled }) => {
     const clamp = (n: number) => Math.min(cap, Math.max(1, Math.round(n) || 1))
     const unit = lineage ? 'steps' : 'levels'
     return (
-        <Option label={lineage ? 'Steps' : 'Levels'}>
+        <span className="inline-flex flex-wrap items-center gap-1.5">
             <input type="number" min={1} max={cap} value={lo} aria-label={`Fewest ${unit}`}
                    onChange={(e) => {
                        const min = clamp(Number(e.target.value))
@@ -337,6 +389,6 @@ const HopsField: FC<{
                     up to {cap}{cap < 10 && named ? ' (name the far end to go further)' : ''}
                 </span>
             )}
-        </Option>
+        </span>
     )
 }

@@ -6,7 +6,7 @@
  * mocked (cached per tag) so the portal menus render synchronously.
  */
 import React from 'react'
-import { render, screen } from '@testing-library/react'
+import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -69,6 +69,12 @@ async function moreOptions() {
     await userEvent.setup().click(screen.getByRole('button', { name: /More options/ }))
 }
 
+/** Pick ``option`` in the segmented choice ``group``. */
+async function choose(group: string, option: string) {
+    const choices = screen.getByRole('radiogroup', { name: group })
+    await userEvent.setup().click(within(choices).getByRole('radio', { name: option }))
+}
+
 
 describe('RelationshipEditor', () => {
     const before = useSchemaStore.getState().schema
@@ -90,7 +96,8 @@ describe('RelationshipEditor', () => {
         expect(screen.getByRole('button', { name: 'How it is related' })).toHaveTextContent('Is directly inside')
         expect(screen.getByRole('button', { name: 'How many of them' })).toHaveTextContent('at least one')
         expect(screen.getByText('container that…')).toBeInTheDocument()
-        expect(screen.getByText('domain')).toBeInTheDocument()
+        // In the picture, and in the relative's own condition.
+        expect(screen.getAllByText('domain')).toHaveLength(2)
     })
 
     it('says that no condition means any relative', () => {
@@ -136,21 +143,21 @@ describe('RelationshipEditor', () => {
     it('turns Feeds into an outgoing link once every link is chosen', async () => {
         const onChange = editor({ kind: 'related', axis: 'downstream', maxHops: 3 })
         await moreOptions()
-        await pick('Through which edges', /^Any link/)
+        await choose('Through which edges', 'Any link')
         expect(onChange).toHaveBeenCalledWith({ kind: 'related', axis: 'downstream', maxHops: 3, edgeClass: 'links' })
     })
 
     it('reads an outgoing link through lineage as Feeds again', async () => {
         const onChange = editor({ kind: 'related', axis: 'downstream', edgeClass: 'links' })
         await moreOptions()
-        await pick('Through which edges', /^Lineage/)
+        await choose('Through which edges', 'Lineage')
         expect(onChange).toHaveBeenCalledWith({ kind: 'related', axis: 'downstream' })
     })
 
     it('follows a link out, in or either way', async () => {
         const onChange = editor({ kind: 'related', axis: 'neighbor', edgeClass: 'links' })
         await moreOptions()
-        await pick('Which way', /^Incoming/)
+        await choose('Which way', 'Incoming')
         expect(onChange).toHaveBeenCalledWith({ kind: 'related', axis: 'upstream', edgeClass: 'links' })
     })
 
@@ -184,13 +191,54 @@ describe('RelationshipEditor', () => {
     it('holds a display rule’s lineage to one step', async () => {
         editor({ kind: 'related', axis: 'downstream' }, { rule: true })
         await moreOptions()
+        const steps = screen.getByRole('radiogroup', { name: 'How many steps' })
+        expect(within(steps).getAllByRole('radio').map((r) => r.textContent)).toEqual(['1 step'])
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Custom range' }))
         expect(screen.getByLabelText('Most steps')).toHaveAttribute('max', '1')
+    })
+
+    it('offers the usual reaches as one choice each, and a range of your own', async () => {
+        const onChange = editor({ kind: 'related', axis: 'downstream', maxHops: 3 })
+        await moreOptions()
+        const steps = screen.getByRole('radiogroup', { name: 'How many steps' })
+        expect(within(steps).getAllByRole('radio').map((r) => r.textContent)).toEqual(['1 step', 'Up to 2', 'Up to 3'])
+        expect(within(steps).getByRole('radio', { name: 'Up to 3' })).toBeChecked()
+        await choose('How many steps', 'Up to 2')
+        expect(onChange).toHaveBeenLastCalledWith({ kind: 'related', axis: 'downstream', maxHops: 2 })
+        await choose('How many steps', '1 step')
+        expect(onChange).toHaveBeenLastCalledWith({ kind: 'related', axis: 'downstream' })
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Custom range' }))
+        expect(screen.getByLabelText('Fewest steps')).toHaveValue(1)
+    })
+
+    it('looks any depth down the tree, or a number of levels', async () => {
+        const onChange = editor({ kind: 'related', axis: 'descendant' })
+        await moreOptions()
+        expect(screen.getByRole('radio', { name: 'Any depth' })).toBeChecked()
+        await choose('How many levels', 'Up to 2')
+        expect(onChange).toHaveBeenLastCalledWith({ kind: 'related', axis: 'descendant', maxHops: 2 })
+    })
+
+    it('opens a range written in Code mode as a range', async () => {
+        editor({ kind: 'related', axis: 'upstream', minHops: 2, maxHops: 3 })
+        await moreOptions()
+        expect(screen.queryByRole('radiogroup', { name: 'How many steps' })).not.toBeInTheDocument()
+        expect(screen.getByLabelText('Fewest steps')).toHaveValue(2)
+    })
+
+    it('draws the relationship above its choices — but not in the Sentence’s popup', () => {
+        editor({ kind: 'related', axis: 'upstream', edgeTypes: ['PRODUCES'],
+            where: { kind: 'entityType', op: 'in', values: ['dataJob'] } })
+        expect(screen.getByRole('img')).toHaveAccessibleName(
+            'This has incoming Produces from at least one Data job, 1 step')
     })
 
     it('edits the verb and how many in the Sentence’s popup, the relative being a line of its own', () => {
         editor({ kind: 'related', axis: 'downstream', where: DOMAIN }, { hideWhere: true })
         expect(screen.getByRole('button', { name: 'How it is related' })).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'How many of them' })).toBeInTheDocument()
+        expect(screen.queryByRole('img')).not.toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /1 step · lineage/ })).toBeInTheDocument()
         expect(screen.queryByText('entity that…')).not.toBeInTheDocument()
         expect(screen.queryByText('domain')).not.toBeInTheDocument()
     })

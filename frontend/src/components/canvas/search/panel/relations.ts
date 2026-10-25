@@ -193,6 +193,19 @@ export function optionsSummary(p: RelatedPredicate): string | null {
     return lo === hi ? `${hi} level${hi === 1 ? '' : 's'}` : `${lo}–${hi} levels`
 }
 
+/** The entity types a relative's condition names, if it names any. */
+export function farEndTypes(where: Predicate | undefined): string[] {
+    if (!where) return []
+    if (where.kind === 'entityType') return where.op === 'notIn' ? [] : where.values
+    if (where.kind === 'group' && (where.op ?? 'and') === 'and') {
+        for (const c of where.children) {
+            const types = farEndTypes(c)
+            if (types.length) return types
+        }
+    }
+    return []
+}
+
 /** A new relationship along ``axis``: no condition yet (any relative). */
 export function newRelation(axis: RelationAxis, where?: Predicate): RelatedPredicate {
     return where ? { kind: 'related', axis, where } : { kind: 'related', axis }

@@ -120,7 +120,7 @@ describe('VisualQueryBuilder', () => {
         expect(screen.getByText('Number of edges')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'How many edges' })).toHaveTextContent('at least')
         expect(screen.getByLabelText('Number of edges')).toHaveValue(3)
-        expect(screen.getByRole('button', { name: 'Which way' })).toHaveTextContent('Outgoing')
+        expect(screen.getByRole('radio', { name: 'Outgoing' })).toBeChecked()
         expect(screen.getByRole('button', { name: 'Through which edges' })).toHaveTextContent('Any link')
     })
 
