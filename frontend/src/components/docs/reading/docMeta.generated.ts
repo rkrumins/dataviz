@@ -361,7 +361,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/WORKSPACE_ADMIN.md"
   },
   "users-access": {
-    "updated": "2026-10-24",
+    "updated": "2026-10-25",
     "path": "docs/guide/USERS_ACCESS.md"
   },
   "service-accounts": {
