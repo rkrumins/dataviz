@@ -30,7 +30,7 @@ from backend.app.db.repositories import (
 )
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.revocation_service import revoke_subject_sessions
-from backend.app.services import service_account_standing
+from backend.app.services import service_account_access, service_account_standing
 from backend.common.service_accounts import is_service_account
 from backend.auth_service.interface import User
 from backend.common.display_name import resolve_display_name
@@ -344,16 +344,11 @@ async def add_member(
         raise HTTPException(status_code=409, detail="A service account can't join a team")
     await _require_super_admin_for_super_admin_group(session, group_id, claims)
     # Whoever joins a team that manages service accounts can act as them:
-    # putting someone there is looking after those accounts.
-    managed = await service_account_repo.accounts_managed_by_team(session, group_id)
-    if managed and not has_permission(claims, "system:service-accounts:manage"):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=(
-                "This team manages service accounts, so whoever joins it can act as them. "
-                "Adding someone takes the permission to look after service accounts."
-            ),
-        )
+    # held to the rule for appointing a manager.
+    managed = await service_account_access.may_join_managing_team(
+        session, claims, group_id, body.user_id,
+        resolve_display_name(user.display_name, user.first_name, user.last_name),
+    )
 
     member = await group_repo.add_member(
         session, group_id, body.user_id, added_by=admin.id,

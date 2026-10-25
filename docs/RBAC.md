@@ -523,10 +523,13 @@ one of its data sources is.
   shortcut reaches its keys whatever a row says. It may hold any workspace role that neither
   administers the workspace nor lets people in, and what is requestable is applied again at
   resolution, so a role later widened to administer brings it none of that. Its managers make
-  keys that act as it, whatever they can reach themselves: appointing a manager delegates the
-  account's access, so it takes being able to grant each of the account's roles; and whoever
-  controls a managing team's membership controls that delegation, so adding someone to a team
-  that manages a service account takes `system:service-accounts:manage` as well as
+  keys that act as it, whatever they can reach themselves, and run the account itself — all but
+  giving it roles, which takes `system:service-accounts:manage`. Appointing a manager delegates
+  the account's access, so it may give the appointee only what they hold already or what the
+  appointer could grant them: for each of the account's roles, the appointee holds every
+  permission it gives the account there (a team, through its own roles), or the appointer could
+  grant it there. Whoever controls a managing team's membership controls that delegation too, so
+  adding someone to a team that manages a service account is held to the same rule on top of
   `system:groups:manage`, and an access-request approval never adds anyone to one. A holder of
   `system:users:manage` can make an account's keys without managing it, and its managers are
   told; `system:service-accounts:manage` alone makes none. See [Service

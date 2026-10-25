@@ -59,7 +59,7 @@
 | `POST` | `/api/v1/me/notifications/read` | authenticated | enforced | refused |
 | `GET` | `/api/v1/me/permissions` | authenticated | n/a | refused |
 | `GET` | `/api/v1/me/service-accounts` | authenticated | n/a | refused |
-| `GET` | `/api/v1/me/service-accounts/{account_id}` | authenticated | n/a | refused |
+| `GET` | `/api/v1/me/service-accounts/{account_id}` | manages it, or system:service-accounts:manage or system:users:manage (in handler) | n/a | refused |
 | `GET` | `/api/v1/me/service-accounts/{account_id}/api-keys` | authenticated | n/a | refused |
 | `POST` | `/api/v1/me/service-accounts/{account_id}/api-keys` | authenticated | enforced | refused |
 | `GET` | `/api/v1/me/service-accounts/{account_id}/api-keys/options` | authenticated | n/a | refused |
@@ -272,14 +272,14 @@
 | `GET` | `/api/v1/admin/service-accounts` | system:service-accounts:manage | n/a | refused |
 | `POST` | `/api/v1/admin/service-accounts` | system:service-accounts:manage | enforced | refused |
 | `POST` | `/api/v1/admin/service-accounts/hand-over` | system:service-accounts:manage | enforced | refused |
-| `GET` | `/api/v1/admin/service-accounts/{account_id}` | system:service-accounts:manage | n/a | refused |
-| `PATCH` | `/api/v1/admin/service-accounts/{account_id}` | system:service-accounts:manage | enforced | refused |
-| `POST` | `/api/v1/admin/service-accounts/{account_id}/disable` | system:service-accounts:manage | enforced | refused |
-| `POST` | `/api/v1/admin/service-accounts/{account_id}/enable` | system:service-accounts:manage | enforced | refused |
-| `DELETE` | `/api/v1/admin/service-accounts/{account_id}/managers/{kind}/{subject_id}` | system:service-accounts:manage | enforced | refused |
-| `PUT` | `/api/v1/admin/service-accounts/{account_id}/managers/{kind}/{subject_id}` | system:service-accounts:manage | enforced | refused |
-| `POST` | `/api/v1/admin/service-accounts/{account_id}/roles` | system:service-accounts:manage | enforced | refused |
-| `DELETE` | `/api/v1/admin/service-accounts/{account_id}/roles/{binding_id}` | system:service-accounts:manage | enforced | refused |
+| `GET` | `/api/v1/admin/service-accounts/{account_id}` | manages it, or system:service-accounts:manage or system:users:manage (in handler) | n/a | refused |
+| `PATCH` | `/api/v1/admin/service-accounts/{account_id}` | manages it, or system:service-accounts:manage (in handler) | enforced | refused |
+| `POST` | `/api/v1/admin/service-accounts/{account_id}/disable` | manages it, or system:service-accounts:manage (in handler) | enforced | refused |
+| `POST` | `/api/v1/admin/service-accounts/{account_id}/enable` | manages it unless an administrator holds it, or system:service-accounts:manage (in handler) | enforced | refused |
+| `DELETE` | `/api/v1/admin/service-accounts/{account_id}/managers/{kind}/{subject_id}` | manages it, or system:service-accounts:manage (in handler) | enforced | refused |
+| `PUT` | `/api/v1/admin/service-accounts/{account_id}/managers/{kind}/{subject_id}` | manages it, or system:service-accounts:manage (in handler) | enforced | refused |
+| `POST` | `/api/v1/admin/service-accounts/{account_id}/roles` | system:service-accounts:manage (in handler) | enforced | refused |
+| `DELETE` | `/api/v1/admin/service-accounts/{account_id}/roles/{binding_id}` | manages it, or system:service-accounts:manage (in handler) | enforced | refused |
 | `GET` | `/api/v1/admin/sso/activity` | system:audit:read | n/a | refused |
 | `GET` | `/api/v1/admin/sso/config` | system:admin | n/a | refused |
 | `PATCH` | `/api/v1/admin/sso/config` | system:admin | enforced | refused |

@@ -402,8 +402,10 @@ or it may not do what the script asked.
    - **`paused`** — a personal key: sign in to the app once, and it resumes.
      A service account's key: the account has no manager; ask an
      administrator to appoint one.
-   - **`owner_inactive`** — the account it acts as is suspended, or the
-     service account is disabled: ask an administrator.
+   - **`owner_inactive`** — the account it acts as is suspended: ask an
+     administrator. A service account's key: the account is disabled, and its
+     managers can enable it — unless an administrator disabled it, when only an
+     administrator can.
    - **`ip_not_allowed`** — the script runs outside the key's networks.
 
    A `401` here means the key is revoked or mistyped: make a new one.

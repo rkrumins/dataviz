@@ -1,6 +1,6 @@
 /**
  * Service accounts — for administrators (Administration → Service accounts),
- * and for the people who manage one (Account → API keys).
+ * and for the people who manage one (Account → API keys, and its own page).
  *
  * A service account is a principal that never signs in: an integration acts
  * as it through API keys its managers make. Its keys work while someone in
@@ -67,6 +67,8 @@ export interface ServiceAccount {
     /** Since when nobody has; its keys pause at `pausesAt`. */
     unmanagedSince: string | null
     pausesAt: string | null
+    /** An administrator disabled it: only one of them enables it again. */
+    adminHold: boolean
     /** Only when listed by `managedBy`. */
     handOver: HandOverFacts | null
 }
@@ -79,9 +81,28 @@ export interface ServiceAccountRole {
     grantedAt: string | null
 }
 
+/** What you may do with one account, as the server decides it. */
+export interface ServiceAccountCan {
+    view: boolean
+    /** Rename it, or say what it is for. */
+    edit: boolean
+    disable: boolean
+    /** Its managers can't while an administrator holds it disabled. */
+    enable: boolean
+    /** Appoint and remove its managers. */
+    managers: boolean
+    /** Make, rotate and revoke its keys. */
+    keys: boolean
+    /** Give it workspace roles from its page. */
+    grant: boolean
+    /** Take its roles away. */
+    revoke: boolean
+}
+
 export interface ServiceAccountDetail extends ServiceAccount {
     roles: ServiceAccountRole[]
     liveKeys: number
+    can: ServiceAccountCan
 }
 
 export interface ServiceAccountList {
@@ -120,6 +141,8 @@ export const serviceAccountService = {
         return authFetch(`${ADMIN}${query(filters)}`)
     },
 
+    /** For its managers, the administrators of service accounts, and anyone
+     *  who may make any account's keys. */
     get(id: string): Promise<ServiceAccountDetail> {
         return authFetch(one(id))
     },
@@ -167,10 +190,5 @@ export const serviceAccountService = {
     /** The accounts you manage, yourself or through a team, a page at a time. */
     mine(params: { limit?: number; offset?: number } = {}): Promise<ServiceAccountList> {
         return authFetch(`${MINE}${query(params)}`)
-    },
-
-    /** One you manage — or, holding `system:users:manage`, any. */
-    mineGet(id: string): Promise<ServiceAccountDetail> {
-        return authFetch(`${MINE}/${encodeURIComponent(id)}`)
     },
 }
