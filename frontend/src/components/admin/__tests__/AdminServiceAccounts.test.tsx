@@ -39,8 +39,8 @@ function account(over: Partial<ServiceAccount> = {}): ServiceAccount {
 
 function detail(over: Partial<ServiceAccountDetail> = {}): ServiceAccountDetail {
     return {
-        ...account(), roles: [], liveKeys: 2,
-        can: { view: true, edit: true, disable: true, enable: true, managers: true, keys: false, grant: true, revoke: true },
+        ...account(), roles: [], requests: [], liveKeys: 2,
+        can: { view: true, edit: true, disable: true, enable: true, managers: true, keys: false, grant: true, revoke: true, request: true },
         ...over,
     }
 }

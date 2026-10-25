@@ -17,8 +17,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
-    AlertCircle, ArrowLeft, Bot, Code2, ExternalLink, History, KeySquare, Plus, Power, RefreshCw, ShieldAlert,
-    Trash2, Users, X,
+    AlertCircle, ArrowLeft, Bot, Clock, Code2, ExternalLink, History, KeySquare, Plus, Power, RefreshCw, Send,
+    ShieldAlert, Trash2, Users, X,
 } from 'lucide-react'
 
 import { AccountCard, AccountShell } from '@/components/account/AccountShell'
@@ -32,6 +32,7 @@ import { clearDraft, peekDraft, type ApiKeyDraft } from '@/components/apiKeys/ap
 import { isLive, isRenewable, stepUpUnavailable } from '@/components/apiKeys/apiKeyFormat'
 import { KeyClientProvider, useKeyClient } from '@/components/apiKeys/keyClient'
 import { ApiKeyWizard } from '@/components/apiKeys/wizard/ApiKeyWizard'
+import { RequestForAccount } from '@/components/serviceAccounts/RequestForAccount'
 import { RoleGrant } from '@/components/serviceAccounts/RoleGrant'
 import { SubjectPicker, subjectKey } from '@/components/serviceAccounts/SubjectPicker'
 import { ManagerRow, StandingChip, TeamNote, standingOf } from '@/components/serviceAccounts/parts'
@@ -40,6 +41,7 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { accessRequestsService } from '@/services/accessRequestsService'
 import { serviceAccountKeys, type ApiKey, type ApiKeyOptions, type KeyRef } from '@/services/apiKeyService'
 import {
     serviceAccountService, type ServiceAccountDetail, type ServiceAccountManager,
@@ -114,7 +116,7 @@ export function ServiceAccountPage() {
             )}
             {account && keyAccount && (
                 <>
-                    <AboutAccount account={account} central={central} busy={busy} change={change} />
+                    <AboutAccount account={account} central={central} busy={busy} change={change} reload={() => void load().then(setAccount)} />
                     {account.can.keys ? (
                         <KeyClientProvider client={client} account={keyAccount}>
                             <AccountKeys account={account} />
@@ -139,13 +141,17 @@ type Change = (fn: () => Promise<unknown>, done: string) => Promise<boolean>
 
 /** What keeps its keys working — its standing, who manages it, where it has a
  *  role — and, for whoever may, the means to change each. */
-function AboutAccount({ account, central, busy, change }: {
+function AboutAccount({ account, central, busy, change, reload }: {
     account: ServiceAccountDetail
     /** An administrator of service accounts: may leave it with no manager. */
     central: boolean
     busy: boolean
     change: Change
+    /** Read the account again — after asking a workspace for its access. */
+    reload: () => void
 }) {
+    const [asking, setAsking] = useState(false)
+    const keeping = new Set(account.requests.map((r) => r.bindingId).filter(Boolean))
     const { can } = account
     const standing = standingOf(account)
     const [editing, setEditing] = useState(false)
@@ -294,13 +300,31 @@ function AboutAccount({ account, central, busy, change }: {
             <h3 className="mt-5 mb-2 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Where it has a role</h3>
             {account.roles.length === 0 ? (
                 <p className="text-xs text-ink-muted mb-3">
-                    No roles yet: its keys reach nothing until an administrator gives it one.
+                    No roles yet: its keys reach nothing until a workspace gives it one.
                 </p>
             ) : (
                 <ul className="flex flex-wrap gap-2 mb-3" aria-label="Roles">
                     {account.roles.map((r) => (
                         <li key={r.bindingId} className="inline-flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] text-xs text-ink-secondary">
-                            <span><span className="font-semibold text-ink">{r.workspaceName ?? r.workspaceId}</span> · {roleVisualFor(r.role).label}</span>
+                            <span>
+                                <span className="font-semibold text-ink">{r.workspaceName ?? r.workspaceId}</span> · {roleVisualFor(r.role).label}
+                                {r.expiresAt && <> · until {new Date(r.expiresAt).toLocaleDateString()}</>}
+                            </span>
+                            {r.expiresAt && can.request && (keeping.has(r.bindingId) ? (
+                                <span className="px-1.5 text-ink-muted">Asked to keep</span>
+                            ) : (
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={busy}
+                                    onClick={() => void change(
+                                        () => accessRequestsService.extend({ bindingId: r.bindingId }),
+                                        `Asked ${r.workspaceName ?? 'the workspace'} to keep its access`,
+                                    )}
+                                >
+                                    Keep
+                                </Button>
+                            ))}
                             {can.revoke && (
                                 <IconButton
                                     icon={X}
@@ -313,8 +337,44 @@ function AboutAccount({ account, central, busy, change }: {
                     ))}
                 </ul>
             )}
+            {account.requests.length > 0 && (
+                <ul className="space-y-1.5 mb-3" aria-label="Waiting on a workspace">
+                    {account.requests.map((r) => (
+                        <li key={r.id} className="flex flex-wrap items-center gap-2 text-xs text-ink-secondary">
+                            <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" aria-hidden />
+                            <span className="min-w-0 flex-1">
+                                {r.bindingId ? 'Asked to keep' : 'Asked for'} <span className="font-semibold text-ink">{roleVisualFor(r.role).label}</span>
+                                {' in '}<span className="font-semibold text-ink">{r.workspaceName ?? r.workspaceId}</span>
+                                {r.requestedBy && <> by {r.requestedBy}</>} — waiting on the workspace
+                            </span>
+                            {can.request && (
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={busy}
+                                    onClick={() => void change(() => accessRequestsService.withdraw(r.id), 'Request withdrawn')}
+                                >
+                                    Withdraw
+                                </Button>
+                            )}
+                        </li>
+                    ))}
+                </ul>
+            )}
             {can.grant && (
                 <RoleGrant busy={busy} onGrant={(workspaceId, role) => change(() => serviceAccountService.grantRole(account.id, { workspaceId, role }), 'Role given')} />
+            )}
+            {can.request && (
+                <Button variant="secondary" size="sm" leftIcon={Send} className="mt-3" onClick={() => setAsking(true)}>
+                    Ask a workspace for access
+                </Button>
+            )}
+            {asking && (
+                <RequestForAccount
+                    account={account}
+                    onClose={() => setAsking(false)}
+                    onSent={() => { setAsking(false); reload() }}
+                />
             )}
         </AccountCard>
     )

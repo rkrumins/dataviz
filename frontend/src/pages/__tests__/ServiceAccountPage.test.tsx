@@ -13,7 +13,7 @@ import { ServiceAccountPage } from '../ServiceAccountPage'
 import { apiKey, inDays, options as opts } from '@/components/apiKeys/__tests__/fixtures'
 import type { ServiceAccountCan, ServiceAccountDetail } from '@/services/serviceAccountService'
 
-const { sa, client, keysOf, notify, feature, perms, searchDirectory, listPage, requestableRoles } = vi.hoisted(() => {
+const { sa, client, keysOf, notify, feature, perms, searchDirectory, listPage, requestableRoles, ar, directory } = vi.hoisted(() => {
     const client = {
         list: vi.fn(), options: vi.fn(), revoke: vi.fn(), get: vi.fn(), rotate: vi.fn(),
         searchResources: vi.fn(), create: vi.fn(), preview: vi.fn(), lastUse: vi.fn(), update: vi.fn(),
@@ -25,7 +25,8 @@ const { sa, client, keysOf, notify, feature, perms, searchDirectory, listPage, r
         },
         client, keysOf: vi.fn(() => client), notify: vi.fn(), feature: { on: true },
         perms: new Set<string>(),
-        searchDirectory: vi.fn(), listPage: vi.fn(), requestableRoles: vi.fn(),
+        searchDirectory: vi.fn(), listPage: vi.fn(), requestableRoles: vi.fn(), directory: vi.fn(),
+        ar: { submit: vi.fn(), extend: vi.fn(), withdraw: vi.fn() },
     }
 })
 
@@ -35,8 +36,8 @@ vi.mock('@/services/apiKeyService', async (importOriginal) => ({
     serviceAccountKeys: keysOf,
 }))
 vi.mock('@/services/userDirectoryService', () => ({ searchDirectory }))
-vi.mock('@/services/workspaceService', () => ({ workspaceService: { listPage } }))
-vi.mock('@/services/accessRequestsService', () => ({ accessRequestsService: { requestableRoles } }))
+vi.mock('@/services/workspaceService', () => ({ workspaceService: { listPage, directory } }))
+vi.mock('@/services/accessRequestsService', () => ({ accessRequestsService: { requestableRoles, ...ar } }))
 vi.mock('@/components/account/AccountShell', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/components/account/AccountShell')>()),
     AccountShell: ({ title, children }: { title: string; children?: React.ReactNode }) => (
@@ -54,6 +55,7 @@ vi.mock('@/store/auth', () => ({ usePermission: (perm: string) => perms.has(perm
 /** What one of its managers may do. */
 const MANAGER: ServiceAccountCan = {
     view: true, edit: true, disable: true, enable: true, managers: true, keys: true, grant: false, revoke: true,
+    request: true,
 }
 
 const ADA = {
@@ -73,7 +75,8 @@ function account(over: Partial<ServiceAccountDetail> = {}): ServiceAccountDetail
             },
         ],
         managed: true, singleManager: true, unmanagedSince: null, pausesAt: null, adminHold: false, handOver: null,
-        roles: [{ bindingId: 'rb_1', workspaceId: 'ws1', workspaceName: 'Finance', role: 'workspace_viewer', grantedAt: null }],
+        roles: [{ bindingId: 'rb_1', workspaceId: 'ws1', workspaceName: 'Finance', role: 'workspace_viewer', grantedAt: null, expiresAt: null }],
+        requests: [],
         liveKeys: 1,
         can: MANAGER,
         ...over,
@@ -105,6 +108,7 @@ beforeEach(() => {
     client.get.mockReturnValue(new Promise(() => {}))
     searchDirectory.mockResolvedValue({ users: [{ id: 'usr_bea', displayName: 'Bea Smith', email: 'bea@example.com' }], groups: [] })
     listPage.mockResolvedValue({ items: [], totalCount: 0 })
+    directory.mockRejectedValue(new Error('switched off'))
     requestableRoles.mockResolvedValue({ roles: [] })
 })
 
@@ -223,6 +227,71 @@ describe('running it', () => {
         expect(within(keys).queryByRole('button', { name: /create key/i })).not.toBeInTheDocument()
         expect(client.list).not.toHaveBeenCalled()
         expect(screen.queryByLabelText('Add a manager')).not.toBeInTheDocument()
+    })
+})
+
+describe('its access', () => {
+    it('asks a workspace for access for it', async () => {
+        listPage.mockResolvedValue({ items: [{ id: 'ws_sales', name: 'Sales' }], totalCount: 1 })
+        requestableRoles.mockResolvedValue({
+            roles: [{ name: 'workspace_member', description: null, isSystem: true }], requestPolicy: 'approval', joinRole: null,
+        })
+        ar.submit.mockResolvedValue({ id: 'req_1' })
+        renderPage()
+        const about = await screen.findByRole('region', { name: 'About this service account' })
+        await userEvent.click(within(about).getByRole('button', { name: /ask a workspace for access/i }))
+        const dialog = await screen.findByRole('dialog', { name: 'Ask for access for “Metadata sync”' })
+        await within(dialog).findByRole('option', { name: 'Sales' })
+        await userEvent.selectOptions(within(dialog).getByLabelText('Workspace'), 'ws_sales')
+        await within(dialog).findByRole('option', { name: 'Workspace member' })
+        await userEvent.selectOptions(within(dialog).getByLabelText('Role'), 'workspace_member')
+        await userEvent.type(within(dialog).getByLabelText('Why it needs this'), 'Nightly sync of Sales graphs')
+        await userEvent.click(within(dialog).getByRole('button', { name: /^ask$/i }))
+        await waitFor(() => expect(ar.submit).toHaveBeenCalledWith({
+            targetType: 'workspace', targetId: 'ws_sales', requestedRole: 'workspace_member',
+            justification: 'Nightly sync of Sales graphs', serviceAccountId: 'svc_sync',
+        }))
+        await waitFor(() => expect(sa.get).toHaveBeenCalledTimes(2))       // read again, with the request
+    })
+
+    it('says a workspace that takes no requests must add it', async () => {
+        listPage.mockResolvedValue({ items: [{ id: 'ws_sales', name: 'Sales' }], totalCount: 1 })
+        requestableRoles.mockResolvedValue({ roles: [], requestPolicy: 'closed', joinRole: null })
+        renderPage()
+        const about = await screen.findByRole('region', { name: 'About this service account' })
+        await userEvent.click(within(about).getByRole('button', { name: /ask a workspace for access/i }))
+        const dialog = await screen.findByRole('dialog', { name: 'Ask for access for “Metadata sync”' })
+        await within(dialog).findByRole('option', { name: 'Sales' })
+        await userEvent.selectOptions(within(dialog).getByLabelText('Workspace'), 'ws_sales')
+        expect(await within(dialog).findByText(/isn’t taking requests: ask its admins to add “Metadata sync”/)).toBeInTheDocument()
+        expect(within(dialog).getByRole('button', { name: /^ask$/i })).toBeDisabled()
+    })
+
+    it('shows what it waits on, and withdraws it', async () => {
+        sa.get.mockResolvedValue(account({
+            requests: [{
+                id: 'req_1', workspaceId: 'ws_sales', workspaceName: 'Sales', role: 'workspace_member',
+                createdAt: '2026-10-25T00:00:00+00:00', requestedBy: 'Ada Lovelace', bindingId: null,
+            }],
+        }))
+        ar.withdraw.mockResolvedValue({ id: 'req_1', status: 'withdrawn' })
+        renderPage()
+        const waiting = await screen.findByRole('list', { name: 'Waiting on a workspace' })
+        expect(waiting).toHaveTextContent('Asked for Workspace member in Sales by Ada Lovelace — waiting on the workspace')
+        await userEvent.click(within(waiting).getByRole('button', { name: /withdraw/i }))
+        await waitFor(() => expect(ar.withdraw).toHaveBeenCalledWith('req_1'))
+    })
+
+    it('asks to keep a role that ends', async () => {
+        sa.get.mockResolvedValue(account({
+            roles: [{ bindingId: 'rb_1', workspaceId: 'ws1', workspaceName: 'Finance', role: 'workspace_viewer', grantedAt: null, expiresAt: '2099-01-01T00:00:00+00:00' }],
+        }))
+        ar.extend.mockResolvedValue({ id: 'req_2' })
+        renderPage()
+        const roles = await screen.findByRole('list', { name: 'Roles' })
+        expect(roles).toHaveTextContent(/until/)
+        await userEvent.click(within(roles).getByRole('button', { name: /^keep$/i }))
+        await waitFor(() => expect(ar.extend).toHaveBeenCalledWith({ bindingId: 'rb_1' }))
     })
 })
 

@@ -79,6 +79,21 @@ export interface ServiceAccountRole {
     workspaceName: string | null
     role: string
     grantedAt: string | null
+    /** When it ends; null while it lasts until taken away. */
+    expiresAt: string | null
+}
+
+/** A request for its access still waiting on a workspace. */
+export interface ServiceAccountRequest {
+    id: string
+    workspaceId: string
+    workspaceName: string | null
+    role: string
+    createdAt: string
+    /** Who asked for it, by name. */
+    requestedBy: string | null
+    /** A request to keep this role, which ends soon. */
+    bindingId: string | null
 }
 
 /** What you may do with one account, as the server decides it. */
@@ -97,10 +112,14 @@ export interface ServiceAccountCan {
     grant: boolean
     /** Take its roles away. */
     revoke: boolean
+    /** Ask a workspace for access for it, or to keep access that ends. */
+    request: boolean
 }
 
 export interface ServiceAccountDetail extends ServiceAccount {
     roles: ServiceAccountRole[]
+    /** Requests for its access still waiting on a workspace. */
+    requests: ServiceAccountRequest[]
     liveKeys: number
     can: ServiceAccountCan
 }
@@ -173,8 +192,9 @@ export const serviceAccountService = {
         return authFetch(manager(id, ref), { method: 'DELETE' })
     },
 
-    /** A workspace role that neither administers the workspace nor lets people in. */
-    grantRole(id: string, body: { workspaceId: string; role: string }): Promise<ServiceAccountRole> {
+    /** A workspace role that neither administers the workspace nor lets people in,
+     *  until `expiresAt` or until taken away. */
+    grantRole(id: string, body: { workspaceId: string; role: string; expiresAt?: string }): Promise<ServiceAccountRole> {
         return authFetch(`${one(id)}/roles`, { method: 'POST', body: JSON.stringify(body) })
     },
 
