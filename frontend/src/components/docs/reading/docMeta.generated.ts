@@ -59,7 +59,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/local-integration-testing.md"
   },
   "integration-quickstart": {
-    "updated": "2026-10-24",
+    "updated": "2026-10-25",
     "path": "docs/INTEGRATION_QUICKSTART.md"
   },
   "api-guide": {
@@ -227,7 +227,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "deploy/k8s/overlays/production-cluster/README.md"
   },
   "configuration": {
-    "updated": "2026-10-19",
+    "updated": "2026-10-25",
     "path": "docs/CONFIGURATION.md"
   },
   "observability": {

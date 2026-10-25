@@ -269,6 +269,13 @@ An import that names a view (`viewId`) places the entities it creates in that vi
 write to the view — so the view must be in the workspace, not deleted, and editable by the caller
 (`_check_import_view`): with an API key, one with **Views: read & write**.
 
+An `idempotencyKey` makes `POST …/imports` and `POST …/exports` safe to send again. The route stores
+it as its sender's (`<user id>:<key>`), and `ix_jobs_idem_active` keeps one job per key on a graph,
+finished or not: the same key from the same caller answers with the job it started (`_job_for_key`)
+— an import whose file never arrived takes the new request's file and starts — and a key that
+started the other kind of job is `409 idempotency_key_reused`. Two requests racing with one key both
+get the winner's job, and the loser's draft is abandoned (`create_import_job`).
+
 ---
 
 ## 4. Identity & idempotency (a round-trip is a no-op)
@@ -685,12 +692,6 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
 - **`auto_publish` and a custom draft `name`** exist on `JobORM` / `create_import_job`
   (`service.py:75-77`) but the `create_import` endpoint doesn't expose them — imports always flow
   through the manual review/publish path (the draft is named "Import").
-- **`idempotency_key` on an import or export job is unique per graph, but not honoured as a retry.**
-  `ix_jobs_idem_active` covers every job, finished or not, so sending a key already used on the graph —
-  by an import or an export — fails the insert: the answer is `503`, and the draft the import opened
-  stays behind, empty. Leave it out, or make each one unique. Job-level idempotency for these paths is
-  a designed follow-up (the ndjson `bulk-ingest`/`sync` paths dedup at the service level, separately;
-  see [10 — Authoritative Sources](10-authoritative-sources-datahub-openmetadata.md)).
 - **`INLINE_IMPORT_MAX` (5,000) two-tier threshold** exists in config as the intended
   "stage small imports client-side, run large ones async" split, but the endpoint currently always
   dispatches the async worker.
