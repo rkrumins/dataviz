@@ -43,10 +43,12 @@ restrictions, [below](#what-a-rules-predicate-may-not-use)).
 ## Signing in from a script
 
 A script authenticates with an **API key** or with a **cookie session** signed
-in with a password. Either way it acts as you. Every endpoint on this page takes
-a key.
+in with a password. Either way it acts as you — or, with a
+[service account](/guide/service-accounts)'s key, as that account. Every endpoint
+on this page takes a key.
 
-**With an API key.** Create one under **Account → API keys** — **Data: read**
+**With an API key.** Create one under **Account → API keys** (a service
+account's, on its page) — **Data: read**
 on the data sources you search, **Views: read & write** on the views whose
 library you change ([API Keys](/guide/api-keys)) — and send it in the
 `Authorization` header. No cookies, no CSRF header:
