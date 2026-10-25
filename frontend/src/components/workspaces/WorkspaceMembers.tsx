@@ -23,7 +23,7 @@ import {
     Users, Shield, UserCog, Eye, UserPlus, Trash2, RefreshCw,
     Search, Loader2, X, AlertCircle, AlertTriangle, Mail, Users2,
     ChevronDown, ChevronUp, ChevronRight, Clock, CalendarClock,
-    UserCheck,
+    UserCheck, Bot,
 } from 'lucide-react'
 import {
     workspaceMembersService,
@@ -50,6 +50,8 @@ import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { TablePagination } from '@/components/ui/TablePagination'
 import { UserAvatar } from '@/components/ui/UserAvatar'
+import { ServiceAccountBadge } from '@/components/serviceAccounts/parts'
+import { isServiceAccountId } from '@/lib/serviceAccounts'
 import { cn } from '@/lib/utils'
 import { roleVisualFor, isBuiltinRole } from '@/lib/roleVisual'
 import { ROLE_NAMES } from '@/lib/roleNames'
@@ -268,6 +270,16 @@ function SubjectAvatar({ type, displayName, userId, size = 'md' }: {
                 'rounded-full bg-violet-500/10 border border-violet-500/20 flex items-center justify-center text-violet-600 dark:text-violet-400 shrink-0',
             )}>
                 <Users2 className={size === 'sm' ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
+            </div>
+        )
+    }
+    if (isServiceAccountId(userId)) {
+        return (
+            <div className={cn(
+                dims,
+                'rounded-full bg-sky-500/10 border border-sky-500/20 flex items-center justify-center text-sky-600 dark:text-sky-400 shrink-0',
+            )}>
+                <Bot className={size === 'sm' ? 'w-3.5 h-3.5' : 'w-4 h-4'} />
             </div>
         )
     }
@@ -794,6 +806,7 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
                                                                 GROUP
                                                             </span>
                                                         )}
+                                                        {isServiceAccountId(m.subject.id) && <ServiceAccountBadge />}
                                                     </div>
                                                     {m.subject.secondary && (
                                                         <div className="flex items-center gap-1 mt-0.5">

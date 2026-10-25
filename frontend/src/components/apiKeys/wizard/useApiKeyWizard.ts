@@ -15,7 +15,6 @@ import { useCallback, useEffect, useState } from 'react'
 
 import {
     ApiKeyError,
-    apiKeyService,
     type ApiKeyOptions,
     type ApiKeyPermissions,
     type ApiKeyPreview,
@@ -31,6 +30,7 @@ import {
 import { freshDraft, parkDraft, type ApiKeyDraft, type WizardStep } from '../apiKeyDraft'
 import { withGatewayStepUp } from '../gatewayStepUp'
 import { keyExposure } from '../exposure'
+import { useKeyAccount, useKeyClient } from '../keyClient'
 import { presetById, presetPatch, type Preset } from '../presets'
 
 export const STEPS: { id: WizardStep; title: string }[] = [
@@ -69,6 +69,8 @@ export function useApiKeyWizard({ options, resumed }: {
     /** A draft parked before an identity-provider sign-in. */
     resumed?: ApiKeyDraft | null
 }) {
+    const client = useKeyClient()
+    const account = useKeyAccount()
     const [draft, setDraft] = useState<ApiKeyDraft>(() => resumed ?? freshDraft(options))
     const [password, setPassword] = useState('')
     const [busy, setBusy] = useState(false)
@@ -104,14 +106,14 @@ export function useApiKeyWizard({ options, resumed }: {
     useEffect(() => {
         if (!reviewing) return
         const abort = new AbortController()
-        apiKeyService.preview(bodyOf(JSON.parse(content) as ApiKeyDraft), abort.signal)
+        client.preview(bodyOf(JSON.parse(content) as ApiKeyDraft), abort.signal)
             .then((data) => setPreview({ key: content, status: 'ready', data }))
             .catch((err: unknown) => {
                 if (abort.signal.aborted) return
                 setPreview({ key: content, status: 'error', message: err instanceof Error ? err.message : 'No preview.' })
             })
         return () => abort.abort()
-    }, [reviewing, content])
+    }, [reviewing, content, client])
     const previewState: PreviewState | null = !reviewing ? null
         : preview?.key === content ? preview : { key: content, status: 'loading' }
 
@@ -151,7 +153,7 @@ export function useApiKeyWizard({ options, resumed }: {
         setError(null)
         setPasswordFailed(false)
         try {
-            const result = await withGatewayStepUp(() => apiKeyService.create({
+            const result = await withGatewayStepUp(() => client.create({
                 ...bodyOf(draft),
                 currentPassword: options.stepUp.method === 'password' ? password : undefined,
             }))
@@ -161,7 +163,7 @@ export function useApiKeyWizard({ options, resumed }: {
             const signIn = err instanceof ApiKeyError && err.code === 'step_up_required' && err.method === 'sso'
                 ? siteUrl(err.loginUrl) : null
             if (signIn) {
-                parkDraft({ ...draft, step: 'review' })
+                parkDraft({ ...draft, step: 'review', principal: account?.id })
                 window.location.href = signIn
                 return
             }
@@ -176,7 +178,7 @@ export function useApiKeyWizard({ options, resumed }: {
         } finally {
             setBusy(false)
         }
-    }, [draft, options.stepUp.method, password])
+    }, [draft, options.stepUp.method, password, client, account])
 
     return {
         draft,

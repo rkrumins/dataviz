@@ -220,6 +220,95 @@ rule in the governance pack.
 - Native queries use the data source's existing login; the engines' read-only modes keep them
   read-only, not the login's privileges.
 
+
+## [Unreleased] — Service accounts: integrations that outlive the person who set them up
+
+### Added
+
+**Service accounts.** An account nobody signs in as, for an integration to run as. Super and org
+admins create one under **Administration → Service accounts**, name its managers — people, or
+teams — and give it workspace roles: any that neither administers a workspace nor lets people in.
+Its managers make, rotate and revoke its keys from **Account → API keys → Service accounts you
+manage**, confirming it's them as for their own keys. A key (`nxsat_…`) acts as the account,
+reaches what the account's roles give it, and counts against the account's own limit of 25. An
+integration swaps its `nxpat_…` key for one and changes nothing else.
+
+**What happens when a manager leaves.**
+- **Teams as managers.** A team, ideally one your identity provider keeps, keeps an account
+  managed as people join and leave. Anyone in it can make keys that act as the account, which
+  the page says where you choose one — so only an administrator of service accounts adds
+  someone to a team that manages one, and its managers are told when someone joins.
+- **Hand-over.** Suspending someone on **Administration → Users** lists every service account
+  their leaving touches — those they manage themselves or through a team, and those they made a
+  key for that still works — flags those nobody else manages and the keys they made, hands their
+  own seats to a successor, and offers to revoke the keys they made, before suspending them.
+  **Administration → Service accounts → Hand over…** hands over on its own. Whenever someone who
+  made keys that still work stops answering for an account, those who still answer are told.
+- **A safety net.** When an account's last manager in good standing goes — suspended, removed,
+  out of their team, or no longer signing in — every super and org admin is told at once. Its
+  keys keep working for a grace period (**Keep a service account's keys working after its last
+  manager goes**: at once, 7, 14 or 30 days; 14 by default), the admins are reminded three days
+  before it ends — again if the grace period is lengthened, and once that the keys have paused if
+  it is shortened past the day — and then the keys pause (`401 api_key_unmanaged`) until a
+  manager is appointed. More than five accounts at once make one notice, not one each.
+- **A single-manager marker** on every account one person is all it depends on.
+
+A new permission, `system:service-accounts:manage`, granted to super and org admins. Someone
+who may manage users (a super admin) can make an account's keys without managing it; its
+managers are told when they do. `POST /admin/users/{id}/api-keys/revoke-made` (with
+`system:users:manage`) revokes the service account keys a person made.
+
+A new counter, `api_key_housekeeping_steps_total{step,outcome}`, says whether each step of the
+hourly API key pass completed; [Observability](/docs/observability) has an alert for the service
+account check not completing.
+
+### Changed
+
+- A key's notices — misuse, expiry reminders, an administrator revoking it, a key revoking
+  itself — go to those who answer for a service account's key: its own managers and whoever made
+  the key while they still can act for it; failing those, up to 25 members of its managing teams,
+  the most recently active first; or its administrators while nobody can act for it. So does
+  anything said to the account itself — a workspace removing its access or setting an end date
+  on it, that access about to end, a decision on a publication it asked for, an administrator
+  disabling or enabling it — naming the account.
+- The API explorer's API key scheme names both kinds of key, `nxpat_…` and `nxsat_…`.
+- People lists, pickers, the directory, the admin user search, people counts, analytics and
+  inboxes leave service accounts out; the routes about a person answer `404` for one. Where
+  access is listed — a workspace's members, everyone with access, access reviews, the activity
+  log — one is marked as a service account and links to its page.
+
+### Security
+
+- A service account never signs in: every sign-in path refuses it, an identity provider can't
+  link to one, and it can't join a team or a workspace's members directly. It holds only the
+  workspace roles given it on its own page: never a platform role, a team's roles, or a role
+  that administers a workspace — not even one widened to after it was given — and no view,
+  template or draft can be shared with it. A view it made is its own only while it holds a role
+  in that view's workspace.
+- A service account neither reviews nor approves a pull request, and nobody approves one opened
+  through an account they manage.
+- Appointing a manager, or handing an account over, takes being able to grant each of its roles:
+  a manager can do whatever the account can.
+- A service account key whose account record is missing is refused.
+
+### Upgrading
+
+- The upgrade job adds the `service_accounts` and `service_account_managers` tables and the new
+  permission (`20261023_1200_service_accounts`). Nothing else to run.
+- Secret scanning: widen the pattern to `nx[ps]at_[0-9A-Za-z]{38}` to find service account keys
+  too.
+
+### Known limitations
+
+- Service accounts can't be deleted: disable one, and revoke its keys.
+- Its standing is re-checked when its managers change and once an hour, so a manager who signs
+  in again after their sign-in window lapsed brings its keys back within the hour. The account's
+  page says what its keys do in the meantime.
+- No warning before a manager's own standing lapses; the alert comes when the account has nobody
+  left.
+- Auditors see service accounts' keys in the API keys inventory and the activity log, but not
+  the accounts' own page.
+
 ---
 
 ## [Unreleased] — Move a data source to another workspace, with its views
@@ -385,7 +474,8 @@ step.
   its new workspace, and deleting it later left its graph standing for good. The history now moves
   with it. A move waits (`409`, with the reason) while version control is busy with the source,
   while a failed attempt to turn it on waits to be resumed or cancelled, and while it holds open
-  drafts or review requests.
+  drafts or review requests. (The move entry above lifted that last condition: open drafts and
+  review requests now go with the source.)
 
 ### Security
 

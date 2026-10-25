@@ -202,12 +202,12 @@ do their job; you can always raise it later.
 | Role | ID | What it's for |
 | --- | --- | --- |
 | **Super Admin** | `super_admin` | The platform owner. Carries `system:admin`, which implies every permission everywhere: every Administration page, every workspace, user accounts, single sign-on and feature switches. Bind sparingly. |
-| **Org Admin** | `org_admin` | Runs every workspace and creates new ones, manages groups, and sees Analytics. Does **not** manage user accounts or single sign-on — in Administration it opens only **Groups**. |
+| **Org Admin** | `org_admin` | Runs every workspace and creates new ones, manages groups, and sees Analytics. Does **not** manage user accounts or single sign-on — in Administration it opens **Groups** and **Service accounts**. |
 | **Org Auditor** | `org_auditor` | Read-only across every workspace, with the permissions to read the activity log — **Administration → Activity** — and every role binding (`system:audit:read`, `system:bindings:read`) and to see Analytics. Can't change anything. |
 | **User** | `user` | The default for anyone without an organization-wide role. No platform-wide access on its own — everything comes from workspace roles. |
 
 > **Note:** Opening **Administration** itself needs `system:admin`,
-> `system:groups:manage` or `system:audit:read`, so an **Org Auditor** reaches
+> `system:groups:manage`, `system:audit:read` or `system:service-accounts:manage`, so an **Org Auditor** reaches
 > **Activity** and **Telemetry** there. See [The Admin Console](/guide/governance-ops#who-can-open-each-page).
 
 > **Note:** A workspace appears in an **Org Admin**'s or **Org Auditor**'s
@@ -277,6 +277,12 @@ that access on their next request.
 > **Note:** Only a **Super Admin** can add or remove members of a group that
 > grants Super Admin, or delete it. Joining such a group makes someone a Super
 > Admin, so an **Org Admin** who tries is told only a Super Admin can.
+
+> **Note:** A group that manages a [service account](/guide/service-accounts)
+> lets everyone in it make keys that act as the account. Adding someone to it
+> takes the permission to look after service accounts as well, and the
+> account's managers are told; approving an access request never adds anyone
+> to such a group.
 
 > **Tip:** Prefer groups over individuals for anything beyond a handful of
 > people. It keeps access auditable and easy to change. You can also attach
@@ -370,7 +376,7 @@ Each row has the actions for that account's state:
 | **Mark as system account** | Make it a break-glass account (see below). |
 | **Reset password** | **Generate Token** (a one-time token they enter at `/reset-password`) or **Set Password** directly; a password you set is one they replace the next time they sign in. |
 | **End sessions** | Sign them out everywhere, now. They can sign straight back in. Their API keys keep working — revoke those under **Administration → API keys**. |
-| **Suspend user** / **Reactivate** | Stop the account signing in — immediately — or let it back in. Suspending also stops their API keys until you reactivate. |
+| **Suspend user** / **Reactivate** | Stop the account signing in — immediately — or let it back in. Suspending also stops their API keys until you reactivate. If they manage service accounts — themselves or through a team — or made keys for one that still work, the dialog lists them, offers to hand their own seats to a successor first, and to revoke the keys they made. |
 
 Clicking a row opens that person's access drawer, which leads with an
 **Activity** block:
@@ -538,6 +544,17 @@ workspace's **People with access** list.
 - [ ] Bind at the right **scope** — organization-wide only if truly needed.
 - [ ] Tell them about **My access** and this guide.
 
+## Admin checklist for someone leaving
+
+- [ ] **Hand over their service accounts** — suspending them on **User
+      Management** lists the ones they manage and hands their own seats to a
+      successor. Prefer a team: it outlives the next leaver too.
+- [ ] **Revoke the service account keys they made** — the same dialog lists
+      them, on any account, and revokes them in one step; they may have kept a
+      copy. Whoever answers for each account is told, to make a new key.
+- [ ] **Revoke their own API keys** under **Administration → API keys** if
+      anything still uses one.
+
 ---
 
 ## Where to next
@@ -552,3 +569,5 @@ workspace's **People with access** list.
   someone can't sign in or has the wrong access.
 - [API Keys](/guide/api-keys) — when someone wants a script or a service to
   act as them, or you need to see and revoke the keys people hold.
+- [Service Accounts](/guide/service-accounts) — when an integration should run
+  as an account of its own, and survive the people who look after it.

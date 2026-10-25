@@ -4,7 +4,7 @@
 to know which endpoint a switch turns off.*
 
 This page is the reference for the feature-switch API behind **Administration → Features**:
-every route with its request and answer, how a change is saved safely, and all 34 switches
+every route with its request and answer, how a change is saved safely, and all 35 switches
 with their defaults and the server routes each one controls.
 
 - **Administrators:** what each switch does on screen, and how to change one, is in
@@ -146,8 +146,8 @@ what `lastChanges` and `/{key}/history` read.
 
 ## Add, change and retire definitions
 
-The 28 built-in switches ship with the code. These routes add switches of your own and adjust
-definitions; they answer the same shape as the read.
+The 35 built-in switches ship with the code. These routes add switches of your own and adjust
+definitions; they answer the same shape as the read, without `lastChanges`.
 
 **Add** — `POST /api/v1/admin/features/definitions`:
 
@@ -169,7 +169,7 @@ required. `type` is `boolean` or `string[]`; a `string[]` switch also needs
 > **Warning:** `options`, `helpUrl`, `adminHint` and `impactWhenOff` are cleared when you leave
 > them out. Send their current values with every change.
 
-> **Note:** For the 28 built-in switches, the API service rewrites `name`, `description`,
+> **Note:** For the 35 built-in switches, the API service rewrites `name`, `description`,
 > `adminHint`, `impactWhenOff`, `helpUrl`, `category`, `type`, `options` and `sortOrder` from
 > the code every time it starts, so a change to those lasts only until the next restart.
 > Change the text in `backend/app/config/features_seed.py` instead.
@@ -188,7 +188,7 @@ An unknown key answers `404`.
 
 ## Feature flags (authoritative set)
 
-All 34 switches, grouped as **Administration → Features** groups them. **Switch** is the name
+All 35 switches, grouped as **Administration → Features** groups them. **Switch** is the name
 an administrator sees. **When it is off** names the routes the server refuses — `403` with
 `{"detail": {"type": "feature_disabled", "feature": "<key>", "message": "…"}}` unless the row
 says otherwise — or what it does instead. Paths are relative to `/api/v1`. Every switch whose
@@ -223,10 +223,11 @@ feature open to anyone who knows the URL.
 |---|---|---|---|---|
 | Self-registration | `signupEnabled` | Off | `POST /auth/signup` refuses a sign-up that carries no valid invite | Security. Invited people can always sign up |
 | Invite links | `inviteLinksEnabled` | On | `POST /admin/users/invite` and `/admin/users/invite/bulk` refuse to create links; `GET /auth/verify-invite` reports every link unusable; `POST /auth/signup` and `POST /auth/redeem-invite` refuse invite links with `400` | Kills links already sent; turning it back on revives those that haven't expired |
-| API keys | `apiKeysEnabled` | On | Every request made with an API key is refused `401 api_keys_disabled`; `POST /me/api-keys` and `/me/api-keys/{id}/rotate` refuse `403 api_keys_disabled` | Security: unreadable means refused. Listing and revoking keys stay available |
+| API keys | `apiKeysEnabled` | On | Every request made with an API key is refused `401 api_keys_disabled` — `DELETE /api-keys/self` included, so a key can't end itself; `POST /me/api-keys` and `/me/api-keys/{id}/rotate`, and the same routes under `/me/service-accounts/{account_id}/api-keys`, refuse `403 api_keys_disabled` | Security: unreadable means refused. Listing and revoking keys with a session stay available |
 | Longest an API key may live | `apiKeyMaxLifetime` | `none` | A ladder (`none`, `365`, `180`, `90`, `30` days): a key older than the maximum is refused as expired, and new keys must expire within it | Applies to keys that already exist |
-| Pause keys of people who stop signing in | `apiKeySsoSignInWindow` | `30` | A ladder (`14`, `30`, `90` days, `off`): a key whose owner has an SSO identity and has not signed in through it within the window is refused `401 owner_reauth_required` until they do | Owners without an SSO identity are not affected |
+| Pause keys of people who stop signing in | `apiKeySsoSignInWindow` | `30` | A ladder (`14`, `30`, `90` days, `off`): a key whose owner has an SSO identity and has not signed in through it within the window is refused `401 owner_reauth_required` until they do. The same window decides whether a service account's manager is in good standing | Owners without an SSO identity are not affected |
 | Accept a fresh sign-in round trip for API keys | `apiKeySsoRoundTripStepUp` | `false` | Off: `POST /me/api-keys` and `/me/api-keys/{id}/rotate` from a portal session are refused `403 step_up_unavailable`. OIDC and SAML sessions need a sign-in the provider dated within 15 minutes (`auth_time_proven`); Enterprise gateway sessions need the gateway's confirmation — asked on the request when this server can reach it (`503 gateway_unreachable` if it does not answer), else a sign-in through it within 15 minutes. On: a portal sign-in within 15 minutes is accepted too | Security: unreadable means off. Password sessions are not affected |
+| Keep a service account's keys working after its last manager goes | `serviceAccountUnmanagedGrace` | `14` | A ladder (`0`, `7`, `14`, `30` days): a service account's key is refused `401 api_key_unmanaged` once the account has had no manager in good standing for longer than this | Security: unreadable means refused. Personal keys are not affected |
 | Find a workspace | `workspaceDirectoryEnabled` | `false` | `GET /workspace-directory` is refused. Access requests still work from a shared link; while it is off, a requester sees a workspace's name in `POST /access-requests` and `GET /me/access-requests` only if they can open it (on: also if it is listed) | Security: unreadable means off |
 
 ### Lineage
@@ -301,7 +302,7 @@ which keeps it for 30 seconds, and falls back by posture (`fail_safe_default` in
 
 | What | Where | Owned by |
 |---|---|---|
-| Definitions | `feature_definitions` table | The code: the 28 built-in definitions are seeded, and their text and structure rewritten, each time the API service starts |
+| Definitions | `feature_definitions` table | The code: the 35 built-in definitions are seeded, and their text and structure rewritten, each time the API service starts |
 | Categories | `feature_categories` table | The code: seeded the same way |
 | Values and version | `feature_flags` table, one row | Administrators: seeded once with the defaults, never reset by a deployment |
 | Change log | `feature_flag_changes` table | Written by every save |

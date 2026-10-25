@@ -149,7 +149,7 @@ This generates enterprise demo scenarios (finance, ecommerce) and loads them int
 
 ### 4. Access
 
-Same URLs as Option A. Login credentials are the same unless you changed them in `.env`.
+Same URLs as Option A. Login credentials are the same unless you changed them in `.env`. To call the API from a script, make an API key in the app and follow the [Integration Quickstart](docs/INTEGRATION_QUICKSTART.md).
 
 ### 5. Local dev against Docker infrastructure
 

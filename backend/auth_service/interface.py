@@ -91,9 +91,14 @@ class ApiKeyPolicy:
     ``max_lifetime_days``: no key outlives this many days from its creation,
     whatever expiry it was minted with — applied to existing keys too. ``None``
     means no maximum.
+
+    ``service_account_grace_days``: how long a service account's keys keep
+    working after its last manager in good standing has gone; 0 pauses them
+    as soon as that is noticed.
     """
     sso_signin_window_days: Optional[int] = 30
     max_lifetime_days: Optional[int] = None
+    service_account_grace_days: int = 14
 
 
 @dataclass(frozen=True)

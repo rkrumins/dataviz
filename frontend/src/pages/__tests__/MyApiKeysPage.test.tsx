@@ -10,7 +10,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MyApiKeysPage } from '../MyApiKeysPage'
 import { apiKey, inDays, options as opts, usage } from '@/components/apiKeys/__tests__/fixtures'
 
-const { list, options, revoke, get, rotate, notify, feature, account } = vi.hoisted(() => ({
+const { list, options, revoke, get, rotate, notify, feature, account, mine } = vi.hoisted(() => ({
+    mine: vi.fn(),
     list: vi.fn(),
     options: vi.fn(),
     revoke: vi.fn(),
@@ -25,6 +26,7 @@ vi.mock('@/services/apiKeyService', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/services/apiKeyService')>()),
     apiKeyService: { list, options, revoke, get, rotate, searchResources: vi.fn(), create: vi.fn(), preview: vi.fn() },
 }))
+vi.mock('@/services/serviceAccountService', () => ({ serviceAccountService: { mine } }))
 vi.mock('@/components/account/AccountShell', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/components/account/AccountShell')>()),
     AccountShell: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
@@ -49,6 +51,7 @@ beforeEach(() => {
     options.mockResolvedValue(opts())
     revoke.mockResolvedValue(undefined)
     get.mockReturnValue(new Promise(() => {}))
+    mine.mockResolvedValue({ items: [], total: 0, graceDays: 14 })
 })
 
 describe('the list', () => {
@@ -222,5 +225,42 @@ describe('before the first key', () => {
         expect(within(hero).getByRole('link', { name: /calling the api/i })).toHaveAttribute('href', '/docs/api-guide')
         await userEvent.click(within(hero).getByRole('button', { name: /create your first key/i }))
         expect(await screen.findByRole('dialog', { name: /create an api key/i })).toBeInTheDocument()
+    })
+})
+
+describe('service accounts you manage', () => {
+    const ACCOUNT = {
+        id: 'svc_sync', name: 'Metadata sync', description: 'Reads graph metadata nightly', status: 'active' as const,
+        createdAt: '2026-10-01T00:00:00+00:00', createdBy: null, managers: [], managed: false, singleManager: false,
+        unmanagedSince: '2026-10-20T00:00:00+00:00', pausesAt: inDays(5), handOver: null,
+    }
+
+    it('are listed, each with how it stands, and lead to its own keys', async () => {
+        mine.mockResolvedValue({ items: [ACCOUNT], total: 1, graceDays: 14 })
+        render(<MyApiKeysPage />)
+        const card = await screen.findByRole('list', { name: 'Service accounts you manage' })
+        const link = within(card).getByRole('link', { name: /metadata sync/i })
+        expect(link).toHaveAttribute('href', '/me/service-accounts/svc_sync')
+        expect(within(link).getByText(/needs a manager — keys pause/i)).toBeInTheDocument()
+    })
+
+    it('come a page at a time, and the rest on asking', async () => {
+        mine.mockImplementation(({ offset = 0 }: { offset?: number }) => Promise.resolve({
+            items: offset === 0 ? [ACCOUNT] : [{ ...ACCOUNT, id: 'svc_more', name: 'Nightly export' }],
+            total: 2, graceDays: 14,
+        }))
+        render(<MyApiKeysPage />)
+        const card = await screen.findByRole('list', { name: 'Service accounts you manage' })
+        expect(mine).toHaveBeenCalledWith({ limit: 50 })
+        await userEvent.click(screen.getByRole('button', { name: 'Show 1 more of 2' }))
+        expect(await within(card).findByRole('link', { name: /nightly export/i })).toBeInTheDocument()
+        expect(mine).toHaveBeenLastCalledWith({ limit: 50, offset: 1 })
+        expect(screen.queryByRole('button', { name: /more of/ })).not.toBeInTheDocument()
+    })
+
+    it('are left out for someone who manages none', async () => {
+        render(<MyApiKeysPage />)
+        await screen.findByRole('region', { name: 'Your keys' })
+        expect(screen.queryByRole('region', { name: 'Service accounts you manage' })).not.toBeInTheDocument()
     })
 })

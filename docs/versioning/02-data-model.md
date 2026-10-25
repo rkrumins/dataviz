@@ -108,7 +108,7 @@ erDiagram
         text branch_id
         bigint commit_seq "monotonic / branch"
         text merkle_root
-        text kind "genesis|edit|checkpoint|squash_publish|import|sync|revert"
+        text kind "genesis|edit|checkpoint|pull|squash_publish|import|sync|revert|restore"
         text actor
         json contributors "distinct actors (squash)"
         json source_commit_ids "squash provenance"
@@ -241,7 +241,7 @@ scan — resumable across a crash, reused by both preview and apply (idempotent 
 monotonic within its branch, enforced by `uq_commits_branch_seq (graph_id, branch_id, commit_seq)`
 (`models.py:387-389`) — the unique constraint that turns a concurrent-writer race into a retriable
 integrity error (see the concurrency model in [03](03-branching-commits-merge.md)). `kind` spans the
-full lifecycle: `genesis | edit | checkpoint | squash_publish | import | sync | revert`
+full lifecycle: `genesis | edit | checkpoint | pull | squash_publish | import | sync | revert | restore`
 (`ck_commits_kind`, `models.py:392-396`). Squash provenance lives here: `contributors` (distinct
 actors folded in), `source_branch_id`, `source_commit_ids` + `source_commit_count` (the "merged N
 commits" drill-down), plus `merkle_root`, `stats`, `originating_view_id`, and `idempotency_key` (bulk

@@ -7,7 +7,8 @@
  *
  * A parked draft is versioned and lasts 30 minutes: a shape this code no
  * longer reads, or a form someone walked away from, starts fresh rather than
- * coming back half-understood.
+ * coming back half-understood. It also says whose keys it is for, so a
+ * service account's comes back on that account's page and nowhere else.
  */
 import type { ApiKey, ApiKeyOptions, ApiKeyPermissions, PickerItem, RotateApiKeyBody } from '@/services/apiKeyService'
 import { defaultExpiry, type ExpiryChoice } from './apiKeyFormat'
@@ -40,6 +41,8 @@ export interface ApiKeyDraft {
     customDate: string
     cidrs: string[]
     grace: Grace
+    /** The service account the key is for; absent for your own. */
+    principal?: string
 }
 
 const DRAFT_KEY = 'nx-api-key-draft'
@@ -52,14 +55,16 @@ export function parkDraft(draft: ApiKeyDraft, now: number = Date.now()): void {
     }
 }
 
-/** The parked draft, if it is one this code reads and it is still fresh. */
-export function peekDraft(now: number = Date.now()): ApiKeyDraft | null {
+/** The parked draft, if it is one this code reads, it is still fresh, and it
+ *  is for these keys: a service account's (`principal`), or your own. */
+export function peekDraft(now: number = Date.now(), principal: string | null = null): ApiKeyDraft | null {
     try {
         const raw = sessionStorage.getItem(DRAFT_KEY)
         if (!raw) return null
         const { savedAt, ...draft } = JSON.parse(raw) as ApiKeyDraft & { savedAt?: number }
         if (draft.v !== DRAFT_VERSION || typeof savedAt !== 'number') return null
         if (now - savedAt > DRAFT_SHELF_LIFE_MS || now < savedAt) return null
+        if ((draft.principal ?? null) !== principal) return null
         return draft
     } catch {
         return null

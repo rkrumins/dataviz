@@ -49,7 +49,7 @@ Find the row that matches your role. Read its first page, then the others in the
 | A new engineer | [Setup Guide](/docs/setup) — get the stack running on your machine | [Contributing](/docs/contributing), [Testing & CI](/docs/testing-and-ci), [Architecture](/docs/architecture), [Backend Reference](/docs/backend), [Frontend Reference](/docs/frontend) |
 | An architect or tech lead | [Architecture](/docs/architecture) — every process and store, and how a request flows | [Data Architecture](/docs/data-architecture), [Design Decisions](/docs/decisions), [Scaling Architecture](/docs/scaling-architecture) |
 | A platform operator | [Self-Host Deployment](/docs/deployment) — run it with Docker Compose | [Kubernetes](/docs/kubernetes), [Configuration Reference](/docs/configuration) |
-| An integrator | [API Guide](/docs/api-guide) — call the API from your own code | [Backend Reference](/docs/backend), [Feature Flags API](/docs/api-features) |
+| An integrator | [Integration Quickstart](/docs/integration-quickstart) — get a key and call the API from your own code | [API Guide](/docs/api-guide), [Key Management API](/docs/key-management-api), [Feature Switches API](/docs/api-features) |
 | A security reviewer | [Security Overview](/docs/security-overview) — the controls and how to configure them | [RBAC](/docs/rbac), [SSO (Operator Guide)](/docs/sso) |
 | A data engineer | [Onboarding a Source](/docs/onboarding-a-source) — bring a graph in, end to end | [Platform Services Overview](/docs/services-overview), [Aggregation Pipeline](/docs/aggregation-pipeline) |
 | A product administrator | [Admin Setup](/guide/admin-setup) in the User Guide — your first hour as an administrator | [Users & Access](/guide/users-access), [Feature Switches](/guide/feature-switches) |
@@ -430,6 +430,7 @@ timeline
                           : Impact analysis and coverage checking
         Auth & Users      : Argon2id passwords and HttpOnly cookie sessions with CSRF protection
                           : Personal API keys scoped to chosen workspaces, views and data sources
+                          : Service accounts whose keys answer to their managers
                           : Eight built-in roles, custom roles, group bindings
                           : Signup with admin approval (default OFF) and invite links
         Data Catalog      : CatalogItem abstraction (Provider → CatalogItem → DataSource)
@@ -479,7 +480,6 @@ timeline
 | Integrations | Additional provider adapters (Apache Atlas, dbt, Airflow) | Not started |
 | Integrations | DataHub beyond connectivity | Not started — the adapter answers ping, stats and basic lineage only |
 | Integrations | Event-streaming lineage ingestion | Partly covered — a drift probe notices an external load within about a minute, and a refresh endpoint takes push notice ([External Change Notification](features/external-change-notification.md)) |
-| Enterprise | Service accounts for automation | Not started — personal API keys ship ([API Keys](/guide/api-keys)); a key acts as the person who made it |
 | Enterprise | GraphQL API layer | Not started — `backend/app/graphql/types.py` is an unused sketch |
 | Enterprise | A general access-policy engine | Not started — workspace-scoped roles, group bindings, custom roles and per-view grants cover most needs today |
 | Collaboration | Comments and annotations | Not started — change proposals ship as versioning pull requests with reviewers |

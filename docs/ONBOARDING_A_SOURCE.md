@@ -56,7 +56,7 @@ You need:
 |---|---|---|
 | FalkorDB | **FalkorDB** | Everything on this page works: rollups, reconciliation, version control, building from scratch |
 | Neo4j | **Neo4j** | Map your property names to {brand}'s in the wizard's **Schema Mapping** step. Edges can be created but not updated or deleted, and version control can't be turned on |
-| Google Spanner Graph | **Google Spanner Graph** | Addressed by project, instance and database instead of host and port, with a service account. Version control can't be turned on |
+| Google Spanner Graph | **Google Spanner Graph** | Addressed by project, instance and database instead of host and port, with a Google Cloud service account. Version control can't be turned on |
 | DataHub | **DataHub** | A read-only, external catalog. In this release the connection can be registered and tested, but it lists no graphs to onboard |
 
 **Checkpoint:** you have the host, port and credentials. You don't need to test reachability by
@@ -87,8 +87,8 @@ become a data source.
 > administrator.
 
 From a script, signed in as a Super admin with the API Guide's password helper — API keys cannot
-call administration routes ([Sign in from a script](/docs/api-guide#sign-in-from-a-script)) — test
-the settings without saving them, then save:
+register providers ([Sign in from a script](/docs/api-guide#sign-in-from-a-script)) — test the
+settings without saving them, then save:
 
 ```bash
 P='{"name": "Lineage store", "providerType": "falkordb", "host": "<host>", "port": 6379,
@@ -231,7 +231,11 @@ administrator's view is [Data Freshness & Ingestion](/guide/data-freshness).
 **Versioning** tab shows "Version control is off" and an **Enable version control** button (you need
 `workspace:datasource:manage`; the tab exists while the **Version control** feature switch is on).
 Edits then go through drafts, reviews and a full history — see
-[Versioning & Change Control](/guide/versioning-change-control).
+[Versioning & Change Control](/guide/versioning-change-control). From a script, turning it on takes
+a person's password session — `POST /api/v1/{ws_id}/graph/bootstrap?dataSourceId=…` starts the copy
+as a job — while an API key can follow it with `GET …/graph/bootstrap/status?dataSourceId=…`, and
+`GET /api/v1/admin/workspaces/{ws_id}/data-sources?include=versioning` says when it is on
+([Graph Metadata & History API](/docs/graph-metadata-api)).
 
 **Checkpoint:** your source reads **In sync** (or **Version controlled**) on the **Freshness** tab.
 

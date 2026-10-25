@@ -97,8 +97,8 @@ the changed entities differ (the "draft = main ⊕ sparse delta" overlay).
 | **Draft** | A per-user (optionally **shared**) editing branch off `main`. Scoped to a **view** via `originating_view_id` ("branch-per-view"). |
 | **`working_changes`** | The durable staging buffer — client edits land here before a checkpoint folds them into version rows. |
 | **Checkpoint** | Folding a draft's staged changes into append-only version rows + one commit. |
-| **Commit** | An append-only, per-branch record. `kind ∈ genesis \| edit \| checkpoint \| squash_publish \| import \| sync \| revert`. Monotonic `commit_seq` per branch. |
-| **Publish** | **Squash-publish** a draft into `main` as one `squash_publish` commit (auto-rebases if `main` moved and it's clean). |
+| **Commit** | An append-only, per-branch record. `kind ∈ genesis \| edit \| checkpoint \| pull \| squash_publish \| import \| sync \| revert \| restore`. Monotonic `commit_seq` per branch. |
+| **Publish** | **Squash-publish** a draft into `main` as one `squash_publish` commit. Refused with `409 not_up_to_date` if `main` moved since the draft began: pull the latest `main` in first. |
 | **Merge Request (MR)** | A **reviewed** draft→`main` publish (approval/checks gate). Stored in `merge_requests`. |
 | **Pull Request (PR)** | A fork→base merge proposal. Same table; "PR" and "fork PR" are used interchangeably. |
 | **Fork** | A **copy-on-write** clone of a graph — no rows copied; reads compose from the parent at the fork point. |

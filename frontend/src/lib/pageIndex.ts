@@ -443,6 +443,15 @@ export const PAGE_INDEX: PageEntry[] = [
         path: '/admin/api-keys',
         gate: { kind: 'admin', key: 'api-keys' },
     },
+    {
+        id: 'admin-service-accounts',
+        category: 'Setting',
+        title: 'Service accounts',
+        description: 'Accounts integrations run as, and who answers for each',
+        keywords: ['admin', 'service account', 'integration', 'robot', 'bot', 'manager', 'hand over', 'nxsat'],
+        path: '/admin/service-accounts',
+        gate: { kind: 'admin', key: 'service-accounts' },
+    },
 ]
 
 /**

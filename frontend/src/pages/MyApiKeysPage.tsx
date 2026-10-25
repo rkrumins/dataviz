@@ -14,21 +14,28 @@
  * Revoking is always available, even with API keys switched off for the
  * deployment: closing a credential must never depend on being allowed to
  * open one.
+ *
+ * Someone who manages service accounts finds them here too: their keys act
+ * as the account rather than as you, and live on each account's own page.
  */
 import { useCallback, useEffect, useState } from 'react'
 import {
-    AlertCircle, BookOpen, Clock, Code2, Eye, History, KeySquare, LogIn, PauseCircle, Pencil,
-    Plus, RefreshCw, RotateCw, ShieldAlert, ShieldCheck, Sparkles, Trash2, TriangleAlert,
+    AlertCircle, BookOpen, Bot, ChevronRight, Clock, Code2, Eye, History, KeySquare, LogIn, PauseCircle,
+    Plus, RefreshCw, RotateCw, ShieldAlert, ShieldCheck, Sparkles, TriangleAlert,
 } from 'lucide-react'
 
 import { AccountCard, AccountShell, useAccountIdentity } from '@/components/account/AccountShell'
 import { EditKeyDialog } from '@/components/apiKeys/EditKeyDialog'
+import { Banner } from '@/components/apiKeys/Banner'
+import { DrawerActions } from '@/components/apiKeys/DrawerActions'
 import { KeyCard, PastKeyRow } from '@/components/apiKeys/KeyCard'
 import { KeyDetailDrawer } from '@/components/apiKeys/KeyDetailDrawer'
 import { RotateKeyDialog } from '@/components/apiKeys/RotateKeyDialog'
 import { clearDraft, peekDraft, type ApiKeyDraft } from '@/components/apiKeys/apiKeyDraft'
 import { expiryCountdown, isLive, isRenewable, siteUrl, stepUpUnavailable, stillCalled } from '@/components/apiKeys/apiKeyFormat'
 import { ApiKeyWizard } from '@/components/apiKeys/wizard/ApiKeyWizard'
+import { standingOf } from '@/components/serviceAccounts/parts'
+import { Badge } from '@/components/ui/Badge'
 import { Button, IconButton } from '@/components/ui/Button'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
@@ -36,6 +43,7 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import { apiKeyService, type ApiKey, type ApiKeyOptions, type KeyRef } from '@/services/apiKeyService'
+import { serviceAccountService, type ServiceAccount } from '@/services/serviceAccountService'
 import { useFeature } from '@/store/features'
 
 export function MyApiKeysPage() {
@@ -79,6 +87,20 @@ function ApiKeysContent() {
     const [editing, setEditing] = useState<ApiKey | null>(null)
     const [drawerKey, setDrawerKey] = useState<ApiKey | null>(null)
     const closeDrawer = useCallback(() => setDrawerKey(null), [])
+    // The service accounts you answer for. Most people have none, and the
+    // card only appears for those who do — so a failure just leaves it out.
+    const [managed, setManaged] = useState<{ items: ServiceAccount[]; total: number }>({ items: [], total: 0 })
+    useEffect(() => {
+        let live = true
+        serviceAccountService.mine({ limit: MANAGED_PAGE })
+            .then((res) => { if (live) setManaged({ items: res.items, total: res.total }) })
+            .catch(() => {})
+        return () => { live = false }
+    }, [])
+    const moreManaged = useCallback(async () => {
+        const res = await serviceAccountService.mine({ limit: MANAGED_PAGE, offset: managed.items.length })
+        setManaged((was) => ({ items: [...was.items, ...res.items], total: res.total }))
+    }, [managed.items.length])
 
     useEffect(() => {
         let live = true
@@ -333,6 +355,8 @@ function ApiKeysContent() {
                 </>
             )}
 
+            {managed.items.length > 0 && <ManagedAccounts accounts={managed.items} total={managed.total} onMore={moreManaged} />}
+
             <div className="flex flex-col items-start gap-2 px-1">
                 <p className="flex items-start gap-2 text-xs text-ink-muted max-w-2xl">
                     <ShieldCheck className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden />
@@ -402,32 +426,6 @@ function ApiKeysContent() {
 
 const ACTION = 'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold bg-canvas-elevated text-ink border border-black/[0.08] dark:border-white/[0.10] hover:bg-black/[0.03] dark:hover:bg-white/[0.06] shadow-sm transition-colors whitespace-nowrap'
 
-const BANNER_TONE = {
-    danger: { box: 'border-rose-500/25 bg-rose-500/[0.06]', icon: 'bg-rose-500/15 text-rose-600 dark:text-rose-400', title: 'text-rose-700 dark:text-rose-300' },
-    warn: { box: 'border-amber-500/30 bg-amber-500/[0.07]', icon: 'bg-amber-500/15 text-amber-600 dark:text-amber-400', title: 'text-amber-800 dark:text-amber-200' },
-}
-
-/** Something about the deployment, or this page, that holds for every key. */
-function Banner({ tone, icon: Icon, title, children }: {
-    tone: keyof typeof BANNER_TONE
-    icon: typeof Clock
-    title: string
-    children: React.ReactNode
-}) {
-    const t = BANNER_TONE[tone]
-    return (
-        <div role={tone === 'danger' ? 'alert' : 'status'} className={cn('flex items-start gap-3 p-4 rounded-2xl border', t.box)}>
-            <span className={cn('w-9 h-9 rounded-xl flex items-center justify-center shrink-0', t.icon)}>
-                <Icon className="w-[18px] h-[18px]" aria-hidden />
-            </span>
-            <div className="min-w-0 flex-1">
-                <p className={cn('text-sm font-semibold', t.title)}>{title}</p>
-                <p className="mt-0.5 text-xs text-ink-secondary leading-relaxed">{children}</p>
-            </div>
-        </div>
-    )
-}
-
 function Stat({ label, value, suffix, tone, children }: {
     label: string
     value: string
@@ -447,6 +445,59 @@ function Stat({ label, value, suffix, tone, children }: {
             </p>
             {children}
         </div>
+    )
+}
+
+/** How many of the service accounts you manage the card shows at a time. */
+const MANAGED_PAGE = 50
+
+/** The service accounts you manage: their keys are made on each one's page. */
+function ManagedAccounts({ accounts, total, onMore }: {
+    accounts: ServiceAccount[]
+    total: number
+    onMore: () => Promise<void>
+}) {
+    const [loading, setLoading] = useState(false)
+    const left = total - accounts.length
+    return (
+        <AccountCard
+            icon={Bot}
+            title="Service accounts you manage"
+            blurb="Their keys act as the account, not as you, and keep working when you leave — as long as someone still manages it."
+        >
+            <ul className="divide-y divide-black/[0.06] dark:divide-white/[0.07]" aria-label="Service accounts you manage">
+                {accounts.map((a) => {
+                    const standing = standingOf(a)
+                    return (
+                        <li key={a.id}>
+                            <a href={`/me/service-accounts/${encodeURIComponent(a.id)}`} className="group flex items-center gap-3 py-3">
+                                <span className="w-9 h-9 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
+                                    <Bot className="w-4 h-4" aria-hidden />
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                    <span className="block text-sm font-semibold text-ink truncate group-hover:text-indigo-600 dark:group-hover:text-indigo-400">{a.name}</span>
+                                    <span className="block text-xs text-ink-muted truncate">{a.description ?? 'Make, rotate and revoke its keys'}</span>
+                                </span>
+                                <Badge tone={standing.tone} size="md" className="shrink-0">{standing.label}</Badge>
+                                <ChevronRight className="w-4 h-4 text-ink-muted shrink-0" aria-hidden />
+                            </a>
+                        </li>
+                    )
+                })}
+            </ul>
+            {left > 0 && (
+                <div className="pt-3">
+                    <Button
+                        variant="ghost"
+                        size="sm"
+                        loading={loading}
+                        onClick={() => { setLoading(true); void onMore().catch(() => {}).finally(() => setLoading(false)) }}
+                    >
+                        Show {Math.min(left, MANAGED_PAGE)} more of {total}
+                    </Button>
+                </div>
+            )}
+        </AccountCard>
     )
 }
 
@@ -501,60 +552,5 @@ function FirstRun({ canCreate, onCreate }: { canCreate: boolean; onCreate: () =>
                 </div>
             </div>
         </section>
-    )
-}
-
-/** The drawer's footer: the same choices as the card, revoking asked once in place. */
-function DrawerActions({ apiKey, resumeUrl, onRotate, onEdit, onRevoke }: {
-    apiKey: ApiKey
-    /** A paused key's way back: signing in again. */
-    resumeUrl: string | null
-    onRotate?: () => void
-    onEdit?: () => void
-    onRevoke?: () => void
-}) {
-    const [confirming, setConfirming] = useState(false)
-    if (confirming) {
-        return (
-            <>
-                <span className="text-xs font-medium text-ink-secondary mr-auto">Stop “{apiKey.name}” now?</span>
-                <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>Keep</Button>
-                <Button variant="danger" size="sm" onClick={() => { setConfirming(false); onRevoke?.() }}>Revoke</Button>
-            </>
-        )
-    }
-    return (
-        <>
-            {onRevoke && (
-                <Button variant="ghost" size="sm" leftIcon={Trash2} onClick={() => setConfirming(true)} className="mr-auto hover:text-rose-600 dark:hover:text-rose-400">
-                    Revoke
-                </Button>
-            )}
-            {onEdit && (
-                <Button variant="secondary" size="sm" leftIcon={Pencil} onClick={onEdit} className="border-black/[0.10] dark:border-white/[0.12] shadow-sm">
-                    Edit
-                </Button>
-            )}
-            {onRotate && (
-                <Button
-                    variant={resumeUrl ? 'secondary' : 'primary'}
-                    size="sm"
-                    leftIcon={RotateCw}
-                    onClick={onRotate}
-                    className={resumeUrl ? 'border-black/[0.10] dark:border-white/[0.12] shadow-sm' : undefined}
-                >
-                    {isRenewable(apiKey) ? 'Renew' : 'Rotate'}
-                </Button>
-            )}
-            {resumeUrl && (
-                <a
-                    href={resumeUrl}
-                    className="inline-flex items-center gap-1.5 h-7 px-2.5 rounded-lg text-xs font-semibold text-white bg-accent-lineage shadow-sm shadow-accent-lineage/25 hover:brightness-110 transition whitespace-nowrap"
-                >
-                    <LogIn className="w-3.5 h-3.5" aria-hidden />
-                    Sign in to resume
-                </a>
-            )}
-        </>
     )
 }

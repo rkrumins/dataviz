@@ -115,6 +115,17 @@ describe('where an event links to', () => {
         }))
         expect(links).toEqual([{ key: 'group', label: 'Open the group', href: '/admin/groups?group=grp_1' }])
     })
+
+    it('opens a service account by its id', () => {
+        const account = activityLinks(ev({
+            eventType: 'identity.service_account.disabled', category: 'access',
+            target: { type: 'service_account', id: 'svc_0123456789ab' }, workspaceId: null, dataSourceId: null,
+        }))
+        expect(account).toEqual([{
+            key: 'service-account', label: 'Open the service account',
+            href: '/admin/service-accounts?account=svc_0123456789ab',
+        }])
+    })
 })
 
 describe('reading the summary', () => {
@@ -160,6 +171,7 @@ describe('how long the log keeps activity', () => {
 describe('a spotlight is for a person picked by id', () => {
     it('not for text that could match several people', () => {
         expect(isPersonId('usr_ana')).toBe(true)
+        expect(isPersonId('svc_0123456789ab')).toBe(true)
         expect(isPersonId('ana')).toBe(false)
         expect(isPersonId('ana@example.com')).toBe(false)
     })
