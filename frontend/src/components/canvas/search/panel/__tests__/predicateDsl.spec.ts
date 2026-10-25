@@ -454,11 +454,11 @@ describe('predicateDsl — Code mode never rewrites a condition', () => {
             edgeClass: 'lineage' } as Predicate],
         ['a path', { kind: 'path', sourceUrns: ['urn:a'], targetUrns: ['urn:b'], maxHops: 4,
             edgeClass: 'lineage', direction: 'outgoing' } as Predicate],
-        ['a degree', { kind: 'degree', op: 'gt', value: 3, direction: 'out' } as Predicate],
         ['every entity', { kind: 'all' } as Predicate],
         ['a depth-bounded descendantOf', { kind: 'descendantOf', urns: ['urn:x'], maxDepth: 1 }],
-        ['a lineage test on named edges', { kind: 'isRoot', edgeClass: 'lineage',
-            edgeTypes: ['FEEDS'] } as Predicate],
+        ['a graph shape with edge types still to pick', { kind: 'isRoot', edgeTypes: [] } as Predicate],
+        ['an edge count with edge types still to pick', { kind: 'degree', direction: 'in', op: 'gt',
+            value: 1, edgeTypes: [] } as Predicate],
         ['text in any field', text({ target: 'any' })],
         ['an exact name', text({ match: 'exact' })],
         ['a case-sensitive name', text({ value: 'Orders', caseSensitive: true })],
@@ -518,17 +518,17 @@ describe('predicateDsl — relationships and names', () => {
         ['root(@"Country")', { kind: 'related', axis: 'root', where: named('Country') }],
         ['every child(description IS NOT EMPTY)', { kind: 'related', axis: 'child', quantifier: 'all',
             where: { kind: 'property', key: 'description', op: 'isNotEmpty' } }],
-        ['no upstream()', { kind: 'related', axis: 'upstream', quantifier: 'none' }],
+        ['no fedBy()', { kind: 'related', axis: 'upstream', quantifier: 'none' }],
         ['count(child(type:column)) > 100', { kind: 'related', axis: 'child', where: type('column'),
             count: { op: 'gt', value: 100 } }],
-        ['downstream*..3(type:dashboard).via(confidence >= 0.8)', { kind: 'related',
+        ['feeds*..3(type:dashboard).via(confidence >= 0.8)', { kind: 'related',
             axis: 'downstream', maxHops: 3, where: type('dashboard'),
             edge: { kind: 'edgeProperty', key: 'confidence', op: 'gte', value: 0.8 } }],
-        ['upstream*2()', { kind: 'related', axis: 'upstream', minHops: 2, maxHops: 2 }],
+        ['fedBy*2()', { kind: 'related', axis: 'upstream', minHops: 2, maxHops: 2 }],
         ['ancestor*2..4(type:domain)', { kind: 'related', axis: 'ancestor', minHops: 2, maxHops: 4,
             where: type('domain') }],
         ['descendant*2..()', { kind: 'related', axis: 'descendant', minHops: 2 }],
-        ['downstream(upstream(@"Sales/orders"))', { kind: 'related', axis: 'downstream',
+        ['feeds(fedBy(@"Sales/orders"))', { kind: 'related', axis: 'downstream',
             where: { kind: 'related', axis: 'upstream', where: named('Sales', 'orders') } }],
         ['@"Country/United Kingdom"', named('Country', 'United Kingdom')],
         ['@"a\\/b/c"', named('a/b', 'c')],
@@ -550,7 +550,8 @@ describe('predicateDsl — relationships and names', () => {
     })
 
     it('keeps an axis word without its parenthesis a text search', () => {
-        for (const text of ['root cause', 'parent (x)', 'every child', 'count', 'no upstream']) {
+        for (const text of ['root cause', 'parent (x)', 'every child', 'count', 'no upstream',
+            'feeds', 'linked to', 'outgoing (x)', 'edges']) {
             const r = parsePredicate(text)
             expect(r.error).toBeUndefined()
             expect(JSON.stringify(r.predicate)).not.toContain('related')
@@ -563,7 +564,7 @@ describe('predicateDsl — relationships and names', () => {
         ['count(child()) > 1.5', /whole number/],
         ['parent*2(type:x)', /takes no hop range/],
         ['upstream*(type:x)', /how far/],
-        ['parent(type:x).via(mode = stream)', /lineage relationship/],
+        ['parent(type:x).via(mode = stream)', /follows a connection/],
         ['type:x .via(mode = stream)', /follows a relationship/],
         ['upstream().via(type:x)', /edges walked/],
         ['parent(type:x', /Missing "\)"/],
@@ -572,9 +573,10 @@ describe('predicateDsl — relationships and names', () => {
     })
 
     it.each<[string, Predicate]>([
-        ['a relationship through named edge types', { kind: 'related', axis: 'upstream',
-            edgeTypes: ['FEEDS'] }],
-        ['a relationship through every link', { kind: 'related', axis: 'neighbor', edgeClass: 'links' }],
+        ['a relationship through edge types still to pick', { kind: 'related', axis: 'upstream',
+            edgeTypes: [] }],
+        ['a relationship naming both edge types and a class', { kind: 'related', axis: 'upstream',
+            edgeTypes: ['FEEDS'], edgeClass: 'links' }],
         ['a reference narrowed by type', { kind: 'is', refs: [{ path: ['Sales'], entityType: 'domain' }] }],
         ['a case-insensitive reference', { kind: 'is', refs: [{ path: ['sales'], caseSensitive: false }] }],
         ['several references', { kind: 'is', refs: [{ path: ['a'] }, { path: ['b'] }] }],
@@ -622,7 +624,9 @@ describe('predicateDsl — relationships and names', () => {
                     children: [a, b] })))
                 : leaf),
             edge: fc.option(edge),
-        }).map(({ axis, lead, count, lo, span, where, edge: e }) => {
+            through: fc.constantFrom<'lineage' | 'links' | string[]>('lineage', 'links', ['PRODUCES'],
+                ['TAGGED_WITH', 'DEFINED_BY'], ['produces']),
+        }).map(({ axis, lead, count, lo, span, where, edge: e, through }) => {
             const meta = axisMeta(axis)
             const p: RelatedPredicate = { kind: 'related', axis }
             if (lead === 'count') p.count = count as RelatedPredicate['count']
@@ -639,6 +643,8 @@ describe('predicateDsl — relationships and names', () => {
             }
             if (where) p.where = where
             if (e && meta.lineage) p.edge = e
+            if (meta.lineage && through === 'links') p.edgeClass = 'links'
+            else if (meta.lineage && Array.isArray(through)) p.edgeTypes = through
             return p
         })
         fc.assert(fc.property(relation(1), (p) => {
@@ -646,6 +652,161 @@ describe('predicateDsl — relationships and names', () => {
             expect(text).not.toContain('{')
             expect(parse(text)).toEqual(p)
         }), { numRuns: 400 })
+    })
+})
+
+
+describe('predicateDsl — connections, edge types and edge counts', () => {
+    const parse = (text: string) => parsePredicate(text).predicate
+    const type = (value: string): Predicate => ({ kind: 'entityType', op: 'in', values: [value] })
+    const tag = (value: string): Predicate => ({ kind: 'tag', op: 'hasAny', values: [value] })
+    const both = (...children: Predicate[]): Predicate => ({ kind: 'group', op: 'and', children })
+
+    it.each<[string, Predicate]>([
+        // Lineage reads as what it does; any link, or edge types, in neutral words.
+        ['linkedTo[lineage](type:dataset)', { kind: 'related', axis: 'neighbor', where: type('dataset') }],
+        ['linkedTo(type:glossaryTerm)', { kind: 'related', axis: 'neighbor', edgeClass: 'links',
+            where: type('glossaryTerm') }],
+        ['outgoing(type:dataset)', { kind: 'related', axis: 'downstream', edgeClass: 'links',
+            where: type('dataset') }],
+        ['incoming*..2()', { kind: 'related', axis: 'upstream', maxHops: 2, edgeClass: 'links' }],
+        ['outgoing[PRODUCES](type:dataset AND tag:PII)', { kind: 'related', axis: 'downstream',
+            edgeTypes: ['PRODUCES'], where: both(type('dataset'), tag('PII')) }],
+        ['incoming[PRODUCES, CONSUMES](type:dataJob)', { kind: 'related', axis: 'upstream',
+            edgeTypes: ['PRODUCES', 'CONSUMES'], where: type('dataJob') }],
+        ['no incoming[PRODUCES]()', { kind: 'related', axis: 'upstream', quantifier: 'none',
+            edgeTypes: ['PRODUCES'] }],
+        ['count(outgoing[PRODUCES](type:dataset)) > 10', { kind: 'related', axis: 'downstream',
+            edgeTypes: ['PRODUCES'], where: type('dataset'), count: { op: 'gt', value: 10 } }],
+        ['linkedTo[DEFINED_BY]*..2(type:glossaryTerm).via(confidence >= 0.8)', { kind: 'related',
+            axis: 'neighbor', maxHops: 2, edgeTypes: ['DEFINED_BY'], where: type('glossaryTerm'),
+            edge: { kind: 'edgeProperty', key: 'confidence', op: 'gte', value: 0.8 } }],
+        // Containment at both ends: what is inside it feeds what is inside Finance.
+        ['descendant(feeds*..3(type:dashboard AND ancestor(@"Finance")))', { kind: 'related',
+            axis: 'descendant', where: { kind: 'related', axis: 'downstream', maxHops: 3,
+                where: both(type('dashboard'), { kind: 'related', axis: 'ancestor',
+                    where: { kind: 'is', refs: [{ path: ['Finance'] }] } }) } }],
+        // Graph shapes, over the edges they name.
+        ['noUpstream', { kind: 'isRoot', edgeClass: 'lineage' }],
+        ['noIncoming', { kind: 'isRoot', edgeClass: 'links' }],
+        ['noOutgoing', { kind: 'isLeaf', edgeClass: 'links' }],
+        ['hasIncoming', { kind: 'hasIncoming', edgeClass: 'links' }],
+        ['hasOutgoing[containment]', { kind: 'hasOutgoing', edgeClass: 'containment' }],
+        ['noLinks', { kind: 'isOrphan', edgeClass: 'links' }],
+        ['noEdges', { kind: 'isOrphan', edgeClass: 'any' }],
+        ['noEdges[containment]', { kind: 'isOrphan', edgeClass: 'containment' }],
+        ['noIncoming[any]', { kind: 'isRoot', edgeClass: 'any' }],
+        ['noIncoming[DEFINED_BY]', { kind: 'isRoot', edgeTypes: ['DEFINED_BY'] }],
+        ['noEdges[TAGGED_WITH, DEFINED_BY]', { kind: 'isOrphan', edgeTypes: ['TAGGED_WITH', 'DEFINED_BY'] }],
+        // Edge counts: any link unless the brackets say otherwise.
+        ['edges(out) > 10', { kind: 'degree', direction: 'out', op: 'gt', value: 10, edgeClass: 'links' }],
+        ['edges[PRODUCES](in) >= 2', { kind: 'degree', direction: 'in', op: 'gte', value: 2,
+            edgeTypes: ['PRODUCES'] }],
+        ['edges[lineage](both) = 0', { kind: 'degree', direction: 'both', op: 'eq', value: 0,
+            edgeClass: 'lineage' }],
+        ['type:dataset AND edges[any](both) < 3', both(type('dataset'),
+            { kind: 'degree', direction: 'both', op: 'lt', value: 3, edgeClass: 'any' })],
+    ])('reads and writes %s', (text, p) => {
+        expect(parse(text)).toEqual(p)
+        expect(stringifyPredicate(p)).toBe(text)
+    })
+
+    it.each<[string, Predicate]>([
+        ['no upstream()', { kind: 'related', axis: 'upstream', quantifier: 'none' }],
+        ['downstream*..3(type:dashboard)', { kind: 'related', axis: 'downstream', maxHops: 3,
+            where: type('dashboard') }],
+        ['upstream*2()', { kind: 'related', axis: 'upstream', minHops: 2, maxHops: 2 }],
+        ['neighbor(type:dataset)', { kind: 'related', axis: 'neighbor', where: type('dataset') }],
+        ['downstream(upstream(type:x))', { kind: 'related', axis: 'downstream',
+            where: { kind: 'related', axis: 'upstream', where: type('x') } }],
+        ['noUpstreamLineage', { kind: 'isRoot', edgeClass: 'lineage' }],
+        ['no_downstream', { kind: 'isLeaf', edgeClass: 'lineage' }],
+        ['orphans', { kind: 'isOrphan', edgeClass: 'lineage' }],
+        ['hasDownstream', { kind: 'hasOutgoing', edgeClass: 'lineage' }],
+    ])('reads the older spelling %s the same', (text, p) => {
+        expect(parse(text)).toEqual(p)
+    })
+
+    it.each<[string, Predicate]>([
+        // A bracket on any connection word: feeding is what lineage does.
+        ['feeds[links](type:x)', { kind: 'related', axis: 'downstream', edgeClass: 'links', where: type('x') }],
+        ['fedBy[PRODUCES]()', { kind: 'related', axis: 'upstream', edgeTypes: ['PRODUCES'] }],
+        ['outgoing[lineage]()', { kind: 'related', axis: 'downstream' }],
+        ['noUpstream[DEFINED_BY]', { kind: 'isRoot', edgeTypes: ['DEFINED_BY'] }],
+        // Any case; the edges before or after the steps; spaces in the brackets.
+        ['FEEDS(type:x)', { kind: 'related', axis: 'downstream', where: type('x') }],
+        ['LinkedTo()', { kind: 'related', axis: 'neighbor', edgeClass: 'links' }],
+        ['outgoing*..3[ PRODUCES ,CONSUMES ](type:x)', { kind: 'related', axis: 'downstream', maxHops: 3,
+            edgeTypes: ['PRODUCES', 'CONSUMES'], where: type('x') }],
+        ['noincoming[Links]', { kind: 'isRoot', edgeClass: 'links' }],
+        ['EDGES[produces](IN) != 1', { kind: 'degree', direction: 'in', op: 'neq', value: 1,
+            edgeTypes: ['produces'] }],
+    ])('reads %s', (text, p) => {
+        expect(parse(text)).toEqual(p)
+    })
+
+    it.each<[string, Predicate, string]>([
+        // A graph shape names the edges it counts; edge types make the class moot.
+        ['a shape over named edges', { kind: 'isRoot', edgeClass: 'lineage', edgeTypes: ['FEEDS'] },
+            'noIncoming[FEEDS]'],
+        ['an edge count over lineage by default', { kind: 'degree', op: 'gt', value: 3, direction: 'out' },
+            'edges[lineage](out) > 3'],
+        ['an edge count both ways by default', { kind: 'degree', value: 0, edgeClass: 'links' } as Predicate,
+            'edges(both) = 0'],
+    ])('writes %s as words meaning the same', (_, p, text) => {
+        expect(stringifyPredicate(p)).toBe(text)
+    })
+
+    it.each([
+        ['parent[PRODUCES](type:x)', /follows the hierarchy, which takes no edge types/],
+        ['child[links]()', /follows the hierarchy/],
+        ['outgoing[](type:x)', /Name edge types between the brackets/],
+        ['outgoing[ , ](type:x)', /Name edge types between the brackets/],
+        ['outgoing[links, PRODUCES](x)', /not both/],
+        ['linkedTo[any](x)', /\[lineage\], \[links\] or edge types, not \[any\]/],
+        ['outgoing[PRODUCES]*..3[CONSUMES](x)', /once/],
+        ['noIncoming[]', /Name edge types/],
+        ['edges(sideways) > 1', /which way/],
+        ['edges(out) > 1.5', /whole number/],
+        ['edges(out)', /whole number/],
+        ['edges[links, any](in) > 1', /not both/],
+        ['count(edges(out) > 1) > 2', /takes a relationship/],
+        ['outgoing[PRODUCES', /Close the edge types with \]/],
+    ])('refuses %s', (text, why) => {
+        expect(parsePredicate(text).error).toMatch(why)
+    })
+
+    it('points a bracket’s error at its word', () => {
+        const input = 'type:x AND parent[PRODUCES](type:y)'
+        const r = parsePredicate(input)
+        expect(input.slice(r.errorAt!.from, r.errorAt!.to)).toBe('parent[PRODUCES](')
+    })
+
+    it('says what an edge word was read as', () => {
+        const roles = (input: string) => parsePredicate(input).tokens.map((t) => `${t.text}:${t.role}`)
+        expect(roles('outgoing[PRODUCES, CONSUMES](x) noEdges[any] edges(in) > 2')).toEqual([
+            'outgoing[PRODUCES, CONSUMES](:function', 'x:text', '):punct', 'noEdges[any]:keyword',
+            'edges(:function', 'in:keyword', '):punct', '>:operator', '2:value',
+        ])
+    })
+
+    it('any edge count or graph shape the Form builds survives a round trip in words', () => {
+        const set = fc.constantFrom<{ edgeClass?: 'lineage' | 'links' | 'any' | 'containment'; edgeTypes?: string[] }>(
+            { edgeClass: 'lineage' }, { edgeClass: 'links' }, { edgeClass: 'any' }, { edgeClass: 'containment' },
+            { edgeTypes: ['PRODUCES'] }, { edgeTypes: ['TAGGED_WITH', 'DEFINED_BY'] })
+        const shape = fc.tuple(
+            fc.constantFrom('isRoot', 'isLeaf', 'isOrphan', 'hasIncoming', 'hasOutgoing'), set,
+        ).map(([kind, s]) => ({ kind, ...s }) as Predicate)
+        const degree = fc.tuple(fc.record({
+            direction: fc.constantFrom('in', 'out', 'both'),
+            op: fc.constantFrom('eq', 'neq', 'gt', 'gte', 'lt', 'lte'),
+            value: fc.nat(1000),
+        }), set).map(([d, s]) => ({ kind: 'degree', ...d, ...s }) as Predicate)
+        fc.assert(fc.property(fc.oneof(shape, degree), (p) => {
+            const text = stringifyPredicate(p)
+            expect(text).not.toContain('{')
+            expect(parse(text)).toEqual(p)
+        }), { numRuns: 300 })
     })
 })
 

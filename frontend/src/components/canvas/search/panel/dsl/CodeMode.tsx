@@ -22,12 +22,14 @@ import type { DslVocabulary } from './dslLanguage'
 
 
 export function CodeMode({
-    draft, isRunning, onCommit, vocabulary,
+    draft, isRunning, onCommit, vocabulary, onOpenCypher,
 }: {
     draft: Predicate | null
     isRunning: boolean
     onCommit: (p: Predicate | null) => void
     vocabulary: DslVocabulary
+    /** Open the Cypher tab: for what these words can't say. */
+    onOpenCypher?: () => void
 }) {
     const shown = stringifyPredicate(draft)
     const [text, setText] = useState(shown)
@@ -101,6 +103,15 @@ export function CodeMode({
                 <kbd className="px-1 rounded bg-glass/40 text-ink-muted">Esc</kbd> to undo your edit ·{' '}
                 <kbd className="px-1 rounded bg-glass/40 text-ink-muted">Ctrl Space</kbd> for suggestions
             </div>
+            {onOpenCypher && (
+                <div className="text-[10.5px] text-ink-muted px-1">
+                    Comparing with a relative, sums, shortest routes?{' '}
+                    <button type="button" onClick={onOpenCypher}
+                            className="text-accent-lineage hover:underline">
+                        Write it in Cypher
+                    </button>
+                </div>
+            )}
         </div>
     )
 }
@@ -152,6 +163,7 @@ function exampleGroups(v: DslVocabulary): { task: string; items: [string, string
     const otherType = v.entityTypes.find((t) => t !== type) ?? 'dashboard'
     const tag = v.tags.find((t) => /^[\w.-]+$/.test(t)) ?? 'PII'
     const key = v.propertyKeys.find((k) => /^[A-Za-z_][\w.-]*$/.test(k)) ?? 'owner'
+    const edgeType = v.edgeTypes?.find((t) => !t.containment && /^[\w.-]+$/.test(t.id))?.id ?? 'PRODUCES'
     return [
         { task: 'Find by name or type', items: [
             ['customer', 'a name containing "customer"'],
@@ -164,14 +176,22 @@ function exampleGroups(v: DslVocabulary): { task: string; items: [string, string
             ['updated WITHIN LAST 30 DAYS', 'a date in the last 30 days'],
         ] },
         { task: 'Follow lineage', items: [
-            [`upstream(type:${type})`, `something feeding it is a ${type}`],
-            [`downstream*..3(type:${otherType})`, `feeds a ${otherType} within 3 hops`],
-            ['upstream().via(confidence >= 0.8)', 'fed through confident edges'],
+            [`fedBy(type:${type})`, `something feeding it is a ${type}`],
+            [`feeds*..3(type:${otherType})`, `feeds a ${otherType} within 3 steps`],
+            ['fedBy().via(confidence >= 0.8)', 'fed through confident edges'],
             ['noDownstream', 'feeds nothing'],
+        ] },
+        { task: 'Follow any link', items: [
+            [`linkedTo(type:${otherType})`, `linked to a ${otherType} by any edge, either way`],
+            [`outgoing[${edgeType}](type:${type})`, `a ${edgeType} edge out of it to a ${type}`],
+            [`noIncoming[${edgeType}]`, `no ${edgeType} edge comes into it`],
+            ['noLinks', 'nothing links to it or from it'],
+            ['edges(both) > 10', 'more than 10 links, either way'],
         ] },
         { task: 'Containers and names', items: [
             [`parent(type:${type})`, `its container is a ${type}`],
             ['count(child()) > 100', 'holds more than 100 things'],
+            [`descendant(feeds(type:${otherType}))`, `something inside it feeds a ${otherType}`],
             ['inside @"|"', 'inside an entity — type its name'],
         ] },
         { task: 'Combine', items: [

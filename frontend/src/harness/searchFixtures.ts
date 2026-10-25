@@ -316,6 +316,15 @@ export const SEARCH_FIXTURES: Record<string, SearchFixture> = {
             feedsFinanceChart,
         ] },
     },
+    code: {
+        editorMode: 'code',
+        note: 'The same connections in Code mode: incoming[PRODUCES](…) and feeds*..3(…), with the examples.',
+        draft: { kind: 'group', op: 'and', children: [
+            type('dataset'),
+            { kind: 'related', axis: 'upstream', edgeTypes: ['PRODUCES'], where: type('dataJob') },
+            feedsFinanceChart,
+        ] },
+    },
     edgeTypes: {
         editorMode: 'form',
         note: 'Connected through an edge type: the picker, each type with what it connects.',

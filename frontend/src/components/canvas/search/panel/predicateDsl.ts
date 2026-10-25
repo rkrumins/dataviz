@@ -64,19 +64,32 @@
  *   noUpstream / noUpstreamLineage → isRoot edgeClass=lineage
  *   noDownstream                   → isLeaf edgeClass=lineage
  *   noLineage                      → isOrphan edgeClass=lineage
+ *   noIncoming / noOutgoing        → isRoot / isLeaf over any link
+ *   hasIncoming / hasOutgoing      → at least one link in / out
+ *   noLinks / noEdges              → isOrphan over any link / any edge at all
+ *   noIncoming[PRODUCES]           → over these edge types instead; also
+ *                                    [lineage], [links], [any], [containment]
+ *   edges(out) > 10                → degree: more than 10 outgoing links
+ *   edges[PRODUCES](in) >= 2       → of these edges (in / out / both)
  *
- * Relationships — a condition on related entities. The axis word must be
+ * Relationships — a condition on related entities. The word must be
  * followed by ``(`` with no space between (``parent (x)`` is two words):
  *   parent(type:domain)            → related axis=parent where=…
  *   root(name = Sales)             → the top-level container
  *   child(type:column tag:PII)     → also ancestor / descendant
- *   upstream()                     → fed by anything; downstream / neighbor
- *   downstream*..3(type:dashboard) → 1 to 3 hops; *2..4, *2 (exactly 2),
+ *   fedBy()                        → fed by anything, through lineage
+ *   feeds*..3(type:dashboard)      → 1 to 3 steps; *2..4, *2 (exactly 2),
  *                                    and *2.. (2 levels or more, up or
  *                                    down the tree)
- *   upstream(…).via(confidence >= 0.8) → every edge walked meets it
+ *   linkedTo(type:glossaryTerm)    → by any edge but the hierarchy's,
+ *                                    either way; outgoing / incoming one way
+ *   outgoing[PRODUCES](type:dataset) → through these edge types; [links]
+ *                                    and [lineage] name a class instead
+ *   upstream / downstream / neighbor → older spellings of fedBy / feeds /
+ *                                    linkedTo[lineage]
+ *   fedBy(…).via(confidence >= 0.8) → every edge walked meets it
  *   every child(description IS NOT EMPTY) → each one does (and one exists)
- *   no upstream(type:topic)        → none does
+ *   no fedBy(type:topic)           → none does
  *   count(child(type:column)) > 100 → how many do (distinct entities)
  *
  * Entities by name:
@@ -113,6 +126,7 @@ import type {
     TextTarget,
     PropertyOp,
     PropertyPredicate,
+    DegreePredicate,
     EdgeClass,
     EdgePredicateNode,
     EdgePropertyPredicate,
@@ -126,6 +140,7 @@ import { type DurationUnit, parseDuration, toDuration } from '../typed/valueCode
 import type { ValueType } from '../typed/valueTypes'
 
 import { axisMeta, formatNamePath, hopRange, parseNamePath } from './relations'
+import type { ShapeKind } from './vocabulary/edgeWords'
 
 
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
@@ -180,7 +195,8 @@ export function parsePredicate(input: string): ParseResult {
             predicate: null,
             error: unclosed.kind === TokenKind.Ref
                 ? `Close the name with ${quote}: @${quote}…${quote}`
-                : `Close the text with ${quote}`,
+                : unclosed.kind === TokenKind.Word ? 'Close the edge types with ]'
+                    : `Close the text with ${quote}`,
             errorAt: { from: unclosed.from, to: unclosed.to },
         })
     }
@@ -314,8 +330,13 @@ function meaning(p: Predicate): string {
             return stable(['entityType', p.op ?? 'in', p.values])
         case 'hasProperty':
             return stable(['hasProperty', p.key, p.keyMatch ?? 'exact', !!p.negate])
+        // Edge types named, the class doesn't count.
         case 'isRoot': case 'isLeaf': case 'isOrphan': case 'hasIncoming': case 'hasOutgoing':
-            return stable([p.kind, p.edgeClass ?? DEFAULT_EDGE_CLASS, p.edgeTypes ?? null])
+            return stable([p.kind, p.edgeTypes?.length ? null : (p.edgeClass ?? DEFAULT_EDGE_CLASS),
+                p.edgeTypes ?? null])
+        case 'degree':
+            return stable(['degree', p.direction ?? 'both', p.op ?? 'eq', p.value,
+                p.edgeTypes?.length ? null : (p.edgeClass ?? DEFAULT_EDGE_CLASS), p.edgeTypes ?? null])
         case 'property': {
             const op = p.op ?? 'eq'
             const arity = arityOf(op)
@@ -357,11 +378,9 @@ function refSpelling(ref: NodeRef): string {
 }
 
 
-/** ``parent(…)``, ``every child(…)``, ``downstream*..3(…).via(…)``,
- *  ``count(child(…)) > 3`` — or null when one has edge types, which only
- *  JSON writes. */
-function relationSpelling(p: RelatedPredicate): string | null {
-    if (p.edgeTypes?.length) return null
+/** ``parent(…)``, ``every child(…)``, ``feeds*..3(…).via(…)``,
+ *  ``outgoing[PRODUCES](…)``, ``count(child(…)) > 3``. */
+function relationSpelling(p: RelatedPredicate): string {
     const meta = axisMeta(p.axis)
     let hops = ''
     if (meta.hops) {
@@ -374,12 +393,53 @@ function relationSpelling(p: RelatedPredicate): string | null {
             hops = `*${lo}..`
         }
     }
-    let text = `${p.axis}${hops}(${p.where ? stringifyPredicate(p.where) : ''})`
+    let text = `${relationWord(p)}${hops}(${p.where ? stringifyPredicate(p.where) : ''})`
     if (p.edge) text += `.via(${stringifyPredicate(fromEdge(p.edge))})`
     if (p.count) return `count(${text}) ${COUNT_SYMBOLS[p.count.op ?? 'gte']} ${p.count.value}`
     if (p.quantifier === 'none') return `no ${text}`
     if (p.quantifier === 'all') return `every ${text}`
     return text
+}
+
+
+/** The word a relationship opens with: the hierarchy's axis, feeds / fedBy
+ *  for lineage one way, and the neutral link words for anything else — an
+ *  edge type's direction isn't always the way data flows. */
+function relationWord(p: RelatedPredicate): string {
+    if (!axisMeta(p.axis).lineage) return p.axis
+    const link = LINK_WORDS[p.axis as keyof typeof LINK_WORDS]
+    if (p.edgeTypes) return `${link}[${p.edgeTypes.join(', ')}]`
+    if (p.edgeClass === 'links') return link
+    return p.axis === 'upstream' ? 'fedBy' : p.axis === 'downstream' ? 'feeds' : 'linkedTo[lineage]'
+}
+
+const LINK_WORDS = { upstream: 'incoming', downstream: 'outgoing', neighbor: 'linkedTo' } as const
+
+
+/** A graph shape's word over lineage and over any link. */
+const SHAPE_SPELLINGS: Record<ShapeKind, { lineage: string; links: string }> = {
+    isRoot: { lineage: 'noUpstream', links: 'noIncoming' },
+    isLeaf: { lineage: 'noDownstream', links: 'noOutgoing' },
+    isOrphan: { lineage: 'noLineage', links: 'noLinks' },
+    hasIncoming: { lineage: 'hasUpstream', links: 'hasIncoming' },
+    hasOutgoing: { lineage: 'hasDownstream', links: 'hasOutgoing' },
+}
+
+/** ``noUpstream``, ``noIncoming``, ``noEdges``, ``noIncoming[PRODUCES]``. */
+function shapeSpelling(kind: ShapeKind, c: { edgeClass?: EdgeClass | null; edgeTypes?: string[] | null }): string {
+    const words = SHAPE_SPELLINGS[kind]
+    const neutral = kind === 'isOrphan' ? 'noEdges' : words.links
+    if (c.edgeTypes) return `${neutral}[${c.edgeTypes.join(', ')}]`
+    const set = c.edgeClass ?? DEFAULT_EDGE_CLASS
+    if (set === 'lineage' || set === 'links') return words[set]
+    return kind === 'isOrphan' && set === 'any' ? 'noEdges' : `${neutral}[${set}]`
+}
+
+/** ``edges(out) > 10`` — any link unless the brackets say otherwise. */
+function degreeSpelling(c: DegreePredicate): string {
+    const set = c.edgeTypes ? `[${c.edgeTypes.join(', ')}]`
+        : c.edgeClass === 'links' ? '' : `[${c.edgeClass ?? DEFAULT_EDGE_CLASS}]`
+    return `edges${set}(${c.direction ?? 'both'}) ${COUNT_SYMBOLS[c.op ?? 'eq']} ${c.value}`
 }
 
 
@@ -426,11 +486,10 @@ function spelling(c: Predicate): string | null {
             const key = needsQuotes(c.key) ? `"${c.key}"` : c.key
             return `${key} ${formatComparison(c)}${formatSuffixes(c)}`
         }
-        case 'isRoot':       return 'noUpstream'
-        case 'isLeaf':       return 'noDownstream'
-        case 'isOrphan':     return 'noLineage'
-        case 'hasIncoming':  return 'hasUpstream'
-        case 'hasOutgoing':  return 'hasDownstream'
+        case 'isRoot': case 'isLeaf': case 'isOrphan': case 'hasIncoming': case 'hasOutgoing':
+            return shapeSpelling(c.kind, c)
+        case 'degree':
+            return degreeSpelling(c)
         case 'related':
             return relationSpelling(c)
         case 'is': {
@@ -576,8 +635,11 @@ function lex(input: string): Token[] {
             continue
         }
         // Bareword — read until whitespace, operator, paren, comma, or quote.
-        // A comma inside ``prefix:a,b`` is part of its list of values.
+        // A comma inside ``prefix:a,b`` is part of its list of values, and
+        // so is anything in the brackets of a word that takes edge types:
+        // ``outgoing[PRODUCES, CONSUMES](``.
         let j = i
+        let unclosed = false
         while (j < input.length) {
             const c = input[j]
             if (/\s/.test(c)) break
@@ -585,6 +647,12 @@ function lex(input: string): Token[] {
             if (c === ',' && input.slice(i, j).includes(':') && j + 1 < input.length
                 && !/[\s(),"'!=<>]/.test(input[j + 1])) {
                 j += 1
+                continue
+            }
+            if (c === '[' && EDGE_WORD.test(input.slice(i, j).replace(/[_-]/g, ''))) {
+                const close = input.indexOf(']', j)
+                unclosed = close === -1
+                j = unclosed ? input.length : close + 1
                 continue
             }
             if (c === '(' || c === ')' || c === ',' || c === '!') break
@@ -612,7 +680,7 @@ function lex(input: string): Token[] {
             } else if (up === 'NOT' && !word.includes(':')) {
                 out.push({ kind: TokenKind.NotKw, text: 'NOT', raw: word, ...at })
             } else {
-                out.push({ kind: TokenKind.Word, text: word, raw: word, ...at })
+                out.push({ kind: TokenKind.Word, text: word, raw: word, ...at, ...(unclosed ? { unclosed } : {}) })
             }
             i = j
         } else {
@@ -677,9 +745,54 @@ const TAIL_KEYWORDS = new Set([
 ])
 
 
-/** A word that opens a relationship, a count or an edge filter when ``(``
- *  follows it directly. */
-const CALL_WORD = /^((parent|child|ancestor|descendant|root|upstream|downstream|neighbor)(\*\d*(\.\.\d*)?)?|count|\.via)$/i
+/** A word that opens a relationship, a count, an edge count or an edge
+ *  filter when ``(`` follows it directly. A relationship's edges may come
+ *  in brackets before or after its steps: ``outgoing[PRODUCES]*..3(``. */
+const CALL_WORD = /^((parent|child|ancestor|descendant|root|upstream|downstream|neighbor|feeds|fedby|linkedto|outgoing|incoming)(\[[^\]]*\])?(\*\d*(\.\.\d*)?)?(\[[^\]]*\])?|edges(\[[^\]]*\])?|count|\.via)$/i
+
+/** A word that takes edge types in brackets — the hierarchy's too, to be
+ *  told it doesn't. Read with ``_`` and ``-`` left out. */
+const EDGE_WORD = /^((parent|child|ancestor|descendant|root|upstream|downstream|neighbor|feeds|fedby|linkedto|outgoing|incoming)(\*\d*(\.\.\d*)?)?|edges|noupstream(lineage)?|nodownstream(lineage)?|nolineage|orphans?|hasupstream|hasdownstream|noincoming|nooutgoing|nolinks|noedges|hasincoming|hasoutgoing)$/i
+
+/** A relationship's call, as typed: word, [edges], *steps, [edges]. */
+const RELATION_CALL = /^([a-z]+)(?:\[([^\]]*)\])?(?:(\*)(\d*)(\.\.)?(\d*))?(?:\[([^\]]*)\])?$/i
+
+/** A relationship word: the axis it follows, and whether over any link. */
+const RELATION_WORDS: Record<string, { axis: RelatedPredicate['axis']; links?: true }> = {
+    parent: { axis: 'parent' }, child: { axis: 'child' }, ancestor: { axis: 'ancestor' },
+    descendant: { axis: 'descendant' }, root: { axis: 'root' },
+    upstream: { axis: 'upstream' }, downstream: { axis: 'downstream' }, neighbor: { axis: 'neighbor' },
+    fedby: { axis: 'upstream' }, feeds: { axis: 'downstream' },
+    incoming: { axis: 'upstream', links: true }, outgoing: { axis: 'downstream', links: true },
+    linkedto: { axis: 'neighbor', links: true },
+}
+
+/** The classes ``[…]`` may name on a connection, and on a shape or count. */
+const LINK_CLASSES: readonly EdgeClass[] = ['lineage', 'links']
+const SHAPE_CLASSES: readonly EdgeClass[] = ['lineage', 'links', 'any', 'containment']
+
+/** What ``[…]`` names: one class of edges, or edge types. */
+function readEdgeSet(content: string, classes: readonly EdgeClass[]): { edgeClass?: EdgeClass; edgeTypes?: string[] } {
+    const names = content.split(',').map((n) => n.trim()).filter(Boolean)
+    if (!names.length) throw new Error('Name edge types between the brackets: outgoing[PRODUCES](…)')
+    const named = names.map((n) => n.toLowerCase()).filter((n) => SHAPE_CLASSES.includes(n as EdgeClass))
+    if (!named.length) return { edgeTypes: names }
+    const list = classes.map((c) => `[${c}]`).join(', ')
+    if (names.length > 1) throw new Error(`Name edge types, or one of ${list} — not both`)
+    if (!classes.includes(named[0] as EdgeClass)) {
+        throw new Error(`A connection follows ${list} or edge types, not [${named[0]}]`)
+    }
+    return { edgeClass: named[0] as EdgeClass }
+}
+
+/** A call that opens a relationship — not count(, .via( or edges(. */
+function opensRelation(t: Token | null | undefined): t is Token {
+    return t?.kind === TokenKind.Call && t.text !== 'count' && t.text !== '.via' && !/^edges\b/.test(t.text)
+}
+
+const DEGREE_DIRECTIONS: Record<string, NonNullable<DegreePredicate['direction']>> = {
+    in: 'in', out: 'out', both: 'both',
+}
 
 
 /** Just past the ``}`` closing the JSON object that opens at ``start`` —
@@ -856,8 +969,7 @@ class Parser {
                 this.recognized.push(`${t.raw} ${next.raw}`)
                 return { kind: 'descendantOf', urns: [], refs: [refOf(next.text)], uiScope: 'name' } as Predicate
             }
-            if ((word === 'every' || word === 'no') && next?.kind === TokenKind.Call
-                && next.text !== 'count' && next.text !== '.via') {
+            if ((word === 'every' || word === 'no') && opensRelation(next)) {
                 this.consume()
                 t.role = 'keyword'
                 return this.parseRelation(next, word === 'no' ? 'none' : 'all')
@@ -881,9 +993,9 @@ class Parser {
             return value as Predicate
         }
 
-        // 1) boolean-shaped bareword (noUpstream, etc.)
+        // 1) boolean-shaped bareword (noUpstream, noIncoming[PRODUCES], etc.)
         if (t.kind === TokenKind.Word) {
-            const bool = matchBooleanToken(t.text)
+            const bool = this.read(() => matchBooleanToken(t.text), t)
             if (bool) {
                 t.role = 'keyword'
                 this.recognized.push(t.text)
@@ -1000,11 +1112,12 @@ class Parser {
     /** A relationship, or ``count(<relationship>) <op> <n>``; its ``(`` is
      *  already consumed. */
     parseCall(t: Token): Predicate {
-        if (t.text === '.via') this.fail('.via( follows a relationship: upstream(…).via(…)', t)
+        if (t.text === '.via') this.fail('.via( follows a relationship: fedBy(…).via(…)', t)
+        if (/^edges\b/.test(t.text)) return this.parseDegree(t)
         if (t.text !== 'count') return this.parseRelation(t)
         t.role = 'function'
         const inner = this.consume()
-        if (inner?.kind !== TokenKind.Call || inner.text === 'count' || inner.text === '.via') {
+        if (!opensRelation(inner)) {
             this.fail('count( takes a relationship: count(child(type:column)) > 10', inner ?? t)
         }
         const rel = this.parseRelation(inner) as RelatedPredicate
@@ -1022,15 +1135,52 @@ class Parser {
         return { ...rel, count: { op, value } }
     }
 
-    parseRelation(t: Token, quantifier?: 'none' | 'all'): Predicate {
-        const m = /^([a-z]+)(?:(\*)(\d*)(\.\.)?(\d*))?$/.exec(t.text)
-        if (!m) this.fail(`Not a relationship: ${t.raw}`, t)
+    /** ``edges[…](in|out|both) <op> <n>``; its ``(`` is already consumed. */
+    parseDegree(t: Token): Predicate {
         t.role = 'function'
-        const axis = m[1] as RelatedPredicate['axis']
-        const [, , star, first, dots, second] = m
+        const bracket = /\[([^\]]*)\]/.exec(t.raw)?.[1]
+        const edges = bracket === undefined ? { edgeClass: 'links' as const }
+            : this.read(() => readEdgeSet(bracket, SHAPE_CLASSES), t)
+        const dirT = this.consume()
+        const direction = dirT?.kind === TokenKind.Word ? DEGREE_DIRECTIONS[dirT.text.toLowerCase()] : undefined
+        if (!direction) this.fail('Say which way: edges(in), edges(out) or edges(both)', dirT ?? t)
+        dirT.role = 'keyword'
+        this.expectClose('edges(…')
+        const opT = this.consume()
+        const op = opT?.kind === TokenKind.Op ? COUNT_OPS[opT.text] : undefined
+        const valT = this.consume()
+        const value = valT ? Number(valT.text) : NaN
+        if (!op || !Number.isInteger(value) || value < 0) {
+            this.fail('edges(…) compares to a whole number: edges(out) > 10', valT ?? opT ?? t)
+        }
+        opT.role = 'operator'
+        valT.role = 'value'
+        this.recognized.push(`${t.raw}${dirT.raw}) ${opT.text} ${value}`)
+        return { kind: 'degree', direction, op, value, ...edges }
+    }
+
+    parseRelation(t: Token, quantifier?: 'none' | 'all'): Predicate {
+        // As typed: edge types keep their case.
+        const m = RELATION_CALL.exec(t.raw.slice(0, -1))
+        const word = m ? RELATION_WORDS[m[1].toLowerCase()] : undefined
+        if (!m || !word) this.fail(`Not a relationship: ${t.raw}`, t)
+        t.role = 'function'
+        const { axis } = word
+        const [, name, before, star, first, dots, second, after] = m
         const meta = axisMeta(axis)
-        if (star && !meta.hops) this.fail(`${axis}( takes no hop range`, t)
-        if (star && !first && !second) this.fail(`Say how far: ${axis}*..3(…)`, t)
+        if (star && !meta.hops) this.fail(`${name}( takes no hop range`, t)
+        if (star && !first && !second) this.fail(`Say how far: ${name}*..3(…)`, t)
+        if (before !== undefined && after !== undefined) this.fail(`Name its edges once: ${name}[…](…)`, t)
+        const bracket = before ?? after
+        if (bracket !== undefined && !meta.lineage) {
+            this.fail(`${name}( follows the hierarchy, which takes no edge types — feeds[…], fedBy[…] `
+                + 'and linkedTo[…] do', t)
+        }
+        const set: { edgeClass?: EdgeClass; edgeTypes?: string[] } = bracket === undefined
+            ? (word.links ? { edgeClass: 'links' } : {})
+            : this.read(() => readEdgeSet(bracket, LINK_CLASSES), t)
+        // Lineage is what a connection follows unless it says otherwise.
+        const edges = (set.edgeClass === 'lineage' ? {} : set) as Pick<RelatedPredicate, 'edgeClass' | 'edgeTypes'>
         let minHops: number | undefined
         let maxHops: number | undefined
         if (dots) {                       // *M..N, *..N, *M..
@@ -1051,11 +1201,12 @@ class Parser {
             ...(quantifier ? { quantifier } : {}),
             ...(minHops !== undefined && minHops > 1 ? { minHops } : {}),
             ...(maxHops !== undefined ? { maxHops } : {}),
+            ...edges,
             ...(where ? { where } : {}),
         }
         const next = this.peek()
         if (next?.kind === TokenKind.Call && next.text === '.via') {
-            if (!meta.lineage) this.fail(`.via(…) follows a lineage relationship, not ${axis}(…)`, next)
+            if (!meta.lineage) this.fail(`.via(…) follows a connection — feeds, fedBy, linkedTo — not ${name}(…)`, next)
             this.consume()
             next.role = 'function'
             const condition = this.parseExpr()
@@ -1073,6 +1224,15 @@ class Parser {
     expectClose(what: string): void {
         if (this.peek()?.kind !== TokenKind.RParen) this.fail(`Missing ")" after ${what}`)
         this.consume()
+    }
+
+    /** ``read()``, its error pointing at ``t``. */
+    read<T>(read: () => T, t: Token): T {
+        try {
+            return read()
+        } catch (err) {
+            this.fail(err instanceof Error ? err.message : String(err), t)
+        }
     }
 
     /** `CONTAINS`, `STARTS WITH` or `ENDS WITH` at the cursor — consumed
@@ -1292,24 +1452,24 @@ class Parser {
 // Predicate builders + helpers
 // ---------------------------------------------------------------------------
 
+/** A graph shape's words, read with ``_`` and ``-`` left out: the shape and
+ *  the edges it counts unless brackets say otherwise. */
+const SHAPE_WORDS: Record<string, [ShapeKind, EdgeClass]> = {
+    noupstream: ['isRoot', 'lineage'], noupstreamlineage: ['isRoot', 'lineage'],
+    nodownstream: ['isLeaf', 'lineage'], nodownstreamlineage: ['isLeaf', 'lineage'],
+    nolineage: ['isOrphan', 'lineage'], orphan: ['isOrphan', 'lineage'], orphans: ['isOrphan', 'lineage'],
+    hasupstream: ['hasIncoming', 'lineage'], hasdownstream: ['hasOutgoing', 'lineage'],
+    noincoming: ['isRoot', 'links'], nooutgoing: ['isLeaf', 'links'], nolinks: ['isOrphan', 'links'],
+    noedges: ['isOrphan', 'any'], hasincoming: ['hasIncoming', 'links'], hasoutgoing: ['hasOutgoing', 'links'],
+}
+
+/** ``noUpstream``, ``noIncoming[PRODUCES]`` and the like — or null. */
 function matchBooleanToken(text: string): Predicate | null {
-    const norm = text.toLowerCase().replace(/[_-]/g, '')
-    if (norm === 'noupstream' || norm === 'noupstreamlineage') {
-        return { kind: 'isRoot', edgeClass: DEFAULT_EDGE_CLASS }
-    }
-    if (norm === 'nodownstream' || norm === 'nodownstreamlineage') {
-        return { kind: 'isLeaf', edgeClass: DEFAULT_EDGE_CLASS }
-    }
-    if (norm === 'nolineage' || norm === 'orphan' || norm === 'orphans') {
-        return { kind: 'isOrphan', edgeClass: DEFAULT_EDGE_CLASS }
-    }
-    if (norm === 'hasupstream') {
-        return { kind: 'hasIncoming', edgeClass: DEFAULT_EDGE_CLASS }
-    }
-    if (norm === 'hasdownstream') {
-        return { kind: 'hasOutgoing', edgeClass: DEFAULT_EDGE_CLASS }
-    }
-    return null
+    const m = /^([^[]+)(?:\[([^\]]*)\])?$/.exec(text)
+    const shape = m ? SHAPE_WORDS[m[1].toLowerCase().replace(/[_-]/g, '')] : undefined
+    if (!m || !shape) return null
+    const [kind, edgeClass] = shape
+    return { kind, ...(m[2] === undefined ? { edgeClass } : readEdgeSet(m[2], SHAPE_CLASSES)) }
 }
 
 

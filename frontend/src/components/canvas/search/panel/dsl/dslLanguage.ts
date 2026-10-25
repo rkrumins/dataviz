@@ -7,7 +7,9 @@
  *   completion     what fits where the cursor is — entity types after
  *                  ``type:``, a property's values after ``owner =``, edge
  *                  fields inside ``.via(``, entities by name after ``@"``,
- *                  and words and relationships to start a condition with
+ *                  edge types inside ``outgoing[``, and words and
+ *                  relationships to start a condition with
+ *   warnings       an edge type this data source doesn't have
  *
  * Every list the completion offers is the view's own (discovery, or a
  * server search for names and values), so nothing is guessed or loaded whole.
@@ -26,8 +28,9 @@ import type { NodeRef } from '@/types/search'
 
 import type { RoleRange } from '../../editor/codeMirrorBase'
 import type { NamedEntity } from '../entityNames'
-import { parsePredicate } from '../predicateDsl'
+import { type DslToken, parsePredicate } from '../predicateDsl'
 import { formatNamePath } from '../relations'
+import { EDGE_SET_OPTIONS } from '../vocabulary/edgeWords'
 
 
 /** What the editor completes from — the view's vocabulary. */
@@ -38,6 +41,9 @@ export interface DslVocabulary {
     layers: readonly string[]
     propertyKeys: readonly string[]
     edgeKeys: readonly string[]
+    /** The edge types ``[…]`` names: what each is and connects, and whether
+     *  it is the hierarchy's — which a connection never walks. */
+    edgeTypes?: readonly { id: string; detail?: string; containment?: boolean }[]
     /** A property's common values, narrowed by the text typed. */
     suggestValues?: (key: string, q: string) => Promise<{ values?: { value?: unknown }[] } | null>
     /** Entities by name, and the shortest path that names one alone. */
@@ -69,10 +75,12 @@ export function dslRanges(text: string): RoleRange[] {
 
 
 /** The parse error as a diagnostic: underlined where it points — the last
- *  character when it points past the end ("it ends too soon"). */
-export function dslDiagnostics(text: string): Diagnostic[] {
+ *  character when it points past the end ("it ends too soon"). A query
+ *  that reads gets a warning on each edge type not among ``edgeTypes``,
+ *  once they are known. */
+export function dslDiagnostics(text: string, edgeTypes?: readonly { id: string }[]): Diagnostic[] {
     const result = parsePredicate(text)
-    if (!result.error) return []
+    if (!result.error) return edgeTypes?.length ? unknownEdgeTypes(result.tokens, edgeTypes) : []
     let from = Math.min(result.errorAt?.from ?? 0, text.length)
     let to = Math.min(result.errorAt?.to ?? text.length, text.length)
     if (to <= from) {
@@ -82,7 +90,36 @@ export function dslDiagnostics(text: string): Diagnostic[] {
     return [{ from, to, severity: 'error', message: result.error }]
 }
 
-export const dslLint = linter((view) => dslDiagnostics(view.state.doc.toString()), { delay: 200 })
+/** The words ``[…]`` reads as a class of edges, not an edge type. */
+const EDGE_CLASS_WORDS = new Set(['lineage', 'links', 'any', 'containment'])
+
+/** A warning on each name in brackets that isn't an edge type here. */
+function unknownEdgeTypes(tokens: readonly DslToken[], edgeTypes: readonly { id: string }[]): Diagnostic[] {
+    const known = new Set(edgeTypes.map((t) => t.id.toUpperCase()))
+    const out: Diagnostic[] = []
+    for (const t of tokens) {
+        if (t.role !== 'function' && t.role !== 'keyword') continue
+        const open = t.text.indexOf('[')
+        const close = t.text.indexOf(']', open)
+        if (open < 0 || close < 0) continue
+        let at = t.from + open + 1
+        for (const part of t.text.slice(open + 1, close).split(',')) {
+            const name = part.trim()
+            if (name && !EDGE_CLASS_WORDS.has(name.toLowerCase()) && !known.has(name.toUpperCase())) {
+                const from = at + part.indexOf(name)
+                out.push({ from, to: from + name.length, severity: 'warning',
+                           message: `Edge type ${name} isn't in this data source` })
+            }
+            at += part.length + 1
+        }
+    }
+    return out
+}
+
+/** The underline and the warnings, ``vocabulary()`` read at each pass. */
+export function dslLint(vocabulary: () => DslVocabulary) {
+    return linter((view) => dslDiagnostics(view.state.doc.toString(), vocabulary().edgeTypes), { delay: 200 })
+}
 
 
 // ---------------------------------------------------------------------------
@@ -97,6 +134,7 @@ export type DslCompletionContext =
         taken: string[] }
     | { kind: 'value'; key: string; from: number; text: string; quoted: boolean }
     | { kind: 'edgeKey'; from: number; text: string }
+    | { kind: 'edgeType'; from: number; text: string; taken: string[]; connection: boolean }
     | { kind: 'term'; from: number; text: string }
 
 const PREFIXES: Record<string, 'type' | 'tag' | 'layer' | 'has'> = {
@@ -114,6 +152,17 @@ export function completionContextAt(doc: string, pos: number): DslCompletionCont
     // Inside @"… not yet closed: an entity, by name.
     const ref = /@(["'])([^"']*)$/.exec(before)
     if (ref) return { kind: 'name', from: pos - ref[2].length, text: ref[2] }
+
+    // Inside outgoing[… not yet closed: edge types — a connection's never
+    // the hierarchy's.
+    const bracket = /(?:^|[\s(!])([A-Za-z_-]+)(?:\*[\d.]*)?\[([^\]]*)$/.exec(before)
+    const edgeWord = bracket?.[1].toLowerCase().replace(/[_-]/g, '') ?? ''
+    if (bracket && (CONNECTION_WORDS.has(edgeWord) || COUNTING_WORDS.has(edgeWord))) {
+        const names = bracket[2].split(',')
+        const text = (names.pop() ?? '').trimStart()
+        return { kind: 'edgeType', from: pos - text.length, text, taken: names.map((n) => n.trim()),
+                 connection: CONNECTION_WORDS.has(edgeWord) }
+    }
 
     const comparison = COMPARISON.exec(before)
     if (comparison) {
@@ -142,6 +191,13 @@ export function completionContextAt(doc: string, pos: number): DslCompletionCont
     return { kind: 'term', from: pos - term.length, text: term }
 }
 
+/** Words whose brackets name edges, read with ``_`` and ``-`` left out: a
+ *  connection's, which never walks the hierarchy, and those that count. */
+const CONNECTION_WORDS = new Set(['feeds', 'fedby', 'linkedto', 'outgoing', 'incoming',
+    'upstream', 'downstream', 'neighbor'])
+const COUNTING_WORDS = new Set(['edges', 'noupstream', 'nodownstream', 'nolineage', 'hasupstream',
+    'hasdownstream', 'noincoming', 'nooutgoing', 'nolinks', 'noedges', 'hasincoming', 'hasoutgoing'])
+
 /** Whether ``text`` (after an opening bracket) closes it. */
 function closes(text: string): boolean {
     let depth = 0
@@ -165,22 +221,32 @@ const TERMS: Completion[] = [
     snippetCompletion('name CONTAINS "${}"', { label: 'name CONTAINS', detail: 'text in its name', type: 'keyword' }),
     snippetCompletion('@"${}"', { label: '@"…"', detail: 'an entity, by name', type: 'keyword', boost: 2 }),
     snippetCompletion('inside @"${}"', { label: 'inside @"…"', detail: 'inside an entity', type: 'keyword' }),
-    snippetCompletion('upstream(${})', { label: 'upstream(…)', detail: 'something feeds it that…', type: 'function', boost: 1 }),
-    snippetCompletion('downstream(${})', { label: 'downstream(…)', detail: 'it feeds something that…', type: 'function', boost: 1 }),
-    snippetCompletion('upstream*..3(${})', { label: 'upstream*..3(…)', detail: 'within 3 hops upstream', type: 'function' }),
-    snippetCompletion('downstream*..3(${})', { label: 'downstream*..3(…)', detail: 'within 3 hops downstream', type: 'function' }),
-    snippetCompletion('neighbor(${})', { label: 'neighbor(…)', detail: 'lineage either way', type: 'function' }),
+    snippetCompletion('feeds(${})', { label: 'feeds(…)', detail: 'it feeds something that…', type: 'function', boost: 1 }),
+    snippetCompletion('fedBy(${})', { label: 'fedBy(…)', detail: 'something feeds it that…', type: 'function', boost: 1 }),
+    snippetCompletion('feeds*..3(${})', { label: 'feeds*..3(…)', detail: 'feeds, within 3 steps', type: 'function' }),
+    snippetCompletion('fedBy*..3(${})', { label: 'fedBy*..3(…)', detail: 'fed by, within 3 steps', type: 'function' }),
+    snippetCompletion('linkedTo(${})', { label: 'linkedTo(…)', detail: 'linked to, by any edge, either way', type: 'function', boost: 1 }),
+    snippetCompletion('outgoing[${1}](${2})', { label: 'outgoing[…](…)', detail: 'links out through edge types…', type: 'function' }),
+    snippetCompletion('incoming[${1}](${2})', { label: 'incoming[…](…)', detail: 'links in through edge types…', type: 'function' }),
     snippetCompletion('parent(${})', { label: 'parent(…)', detail: 'its container is…', type: 'function' }),
     snippetCompletion('ancestor(${})', { label: 'ancestor(…)', detail: 'inside something that…', type: 'function' }),
     snippetCompletion('child(${})', { label: 'child(…)', detail: 'holds something that…', type: 'function' }),
     snippetCompletion('descendant(${})', { label: 'descendant(…)', detail: 'holds, at any depth…', type: 'function' }),
     snippetCompletion('root(${})', { label: 'root(…)', detail: 'its top-level container is…', type: 'function' }),
     snippetCompletion('every child(${})', { label: 'every child(…)', detail: 'all it holds is…', type: 'function' }),
-    snippetCompletion('no upstream(${})', { label: 'no upstream(…)', detail: 'nothing feeding it is…', type: 'function' }),
+    snippetCompletion('no fedBy(${})', { label: 'no fedBy(…)', detail: 'nothing feeding it is…', type: 'function' }),
     snippetCompletion('count(child(${})) > 0', { label: 'count(…)', detail: 'how many relatives are…', type: 'function' }),
+    snippetCompletion('edges(${1:both}) > ${2:10}', { label: 'edges(…) >', detail: 'how many edges, in, out or both', type: 'function' }),
+    snippetCompletion('upstream(${})', { label: 'upstream(…)', detail: 'older spelling of fedBy(…)', type: 'function', boost: -1 }),
+    snippetCompletion('downstream(${})', { label: 'downstream(…)', detail: 'older spelling of feeds(…)', type: 'function', boost: -1 }),
+    snippetCompletion('neighbor(${})', { label: 'neighbor(…)', detail: 'older spelling of linkedTo[lineage](…)', type: 'function', boost: -1 }),
     { label: 'noUpstream', detail: 'nothing feeds it', type: 'keyword' },
     { label: 'noDownstream', detail: 'it feeds nothing', type: 'keyword' },
     { label: 'noLineage', detail: 'no lineage at all', type: 'keyword' },
+    { label: 'noIncoming', detail: 'nothing links into it', type: 'keyword' },
+    { label: 'noOutgoing', detail: 'it links to nothing', type: 'keyword' },
+    { label: 'noLinks', detail: 'no links at all', type: 'keyword' },
+    { label: 'noEdges', detail: 'no edges at all', type: 'keyword' },
     { label: 'AND', type: 'keyword' },
     { label: 'OR', type: 'keyword' },
     { label: 'NOT', type: 'keyword' },
@@ -233,6 +299,24 @@ export function dslCompletionSource(vocabulary: () => DslVocabulary): Completion
                                   apply: at.quoted || bare(text) ? text : quoted(text) }]
                     }),
                     filter: false,
+                }
+            }
+            case 'edgeType': {
+                const taken = new Set(at.taken.map((t) => t.toUpperCase()))
+                return {
+                    from: at.from,
+                    options: [
+                        // A class stands alone: offered as the first name only.
+                        ...(at.taken.length ? [] : EDGE_SET_OPTIONS
+                            .filter((o) => o.value !== 'types'
+                                && (!at.connection || o.value === 'lineage' || o.value === 'links'))
+                            .map((o) => ({ label: o.value, detail: o.description, type: 'keyword', boost: 1 }))),
+                        ...(vocab.edgeTypes ?? [])
+                            .filter((t) => !taken.has(t.id.toUpperCase()) && !(at.connection && t.containment))
+                            .slice(0, MAX_OPTIONS)
+                            .map((t) => ({ label: t.id, detail: t.detail, type: 'constant' })),
+                    ],
+                    validFor: /^[\w.-]*$/,
                 }
             }
             case 'edgeKey':

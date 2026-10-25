@@ -17,6 +17,11 @@ const VOCAB: DslVocabulary = {
     layers: ['Source'],
     propertyKeys: ['owner', 'Asset Owner'],
     edgeKeys: ['confidence', 'logic'],
+    edgeTypes: [
+        { id: 'PRODUCES', detail: 'Produces · Data job → Dataset' },
+        { id: 'DEFINED_BY', detail: 'Defined by' },
+        { id: 'CONTAINS', detail: 'Contains', containment: true },
+    ],
 }
 
 /** Where ``|`` stands in ``doc``, and ``doc`` without it. */
@@ -47,6 +52,17 @@ describe('dslLanguage — highlighting and the underline', () => {
         expect(at('parent(type:x')).toEqual([['x', 'Missing ")" after parent(…']])
         expect(at('type:dataset')).toEqual([])
     })
+
+    it('warns about each edge type this data source lacks, once its edge types are known', () => {
+        const at = (text: string, edgeTypes = VOCAB.edgeTypes) => dslDiagnostics(text, edgeTypes)
+            .map((d) => [text.slice(d.from, d.to), d.severity, d.message])
+        expect(at('outgoing[PRODUCES, PRODUCE ](x) noEdges[any] noIncoming[defined_by]')).toEqual([
+            ['PRODUCE', 'warning', "Edge type PRODUCE isn't in this data source"]])
+        expect(at('edges[TAGS](in) > 1')).toEqual([['TAGS', 'warning', "Edge type TAGS isn't in this data source"]])
+        // Not before they are known, and a query that doesn't read gets its error alone.
+        expect(at('outgoing[PRODUCE](x)', [])).toEqual([])
+        expect(at('outgoing[PRODUCE](x')).toEqual([['x', 'error', 'Missing ")" after outgoing[PRODUCE](…']])
+    })
 })
 
 
@@ -61,6 +77,12 @@ describe('dslLanguage — what the cursor is in the middle of', () => {
         ['upstream().via(con|', { kind: 'edgeKey', from: 15, text: 'con' }],
         ['upstream().via(x = 1) ty|', { kind: 'term', from: 22, text: 'ty' }],
         ['type:dataset AND up|', { kind: 'term', from: 17, text: 'up' }],
+        ['outgoing[PR|', { kind: 'edgeType', from: 9, text: 'PR', taken: [], connection: true }],
+        ['count(feeds*..3[PRODUCES, D|', { kind: 'edgeType', from: 26, text: 'D', taken: ['PRODUCES'],
+            connection: true }],
+        ['noIncoming[|', { kind: 'edgeType', from: 11, text: '', taken: [], connection: false }],
+        ['edges[|', { kind: 'edgeType', from: 6, text: '', taken: [], connection: false }],
+        ['foo[ba|', { kind: 'term', from: 0, text: 'foo[ba' }],
     ])('reads %s', (doc, expected) => {
         const [text, pos] = cursor(doc)
         expect(completionContextAt(text, pos)).toEqual(expected)
@@ -81,13 +103,27 @@ describe('dslLanguage — completion', () => {
         expect(r?.options.map((o) => [o.label, o.apply])).toEqual([['alice', 'alice'], ['Ops team', '"Ops team"']])
     })
 
+    it('offers edge types in brackets — a class first, never the hierarchy’s on a connection', async () => {
+        const r = await complete('outgoing[|')
+        expect(labels(r)).toEqual(['lineage', 'links', 'PRODUCES', 'DEFINED_BY'])
+        expect(r?.options.find((o) => o.label === 'PRODUCES')?.detail).toBe('Produces · Data job → Dataset')
+        // A shape or a count takes every class and the hierarchy's types too.
+        expect(labels(await complete('noEdges[|'))).toEqual(['lineage', 'links', 'any', 'containment',
+            'PRODUCES', 'DEFINED_BY', 'CONTAINS'])
+        // After a name: other names only.
+        expect(labels(await complete('incoming[PRODUCES, |'))).toEqual(['DEFINED_BY'])
+    })
+
     it('offers edge fields inside .via(', async () => {
         expect(labels(await complete('upstream().via(c|'))).toEqual(['confidence', 'logic'])
     })
 
     it('offers words, relationships and keys to start a condition with', async () => {
-        const r = await complete('up|')
-        expect(labels(r)).toEqual(expect.arrayContaining(['type:', 'upstream(…)', '@"…"', 'owner', 'Asset Owner']))
+        const r = await complete('fe|')
+        expect(labels(r)).toEqual(expect.arrayContaining(['type:', 'feeds(…)', 'fedBy(…)', 'linkedTo(…)',
+            'outgoing[…](…)', 'noLinks', 'edges(…) >', '@"…"', 'owner', 'Asset Owner']))
+        // The older spellings still complete, said to be older.
+        expect(r?.options.find((o) => o.label === 'upstream(…)')?.detail).toBe('older spelling of fedBy(…)')
         expect(r?.options.find((o) => o.label === 'Asset Owner')?.apply).toBe('"Asset Owner"')
         // Nothing unasked at a blank spot; Ctrl-Space asks.
         expect(await complete('a |')).toBeNull()
