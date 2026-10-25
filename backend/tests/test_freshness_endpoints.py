@@ -1195,7 +1195,7 @@ def test_refresh_route_proxy_forwards_actor(monkeypatch):
     monkeypatch.setattr(fresh_mod, "_PROXY_ENABLED", True)
     captured = {}
 
-    async def _fake_proxy(method, path, request, body=None):
+    async def _fake_proxy(method, path, request, body=None, timeout=None):
         captured["body"] = body
         return "proxied"
     monkeypatch.setattr(fresh_mod, "_proxy", _fake_proxy)
@@ -1217,7 +1217,7 @@ def test_refresh_route_proxy_overrides_client_origin(monkeypatch):
     monkeypatch.setattr(fresh_mod, "_PROXY_ENABLED", True)
     captured = {}
 
-    async def _fake_proxy(method, path, request, body=None):
+    async def _fake_proxy(method, path, request, body=None, timeout=None):
         captured["body"] = body
         return "proxied"
     monkeypatch.setattr(fresh_mod, "_proxy", _fake_proxy)

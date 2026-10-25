@@ -106,27 +106,35 @@ class ImportExportService:
         from the traceable ``{ws}/{ds}/{graph}/{job}/source.<fmt>`` layout (the caller then streams
         the upload to it). ``branch_id`` supplied -> stack onto that existing draft (multiple
         imports per branch, like successive manual edits); omitted -> open a fresh import draft.
-        """
-        if branch_id is None:
+
+        An ``idempotency_key`` already taken on the graph raises ``IntegrityError``, and the draft
+        this call opened for it is abandoned rather than left behind, empty."""
+        opened = branch_id is None
+        if opened:
             branch_id = await self._svc.open_draft(
                 graph_id=graph_id, owner=actor, name=name or "Import")
 
-        async with db.graphver_session() as s:
-            job = JobORM(
-                job_type="ingest", graph_id=graph_id, workspace_id=workspace_id,
-                data_source_id=data_source_id, provider_id=provider_id,
-                scope_view_id=scope_view_id, branch_id=branch_id,
-                reconcile_mode=reconcile_mode, import_format=import_format,
-                field_scope=field_scope, auto_publish=auto_publish,
-                source_uri=source_uri, idempotency_key=idempotency_key, status="pending",
-            )
-            s.add(job)
-            await s.flush()
-            job_id = job.id
-            if source_uri is None:
-                source_uri = storage_key(
-                    workspace_id, data_source_id, graph_id, job_id, f"source.{import_format}")
-                job.source_uri = source_uri
+        try:
+            async with db.graphver_session() as s:
+                job = JobORM(
+                    job_type="ingest", graph_id=graph_id, workspace_id=workspace_id,
+                    data_source_id=data_source_id, provider_id=provider_id,
+                    scope_view_id=scope_view_id, branch_id=branch_id,
+                    reconcile_mode=reconcile_mode, import_format=import_format,
+                    field_scope=field_scope, auto_publish=auto_publish,
+                    source_uri=source_uri, idempotency_key=idempotency_key, status="pending",
+                )
+                s.add(job)
+                await s.flush()
+                job_id = job.id
+                if source_uri is None:
+                    source_uri = storage_key(
+                        workspace_id, data_source_id, graph_id, job_id, f"source.{import_format}")
+                    job.source_uri = source_uri
+        except IntegrityError:
+            if opened:
+                await self._svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=actor)
+            raise
         return {"job_id": job_id, "branch_id": branch_id, "source_uri": source_uri}
 
     async def start_import(self, job_id: str) -> str:

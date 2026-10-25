@@ -31,8 +31,11 @@ PACK = {
 VIEWS = [{"id": "v1", "name": "Finance"}, {"id": "v2", "name": "Sales"}, {"id": "v3", "name": "Ops"}]
 KEY = "nxpat_" + "a" * 38
 PAUSED_KEY = "nxpat_" + "b" * 38
-#: What ``GET /api/v1/api-keys/self`` says of each key the stand-in knows.
-KEYS = {KEY: "active", PAUSED_KEY: "paused"}
+PAUSED_SERVICE_KEY = "nxsat_" + "b" * 38
+FENCED_KEY = "nxpat_" + "d" * 38
+#: What ``GET /api/v1/api-keys/self`` says of each key the stand-in knows: its kind and status.
+KEYS = {KEY: ("personal", "active"), PAUSED_KEY: ("personal", "paused"),
+        PAUSED_SERVICE_KEY: ("service", "paused"), FENCED_KEY: ("personal", "ip_not_allowed")}
 
 
 def _answer(added: int = 2, refused: int = 0, **over) -> dict:
@@ -78,7 +81,8 @@ class FakeApi(urllib.request.HTTPHandler):
                 return 401, {"detail": {"error": "invalid_api_key",
                                         "message": "The API key is not valid."}}, []
             if r["path"] == "/api/v1/api-keys/self" and r["method"] == "GET":
-                return 200, {"id": "key_1", "name": "ci publisher", "status": KEYS[key]}, []
+                kind, status = KEYS[key]
+                return 200, {"id": "key_1", "name": "ci publisher", "kind": kind, "status": status}, []
         elif "nx_access=access-token" not in r["headers"].get("cookie", ""):
             return 401, {"detail": "Not authenticated"}, []
         if r["path"] == "/api/v1/views/" and r["method"] == "GET":
@@ -238,6 +242,8 @@ def test_an_api_key_publishes_without_signing_in(run_with_key, pack_file):
 
 @pytest.mark.parametrize("key, says", [
     (PAUSED_KEY, "is paused until its owner signs in again"),
+    (PAUSED_SERVICE_KEY, "is paused until its service account has a manager again"),
+    (FENCED_KEY, "can't be used from this address"),
     ("nxpat_" + "c" * 38, "HTTP 401: The API key is not valid."),
 ])
 def test_a_key_that_cannot_act_stops_before_any_view(run_with_key, pack_file, key, says):
