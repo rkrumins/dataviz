@@ -523,6 +523,16 @@ async def remove_manager(
     return bool(result.rowcount)
 
 
+async def seat_holders(session: AsyncSession, account_id: str) -> set[tuple[Optional[str], Optional[str]]]:
+    """Who holds a seat on the account: ``(person, None)`` or ``(None, team)``."""
+    return {
+        (user_id, group_id) for user_id, group_id in (await session.execute(
+            select(ServiceAccountManagerORM.user_id, ServiceAccountManagerORM.group_id)
+            .where(ServiceAccountManagerORM.service_account_id == account_id)
+        )).all()
+    }
+
+
 async def is_manager(session: AsyncSession, account_id: str, user_id: str) -> bool:
     """Whether this person manages the account, themselves or through a live
     team they are in."""

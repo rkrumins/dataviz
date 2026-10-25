@@ -241,6 +241,41 @@ rule in the governance pack.
 - Native queries use the data source's existing login; the engines' read-only modes keep them
   read-only, not the login's privileges.
 
+---
+
+## [Unreleased] — Service accounts: their managers run them
+
+### Added
+
+- **Each service account has its own page**, for its managers and for the administrators of
+  service accounts alike: how it stands, who manages it, where it has a role, and its keys. It
+  replaces the account's keys page under **Account → API keys** and its dialog under
+  **Administration → Service accounts**, and links to either open it. Reading an account now says
+  what you may do with it (`can`).
+- **Its managers run it.** Besides making its keys, they rename and describe it, disable and enable
+  it, appoint and remove managers — never the last one — and take away roles it no longer needs.
+  Giving it a role is still an administrator's to do.
+
+### Changed
+
+- **Appointing a manager may give them only what they hold already, or what you could grant
+  them.** For each of the account's roles, the new manager must hold every permission it gives the
+  account there — a team, through its own roles — or you must be able to grant it there. Before,
+  you had to be able to grant every one of its roles yourself. The same rule now decides who may
+  add someone to a team that manages a service account, which used to take
+  `system:service-accounts:manage`.
+- **An administrator's disable holds an account.** Disabled by someone holding
+  `system:service-accounts:manage`, an account stays disabled until one of them enables it; its
+  managers can't.
+- Notices about a service account link to its page.
+
+### Upgrading
+
+- The upgrade job adds `service_accounts.admin_hold` (`20261025_1200_sa_admin_hold`) and holds
+  every account disabled today, since an administrator disabled each of them. Nothing else to run.
+
+---
+
 ## [Unreleased] — Fixes for integrations
 
 ### Fixed

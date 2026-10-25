@@ -232,15 +232,15 @@ describe('service accounts you manage', () => {
     const ACCOUNT = {
         id: 'svc_sync', name: 'Metadata sync', description: 'Reads graph metadata nightly', status: 'active' as const,
         createdAt: '2026-10-01T00:00:00+00:00', createdBy: null, managers: [], managed: false, singleManager: false,
-        unmanagedSince: '2026-10-20T00:00:00+00:00', pausesAt: inDays(5), handOver: null,
+        unmanagedSince: '2026-10-20T00:00:00+00:00', pausesAt: inDays(5), adminHold: false, handOver: null,
     }
 
-    it('are listed, each with how it stands, and lead to its own keys', async () => {
+    it('are listed, each with how it stands, and lead to its own page', async () => {
         mine.mockResolvedValue({ items: [ACCOUNT], total: 1, graceDays: 14 })
         render(<MyApiKeysPage />)
         const card = await screen.findByRole('list', { name: 'Service accounts you manage' })
         const link = within(card).getByRole('link', { name: /metadata sync/i })
-        expect(link).toHaveAttribute('href', '/me/service-accounts/svc_sync')
+        expect(link).toHaveAttribute('href', '/service-accounts/svc_sync')
         expect(within(link).getByText(/needs a manager — keys pause/i)).toBeInTheDocument()
     })
 

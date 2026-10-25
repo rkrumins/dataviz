@@ -33,11 +33,17 @@ export interface Standing {
 
 /** The one thing to know about an account, most pressing first. */
 export function standingOf(
-    account: Pick<ServiceAccount, 'status' | 'managed' | 'singleManager' | 'pausesAt'>,
+    account: Pick<ServiceAccount, 'status' | 'managed' | 'singleManager' | 'pausesAt' | 'adminHold'>,
     now: Date = new Date(),
 ): Standing {
     if (account.status === 'disabled') {
-        return { tone: 'neutral', label: 'Disabled', detail: 'Its keys don’t work until an administrator enables it.' }
+        return {
+            tone: 'neutral',
+            label: 'Disabled',
+            detail: account.adminHold
+                ? 'An administrator disabled it: its keys don’t work until an administrator enables it.'
+                : 'Its keys don’t work until one of its managers enables it.',
+        }
     }
     if (account.pausesAt && new Date(account.pausesAt) <= now) {
         return {
@@ -70,7 +76,7 @@ export function standingOf(
 }
 
 export function StandingChip({ account, now }: {
-    account: Pick<ServiceAccount, 'status' | 'managed' | 'singleManager' | 'pausesAt'>
+    account: Pick<ServiceAccount, 'status' | 'managed' | 'singleManager' | 'pausesAt' | 'adminHold'>
     now?: Date
 }) {
     const standing = standingOf(account, now)
@@ -111,5 +117,16 @@ export function ManagerRow({ manager, action }: { manager: ServiceAccountManager
             )}
             {action}
         </li>
+    )
+}
+
+/** "Anyone in Data platform can make keys that act as Metadata sync." */
+export function TeamNote({ teams, account }: { teams: string[]; account: string }) {
+    if (teams.length === 0) return null
+    return (
+        <p className="mt-2 flex items-start gap-1.5 text-xs text-ink-muted">
+            <Users className="w-3.5 h-3.5 mt-px shrink-0" aria-hidden />
+            Anyone in {teams.join(' or ')} can make keys that act as {account}.
+        </p>
     )
 }

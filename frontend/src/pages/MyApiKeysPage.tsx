@@ -40,6 +40,7 @@ import { Button, IconButton } from '@/components/ui/Button'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { serviceAccountHref } from '@/lib/serviceAccounts'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import { apiKeyService, type ApiKey, type ApiKeyOptions, type KeyRef } from '@/services/apiKeyService'
@@ -470,7 +471,7 @@ function ManagedAccounts({ accounts, total, onMore }: {
                     const standing = standingOf(a)
                     return (
                         <li key={a.id}>
-                            <a href={`/me/service-accounts/${encodeURIComponent(a.id)}`} className="group flex items-center gap-3 py-3">
+                            <a href={serviceAccountHref(a.id)} className="group flex items-center gap-3 py-3">
                                 <span className="w-9 h-9 rounded-xl bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 flex items-center justify-center shrink-0">
                                     <Bot className="w-4 h-4" aria-hidden />
                                 </span>

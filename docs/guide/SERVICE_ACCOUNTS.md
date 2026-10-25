@@ -16,6 +16,8 @@ it up, and goes on running when they move on.
 
 - An administrator **creates** it, names at least one **manager** — a person
   or a team — and gives it **workspace roles**.
+- Its managers **run** it on its own page: they rename it, disable and enable
+  it, appoint and remove managers, and take away roles it no longer needs.
 - Its managers — or a super admin — **make, rotate and revoke its keys**, each
   confirming it's them exactly as for their own keys. A key is recorded as
   made by the person, and acts as the account.
@@ -48,7 +50,8 @@ by super admins and org admins (the permission is
 keys: that takes managing the account, or `system:users:manage` (a super
 admin). The list says how each one stands, most
 pressing first: **Needs a manager**, with the day its keys pause; **Single
-manager**, when one person is all it depends on; **Disabled**.
+manager**, when one person is all it depends on; **Disabled**. Each account
+opens on its own page, the same one its managers use.
 
 ### Creating one
 
@@ -81,35 +84,52 @@ anyone remembering it.
 
 The trade-off is said wherever you choose one: **anyone in the team can make
 keys that act as the account**. Whoever controls the team's membership
-controls that, too — so once a team manages a service account, only an
-administrator of service accounts can add someone to it: not a team
-administrator alone, and never by approving an access request. Those who
-answer for the account are told whenever someone joins. A team your identity
-provider keeps changes as the provider says.
+controls that, too — so adding someone to a team that manages a service
+account is held to the rule for appointing a manager, below, and nobody joins
+one by having an access request approved. Those who answer for the account are
+told whenever someone joins. A team your identity provider keeps changes as
+the provider says.
 
-A manager can do whatever the account can, so appointing one — or handing an
-account over — takes being able to grant each of its roles yourself.
+A manager can do whatever the account can. So nobody — an administrator, or
+one of its managers — can make someone able to act as it who would gain access
+the appointer couldn't give them directly: for each of the account's roles,
+either they hold as much there already, or whoever appoints them could grant
+it there. A team holds what its own roles give every member. If someone would
+gain more, the refusal names the roles in the way. The same goes for handing
+an account over.
 
 ### Disabling
 
 **Disable** stops every key the account holds at once (`api_key_owner_inactive`)
 and refuses new ones; nothing is revoked, and **Enable** brings them back.
-Accounts are not deleted: disable one, and revoke its keys, instead.
+Its managers can disable and enable it too — but when an administrator of
+service accounts disables it, it is **held**: it stays disabled until an
+administrator enables it. Accounts are not deleted: disable one, and revoke
+its keys, instead.
 
 ---
 
 ## For managers
 
 The accounts you manage — yourself, or through a team — are listed under
-**Account → API keys → Service accounts you manage**. Open one for how it
-stands, who manages it and where it has a role, and its keys. **Create key**
-opens the same wizard as for your own keys: what you choose is checked
-against what the **account** can reach, and you confirm it's you before the
-token is shown.
+**Account → API keys → Service accounts you manage**. Each opens on its own
+page: how it stands, who manages it and where it has a role, and its keys.
+**Create key** opens the same wizard as for your own keys: what you choose is
+checked against what the **account** can reach, and you confirm it's you
+before the token is shown.
 
-Who manages an account, and its roles, are an administrator's to change.
-Someone allowed to manage users (a super admin) can make, rotate and revoke an
-account's keys without managing it; its managers are told when they do.
+You run the account there, as any of its managers:
+
+- **Rename** it, or say what it is for.
+- **Disable** it, which stops every key at once, and **enable** it again —
+  unless an administrator disabled it.
+- **Appoint** other managers, by the rule above, and **remove** them — though
+  not the last one: appoint another first.
+- **Take away** a role it no longer needs, so it reaches no more than it uses.
+
+Giving it a role is an administrator's to do. Someone allowed to manage users
+(a super admin) can make, rotate and revoke an account's keys without managing
+it; its managers are told when they do.
 
 What concerns the account is told to those who answer for it, naming it:
 the people who manage it themselves and, about a key, whoever made it while
