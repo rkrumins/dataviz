@@ -72,8 +72,9 @@ the workspace.
 1. Open the workspace and select the **Members** tab. (Or, on **Workspaces**,
    hover over the workspace's card and select **Members**.)
 2. Select **Add member**. The **Add member** dialog opens.
-3. Choose **User** or **Group**, search, and pick one. A steward adds users
-   only, so there's no **Group** choice.
+3. Choose **User**, **Group** or **Service account**, search, and pick one; a
+   service account says what it is for and who manages it. A steward adds
+   users and service accounts only, so there's no **Group** choice.
 4. Under **Role**, choose a role (see the table below). **Workspace member** is
    selected to start with. The list holds only the roles you may grant.
 5. Under **Access duration**, keep **Permanent**, or choose **24h**, **7d**,
@@ -147,10 +148,11 @@ Hover a chip for who did it and when, the identity-provider groups and
 provider, or the team. The counts at the top include **Organization-wide**.
 
 A row marked **Service account** is an account an integration acts as,
-through API keys its managers make; nobody signs in as it. Administrators
-give it its roles under **Administration → Service accounts** — it can't be
-added here — and you can still remove it here: its managers hear about it.
-See [Service Accounts](/guide/service-accounts).
+through API keys its managers make; nobody signs in as it. You let one in as
+you would a person — with **Add member**, or by approving a request its
+managers make for it — and remove it here: its managers hear about it. Its
+name opens its page, which says what it is for and who manages it. See
+[Service Accounts](/guide/service-accounts#for-workspaces).
 
 ### Removing someone
 
@@ -201,7 +203,8 @@ The requester follows it on **My access**.
 
 > **Note:** Stewards answer with **Workspace viewer** or **Workspace member**.
 > Requests for levels that run the workspace or let others in can't be made;
-> grant those with **Add member**. Nobody answers their own request.
+> grant those with **Add member**. Nobody answers their own request, nor one
+> for a service account they manage or asked for.
 
 ### How people get in
 
@@ -241,8 +244,9 @@ Then:
   hear about it.
 - Groups can still be bound with **Add member**.
 - A [service account](/guide/service-accounts)'s role is not an exception: the
-  identity provider doesn't know the account, so its roles are an
-  administrator's decision on its own page, and they don't end on their own.
+  identity provider doesn't know the account, so only admins give it a role
+  here, and it lasts until it is taken away, or until the end they chose. A
+  request for one is approved or declined, never pointed to a group.
 
 ### Reviewing who has access
 

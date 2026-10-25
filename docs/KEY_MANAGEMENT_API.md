@@ -237,13 +237,17 @@ accounts (`system:service-accounts:manage`) doesn't make keys on its own.
 | Route | Answers |
 |---|---|
 | `GET /api/v1/me/service-accounts?limit=&offset=` | The accounts you manage, yourself or through a team, by name: `{items, total, graceDays}` (`limit` up to 200) |
-| `GET /api/v1/me/service-accounts/{account_id}` | One of them — or any, for an administrator of service accounts or anyone holding `system:users:manage` — with its `roles`, `liveKeys` and `can` |
+| `GET /api/v1/me/service-accounts/{account_id}` | One of them — or any, for an administrator of service accounts or anyone holding `system:users:manage` — with its `roles`, `requests`, `liveKeys` and `can`. An admin or steward of a workspace it holds a role in reads it too: its roles in the workspaces they can open, and no `requests` |
 
 Each account: `id`, `name`, `description`, `status` (`active` or `disabled`), `adminHold` (an
 administrator disabled it), `managers` (people and teams, each with `inGoodStanding`), `managed`
 (someone can act for it now), `singleManager`, `unmanagedSince` and `pausesAt` (when nobody has, and
 when its keys pause). One account also says what you may do with it: `can`, with `view`, `edit`,
-`disable`, `enable`, `managers`, `keys`, `grant` and `revoke`, each `true` or `false`.
+`disable`, `enable`, `managers`, `keys`, `grant`, `revoke` and `request`, each `true` or `false`.
+Each of its `roles` has `bindingId`, `workspaceId`, `workspaceName`, `role`, `grantedAt` and
+`expiresAt` (`null` while it lasts until taken away); each of its `requests` — asked for it and
+still waiting on a workspace — has `id`, `workspaceId`, `workspaceName`, `role`, `createdAt`,
+`requestedBy` (who asked, by name) and `bindingId` (when it asks to keep that role).
 
 **Running an account** is for its managers and the administrators of service accounts
 (`system:service-accounts:manage`); **setting accounts up** is for the administrators alone. Both
@@ -256,7 +260,7 @@ are under `/api/v1/admin/service-accounts`:
 | `GET`, `PATCH /{id}` | Managers, administrators | Read one, with `can`; rename or describe it. `GET` also answers anyone holding `system:users:manage` |
 | `POST /{id}/disable`, `/{id}/enable` | Managers, administrators | Stop every key it holds, or let them work again. An administrator's disable holds it (`adminHold`): then only an administrator enables it |
 | `PUT`, `DELETE /{id}/managers/{users\|groups}/{subject_id}` | Managers, administrators | Appoint or remove a manager. Its managers can't remove the last one: `409` |
-| `POST /{id}/roles` | Administrators | Give it a workspace role: `{workspaceId, role}` |
+| `POST /{id}/roles` | Administrators | Give it a workspace role: `{workspaceId, role}`, and `expiresAt` to end it then |
 | `DELETE /{id}/roles/{binding_id}` | Managers, administrators | Take a role away |
 | `POST /hand-over` | Administrators | Move a person's manager seats to a successor: `{fromUserId, to: {type, id}}`, and `accountIds` to move only some |
 
@@ -266,6 +270,13 @@ role that administers a workspace or lets people in, and `403` when you couldn't
 yourself — or, appointing a manager or adding someone to a team that manages the account, when they
 would gain one of its roles that you couldn't grant them: a manager can do whatever the account can.
 The rules behind them: [Service Accounts](/guide/service-accounts).
+
+**A workspace's access** is given as a person's is, by its admins and stewards — on its members
+(`POST /api/v1/admin/workspaces/{ws_id}/members` with the account as `subjectId`), or by approving
+a request. Its managers ask with `POST /api/v1/access-requests` and `serviceAccountId`, ask to keep
+a role that ends with `POST /api/v1/access-requests/extend` and its `bindingId`, and withdraw with
+`POST /api/v1/me/access-requests/{id}/withdraw`. The rules, and how they are answered:
+[RBAC](/docs/rbac#access-requests).
 
 ---
 

@@ -9,6 +9,40 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Service accounts: workspaces give them access
+
+### Added
+
+- **A workspace lets a service account in as it lets a person in.** Its admins and stewards add
+  one on **Members** — **Add member**, then **Service account** — which says what each account is
+  for and who manages it, and give it what they could give a person, among the roles a service
+  account may hold, for a while if they like.
+- **Its managers ask a workspace for access** from the account's page, choosing a workspace, a
+  role and why; the workspace answers as it answers a person, seeing what the account is for, who
+  manages it and who asked. A role given for a while can be asked to be kept, and a request
+  waiting on a workspace is listed on the page, where any of its managers can withdraw it. The
+  activity log names who asked.
+- Nobody answers a request for a service account they manage, or one they asked for. A request
+  for one is never answered with a team or pointed to the identity provider, and where the
+  provider decides who is in a workspace, only its admins give a service account access — not as
+  an exception, which would end within 90 days.
+- **The admins and stewards of a workspace it is in can open its page**, to see what it is for and
+  who manages it, with its roles in the workspaces they can open.
+- An administrator giving it a role through the API (`POST …/service-accounts/{id}/roles`) can end
+  it on a date (`expiresAt`).
+
+### Changed
+
+- Adding a service account on a workspace's **Members** tab used to answer `409`; it is added
+  there now, under the rules above.
+
+### Upgrading
+
+- The upgrade job adds `access_requests.requested_by` (`20261025_1400_sa_requests`), who asked
+  for a request made for a service account. Nothing else to run.
+
+---
+
 ## [Unreleased] — Service accounts: their managers run them
 
 ### Added

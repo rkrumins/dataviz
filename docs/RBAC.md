@@ -523,8 +523,10 @@ one of its data sources is.
   shortcut reaches its keys whatever a row says. It may hold any workspace role that neither
   administers the workspace nor lets people in, and what is requestable is applied again at
   resolution, so a role later widened to administer brings it none of that. Its managers make
-  keys that act as it, whatever they can reach themselves, and run the account itself — all but
-  giving it roles, which takes `system:service-accounts:manage`. Appointing a manager delegates
+  keys that act as it, whatever they can reach themselves, run the account itself, and ask
+  workspaces for access for it; each workspace's admins and stewards give it roles there as they
+  give people ([Access requests](#access-requests)), and `system:service-accounts:manage` can
+  anywhere. Appointing a manager delegates
   the account's access, so it may give the appointee only what they hold already or what the
   appointer could grant them: for each of the account's roles, the appointee holds every
   permission it gives the account there (a team, through its own roles), or the appointer could
@@ -851,6 +853,41 @@ it is open. Approving it sets the binding's new end (`expiresAt` /
 binding's role, and writes `rbac.workspace.member_expiry_updated` beside
 `rbac.access_request.approved`. `PUT …/members/{binding}/expiry` answers it
 too, as approved by the admin.
+
+**For a service account.** A workspace gives one access as it gives a
+person, with two differences: only the roles a service account may hold —
+requestable ones — and never through a team or the identity provider, which
+doesn't know it.
+
+* Its managers — and the administrators of service accounts — ask: `POST
+  /access-requests` with `serviceAccountId` (`can.request`; 404 to whoever
+  can't see the account, 403 to whoever can but may not ask) records the
+  request as the account's, `requester_id`, and who asked,
+  `access_requests.requested_by`, whom the activity log names as its actor.
+  The account holds one open request per workspace, any of its managers
+  withdraws it, and `POST /access-requests/extend` takes the account's
+  `bindingId` from them. A `closed` workspace refuses it as for a person;
+  under `open`, `/join` admits only the caller, so an account's Viewer is
+  asked for too.
+* A request names it: `serviceAccount` (`description`, and `managers`, each
+  `type`, `name` and `fromIdp` — a team the identity provider keeps) and
+  `requestedBy`.
+* Answering: nobody who manages the account or asked for it (403). Approve
+  with `role` only — `groupId` is 422, and so is a role it may not hold — and
+  `route` is 409. Where the identity provider decides (`access_mode =
+  'idp'`), only `workspace:admin` approves one (403 for a steward), and the
+  grant is not an exception: no `exception`, no 90-day limit.
+* The Members tab adds one as it adds a person (`subjectId` the account's
+  `svc_` id), under the same rules: one of the workspace's roles that is
+  requestable (422), within the caller's ceiling (403), and in an `idp`
+  workspace `workspace:admin` only (403), never as an exception. `GET
+  …/members/service-accounts?q=` (`workspace:members:add`) finds up to 20
+  enabled accounts by name or purpose, each with its `description`,
+  `managers` and the `roles` it holds there; `grant-options` marks each role
+  `requestable`.
+* The admins and stewards of a workspace it holds a role in read the account
+  (`GET /admin/service-accounts/{id}`) — its roles in the workspaces they can
+  open — to know whose it is.
 
 **Reminders** (`backend/app/services/access_housekeeping.py`, an hourly
 control-plane sweeper under an advisory lock):

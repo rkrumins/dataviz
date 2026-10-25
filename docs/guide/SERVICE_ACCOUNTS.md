@@ -14,10 +14,14 @@ it up, and goes on running when they move on.
 
 ## How it works
 
-- An administrator **creates** it, names at least one **manager** — a person
-  or a team — and gives it **workspace roles**.
+- An administrator **creates** it and names at least one **manager** — a
+  person or a team. Creating it gives it no access.
+- Each **workspace** decides what it may do there, as it does for a person:
+  its admins and stewards add it on **Members**, or answer a request its
+  managers make for it.
 - Its managers **run** it on its own page: they rename it, disable and enable
-  it, appoint and remove managers, and take away roles it no longer needs.
+  it, appoint and remove managers, ask workspaces for access, and take away
+  roles it no longer needs.
 - Its managers — or a super admin — **make, rotate and revoke its keys**, each
   confirming it's them exactly as for their own keys. A key is recorded as
   made by the person, and acts as the account.
@@ -56,21 +60,19 @@ opens on its own page, the same one its managers use.
 ### Creating one
 
 Choose **Create service account**, give it a name and say what it is for,
-and choose at least one manager. Then open it and give it roles: pick a
-workspace and a role. A service account can hold any workspace role that
-neither administers the workspace nor lets people in — Workspace viewer to
-read, Workspace member or Data engineer to change data, but never Workspace
-admin or Workspace steward — and never a platform role or a place in a team.
-Its keys pick a new role up within half a minute.
+and choose at least one manager. Its access then comes from the workspaces it
+works in, [as a person's does](#for-workspaces); you can also give it a role
+yourself: open it, and pick a workspace and a role. A service account can hold
+any workspace role that neither administers the workspace nor lets people in —
+Workspace viewer to read, Workspace member or Data engineer to change data,
+but never Workspace admin or Workspace steward — and never a platform role or
+a place in a team. Its keys pick a new role up within half a minute.
 
 Those roles are all it has. Nothing else can be shared with it — a view, a
 template or a draft — and should someone later widen a role it holds to
 administer a workspace or let people in, it gets none of that. A view it made
 is its own only while it holds a role in that view's workspace: take the role
-away and the view is out of its reach too. In a workspace
-whose identity provider decides who is in it, its role is not an exception
-that ends within 90 days: the provider doesn't know the account, so the role
-is your decision here, and it lasts until you take it away.
+away and the view is out of its reach too.
 
 Wherever access is listed — a workspace's members, everyone with access,
 access reviews, the activity log — it is marked as a service account, and
@@ -109,6 +111,37 @@ its keys, instead.
 
 ---
 
+## For workspaces
+
+A workspace lets a service account in as it lets a person in: its admins and
+stewards decide, and no service account reaches it unless they — or an
+administrator of service accounts — say so.
+
+- **Add it.** On the workspace's **Members** tab, choose **Add member**, then
+  **Service account**. Find it by its name or by what it is for — each says
+  who manages it — and choose a role, for a while if you like. You give it
+  what you could give a person, among the roles a service account may hold.
+- **Answer a request for it.** Its managers ask from its page. The request
+  says what the account is for, who manages it — marking a team your identity
+  provider keeps — and who asked; approving lets them act here through it.
+  Approve it with a role, for a while if you like, or decline it, as you
+  would a person's. A request for a service account is never answered by
+  adding it to a team or pointing it to the identity provider, and nobody
+  answers one for an account they manage, or asked for.
+- **See whose it is.** Its name opens its page: what it is for, who manages
+  it, and its roles in the workspaces you can open.
+- **Remove it** as you would a person. Its managers hear about it.
+
+A service account never joins on its own: in a workspace that people may join
+at once, it is asked for like any other role, and a workspace that isn't
+taking requests takes none for it either — its admins add it. Where the
+identity provider decides who is in the workspace, only its admins give a
+service account access, and its role is not an exception that ends within 90
+days: the provider doesn't know the account, so the role is the admins'
+decision, and it lasts until it is taken away, or until the end they chose.
+
+---
+
 ## For managers
 
 The accounts you manage — yourself, or through a team — are listed under
@@ -125,11 +158,17 @@ You run the account there, as any of its managers:
   unless an administrator disabled it.
 - **Appoint** other managers, by the rule above, and **remove** them — though
   not the last one: appoint another first.
+- **Ask a workspace for access**: choose a workspace — one you are in, or one
+  **Find a workspace** lists — a role it may hold there, and why. Its admins
+  and stewards answer, as they answer a person. The request waits on the page,
+  where any of its managers can withdraw it. A workspace that isn't taking
+  requests says so: ask its admins to add the account.
+- **Keep access that's ending**: a role given for a while says when it ends,
+  and **Keep** asks the workspace to extend it.
 - **Take away** a role it no longer needs, so it reaches no more than it uses.
 
-Giving it a role is an administrator's to do. Someone allowed to manage users
-(a super admin) can make, rotate and revoke an account's keys without managing
-it; its managers are told when they do.
+Someone allowed to manage users (a super admin) can make, rotate and revoke an
+account's keys without managing it; its managers are told when they do.
 
 What concerns the account is told to those who answer for it, naming it:
 the people who manage it themselves and, about a key, whoever made it while
@@ -138,9 +177,9 @@ they still answer for it. An account managed only through a team tells up to
 while nobody answers for it, its administrators are told instead. That covers
 misuse of a key, a key about to expire, a key revoked by an administrator or
 by whatever held it, disabling or enabling the account, and anything said to
-the account itself, such as a workspace removing its access, an end date set
-on that access or its coming end, or a decision on a publication it asked
-for. Nobody reads the account's own inbox.
+the account itself, such as an answer to a request for its access, a
+workspace removing that access, an end date set on it or its coming end, or a
+decision on a publication it asked for. Nobody reads the account's own inbox.
 
 ---
 
@@ -184,9 +223,9 @@ Three things keep an integration from stopping because its person left.
 ## For integrators
 
 To get one, ask a super admin or org admin to create it — named for what it
-does — with you, or better your team, as its manager, and to give it a role in
-each workspace it works in. Then make its key under **Account → API keys →
-Service accounts you manage**.
+does — with you, or better your team, as its manager. Then, from its page, ask
+each workspace it works in for access — or ask their admins to add it — and
+make its key under **Account → API keys → Service accounts you manage**.
 
 Swap `Authorization: Bearer nxpat_…` for `Authorization: Bearer nxsat_…` and
 change nothing else: the same routes answer the same way.
@@ -218,7 +257,8 @@ manage. Both answer `403` with `"type": "access_denied"`.
 Creating, renaming, disabling and enabling an account, and appointing or
 removing its managers, appear in **Administration → Activity** with who did
 it. Its keys' events name the person who made, rotated or revoked each key,
-with the account as what it was done to.
+with the account as what it was done to, and a request for its access names
+the manager who asked.
 
 ---
 
