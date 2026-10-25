@@ -68,7 +68,7 @@ screen.
 
 | Term | What it means | Read more |
 |---|---|---|
-| **Manager** (of a service account) | A person, or a team, who answers for a service account and makes, rotates and revokes its keys. Appointed by an administrator. | [Service Accounts](/guide/service-accounts) |
+| **Manager** (of a service account) | A person, or a team, who answers for a service account: runs it on its own page, and makes, rotates and revokes its keys. Appointed by an administrator, or by another of its managers. | [Service Accounts](/guide/service-accounts) |
 | **Merge** | Apply a reviewed draft's changes to the published version, from its review. | [The Review Center](/guide/review-center) |
 | **Merge request** | A request to merge a draft, opened with **Submit for review**. A reviewer can **Approve**, **Merge** or **Dismiss** it. | [The Review Center](/guide/review-center) |
 | **Multi-entity trace** | A trace started from several entities at once: choose **Select**, pick the entities, then **Trace N Entities** (for example **Trace 3 Entities**). | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
