@@ -148,7 +148,7 @@ export function PersonChip({ id, person, size = 'sm', showEmail = false, caption
             }
             detail={deleted
                 ? 'This account has been deleted. It is still named here: the record is of what happened.'
-                : link ? (account ? 'Opens it in Service accounts.' : 'Opens their account in User Management.') : undefined}
+                : link ? (account ? 'Opens its own page.' : 'Opens their account in User Management.') : undefined}
             className={cn(OUTER, className)}
         >
             <span className={cn('group/person inline-flex min-w-0 max-w-full items-center', s.gap)}>
