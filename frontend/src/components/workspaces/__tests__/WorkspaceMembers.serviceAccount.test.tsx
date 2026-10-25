@@ -3,7 +3,9 @@
  * name, with what it is for and who manages it — a team the identity
  * provider keeps, marked — and given only a role that neither administers
  * the workspace nor lets people in. Where the identity provider decides who
- * is in, only the workspace's admins add one.
+ * is in, only the workspace's admins add one. Removing someone who manages
+ * one names it, when its role here gives more than they keep, and removes
+ * that role too if asked.
  */
 import { render as rtlRender, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -95,5 +97,51 @@ describe('Add member — a service account', () => {
         await u.click(await screen.findByRole('button', { name: 'Add member' }))
         expect(await screen.findByText('Choose a user')).toBeInTheDocument()
         expect(screen.queryByRole('button', { name: 'Service account' })).not.toBeInTheDocument()
+    })
+})
+
+describe('Removing someone who manages one', () => {
+    const ADA = {
+        bindingId: 'bnd_ada', role: 'workspace_member', grantedAt: '2026-01-01T00:00:00Z', grantedBy: null,
+        subject: { type: 'user', id: 'usr_ada', displayName: 'Ada Lovelace', secondary: 'ada@x.io' },
+    }
+
+    beforeEach(() => {
+        vi.mocked(workspaceMembersService.list).mockResolvedValue([ADA] as never)
+        vi.mocked(workspaceMembersService.revoke).mockResolvedValue(undefined as never)
+        vi.mocked(workspaceMembersService.previewRevoke).mockResolvedValue({
+            affectedUsers: 1, affectedWorkspaces: 1, gainedPerms: [], lostPerms: ['workspace:view:read'],
+            userImpact: [{ userId: 'usr_ada', displayName: 'Ada Lovelace', email: 'ada@x.io', gained: [], lost: ['workspace:view:read'] }],
+            serviceAccounts: [{
+                id: 'svc_sync', name: 'Metadata sync', managedBy: ['Ada Lovelace'],
+                bindings: [{ bindingId: 'bnd_sync', role: 'workspace_member' }],
+            }],
+        })
+    })
+
+    async function openRemoval() {
+        const u = userEvent.setup()
+        render(<WorkspaceMembers workspaceId="ws_1" />)
+        await u.click(await screen.findByTitle('Revoke binding'))
+        const kept = await screen.findByRole('region', { name: 'Service accounts that keep access here' })
+        return { u, kept }
+    }
+
+    it('names the account they could still act through, and leaves it unless asked', async () => {
+        const { u, kept } = await openRemoval()
+        expect(kept).toHaveTextContent('Metadata sync')
+        expect(kept).toHaveTextContent('Workspace member here · Ada Lovelace manages it')
+        await u.click(screen.getByText('Revoke binding', { selector: 'button' }))
+        await waitFor(() => expect(workspaceMembersService.revoke).toHaveBeenCalledTimes(1))
+        expect(workspaceMembersService.revoke).toHaveBeenCalledWith('ws_1', 'bnd_ada', { reason: undefined })
+    })
+
+    it('removes its role too when asked', async () => {
+        const { u } = await openRemoval()
+        await u.click(screen.getByRole('checkbox', { name: 'Remove its role here too' }))
+        await u.click(screen.getByText('Revoke binding', { selector: 'button' }))
+        await waitFor(() => expect(workspaceMembersService.revoke).toHaveBeenCalledTimes(2))
+        expect(workspaceMembersService.revoke).toHaveBeenNthCalledWith(1, 'ws_1', 'bnd_ada', { reason: undefined })
+        expect(workspaceMembersService.revoke).toHaveBeenNthCalledWith(2, 'ws_1', 'bnd_sync', { reason: undefined })
     })
 })

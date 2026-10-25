@@ -46,6 +46,7 @@ import { AccessReviewPanel } from './AccessReviewPanel'
 import { useGrantOptions } from '@/hooks/useWorkspaceAccess'
 import { useAuthStore } from '@/store/auth'
 import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
+import { AccountsStillReaching } from './AccountsStillReaching'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -370,6 +371,8 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
         preview: ImpactPreviewResponse | null
         error: string | null
     } | null>(null)
+    // Service accounts the person manages whose roles here to remove as well.
+    const [alsoRemove, setAlsoRemove] = useState<Set<string>>(new Set())
     const revokeReason = useReasonDraft('member-remove')
     // Bindings (the raw grants) vs People (the flattened, inheritance-
     // aware list of everyone who can actually get in).
@@ -531,19 +534,28 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
         }
     }
 
-    const handleRevoke = async (member: WorkspaceMemberResponse, reason?: string) => {
+    const handleRevoke = async (member: WorkspaceMemberResponse, reason?: string, accountRoles: string[] = []) => {
         setActionLoading(`revoke-${member.bindingId}`)
         setError(null)
         try {
             await workspaceMembersService.revoke(workspaceId, member.bindingId, { reason })
+            // Roles of the service accounts they manage, as chosen: through
+            // those accounts they could still act here.
+            for (const bindingId of accountRoles) {
+                await workspaceMembersService.revoke(workspaceId, bindingId, { reason })
+            }
             await fetchMembers()
-            notify('success', `Revoked ${member.subject.displayName ?? member.subject.id}`)
+            const also = accountRoles.length === 0 ? ''
+                : accountRoles.length === 1 ? ' and a service account’s role here'
+                    : ` and ${accountRoles.length} service account roles here`
+            notify('success', `Revoked ${member.subject.displayName ?? member.subject.id}${also}`)
             setModal(null)
             setRevokePreview(null)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to revoke binding'
             notify('error', msg)
             setError(msg)
+            void fetchMembers()
         } finally {
             setActionLoading(null)
         }
@@ -556,6 +568,7 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
      */
     const handleRequestRevoke = async (member: WorkspaceMemberResponse) => {
         revokeReason.reset()
+        setAlsoRemove(new Set())
         setRevokePreview({ member, loading: true, preview: null, error: null })
         try {
             const preview = await workspaceMembersService.previewRevoke(
@@ -983,10 +996,16 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
                 }
                 onCancel={() => setRevokePreview(null)}
                 onConfirm={() => {
-                    if (revokePreview) void handleRevoke(revokePreview.member, revokeReason.take())
+                    if (revokePreview) void handleRevoke(revokePreview.member, revokeReason.take(), [...alsoRemove])
                 }}
                 reason={revokeReason}
-            />
+            >
+                <AccountsStillReaching
+                    accounts={revokePreview?.preview?.serviceAccounts ?? []}
+                    chosen={alsoRemove}
+                    onChange={setAlsoRemove}
+                />
+            </ImpactPreviewModal>
         </div>
     )
 }

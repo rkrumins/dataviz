@@ -268,10 +268,23 @@ export interface ImpactPreviewUser {
     lost: string[]
 }
 
+/** A service account someone losing access manages, with its roles in the
+ *  workspace that give more than they keep: through its keys they could
+ *  still act there. */
+export interface ImpactPreviewServiceAccount {
+    id: string
+    name: string
+    /** Those losing access who manage it. */
+    managedBy: string[]
+    bindings: { bindingId: string; role: string }[]
+}
+
 export interface ImpactPreviewResponse {
     affectedUsers: number
     affectedWorkspaces: number
     gainedPerms: string[]
     lostPerms: string[]
     userImpact: ImpactPreviewUser[]
+    /** Removing a binding: service accounts those losing access manage that keep more there. */
+    serviceAccounts?: ImpactPreviewServiceAccount[]
 }
