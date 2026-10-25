@@ -9,10 +9,12 @@ how many distinct). FalkorDB gets there with pattern comprehensions placed
 where the engine evaluates them correctly (S0_FINDINGS §15), in a tail after
 each statement's head, or walked from the named entities when a relationship
 names its far end. Here, on a graph with a cycle, a diamond, a multi-parent
-entity, duplicate names and a rollup edge, a matrix of relationships — every
-axis, quantifier and count, alone, beside other conditions, under OR and
-NOT, nested three deep — must match exactly the same entities in the
-uncapped engine, the capped one, a rule's count and a rule's membership.
+entity, duplicate names, a rollup edge, links that are not lineage (a tag,
+a glossary term) and lineage the graph spells in lower case, a matrix of
+relationships — every axis, quantifier and count, through lineage, every
+link or named edge types, alone, beside other conditions, under OR and NOT,
+nested three deep — must match exactly the same entities in the uncapped
+engine, the capped one, a rule's count and a rule's membership.
 
 Run:  RUN_FALKOR_LIVE=1 FALKORDB_HOST=localhost FALKORDB_PORT=6379 \\
       python -m pytest tests/integration/test_search_relations_live.py -q
@@ -67,6 +69,10 @@ NODES = [
     (23, "dataset", "a", {}), (24, "dataset", "b", {}), (25, "dataset", "c", {}),
     (26, "dataset", "d1", {}), (27, "dataset", "d2", {}), (28, "dataset", "d3", {}),
     (29, "dataset", "d4", {}),
+    (30, "dataJob", "nightly load", {}),
+    (31, "tag", "PII", {}),
+    (32, "glossaryTerm", "Customer", {}),
+    (33, "dataset", "lonely", {}),
 ]
 # parent -> child. "shared" (21) has two parents.
 CONTAINMENT = [
@@ -93,7 +99,16 @@ LINEAGE = [
     # Both ways at once.
     (18, 21, "TRANSFORMS", 0.6, {"job": "j2"}), (21, 18, "FLOWS_TO", 0.6, {}),
 ]
-LINEAGE_TYPES = ["AGGREGATED", "FLOWS_TO", "TRANSFORMS"]
+# Links that are not lineage — a tag, a glossary term — and lineage the graph
+# spells in lower case: the ontology declares PRODUCES, the graph holds
+# ``produces``. "lonely" (33) has no edges at all.
+LINKS = [
+    (30, 14, "produces", 0.9, {"job": "nightly"}), (30, 18, "produces", 0.7, {}),
+    (14, 31, "TAGGED_WITH", None, None), (20, 31, "TAGGED_WITH", None, None),
+    (18, 32, "DEFINED_BY", None, None), (17, 32, "DEFINED_BY", None, None),
+]
+LINEAGE_TYPES = ["AGGREGATED", "FLOWS_TO", "PRODUCES", "TRANSFORMS"]
+METADATA_TYPES = ["DEFINED_BY", "TAGGED_WITH"]
 
 
 def U(i: int) -> str:
@@ -159,12 +174,18 @@ AXES = [
     ("upstream", {"edge": CONFIDENT}),
     ("downstream", {"edgeTypes": ["AGGREGATED"]}),
     ("downstream", {"maxHops": 2, "edge": NOT_BATCH}),
+    # Every link, and edge types named in any case.
+    ("neighbor", {"edgeClass": "links"}), ("downstream", {"edgeClass": "links", "maxHops": 2}),
+    ("upstream", {"edgeTypes": ["produces"]}),
+    ("downstream", {"edgeTypes": ["Tagged_With", "defined_by"]}),
 ]
 CONDITIONS = [
     None, TYPE("dataset"), TYPE("domain", "workspace"), NAMED("orders"), OWNER, DESCRIBED,
     UNFED, TOP, rel("parent", TYPE("domain")), rel("root", NAMED("Sales")),
     rel("upstream"), AND(TYPE("dataset"), rel("child", DESCRIBED)),
     OR(NAMED("Finance"), rel("child", TYPE("column"))),
+    {"kind": "isOrphan", "edgeClass": "links"}, {"kind": "hasOutgoing", "edgeTypes": ["tagged_with"]},
+    {"kind": "degree", "direction": "both", "op": "gte", "value": 3, "edgeClass": "any"},
 ]
 QUANTIFIERS = [
     {}, {"quantifier": "none"}, {"quantifier": "all"},
@@ -234,6 +255,21 @@ def _matrix():
         rel("upstream", edge=EDGE("job", "isNotSet"), quantifier="none"),
         rel("downstream", IS(29), maxHops=2, edge=EDGE("mode", "neq", "batch")),
         rel("upstream", IS(23), maxHops=3, edge=NOT_BATCH),
+        # Edge shapes over every link and every edge, and named in any case.
+        {"kind": "isOrphan", "edgeClass": "links"}, {"kind": "isOrphan", "edgeClass": "any"},
+        {"kind": "isRoot", "edgeClass": "links"}, {"kind": "isLeaf", "edgeClass": "any"},
+        {"kind": "hasIncoming", "edgeTypes": ["DEFINED_BY"]},
+        {"kind": "hasOutgoing", "edgeTypes": ["PRODUCES"]},
+        {"kind": "degree", "direction": "out", "op": "gt", "value": 2, "edgeClass": "containment"},
+        {"kind": "degree", "direction": "both", "op": "eq", "value": 2, "edgeClass": "links"},
+        AND(TYPE("dataset"), rel("neighbor", TYPE("tag"), edgeClass="links")),
+        AND(TYPE("dataset"), NOT({"kind": "isOrphan", "edgeClass": "any"})),
+        rel("downstream", rel("downstream", TYPE("glossaryTerm"), edgeClass="links"),
+            edgeTypes=["PRODUCES"]),
+        rel("descendant", rel("neighbor", TYPE("tag"), edgeClass="links")),
+        rel("upstream", IS(30), edgeTypes=["produces"]),
+        rel("neighbor", IS(31), edgeClass="links", maxHops=2),
+        rel("upstream", OR(IS(13), rel("ancestor", IS(13))), maxHops=2, edgeClass="links"),
     ]
     return cases
 
@@ -264,7 +300,9 @@ async def provider():
         auth_enabled=False,
     )
     p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
-    p.set_resolved_edge_metadata({t: {"isLineage": True} for t in LINEAGE_TYPES}, LINEAGE_TYPES)
+    p.set_resolved_edge_metadata({**{t: {"isLineage": True} for t in LINEAGE_TYPES},
+                                  **{t: {} for t in METADATA_TYPES}}, LINEAGE_TYPES)
+    p.set_source_type_aliases({"PRODUCES": ["produces"]})
     await p._ensure_connected()
     for label in sorted({label for _, label, _, _ in NODES}):
         await p._graph.query(f"CREATE INDEX FOR (n:`{label}`) ON (n.urn)")
@@ -275,7 +313,7 @@ async def provider():
     for s, t in CONTAINMENT:
         await p._graph.query("MATCH (a {urn: $s}), (b {urn: $t}) CREATE (a)-[:CONTAINS]->(b)",
                              {"s": U(s), "t": U(t)})
-    for s, t, kind, conf, props in LINEAGE:
+    for s, t, kind, conf, props in LINEAGE + LINKS:
         await p._graph.query(
             f"MATCH (a {{urn: $s}}), (b {{urn: $t}}) CREATE (a)-[r:{kind}]->(b) "
             "SET r.confidence = $c, r.properties = $p",
@@ -296,7 +334,7 @@ def _stub() -> StubDeepSearchProvider:
                + [{"source": U(a), "target": U(b), "type": t,
                    **({"confidence": c} if c is not None else {}),
                    **({"properties": props} if props is not None else {})}
-                  for a, b, t, c, props in LINEAGE]),
+                  for a, b, t, c, props in LINEAGE + LINKS]),
         lineage_edge_types=LINEAGE_TYPES)
 
 
@@ -497,6 +535,10 @@ PATHS = [
     {"sourceUrns": [U(13)], "targetWhere": {"kind": "all"}, "edgeTypes": ["AGGREGATED"]},
     {"sourceUrns": [U(1)], "targetWhere": TYPE("city"), "edgeClass": "containment"},
     {"sourceWhere": TYPE("dataset"), "targetWhere": {"kind": "all"}, "maxPaths": 3},
+    {"sourceUrns": [U(30)], "targetWhere": TYPE("tag", "glossaryTerm"), "edgeClass": "links"},
+    {"sourceUrns": [U(31)], "direction": "incoming", "targetWhere": TYPE("dataJob"),
+     "edgeClass": "any"},
+    {"sourceUrns": [U(30)], "targetUrns": [U(11)], "edgeTypes": ["PRODUCES", "flows_to"]},
 ]
 
 
@@ -538,3 +580,24 @@ def test_the_paths_are_telling():
                                                  SCOPES["data_source"], results="paths")))
              for raw in PATHS]
     assert sum(1 for page in found if page.paths) >= len(PATHS) - 1
+
+
+async def test_a_type_the_data_source_lacks_is_refused(provider):
+    """A misspelt edge type is refused by every engine, naming the nearest
+    type — not a condition that silently matches nothing."""
+    from backend.app.services.deep_search import CompileError
+
+    scope = SCOPES["data_source"]
+    for predicate in (rel("downstream", edgeTypes=["PRODUCE"]),
+                      {"kind": "hasIncoming", "edgeTypes": ["PRODUCE"]}):
+        query = _query(predicate, scope)
+        with pytest.raises(CompileError, match="did you mean PRODUCES"):
+            await provider.deep_search(query)
+        with pytest.raises(CompileError, match="did you mean PRODUCES"):
+            await provider.deep_search_session(query, context=SearchRunContext(
+                data_version="relations-v1", scope_hash="h-refused"))
+        answer = await provider.deep_search_membership(
+            scope, [("q", query.predicate)], ALL_URNS, context=SearchRunContext())
+        assert "did you mean PRODUCES" in answer["errors"]["q"]
+    with pytest.raises(CompileError, match="CONTAINS is a containment edge"):
+        await provider.deep_search(_query(rel("upstream", edgeTypes=["CONTAINS"]), scope))

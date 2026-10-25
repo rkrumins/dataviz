@@ -107,10 +107,12 @@ ValueType = Literal["auto", "string", "number", "boolean", "date"]
 lets the value decide: text compares as text, numbers as numbers — the
 behaviour every predicate written before types existed was built on."""
 
-EdgeClass = Literal["lineage", "containment", "any"]
+EdgeClass = Literal["lineage", "containment", "links", "any"]
 """Edge-class selector shared by DegreePredicate, WithinHopsPredicate,
-PathPredicate. Resolved to a concrete edge-type list at compile time
-via the active ontology — never hardcoded relationship names."""
+PathPredicate: the ontology's lineage types, its containment types,
+``links`` — every type but containment — or ``any`` type at all. Resolved
+to a concrete edge-type list at compile time via the active ontology and
+the graph's own types — never hardcoded relationship names."""
 
 
 class PropertyPredicate(_Base):
@@ -605,7 +607,8 @@ class RelatedPredicate(_Base):
     a dashboard whose parent is Finance"); without one, any relative will
     do. A lineage relationship may also require every edge it walks to meet
     ``edge``, and walk only ``edgeTypes`` (by default every lineage type but
-    the rollups).
+    the rollups) — or, with ``edgeClass='links'``, every link: any edge but
+    the hierarchy's, the rollups aside.
 
     ``quantifier``: ``any`` relative meets the condition, ``none`` does, or
     ``all`` do — and there is at least one. ``count`` compares how many
@@ -621,6 +624,7 @@ class RelatedPredicate(_Base):
     max_hops: Optional[int] = Field(None, alias="maxHops", ge=1, le=RELATION_DEPTH_MAX)
     edge_types: Optional[List[str]] = Field(
         None, alias="edgeTypes", min_length=1, max_length=32)
+    edge_class: Optional[Literal["lineage", "links"]] = Field(None, alias="edgeClass")
     edge: Optional[EdgePredicateType] = None
 
     @model_validator(mode="after")
@@ -630,8 +634,12 @@ class RelatedPredicate(_Base):
             raise ValueError(f"{axis} is one step")
         if axis == "root" and (self.min_hops != 1 or hi is not None):
             raise ValueError("root takes no hops: it is the top-level container")
-        if axis in CONTAINMENT_AXES and (self.edge is not None or self.edge_types):
-            raise ValueError("edge filters apply to lineage relationships")
+        if axis in CONTAINMENT_AXES and (self.edge is not None or self.edge_types
+                                         or self.edge_class):
+            raise ValueError("edge types and edge conditions apply to links — feeds, fed by, "
+                             "linked to — not to the hierarchy")
+        if self.edge_types and self.edge_class:
+            raise ValueError("name edge types or an edge class, not both")
         if hi is not None and hi < self.min_hops:
             raise ValueError("maxHops is less than minHops")
         if axis in LINEAGE_AXES and self.hop_range()[1] > RELATION_ANCHORED_HOPS_MAX:

@@ -22,6 +22,7 @@ from pydantic import TypeAdapter, ValidationError as PydanticValidationError
 from backend.app.providers.falkordb_deep_search import (
     CompileError,
     _build_candidate_cypher,
+    _build_compiler_for_provider,
     _build_within_hops_continuation,
     _Compiler,
     tail_clauses,
@@ -98,8 +99,11 @@ class TestModel:
         (rel("child", minHops=2, maxHops=2), "child is one step"),
         (rel("root", maxHops=3), "root takes no hops"),
         (rel("ancestor", edge={"kind": "edgeHasProperty", "key": "k"}),
-         "edge filters apply to lineage"),
-        (rel("descendant", edgeTypes=["X"]), "edge filters apply to lineage"),
+         "edge conditions apply to links"),
+        (rel("descendant", edgeTypes=["X"]), "edge types and edge conditions apply to links"),
+        (rel("child", edgeClass="links"), "not to the hierarchy"),
+        (rel("upstream", edgeClass="links", edgeTypes=["X"]),
+         "name edge types or an edge class, not both"),
         (rel("upstream", minHops=3, maxHops=2), "maxHops is less than minHops"),
         (rel("downstream", maxHops=11), "at most 10 hops"),
         (rel("child", quantifier="none", count={"op": "gt", "value": 1}),
@@ -673,3 +677,139 @@ class TestService:
         with pytest.raises(ValidationError, match="at most 3"):
             await _service(_graph()).search(_query(AND(
                 rel("downstream", TYPE("dashboard"), maxHops=5))))
+
+
+# ---------------------------------------------------------------------------
+# Edge types: named in any case, every link, every edge
+# ---------------------------------------------------------------------------
+
+#: A data source's edge types, each one's upper case → its spellings there:
+#: the graph keeps ``produces`` in lower case beside the declared PRODUCES.
+SPELLINGS = {"AGGREGATED": ["AGGREGATED"], "CONTAINS": ["CONTAINS"], "FLOWS_TO": ["FLOWS_TO"],
+             "PRODUCES": ["PRODUCES", "produces"], "TAGGED_WITH": ["TAGGED_WITH"]}
+
+
+def _spelled() -> _Compiler:
+    return _compiler(edge_type_spellings=SPELLINGS)
+
+
+def _tagged() -> StubDeepSearchProvider:
+    """job → orders → revenue (lineage); orders and revenue tagged PII;
+    job contains a step; ``lonely`` has no edges at all."""
+    nodes = [("job", "dataJob"), ("step", "task"), ("orders", "dataset"),
+             ("revenue", "dashboard"), ("pii", "tag"), ("lonely", "dataset")]
+    edges = [("job", "orders", "produces"), ("orders", "revenue", "FLOWS_TO"),
+             ("orders", "pii", "TAGGED_WITH"), ("revenue", "pii", "TAGGED_WITH"),
+             ("job", "step", "CONTAINS")]
+    return StubDeepSearchProvider(
+        nodes=[{"urn": u, "entityType": t, "displayName": u} for u, t in nodes],
+        edges=[{"source": s, "target": t, "type": k} for s, t, k in edges],
+        lineage_edge_types=["produces", "FLOWS_TO"])
+
+
+async def _tagged_matching(raw) -> list:
+    stub = _tagged()
+    answer = await stub.deep_search_membership(
+        SimpleNamespace(root_urns=None, entity_types=None), [("q", P(raw))],
+        [n["urn"] for n in stub._nodes])
+    return sorted(answer["matches"]["q"])
+
+
+class TestEdgeTypes:
+    def test_a_named_type_is_read_whatever_its_case(self):
+        c = _spelled()
+        c.compile(P(rel("downstream", TYPE("dataset"), edgeTypes=["Produces"])))
+        assert "(n)-[:PRODUCES|produces]->(_xr0)" in c.tail[0]
+        assert _spelled().compile(P({"kind": "isLeaf", "edgeTypes": ["tagged_with"]})) == (
+            "NOT (n)-[:TAGGED_WITH]->()")
+
+    def test_a_type_the_data_source_lacks_is_refused_naming_the_nearest(self):
+        with pytest.raises(CompileError, match="Edge type 'PRODUCE' isn't in this data source "
+                                               "— did you mean PRODUCES"):
+            _spelled().compile(P(rel("downstream", edgeTypes=["PRODUCE"])))
+        with pytest.raises(CompileError, match="Edge type 'qqq' isn't in this data source$"):
+            _spelled().compile(P({"kind": "hasIncoming", "edgeTypes": ["qqq"]}))
+
+    def test_a_relationship_never_walks_containment_as_a_link(self):
+        with pytest.raises(CompileError, match="contains is a containment edge — follow it "
+                                               "with Contains or Is inside"):
+            _spelled().compile(P(rel("upstream", edgeTypes=["contains"])))
+        # Counting its edges is another matter: more than five children.
+        c = _spelled()
+        c.compile(P({"kind": "degree", "direction": "out", "op": "gt", "value": 5,
+                     "edgeTypes": ["contains"]}))
+        assert c.tail == ["size([(n)-[:CONTAINS]->(_xo0) | 1]) > $p1"]
+
+    def test_links_are_every_type_but_containment(self):
+        assert _spelled().compile(P({"kind": "isOrphan", "edgeClass": "links"})) == (
+            "(NOT (n)<-[:AGGREGATED|FLOWS_TO|PRODUCES|TAGGED_WITH|produces]-() AND "
+            "NOT (n)-[:AGGREGATED|FLOWS_TO|PRODUCES|TAGGED_WITH|produces]->())")
+
+    def test_a_relationship_through_every_link_leaves_out_the_rollups(self):
+        c = _spelled()
+        c.compile(P(rel("neighbor", TYPE("tag"), edgeClass="links")))
+        assert "(n)-[:FLOWS_TO|PRODUCES|TAGGED_WITH|produces]-(_xr0)" in c.tail[0]
+
+    def test_any_is_every_edge_type(self):
+        assert _spelled().compile(P({"kind": "hasIncoming", "edgeClass": "any"})) == (
+            "(n)<-[:AGGREGATED|CONTAINS|FLOWS_TO|PRODUCES|TAGGED_WITH|produces]-()")
+        c = _spelled()
+        c.compile(P({"kind": "withinHops", "urns": ["u"], "hops": 2, "edgeClass": "any"}))
+        assert "TAGGED_WITH" in c.hoisted_within_hops[0]["edge_types"]
+
+    def test_every_link_counts_in_a_projection_too(self):
+        c = _spelled()
+        c.compile(P(rel("upstream", {"kind": "isRoot", "edgeClass": "links"})))
+        assert ("size([(_xr0)<-[:AGGREGATED|FLOWS_TO|PRODUCES|TAGGED_WITH|produces]-(_xd1) "
+                "| 1]) = $p2") in c.tail[0]
+
+    def test_every_link_needs_the_resolved_ontology(self):
+        for raw in ({"kind": "isRoot", "edgeClass": "links"}, rel("upstream", edgeClass="links")):
+            c = _Compiler()
+            with pytest.raises(CompileError, match="ontology resolution must complete"):
+                c.compile(P(raw))
+
+    def test_without_the_data_sources_types_names_are_taken_as_given(self):
+        c = _compiler()
+        c.compile(P(rel("downstream", edgeTypes=["Whatever"])))
+        assert "[:Whatever]" in c.tail[0]
+        # And any edge is what the ontology classifies.
+        assert _compiler().compile(P({"kind": "hasIncoming", "edgeClass": "any"})) == (
+            "(n)<-[:AGGREGATED|CONTAINS|FLOWS_TO]-()")
+
+    def test_the_provider_spells_every_type_it_has(self):
+        """What the ontology declares, what the graph holds, each in every
+        spelling the graph has it in."""
+        from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+        provider = FalkorDBProvider(host="localhost", port=1, graph_name="x", auth_enabled=False)
+        provider.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+        provider.set_resolved_edge_metadata({"PRODUCES": {}, "TAGGED_WITH": {}, "FLOWS_TO": {}},
+                                            ["FLOWS_TO", "PRODUCES"])
+        provider._observed_rel_types = {"produces", "FLOWS_TO", "Custom", "CONTAINS"}
+        c = _build_compiler_for_provider(provider)
+        assert c._edge_type_spellings == {
+            "CONTAINS": ["CONTAINS"], "CUSTOM": ["CUSTOM", "Custom"], "FLOWS_TO": ["FLOWS_TO"],
+            "PRODUCES": ["PRODUCES", "produces"], "TAGGED_WITH": ["TAGGED_WITH"]}
+        # Before the ontology is resolved, nothing is known to refuse a name by.
+        bare = FalkorDBProvider(host="localhost", port=1, graph_name="y", auth_enabled=False)
+        assert _build_compiler_for_provider(bare)._edge_type_spellings is None
+
+    def test_a_walk_over_every_link_runs_after_a_lineage_one(self):
+        c = _spelled()
+        c.compile(P(AND(rel("neighbor", TYPE("tag"), edgeClass="links"),
+                        rel("neighbor", TYPE("dataset")))))
+        assert "[:FLOWS_TO]-(" in c.tail[0] and "TAGGED_WITH" in c.tail[1]
+
+    async def test_the_reference_reads_names_and_classes_alike(self):
+        assert await _tagged_matching(rel("downstream", TYPE("dataset"),
+                                          edgeTypes=["PRODUCES"])) == ["job"]
+        assert await _tagged_matching(rel("neighbor", TYPE("tag"))) == []
+        assert await _tagged_matching(rel("neighbor", TYPE("tag"), edgeClass="links")) == [
+            "orders", "revenue"]
+        assert await _tagged_matching({"kind": "isOrphan"}) == ["lonely", "pii", "step"]
+        assert await _tagged_matching({"kind": "isOrphan", "edgeClass": "links"}) == [
+            "lonely", "step"]
+        assert await _tagged_matching({"kind": "isOrphan", "edgeClass": "any"}) == ["lonely"]
+        assert await _tagged_matching({"kind": "degree", "direction": "out", "op": "gte",
+                                       "value": 2, "edgeClass": "any"}) == ["job", "orders"]

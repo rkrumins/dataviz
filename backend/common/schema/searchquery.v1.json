@@ -167,6 +167,7 @@
           "enum": [
             "lineage",
             "containment",
+            "links",
             "any"
           ],
           "title": "Edgeclass",
@@ -735,6 +736,7 @@
           "enum": [
             "lineage",
             "containment",
+            "links",
             "any"
           ],
           "title": "Edgeclass",
@@ -775,6 +777,7 @@
           "enum": [
             "lineage",
             "containment",
+            "links",
             "any"
           ],
           "title": "Edgeclass",
@@ -852,6 +855,7 @@
           "enum": [
             "lineage",
             "containment",
+            "links",
             "any"
           ],
           "title": "Edgeclass",
@@ -892,6 +896,7 @@
           "enum": [
             "lineage",
             "containment",
+            "links",
             "any"
           ],
           "title": "Edgeclass",
@@ -957,6 +962,7 @@
           "enum": [
             "lineage",
             "containment",
+            "links",
             "any"
           ],
           "title": "Edgeclass",
@@ -1353,6 +1359,7 @@
           "enum": [
             "lineage",
             "containment",
+            "links",
             "any"
           ],
           "title": "Edgeclass",
@@ -1793,7 +1800,7 @@
       "type": "object"
     },
     "RelatedPredicate": {
-      "description": "Entities whose related entities meet a condition.\n\n``axis`` says which relatives: up the containment tree (``parent``, any\n``ancestor``, the top-level container ``root``), down it (``child``, any\n``descendant``), or along lineage \u2014 ``upstream`` (what feeds it),\n``downstream`` (what it feeds), ``neighbor`` (either way) \u2014 one step, or\n``minHops`` to ``maxHops``. ``where`` is the condition a relative must\nmeet: any predicate, relationships included, so conditions chain (\"feeds\na dashboard whose parent is Finance\"); without one, any relative will\ndo. A lineage relationship may also require every edge it walks to meet\n``edge``, and walk only ``edgeTypes`` (by default every lineage type but\nthe rollups).\n\n``quantifier``: ``any`` relative meets the condition, ``none`` does, or\n``all`` do \u2014 and there is at least one. ``count`` compares how many\ndistinct relatives meet it instead. An entity is never its own relative,\na cycle notwithstanding.",
+      "description": "Entities whose related entities meet a condition.\n\n``axis`` says which relatives: up the containment tree (``parent``, any\n``ancestor``, the top-level container ``root``), down it (``child``, any\n``descendant``), or along lineage \u2014 ``upstream`` (what feeds it),\n``downstream`` (what it feeds), ``neighbor`` (either way) \u2014 one step, or\n``minHops`` to ``maxHops``. ``where`` is the condition a relative must\nmeet: any predicate, relationships included, so conditions chain (\"feeds\na dashboard whose parent is Finance\"); without one, any relative will\ndo. A lineage relationship may also require every edge it walks to meet\n``edge``, and walk only ``edgeTypes`` (by default every lineage type but\nthe rollups) \u2014 or, with ``edgeClass='links'``, every link: any edge but\nthe hierarchy's, the rollups aside.\n\n``quantifier``: ``any`` relative meets the condition, ``none`` does, or\n``all`` do \u2014 and there is at least one. ``count`` compares how many\ndistinct relatives meet it instead. An entity is never its own relative,\na cycle notwithstanding.",
       "properties": {
         "axis": {
           "enum": [
@@ -1849,6 +1856,22 @@
           ],
           "default": null,
           "title": "Edge"
+        },
+        "edgeClass": {
+          "anyOf": [
+            {
+              "enum": [
+                "lineage",
+                "links"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edgeclass"
         },
         "edgeTypes": {
           "anyOf": [
@@ -4386,6 +4409,7 @@
           "enum": [
             "lineage",
             "containment",
+            "links",
             "any"
           ],
           "title": "Edgeclass",

@@ -37,7 +37,7 @@ from backend.common.search_semantics import (
     resolve_predicate,
     value_slot,
 )
-from backend.common.derived_artifacts import DERIVED_EDGE_TYPES
+from backend.common.derived_artifacts import is_derived_edge_type
 from backend.common.edge_properties import EDGE_NATIVE_KEYS, json_holds
 from backend.common.models.search import (
     NODE_REF_ANY_DEPTH,
@@ -114,6 +114,8 @@ class StubDeepSearchProvider:
         self._lineage_types = frozenset(
             lineage_edge_types if lineage_edge_types is not None
             else {e.get("type") for e in self._edges if e.get("type") not in contains})
+        self._every_type = frozenset(
+            {e.get("type") for e in self._edges} | contains | self._lineage_types)
         self._out: Dict[str, List[int]] = {}
         self._in: Dict[str, List[int]] = {}
         for i, e in enumerate(self._edges):
@@ -349,8 +351,7 @@ class StubDeepSearchProvider:
         """Ends of the lineage routes from ``urn`` of ``lo``..``hi`` edges
         that pass no entity twice (``urn`` included), every edge of an
         allowed type and meeting the edge filter."""
-        allowed = (set(p.edge_types) if p.edge_types
-                   else {t for t in self._lineage_types if t not in DERIVED_EDGE_TYPES})
+        allowed = self._edge_types(p.edge_class or "lineage", p.edge_types, walk=True)
         found: set = set()
 
         def steps(at: str):
@@ -368,7 +369,7 @@ class StubDeepSearchProvider:
                 return
             for i, nxt in steps(at):
                 edge = self._edges[i]
-                if (nxt in visited or edge.get("type") not in allowed
+                if (nxt in visited or str(edge.get("type")).upper() not in allowed
                         or not _edge_passes(edge, p.edge)):
                     continue
                 walk(nxt, visited | {nxt}, depth + 1)
@@ -385,14 +386,7 @@ class StubDeepSearchProvider:
         A named end is its entities; a condition, every entity meeting it
         — for the sources, in the search's scope when the targets are a
         condition too."""
-        if p.edge_types:
-            types = set(p.edge_types)
-        elif p.edge_class == "lineage":
-            types = set(self._lineage_types)
-        elif p.edge_class == "containment":
-            types = set(self._containment_types)
-        else:
-            types = set(self._lineage_types) | set(self._containment_types)
+        types = self._edge_types(p.edge_class, p.edge_types)
 
         def named(urns, refs) -> set:
             return {u for u in [*urns, *(r.urn for r in refs or ())] if u in self._by_urn}
@@ -425,7 +419,8 @@ class StubDeepSearchProvider:
                 return
             for i, nxt in steps(nodes[-1]):
                 edge = self._edges[i]
-                if (nxt in nodes or nxt not in self._by_urn or edge.get("type") not in types
+                if (nxt in nodes or nxt not in self._by_urn
+                        or str(edge.get("type")).upper() not in types
                         or not _edge_passes(edge, p.edge_predicate)):
                     continue
                 walk(nodes + [nxt], edges + [i])
@@ -452,20 +447,31 @@ class StubDeepSearchProvider:
                        hop_count=len(edges))
 
     def _degree(self, urn: str, d: DegreePredicate) -> bool:
-        if d.edge_types:
-            types = set(d.edge_types)
-        elif d.edge_class == "lineage":
-            types = set(self._lineage_types)
-        elif d.edge_class == "containment":
-            types = set(self._containment_types)
-        else:
-            types = set(self._lineage_types) | set(self._containment_types)
+        types = self._edge_types(d.edge_class, d.edge_types)
         count = 0
         if d.direction in ("in", "both"):
-            count += sum(1 for i in self._in.get(urn, ()) if self._edges[i].get("type") in types)
+            count += sum(1 for i in self._in.get(urn, ())
+                         if str(self._edges[i].get("type")).upper() in types)
         if d.direction in ("out", "both"):
-            count += sum(1 for i in self._out.get(urn, ()) if self._edges[i].get("type") in types)
+            count += sum(1 for i in self._out.get(urn, ())
+                         if str(self._edges[i].get("type")).upper() in types)
         return _compare(count, d.op, d.value)
+
+    def _edge_types(self, edge_class: str, edge_types, *, walk: bool = False) -> set:
+        """The edge types, in upper case, a predicate counts or walks: those
+        it names, whatever their case, else its class's — ``links`` every
+        type but containment, ``any`` every type. ``walk``: a relationship's,
+        which leaves out the rollups unless it names them."""
+        if edge_types:
+            return {str(t).upper() for t in edge_types}
+        contains = {str(t).upper() for t in self._containment_types}
+        types = {"lineage": self._lineage_types, "containment": self._containment_types,
+                 "any": self._every_type}.get(edge_class)
+        if types is None:   # links
+            types = {t for t in self._every_type if str(t).upper() not in contains}
+        if walk:
+            types = {t for t in types if not is_derived_edge_type(t)}
+        return {str(t).upper() for t in types}
 
     def _ancestors(self, node: Dict[str, Any]) -> List[str]:
         """The fixture's ``ancestorUrns`` when it gives them, else every

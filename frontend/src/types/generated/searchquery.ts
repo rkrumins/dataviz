@@ -313,7 +313,7 @@ export type Direction = 'out' | 'in' | 'both'
 /**
  * Default edge-class when ``edge_types`` is omitted. Mirrors DegreePredicate / PathPredicate.
  */
-export type Edgeclass = 'lineage' | 'containment' | 'any'
+export type Edgeclass = 'lineage' | 'containment' | 'links' | 'any'
 /**
  * Optional predicate evaluated against every traversed edge. ANDs with ``edge_types`` / ``edge_class``. Compiles to ``ALL(rel IN relationships(p) WHERE …)``.
  */
@@ -361,7 +361,7 @@ export type Values2 = string[]
 export type Kind11 = 'layer'
 export type Layerassignment1 = string
 export type Direction1 = 'in' | 'out' | 'both'
-export type Edgeclass1 = 'lineage' | 'containment' | 'any'
+export type Edgeclass1 = 'lineage' | 'containment' | 'links' | 'any'
 /**
  * Optional explicit edge-type list. When provided, overrides the default set resolved from ``edge_class``.
  */
@@ -369,26 +369,26 @@ export type Edgetypes1 = string[] | null
 export type Kind12 = 'degree'
 export type Op5 = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'
 export type Value1 = number
-export type Edgeclass2 = 'lineage' | 'containment' | 'any'
+export type Edgeclass2 = 'lineage' | 'containment' | 'links' | 'any'
 export type Edgetypes2 = string[] | null
 export type Kind13 = 'isOrphan'
-export type Edgeclass3 = 'lineage' | 'containment' | 'any'
+export type Edgeclass3 = 'lineage' | 'containment' | 'links' | 'any'
 export type Edgetypes3 = string[] | null
 export type Kind14 = 'isLeaf'
-export type Edgeclass4 = 'lineage' | 'containment' | 'any'
+export type Edgeclass4 = 'lineage' | 'containment' | 'links' | 'any'
 export type Edgetypes4 = string[] | null
 export type Kind15 = 'isRoot'
-export type Edgeclass5 = 'lineage' | 'containment' | 'any'
+export type Edgeclass5 = 'lineage' | 'containment' | 'links' | 'any'
 export type Edgetypes5 = string[] | null
 export type Kind16 = 'hasIncoming'
-export type Edgeclass6 = 'lineage' | 'containment' | 'any'
+export type Edgeclass6 = 'lineage' | 'containment' | 'links' | 'any'
 export type Edgetypes6 = string[] | null
 export type Kind17 = 'hasOutgoing'
 /**
  * ``outgoing`` walks source → target along edge direction; ``incoming`` walks against direction; ``any`` is undirected.
  */
 export type Direction2 = 'outgoing' | 'incoming' | 'any'
-export type Edgeclass7 = 'lineage' | 'containment' | 'any'
+export type Edgeclass7 = 'lineage' | 'containment' | 'links' | 'any'
 /**
  * Optional predicate evaluated against every edge in the returned paths. ANDs with ``edge_types`` / ``edge_class``. Compiles to ``ALL(rel IN relationships(p) WHERE …)``.
  */
@@ -449,6 +449,7 @@ export type Axis =
 export type Op6 = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'
 export type Value2 = number
 export type Edge = (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
+export type Edgeclass8 = ('lineage' | 'links') | null
 export type Edgetypes8 = string[] | null
 export type Kind21 = 'related'
 export type Maxhops1 = number | null
@@ -1490,7 +1491,8 @@ export interface IsPredicate {
  * a dashboard whose parent is Finance"); without one, any relative will
  * do. A lineage relationship may also require every edge it walks to meet
  * ``edge``, and walk only ``edgeTypes`` (by default every lineage type but
- * the rollups).
+ * the rollups) — or, with ``edgeClass='links'``, every link: any edge but
+ * the hierarchy's, the rollups aside.
  *
  * ``quantifier``: ``any`` relative meets the condition, ``none`` does, or
  * ``all`` do — and there is at least one. ``count`` compares how many
@@ -1501,6 +1503,7 @@ export interface RelatedPredicate {
     axis: Axis
     count?: CountSpec | null
     edge?: Edge
+    edgeClass?: Edgeclass8
     edgeTypes?: Edgetypes8
     kind?: Kind21
     maxHops?: Maxhops1

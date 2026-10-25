@@ -1195,25 +1195,27 @@ class TestCompilerDegree:
         assert "size(" not in where
         assert "NOT" in where and "(n)-[:" in where
 
-    # -- non-trivial counts (size() still used) ------------------------
+    # -- non-trivial counts (projected, never in the head) ---------------
 
-    def test_degree_in_gt_five_uses_size(self):
-        """Counts > 1 still go through size(). FalkorDB may reject this
-        if NOT-wrapped, but it's the only correct compilation for
-        non-threshold counts; users hitting this need a backend fix that
-        rewrites to a list-comprehension. Documented in the compiler."""
+    def test_degree_in_gt_five_is_counted_in_a_projection(self):
+        """A clause's WHERE rejects a count — size() of a pattern and of a
+        comprehension alike ("Unable to resolve filtered alias") — so a
+        count waits in the tail, counted with a comprehension, as a
+        relationship's test is."""
         c = _degree_compiler()
         where = c.compile(DegreePredicate(direction="in", op="gt", value=5,
                                           edgeClass="lineage"))
-        assert "size(" in where
-        assert "> $p0" in where
+        assert where == "true"
+        assert c.tail == ["size([(n)<-[:CONSUMES|LINEAGE|PRODUCES]-(_xd0) | 1]) > $p1"]
 
-    def test_degree_in_eq_three_uses_size(self):
+    def test_degree_in_eq_three_is_counted_in_a_projection(self):
         c = _degree_compiler()
-        where = c.compile(DegreePredicate(direction="in", op="eq", value=3,
-                                          edgeClass="lineage"))
-        assert "size(" in where
-        assert "= $p0" in where
+        where = c.compile(GroupPredicate(op="and", children=[
+            TagPredicate(values=["PII"]),
+            DegreePredicate(direction="both", op="eq", value=3, edgeClass="lineage")]))
+        assert where == "(n.tags CONTAINS $p0)"
+        assert c.tail == ["(size([(n)<-[:CONSUMES|LINEAGE|PRODUCES]-(_xd1) | 1]) + "
+                          "size([(n)-[:CONSUMES|LINEAGE|PRODUCES]->(_xo1) | 1])) = $p2"]
 
     # -- empty edge-type set short-circuits ----------------------------
 

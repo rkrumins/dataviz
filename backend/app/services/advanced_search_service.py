@@ -194,16 +194,17 @@ def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool
         )
     hops = p.hop_range()[1]
     if p.axis in LINEAGE_AXES:
+        walks = "links" if p.edge_class == "links" or p.edge_types else "lineage"
         named = (top and p.quantifier == "any" and p.count is None
                  and anchor_groups(p.where) is not None)
         if rule and hops > 1:
             raise ValidationError(
-                f"relationship at {path}: a rule follows lineage one hop — it is "
+                f"relationship at {path}: a rule follows {walks} one hop — it is "
                 "asked of every entity on the canvas"
             )
         if hops > s.relation_max_hops and not named:
             raise ValidationError(
-                f"relationship at {path} follows lineage {hops} hops, tested from every "
+                f"relationship at {path} follows {walks} {hops} hops, tested from every "
                 f"candidate: at most {s.relation_max_hops}. Name the far end (by name or "
                 "URN) to follow it further."
             )

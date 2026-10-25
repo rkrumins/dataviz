@@ -71,6 +71,7 @@ from backend.app.providers.falkordb_provider import (
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf
 from backend.app.providers.falkordb_typed_ops import compile_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
+from backend.app.services.deep_search.edge_types import spell_edge_types
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
 from backend.common.edge_properties import (
     EDGE_NATIVE_KEYS,
@@ -228,6 +229,7 @@ class _Compiler:
         *,
         lineage_edge_types: Optional[Set[str]] = None,
         containment_edge_types: Optional[Set[str]] = None,
+        edge_type_spellings: Optional[Dict[str, List[str]]] = None,
     ):
         self.params: Dict[str, Any] = {}
         self.hoisted_root_urns: List[List[str]] = []
@@ -251,6 +253,10 @@ class _Compiler:
         # containment classification will raise CompileError on visit.
         self._lineage_edge_types = lineage_edge_types
         self._containment_edge_types = containment_edge_types
+        # Every edge type the data source has: each one's upper case → how
+        # the graph spells it. What a named type is read through, and what
+        # ``links`` and ``any`` cover; None takes names as given.
+        self._edge_type_spellings = edge_type_spellings
         # Relationships, and any OR / NOT holding one, are evaluated after
         # the head's clause WHERE: each is a boolean expression a caller
         # projects on a WITH and filters by (``tail_clauses``), cheapest
@@ -281,9 +287,9 @@ class _Compiler:
 
     def compile(self, predicate) -> str:
         """The head: the WHERE fragment every candidate is filtered by
-        first. Relationships, and any OR / NOT holding one, go to
-        ``self.tail`` — a comprehension fails in a clause's WHERE, and is
-        built for every row that reaches it, so it runs only on what the
+        first. Relationships and edge counts, and any OR / NOT holding one,
+        go to ``self.tail`` — a comprehension fails in a clause's WHERE, and
+        is built for every row that reaches it, so it runs only on what the
         head lets through."""
         if not _has_relation(predicate):
             return self._visit(predicate, in_or=False, at_top_and=True)
@@ -600,7 +606,7 @@ class _Compiler:
         (which would match every node and look like a planner bug).
         """
         if predicate.edge_types:
-            return list(predicate.edge_types)
+            return self._named_edge_types(predicate.edge_types)
         edge_class = predicate.edge_class
         if edge_class == "lineage":
             if self._lineage_edge_types is None:
@@ -618,19 +624,32 @@ class _Compiler:
                     "ontology resolution must complete before search."
                 )
             return sorted(self._containment_edge_types)
-        if edge_class == "any":
-            if (self._lineage_edge_types is None
-                    or self._containment_edge_types is None):
-                raise CompileError(
-                    "degree / withinHops with edgeClass='any' requires both "
-                    "lineage and containment edge types — ontology "
-                    "resolution must complete before search."
-                )
-            combined = set(self._lineage_edge_types) | set(
-                self._containment_edge_types
-            )
-            return sorted(combined)
+        if edge_class in ("links", "any"):
+            every = self._every_edge_type(
+                f"degree / withinHops with edgeClass={edge_class!r}")
+            if edge_class == "any":
+                return sorted(every)
+            contains = {t.upper() for t in self._containment_edge_types}
+            return sorted(t for t in every if t.upper() not in contains)
         raise CompileError(f"unknown edgeClass: {edge_class!r}")
+
+    def _named_edge_types(self, types, *, link: bool = False) -> List[str]:
+        """The edge types a predicate names, as the graph spells them.
+        ``link``: a relationship's, which never walks the hierarchy's."""
+        return spell_edge_types(types, self._edge_type_spellings,
+                                containment=self._containment_edge_types or (), link=link)
+
+    def _every_edge_type(self, what: str) -> Set[str]:
+        """Every edge type the data source has, as the graph spells them."""
+        if self._lineage_edge_types is None or self._containment_edge_types is None:
+            raise CompileError(
+                f"{what} requires both lineage and containment edge types — ontology "
+                "resolution must complete before search."
+            )
+        every = set(self._lineage_edge_types) | set(self._containment_edge_types)
+        for spelled in (self._edge_type_spellings or {}).values():
+            every.update(spelled)
+        return every
 
     def _visit_degree(self, d) -> str:
         edge_types = self._resolve_degree_edge_types(d)
@@ -709,23 +728,11 @@ class _Compiler:
             assert pattern is not None
             return pattern
 
-        # ----- non-trivial counts → size((pattern)) <op> $value -----
-        # NB: FalkorDB has been observed to reject size((pattern)) when
-        # the surrounding context wraps it in NOT and the relationship
-        # pattern uses alternation. The zero/one thresholds above cover
-        # the common cases (IsOrphan/IsLeaf/IsRoot/HasIncoming/
-        # HasOutgoing). Counts of >1 / =5 / etc. still emit size(); if
-        # FalkorDB also rejects those, the next step is to switch to a
-        # list-comprehension that filters on type(r) instead of using
-        # relationship-type alternation in the pattern itself.
-        symbol = {"eq": "=", "neq": "<>", "gt": ">",
-                  "gte": ">=", "lt": "<", "lte": "<="}[d.op]
-        pn = self._next()
-        self.params[pn] = int(d.value)
-        if direction == "both":
-            return f"(size({in_p}) + size({out_p})) {symbol} ${pn}"
-        assert pattern is not None
-        return f"size({pattern}) {symbol} ${pn}"
+        # ----- non-trivial counts -----
+        # Counted only in a projection: a clause's WHERE rejects size() of a
+        # pattern and of a comprehension alike, so ``compile`` sends an edge
+        # count to the tail (``_counts_edges``).
+        return self._projected_degree(d, rel)
 
     def _visit_path(self, p) -> str:
         """Hoist a PathPredicate. Compiles to ``true`` in the WHERE
@@ -839,7 +846,8 @@ class _Compiler:
 
     def _relation_edge_types(self, p) -> List[str]:
         """The edges a relationship walks: containment for the tree's axes;
-        for lineage its own types, else every lineage type but the rollups."""
+        for lineage its own types, every link with ``links``, else every
+        lineage type — the rollups aside unless named."""
         if p.axis not in LINEAGE_AXES:
             if self._containment_edge_types is None:
                 raise CompileError(
@@ -847,7 +855,12 @@ class _Compiler:
                     "edge types — ontology resolution must complete before search.")
             return sorted(self._containment_edge_types)
         if p.edge_types:
-            return list(p.edge_types)
+            return self._named_edge_types(p.edge_types, link=True)
+        if p.edge_class == "links":
+            every = self._every_edge_type(f"an {p.axis} relationship through every link")
+            contains = {t.upper() for t in self._containment_edge_types}
+            return sorted(t for t in every
+                          if t.upper() not in contains and not is_derived_edge_type(t))
         if self._lineage_edge_types is None:
             raise CompileError(
                 f"an {p.axis} relationship requires the provider's lineage edge "
@@ -1113,9 +1126,18 @@ _SIMPLE_KINDS = frozenset({"text", "property", "tag", "hasProperty", "entityType
 
 
 def _has_relation(p) -> bool:
-    if p.kind == "related":
+    """Whether ``p`` is evaluated in a projection — a relationship, or an
+    edge count (``_counts_edges``) — or is a group holding one."""
+    if p.kind == "related" or _counts_edges(p):
         return True
     return p.kind == "group" and any(_has_relation(c) for c in p.children)
+
+
+def _counts_edges(p) -> bool:
+    """A degree condition counting edges, not asking whether there are any:
+    a clause's WHERE rejects a count — over a pattern or a comprehension
+    alike — so it is projected, as a relationship is (S0_FINDINGS §15)."""
+    return p.kind == "degree" and not (p.value == 0 or (p.value == 1 and p.op in ("lt", "gte")))
 
 
 def _conjuncts(p) -> List[Any]:
@@ -1141,7 +1163,9 @@ def _relation_cost(p) -> int:
     lo, hi = p.hop_range()
     steps = hi if p.axis in LINEAGE_AXES or p.axis == "descendant" else 1
     nested = _relation_cost(p.where) if p.where is not None else 0
-    return _AXIS_COST[p.axis] * steps * (1 + nested)
+    # Every link fans out wider than lineage: through tags, terms, owners.
+    wide = 2 if p.edge_class == "links" else 1
+    return _AXIS_COST[p.axis] * steps * wide * (1 + nested)
 
 
 def _over_no_relatives(p) -> str:
@@ -1442,7 +1466,28 @@ def _build_compiler_for_provider(provider) -> _Compiler:
     return _Compiler(
         lineage_edge_types=lineage,
         containment_edge_types=containment,
+        edge_type_spellings=_edge_type_spellings(provider, lineage, containment),
     )
+
+
+def _edge_type_spellings(provider, *sets) -> Optional[Dict[str, List[str]]]:
+    """Every edge type the data source has — the resolved ontology's (the
+    types it declares and those the graph had when it was resolved), the
+    graph's observed types, the lineage and containment sets — each one's
+    upper case → its spellings in the graph. None before the ontology is
+    resolved: names are then taken as given."""
+    declared = getattr(provider, "_resolved_edge_metadata", None)
+    if declared is None:
+        return None
+    physical = [*(getattr(provider, "_observed_rel_types", None) or ()),
+                *(t for s in sets for t in (s or ()))]
+    spellings = {t: list(provider._alias_rel_types([t]))
+                 for t in sorted({*(str(k).upper() for k in declared),
+                                  *(str(p).upper() for p in physical)})}
+    for p in physical:
+        if p not in spellings[str(p).upper()]:
+            spellings[str(p).upper()].append(p)
+    return spellings
 
 
 def _maybe_add_visible_urns_clause(
