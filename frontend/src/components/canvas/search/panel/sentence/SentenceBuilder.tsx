@@ -15,11 +15,13 @@
  */
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
+import { cn } from '@/lib/utils'
 import { useSearchStore } from '@/store/searchStore'
 import type { NodeRef, Predicate } from '@/types/search'
 
 import type { ValueSuggester } from '../../builder/useDiscovery'
 import type { LayerOption } from '../layerOptions'
+import { useLiveCounts } from '../counts/liveCounts'
 import { useClauseCounts } from '../counts/useClauseCounts'
 import { layoutQueryMap } from '../map/layoutQueryMap'
 import { QueryMap } from '../map/QueryMap'
@@ -80,6 +82,7 @@ export function SentenceBuilder({
 }: SentenceBuilderProps) {
     const sentence = useMemo(() => buildSentence(predicate), [predicate])
     const counts = useClauseCounts(viewId, predicate)
+    const [, setLiveCounts] = useLiveCounts()
     const [openToken, setOpenToken] = useState<string | null>(null)
 
     // Handlers read the latest draft through a ref, so they — and the
@@ -221,6 +224,17 @@ export function SentenceBuilder({
         <SentenceContext.Provider value={ctx}>
             <div className="flex flex-col gap-3">
                 {map.nodes.length > 1 && <QueryMap map={map} counts={counts} onOpen={setOpenToken} />}
+                {/* Where the numbers would be, why they aren't. */}
+                {counts.status === 'off' && predicate && (
+                    <button type="button" onClick={() => setLiveCounts(true)}
+                            className={cn(
+                                'self-end -mb-2 rounded-md px-1.5 py-0.5 text-2xs text-ink-muted',
+                                'hover:bg-accent-lineage/10 hover:text-accent-lineage',
+                                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                            )}>
+                        Counts off · <span className="font-medium text-accent-lineage">Turn on</span>
+                    </button>
+                )}
                 <div role="list" aria-label="The query, as a sentence" className="flex flex-col">
                     {blocks.map((block) => (
                         <div key={block[0].key} role="none" className="group/block flex flex-col">

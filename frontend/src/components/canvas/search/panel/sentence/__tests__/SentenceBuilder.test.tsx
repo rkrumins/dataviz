@@ -3,15 +3,19 @@
  * same two writes: a value changed seeds the draft (no undo step), a change
  * of shape commits it. The words joining the clauses are themselves the
  * all/any choice, the map opens the sentence's tokens, and what no
- * builder edits hands over to Code.
+ * builder edits hands over to Code. With live counts off it says so where
+ * the numbers would be.
  */
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { useState } from 'react'
+import { useState, type ComponentType, type ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-import type { Predicate } from '@/types/search'
+import { ProviderOverride } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import type { Predicate, SearchCountsRequest } from '@/types/search'
 
+import { LIVE_COUNTS_KEY } from '../../counts/liveCounts'
 import { SentenceBuilder } from '../SentenceBuilder'
 
 
@@ -22,7 +26,23 @@ const any = (...children: Predicate[]): Predicate => ({ kind: 'group', op: 'or',
 
 const discovery = { allKeys: [], keysByEntityType: {}, tagValues: ['PII', 'GDPR'], getValueSamples: () => [] }
 
-function setup(initial: Predicate | null) {
+/** A graph that counts every condition as 7. */
+function counting() {
+    const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
+    const searchCounts = vi.fn(async (body: SearchCountsRequest) => ({
+        counts: Object.fromEntries(body.items.map((i) => [i.id, { count: 7, status: 'complete' }])),
+    }))
+    Object.assign(provider, { searchCounts })
+    const wrapper = ({ children }: { children: ReactNode }) => (
+        <ProviderOverride value={{ provider, isLoading: false, error: null, scopeKind: 'ready',
+            workspaceId: 'ws', dataSourceId: null, providerReady: true, providerVersion: 1 } as never}>
+            {children}
+        </ProviderOverride>
+    )
+    return { searchCounts, wrapper }
+}
+
+function setup(initial: Predicate | null, wrapper?: ComponentType<{ children: ReactNode }>) {
     const onSeed = vi.fn()
     const onCommit = vi.fn()
     const onEditInCode = vi.fn()
@@ -36,7 +56,7 @@ function setup(initial: Predicate | null) {
                              onCommit={(next) => { onCommit(next); setDraft(next) }} />
         )
     }
-    render(<Harness />)
+    render(<Harness />, { wrapper })
     return { onSeed, onCommit, onEditInCode }
 }
 
@@ -101,5 +121,21 @@ describe('SentenceBuilder', () => {
         fireEvent.click(screen.getAllByRole('button', { name: /out edges gt 3/ })[0])
         await userEvent.click(await screen.findByRole('button', { name: 'Edit in Code' }))
         expect(onEditInCode).toHaveBeenCalled()
+    })
+
+    it('says the counts are off where the numbers would be, and turns them back on', async () => {
+        localStorage.setItem(LIVE_COUNTS_KEY, 'off')
+        const { searchCounts, wrapper } = counting()
+        setup(all(type('dataset'), tag('PII')), wrapper)
+        const turnOn = screen.getByRole('button', { name: 'Counts off · Turn on' })
+        await new Promise((r) => setTimeout(r, 700))
+        expect(searchCounts).not.toHaveBeenCalled()
+        expect(screen.queryByText('7')).not.toBeInTheDocument()
+
+        fireEvent.click(turnOn)
+        expect(localStorage.getItem(LIVE_COUNTS_KEY)).toBeNull()
+        expect(screen.queryByRole('button', { name: 'Counts off · Turn on' })).not.toBeInTheDocument()
+        await waitFor(() => expect(searchCounts).toHaveBeenCalled(), { timeout: 2000 })
+        expect((await screen.findAllByText('7', {}, { timeout: 2000 })).length).toBeGreaterThan(0)
     })
 })

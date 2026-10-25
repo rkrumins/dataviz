@@ -6,7 +6,7 @@
  * `search-harness.html`, so a layout, a popover or the dark palette is
  * judged by looking rather than by asserting.
  *
- *   node scripts/search-shot.mjs [fixture[:dark][:technical][:w380][:intro] ...]
+ *   node scripts/search-shot.mjs [fixture[:dark][:technical][:w380][:intro][:nocounts] ...]
  */
 import { spawn, execFile } from 'node:child_process'
 import { mkdirSync, existsSync, readdirSync } from 'node:fs'
@@ -21,7 +21,7 @@ const OUT = '.harness'
 const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'empty', 'empty:dark', 'form', 'form:dark',
   'sentence', 'sentence:dark', 'sentence:w380', 'sentenceFlat', 'sentenceAny',
-  'rescue', 'results', 'results:dark', 'empty:intro',
+  'rescue', 'results', 'results:dark', 'empty:intro', 'sentence:nocounts',
 ]
 
 function findChromium() {
@@ -75,7 +75,7 @@ const ready = new Promise((resolve, reject) => {
 try {
   await ready
   for (const shot of SHOTS) {
-    // `fixture[:dark][:technical][:w380][:intro]` — any order after the fixture.
+    // `fixture[:dark][:technical][:w380][:intro][:nocounts]` — any order after the fixture.
     const [fixture, ...flags] = shot.split(':')
     const query = [`fixture=${fixture}`]
     for (const flag of flags) {
@@ -83,6 +83,7 @@ try {
       else if (flag === 'technical') query.push('persona=technical')
       else if (/^w\d+$/.test(flag)) query.push(`width=${flag.slice(1)}`)
       else if (flag === 'intro') query.push('intro')
+      else if (flag === 'nocounts') query.push('nocounts')
     }
     const out = join(OUT, `search-${shot.replace(/:/g, '-')}.png`)
     await run(chromium, [

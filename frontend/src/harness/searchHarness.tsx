@@ -20,6 +20,7 @@
  *   width      the panel's width in px (default 480)
  *   latency    ms every request waits, to see the loading states
  *   intro      show the first-run tip pointing at Search Studio
+ *   nocounts   with live counts turned off (Options → Live counts)
  */
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { MotionGlobalConfig } from 'framer-motion'
@@ -28,6 +29,7 @@ import { createRoot } from 'react-dom/client'
 import { MemoryRouter } from 'react-router-dom'
 
 import '../styles/globals.css'
+import { LIVE_COUNTS_KEY } from '../components/canvas/search/panel/counts/liveCounts'
 import { SEARCH_INTRO_KEY } from '../components/canvas/search/panel/guidance/searchIntro'
 import { SearchMapPanel } from '../components/canvas/search/SearchMapPanel'
 import { ProviderOverride } from '../providers/GraphProviderContext'
@@ -49,6 +51,7 @@ const persona = params.get('persona') === 'technical' ? 'technical' : 'business'
 const width = Number(params.get('width') ?? 480)
 const latency = Number(params.get('latency') ?? 0)
 const intro = params.has('intro')
+const noCounts = params.has('nocounts')
 
 
 // Every animation lands on its end state at once: a screenshot taken on
@@ -62,6 +65,8 @@ try {
     else localStorage.removeItem('synodic.advancedSearch.editorMode')
     if (intro) localStorage.removeItem(SEARCH_INTRO_KEY)
     else localStorage.setItem(SEARCH_INTRO_KEY, '1')
+    if (noCounts) localStorage.setItem(LIVE_COUNTS_KEY, 'off')
+    else localStorage.removeItem(LIVE_COUNTS_KEY)
 } catch { /* a private window: the panel's defaults apply */ }
 
 usePersonaStore.setState({ mode: persona })

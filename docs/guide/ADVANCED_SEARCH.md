@@ -212,10 +212,13 @@ Numbers arrive as you build, before anything runs:
   **type chip** over the results shows its count.
 
 A count reads **N+** while the View is still being counted. Counts need a
-FalkorDB data source; elsewhere the numbers simply don't appear. A line that
-can't be counted says why: **Counted once it is filled in**, **Routes are
-found when the search runs**, or **Too many hops to count — name the far end
-to go further**.
+FalkorDB data source; elsewhere the numbers simply don't appear. On a very
+large View, where a heavy line can take a while to finish counting, you can
+turn them off under **Options → Live counts**: nothing is counted as you
+build, and **Counts off · Turn on** above the sentence brings them back. A
+line that can't be counted says why: **Counted once it is filled in**,
+**Routes are found when the search runs**, or **Too many hops to count —
+name the far end to go further**.
 
 ### When nothing matches
 
@@ -717,7 +720,7 @@ upstream*..2(ancestor(@"Country/United Kingdom"))
 | "*More rows matched — these are the first …*" | The answer had more rows than **Rows** allows | Raise **Rows**, or narrow the query |
 | "*The answer was too large to show whole*", "*… needs more memory than one query may use*" | Whole nodes or long lists made the answer too big | Return properties (`n.name`) instead of whole nodes, or fewer rows |
 | "*You've run a lot of queries in a short time*" | 20 runs a minute is the limit | Wait a moment |
-| No counts beside the Sentence lines, recipes or Ask | The data source isn't FalkorDB, or you opened the View through a share link | Run the query to see its count |
+| No counts beside the Sentence lines, recipes or Ask | **Live counts** is off, the data source isn't FalkorDB, or you opened the View through a share link | Turn on **Options → Live counts**, or run the query to see its count |
 | **Searched for by name: …** under the Ask bar | Those words aren't a type, tag, property, layer or container the View holds | Rephrase with the View's own words, pick a reading, or keep the name search |
 | **Nothing matches from here** on a Sentence line | That line leaves nothing of what the lines above it found | Apply one of the fixes beside it, or change the line |
 

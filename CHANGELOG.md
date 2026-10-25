@@ -26,9 +26,9 @@ with a map of the query's shape whenever it has a relationship or a route. The c
 **Form**, the filter cards, for everyone; Sentence is the guided alternative, a click away.
 
 **Counts as you build.** Each Sentence line says how many still match once it is added, and the map,
-the Ask preview, recipes and type chips carry counts too — all before anything runs.
-`POST /search/counts` takes `purpose: "search"` to count a search's conditions, lineage of more than
-one hop included; rules keep their one-hop limit.
+the Ask preview, recipes and type chips carry counts too — all before anything runs. On a very large
+View, **Options → Live counts** turns them off. `POST /search/counts` takes `purpose: "search"` to
+count a search's conditions, lineage of more than one hop included; rules keep their one-hop limit.
 
 **When nothing matches.** The Sentence line where the matches run out is marked before anything
 runs, with up to three fixes, each counted, one click to apply. An empty answer leads with the same,

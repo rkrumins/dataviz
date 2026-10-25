@@ -1,8 +1,8 @@
 /**
  * Counting as a query is edited: it waits for edits to settle, abandons a
  * count the edit made stale, remembers what it has counted, counts in the
- * search's own scope with a search's limits, and stops asking where
- * counting isn't offered.
+ * search's own scope with a search's limits, stops asking where
+ * counting isn't offered, and asks for nothing with live counts off.
  */
 import { act, renderHook } from '@testing-library/react'
 import type { ReactNode } from 'react'
@@ -14,6 +14,7 @@ import { useSearchStore } from '@/store/searchStore'
 import type { Predicate, SearchCountsRequest } from '@/types/search'
 
 import { countId, type CountItem } from '../clauseItems'
+import { LIVE_COUNTS_KEY, useLiveCounts } from '../liveCounts'
 import { useCounts } from '../useCounts'
 
 
@@ -21,7 +22,7 @@ const item = (p: Predicate): CountItem => ({ id: countId(p), predicate: p })
 const pii = item({ kind: 'tag', op: 'hasAny', values: ['PII'] })
 const gdpr = item({ kind: 'tag', op: 'hasAny', values: ['GDPR'] })
 
-function setup(answer: (body: SearchCountsRequest) => Promise<unknown>) {
+function setup(answer: (body: SearchCountsRequest, opts?: { signal?: AbortSignal }) => Promise<unknown>) {
     const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
     const searchCounts = vi.fn(answer)
     Object.assign(provider, { searchCounts })
@@ -42,6 +43,7 @@ const countsFor = (body: SearchCountsRequest, n: number) => ({
 describe('useCounts', () => {
     beforeEach(() => {
         vi.useFakeTimers()
+        localStorage.clear()
         useSearchStore.getState().clear()
     })
     afterEach(() => vi.useRealTimers())
@@ -100,6 +102,38 @@ describe('useCounts', () => {
         await act(async () => { await vi.advanceTimersByTimeAsync(700) })
         expect(searchCounts).toHaveBeenCalledTimes(1)
         expect(result.current.status).toBe('unavailable')
+    })
+
+    it('asks for nothing with live counts off, and counts again once they are on', async () => {
+        localStorage.setItem(LIVE_COUNTS_KEY, 'off')
+        const { searchCounts, wrapper } = setup(async (body) => countsFor(body, 8))
+        const { result } = renderHook(() => ({ counts: useCounts('view-f', [pii]), live: useLiveCounts() }),
+            { wrapper })
+        await act(async () => { await vi.advanceTimersByTimeAsync(700) })
+        expect(searchCounts).not.toHaveBeenCalled()
+        expect(result.current.counts.status).toBe('off')
+
+        act(() => result.current.live[1](true))
+        await act(async () => { await vi.advanceTimersByTimeAsync(700) })
+        expect(searchCounts).toHaveBeenCalledTimes(1)
+        expect(result.current.counts.counts.get(pii.id)).toEqual({ count: 8, complete: true })
+    })
+
+    it('abandons a count under way when live counts are turned off', async () => {
+        let signal: AbortSignal | undefined
+        const { searchCounts, wrapper } = setup((_body, opts) => {
+            signal = opts?.signal
+            return new Promise(() => {})
+        })
+        const { result } = renderHook(() => ({ counts: useCounts('view-g', [pii]), live: useLiveCounts() }),
+            { wrapper })
+        await act(async () => { await vi.advanceTimersByTimeAsync(700) })
+        expect(searchCounts).toHaveBeenCalledTimes(1)
+        expect(signal?.aborted).toBe(false)
+
+        act(() => result.current.live[1](false))
+        expect(signal?.aborted).toBe(true)
+        expect(result.current.counts.status).toBe('off')
     })
 
     it('asks for nothing when there is nothing to count', async () => {

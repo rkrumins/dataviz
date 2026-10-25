@@ -305,7 +305,7 @@ function RelationTokens({ line, tokenState }: {
 
 
 function CountGutter({ count }: { count: LineCount }) {
-    if (count.status === 'unavailable') return null
+    if (count.status === 'unavailable' || count.status === 'off') return null
     if (count.reason) {
         return (
             <HoverTip label={UNCOUNTABLE_WORDS[count.reason]} className="inline-flex shrink-0">

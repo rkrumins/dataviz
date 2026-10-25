@@ -12,7 +12,9 @@
  *   - ``rough``: two requests at most, for a preview that only has to say
  *     "about how many";
  *   - where counting isn't offered (a share link, an engine without
- *     counts) it says so once and stops asking.
+ *     counts) it says so once and stops asking;
+ *   - with live counts turned off (``liveCounts``) it asks for nothing,
+ *     and a count under way is abandoned.
  */
 import { useEffect, useMemo, useState } from 'react'
 
@@ -25,6 +27,7 @@ import { useSearchStore } from '@/store/searchStore'
 import { currentScope } from '../../searchRequest'
 
 import type { CountItem } from './clauseItems'
+import { useLiveCounts } from './liveCounts'
 
 
 export interface CountState {
@@ -35,7 +38,7 @@ export interface CountState {
     error?: string
 }
 
-export type CountsStatus = 'idle' | 'counting' | 'done' | 'unavailable'
+export type CountsStatus = 'idle' | 'counting' | 'done' | 'unavailable' | 'off'
 
 export interface CountsResult {
     counts: ReadonlyMap<string, CountState>
@@ -86,6 +89,7 @@ export function useCounts(
     // Counts belong to the scope the search runs in: a change of scope is
     // a change of every count.
     const scopeMode = useSearchStore((s) => s.scopeMode)
+    const [live] = useLiveCounts()
     const itemsKey = items.map((i) => i.id).join(',')
     const [state, setState] = useState<{ key: string; counts: Map<string, CountState>; status: CountsStatus }>(
         { key: '', counts: new Map(), status: 'idle' })
@@ -93,7 +97,7 @@ export function useCounts(
     const unavailable = !remote || (!!viewId && !!refused.get(remote)?.has(viewId))
 
     useEffect(() => {
-        if (!remote || !viewId || !enabled || unavailable || items.length === 0) return
+        if (!live || !remote || !viewId || !enabled || unavailable || items.length === 0) return
         const { key: scopeKey, urns } = scopeKeyOf(viewId)
         const runKey = `${scopeKey}|${itemsKey}`
         if (scopeMode === 'visible' && urns > VISIBLE_URNS_MAX) return
@@ -155,11 +159,12 @@ export function useCounts(
         }
     // ``items`` is read through ``itemsKey``: the same ids are the same counts.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [remote, viewId, itemsKey, scopeMode, enabled, rough, debounceMs, unavailable])
+    }, [remote, viewId, itemsKey, scopeMode, enabled, rough, debounceMs, unavailable, live])
 
     return useMemo(() => {
         if (unavailable) return { counts: new Map(), status: 'unavailable' as const }
+        if (!live) return { counts: new Map(), status: 'off' as const }
         if (!viewId || !enabled || items.length === 0) return { counts: new Map(), status: 'idle' as const }
         return { counts: state.counts, status: state.status }
-    }, [unavailable, viewId, enabled, items.length, state])
+    }, [unavailable, live, viewId, enabled, items.length, state])
 }
