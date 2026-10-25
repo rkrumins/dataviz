@@ -366,8 +366,10 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   by the key — a role taken away reaches the key within 30 seconds. A key never carries
   platform permissions, workspace administration or sharing.
 - **The data plane only.** Keys may call a reviewed list of routes — views, graphs, version
-  control, data-source signals and jobs — and everything else answers
-  `403 api_key_not_allowed`. A request naming a workspace, view or data source outside the
+  control except publish, merge, revert, restore and sync (a key writes a published version
+  directly only where whoever it acts as holds publish), data-source signals and jobs — and every other route that needs a signed-in caller
+  answers `403 api_key_not_allowed`; a public route, which needs nobody, answers a key as it
+  answers anyone. A request naming a workspace, view or data source outside the
   key's limits answers `403 api_key_out_of_scope`, or `404` across workspaces; a read-only key
   asking to change something answers `403 api_key_read_only`. A view opens reads of the data
   it renders, never the routes about that data source itself (its jobs, readiness or pull
@@ -393,7 +395,9 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   as, which every sign-in path refuses and no identity provider can link to. It holds only the
   workspace roles given on its own page — never a platform role, a team's roles, or one that
   administers a workspace. Its managers, people or members of managing teams, make its keys
-  after the same step-up and are recorded as having made them. Its keys stop while it is
+  after the same step-up and are recorded as having made them. So can a holder of
+  `system:users:manage` (a super admin) while their session is known to be alive, and the
+  account's managers are told; `system:service-accounts:manage` alone makes no keys. Its keys stop while it is
   disabled (`api_key_owner_inactive`) and pause once nobody in good standing has managed it for
   the grace period, 14 days by default (`401 api_key_unmanaged`); every super and org admin is
   told when it loses its last manager. See [Service Accounts](/guide/service-accounts) and
@@ -403,11 +407,11 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   an `Authorization` header to a cross-site request without the API's consent — but a write
   still passes the Origin check.
 - **Limits and outages.** Each key is limited to `RATELIMIT_API_KEY` requests (1,200 a minute
-  by default, a sliding window; `429` with `Retry-After`), counted before the key is looked up,
-  so a client told to slow down costs no database read. Tokens nobody issued count against
+  by default, a sliding window; `429` with `Retry-After`, and no `X-RateLimit-*` headers),
+  counted before the key is looked up, so a client told to slow down costs no database read. Tokens nobody issued count against
   `RATELIMIT_API_KEY_FAILURES_PER_IP` per client address (an IPv6 client per /64); a key that
   exists but is refused — revoked, expired — is charged to its own budget instead, so one
-  integration looping on a dead key cannot lock out the healthy ones behind the same NAT. A
+  integration retrying a dead key cannot lock out the healthy ones behind the same NAT. A
   request with no client address at all (a Unix socket with no proxy headers) skips the
   per-address budget, and the operator is warned once, rather than every such request
   sharing one budget that 120 bad tokens would exhaust for every key. If the database can't
@@ -428,7 +432,9 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
 (`apiKeyMaxLifetime`, no maximum by default) also shortens keys that already exist; **Pause keys
 of people who stop signing in** (`apiKeySsoSignInWindow`, 30 days by default); **Accept a fresh
 sign-in round trip for API keys** (`apiKeySsoRoundTripStepUp`, off by default) lets people on
-portal connections make keys with a sign-in their portal did not date. Keys are
+portal connections make keys with a sign-in their portal did not date; **Keep a service
+account's keys working after its last manager goes** (`serviceAccountUnmanagedGrace`, 14 days
+by default) sets how long a service account's keys outlive its last manager. Keys are
 refused with `503` while RBAC enforcement is switched off. Behind a proxy, set
 `FORWARDED_ALLOW_IPS` to exactly your proxies, so that per-key network limits and recorded
 addresses see the real client.
@@ -458,7 +464,7 @@ Permissions come in two kinds: `system:*` permissions apply across the platform,
 | Workspace Admin | `workspace_admin` | One workspace | Everything in the workspace, including its members |
 | Data Engineer | `workspace_data_engineer` | One workspace | Data sources, views, semantic layers and catalog — not members or publishing views to everyone |
 | Member | `workspace_member` | One workspace | Views and data sources |
-| Publisher | `workspace_publisher` | One workspace | A member who may also advance a versioned data source's Published version (not checked until ACCESS R3) |
+| Publisher | `workspace_publisher` | One workspace | A member who may also advance a versioned data source's Published version: publish a draft, merge a review, revert, restore or sync |
 | Viewer | `workspace_viewer` | One workspace | Read-only |
 
 Everyone else has the default `user` tier: no platform permissions, and access only to the

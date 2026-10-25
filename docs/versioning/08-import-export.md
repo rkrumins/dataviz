@@ -230,8 +230,8 @@ indexes (migration `20260927_1000_import_indexes`).
 ### 3c. Apply
 
 Each window's ops are applied to the draft before the next window is resolved, via
-`apply_ops(graph_id, ops, actor, branch_id=draft, message="import")`. Each window is one commit on the
-draft — so a huge import becomes a sequence of ordinary checkpoints, and the engine's
+`apply_ops(graph_id, ops, actor, branch_id=draft, message="import")`. Each window is one `edit` commit
+on the draft, with the message `import` — so a huge import becomes a sequence of ordinary commits, and the engine's
 referential-integrity, edge-integrity, cascade-delete, and ontology gates all apply. The resolutions
 are recorded on `import_rows` (`_persist_resolutions`, one `UPDATE … FROM unnest()` per 5,000 rows),
 and `job.summary` tallies `{new, updated, unchanged, deleted, invalid}`. A commit's entity heads are
@@ -264,6 +264,10 @@ refused), shows how much is up, and resumes: the same file chosen again (name, s
 time) after a failure or a reload sends only the missing parts. An upload is its owner's only, and
 its parts are swept with every other artifact after `OBJECT_STORE_TTL_HOURS` (24), so it has a day
 to finish. `POST …/imports` (the file as the request body, up to 100 MB) stays for scripts.
+
+An import that names a view (`viewId`) places the entities it creates in that view's layout — a
+write to the view — so the view must be in the workspace, not deleted, and editable by the caller
+(`_check_import_view`): with an API key, one with **Views: read & write**.
 
 ---
 
@@ -570,7 +574,7 @@ Credentials come from boto3's own chain: `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_
   `LastModified`. Like the other stores, they keep the inputs of jobs that may still read them
   (`jobs_input_prefixes`).
 
-**GCS.** Create an HMAC key for a service account with Storage Object Admin on the bucket (Cloud
+**GCS.** Create an HMAC key for a Google Cloud service account with Storage Object Admin on the bucket (Cloud
 Storage → Settings → Interoperability) and set it as `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`,
 with `OBJECT_STORE_S3_ENDPOINT_URL=https://storage.googleapis.com` and `OBJECT_STORE_S3_REGION=auto`.
 
@@ -681,9 +685,14 @@ tests/integration/test_s3_store_minio.py tests/test_object_store.py`.
 - **`auto_publish` and a custom draft `name`** exist on `JobORM` / `create_import_job`
   (`service.py:75-77`) but the `create_import` endpoint doesn't expose them — imports always flow
   through the manual review/publish path (the draft is named "Import").
-- **`idempotency_key` is stored on import/export jobs but not deduped in the workers** — job-level
-  idempotency for these paths is a designed follow-up (the ndjson `bulk-ingest`/`sync` paths dedup at
-  the service level, separately; see [10 — Authoritative Sources](10-authoritative-sources-datahub-openmetadata.md)).
+- **`idempotency_key` on an import or export job is unique per graph, and only an import honours it
+  as a retry.** `ix_jobs_idem_active` covers every job, finished or not. An import sent a key it has
+  already seen answers with the import it created, with no second draft or job. An export sent a key
+  already used on the graph — by an import or an export — fails the insert, and the answer is `503`.
+  Imports and exports share the keys, so give each export its own, and never send an import a key an
+  export used. Job-level idempotency for exports is a designed follow-up (the ndjson
+  `bulk-ingest`/`sync` paths dedup at the service level, separately; see
+  [10 — Authoritative Sources](10-authoritative-sources-datahub-openmetadata.md)).
 - **`INLINE_IMPORT_MAX` (5,000) two-tier threshold** exists in config as the intended
   "stage small imports client-side, run large ones async" split, but the endpoint currently always
   dispatches the async worker.

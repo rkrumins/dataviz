@@ -43,10 +43,12 @@ restrictions, [below](#what-a-rules-predicate-may-not-use)).
 ## Signing in from a script
 
 A script authenticates with an **API key** or with a **cookie session** signed
-in with a password. Either way it acts as you. Every endpoint on this page takes
-a key.
+in with a password. Either way it acts as you — or, with a
+[service account](/guide/service-accounts)'s key, as that account. Every endpoint
+on this page takes a key.
 
-**With an API key.** Create one under **Account → API keys** — **Data: read**
+**With an API key.** Create one under **Account → API keys** (a service
+account's, on its page) — **Data: read**
 on the data sources you search, **Views: read & write** on the views whose
 library you change ([API Keys](/guide/api-keys)) — and send it in the
 `Authorization` header. No cookies, no CSRF header:
@@ -703,11 +705,6 @@ curl -s -b "$JAR" -o pii.csv \
 - **No data-source, workspace or organisation library.** Display rules and saved
   queries belong to one View. "Publish to a data source" is the fan-out above;
   there is no bulk endpoint, and a View created later doesn't inherit anything.
-- **No service accounts.** A script's API key acts as the person who made it,
-  and stops working when they leave.
-- **The publish script signs in with a password** (`publish_view_library.py`
-  takes no API key). Where password sign-in is off for single sign-on, only
-  system accounts can run it; use the endpoints with a key instead.
 - **Saved queries keep only the predicate** — not the scope mode, options,
   aggregations, sort or template inputs.
 - **"Mine" searches stay in one browser**: no API, no sync, not in any export.

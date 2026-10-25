@@ -386,6 +386,40 @@ before it can be merged.").
 
 See [The Review Center](/guide/review-center).
 
+### A script's API key is refused
+
+**Likely cause:** the key has stopped working — expired, paused or revoked —
+or it may not do what the script asked.
+
+1. Ask the key about itself. It answers even when it has stopped working:
+
+   ```bash
+   curl -H "Authorization: Bearer $API_KEY" https://your-host/api/v1/api-keys/self
+   ```
+
+   Read `status`:
+   - **`expired`** — rotate it under **Account → API keys** to renew it.
+   - **`paused`** — a personal key: sign in to the app once, and it resumes.
+     A service account's key: the account has no manager; ask an
+     administrator to appoint one.
+   - **`owner_inactive`** — the account it acts as is suspended, or the
+     service account is disabled: ask an administrator.
+   - **`ip_not_allowed`** — the script runs outside the key's networks.
+
+   A `401` here means the key is revoked or mistyped: make a new one.
+2. If it is `active`, read `detail.error` on the refused request:
+   `api_key_not_allowed` (keys can't call that route), `api_key_read_only`,
+   `api_key_out_of_scope` (the key doesn't reach it — one limited to data
+   sources must name one with `dataSourceId`) or `missing_permission`. On a
+   version-controlled data source, `"type": "access_denied"` with
+   `publish_required` means whoever the key acts as lacks publish, so it can't
+   write the published version directly: send the change to a draft for a
+   person to publish.
+3. Every reason and what to do is in
+   [When a key is refused](/guide/api-keys#when-a-key-is-refused). For the
+   script's side — retries, timeouts and the rate limit — see the
+   [Integration Quickstart](/docs/integration-quickstart#6-handle-what-comes-back).
+
 ---
 
 ## For Administrators

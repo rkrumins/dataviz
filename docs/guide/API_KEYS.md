@@ -6,7 +6,7 @@ An API key lets a script or a service call the API **as you**: it reads and
 changes views and data the way you could yourself, and is recorded as you in
 every audit trail. You choose how much of that it gets — some workspaces,
 views or data sources, and read or write — and it can never do more than you
-can. If your own access shrinks, so does the key's, on its next request.
+can. If your own access shrinks, so does the key's, within 30 seconds.
 
 > **Note:** *The one-sentence model* — a key is your access, narrowed to what
 > you chose, checked afresh on every request.
@@ -15,6 +15,10 @@ A key that acts as you stops when you leave. For an integration that should
 outlive you — a scheduled job, a sync with another system — make its key on a
 [service account](/guide/service-accounts) instead: an account nobody signs in
 as, whose keys its managers make.
+
+Writing the integration itself? The [Integration
+Quickstart](/docs/integration-quickstart) takes it from choosing a key to
+handling every answer the API gives.
 
 ---
 
@@ -62,6 +66,9 @@ JavaScript and a `.env` file. Copy it into a secrets manager and tick **I've
 stored it somewhere safe** — it is not stored anywhere you can see it again.
 The page then waits for the key's first call and says when it arrives. If you
 lose a key, [rotate](#rotating-or-renewing-a-key) it.
+
+You can hold 25 keys at once — those still in date, paused ones included.
+Past that, creating one is refused until you revoke a key you no longer use.
 
 > **Tip:** Make one key per integration, each limited to what that
 > integration needs. A key that reads one view is a small loss if it leaks; a
@@ -116,11 +123,11 @@ Send it in the `Authorization` header:
 
 ```bash
 curl -H "Authorization: Bearer nxpat_…" \
-  https://your-host/api/v1/views/v_123
+  https://your-host/api/v1/views/view_…
 ```
 
-Never put a key in a URL: addresses end up in logs and browser history. Keys
-in a query string are not accepted.
+Never put a key in a URL: addresses end up in logs and browser history. A key
+in a query string isn't read.
 
 A key is read from this header and nowhere else. If a proxy or company
 gateway in front of the API sets, replaces or strips `Authorization` — some
@@ -134,16 +141,23 @@ To check a key without changing anything, ask it about itself:
 curl -H "Authorization: Bearer nxpat_…" https://your-host/api/v1/api-keys/self
 ```
 
-The answer says whether it is active, paused or expired, what it may do, and
-when it stops working. Every successful response also carries
-`X-API-Key-Expires-At`, so a client can warn you before the day comes.
+The answer says whether it works and when it stops working — and, while it
+works, what it may do. It comes back `200` even for a key that has stopped:
+`status` says why — `paused`, `expired`, `owner_inactive` (its account is
+suspended or disabled) or `ip_not_allowed` — so check `status`, not the HTTP
+code. Only a revoked key is refused. Every answer below `400` to a key that
+expires also carries `X-API-Key-Expires-At`, so a client can warn you before
+the day comes.
 
 ### What a key can call
 
 Keys are for the data plane: reading and changing views and the data behind
-them, proposing and publishing changes, and following what changed.
-Administration, sharing and settings are not available to keys. The API
-reference marks every operation a key may call.
+them, proposing changes, and following what changed. People and access,
+sharing, settings and switches, layout templates and saved filters are not
+available to keys, nor importing a view file, turning version control on,
+creating or forking a graph, or publishing, merging, reverting, restoring or
+syncing one. The API reference marks every operation a key
+may call — see [Find the endpoint you need](/docs/api-guide#find-the-endpoint-you-need).
 
 | To… | Use |
 | --- | --- |
@@ -153,8 +167,12 @@ reference marks every operation a key may call.
 | Read or change a data source's graph | `/api/v1/{workspace}/graph/…?dataSourceId={id}` |
 | List a workspace's graphs, and which are versioned | `GET /api/v1/admin/workspaces/{workspace}/data-sources?include=versioning` — a key covering the whole workspace |
 | Propose a change | open a draft, stage the change, open a merge request (`/versioning/…`) |
-| Publish a change | merge a request you may merge, or publish your draft |
+| Publish a change | not with a key: a person with publish merges the request, or publishes the draft |
 | Follow what changed | the view's activity (`GET /views/{id}/activity`), the commit log and watermark of its graph (`/versioning/graphs/{id}/commits`, `/watermark` — see [Graph Metadata & History API](/docs/graph-metadata-api)), a data source's jobs and their event stream |
+
+Searches, traces and exports are reads made with `POST`: a read-only key may
+make them. Creating a view, and listing a workspace's data sources, act on the
+whole workspace, so they need a key that covers all of it.
 
 A key limited to particular data sources must **name** one with
 `dataSourceId`; it cannot rely on a workspace's default data source. A key
@@ -173,6 +191,7 @@ checked again each time.
 | Status | `error` | What it means |
 | --- | --- | --- |
 | 401 | `invalid_api_key` | Not a key this platform issued, or mistyped. |
+| 401 | `api_key_required` | `/api-keys/self` was called without a key. |
 | 401 | `api_key_revoked` | Revoked. It will not work again. |
 | 401 | `api_key_expired` | Past its expiry, or older than your administrator's maximum. |
 | 401 | `owner_reauth_required` | Paused: you have not signed in through your identity provider for too long — or have no way to sign in, such as only a password while password sign-in is switched off. Sign in and it resumes. |
@@ -183,8 +202,11 @@ checked again each time.
 | 403 | `api_key_not_allowed` | This endpoint cannot be called with a key. |
 | 403 | `api_key_read_only` | A read-only key asked to change something. |
 | 403 | `api_key_out_of_scope` | The request reaches past what the key was limited to. |
-| 429 | `rate_limited` | Too many requests with this key; wait for `Retry-After`. |
-| 503 | `api_keys_unavailable` | The key could not be checked just now. Retry — it says nothing about the key. |
+| 403 | `api_key_cannot_publish` | A key without **Publish views to everyone** tried to create a view published to everyone. |
+| 403 | `missing_permission` | The request needs the permission named in `permission`, and the key doesn't hold it: whoever it acts as lacks it, or the key wasn't given it. A key never adds to its owner's access. |
+| 403 | `csrf_failed` | A change was sent with an `Origin` or `Referer` from a site the deployment doesn't trust. Scripts send neither. |
+| 429 | `rate_limited` | More than 1,200 requests a minute with this key, or more than 120 bad keys a minute from this address. Wait for `Retry-After`. |
+| 503 | `api_keys_unavailable` | The key could not be checked just now. Retry — it says nothing about the key. It lasts while your administrator has authorization enforcement switched off. |
 
 Refusals carry a standard `WWW-Authenticate: Bearer` header:
 `error="invalid_token"` when the key is not accepted, `error="insufficient_scope"`
@@ -220,7 +242,8 @@ those, rotate it or make a new key.
 
 ### Rotating or renewing a key
 
-**Rotate** makes a new token that can do exactly what the old one does.
+**Rotate** makes a new token that can do exactly what the old one does: the
+same name, permissions, reach and networks. Only its expiry can change.
 Choose how long the old token keeps working beside it — not at all, an hour,
 a day or a week — and the dialog says when that is, so you can swap the new
 one in everywhere first. While both work they count as two of your 25, so at
@@ -241,8 +264,9 @@ point to each other.
 **Revoke** stops a key at once, permanently. Keys that have ended stay under
 **Expired and revoked** for 90 days, as a record.
 
-Whoever holds a key can also revoke it — even a paused or expired one — so if
-you find a key where it should not be, end it:
+Whoever holds a key can also revoke it — even a paused or expired one, though
+not while your administrator has switched API keys off — so if you find a key
+where it should not be, end it:
 
 ```bash
 curl -X DELETE -H "Authorization: Bearer nxpat_…" https://your-host/api/v1/api-keys/self
@@ -315,6 +339,10 @@ Switches](/guide/feature-switches).
 
 ## Where to next
 
+- [Integration Quickstart](/docs/integration-quickstart) — when you write the
+  integration: a key, its first calls, and every answer it can get.
+- [API Guide](/docs/api-guide) and [Key Management API](/docs/key-management-api)
+  — the conventions every route shares, and every key route.
 - [Service Accounts](/guide/service-accounts) — when an integration must keep
   running whoever set it up.
 - [Versioning & Change Control](/guide/versioning-change-control) — when your

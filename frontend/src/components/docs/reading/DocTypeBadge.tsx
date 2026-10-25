@@ -19,6 +19,7 @@ const STYLE: Record<DocType, { label: string; icon: LucideIcon; cls: string }> =
 export const DOC_TYPES: Record<string, DocType> = {
   // Tutorial — learning-oriented
   'onboarding-a-source': 'tutorial',
+  'integration-quickstart': 'tutorial',
   // Explanation — understanding-oriented
   overview: 'explanation',
   architecture: 'explanation',
@@ -64,6 +65,7 @@ export const DOC_TYPES: Record<string, DocType> = {
   changelog: 'reference',
   'feature-search-and-rules-reference': 'reference',
   'graph-metadata-api': 'reference',
+  'key-management-api': 'reference',
   'versioning-data-model': 'reference',
   'versioning-import-export': 'reference',
   'versioning-guide': 'reference',

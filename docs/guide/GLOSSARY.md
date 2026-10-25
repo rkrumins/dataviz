@@ -19,8 +19,10 @@ screen.
 | **Aggregation** | The background job that builds a data source's lineage summaries (rollups), so lines can be drawn between collapsed items. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Analytics** | The sidebar page with growth, engagement and adoption figures for the platform. | [Analytics](/guide/analytics) |
 | **Announcement** | A banner message an administrator shows to everyone, set under **Administration → Announcements**. | [The Admin Console](/guide/governance-ops) |
+| **API key** | A token a script or service sends to call the API: a personal key (`nxpat_…`) acts as you, a service account's (`nxsat_…`) as that account — each narrowed to what was chosen when it was made. Made under **Account → API keys**. | [API Keys](/guide/api-keys) |
 | **Approval** | The step where an administrator lets a new account in: **Approve** under **Administration → User Management**. | [Users & Access](/guide/users-access) |
 | **Branding** | The app name, logo, theme and support address an administrator sets under **Administration → Branding**. | [The Admin Console](/guide/governance-ops) |
+| **Break-glass account** | An account kept for when nobody else can sign in, such as during an identity-provider outage. It holds no API keys and can't manage a service account. | [Users & Access](/guide/users-access#system-accounts-break-glass) |
 | **Canvas** | The area where a view's graph is drawn and explored. | [Reading Lineage](/guide/reading-lineage) |
 | **Catalog item** | A graph found on a provider and registered so it can be added to a workspace as a data source. | [Admin Setup](/guide/admin-setup) |
 | **Context View** | A canvas type that sorts entities into columns (layers) you define and draws the lineage between them — made for reading a pipeline. | [The Lineage Lens & Context View](/guide/lineage-lens) |
@@ -48,6 +50,7 @@ screen.
 | **Feature switch** | An on/off setting under **Administration → Features** that turns a capability on or off for everyone in the deployment (also called a feature flag). | [Feature Switches](/guide/feature-switches) |
 | **Find a workspace** | The **Workspaces** tab that lists your organization's workspaces, so you can see what each is for and ask to join one. An administrator switches it on. | [Requesting Access](/guide/requesting-access#find-a-workspace) |
 | **Freshness** | How current a data source's lineage summaries are. Administrators watch it under **Ingestion → Freshness**. | [Data Freshness & Ingestion](/guide/data-freshness) |
+| **Grace period** | How long a service account's keys keep working after its last manager goes — 14 days unless an administrator changed it — before they pause. | [Service Accounts](/guide/service-accounts#when-a-manager-leaves) |
 | **Granularity** | How fine the lineage you see is — column, table or whole system. There's no global switch: open or close containers, or use the Lineage Lens **Density** control. | [Reading Lineage](/guide/reading-lineage) |
 | **Graph** (canvas type) | A canvas type that shows entities and their relationships positioned freely, for exploring how things connect. | [Creating Views](/guide/creating-views) |
 | **Graph store** | The graph database server that holds the graphs. Administrators watch its nodes under **Administration → Graph store**. | [The Graph Store](/guide/graph-store-topology) |
@@ -65,6 +68,7 @@ screen.
 
 | Term | What it means | Read more |
 |---|---|---|
+| **Manager** (of a service account) | A person, or a team, who answers for a service account and makes, rotates and revokes its keys. Appointed by an administrator. | [Service Accounts](/guide/service-accounts) |
 | **Merge** | Apply a reviewed draft's changes to the published version, from its review. | [The Review Center](/guide/review-center) |
 | **Merge request** | A request to merge a draft, opened with **Submit for review**. A reviewer can **Approve**, **Merge** or **Dismiss** it. | [The Review Center](/guide/review-center) |
 | **Multi-entity trace** | A trace started from several entities at once: choose **Select**, pick the entities, then **Trace N Entities** (for example **Trace 3 Entities**). | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
@@ -97,6 +101,7 @@ screen.
 | **Scope** | Where a role applies: the whole organisation, or one workspace. | [Users & Access](/guide/users-access) |
 | **Search** | The search box in the top bar (⌘K / Ctrl-K) — find pages, views, workspaces and documentation. Inside a view, **Advanced search** (⌘⇧F / Ctrl-Shift-F) finds every match on the canvas. | [Advanced Search](/guide/advanced-search) |
 | **Semantic layer** | The definitions of what your data means — its entity types, relationship types and how they nest. Managed under **Semantic Layers**; a published version's definitions never change — editing them creates a new version. | [The Semantic Layer](/guide/semantic-layer) |
+| **Service account** | An account nobody signs in as, for an integration that must outlive whoever set it up: its managers make its API keys, and it holds only the workspace roles an administrator gives it. Not a Google Cloud service account, which a provider connection may use. | [Service Accounts](/guide/service-accounts) |
 | **Stage changes** | The button at the foot of an editing drawer that keeps your edit for **Review & Save** (⌘S / Ctrl-S). Nothing is saved yet. | [Editing in a Draft](/guide/editing-in-a-draft) |
 | **Steward** | A workspace role for the people who let others in: a **Member** who also adds people as viewers or members and answers their access requests. | [Workspace Admin](/guide/workspace-admin#giving-people-access-the-members-tab) |
 | **Sync chip** | The chip next to the data source's name in a view's header that says whether the view reads the latest data — for example **In sync · v12** or **1 version behind**. | [Data Freshness & Ingestion](/guide/data-freshness) |
