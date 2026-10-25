@@ -22,6 +22,8 @@ terms. Here the meaning is written down once:
   Python, measured against FalkorDB 4.18 and pinned by the live parity
   test (``tests/integration/test_search_semantics_live.py``). The stub
   adapter answers with it, so its results are production's results.
+* ``resolve_key_comparison`` / ``evaluate_keys`` — the same for one
+  property compared with another of the same entity (``value_key``).
 
 The value TYPE decides how a stored value is read, whatever kind it was
 stored as:
@@ -116,6 +118,10 @@ POSITIVE_OF: Dict[str, str] = {
 
 _ORDER_OPS = frozenset({"gt", "gte", "lt", "lte", "between"})
 
+#: The operators that compare a property with another property of the
+#: same entity (``value_key``) rather than with a value.
+KEY_OPERATORS: Tuple[str, ...] = ("eq", "neq", "gt", "gte", "lt", "lte")
+
 
 def operator_table() -> Dict[str, Dict[str, Any]]:
     """The table as plain data — what the schema export writes for the
@@ -153,7 +159,12 @@ class Comparison:
 # ---------------------------------------------------------------------------
 
 def resolve_predicate(pred: Any, *, now: Optional[datetime] = None) -> Comparison:
-    """``resolve_comparison`` for a PropertyPredicate / EdgePropertyPredicate."""
+    """``resolve_comparison`` for a PropertyPredicate / EdgePropertyPredicate
+    — ``resolve_key_comparison`` for one compared with another property."""
+    if getattr(pred, "value_key", None):
+        return resolve_key_comparison(
+            pred.op, value_type=getattr(pred, "value_type", "auto") or "auto",
+            case_sensitive=bool(getattr(pred, "case_sensitive", False)))
     return resolve_comparison(
         pred.op, pred.value,
         value_type=getattr(pred, "value_type", "auto") or "auto",
@@ -205,6 +216,26 @@ def resolve_comparison(
     elif spec.arity == "many":
         values = tuple(dict.fromkeys(values))
     return Comparison(op, kind, values, None, case_sensitive, include_missing)
+
+
+def resolve_key_comparison(op: str, *, value_type: str = "auto",
+                           case_sensitive: bool = False) -> Comparison:
+    """A comparison of one property with another of the same entity. No
+    value says what type to compare as, so ``auto`` reads an ORDER as
+    numbers ("freshness hours > SLA hours") and equality as text, which
+    is exact for any value ("owner = steward"). Dates compare to the
+    second: a day is its first second."""
+    if op not in KEY_OPERATORS:
+        raise SemanticsError("compare one property with another using =, ≠, <, ≤, > or ≥")
+    if value_type not in VALUE_TYPES:
+        raise SemanticsError(f"unknown value type {value_type!r}")
+    if value_type == "auto":
+        kind = "number" if op in _ORDER_OPS else "string"
+    elif value_type in OPERATOR_TABLE[op].types:
+        kind = value_type
+    else:
+        raise SemanticsError(f"{op!r} does not compare {value_type} values")
+    return Comparison(op, kind, (), "second" if kind == "date" else None, case_sensitive)
 
 
 def _raw_values(op: str, arity: str, value: Any) -> Tuple[Any, ...]:
@@ -433,6 +464,22 @@ def evaluate(stored: Any, cmp: Comparison) -> bool:
             return cmp.include_missing
         return not _matches(stored, positive, cmp)
     return _matches(stored, op, cmp)
+
+
+def evaluate_keys(left: Any, right: Any, cmp: Comparison) -> bool:
+    """Whether two stored values of one entity compare (``value_key``):
+    each read as the comparison's type, a list by any of its elements.
+    ``neq`` needs both values — a missing key compares to nothing."""
+    positive = POSITIVE_OF.get(cmp.op)
+    if positive is None:
+        return _pairs(left, right, cmp.op, cmp)
+    return left is not None and right is not None and not _pairs(left, right, positive, cmp)
+
+
+def _pairs(left: Any, right: Any, op: str, cmp: Comparison) -> bool:
+    lefts = [k for k in (_key(e, cmp) for e in _elements(left)) if k is not None]
+    rights = [k for k in (_key(e, cmp) for e in _elements(right)) if k is not None]
+    return any(_test(a, op, (b,)) for a in lefts for b in rights)
 
 
 def element_texts(stored: Any) -> Tuple[str, ...]:

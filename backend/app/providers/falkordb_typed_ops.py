@@ -122,6 +122,36 @@ def compile_comparison(col: str, cmp: Comparison, bind: Bind) -> str:
     return f"({col} IS NOT NULL AND NOT {test})"
 
 
+def compile_key_comparison(left: str, right: str, cmp: Comparison) -> str:
+    """A WHERE fragment true exactly where ``search_semantics.evaluate_keys``
+    is, for two stored values of one entity (``n.`a``` and ``n.`b```).
+    Both sides' keys are built side by side in one list, never one inside
+    the other's comprehension, and then compared pair by pair."""
+    positive = POSITIVE_OF.get(cmp.op)
+    test = _pair_test(positive or cmp.op, cmp)
+
+    def keys(col: str) -> str:
+        return _keys_of(f"CASE WHEN typeOf({col}) = 'List' THEN {col} ELSE [{col}] END", cmp)
+
+    pairs = (f"ANY(_kp IN [[{keys(left)}, {keys(right)}]] WHERE "
+             f"ANY(_ka IN _kp[0] WHERE ANY(_kb IN _kp[1] WHERE {test('_ka', '_kb')})))")
+    if positive is None:
+        return pairs
+    return f"({left} IS NOT NULL AND {right} IS NOT NULL AND NOT {pairs})"
+
+
+def _pair_test(op: str, cmp: Comparison):
+    """``a <op> b`` for two keys of the comparison's type. Numbers are
+    ordered by sign first and compared raw only where the signs agree, so
+    FalkorDB's wrapping integer order (``_number_order``) never decides."""
+    if cmp.type == "number" and op != "eq":
+        neg = "lt" if op in ("lt", "lte") else "gt"
+        first = "({a} < 0 AND {b} >= 0)" if neg == "lt" else "({a} >= 0 AND {b} < 0)"
+        return lambda a, b: (f"({first.format(a=a, b=b)} OR "
+                             f"(({a} >= 0) = ({b} >= 0) AND {a} {_SYMBOL[op]} {b}))")
+    return lambda a, b: f"{a} {_SYMBOL[op]} {b}"
+
+
 def _match(col: str, op: str, cmp: Comparison, bind: Bind) -> str:
     values = cmp.comparable
     if op == "containsAll":

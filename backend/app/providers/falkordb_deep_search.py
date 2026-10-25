@@ -69,7 +69,7 @@ from backend.app.providers.falkordb_provider import (
     platform_property_names,
 )
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf
-from backend.app.providers.falkordb_typed_ops import compile_comparison, text_of
+from backend.app.providers.falkordb_typed_ops import compile_comparison, compile_key_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.app.services.deep_search.edge_types import spell_edge_types
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
@@ -248,6 +248,9 @@ class _Compiler:
         # compiles them for native values only; a list — set by a caller
         # whose graph keeps anything raw — collects each one's ``RawLeaf``.
         self.raw_leaves: Optional[List[RawLeaf]] = None
+        # Whether a property is compared with another (``value_key``): that
+        # reads native values only, which a graph keeping raw ones is told.
+        self.compares_keys = False
         # Ontology-resolved edge type sets. ``None`` means the caller
         # didn't inject them — predicates that depend on lineage /
         # containment classification will raise CompileError on visit.
@@ -504,8 +507,22 @@ class _Compiler:
         return "(" + " OR ".join(clauses) + ")"
 
     def _visit_property(self, p) -> str:
+        if p.value_key:
+            return self._compare_keys(p)
         return self._raw_value(
             self._compile_comparison(f"{self._var}.{_safe_property_name(p.key)}", p), p)
+
+    def _compare_keys(self, p) -> str:
+        """One property against another of the same entity, as stored
+        natively — a value kept as JSON text isn't probed for this."""
+        try:
+            cmp = resolve_predicate(p)
+        except SemanticsError as exc:
+            raise CompileError(f"property {p.key!r}: {exc}") from exc
+        self.compares_keys = True
+        v = self._var
+        return compile_key_comparison(f"{v}.{_safe_property_name(p.key)}",
+                                      f"{v}.{_safe_property_name(p.value_key)}", cmp)
 
     def _raw_leaf(self, native: str, key: str, cmp, key_match: str) -> str:
         leaf = RawLeaf(key=key, cmp=cmp, key_match=key_match,
@@ -2011,6 +2028,11 @@ async def _hydrate_hits(
 # `/search/explain` endpoint and the dev panel's "Show Cypher" button.
 # ---------------------------------------------------------------------------
 
+#: Said where values may be kept raw: comparing two properties reads native ones.
+KEY_COMPARISON_NOTE = ("Comparing one property with another reads the values the graph stores "
+                       "natively; a value kept as JSON text (propertiesRaw) isn't compared.")
+
+
 def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     """Return the compiled Cypher + bound parameters without executing.
 
@@ -2151,6 +2173,8 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     # the candidate cap applies to IN-SCOPE nodes. Feeding the chain as
     # ``scope_continuation`` (post-filter) would cap the graph-wide set first
     # and silently drop in-scope matches for broad predicates.
+    if compiler.compares_keys:
+        notes.append(KEY_COMPARISON_NOTE)
     tail = tail_clauses(compiler.tail)
     if compiler.tail:
         notes.append(

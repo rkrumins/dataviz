@@ -134,6 +134,12 @@ class TestCompiler:
         [leaf] = compiler.raw_leaves
         assert where == f"NOT ((EXISTS(n.`legacy_ref`) OR ID(n) IN ${leaf.true_ids}))"
 
+    def test_a_property_compared_with_another_reads_native_values_only(self):
+        where, compiler = self._compile({"kind": "property", "key": "freshnessHours",
+                                         "op": "gt", "valueKey": "slaHours"})
+        assert compiler.raw_leaves == [] and compiler.compares_keys
+        assert "ID(n) IN" not in where
+
     def test_a_text_match_on_a_property_is_a_raw_leaf_too(self):
         _, compiler = self._compile({"kind": "text", "target": "property",
                                      "propertyKey": "owner", "value": "fin"})

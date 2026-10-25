@@ -29,7 +29,7 @@ from backend.app.providers.falkordb_deep_search import (
     match_hash,
     query_hash,
 )
-from backend.app.providers.falkordb_typed_ops import compile_comparison
+from backend.app.providers.falkordb_typed_ops import compile_comparison, compile_key_comparison
 from backend.app.services.advanced_search_service import (
     MAX_LEAF_COUNT,
     MAX_OR_BRANCH,
@@ -61,7 +61,7 @@ from backend.common.models.search import (
     TextPredicate,
     WithinHopsPredicate,
 )
-from backend.common.search_semantics import resolve_comparison
+from backend.common.search_semantics import resolve_comparison, resolve_key_comparison
 
 
 def _typed(col, op, value, *, first=0, **kw):
@@ -954,6 +954,20 @@ class TestCompilerLeaves:
         with pytest.raises(CompileError, match="'size'.*not a number"):
             _Compiler().compile(PropertyPredicate(
                 key="size", op="gt", value="big", value_type="number"))
+
+    def test_property_against_another_property(self):
+        """``value_key`` compares two keys of the same entity: the fragment
+        ``compile_key_comparison`` emits, both keys quoted like any other and
+        no parameters. What it MEANS is pinned by the semantics tests and
+        the live parity test."""
+        c = _Compiler()
+        where = c.compile(PropertyPredicate(key="freshness hours", op="gt", value_key="slaHours"))
+        assert where == compile_key_comparison(
+            "n.`freshness hours`", "n.`slaHours`", resolve_key_comparison("gt"))
+        assert c.params == {} and c.compares_keys
+        with pytest.raises(CompileError, match="does not compare boolean"):
+            _Compiler().compile(PropertyPredicate(key="a", op="gt", value_key="b",
+                                                  value_type="boolean"))
 
     def test_presence_operators_take_no_value(self):
         for op, expected in (("isSet", "n.`k` IS NOT NULL"),

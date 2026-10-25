@@ -340,7 +340,7 @@ function meaning(p: Predicate): string {
         case 'property': {
             const op = p.op ?? 'eq'
             const arity = arityOf(op)
-            return stable(['property', p.key, op,
+            return stable(['property', p.key, op, p.valueKey ?? null,
                 arity === 'none' ? null : arity === 'duration' ? String(p.value).toUpperCase() : p.value,
                 arity === 'none' || OPERATOR_TABLE[op].types.length === 1 ? null : predicateType(p),
                 arity !== 'none' && !!p.caseSensitive, isNegative(op) && !!p.includeMissing])

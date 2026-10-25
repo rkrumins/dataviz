@@ -43,6 +43,7 @@ from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Awaitable, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from backend.app.providers.falkordb_deep_search import (
+    KEY_COMPARISON_NOTE,
     _build_within_hops_continuation,
     _scope_urn_sets_with_depths,
     _sanitize_label,
@@ -192,6 +193,9 @@ async def make_plan(provider, query, compiler, *, run: Run, width: int,
     labels = await _searchable_labels(provider, timeout_s=timeout_s)
     containment = _containment(provider)
     notes: List[str] = []
+    # Values kept raw (``raw_leaves`` collects them) aren't compared key to key.
+    if compiler.compares_keys and compiler.raw_leaves is not None:
+        notes.append(KEY_COMPARISON_NOTE)
     reach = await reach_plan(run, provider, query, compiler, labels, containment,
                              width=width, notes=notes)
     if reach is not None:

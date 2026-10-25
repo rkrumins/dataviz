@@ -210,3 +210,28 @@ async def test_display_rules_tag_exactly_the_matches(provider):
     assert out["errors"] == {}
     for name, predicate in PREDICATES.items():
         assert set(out["matches"][name]) == _expected(predicate) & set(urns), name
+
+
+async def test_a_property_against_another_reads_native_values_and_says_so(provider):
+    """Comparing two keys of one node reads native values only — so a count
+    tells a graph keeping some raw, rather than quietly missing them."""
+    from backend.app.providers.falkordb_deep_search import KEY_COMPARISON_NOTE
+    from backend.app.providers.falkordb_search.engine import execute_count_session
+    from backend.common.models.search import SearchOptions, SearchQuery
+    from backend.common.search_semantics import evaluate_keys, resolve_key_comparison
+
+    predicate = {"kind": "property", "key": "size", "op": "eq", "valueKey": "size"}
+    cmp = resolve_key_comparison("eq")
+    want = {node["urn"] for node in NODES
+            if evaluate_keys(node["native"].get("size"), node["native"].get("size"), cmp)}
+    session, answer = None, None
+    for _ in range(50):
+        query = SearchQuery(predicate=_validated(predicate), scope=_scope(),
+                            options=SearchOptions(results="hits", wait_ms=0, session_id=session))
+        answer = await execute_count_session(provider, query, context=_context("count-keys"))
+        session = answer["sessionId"]
+        if answer["status"] == "complete":
+            break
+    assert answer["status"] == "complete"
+    assert answer["count"] == len(want)
+    assert KEY_COMPARISON_NOTE in answer["notes"]

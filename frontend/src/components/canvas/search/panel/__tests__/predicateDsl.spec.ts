@@ -577,6 +577,8 @@ describe('predicateDsl — relationships and names', () => {
             edgeTypes: [] }],
         ['a relationship naming both edge types and a class', { kind: 'related', axis: 'upstream',
             edgeTypes: ['FEEDS'], edgeClass: 'links' }],
+        ['a property compared with another', { kind: 'property', key: 'freshnessHours', op: 'gt',
+            valueKey: 'slaHours' }],
         ['a reference narrowed by type', { kind: 'is', refs: [{ path: ['Sales'], entityType: 'domain' }] }],
         ['a case-insensitive reference', { kind: 'is', refs: [{ path: ['sales'], caseSensitive: false }] }],
         ['several references', { kind: 'is', refs: [{ path: ['a'] }, { path: ['b'] }] }],

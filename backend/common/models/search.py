@@ -35,6 +35,7 @@ from typing import Annotated, Any, Dict, List, Literal, NamedTuple, Optional, Tu
 
 from pydantic import BaseModel, Field, model_validator
 
+from ..search_semantics import KEY_OPERATORS
 from .graph import GraphNode
 
 
@@ -128,16 +129,32 @@ class PropertyPredicate(_Base):
     as its digits in a string with ``value_type='number'``: it is compared
     exactly. Text comparisons are case-insensitive unless
     ``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /
-    ``notContains`` match entities without the key. The full contract is
-    ``backend/common/search_semantics``.
+    ``notContains`` match entities without the key. ``value_key`` compares
+    with another property of the same entity instead of a value
+    (``freshnessHours > slaHours``): ``=``, ``≠`` and the orders only, an
+    order as numbers and equality as text unless ``value_type`` says
+    otherwise. The full contract is ``backend/common/search_semantics``.
     """
     kind: Literal["property"] = "property"
     key: str = Field(min_length=1, max_length=128)
     op: PropertyOp = "eq"
     value: Any = None
+    value_key: Optional[str] = Field(None, alias="valueKey", min_length=1, max_length=128)
     value_type: ValueType = Field("auto", alias="valueType")
     case_sensitive: bool = Field(False, alias="caseSensitive")
     include_missing: bool = Field(False, alias="includeMissing")
+
+    @model_validator(mode="after")
+    def _against_a_key(self) -> "PropertyPredicate":
+        if self.value_key is None:
+            return self
+        if self.op not in KEY_OPERATORS:
+            raise ValueError("compare one property with another using =, ≠, <, ≤, > or ≥")
+        if self.value is not None:
+            raise ValueError("compare with a value or with another property, not both")
+        if self.include_missing:
+            raise ValueError("comparing two properties needs both: includeMissing doesn't apply")
+        return self
 
 
 class TagPredicate(_Base):

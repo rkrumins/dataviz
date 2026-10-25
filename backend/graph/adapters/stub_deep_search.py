@@ -32,6 +32,7 @@ from backend.common.search_semantics import (
     SemanticsError,
     element_texts,
     evaluate,
+    evaluate_keys,
     fold_case,
     resolve_comparison,
     resolve_predicate,
@@ -833,6 +834,8 @@ def _matches(node: Dict[str, Any], predicate, graph=None) -> bool:
             cmp = resolve_predicate(predicate)
         except SemanticsError as exc:
             raise CompileError(f"property {predicate.key!r}: {exc}") from exc
+        if predicate.value_key:
+            return evaluate_keys(node.get(predicate.key), node.get(predicate.value_key), cmp)
         return evaluate(node.get(predicate.key), cmp)
 
     if isinstance(predicate, HasPropertyPredicate):

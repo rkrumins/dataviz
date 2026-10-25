@@ -1685,7 +1685,7 @@
       "type": "object"
     },
     "PropertyPredicate": {
-      "description": "Typed comparison against a single user-property.\n\n``value_type`` says how stored values are read \u2014 under ``number`` a\nstored \"15\" is 15, under ``string`` a stored 15 is \"15\" \u2014 and the\ncomparison holds for any stored kind, a list included (it matches when\nan element does). ``value`` is shaped by ``op``: one value, a list\n(``in`` / ``notIn`` / ``containsAll``), ``[lo, hi]`` (``between``), an\nISO duration such as ``\"P30D\"`` (``withinLast``) or nothing (``isSet``,\n``isEmpty`` and their negations). An integer beyond 2^53 is best sent\nas its digits in a string with ``value_type='number'``: it is compared\nexactly. Text comparisons are case-insensitive unless\n``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /\n``notContains`` match entities without the key. The full contract is\n``backend/common/search_semantics``.",
+      "description": "Typed comparison against a single user-property.\n\n``value_type`` says how stored values are read \u2014 under ``number`` a\nstored \"15\" is 15, under ``string`` a stored 15 is \"15\" \u2014 and the\ncomparison holds for any stored kind, a list included (it matches when\nan element does). ``value`` is shaped by ``op``: one value, a list\n(``in`` / ``notIn`` / ``containsAll``), ``[lo, hi]`` (``between``), an\nISO duration such as ``\"P30D\"`` (``withinLast``) or nothing (``isSet``,\n``isEmpty`` and their negations). An integer beyond 2^53 is best sent\nas its digits in a string with ``value_type='number'``: it is compared\nexactly. Text comparisons are case-insensitive unless\n``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /\n``notContains`` match entities without the key. ``value_key`` compares\nwith another property of the same entity instead of a value\n(``freshnessHours > slaHours``): ``=``, ``\u2260`` and the orders only, an\norder as numbers and equality as text unless ``value_type`` says\notherwise. The full contract is ``backend/common/search_semantics``.",
       "properties": {
         "caseSensitive": {
           "default": false,
@@ -1738,6 +1738,20 @@
         "value": {
           "default": null,
           "title": "Value"
+        },
+        "valueKey": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Valuekey"
         },
         "valueType": {
           "default": "auto",

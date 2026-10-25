@@ -57,14 +57,14 @@ NODES = [
     (11, "dashboard", "Revenue", {}),
     (12, "dashboard", "Costs", {}),
     (13, "domain", "Sales", {}),
-    (14, "dataset", "orders", {"owner": "alice"}),
+    (14, "dataset", "orders", {"owner": "alice", "freshnessHours": 30, "slaHours": 24}),
     (15, "column", "id", {"description": "pk"}),
     (16, "column", "amount", {"description": ""}),
     (17, "column", "customer", {"description": "who"}),
-    (18, "dataset", "customers", {}),
+    (18, "dataset", "customers", {"freshnessHours": "12", "slaHours": 24}),
     (19, "column", "cid", {"description": "x"}),
     (20, "column", "email", {"description": "y"}),
-    (21, "dataset", "shared", {}),
+    (21, "dataset", "shared", {"freshnessHours": 48, "slaHours": "48"}),
     (22, "topic", "events", {}),
     (23, "dataset", "a", {}), (24, "dataset", "b", {}), (25, "dataset", "c", {}),
     (26, "dataset", "d1", {}), (27, "dataset", "d2", {}), (28, "dataset", "d3", {}),
@@ -152,6 +152,9 @@ OWNER = {"kind": "hasProperty", "key": "owner"}
 DESCRIBED = {"kind": "property", "key": "description", "op": "isNotEmpty"}
 UNFED = {"kind": "degree", "direction": "in", "op": "eq", "value": 0, "edgeClass": "lineage"}
 TOP = {"kind": "isRoot", "edgeClass": "containment"}
+# One property against another: an order as numbers ("12" is 12), equality as text.
+STALE = {"kind": "property", "key": "freshnessHours", "op": "gt", "valueKey": "slaHours"}
+ON_TIME = {"kind": "property", "key": "freshnessHours", "op": "eq", "valueKey": "slaHours"}
 CONFIDENT = {"kind": "edgeProperty", "key": "confidence", "op": "gte", "value": 0.8,
              "valueType": "number"}
 
@@ -270,6 +273,15 @@ def _matrix():
         rel("upstream", IS(30), edgeTypes=["produces"]),
         rel("neighbor", IS(31), edgeClass="links", maxHops=2),
         rel("upstream", OR(IS(13), rel("ancestor", IS(13))), maxHops=2, edgeClass="links"),
+        # One property against another of the same entity — at the top, under
+        # NOT, and on relatives.
+        STALE, ON_TIME, AND(TYPE("dataset"), NOT(STALE)),
+        {"kind": "property", "key": "freshnessHours", "op": "lte", "valueKey": "slaHours",
+         "valueType": "string"},
+        {"kind": "property", "key": "freshnessHours", "op": "neq", "valueKey": "slaHours"},
+        rel("child", STALE), rel("child", ON_TIME, quantifier="none"),
+        rel("child", STALE, count={"op": "gte", "value": 1}),
+        rel("downstream", STALE, maxHops=2), rel("parent", rel("child", STALE)),
     ]
     return cases
 

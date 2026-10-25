@@ -293,6 +293,7 @@ export type Op =
     | 'isNotSet'
     | 'isEmpty'
     | 'isNotEmpty'
+export type Valuekey = string | null
 export type Valuetype = 'auto' | 'string' | 'number' | 'boolean' | 'date'
 export type Kind3 = 'tag'
 export type Op1 = 'has' | 'hasAll' | 'hasAny' | 'notHas'
@@ -1211,8 +1212,11 @@ export interface TextPredicate {
  * as its digits in a string with ``value_type='number'``: it is compared
  * exactly. Text comparisons are case-insensitive unless
  * ``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /
- * ``notContains`` match entities without the key. The full contract is
- * ``backend/common/search_semantics``.
+ * ``notContains`` match entities without the key. ``value_key`` compares
+ * with another property of the same entity instead of a value
+ * (``freshnessHours > slaHours``): ``=``, ``≠`` and the orders only, an
+ * order as numbers and equality as text unless ``value_type`` says
+ * otherwise. The full contract is ``backend/common/search_semantics``.
  */
 export interface PropertyPredicate {
     caseSensitive?: Casesensitive1
@@ -1221,6 +1225,7 @@ export interface PropertyPredicate {
     kind?: Kind2
     op?: Op
     value?: unknown
+    valueKey?: Valuekey
     valueType?: Valuetype
 }
 /**
