@@ -9,6 +9,84 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Connections: any edge, either way, and layers as the View places them
+
+### Added
+
+**Connections through any edge.** A relationship follows lineage, **any link** — every edge type but
+the hierarchy's, so tags, glossary terms and jobs too — or the **edge types** you name, in whatever
+case you type them: "jobs that write a PII dataset", "datasets linked to anything in Finance",
+"glossary terms nothing is defined by". An edge type the data source doesn't have is refused,
+naming the nearest it does ("did you mean PRODUCES?"). Edge counts and graph shapes take the same
+choice: **No links at all**, **No edges at all**, **Number of edges…**. In the API,
+`edgeClass: "links"`, and `edgeClass` on a relationship.
+
+**The connection card.** In the Form a relationship reads as a sentence — **Feeds** · **at least
+one** · *dashboard* — with verbs that describe the entity you're finding: *Is directly inside*, *Is
+inside*, *Sits under*, *Directly contains*, *Contains*, *Feeds*, *Is fed by*, *Is linked to*. **More
+options** holds the steps, which edges (*Lineage*, *Any link*, *Edge types* picked from the data
+source's own, each with the entity types it joins), the direction and the conditions every edge
+walked must meet. Edge counts have a Form row. The palette adds *Contains, at any depth*, *Is linked
+to*, *Connected through an edge type* and *Something inside it feeds*, and the canvas menu **What’s
+linked to this**.
+
+**Connections in Code mode.** `feeds(…)`, `fedBy(…)`, `linkedTo(…)`, `outgoing[PRODUCES](…)`,
+`incoming(…)`; `noIncoming`, `noLinks`, `noEdges`, `noIncoming[DEFINED_BY]`;
+`edges[PRODUCES](in) >= 2`. Completion offers the data source's edge types inside `[…]`, and an
+edge type it doesn't know is underlined as you type.
+
+**Compare two properties of the same entity.** "Datasets past their freshness SLA":
+`freshnessHours > {slaHours}` in Code mode, **Compare with → Another property** in the Form,
+`valueKey` in the API. An order compares as numbers and equality as text, unless you say otherwise.
+
+**Layers the way the View places them.** **In layer…** finds what the View places in a layer by the
+shared placement rule — by hand, by the layer's rules, or with its container — not only what was
+created or moved there. The picker lists the View's layers by name; Code mode reads
+`layer:"Reporting layer"`; it works as a relationship's far end too.
+
+**Follow lineage far, to any far end.** A relationship at the top of the query asking for at least
+one relative went up to 10 hops only to entities it names. Now one a query goes as far to a far end
+that is a condition: it is traced from everything that condition matches across the data source.
+"Dashboards fed, within six hops, by an uncertified dataset."
+
+### Changed
+
+- In Code mode, `feeds`, `fedBy`, `linkedTo`, `outgoing` and `incoming` start a relationship when
+  `(` follows (after any `[edge types]` or `*steps`), and `noIncoming`, `noOutgoing`, `noLinks`,
+  `noEdges`, `hasIncoming`, `hasOutgoing` and `edges(…)` are graph shapes and edge counts: they used
+  to be searched for by name. Quote one to search for it. Code mode prints relationships in the new
+  words; `upstream(`, `downstream(` and `neighbor(` read the same as before.
+- **Add filter → Relationships** reads as verbs: *Parent is…* is now *Is directly inside…*, *Any
+  container above it…* *Is inside…*, *Contains…* *Directly contains…*, and *Fed by…* *Is fed by…*.
+  **Number of edges…** moved from **Advanced** to **Graph shape**.
+- **Feeds…** and **Is fed by…** start at up to 3 steps, as the canvas's questions and Ask do; they
+  started at one.
+
+### Upgrading
+
+- `edgeClass: "any"` on an edge count or graph shape now counts every edge type the data source has,
+  not only lineage and containment: an entity whose only edges are a tag or a glossary term no
+  longer counts as having none.
+- A named edge type the data source doesn't have is now a 400 that names the nearest one, where it
+  used to match nothing; a containment type named on a connection is a 400 too.
+- The layer filter now finds what the View places in the layer, not only the `layerAssignment`
+  stamp: a saved search or display rule with a layer filter can match more. A value no layer of the
+  View has keeps matching the stamp, and says so. With *One placement rule for every view surface*
+  off, a few entities can sit in another column on the canvas than the one search finds them in
+  (`docs/services/ASSIGNMENTS.md`).
+
+### Known limitations
+
+- A layer filter follows a View that places at most 1,000 entities by hand, and as many layer rules
+  as FalkorDB parses quickly (some thirty that compare properties); past that it is refused in plain
+  words. In a containment cycle it follows edges the canvas ignores.
+- Ask doesn't read edge types or links yet ("produced by", "linked to"), and the Sentence view hands
+  edge counts to Code mode.
+- **No**, **only** or a count past 3 hops, or more than one relationship traced past 3, are for
+  Cypher (**Cypher tab → Edit and run**).
+
+---
+
 ## [Unreleased] — Ask the graph: plain words, Search Studio, relationships, names, routes and your own Cypher
 
 ### Added

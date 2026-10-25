@@ -137,11 +137,15 @@ more ways to start. Add more later with the same field under the cards, or
 | Category | Filters |
 | --- | --- |
 | **Text** | Name contains… · Qualified name contains… · Description contains… |
-| **Structure** | Entity type is… · Root in view is… · Inside Subtree |
+| **Structure** | Entity type is… · Root in view is… · In layer… · Inside Subtree |
 | **Tags & properties** | Tag is… · Has property… · Property compares to… |
-| **Graph shape** | No upstream lineage · No downstream lineage · No lineage edges · Has upstream lineage · Has downstream lineage |
-| **Relationships** | Parent is… · Top-level container is… · Any container above it… · Contains… · Fed by… · Feeds… · Is a named entity… · Inside a container named… |
-| **Advanced** | Paths from A to B · Within N hops of… · Number of edges… · Every entity · AND group · OR group · NOT group |
+| **Graph shape** | No upstream lineage · No downstream lineage · No lineage edges · Has upstream lineage · Has downstream lineage · No links at all · No edges at all · Number of edges… |
+| **Relationships** | Is directly inside… · Top-level container is… · Is inside… · Directly contains… · Contains, at any depth… · Feeds… · Is fed by… · Is linked to… · Connected through an edge type… · Something inside it feeds… · Is a named entity… · Inside a container named… |
+| **Advanced** | Paths from A to B · Within N hops of… · Every entity · AND group · OR group · NOT group |
+
+**In layer…** finds what the View places in one of its layers — by hand, by
+the layer's rules, or with its container — picked from the View's layers by
+name.
 
 In **Form**, rows are joined with **AND**; click an **AND** between them to
 match any row (**OR**) instead. Select several rows to **Group as AND / OR** on their own, or
@@ -173,6 +177,13 @@ ignoring case unless you tick **Match case**.
 > group** around "owner **is** alice" includes them. **is empty** finds a
 > missing value, blank text or an empty list; **is not set** finds only a
 > missing one.
+
+**Compare with another property.** For **equals**, **does not equal** and the
+order operators, **Compare with** → **Another property** compares two
+properties of the same entity: "datasets whose `freshnessHours` is greater than
+their `slaHours`". Left to the guess, an order compares as numbers and equality
+as text; **Compare as** says otherwise. An entity missing either property
+doesn't match.
 
 ### Build it as a sentence
 
@@ -232,32 +243,64 @@ whichever builder you use.
 
 ### Relationships
 
-A **relationship** filter finds entities by the entities related to them:
-"datasets **whose parent is** a domain", "tables that **contain** a column
-tagged PII", "anything that **feeds** a dashboard within three hops". Pick one
-under **Add filter → Relationships**, then choose in the row:
+A **relationship** filter finds entities by the entities connected to them:
+"datasets **directly inside** a domain", "tables that **directly contain** a
+column tagged PII", "jobs that write a PII dataset", "anything that **feeds** a
+dashboard within three steps". Pick one under **Add filter → Relationships**.
+The card reads as a sentence — **[verb ▾] [at least one ▾]** — with the related
+entity's own conditions under it.
 
-- **Which relatives** — **Parent** (the container one level up), **Any
-  ancestor**, **Top-level container**, **Child**, **Any descendant**, **Source
-  (upstream)** (what feeds it), **Target (downstream)** (what it feeds), or
-  **Linked either way**.
-- **How many** — **Has a** (at least one matches), **Has no**, **Every** (every
-  one matches — and there is one), or **Count** (at least, more than, exactly …
-  *N* of them).
-- **How far** — for lineage, how many hops: 1 to 3, or up to 10 for **Has a**
-  at the top of the search (one such relationship a search, unless its far end
-  is an entity you name); for ancestors and descendants, how many levels.
-- **Through edges** — for lineage, only edges that meet a condition, such as
-  `confidence` at least 0.8 or `mode` is `stream`. For a property an edge keeps
-  among its own user properties, the choices are **is set**, **is not set**,
-  **is**, **is not**, **is one of** and **is none of**.
-- **Where the relative…** — the relative's own filters, in a builder of its
-  own. Anything a query can say goes there, other relationships included — up
-  to three relationships deep: "feeds a dashboard **whose parent is**
-  *Finance*".
+- **The verb** says how the entity you're finding relates to the other one.
+  - *In the hierarchy*: **Is directly inside** (its container, one level up),
+    **Is inside** (any container above it), **Sits under** (its top-level
+    container), **Directly contains** (what it holds, one level down) and
+    **Contains** (anything inside it, at any depth).
+  - *Connected*: **Feeds** (what it feeds, through lineage), **Is fed by**
+    (what feeds it) and **Is linked to** (any link, either way).
+- **How many** — **at least one** matches, **no** one does, **only** (every
+  one does — and there is one), or **a number of** them (at least, more than,
+  exactly … *N*).
+- **The related entity's conditions** — pick its types, or **Add a condition
+  on them**: anything a query can say goes there, other relationships included,
+  up to three relationships deep — "feeds a dashboard that **is directly
+  inside** *Finance*". With no condition, any related entity will do: **no** ·
+  **Is fed by** finds entities nothing feeds.
 
-With no condition, any relative will do: **Has no** **Source** finds entities
-nothing feeds.
+**More options** opens the rest:
+
+- **Steps** — for lineage and links: **1 step**, **Up to 2**, **Up to 3**, and —
+  for **at least one** at the top of the search — **Up to 5** and **Up to 10**;
+  or a **Custom range**. For the hierarchy, **Levels**: up to 3, or **Any
+  depth**.
+- **Through** — **Lineage**, **Any link** (every edge type but the hierarchy's —
+  lineage, and the edges to tags, glossary terms, jobs and the rest; rollups
+  aside) or **Edge types**, picked from the data source's own — each shows the entity types it
+  joins, grouped by kind, the ones this data source holds first. Any link or
+  edge types turn **Feeds** and **Is fed by** into **Is linked to**, outgoing or
+  incoming: an edge's direction isn't always the data's.
+- **Direction** — through any link or edge types: **Outgoing**, **Incoming** or
+  **Either way**.
+- **Only follow edges where…** — conditions every edge walked must meet, such
+  as `confidence` at least 0.8 or `mode` is `stream`. For a property an edge
+  keeps among its own user properties, the choices are **is set**, **is not
+  set**, **is**, **is not**, **is one of** and **is none of**.
+
+**Following lineage far.** A relationship is tested from each candidate up to
+3 steps. Past that, one asking for **at least one**, at the top of the search —
+not under an OR group or a NOT group, and not inside another relationship — is
+walked from its far end instead, up to 10 steps: from the entities it names,
+or — one such relationship a search — from everything its far end matches
+across the data source. A far end matching more than 200,000 entities, or a
+walk reaching more than 500,000, is refused in plain words: narrow the far end,
+or follow fewer steps. For **no**, **only** or a count that deep, write it in
+[Cypher](#your-own-cypher).
+
+**Edges and their counts.** Under **Graph shape**, **No upstream lineage**,
+**No links at all**, **No edges at all** and the rest find entities by the
+edges they have, and **Number of edges…** counts them — *more than* *5* edges
+through *Any link*, *Incoming*. Each counts through **Lineage**, **Any link**,
+**Any edge** (the hierarchy's included), **Containment** or **These edge
+types…**.
 
 **Name an entity instead of using its URN.** **Is a named entity…** and
 **Inside a container named…** take a path of names from the top —
@@ -287,9 +330,12 @@ The editor helps as you type:
   relationship — and a red underline marks where a query stops making sense,
   with the reason below it.
 - **Suggestions** (or `Ctrl+Space`) offer what fits where the cursor is: entity
-  types after `type:`, tags after `tag:`, a property's values after
-  `owner =`, edge properties inside `.via(`, and entities by name after `@"`.
-  They come from this View's own data.
+  types after `type:`, tags after `tag:`, layers after `layer:`, a property's
+  values after `owner =`, other properties inside `{`, edge types inside
+  `outgoing[` (each with the entity types it joins), edge properties inside
+  `.via(`, and entities by name after `@"`. They come from this View's own
+  data, and an edge type the data source doesn't know is underlined as you
+  type.
 - **Reads as** says the query in words, and lists any words that will be
   searched as plain text in names.
 - **Examples** insert a ready-made condition at the cursor.
@@ -312,21 +358,34 @@ it.
 | `owner IS SET` · `IS NOT SET` · `notes IS EMPTY` · `IS NOT EMPTY` | Presence |
 | `updatedAt WITHIN LAST 30 DAYS` · `WITHIN LAST PT12H` | Relative dates |
 | `noUpstream` · `noDownstream` · `noLineage` · `hasUpstream` · `hasDownstream` | Lineage shape |
+| `noIncoming` · `noOutgoing` · `noLinks` · `noEdges` · `hasIncoming` · `hasOutgoing` | No incoming link · no outgoing link · no link at all · no edge at all · at least one link in · out |
+| `noIncoming[DEFINED_BY]` · `noIncoming[any]` · `noEdges[containment]` | The same through these edge types, or a class: `[lineage]`, `[links]`, `[any]`, `[containment]` |
+| `edges(out) > 10` · `edges[PRODUCES](in) >= 2` | How many edges, which way (`in`, `out`, `both`): links unless brackets say otherwise |
 | `"Asset Owner" = Bob` | A property name with spaces, quoted |
+| `freshnessHours > {slaHours}` | Compared with another property of the same entity (`=`, `!=`, `<`, `<=`, `>`, `>=`) |
+| `layer:Raw` · `layer:"Reporting layer"` | In that layer, as the View places it |
 | `… AS NUMBER` · `… MATCH CASE` · `… INCLUDING MISSING` | After a property comparison: its type, case-sensitivity, and whether entities without the property match |
 | `a AND (b OR c)` · `NOT tag:PII` · `!tag:PII` | Grouping; words side by side mean AND |
 | `parent(type:domain)` · `root(@"Country")` · `ancestor(region = EMEA)` | Its parent is a domain · its top-level container is *Country* · any container above it has region EMEA |
 | `child(type:column tag:PII)` · `descendant*..3(tag:PII)` | It contains a PII column · something PII up to three levels down |
-| `upstream(type:topic)` · `downstream*..3(type:dashboard)` · `neighbor()` | Fed by a topic · feeds a dashboard within 3 hops · linked either way |
-| `every child(description IS NOT EMPTY)` · `no upstream()` | Every one matches (and there is one) · none does |
+| `fedBy(type:topic)` · `feeds*..3(type:dashboard)` · `linkedTo(type:glossaryTerm)` | Fed by a topic · feeds a dashboard within 3 steps · linked to a glossary term by any edge but the hierarchy's, either way |
+| `outgoing[PRODUCES](type:dataset)` · `incoming()` · `linkedTo[lineage]()` | Through these edge types, outgoing · through any link, incoming · through lineage, either way |
+| `every child(description IS NOT EMPTY)` · `no fedBy()` | Every one matches (and there is one) · none does |
 | `count(child(type:column)) > 100` | How many relatives match |
-| `upstream(…).via(confidence >= 0.8)` | Every edge walked meets the condition |
+| `fedBy(…).via(confidence >= 0.8)` | Every edge walked meets the condition |
 | `@"Country/United Kingdom"` · `inside @"Country/**/London"` | The entity named by that path · anything inside it (`\/` is a slash in a name, `\\` a backslash) |
 
-A relationship word counts only when `(` follows it directly: `root cause` and
-`parent (x)` are still a search for the words. Hops read like Cypher: `*2`
+A relationship word counts only when `(` follows it directly — after its
+`[edge types]` and `*steps`, if any: `root cause`, `feeds data` and
+`parent (x)` are still a search for the words. Steps read like Cypher: `*2`
 (exactly two), `*..3` (one to three), `*2..4`, and `*2..` for two levels or
-more up or down the tree.
+more up or down the tree. Edge types read in any case — `outgoing[produces]`
+finds the data source's `PRODUCES` — and one it doesn't have is refused,
+naming the nearest it does. A named edge type prints with `outgoing` or
+`incoming` rather than `feeds` or `fedBy`: an edge's direction isn't always the
+data's. The older words read as they always have: `upstream`, `downstream` and
+`neighbor` are `fedBy`, `feeds` and `linkedTo[lineage]`, and **Code** prints
+them in the new words.
 
 Anything the words can't spell — within N hops, a path, a depth-limited
 subtree — appears as its own JSON, such as `{"kind": "withinHops", …}`, and
@@ -458,8 +517,9 @@ Your administrator has turned off **Export graph data**.)
 
 Right-click an entity in a Context View to ask about it without building
 anything: **Everything inside this**, **Its children**, **What feeds this**,
-**What this feeds** (each three hops; change it in the row), or **Routes from
-this to…**, which opens the builder for you to say where to. On a container —
+**What this feeds** (each three hops; change it in the row), **What’s linked to
+this** (its tags, glossary terms, jobs — any link, either way), or **Routes
+from this to…**, which opens the builder for you to say where to. On a container —
 a table, a schema, a domain — the lineage questions take in everything inside
 it, since a dataset's lineage often runs through its columns: **What this
 feeds** is what it, or anything in it, feeds. With several
@@ -627,11 +687,11 @@ tag:PII AND NOT tag:Certified
 ```
 
 **Everything three hops downstream of a table.** Right-click the table and
-choose **What this feeds**, or **Add filter → Relationships → Fed by…**, pick
-**Is a named entity…** as its condition and type the table's path:
+choose **What this feeds**, or **Add filter → Relationships → Is fed by…**,
+pick **Is a named entity…** as its condition and type the table's path:
 
 ```text
-upstream*..3(@"Sales/orders")
+fedBy*..3(@"Sales/orders")
 ```
 
 **Datasets in a domain, by its name.** **Inside a container named…**
@@ -641,8 +701,8 @@ upstream*..3(@"Sales/orders")
 inside @"Sales" type:dataset
 ```
 
-**Tables with a PII column.** Entity type is `table`, then **Contains…** with
-Tag is `PII` as its condition.
+**Tables with a PII column.** Entity type is `table`, then **Directly
+contains…** with Tag is `PII` as its condition.
 
 ```text
 type:table child(tag:PII)
@@ -663,14 +723,140 @@ type:table count(child(type:column)) > 100
 **What feeds a dashboard, through trusted edges.**
 
 ```text
-downstream*..3(type:dashboard).via(confidence >= 0.8)
+feeds*..3(type:dashboard).via(confidence >= 0.8)
 ```
 
 **Everything fed from inside one country.** Fed by something, within two
 hops, whose container somewhere above is *Country / United Kingdom*:
 
 ```text
-upstream*..2(ancestor(@"Country/United Kingdom"))
+fedBy*..2(ancestor(@"Country/United Kingdom"))
+```
+
+### Connections, worked through
+
+Each gives the question, the Form clicks and the Code-mode text. Swap the
+types, tags, edge types and properties for your data's own.
+
+**Jobs that write a PII dataset.** Entity type is `dataJob`, then **Add filter
+→ Connected through an edge type…**: pick **Produces** and **Outgoing**, and
+under it Entity type is `dataset` and Tag is `PII`.
+
+```text
+type:dataJob outgoing[PRODUCES](type:dataset tag:PII)
+```
+
+**Datasets no job writes.** Entity type is `dataset`, **Connected through an
+edge type…** with **Produces** and **Incoming**, then **no**.
+
+```text
+type:dataset no incoming[PRODUCES]()
+```
+
+**Glossary terms nothing is defined by.** Entity type is `glossaryTerm`, then
+**Graph shape → No upstream lineage**, and under **Through**, **These edge
+types…** → **Defined by**: the row now reads *No incoming Defined by edges*.
+
+```text
+type:glossaryTerm noIncoming[DEFINED_BY]
+```
+
+**Datasets with no edges at all.** Not a tag, not a glossary term, not a
+container: **No edges at all**.
+
+```text
+type:dataset noEdges
+```
+
+**Datasets linked to anything in Finance.** **Is linked to…**, and under it
+**Inside a container named…** `Finance`.
+
+```text
+type:dataset linkedTo(inside @"Finance")
+```
+
+**Dead ends that still carry a glossary term.** **No downstream lineage**,
+then **Is linked to…** with Entity type is `glossaryTerm`.
+
+```text
+type:dataset noDownstream linkedTo(type:glossaryTerm)
+```
+
+**Schemas with a table that feeds a Finance dashboard.** Entity type is
+`schema`, then **Something inside it feeds…**; under **Feeds**, Entity type is
+`dashboard` and **Is inside…** with **Is a named entity…** `Finance`.
+
+```text
+type:schema descendant(feeds*..3(type:dashboard ancestor(@"Finance")))
+```
+
+**Domains with no unowned dataset.** **Contains, at any depth…**, set **no**,
+and under it Entity type is `dataset` and `owner` **is not set**.
+
+```text
+type:domain no descendant(type:dataset owner IS NOT SET)
+```
+
+**Dashboards fed, within six steps, by an uncertified source.** **Is fed
+by…**, and under **More options** a **Custom range** of 1 to 6 steps — past 3,
+at the top of the search, so it is traced from its far end. Under it, Entity
+type is `dataset`, **No upstream lineage** and a **NOT group** holding Tag is
+`Certified`.
+
+```text
+type:dashboard fedBy*..6(type:dataset noUpstream NOT tag:Certified)
+```
+
+**Columns derived from a PII column.**
+
+```text
+type:column fedBy*..3(type:column tag:PII)
+```
+
+**Jobs that write more than ten datasets.** **Connected through an edge
+type…** with **Produces** and **Outgoing**, set **a number of** · **more than**
+· `10`, and Entity type is `dataset` under it. To count the edges themselves,
+**Graph shape → Number of edges…**: *more than* *10* edges through *Produces*,
+*Outgoing*.
+
+```text
+type:dataJob count(outgoing[PRODUCES](type:dataset)) > 10
+type:dataJob edges[PRODUCES](out) > 10
+```
+
+**Datasets past their freshness SLA.** **Property compares to…**
+`freshnessHours` **is greater than**, then **Compare with** → **Another
+property** and `slaHours`.
+
+```text
+type:dataset freshnessHours > {slaHours}
+```
+
+**Raw-layer datasets that feed the Reporting layer.** Entity type is
+`dataset`, **In layer…** `Raw`, then **Feeds…** with **In layer…** `Reporting
+layer` under it.
+
+```text
+type:dataset layer:Raw feeds*..3(layer:"Reporting layer")
+```
+
+**Through trusted streaming edges only.** On a **Feeds** or **Is fed by**
+card, **More options → Only follow edges where…** `mode` is `stream` and
+`confidence` is at least 0.8.
+
+```text
+fedBy(type:topic).via(mode = stream AND confidence >= 0.8)
+```
+
+**Beyond the builders: Cypher.** Comparing a column's data type with its
+source column's needs two entities at once — write it in the
+[Cypher tab](#your-own-cypher):
+
+```cypher
+MATCH (src:column)-[:FLOWS_TO]->(col:column)
+WHERE src.dataType <> col.dataType
+RETURN col.urn, col.dataType, src.urn, src.dataType
+LIMIT 200
 ```
 
 ---
@@ -684,7 +870,8 @@ upstream*..2(ancestor(@"Country/United Kingdom"))
 | Filters directly inside one OR group | 24 |
 | *Inside Subtree*, *Within N hops*, *Path* | Only at the top level (not inside OR or NOT, nor in a relationship's condition); one *Path* per query |
 | Relationships inside relationships | 3 deep |
-| Lineage hops in a relationship | 3; 10 for **Has a** at the top level — walked from the entities it names, or, one a search, traced from what its far end matches (at most 200,000 entities, reaching at most 500,000) |
+| Lineage hops in a relationship | 3; 10 for **at least one** at the top level — walked from the entities it names, or, one a search, traced from what its far end matches (at most 200,000 entities, reaching at most 500,000) |
+| **In layer…** | A View that places at most 1,000 entities by hand, and no more layer rules than FalkorDB can follow quickly |
 | Entities one name path names | 64 |
 | Routes a *Path* lists | 128 |
 | Saved searches per View | 500 (names unique in the View, up to 120 characters) |
@@ -710,10 +897,15 @@ upstream*..2(ancestor(@"Country/United Kingdom"))
 | "*…only allowed in the top-level AND group*" | *Inside Subtree*, *Within N hops* or *Path* sits inside an OR or NOT group | Move it to the top level of the query |
 | "*between needs a lower and an upper value*", "*give a duration like P30D*" | A value can't be compared the way the filter asks | Fix the value the message names |
 | "*… names no entity*" under **No matches**, or **not found** on a name | A name path is spelled differently, or starts below the top | Start at a top-level entity and name each container on the way down, or start with `**` |
-| "*… follows lineage 4 hops. Following more than 3 works for 'at least one' at the top of the query…*" | The relationship asks for none, every one or a count, sits under an OR or NOT group, or is inside another condition | Ask for **Has a** at the top of the query, follow at most 3 hops, or write it in Cypher |
+| "*… follows lineage 4 hops. Following more than 3 works for 'at least one' at the top of the query…*" | The relationship asks for none, every one or a count, sits under an OR or NOT group, or is inside another condition | Ask for **at least one** at the top of the query, follow at most 3 steps, or write it in Cypher |
 | "*2 relationships in this query follow lineage more than 3 hops, and one may*" | Only one relationship a search is traced from what its far end matches | Follow the others at most 3 hops, or name their far ends (**Is a named entity…**) |
 | "*More than 200,000 entities match the far end…*", "*… reaches more than 500,000 entities*" | A relationship followed past 3 hops starts from everything its far end matches | Narrow the far end (a type, a tag, a container), or follow fewer hops |
 | "*Following lineage more than 3 hops works for a search that lists its matches, not for its group counts*" | Group counts (aggregations) can't follow a relationship that far | List the matches, or follow at most 3 hops |
+| "*Edge type 'PRODUCE' isn't in this data source — did you mean PRODUCES?*" | The data source has no edges of that type: a typo, or a type from another data source | Pick it from **Edge types**, or use the name suggested |
+| "*CONTAINS is a containment edge — follow it with Contains or Is inside…*" | A connection names one of the hierarchy's edge types | Use **Directly contains**, **Contains**, **Is directly inside** or **Is inside** |
+| "*No layer in this view is called “…”*" under the results | The layer filter names no layer of this View, so it matched entities whose stored layer has that name | Pick the layer from **In layer…** |
+| "*2 layers in this view are called “…”*" | Two layers share the name | Rename one, or name the layer by its id |
+| "*This view places … entities by hand…*", "*… too many for a layer filter to follow quickly*" | The layer filter follows the View's own placement, and this View's is too big to follow | Filter by type, tag or container instead |
 | "*This link can't follow lineage or relationships*" | You opened the View through a share link | Open it as a member of the workspace |
 | The count reads **N+** or the results say they stopped | The answer was still being counted when the time ran out | Run it again, or narrow it; **Load all** fetches every match |
 | **Save** offers only **Just me** | You can't edit this View | Ask someone who can, or share the search with them |

@@ -119,7 +119,7 @@ Keys are camelCase (snake_case is accepted too); unknown keys are ignored.
 | `kind` | Fields (defaults) | Limits | Matches |
 | --- | --- | --- | --- |
 | `text` | `value`, `target` (`any`), `match` (`substring`), `propertyKey`, `caseSensitive` (false) | value 1–512 chars | Text in a field (targets below) |
-| `property` | `key`, `op` (`eq`), `value`, `valueType` (`auto`), `caseSensitive` (false), `includeMissing` (false) | key 1–128 chars | A typed comparison ([operators](#property-operators)) |
+| `property` | `key`, `op` (`eq`), `value`, `valueType` (`auto`), `caseSensitive` (false), `includeMissing` (false), `valueKey` | key 1–128 chars | A typed comparison ([operators](#property-operators)) — or, with `valueKey` in place of `value`, the entity's own `valueKey` property (`eq` · `neq` · `gt` · `gte` · `lt` · `lte`; with `auto`, an order compares as numbers and equality as text) |
 | `tag` | `op`: `has` · `hasAll` · `hasAny` · `notHas` (`has`), `values` | 1–32 values | Tags, exactly. `has`/`hasAny`: any of them; `hasAll`: every one; `notHas`: none |
 | `hasProperty` | `key`, `negate` (false), `keyMatch`: `exact` · `prefix` · `contains` (`exact`) | key 1–128 | The property is present — by its exact name, or (`prefix`, `contains`) by part of its name, ignoring case |
 | `all` | — | — | Every entity in scope (an empty group is refused; ask for everything with this) |
@@ -128,18 +128,21 @@ Keys are camelCase (snake_case is accepted too); unknown keys are ignored.
 | `withinHops` | `urns`, `refs`, `hops`, `direction`: `out` · `in` · `both` (`both`), `edgeClass` (`lineage`), `edgeTypes`, `edgePredicate` | 1–64 urns or references; hops 1–10 | Within N hops of those entities |
 | `path` | each end named (`sourceUrns` / `sourceRefs`, `targetUrns` / `targetRefs`) or a condition (`sourceWhere`, `targetWhere`); `direction`: `outgoing` · `incoming` · `any` (`outgoing`), `edgeClass` (`lineage`), `edgeTypes`, `maxHops` (4), `maxPaths` (32), `edgePredicate` | 1–8 urns or references an end; hops 1–6 — 4 with an end a condition, 3 with both; paths 1–128 | Routes between them (`results: "paths"`): [path patterns](#path-patterns) |
 | `is` | `refs` | 1–64 references | The entities those [references](#names-instead-of-urns) name |
-| `related` | `axis`, `where`, `quantifier` (`any`), `count`, `minHops` (1), `maxHops`, `edgeTypes`, `edge` | [Relationships](#relationships) | Entities whose relatives meet a condition |
+| `related` | `axis`, `where`, `quantifier` (`any`), `count`, `minHops` (1), `maxHops`, `edgeClass`, `edgeTypes`, `edge` | [Relationships](#relationships) | Entities whose relatives meet a condition |
 | `degree` | `direction`: `in` · `out` · `both` (`both`), `op`: `eq` · `neq` · `gt` · `gte` · `lt` · `lte` (`eq`), `value`, `edgeClass` (`lineage`), `edgeTypes` | value 0–1,000,000; 1–32 edge types | The number of edges |
 | `isOrphan` | `edgeClass` (`lineage`), `edgeTypes` | | No edges of the class (degree both = 0) |
 | `isRoot` | same | | No incoming edges (in = 0) — "no upstream" |
 | `isLeaf` | same | | No outgoing edges (out = 0) — "no downstream" |
 | `hasIncoming` | same | | At least one incoming edge |
 | `hasOutgoing` | same | | At least one outgoing edge |
-| `layer` | `layerAssignment` | | *Legacy*: the node's stored `layerAssignment` property, not the View's layers. Use `descendantOf` for "inside this layer's roots" |
+| `layer` | `layerAssignment` | a View's hand placements: 1,000 | In that layer of the View, as the shared placement rule places entities there (`docs/services/ASSIGNMENTS.md`) — `layerAssignment` names it by id, or by name ignoring case (a name two layers share is refused with their ids); a value no layer has matches the stored `layerAssignment` stamp, and says so |
 | `group` | `op`: `and` · `or` · `not` (`and`), `children` | 1–128 children (service caps below) | A boolean combination |
 
-`edgeClass` is `lineage`, `containment` or `any`; it resolves to edge types
-from the data source's ontology. `edgeTypes` names types explicitly instead.
+`edgeClass` is `lineage`, `containment`, `links` (every edge type but the
+hierarchy's) or `any` (every edge type the data source has); it resolves to
+edge types from the data source's ontology. `edgeTypes` names types explicitly
+instead, in any case — each is read as the graph spells it, and a type the data
+source doesn't have is refused, naming the nearest it does.
 
 An edge filter tests every edge walked — `edgePredicate` on `withinHops` and
 `path`, `edge` on a lineage relationship — with 3 edge predicates:
@@ -211,22 +214,25 @@ A relationship matches an entity by the entities related to it:
 | `parent` · `child` | The container one level up · what it contains directly | one step |
 | `ancestor` · `descendant` | Any container above it · anything inside it | `minHops`–`maxHops` levels; default 1–20 |
 | `root` | Its top-level container — none for an entity that is top-level itself | none |
-| `upstream` | What feeds it, through lineage | `minHops`–`maxHops`; default 1 |
-| `downstream` | What it feeds | as `upstream` |
+| `upstream` | What feeds it, through lineage — or, with `edgeClass: links` or `edgeTypes`, what links to it | `minHops`–`maxHops`; default 1 |
+| `downstream` | What it feeds — or what it links to | as `upstream` |
 | `neighbor` | Either way | as `upstream` |
 
-The lineage axes are named for what the relative is, never in or out: an
-entity's `upstream` relatives are its sources. (`withinHops` names the
-direction of the walk instead.)
+The link axes are named for what the relative is, never in or out: an entity's
+`upstream` relatives are its sources. (`withinHops` names the direction of the
+walk instead.) The Form calls them **Is fed by**, **Feeds** and **Is linked
+to**; Code mode `fedBy`, `feeds` and `linkedTo` — `incoming`, `outgoing` and
+`linkedTo` over any link or named edge types.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
 | `where` | — | The condition a relative must meet: any predicate, relationships included, so conditions chain. Without one, any relative will do |
 | `quantifier` | `any` | `any` relative meets it · `none` does · `all` do, and there is at least one |
 | `count` | — | `{op, value}` in place of the quantifier: how many distinct relatives meet it, compared with `op` (`eq` · `neq` · `gt` · `gte` · `lt` · `lte`, default `gte`) to `value` (0–1,000,000) |
-| `minHops` · `maxHops` | 1 · see above | 1–20; lineage goes at most 10 |
-| `edgeTypes` | every lineage type but rollups | Lineage only. A rollup type (`AGGREGATED`) is followed one hop only |
-| `edge` | — | Lineage only: every edge walked meets this [edge filter](#predicates) |
+| `minHops` · `maxHops` | 1 · see above | 1–20; a link axis goes at most 10 |
+| `edgeClass` | `lineage` | Links only: `lineage`, or `links` — every edge type but the hierarchy's, rollups aside. Not with `edgeTypes` |
+| `edgeTypes` | every lineage type but rollups | Links only, any edge type but a containment one. A rollup type (`AGGREGATED`) is followed one hop only |
+| `edge` | — | Links only: every edge walked meets this [edge filter](#predicates) |
 
 What they mean, for an entity *n* whose relatives along the axis are *R(n)*:
 
@@ -257,8 +263,9 @@ the View.
 
 Code mode writes them as words — `parent(type:domain)`, `every
 child(description IS NOT EMPTY)`, `count(child(type:column)) > 100`,
-`downstream*..3(type:dashboard).via(confidence >= 0.8)`, `@"Country/United
-Kingdom"`, `inside @"Country/**/London"`; see
+`feeds*..3(type:dashboard).via(confidence >= 0.8)`,
+`outgoing[PRODUCES](type:dataset)`, `linkedTo(type:glossaryTerm)`,
+`@"Country/United Kingdom"`, `inside @"Country/**/London"`; see
 [Code mode](/guide/advanced-search#code-mode).
 
 ### Path patterns
@@ -334,6 +341,8 @@ P30D").
 | Lineage hops when the far end is named (an `is`, in the top-level AND) | 10 | — |
 | Lineage hops traced from a far end that is a condition (at least one relative, in the top-level AND; one a query) | 10, from at most 200,000 matches reaching at most 500,000 entities | — |
 | Entities one reference names | 64 | — |
+| A `layer` filter: entities its View places by hand | 1,000 | — |
+| A `layer` filter: its View's layer rules | as many as FalkorDB parses in a quarter of its budget — types merge into one list, a property comparison costs most (some thirty) | — |
 | A query of only `text` with `target: "any"` | refused on a View that bounds neither its roots nor its entity types | — |
 
 A relationship's condition counts toward depth and leaves like any other
