@@ -319,6 +319,7 @@ async def resolve(
     user_id: str,
     *,
     sid: str | None = None,
+    excluded_binding_id: str | None = None,
 ) -> PermissionClaims:
     """Compute the user's effective permissions across all scopes.
 
@@ -349,6 +350,9 @@ async def resolve(
         data sources / edit its views / etc." Lets custom roles
         bundle just ``workspace:admin`` rather than enumerating every
         workspace permission.
+
+    ``excluded_binding_id`` leaves one binding out: what they would hold
+    were it removed (``preview-revoke``).
     """
     sid = sid or new_session_id()
 
@@ -359,6 +363,8 @@ async def resolve(
     bindings = await binding_repo.list_for_user_with_groups(
         session, user_id=user_id, group_ids=group_ids
     )
+    if excluded_binding_id is not None:
+        bindings = [b for b in bindings if b.id != excluded_binding_id]
     if service:
         bindings = [
             b for b in bindings if b.scope_type == "workspace" and b.subject_type == "user"

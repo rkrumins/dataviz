@@ -754,6 +754,55 @@ async def test_a_workspace_it_is_in_sees_whose_it_is(test_client, db_session, pe
         assert (await test_client.get(f"{BASE}/{svc}")).status_code == 404
 
 
+# ── Removing someone who manages one ────────────────────────────────
+
+
+def _in_sales(subject_id: str, role: str) -> RoleBindingORM:
+    return RoleBindingORM(
+        subject_type="user", subject_id=subject_id, role_name=role,
+        scope_type="workspace", scope_id="ws_x",
+    )
+
+
+async def test_removing_its_manager_names_the_access_it_keeps(test_client, db_session, people):
+    """Through its keys its manager could still act in Sales. Removing them
+    names each account they manage, themselves or through a team, with its
+    roles there that give more than they keep."""
+    sync = (await _create(test_client))["id"]
+    export = (await _create(
+        test_client, name="Nightly export", managers=({"type": "group", "id": "grp_ops"},),
+    ))["id"]
+    db_session.add(GroupMemberORM(group_id="grp_ops", user_id="usr_ada"))
+    ada, synced, exported = (
+        _in_sales("usr_ada", "workspace_member"), _in_sales(sync, "workspace_member"),
+        _in_sales(export, "workspace_viewer"),
+    )
+    db_session.add_all([ada, synced, exported])
+    await db_session.commit()
+    preview_revoke = f"{MEMBERS}/{ada.id}/preview-revoke"
+
+    async def kept() -> list:
+        with claims(ws_perms={"ws_x": ("workspace:admin",)}):
+            preview = await test_client.post(preview_revoke)
+        assert preview.status_code == 200, preview.text
+        return [(a["name"], a["managedBy"], a["bindings"]) for a in preview.json()["serviceAccounts"]]
+
+    assert await kept() == [
+        ("Metadata sync", ["Ada P"], [{"bindingId": synced.id, "role": "workspace_member"}]),
+        ("Nightly export", ["Ada P"], [{"bindingId": exported.id, "role": "workspace_viewer"}]),
+    ]
+    # Still a Viewer of Sales, she would reach only what the sync gets beyond that.
+    db_session.add(_in_sales("usr_ada", "workspace_viewer"))
+    await db_session.commit()
+    assert await kept() == [
+        ("Metadata sync", ["Ada P"], [{"bindingId": synced.id, "role": "workspace_member"}]),
+    ]
+    # Losing nothing, she reaches nothing more through either.
+    db_session.add(_in_sales("usr_ada", "workspace_admin"))
+    await db_session.commit()
+    assert await kept() == []
+
+
 # ── Workspace roles ─────────────────────────────────────────────────
 
 

@@ -42,14 +42,16 @@ from backend.app.db.repositories import (
     service_account_repo,
     user_repo,
 )
-from backend.app.services import workspace_access
-from backend.app.services.permission_service import PermissionClaims, simulate_for_user
+from backend.app.services import service_account_access, workspace_access
+from backend.app.services.permission_service import PermissionClaims, resolve, simulate_for_user
 from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     AccessProvenance,
     AccessRequestManager,
+    ImpactPreviewAccountBinding,
     ImpactPreviewResponse,
+    ImpactPreviewServiceAccount,
     ImpactPreviewUser,
     RequestableRole,
     WorkspaceAccessGrant,
@@ -761,7 +763,9 @@ async def preview_revoke_binding(
 
     Computes which users would lose what permissions if the named
     binding were revoked. For a user binding, only one user is
-    affected; for a group binding, every group member is.
+    affected; for a group binding, every group member is. Those losing
+    access who manage a service account with a role here could still act
+    here through its keys: each such account is named, with those roles.
     """
     binding = await binding_repo.get_binding(session, binding_id)
     if binding is None or binding.scope_type != "workspace" or binding.scope_id != ws_id:
@@ -782,6 +786,8 @@ async def preview_revoke_binding(
     aggregate_lost: set[str] = set()
     affected_ws: set[str] = set()
     user_impact: list[ImpactPreviewUser] = []
+    # Who loses something, by name, and what they keep.
+    losing: dict[str, tuple[str, PermissionClaims]] = {}
 
     for uid in user_ids:
         before_g, before_w = await simulate_for_user(session, uid)
@@ -819,6 +825,8 @@ async def preview_revoke_binding(
         )
         aggregate_gained.update(gained)
         aggregate_lost.update(lost)
+        if lost:
+            losing[uid] = (display_name or uid, await resolve(session, uid, excluded_binding_id=binding_id))
 
     return ImpactPreviewResponse(
         affected_users=len(user_impact),
@@ -826,4 +834,36 @@ async def preview_revoke_binding(
         gained_perms=sorted(aggregate_gained),
         lost_perms=sorted(aggregate_lost),
         user_impact=user_impact,
+        service_accounts=await _accounts_still_reaching(session, ws_id, losing),
     )
+
+
+async def _accounts_still_reaching(
+    session: AsyncSession, ws_id: str, losing: dict[str, tuple[str, PermissionClaims]],
+) -> list[ImpactPreviewServiceAccount]:
+    """The service accounts those losing access manage, with their roles here
+    that give more than the person keeps: through its keys, they could still
+    act here."""
+    found: dict[str, tuple[list[str], dict[str, str]]] = {}
+    for uid, (name, keeps) in losing.items():
+        managed = await service_account_repo.managed_accounts(session, uid)
+        for binding, _gets in await service_account_access.reach_gaps(session, managed, [keeps]):
+            if binding.scope_id != ws_id:
+                continue
+            managed_by, roles = found.setdefault(binding.subject_id, ([], {}))
+            if name not in managed_by:
+                managed_by.append(name)
+            roles[binding.id] = binding.role_name
+    if not found:
+        return []
+    names = await user_repo.get_identities_by_ids(session, sorted(found))
+    return sorted((
+        ImpactPreviewServiceAccount(
+            id=account_id, name=(names.get(account_id) or {}).get("name") or account_id,
+            managed_by=managed_by,
+            bindings=[
+                ImpactPreviewAccountBinding(binding_id=b, role=r) for b, r in sorted(roles.items())
+            ],
+        )
+        for account_id, (managed_by, roles) in found.items()
+    ), key=lambda a: a.name.lower())
