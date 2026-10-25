@@ -10,7 +10,7 @@ Use this page to find where an API lives: which router serves a path, what that 
 2. Follow the link in **Documented in** for the concepts and the main calls.
 3. For exact paths, parameters and schemas, open the [live API explorer](#explore-the-live-api) on a running deployment — it is generated from the code, so it is always current.
 
-If you are writing a script or an integration rather than changing the backend, start with the [API Guide](/docs/api-guide). Every environment variable named here is described in the [configuration reference](/docs/configuration).
+If you are writing a script or an integration rather than changing the backend, start with the [Integration Quickstart](/docs/integration-quickstart), then the [API Guide](/docs/api-guide). Every environment variable named here is described in the [configuration reference](/docs/configuration).
 
 ## The backend at a glance
 
@@ -40,11 +40,12 @@ How they fit together, and how a request flows through them: [Architecture](/doc
 | Version control | `/{ws_id}/versioning` | Drafts, commits, review and merge, publish, revert, restore, imports and exports | [Versioning API Reference](/docs/versioning-api-reference) |
 | Assignment rule sets | `/{ws_id}/assets` | Saved rule sets that place entities into layers | [Assignments](/docs/services-assignments) |
 | Layout templates | `/layout-templates`, `/layout-templates/{template_id}/grants` | Reusable layer layouts for Context Views — built-in, organization, workspace and personal — and their shares | [Creating Views](/guide/creating-views#layout-templates), [RBAC](/docs/rbac#layout-templates) |
-| Views | `/views`, `/views/{view_id}/grants`, `/views/{view_id}/versions`, `/views/transfer` | Saved views, sharing, a view's design history, and moving views between environments | [View Portability](/docs/feature-view-portability), [Managing & Sharing Views](/guide/managing-views) |
+| Views | `/views`, `/views/{view_id}/grants`, `/views/{view_id}/versions`, `/views/transfer`, `/views/saved-filters` | Saved views, sharing, a view's design history, moving views between environments, and each person's saved Explorer filters | [View Portability](/docs/feature-view-portability), [Managing & Sharing Views](/guide/managing-views) |
 | Sessions and sign-in | `/auth` | Sign-in, sign-out, session refresh, the current user, single sign-on flows, sign-up, password reset, invites | [Multi-Environment Sessions](/docs/multi-environment-sessions), [SSO](/docs/sso), [Sign-up Service](/docs/signup-service) |
 | Your account | `/users`, `/me` | Your profile, password, sessions and activity; your permissions, linked identities, notifications and access requests | [RBAC](/docs/rbac), [SSO](/docs/sso) |
-| Users, groups and access | `/admin/users`, `/admin/groups`, `/admin/workspaces/{ws_id}/members`, `/admin/role-bindings`, `/admin` (permissions and roles), `/admin/rbac/search`, `/access-requests`, `/admin/access-requests`, `/admin/workspaces/{ws_id}/access-requests`, `/directory`, `/admin/audit` | People, invites, groups, role bindings, custom roles, access requests, the people picker, and the audit log | [RBAC](/docs/rbac), [Users & Access](/guide/users-access) |
-| Single sign-on administration | `/admin/idp-providers`, `/admin/idp-group-mappings`, `/admin/sso/config`, `/admin/sso/activity`, `/admin/sso/failures` | Identity providers, group-to-role mappings, the platform's sign-in posture, and sign-in diagnostics | [SSO](/docs/sso), [SSO Integration](/docs/sso-integration) |
+| Users, groups and access | `/admin/users`, `/admin/groups`, `/admin/workspaces/{ws_id}/members`, `/admin/role-bindings`, `/admin` (permissions and roles), `/admin/rbac/search`, `/access-requests`, `/admin/access-requests`, `/admin/workspaces/{ws_id}/access-requests`, `/admin/workspaces/{ws_id}/access-reviews`, `/directory`, `/workspace-directory`, `/admin/audit`, `/admin/activity`, `/admin/workspaces/{ws_id}/activity` | People, invites, groups, role bindings, custom roles, access requests and reviews, the people picker, the directory of workspaces to ask to join, and the audit and activity logs | [RBAC](/docs/rbac), [Users & Access](/guide/users-access) |
+| API keys and service accounts | `/api-keys`, `/me/api-keys`, `/me/service-accounts`, `/me/service-accounts/{account_id}/api-keys`, `/admin/api-keys`, `/admin/users/{user_id}/api-keys`, `/admin/service-accounts` | A key describing or ending itself; your keys, the service accounts you manage and their keys; every key on the platform, and revoking a person's; creating and running service accounts | [Key Management API](/docs/key-management-api), [API Keys](/guide/api-keys), [Service Accounts](/guide/service-accounts) |
+| Single sign-on administration | `/admin/idp-providers`, `/admin/idp-group-mappings`, `/admin/sso/config`, `/admin/sso/activity`, `/admin/sso/failures`, `/admin/users/{user_id}/identities` | Identity providers, group-to-role mappings, the platform's sign-in posture, sign-in diagnostics, and the sign-ins linked to a person | [SSO](/docs/sso), [SSO Integration](/docs/sso-integration) |
 | Providers, catalog and workspaces | `/admin/providers`, `/admin/catalog`, `/admin/workspaces`, `/admin/data-source-transfers`, `/admin/ontologies` | Registering graph stores and their graphs, binding them into workspaces as data sources, moving a data source and its views to another workspace (directly, or by a request the destination answers), and the semantic layer | [Onboarding a Source](/docs/onboarding-a-source), [The Semantic Layer](/guide/semantic-layer) |
 | Ingestion operations | `/admin` (aggregation jobs and settings, freshness, stats polling), `/admin/insights`, `/profiling` | Aggregation jobs (forwarded to the control plane), data freshness and refresh, cached asset discovery, and counts over time | [Aggregation Pipeline](/docs/aggregation-pipeline), [Insights](/docs/services-insights), [Data Freshness & Ingestion](/guide/data-freshness) |
 | Feature switches | `/admin/features`, `/features` | Managing feature switches, and reading their values | [Features API](/docs/api-features), [Feature Flags Lifecycle](/docs/feature-flags-lifecycle) |
@@ -68,7 +69,7 @@ The browser app uses cookie sessions, not bearer tokens; scripts can use an API 
 - **Every request** is authenticated by `get_current_user` (`backend/app/auth/dependencies.py`), which verifies the access cookie's JWT and checks that the session has not been revoked. `get_permission_claims` adds the session's workspace grants from the session store (Redis, falling back to PostgreSQL); global permission claims ride in the token itself.
 - **Every state-changing request** (`POST`, `PUT`, `PATCH`, `DELETE`) must carry the `nx_csrf` value in an `X-CSRF-Token` header. `CSRFMiddleware` (`backend/auth_service/csrf.py`) checks the header against the cookie, the token's binding to the session, and the request's origin; a failure answers `403` with `csrf_failed`.
 - **Renewal.** `POST /api/v1/auth/refresh` rotates the refresh token and mints a new access token. The app does this before `nx_access` expires, and once more on a `401`.
-- **API keys.** A request carrying `Authorization: Bearer nxpat_…` is authenticated by the key alone: `api_key_auth.authenticate` (`backend/app/auth/api_key_auth.py`), called first by `get_current_user`, `get_optional_user` and `get_permission_claims`, checks the key and its owner through `validate_api_key`, refuses routes not in `api_key_surface.SURFACE` and resources outside the key's selection, and hands back the owner with claims narrowed to the key (`resolve_for_api_key`). `CSRFMiddleware` removes the cookies from such a request and skips the double-submit. A pending password change does not hold a key, as it does not hold an SSO session. See [API Keys](/guide/api-keys) and [ADR-027](/docs/decisions#adr-027-personal-api-keys-scoped-per-resource).
+- **API keys.** A request carrying `Authorization: Bearer nxpat_…` — or a service account's `nxsat_…` — is authenticated by the key alone: `api_key_auth.authenticate` (`backend/app/auth/api_key_auth.py`) checks the key and its owner through `validate_api_key`, refuses routes not in `api_key_surface.SURFACE` and resources outside the key's selection, and hands back the owner — a person or a service account — with claims narrowed to the key (`resolve_for_api_key`). `get_current_user`, `get_optional_user` and `get_permission_claims` call it first through `api_key_auth.acting`, which also refuses a key that isn't active; only the routes where a key describes or ends itself take one that has stopped. `CSRFMiddleware` removes the cookies from such a request and skips the double-submit, but still refuses a write whose `Origin` isn't trusted. A pending password change does not hold a key, as it does not hold an SSO session. See [API Keys](/guide/api-keys), the [Key Management API](/docs/key-management-api), [ADR-027](/docs/decisions#adr-027-personal-api-keys-scoped-per-resource) and [ADR-028](/docs/decisions#adr-028-service-accounts-answer-to-their-managers).
 - **Permissions.** Each route declares what it needs with the `requires(...)` dependency; the catalogue of roles and permissions is in [RBAC](/docs/rbac).
 
 Rules that are easy to trip over when you change these endpoints:
@@ -102,15 +103,15 @@ What every trace endpoint shares:
 
 Every request passes through this stack, outermost first, as registered in `backend/app/main.py` (pinned by `backend/tests/test_middleware_order.py`):
 
-1. **Timeout** (`_TimeoutMiddleware`) — until startup finishes, answers everything but the health probes with `503` and `Retry-After`; afterwards gives each path a deadline (30 seconds by default, 120 for graph and trace routes) and answers `504` when it passes. Streaming paths are exempt.
-2. **Body size** (`_BodySizeLimitMiddleware`) — refuses an oversized body with `413` before anything parses it: `MAX_REQUEST_BODY_BYTES` (8 MiB by default), or `MAX_IMPORT_BODY_BYTES` (100 MiB) on the bulk-import routes.
+1. **Timeout** (`_TimeoutMiddleware`) — until startup finishes, answers everything but the health probes with `503` and `Retry-After`; afterwards gives each path a deadline and answers `504` when it passes: 30 seconds by default; 120 for graph and trace routes, `/versioning/`, view transfer and moving a data source; 90 for the rolled-up edge reads (`/graph/edges/aggregated`, `/graph/edges/between`). Streaming paths are exempt.
+2. **Body size** (`_BodySizeLimitMiddleware`) — refuses an oversized body with `413` before anything parses it: `MAX_REQUEST_BODY_BYTES` (8 MiB by default), or `MAX_IMPORT_BODY_BYTES` (100 MiB) on the bulk-import, `/versioning/` and view-file routes and `/graph/save`.
 3. **Security headers** (`SecurityHeadersMiddleware`) — `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`, a Content Security Policy, and HSTS on HTTPS.
 4. **Host allowlist** (`_TrustedHostMiddleware`) — only when `ALLOWED_HOSTS` is set; another `Host` answers `400`.
 5. **Request id** (`RequestIdMiddleware`) — reads or creates `X-Request-ID` and returns it.
 6. **Access log** (`StructuredLoggingMiddleware`) — one JSON log line per request, and an `X-Process-Time` header.
 7. **Compression** (`GZipMiddleware`) — responses over 1 KB, at level `GZIP_COMPRESSLEVEL` (default 1); downloaded files are left uncompressed.
 8. **CORS** (`CORSMiddleware`) — origins from `CORS_ALLOWED_ORIGINS` (`http://localhost:3000` and `http://localhost:5173` when unset), with credentials.
-9. **CSRF** (`CSRFMiddleware`) — innermost, so even its `403` carries the headers and CORS added above it.
+9. **CSRF** (`CSRFMiddleware`) — innermost, so even its `403` carries the headers and CORS added above it. A request with an API key skips the double-submit, but a write's `Origin` is still checked.
 
 Starlette runs the last-registered middleware outermost, so the code registers them in the reverse of this list.
 
@@ -164,15 +165,16 @@ They are on unless `ENV` is `prod` or `production`; set `API_DOCS_ENABLED=true` 
 | Status | Meaning |
 |---|---|
 | 400 | The request is malformed, names no workspace or data source, or names a host outside `ALLOWED_HOSTS` |
-| 401 | No session, or an expired or invalid one |
-| 403 | Not permitted; also `csrf_failed`, `feature_disabled` and `password_change_required` |
+| 401 | No session, or an expired or invalid one; or an API key that isn't accepted (`invalid_api_key`, `api_key_revoked`, `api_key_expired`, `owner_reauth_required`, `api_key_unmanaged`, `api_key_owner_inactive`, `api_key_ip_not_allowed`, `api_keys_disabled`) |
+| 403 | Not permitted (`missing_permission`, naming the permission); also `csrf_failed`, `feature_disabled` and `password_change_required`; and more than an API key may do (`api_key_not_allowed`, `api_key_read_only`, `api_key_out_of_scope`, `api_key_cannot_publish`) |
 | 404 | Not found |
 | 409 | A conflict: a duplicate, a stale version, a delete blocked by references, or an identity-provider-owned field |
 | 410 | A retired endpoint (`POST /{ws_id}/graph/trace`) |
 | 413 | The request body is too large |
 | 422 | The request failed validation |
-| 429 | Rate-limited or shed under load; honour `Retry-After` |
-| 503 | Starting up, database unavailable, or a graph provider unavailable, loading or failing over; usually with `Retry-After` |
+| 429 | Rate-limited or shed under load; honour `Retry-After`. The per-address limits from slowapi (sign-in, making keys) answer `{"error": "Rate limit exceeded: …"}` with no `Retry-After` |
+| 500 | An unhandled error, as JSON; `SEARCH_FAILED` and `GRAPH_QUERY_ERROR` name a search or query the graph store couldn't finish |
+| 503 | Starting up, database unavailable, API keys can't be checked (`api_keys_unavailable`), or a graph provider unavailable, loading or failing over; usually with `Retry-After` |
 | 504 | The request ran past its deadline |
 
 ## Where in the code
@@ -185,7 +187,8 @@ They are on unless `ENV` is `prod` or `production`; set `API_DOCS_ENABLED=true` 
 | Session routes | `backend/auth_service/api/router.py` |
 | Cookies and CSRF | `backend/auth_service/cookies.py`, `backend/auth_service/csrf.py` |
 | Request authentication and permissions | `backend/app/auth/dependencies.py` (`get_current_user`, `requires`) |
-| API keys on a request, and which routes take them | `backend/app/auth/api_key_auth.py` (`authenticate`), `backend/app/auth/api_key_surface.py` (`SURFACE`) |
+| API keys on a request, and which routes take them | `backend/app/auth/api_key_auth.py` (`authenticate`, `acting`), `backend/app/auth/api_key_surface.py` (`SURFACE`) |
+| Key and service account routes | `backend/app/api/v1/endpoints/api_keys.py`, `backend/app/api/v1/endpoints/service_accounts.py` |
 | Trace endpoints | `backend/app/api/v1/endpoints/graph.py` (`trace_v2`, `trace_closure`, `trace_expand`, `trace_expand_batch`) |
 | Trace request models | `backend/common/models/graph.py` (`TraceRequest`, `TraceClosureRequest`, `ExpandRequest`) |
 | Query orchestration | `backend/app/services/context_engine.py` (`ContextEngine`) |
@@ -197,7 +200,9 @@ They are on unless `ENV` is `prod` or `production`; set `API_DOCS_ENABLED=true` 
 
 ## See also
 
+- [Integration Quickstart](/docs/integration-quickstart) — a key, the first calls and every answer
 - [API Guide](/docs/api-guide) — calling the API from scripts and integrations
+- [Key Management API](/docs/key-management-api) — every key and service account route
 - [Architecture](/docs/architecture) — the processes, the stores and a request's lifecycle
 - [Configuration](/docs/configuration) — every environment variable
 - [RBAC](/docs/rbac) — roles, permissions and how they are checked

@@ -132,7 +132,9 @@ A versioned graph carries `kind ∈ manual | authoritative | hybrid | blank`
 (`backend/app/services/versioning/models.py`, `ck_graphs_kind`). It is **descriptive metadata** —
 the write path does not branch on it (only on fork lineage and `ontology_enforcement`) — but it is
 the intended place to distinguish a human-authored graph (`manual`) from one seeded/refreshed from an
-external SoR (`authoritative`) or both (`hybrid`). See [02 — Data Model](02-data-model.md).
+external SoR (`authoritative`) or both (`hybrid`). Nothing sets `authoritative` or `hybrid` today:
+enabling version control makes `manual`, a blank model `blank`, and a fork takes its parent's. See
+[02 — Data Model](02-data-model.md).
 
 ---
 
@@ -145,7 +147,7 @@ external snapshot is **merged into `main` as a single `sync` commit that preserv
 
 | Operation | Method | Commit kind | Semantics |
 |---|---|---|---|
-| **Enable / bootstrap** (first seed) | `enable_versioning` → `bulk_ingest` (`service.py:3644`); endpoint `POST /graph/bootstrap` (`endpoints/graph.py:105`) | `import` | Snapshot the provider's full state into a fresh graph in **one atomic transaction**; idempotent; provider reads happen outside the txn. `bootstrap_versioned_graph` is idempotent on `bootstrap:{graph_id}` (`providers/versioned_bootstrap.py:50`). |
+| **Enable / bootstrap** (first seed) | Endpoint `POST /graph/bootstrap` (`bootstrap_versioned_graph_endpoint`) → `create_bootstrap_job`, run by the versioning worker (`bootstrap_worker.py`) | `import` | An **async job**: the route answers **202** with it, and the worker copies the provider's graph in bounded windows into commit 2, resumable after a crash, making it `main`'s head only once an integrity report proves the copy. Idempotent per data source. It always makes a `manual` graph: `kind` isn't a parameter. (`enable_versioning` → `bulk_ingest` seeds a graph in one transaction for in-process callers; no route uses it.) |
 | **Re-sync** (ongoing) | `resync_from_provider` (`service.py:3741`) → `sync_ingest` (`service.py:3761`); endpoint `POST /graph/resync` (`endpoints/graph.py:128`) | `sync` | Re-read the provider's **current** snapshot and 3-way-merge it into `main`. On-demand today. |
 
 `resync_from_provider` is deliberately **provider-agnostic**: it pages the provider's full node+edge
@@ -239,7 +241,8 @@ The re-sync engine is generic; a full authoritative integration adds the pieces 
 
 > **Proposal (recommended integration shape).** For a federated catalog: (1) implement/enable the
 > connector and set the data source `provider_type` + `source_mode="federated"`; (2)
-> `POST /graph/bootstrap` for the day-0 seed (`kind="authoritative"`); (3) schedule
+> `POST /graph/bootstrap` for the day-0 seed — which today always makes a `manual` graph, so recording
+> `kind="authoritative"` is part of this work; (3) schedule
 > `resync_from_provider` on a cadence (a new job type on the existing worker) so the base layer stays
 > current; (4) let curators work in **drafts** (overlays) that the no-clobber 3-way preserves across
 > every re-sync; (5) *optionally* wire `write_back_enabled` to push published curation upstream where

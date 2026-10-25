@@ -527,7 +527,9 @@ one of its data sources is.
   account's access, so it takes being able to grant each of the account's roles; and whoever
   controls a managing team's membership controls that delegation, so adding someone to a team
   that manages a service account takes `system:service-accounts:manage` as well as
-  `system:groups:manage`, and an access-request approval never adds anyone to one. See [Service
+  `system:groups:manage`, and an access-request approval never adds anyone to one. A holder of
+  `system:users:manage` can make an account's keys without managing it, and its managers are
+  told; `system:service-accounts:manage` alone makes none. See [Service
   Accounts](/guide/service-accounts).
 
 ## 403 body

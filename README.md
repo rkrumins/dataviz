@@ -79,4 +79,5 @@ Start here, then follow the trail for whatever you're doing.
 | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) | System overview |
 | [docs/MIGRATIONS.md](docs/MIGRATIONS.md) | How the schema is built, and the rules for a new migration |
 | [docs/BACKEND.md](docs/BACKEND.md) | Backend internals |
+| [docs/INTEGRATION_QUICKSTART.md](docs/INTEGRATION_QUICKSTART.md) | Calling the API from a script or service: a key, the first calls, every answer |
 | [docs/FRONTEND.md](docs/FRONTEND.md) | Frontend internals |

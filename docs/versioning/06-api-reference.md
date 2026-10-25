@@ -36,22 +36,32 @@ tables call out.
 `POST /api/v1/auth/login {email, password}` sets the session cookies, among them `nx_access`
 (`HttpOnly`) and `nx_csrf`. Send the cookies back on every request, and copy `nx_csrf` into the
 `X-CSRF-Token` header on **every** `POST`, `PUT`, `PATCH` and `DELETE` — including the reads that are
-`POST`s. `GET`s need no header. The access cookie lasts 15 minutes in the shipped configuration;
-`POST /api/v1/auth/refresh` renews every cookie, `nx_csrf` included. Working curl, `requests` and
+`POST`s. `GET`s need no header. The access cookie lasts `JWT_EXPIRY_MINUTES` — 15 minutes in the
+Compose files, 60 in the Helm chart, 5 where it isn't set; `POST /api/v1/auth/refresh` renews every
+cookie, `nx_csrf` included. Working curl, `requests` and
 `httpx` helpers are in the [API Guide](/docs/api-guide#sign-in-from-a-script). The routers trust the
 authenticated `User` and `PermissionClaims`; they never re-derive identity.
 
 ### API keys
 
-`Authorization: Bearer nxpat_…` replaces the cookies and the CSRF header — see
-[API Keys](/guide/api-keys). The key acts as its owner, narrowed to what it was limited to: data
-read for the reads, data read & write for every write. Every route below accepts a key except
-creating a graph (`POST /graphs`, `/blank-graphs`, `…/forks`), opening a draft by data source
-(`POST /resolve`), adding or removing a draft's members, projection rebuild and reconcile, and on
-the graph router `bootstrap…`, `resync` and `edges/aggregated/materialize`. A
-key limited to particular data sources reaches a graph, branch or request only when the data
-source behind it is one of them — otherwise `403 api_key_out_of_scope`, or `404` across
-workspaces.
+`Authorization: Bearer nxpat_…` — or a [service account](/guide/service-accounts)'s `nxsat_…` —
+replaces the cookies and the CSRF header — see [API Keys](/guide/api-keys). The key acts as its
+owner, a person or a service account, narrowed to what it was limited to: data read for the reads,
+data read & write for every write. Every route below accepts a key except creating a graph
+(`POST /graphs`, `/blank-graphs`, `…/forks`) and checking a blank model's name
+(`GET /blank-graphs/name-check`), opening a draft by data source (`POST /resolve`), adding or
+removing a draft's members, projection rebuild and reconcile, and on the graph router
+`POST /bootstrap`, `/bootstrap/decision`, `/bootstrap/retry` and `/bootstrap/abandon`, `/resync`
+and `edges/aggregated/materialize` — `GET /bootstrap/status` and `/bootstrap/duplicates` accept
+one. A key limited to particular data sources reaches a graph, branch or request only when the
+data source behind it is one of them — otherwise `403 api_key_out_of_scope`, or `404` across
+workspaces; opening a fork's pull request (`POST …/pulls`) also needs the parent graph's data
+source.
+
+A read-only key reads, and may also create an export (`POST …/exports`, which only reads the
+graph). It can't open a pull request or cancel an export, though `_READ` gates both: they change
+something. A service account can't approve a pull request or be named its reviewer, and nobody
+approves one opened through a service account they manage — both **403 `access_denied`**.
 
 ### Permissions (RBAC)
 
@@ -80,7 +90,7 @@ so a read-only canvas can boot. Every other versioning route is membership-only.
 | **Version control** | `versioningEnabled` | Every `POST`, `PUT`, `PATCH` and `DELETE` on the versioning router except `…/projection/rebuild`, `…/projection/reconcile` and `POST …/exports`; on the graph router, `POST /bootstrap`, `/bootstrap/retry`, `/bootstrap/decision`, `/bootstrap/abandon` and `/resync`. Reads stay open |
 | **Export graph data** | `graphExportEnabled` | Export plan, stream, job creation and download, on both routers |
 | **Build lineage from scratch** | `blankModelsEnabled` | `POST /blank-graphs` |
-| **Edit mode** | `editModeEnabled` | `POST /graph/changes` |
+| **Edit mode** | `editModeEnabled` | `POST /graph/changes`, `POST /graph/nodes/create`, and `POST`, `PATCH` and `DELETE` on `/graph/edges` |
 | **Lineage trace** | `traceEnabled` | The `/graph/trace…` routes ([§4](#lineage-trace-routes)) |
 
 A closed switch answers **403** with `{"detail": {"type": "feature_disabled", "feature": …, "message": …}}`.
@@ -94,7 +104,8 @@ workspaces. A graph in the trash — its data source deleted, or its purge runni
 too. `pr_in_workspace` does the same for a request's **base** graph and also requires you to
 take part in the request — its author, an assigned reviewer, or a holder of `_MANAGE` — else **404**.
 Moving a data source to another workspace moves its graph with it, so the graph answers there and
-no longer here.
+no longer here. Forks of the graph stay behind, and a resumable upload under way must start again
+in the new workspace.
 `view_in_workspace` resolves a view from the **management** database (a separate store from
 `graphver`) with the same rule. On the graph router, the enablement routes check the data source
 with `_data_source_in_workspace`, and `/changes` and `/nodes/{urn}/delete-impact` check the graph
@@ -114,7 +125,7 @@ that backs `dataSourceId`.
 | `PullRequestExists` | **409** | `{type: "pull_request_exists", prId, branchId, title, message}` — the branch already has a live request ([03](/docs/versioning-branching-and-merge)); `prId` is the one that exists, so send the user *to* it |
 | `ConcurrencyError` | **409** | `{type: "integrity", message}` |
 | `DiffTooLarge` | **409** | `{type: "too_large_for_tree", changed, limit, message}` — the draft changes more entities than the Changes tree lays out |
-| `ValueError` | **404** | `str(message)` — an unknown id |
+| `ValueError` | **404** | `str(message)` — an unknown id, and also a request the state doesn't allow: a pull or merge request already merged or closed, a commit to revert or restore that isn't on `main` (or is the genesis commit), `main` where a draft is needed, a draft already merged or abandoned, a graph that isn't a fork. Read `detail` before treating it as missing |
 
 Other refusals you will meet on these routers:
 
@@ -150,8 +161,8 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 | Method · Path | Gate | Purpose / key fields |
 |---|---|---|
 | `POST /graphs` | `_MANAGE` | Create a versioned graph holding only its genesis commit. `{dataSourceId, workspaceId, kind?, baseOntologyId?, tenantId?, falkorGraphName?, falkorProvider?, ontologySpec?, ontologyEnforcement?}` → **201** `{graphId, mainBranchId, genesisCommitId}`. `workspaceId` must equal the path (else **400**); `falkorProvider` defaults to the data source's provider. To copy a data source's existing graph in, use **bootstrap** ([§4](#cascade-preview--bootstrapresync)) instead |
-| `GET /graphs/{gid}` | `_READ` | Graph metadata (`GraphResponse`: `kind`, `forkParentGraphId`, `forkBaseCommitSeq`, `mainHeadCommitSeq`, `createdBy`, `createdAt`) |
-| `GET /resolve` | `_READ`, or read access to the view in `viewId` | `?dataSourceId&viewId` → `ResolveResponse{graphId, mainBranchId, mainHeadCommitSeq, myDraft?, kind, bootstrap?}`. **Read-only — never opens a draft.** `kind` is `manual`, `authoritative`, `hybrid` or `blank`; `bootstrap` is the enablement job while the graph is still at genesis and that job is pending, running or failed. **404** when no versioned graph backs the data source. For every data source of a workspace at once, `GET /api/v1/admin/workspaces/{ws_id}/data-sources?include=versioning` gives each one's `graphId`, `kind` and the head of `main` — see [Graph Metadata & History API](/docs/graph-metadata-api) |
+| `GET /graphs/{gid}` | `_READ` | Graph metadata (`GraphResponse`: `graphId`, `workspaceId`, `tenantId`, `kind`, `baseOntologyId`, `forkParentGraphId`, `forkBaseCommitSeq`, `mainHeadCommitSeq`, `createdBy`, `createdAt`, `userNames`) |
+| `GET /resolve` | `_READ`, or read access to the view in `viewId` | `?dataSourceId&viewId` → `ResolveResponse{graphId, mainBranchId, mainHeadCommitSeq, myDraft?, kind, bootstrap?}`. **Read-only — never opens a draft.** `kind` is `manual`, `authoritative`, `hybrid` or `blank`; `bootstrap` is the enablement job while the graph is still at genesis and that job is pending, running, waiting for a decision (`needs_decision`) or failed — the graph is versioned only once `bootstrap` is `null`. **404** when no versioned graph backs the data source. For every data source of a workspace at once, `GET /api/v1/admin/workspaces/{ws_id}/data-sources?include=versioning` gives each one's `graphId`, `kind` and the head of `main` — see [Graph Metadata & History API](/docs/graph-metadata-api) |
 | `POST /resolve` | `_MANAGE` | `{dataSourceId, originatingViewId?}` → the same shape, but **opens the caller's draft if there is none** (the frontend's `resolveAndOpenDraft`) |
 
 > **Note.** "Enable version control" (**bootstrap**) and the authoritative **re-sync** from the
@@ -169,7 +180,7 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 
 | Method · Path | Gate | Purpose / key fields |
 |---|---|---|
-| `GET …/branches` | `_READ` | `?limit(100, max 500)&offset&viewId` → `[BranchResponse]`. Graph-wide by default; `viewId` narrows to that view's drafts (**branch-per-view**). Without `_MANAGE` you see `main`, your own drafts, and the shared drafts you are a member of |
+| `GET …/branches` | `_READ` | `?limit(100, max 500)&offset&viewId` → `[BranchResponse]`. Graph-wide by default; `viewId` narrows to that view's drafts (**branch-per-view**). Without `_MANAGE` you see `main`, your own drafts, and the shared drafts you are a member of yourself — not those shared with a team you're in. Those others' drafts are dropped after the page is read, so a page can come back short, or empty, before the end: advance `offset` by `limit` |
 | `POST …/branches` | `_MANAGE` | `{name?, originatingViewId?, shared?}` → **201** `{branchId}` |
 | `GET …/branches/{bid}/members` | `_READ` | A shared draft's collaborators: `{members: […]}` |
 | `POST …/branches/{bid}/members` | `_MANAGE` | Add one: `{subjectType: "user" \| "group", subjectId, role: "viewer" \| "editor" \| "maintainer"}` |
@@ -177,7 +188,7 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 | `PATCH …/branches/{bid}` | `_MANAGE` | `{name?, description?, isShared?}`, by the owner or a maintainer; `""` clears a name or description |
 | `POST …/branches/{bid}/abandon` | `_MANAGE` | Discard the draft → `BranchResponse`. Its layout edits go with it |
 | `GET …/branches/{bid}/freshness` | `_READ` | Is the draft behind `main`? `{behind, behindBy, mainHeadCommitSeq, baseCommitSeq}` — cheap enough to poll while editing |
-| `POST …/branches/{bid}/rebase` | `_MANAGE` | "Pull latest `main` into the draft." `{resolutions?}` → `{clean, conflicts, seeds, changes, incoming, baseCommitSeq, alreadyUpToDate}`. On `clean: false`, resolve and resubmit with `resolutions`; `seeds` holds the draft's own value of each conflicting entity. **`changes` ≠ `incoming`**: `changes` is how *your own* edits were rewritten onto the new base (usually nothing); `incoming` is what actually arrived from `main` — `{branchId, commitIds, commitCount, contributors, stats, fromSeq, toSeq}`, the window to read from `…/diff-window`. A clean pull always writes a `pull` commit ([03](/docs/versioning-branching-and-merge)) |
+| `POST …/branches/{bid}/rebase` | `_MANAGE` | "Pull latest `main` into the draft." `{resolutions?}` → `{clean, conflicts, seeds, changes, incoming, baseCommitSeq, alreadyUpToDate}`. On `clean: false`, resolve and resubmit with `resolutions`; `seeds` holds the draft's own value of each conflicting entity. **`changes` ≠ `incoming`**: `changes` is how *your own* edits were rewritten onto the new base (usually nothing); `incoming` is what actually arrived from `main` — `{branchId, commitIds, commitCount, contributors, stats, fromSeq, toSeq}`, the window to read from `…/diff-window`. A clean pull writes a `pull` commit ([03](/docs/versioning-branching-and-merge)) — none when the draft was already up to date (`alreadyUpToDate: true`) |
 
 ### 2.4 Changes → checkpoint → publish
 
@@ -197,9 +208,9 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 | `GET …/watermark` | `_READ` | `WatermarkModel{committed, projected, fresh, status, target, lastError?, lastProjectedAt?, progressDone?, progressTotal?, committedRevision?, projectedRevision?}`. `status` is `idle`, `projecting`, `rebuilding` or `evicted`; each revision is `{commitId, createdAt, actor, message}`. Drives the "refreshing…" badge and the Data health tab |
 | `POST …/projection/rebuild` | `_MANAGE` | Full replay Postgres → FalkorDB → `{started, alreadyRunning, watermark}`. **409** when there is no real target (unpinned, or the synthetic `gv_<id>`). Idempotent; it also self-heals a stranded status |
 | `POST …/projection/reconcile` | `_MANAGE` | `{deep?}` → `DriftReportModel` (counts and id-set differences; `deep` also compares fields). A request-scoped full scan: a second one for the same graph → **409**; a read-layer failure → **503** |
-| `POST …/commits/{cid}/revert` | `_MANAGE` | Apply the inverse of one `main` commit as a new `revert` commit. `{message?}` → `{commitId}`. **409** if a later commit changed the same entities. The genesis commit can't be reverted |
+| `POST …/commits/{cid}/revert` | `_MANAGE` | Apply the inverse of one `main` commit as a new `revert` commit. `{message?}` → `{commitId}` — `""` when there was nothing to undo. **409** if a later commit changed the same entities. The genesis commit can't be reverted (**404**) |
 | `GET …/commits/{cid}/restore-preview` | `_READ` | What a restore would do: `{commitsUndone, nodes, edges}`, each with create, update and delete counts. Nothing is written |
-| `POST …/commits/{cid}/restore` | `_MANAGE` | Reset `main` to its state at that commit, as one new `restore` commit (point-in-time rollback). `{message?}` → `{commitId}`. No conflict path: everything after the target is overridden by definition |
+| `POST …/commits/{cid}/restore` | `_MANAGE` | Reset `main` to its state at that commit, as one new `restore` commit (point-in-time rollback). `{message?}` → `{commitId}` — `""` when `main` already matches it. No conflict path: everything after the target is overridden by definition |
 
 See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what these do.
 
@@ -209,7 +220,7 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 |---|---|---|
 | `GET …/branches/{bid}/state` | `_READ` | `?asOfSeq` → `{nodes, edges, watermark}` (materialized, limited to what you may read) |
 | `GET …/commits/{cid}/state` | `_READ` | Time travel: the full state at a commit |
-| `GET …/entities/{eid}/history` | `_READ` | One entity's revisions, newest first, a page at a time: `?branchId&scope(all \| draft \| published)&limit(50, max 200)&before&include=payload&kind(node \| edge)` → `EntityHistoryResponse{entityId, kind, versions, userNames, hasMore, nextBefore}`. Send `nextBefore` back as `before` for the next page; a cursor the server didn't issue is **422 `invalid_cursor`**. Another person's private draft is **403** |
+| `GET …/entities/{eid}/history` | `_READ` | One entity's revisions, newest first, a page at a time: `?branchId&scope(all \| draft \| published)&limit(50, max 200)&before&include=payload&kind(node \| edge)` → `EntityHistoryResponse{entityId, kind, versions, userNames, hasMore, nextBefore}`; each entry of `versions` keeps the store's snake_case names. Send `nextBefore` back as `before` for the next page; a cursor the server didn't issue is **422 `invalid_cursor`**. Another person's private draft is **403** |
 | `GET …/entities/{eid}/summary` | `_READ` | Who created the entity and who last changed it, on the line being read: `?branchId&kind&include=value` → `{entityId, kind, exists, version?, inherited, created?, updated?, revisions, changedOnMainSinceBranch, baseCommitSeq?, value?, userNames}`. `include=value` adds the entity and its concurrency token |
 | `GET …/branches/{bid}/diff` | `_READ` | `?fromSeq&toSeq` → `{added, removed, modified}` — **id-keyed**: enough to *count* what changed, not to *show* it |
 | `GET …/branches/{bid}/diff-window` | `_READ` | The same window with **whole-payload before and after** (`DiffVsMainResponse`) — the renderable shape. Backs "what came in when I pulled": the window is `main` between the draft's old and new base, both recorded on the `pull` commit |
@@ -222,7 +233,7 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 | Method · Path | Gate | Purpose |
 |---|---|---|
 | `GET …/commits` | `_READ` | `?branchId&originatingViewId&publishedOnly&limit(100, max 500)&before&after&offset` → `CommitLogResponse{commits, userNames, hasMore, nextBefore}`, newest first; the branch defaults to `main`. `before` and `after` are exclusive bounds on `commit_seq`: send `nextBefore` back as `before` for the next page, and `after` the newest commit you hold to get only what is new — a walk never skips or repeats while commits land. `main`'s log stops at its head, so it shows only commits that have landed. With `originatingViewId`, `publishedOnly=true` gives the view's published timeline (its squash-publishes and the graph-wide commits it shares); without it, every raw draft commit attributed to the view — which spans branches, so it pages by `offset` alone. **400** for `before`/`after` with `offset`, or on that raw view history. Each commit is a stored row in snake_case (`CommitLogEntry`: `commit_id`, `commit_seq`, `kind`, `message`, …) — every field is explained in [Graph Metadata & History API](/docs/graph-metadata-api#each-commit) |
-| `GET …/commits/{cid}/squashed` | `_READ` | The raw draft commits folded into a squash — the "merged N commits" drill-down, with `hasMore`. Empty for any other commit |
+| `GET …/commits/{cid}/squashed` | `_READ` | The raw draft commits folded into a squash — the "merged N commits" drill-down, with `hasMore`. For a `pull`, the `main` commits it brought in; for a `restore`, the commit it went back to. Empty for any other commit, and for a merged fork pull request, whose commits are in the fork |
 
 ### 2.8 Versioned graph read (canvas neighbors)
 
@@ -234,8 +245,8 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `POST …/bulk-ingest` | `_MANAGE` | An NDJSON body (one node or edge per line) → **one `import` commit straight on `main`** — no draft, no review. Invalid lines are reported in `rejected`, not fatal; idempotent on `?idempotencyKey`. Answers in snake_case: `{commit_id, commit_seq, ingested, nodes, edges, rejected, idempotent_replay}`. The body is read whole, so the 100 MB request limit applies; for a reviewed load, use `POST …/imports` ([§2.10](#210-imports--exports)) |
-| `POST …/sync` | `_MANAGE` | An NDJSON snapshot into `main` as one `sync` commit, by **3-way merge**: `?strategy=merge` (a field both sides changed → **409**) or `?strategy=external_wins`; also `?source` and `?idempotencyKey`. An entity the snapshot drops is deleted, with its containment subtree, if nobody edited it. Refused when `main` holds more than 250,000 entities (`GRAPHVER_RESYNC_MAX_ENTITIES`) with **422 `graph_too_large_to_sync`** `{entities, limit, estimatedBytes, message}`. See [10 · Authoritative Sources](/docs/versioning-authoritative-sources) |
+| `POST …/bulk-ingest` | `_MANAGE` | An NDJSON body, one entity per line — a node `{"kind": "node", "entityType", "urn"?, "id"?, …properties}` or an edge `{"kind": "edge", "edgeType", "source", "target", …properties}`, whose ends name a node in the same body by `urn` or `id` — → **one `import` commit straight on `main`** — no draft, no review. Invalid lines are reported in `rejected` (`{row, reason}`), not fatal; idempotent on `?idempotencyKey`. Answers in snake_case: `{commit_id, commit_seq, ingested, nodes, edges, rejected, idempotent_replay}`; `commit_id` is `null` when no line was valid. The body is read whole, so the 100 MB request limit applies; for a reviewed load, use `POST …/imports` ([§2.10](#210-imports--exports)) |
+| `POST …/sync` | `_MANAGE` | An NDJSON snapshot into `main` as one `sync` commit, by **3-way merge**: `?strategy=merge` (a field both sides changed → **409**) or `?strategy=external_wins`; also `?source` and `?idempotencyKey`. An entity the snapshot drops is deleted, with its containment subtree, if nobody edited it. Answers in snake_case: `{commit_id, commit_seq, applied, rejected, idempotent_replay, overridden}` — `commit_id` is `null` when nothing changed, and `overridden` lists up to 200 people's edits the source overruled. Refused when `main` holds more than 250,000 entities (`GRAPHVER_RESYNC_MAX_ENTITIES`) with **422 `graph_too_large_to_sync`** `{entities, limit, estimatedBytes, message}`. See [10 · Authoritative Sources](/docs/versioning-authoritative-sources) |
 
 ### 2.10 Imports & exports
 
@@ -245,8 +256,8 @@ scripted run. The endpoints:
 
 | Method · Path | Gate | Purpose |
 |---|---|---|
-| `POST …/imports` | `_MANAGE` | `?format(ndjson)&reconcileMode(upsert \| replace)&branchId&viewId&idempotencyKey`, **body = the raw file** → **202** `{jobId, branchId, sourceUri, status}`. Opens a draft (or adds to the one in `branchId`), streams the file to the object store, then queues the job: `status` is `pending` until a versioning worker's transfer lane claims it (the web tier never runs jobs). Never writes to `main` |
-| `GET …/imports` | `_READ` | The graph's import jobs |
+| `POST …/imports` | `_MANAGE` | `?format(ndjson \| csv \| tsv \| json \| xlsx)&reconcileMode(upsert \| replace)&branchId&viewId&idempotencyKey`, **body = the raw file** → **202** `{jobId, branchId, sourceUri, status}`. Opens a draft (or adds to the one in `branchId`), streams the file to the object store, then queues the job: `status` is `pending` until a versioning worker's transfer lane claims it (the web tier never runs jobs). Never writes to `main`. `viewId` places what it creates in that view's layout, so it needs edit access to the view. **Don't send an `idempotencyKey` used before on this graph** — by an import or an export: today that answers **503** and leaves the draft it opened behind, empty |
+| `GET …/imports` | `_READ` | The graph's newest 50 import jobs |
 | `GET …/imports/template` | `_READ` | `?format` (default `csv`) → a starter file with the columns and a few example rows |
 | `POST …/imports/uploads` | `_MANAGE` | Start a resumable upload: `{fileName, size, format}` → **201** `{uploadId, fileName, size, format, partBytes, parts, received: [], jobId: null}`. Parts are 16 MiB. **413** when the file is too large for its format: 10 GiB for NDJSON, CSV and TSV, 100 MB for JSON and Excel |
 | `PUT …/imports/uploads/{uploadId}/parts/{n}` | `_MANAGE` | Part `n` (numbered from `0`) as the raw body → `{part, size}`. It must hold exactly its share (`partBytes`; the last part the rest), else **422**. Sending a part again replaces it |
@@ -257,7 +268,7 @@ scripted run. The endpoints:
 | `GET …/exports/plan` | `_READ` + **Export graph data** | `?format&asOfSeq&viewId&branchId&ids&types` → what the export would hold, before anything downloads: `{format, nodes, edges, exact, empty, asOfSeq, branchId, view, formatLimit, maxBytes}`; `view` is `{viewId, placements, found, entities}`. Counts are `null` when counting takes longer than `GRAPH_EXPORT_PLAN_BUDGET_SECS` (20 s) |
 | `GET …/exports/stream` | `_READ` + **Export graph data** | The same parameters plus `props&filename` → the file, **streamed as it is written** from one pinned snapshot (flat memory at any size; no request time limit). Exports take turns — `GRAPH_EXPORT_CONCURRENCY` (2) per server; one waits up to `GRAPH_EXPORT_SLOT_WAIT_SECS` (15 minutes) for a turn, then gets **429 `EXPORTS_BUSY`** with `Retry-After`. **422 `EXCEL_ROW_LIMIT`** for an Excel file a sheet can't hold. For scripts and large graphs, prefer the job below |
 | `POST …/exports` | `_READ` + **Export graph data** | `?format&asOfSeq&viewId&branchId&props&ids&types&filename&idempotencyKey` → **202** `{jobId, resultUri, status}`. The workers write the same records into the object store, up to `GRAPH_EXPORT_MAX_BYTES` (50 GiB) — what the Export dialog does for a data source with version control. `filename` (no extension) names the download |
-| `GET …/exports · /{jobId}` | `_READ`, and read access to the export's draft and view | The export jobs you may read, newest first, or one job: `queuedAhead` while it waits; while it runs, `summary` says how far it has got (`nodes` and `edges` this pass, `passes`, `bytes` written); once finished, `kept` says whether its file is still there to download (a day). An export of a draft or view you can't read is a **404**, and left out of the list |
+| `GET …/exports · /{jobId}` | `_READ`, and read access to the export's draft and view | The export jobs you may read among the newest 50, newest first, or one job: `queuedAhead` while it waits; while it runs, `summary` says how far it has got (`nodes` and `edges` this pass, `passes`, `bytes` written); once finished, `kept` says whether its file is still there to download (a day). An export of a draft or view you can't read is a **404**, and left out of the list |
 | `GET …/exports/{jobId}/download` | as above + **Export graph data** | The finished file, as a download that resumes: `Content-Length`, `Accept-Ranges: bytes`, `ETag`, `Last-Modified`. A `Range` → **206** with `Content-Range` (one range; a header asking for several gets the whole file); an `If-Range` that names another version → the whole file; a range past the end → **416**. No request time limit. **409 `not_ready`** until the job is `completed`; **404** once swept |
 | `POST …/exports/{jobId}/cancel` | as `GET …/exports/{jobId}`; then the export's creator, or `_MANAGE` | Stops an export that hasn't ended → the job, wherever it ended: `cancelled` (its `summary` names `cancelledBy`), or `completed`/`failed` when it ended first, left as it is. A queued export is never claimed; a running one stops at its next progress checkpoint, within seconds, and the part of its file written so far is removed. **403** for anyone else; **404** as for an export you may not read |
 | `GET /api/v1/{ws_id}/graph/export/plan · /stream` | `_READ` + **Export graph data** | `?dataSourceId&format[&props&filename]` → the same for a data source **without** version control: its live graph, read from the provider (rows carry URNs, not entity ids). Counts are estimates from the provider's statistics |
@@ -279,7 +290,7 @@ scripted run. The endpoints:
 | Method · Path | Gate | Purpose |
 |---|---|---|
 | `POST …/pulls` | **`_READ`** | Here `{gid}` is the **fork**: open a PR from its `main` back to its parent's `main`. `{title?, description?, reviewers?}` → **201** `{prId}`. Listed `reviewers` must all approve before it can merge (**409 `approval_required`**) |
-| `GET …/pulls` | `_READ` | Here `{gid}` is the **target**: `?limit&offset&viewId` → `[PrResponse]`, the PRs into this graph |
+| `GET …/pulls` | `_READ` | Here `{gid}` is the **target**: `?limit&offset&viewId` → `[PrResponse]`, the PRs into this graph. Without `_MANAGE`, only those you opened or review. `PrResponse`: `prId`, `graphId`, `sourceBranchId`, `targetGraphId`, `targetBranch`, `baseCommitSeq`, `behind`, `behindBy`, `status` (`mergeable`, `conflicts`, `approved`, `merged` or `closed`), `title`, `description`, `conflicts`, `resultingCommitId`, `reviewers`, `approvedBy`, `approvalStatus` (`pending`, `approved`, or `null` without reviewers), `checksStatus`, `actor`, `createdAt`, `updatedAt`, `mergedAt`, `mergedBy`, `mergedVia` (`review` or `direct_publish`), `closedAt`, `closedBy`, `originatingViewId`, `userNames` |
 | `GET /pulls/{pr}` | `_READ`, and you take part in it | One PR, with `sourceBranchOwner` and `sourceBranchName` |
 | `PATCH /pulls/{pr}` | `_MANAGE` | Edit `title` and `description` |
 | `GET /pulls/{pr}/preview · /diff · /diff/summary · /diff/children` | `_READ`, and you take part in it | Merge preview, and the itemised and hierarchical "Files changed" |
@@ -291,7 +302,7 @@ scripted run. The endpoints:
 |---|---|---|
 | `POST …/branches/{bid}/merge-requests` | `_MANAGE` | Raise a reviewed draft → `main` request. `{title?, description?, reviewers?}` → **201** `{prId}`. **409 `pull_request_exists`** when the draft already has a live one |
 | `GET …/merge-requests` | `_READ` | `?limit&offset` — draft requests and incoming fork PRs into this graph's `main` |
-| `GET /views/{viewId}/pull-requests` | `_READ`, and the view is in this workspace | `?status&limit&offset` — requests raised from this view's drafts |
+| `GET /views/{viewId}/pull-requests` | `_READ`, and the view is in this workspace | `?status&limit&offset` — requests raised from this view's drafts. Requests into a graph in the trash are still listed, but each answers **404** when opened |
 | `GET /views/{viewId}/pull-requests/count` | `_READ`, and the view is in this workspace | `{fromView, onDataSource}`, active requests only |
 | `GET /data-sources/{dataSourceId}/pull-requests` | `_READ` | `?status&limit&offset` — every request on the data source; **404** unless its graph is in this workspace |
 | `GET /merge-requests/{pr}` (and `/preview`, `/diff`, `/diff/summary`, `/diff/children`) | `_READ`, and you take part in it | The **unified** read surface — it serves draft requests and fork PRs alike |
