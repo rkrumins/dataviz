@@ -1422,7 +1422,7 @@ class TestCompilerGroups:
         where = c.compile(GroupPredicate(op="not", children=[
             TagPredicate(values=["public"]),
         ]))
-        assert where == "NOT ((n.tags CONTAINS $p0))"
+        assert where == "NOT (n.tags CONTAINS $p0)"
 
     def test_descendant_of_top_level_hoisted(self):
         # DescendantOf at the top-level AND compiles to TRUE; the URNs

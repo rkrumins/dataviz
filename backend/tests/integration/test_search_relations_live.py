@@ -560,6 +560,61 @@ def _routes(page):
                   for r in page.paths or [])
 
 
+# --- nesting as deep as the service allows ------------------------------------
+
+ALICE = {"kind": "property", "key": "owner", "op": "eq", "value": "alice"}
+
+#: As deep as ``_validate_predicate`` lets a query nest. FalkorDB's parser reads
+#: an operand with no operator after it twice (``parse_cost``), and these once
+#: took it up to seconds per statement just to parse — a time no timeout bounds.
+DEEP = [
+    NOT(NOT(NOT(NOT(NOT(ALICE))))),
+    rel("downstream", rel("child", rel("upstream", ALICE))),
+    NOT(rel("downstream", NOT(rel("child", NOT(ALICE))))),
+    OR(rel("downstream", ALICE), NOT(AND(rel("child", DESCRIBED), NOT(rel("upstream", ALICE))))),
+    rel("child", rel("downstream", ALICE, quantifier="all"), count={"op": "gte", "value": 1}),
+    OR(*[AND(*[OR(*[AND(OR(ALICE, DESCRIBED), OR(OWNER, ALICE))] * 2)] * 2)] * 2),
+]
+
+
+@pytest.mark.parametrize("scope_name", list(SCOPES))
+async def test_the_deepest_nesting_parses_in_linear_time(provider, scope_name):
+    """Every statement each engine sends for the deepest shapes the service
+    allows is one FalkorDB parses in linear time (``parse_cost``), and each
+    engine answers as the reference does."""
+    from backend.app.services.native_query.parse_cost import parse_cost
+
+    scope = SCOPES[scope_name]
+    context = SearchRunContext(data_version="relations-v1", scope_hash=f"h-deep-{scope_name}")
+    sent, wrong = [], []
+    real = provider._graph.ro_query
+
+    async def spy(cypher, params=None, **kw):
+        sent.append(cypher)
+        return await real(cypher, params, **kw)
+
+    provider._graph.ro_query = spy
+    try:
+        for i, predicate in enumerate(DEEP):
+            query = _query(predicate, scope)
+            _validate_predicate(query.predicate)        # within the service's caps
+            want = (await _expected(scope, [predicate]))[0]
+            page = await provider.deep_search_session(query, context=context)
+            count = await provider.deep_search_count(query, context=context)
+            capped = await provider.deep_search(query)
+            member = await provider.deep_search_membership(
+                scope, [("q", query.predicate)], ALL_URNS, context=SearchRunContext())
+            got = (sorted(h.node.urn for h in page.hits), count["count"],
+                   sorted(h.node.urn for h in capped.hits),
+                   sorted(member["matches"].get("q", [])))
+            if got != (want, len(want), want, want) or member["errors"]:
+                wrong.append((i, predicate, (got, member["errors"]), want))
+    finally:
+        provider._graph.ro_query = real
+    assert not wrong, _report(wrong)
+    assert max(parse_cost(q) for q in sent) < 200_000
+
+
 @pytest.mark.parametrize("scope_name", list(SCOPES))
 async def test_paths(provider, scope_name):
     """Every route, its edges' properties included — or, cut at maxPaths,

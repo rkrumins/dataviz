@@ -17,6 +17,8 @@ would happily run as a read but must never run for a person here:
   keeps out ``apoc.*``, ``gds.*`` and every plugin;
 * a ``$parameter`` — a native query carries its values in its text;
 * on FalkorDB, ``substring`` started anywhere but 0 (``_check_substring``);
+* on FalkorDB, a query it would take too long just to parse — nested
+  past what it reads in half a second (``_check_parse_cost``);
 * a line break an engine might read differently from the guard — so where a
   ``//`` comment ends is never in doubt (``normalized`` turns ``\r\n`` and
   ``\r`` into ``\n`` first: Neo4j ends a comment at a lone ``\r``, FalkorDB
@@ -43,6 +45,7 @@ from backend.app.services.native_query.lexer import (
     is_clause_word,
     tokenize,
 )
+from backend.app.services.native_query.parse_cost import MAX_PARSE_COST, parse_cost
 from backend.common.interfaces.native_query import NativeQueryRefused, NativeQuerySyntaxError
 
 FALKORDB = "falkordb"
@@ -156,6 +159,7 @@ def check(text: str, *, engine: str) -> List[Token]:
     _check_functions(tokens, engine)
     if engine == FALKORDB:
         _check_substring(tokens)
+        _check_parse_cost(text)
     return tokens
 
 
@@ -226,6 +230,20 @@ def _check_substring(tokens: List[Token]) -> None:
                 "and right(text, n): substring(text, a, b) is left(right(text, size(text) - a), b).",
                 position=token.start,
             )
+
+
+def _check_parse_cost(text: str) -> None:
+    """Refuse what FalkorDB would take too long just to parse (``parse_cost``):
+    it reads an operand with no operator after it twice, so the time doubles
+    with every level of nesting, and nothing bounds it — the query's own
+    timeout starts after."""
+    if parse_cost(text) > MAX_PARSE_COST:
+        raise NativeQueryRefused(
+            "This query nests too deeply: FalkorDB would take too long just to read it. Each "
+            "bracket, function call or NOT around a condition with nothing after it doubles that "
+            "time. Take out some nesting, or put an operator after the nested part: (a OR b) = true "
+            "is read once where (a OR b) alone is read twice, and x = false once where NOT (x) is "
+            "read four times.")
 
 
 def _argument(tokens: List[Token], opening: int, n: int):

@@ -54,6 +54,7 @@ from backend.app.providers.falkordb_deep_search import (
 )
 from backend.app.providers.falkordb_search.keys import SortSpec
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf, probe_condition
+from backend.app.services.native_query.parse_cost import grouped
 
 #: Root sets up to this size clamp range units with an ``IN`` list. The
 #: check costs (ancestor rows) × (roots): 50 roots cost 2× an unclamped
@@ -544,7 +545,7 @@ def match_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
     the predicate's parameters bound."""
     params: Dict[str, Any] = dict(ctx.params)
     rel = _rel(ctx.containment)
-    where = [] if ctx.where in ("", "true") else [f"({ctx.where})"]
+    where = [] if ctx.where in ("", "true") else [grouped(ctx.where)]
     if unit.kind == "walk":
         params["_walk"] = list(unit.roots or [])
         head = ("UNWIND $_walk AS _wi MATCH (_w) WHERE ID(_w) = _wi "

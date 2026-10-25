@@ -147,7 +147,8 @@ jobs:
             tests/integration/test_relational_shapes_live.py \
             tests/integration/test_search_refs_live.py \
             tests/integration/test_search_relations_live.py \
-            tests/integration/test_native_query_live.py -q
+            tests/integration/test_native_query_live.py \
+            tests/integration/test_parse_cost_live.py -q
 
   full-suite:
     name: Full backend suite (informational)

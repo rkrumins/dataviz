@@ -37,6 +37,7 @@ from backend.app.providers.falkordb_search.raw_properties import (
     RawLeaf, answered, empty_params, evaluate_rows, graph_raw_labels, probe_condition,
 )
 from backend.app.services.deep_search import CompileError
+from backend.app.services.native_query.parse_cost import grouped, operand
 from backend.common.models.search import SearchScope
 
 
@@ -92,8 +93,9 @@ async def evaluate_membership(
     for label, label_urns in by_label.items():
         lists = (await _raw_answers(run, label, label_urns, raw_leaves)
                  if label in raw_labels else empty_params(raw_leaves))
-        flags = ", ".join(f"ANY(_mz IN [0] WHERE {answered(where, raw_leaves, lists)}) AS m{i}"
-                          for i, (_, where) in enumerate(columns))
+        flags = ", ".join(
+            f"{operand(f'ANY(_mz IN [0] WHERE {answered(where, raw_leaves, lists)})')} AS m{i}"
+            for i, (_, where) in enumerate(columns))
         res = await run(
             f"MATCH (n:`{_sanitize_label(label)}`) WHERE n.urn IN $_urns "
             f"RETURN n.urn, labels(n), {anc}, {flags}",
@@ -163,8 +165,8 @@ def _compile(provider, items, errors, *, raw: bool = False
         if raw:
             compiler.raw_leaves = []
         try:
-            where = " AND ".join(f"({w})" for w in [compiler.compile(predicate),
-                                                    *compiler.tail] if w != "true")
+            where = " AND ".join(grouped(w) for w in [compiler.compile(predicate),
+                                                      *compiler.tail] if w != "true")
         except CompileError as exc:
             errors[item_id] = str(exc)
             continue
