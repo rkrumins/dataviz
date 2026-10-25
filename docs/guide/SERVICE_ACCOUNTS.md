@@ -131,6 +131,9 @@ administrator of service accounts — say so.
 - **See whose it is.** Its name opens its page: what it is for, who manages
   it, and its roles in the workspaces you can open.
 - **Remove it** as you would a person. Its managers hear about it.
+- **Removing someone who manages one** names it, when its role here gives
+  more than they would keep — through its keys they could still act here —
+  and offers to remove that role too.
 
 A service account never joins on its own: in a workspace that people may join
 at once, it is asked for like any other role, and a workspace that isn't

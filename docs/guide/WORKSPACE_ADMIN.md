@@ -160,6 +160,13 @@ On their row, select **Revoke binding**. A preview shows what they would
 lose; select **Revoke binding** again to confirm. Access ends at their next
 request. Only admins remove people.
 
+Whoever manages a [service account](/guide/service-accounts) can do
+whatever it can. So if they manage one — themselves or through a team —
+whose role here gives more than they would keep, the preview names it:
+through its keys they could still act here. Tick **Remove its role here
+too** to remove that as well, or ask its other managers to remove them as a
+manager.
+
 ### Answering access requests
 
 People who can't open a workspace can ask for access — see [Requesting

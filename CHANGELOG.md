@@ -30,6 +30,9 @@ limitations** — a changelog that only lists good news is not worth reading.
   who manages it, with its roles in the workspaces they can open.
 - An administrator giving it a role through the API (`POST …/service-accounts/{id}/roles`) can end
   it on a date (`expiresAt`).
+- **Removing someone shows the service accounts they could still act through.** When a workspace
+  admin removes someone who manages a service account — themselves or through a team — whose role
+  there gives more than they would keep, the preview names it, and offers to remove that role too.
 
 ### Changed
 

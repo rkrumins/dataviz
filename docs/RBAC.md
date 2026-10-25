@@ -887,6 +887,13 @@ doesn't know it.
 * The admins and stewards of a workspace it holds a role in read the account
   (`GET /admin/service-accounts/{id}`) — its roles in the workspaces they can
   open — to know whose it is.
+* Removing someone: `POST …/members/{binding}/preview-revoke` names, as
+  `serviceAccounts`, each account those losing access manage — themselves or
+  through a team — with its bindings in the workspace that give more than
+  they would keep (`id`, `name`, `managedBy`, `bindings` of `bindingId` and
+  `role`), read with `resolve(…, excluded_binding_id=…)`. Through those
+  accounts' keys they could still act there; the Members tab offers to
+  remove the bindings too.
 
 **Reminders** (`backend/app/services/access_housekeeping.py`, an hourly
 control-plane sweeper under an advisory lock):
