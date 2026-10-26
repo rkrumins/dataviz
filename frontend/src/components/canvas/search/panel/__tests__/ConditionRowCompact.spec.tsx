@@ -162,10 +162,22 @@ describe('a new or unfinished row opens as its card', () => {
         menu.setAttribute('data-floating-layer', '')
         document.body.appendChild(menu)
         fireEvent.pointerDown(menu)
+        fireEvent.click(menu)
         expect(screen.getByRole('button', { name: 'Fold to one line' })).toBeInTheDocument()
-        fireEvent.pointerDown(screen.getByRole('button', { name: 'Elsewhere' }))
-        expect(line()).toBe('Is tagged #Certified')
         menu.remove()
+    })
+
+    it('folds once a press away has clicked, not as it starts', () => {
+        // Folding mid-press would move what's below under the pointer: the
+        // click "Add filter" began under a row just finished would miss.
+        render(<Row initial={{ kind: 'tag', values: ['Certified'] }} autoFocus />)
+        const elsewhere = screen.getByRole('button', { name: 'Elsewhere' })
+        fireEvent.pointerDown(elsewhere)
+        fireEvent.focusIn(elsewhere)
+        expect(screen.getByRole('button', { name: 'Fold to one line' })).toBeInTheDocument()
+        fireEvent.pointerUp(elsewhere)
+        fireEvent.click(elsewhere)
+        expect(line()).toBe('Is tagged #Certified')
     })
 
     it('opens a saved row that is unfinished', () => {

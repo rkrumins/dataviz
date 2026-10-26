@@ -170,18 +170,30 @@ const ConditionRowImpl: FC<ConditionRowProps> = ({
     const rowRef = useRef<HTMLDivElement>(null)
     useEffect(() => {
         if (!foldable || !expanded || !foldOnLeave || incomplete) return
-        const leave = (e: Event) => {
-            const target = e.target
-            if (!(target instanceof Element) || rowRef.current?.contains(target)) return
-            if (target.closest('[data-floating-layer]')) return
-            setExpanded(false)
-            setFoldOnLeave(false)
-        }
-        document.addEventListener('pointerdown', leave, true)
-        document.addEventListener('focusin', leave)
+        const away = (target: EventTarget | null) => target instanceof Element
+            && !rowRef.current?.contains(target) && !target.closest('[data-floating-layer]')
+        const fold = () => { setExpanded(false); setFoldOnLeave(false) }
+        // A press away folds the row once its click has landed: folding
+        // mid-press would move what's below under the pointer, and the click
+        // ("Add filter" under a row just finished) would miss. Focus the
+        // keyboard moves away folds it at once.
+        let pressing = false
+        let pressedAway = false
+        const down = (e: PointerEvent) => { pressing = true; pressedAway = away(e.target) }
+        const up = () => { pressing = false }
+        const click = () => { if (pressedAway) fold() }
+        const focus = (e: FocusEvent) => { if (!pressing && away(e.target)) fold() }
+        document.addEventListener('pointerdown', down, true)
+        document.addEventListener('pointerup', up, true)
+        document.addEventListener('pointercancel', up, true)
+        document.addEventListener('click', click)
+        document.addEventListener('focusin', focus)
         return () => {
-            document.removeEventListener('pointerdown', leave, true)
-            document.removeEventListener('focusin', leave)
+            document.removeEventListener('pointerdown', down, true)
+            document.removeEventListener('pointerup', up, true)
+            document.removeEventListener('pointercancel', up, true)
+            document.removeEventListener('click', click)
+            document.removeEventListener('focusin', focus)
         }
     }, [foldable, expanded, foldOnLeave, incomplete])
 
