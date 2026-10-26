@@ -404,7 +404,7 @@ function relationSpelling(p: RelatedPredicate): string {
         if (meta.lineage) {
             hops = lo === 1 && hi === 1 ? '' : lo === hi ? `*${hi}` : lo === 1 ? `*..${hi}` : `*${lo}..${hi}`
         } else if (p.maxHops) {
-            hops = lo === 1 ? `*..${hi}` : `*${lo}..${hi}`
+            hops = lo === hi ? `*${hi}` : lo === 1 ? `*..${hi}` : `*${lo}..${hi}`
         } else if (lo > 1) {
             hops = `*${lo}..`
         }

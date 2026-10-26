@@ -559,6 +559,8 @@ describe('predicateDsl — relationships and names', () => {
         ['ancestor*2..4(type:domain)', { kind: 'related', axis: 'ancestor', minHops: 2, maxHops: 4,
             where: type('domain') }],
         ['descendant*2..()', { kind: 'related', axis: 'descendant', minHops: 2 }],
+        ['ancestor*5(type:Category)', { kind: 'related', axis: 'ancestor', minHops: 5, maxHops: 5,
+            where: type('Category') }],
         ['feeds(fedBy(@"Sales/orders"))', { kind: 'related', axis: 'downstream',
             where: { kind: 'related', axis: 'upstream', where: named('Sales', 'orders') } }],
         ['@"Country/United Kingdom"', named('Country', 'United Kingdom')],
