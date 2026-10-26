@@ -110,8 +110,9 @@ recorded is no longer counted as approved. The approval check now runs before th
 and a merge large enough to run as a job is refused with `approval_required` before it is queued,
 instead of closing the draft as publishing until the job fails. A PR's author and its draft's owner
 can't approve it: **403 `access_denied`** with code `self_review`, and the review does not offer
-them Approve. Nor can anyone who manages the service account that opened the PR or owns its draft
-(`self_review` too), and a service account never approves (**403 `access_denied`**, code
+them Approve. Nor can anyone who manages the service account that opened the PR or owns its draft,
+or ever made a key for it, since a key outlives its maker's seat (`self_review` too), and a
+service account never approves (**403 `access_denied`**, code
 `person_required`).
 
 **Reviewers can be asked when a draft goes for review, and after.** "Submit for review" has a
@@ -172,7 +173,9 @@ write (`branch_closed`), so no save is left behind on a merged draft; a job that
 the draft back, at once after a refusal and within about a minute otherwise. `POST /graph/changes`
 takes an `Idempotency-Key` header: a retry with the same key answers with the first save's commit
 and lands nothing twice. Canvas and graph-route writes to a versioned graph commit to Postgres only,
-and the projector carries them to FalkorDB; until it has, reads come from Postgres.
+and the projector carries them to FalkorDB; until it has, reads come from Postgres. A native
+read-only query, which can read only FalkorDB, answers **503 `unavailable`** with `Retry-After`
+until then, instead of rows that are old, partial or missing (an evicted graph).
 
 ### Upgrading
 

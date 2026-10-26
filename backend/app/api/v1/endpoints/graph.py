@@ -2221,7 +2221,8 @@ async def search_native(
 
     Who may: holders of ``workspace:native-query:read`` with data source
     access, or a share of ``viewId`` that opts in, for that view's data
-    source only. Never with an API key; never on a draft. Every refusal is
+    source only. Never with an API key; never on a draft, nor on a versioned
+    source until its projection holds what was published (503). Every refusal is
     ``{detail: {code, message, requestId, position?}}``.
     """
     from backend.app.middleware.request_id import get_request_id
@@ -2275,6 +2276,11 @@ async def search_native(
             request_id, 501, "native_query_unavailable",
             "Native queries run on FalkorDB and Neo4j data sources only.",
         )
+    if not await _holds_published_graph(granted.data_source_id, provider):
+        raise _native_refusal(
+            request_id, 503, "unavailable",
+            "The published graph is catching up. Try again in a moment.", retry_after=5,
+        )
     run = NativeRun(
         workspace_id=ws_id, data_source_id=granted.data_source_id,
         data_source_label=granted.data_source_label, user_id=user.id, engine=engine_name,
@@ -2289,6 +2295,31 @@ async def search_native(
             request_id, exc.status, exc.code, exc.message, position=exc.position,
             retry_after=exc.retry_after,
         )
+
+
+async def _holds_published_graph(data_source_id: str, provider) -> bool:
+    """Whether ``provider`` reads what a versioned source has published, as ContextEngine
+    requires before reading main from FalkorDB: the projection has caught up, in the key it
+    publishes. Until then that key's rows are old, partial or gone (an evicted graph), and a
+    native query has no Postgres reader to fall back on. Always, for a source without version
+    control, or when the versioned set can't be read (``physical_key`` reads the own key then)."""
+    from backend.app.services import versioned_sources
+    from backend.app.services.versioning.service import GraphVersioningService
+
+    try:
+        if data_source_id not in await versioned_sources.versioned_data_source_ids():
+            return True
+    except versioned_sources.VersionedLookupUnavailable:
+        return True
+    svc = GraphVersioningService()
+    graph = await svc.get_graph_by_data_source(data_source_id)
+    if graph is None:
+        return True
+    gid = str(graph["graph_id"])
+    wm = await svc.projection_watermark(gid)
+    return bool(wm["fresh"]) and versioned_sources.serves_pin(
+        getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
+        wm.get("falkor_graph_name"), gid)
 
 
 def _native_refusal(

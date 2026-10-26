@@ -510,3 +510,57 @@ async def test_a_person_who_goes_away_cancels_the_query(db_session, estate):
     assert cancelled.is_set()
     (record,) = await records(db_session)
     assert record["details"]["outcome"] == "cancelled"
+
+
+# ── a versioned data source ─────────────────────────────────────────────
+
+
+@pytest.fixture
+def versioned(monkeypatch):
+    """DS has a versioned graph; a test says how its projection stands."""
+    from backend.app.services import versioned_sources
+    from backend.app.services.versioning.service import GraphVersioningService
+
+    async def ids(**_kw):
+        return frozenset({DS})
+
+    holder = {"wm": {"fresh": True, "falkor_provider": None, "falkor_graph_name": DS}}
+
+    async def graph_by_ds(self, data_source_id):
+        return {"graph_id": "g_native", "workspace_id": WS, "data_source_id": data_source_id}
+
+    async def watermark(self, graph_id):
+        return holder["wm"]
+
+    monkeypatch.setattr(versioned_sources, "versioned_data_source_ids", ids)
+    monkeypatch.setattr(GraphVersioningService, "get_graph_by_data_source", graph_by_ds)
+    monkeypatch.setattr(GraphVersioningService, "projection_watermark", watermark)
+    return holder
+
+
+async def test_a_versioned_source_whose_projection_holds_main_runs(
+        test_client: AsyncClient, db_session, estate, engine, versioned):
+    engine["engine"].manager_cache_key = ("prov_native", DS)
+    with signed_in(person("usr_reader"), READER):
+        r = await run(test_client)
+    assert r.status_code == 200, r.text
+
+
+@pytest.mark.parametrize("wm", [
+    # Behind main: just published, or evicted, or re-seeding after a liveness reset.
+    {"fresh": False, "falkor_provider": None, "falkor_graph_name": DS},
+    # Moved: the key this provider reads is no longer the one the projection publishes.
+    {"fresh": True, "falkor_provider": None, "falkor_graph_name": "gvp_moved"},
+])
+async def test_a_versioned_source_whose_projection_is_behind_says_so_and_runs_nothing(
+        test_client: AsyncClient, db_session, estate, engine, versioned, wm):
+    """The canvas and search read such a graph from Postgres, or say it is catching up; a native
+    query can only read FalkorDB, whose rows would be old, partial or none at all."""
+    versioned["wm"] = wm
+    engine["engine"].manager_cache_key = ("prov_native", DS)
+    with signed_in(person("usr_reader"), READER):
+        r = await run(test_client)
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["code"] == "unavailable"
+    assert r.headers.get("Retry-After")
+    assert engine["engine"].calls == []

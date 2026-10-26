@@ -40,7 +40,12 @@ The route is `POST /api/v1/{ws_id}/graph/search/native`. In order:
    handler runs, and the access check refuses a key's claims again. No
    anonymous caller reaches it.
 3. **The published graph.** A `branchId` other than `main` is refused (`501`):
-   native queries never read a draft.
+   native queries never read a draft. On a data source with version control
+   they read the FalkorDB key its graph projects into, and only once that key
+   holds what was published (`503`, `unavailable`, until then: just after a
+   publish, or while an evicted or moved graph is re-seeded). That key also
+   holds the projection's own `_GVProjMeta` marker node, which a query such as
+   `MATCH (n)` returns.
 4. **One of two ways in** (`backend/app/services/native_query/access.py`):
    - `workspace:native-query:read` together with data-source access in the
      workspace (`via: "permission"`); or
@@ -196,7 +201,7 @@ the log line.
 | `429` | `rate_limited` · `busy` | Too many runs by this person · too many at once on this source (`Retry-After`) |
 | `499` | `cancelled` | The person went away |
 | `501` | `native_query_unavailable` | A draft or branch, or a source that isn't FalkorDB or Neo4j |
-| `503` | `unavailable` · `audit_unavailable` | The source isn't answering · the run couldn't be recorded |
+| `503` | `unavailable` · `audit_unavailable` | The source isn't answering, or a versioned source's published graph is catching up · the run couldn't be recorded |
 | `504` | `native_query_timeout` | The query ran past its time |
 | `500` | `native_query_failed` | Anything else (logged with the request id) |
 
@@ -237,7 +242,8 @@ up and bound what one query can cost:
 - `RESULTSET_SIZE` — the most rows FalkorDB returns in one reply, cutting the
   rest without saying so (the stock image sets 10,000). Keep it above
   `NATIVE_QUERY_MAX_ROWS`: a run reads one row past its limit to know that more
-  matched.
+  matched. Where data sources use version control, set it to `-1`: turning
+  version control on refuses a server with any cap.
 - **Read replicas.** Native queries go to a replica when there is one, so the
   primary — and the writes waiting on FalkorDB's per-graph lock — feel them
   least.

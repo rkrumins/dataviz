@@ -3662,13 +3662,16 @@ async def diff_pull_request_children(
 
 async def _not_their_own(session: AsyncSession, pr: dict, approver_id: str) -> None:
     """Nobody approves what they opened, or what their draft proposes, through a service account
-    they manage: the approval would be of their own work (``self_review``, as for an author)."""
+    they manage or made a key for: the approval would be of their own work (``self_review``, as
+    for an author). A key outlives its maker's seat, so leaving the account changes nothing."""
     for principal in dict.fromkeys((pr.get("actor"), pr.get("source_branch_owner"))):
-        if is_service_account(principal) and await service_account_repo.is_manager(
-                session, principal, approver_id):
+        if is_service_account(principal) and (
+                await service_account_repo.is_manager(session, principal, approver_id)
+                or await service_account_repo.made_a_key(session, principal, approver_id)):
             raise HTTPException(status_code=403, detail={
                 "type": "access_denied", "code": "self_review", "prId": pr.get("pr_id"),
-                "message": "You manage the service account that opened this, so someone else approves it",
+                "message": "You manage the service account that opened this, or made a key for it, "
+                           "so someone else approves it",
             })
 
 

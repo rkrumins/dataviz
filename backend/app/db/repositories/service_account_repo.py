@@ -713,6 +713,16 @@ async def is_manager(session: AsyncSession, account_id: str, user_id: str) -> bo
     )).first() is not None
 
 
+async def made_a_key(session: AsyncSession, account_id: str, user_id: str) -> bool:
+    """Whether this person ever made a key for the account — in date, revoked or
+    expired: a key outlives its maker's seat, and a purge keeps the rows."""
+    return (await session.execute(
+        select(ApiKeyORM.id).where(
+            ApiKeyORM.user_id == account_id, ApiKeyORM.created_by == user_id,
+        ).limit(1)
+    )).first() is not None
+
+
 def _seats(user_id: str):
     """The accounts a person holds a seat on themselves."""
     return select(ServiceAccountManagerORM.service_account_id).where(

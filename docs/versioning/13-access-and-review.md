@@ -244,7 +244,7 @@ State `blocked` returns HOLD, not a denial.
 > - READ_MAIN R; READ_DRAFT per §3's shipped note (404).
 > - DRAFT_WRITE (stage, `/graph/changes`, checkpoint, pull, import into a draft, open a merge request) M + §3 WRITE, on an open draft of the same graph; `main` named as the branch is 409 `main_write_forbidden`.
 > - DRAFT_MANAGE and DRAFT_ABANDON M + O/bM.
-> - PR_REVIEW (approve) M; not the author or the source draft's owner (403 `self_review`); not a service account (403 `person_required`), nor a manager of the service account that opened the PR or owns its draft (403 `self_review`); `expectedHeadCommitId` optional. PR_EDIT and PR_CLOSE M.
+> - PR_REVIEW (approve) M; not the author or the source draft's owner (403 `self_review`); not a service account (403 `person_required`), nor a manager of the service account that opened the PR or owns its draft, nor anyone who made a key for it (403 `self_review`); `expectedHeadCommitId` optional. PR_EDIT and PR_CLOSE M.
 > - PR_OPEN and PR_EDIT: a service account named as a reviewer → 403 `person_required`. `GET …/reviewers` leaves service accounts out.
 > - PR_MERGE and DIRECT_PUBLISH M + P; DIRECT_PUBLISH also O (private) or O/bM (shared).
 > - MAIN_REVERT and MAIN_RESTORE M + P, target `main` only (there is no `target`). MAIN_SYNC (sync and `/graph/resync`) M + P.

@@ -129,7 +129,7 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 |---|---|---|---|
 | 403 | `not_draft_owner` | `{type:"access_denied", code, branchId, owner, message}` | a write, rename, abandon or member change on someone else's private draft; a change of `isShared` by anyone but the owner |
 | 403 | `not_owner_or_member` | `{type:"access_denied", code, required:"editor"\|"maintainer", branchId, message}` | a shared draft refused the caller: editor to write, maintainer to publish, abandon, rename or manage members |
-| 403 | `self_review` | `{type:"access_denied", code, prId, message}` | an approve by the PR's author or its source draft's owner, or by a manager of the service account that opened the PR or owns its draft |
+| 403 | `self_review` | `{type:"access_denied", code, prId, message}` | an approve by the PR's author or its source draft's owner, or by a manager of the service account that opened the PR or owns its draft, or anyone who made a key for it |
 | 403 | `person_required` | `{type:"access_denied", code, message}` | a service account named as a reviewer (opening a PR or merge request, or either PATCH), or approving one |
 | 403 | `publish_required` | `{type:"access_denied", code, required:"workspace:datasource:publish", message}` | a person without publish writing a versioned graph's main directly (graph-router writes with no draft, bulk ingest), or an API key whose owner (the person, or the service account for an `nxsat_` key) lacks it |
 | 403 | `needs_admin` | `{type:"access_denied", code, required:"workspace:admin", error:"missing_permission", permission:"workspace:admin", scope:{type:"workspace", id}, message}` | `?force` or `?allowMassDelete` on a sync or re-sync by anyone but a workspace admin |

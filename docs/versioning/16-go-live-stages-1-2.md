@@ -74,8 +74,8 @@ the graph routes; everyone else edits a draft.
   `approval_required` with `pending` and `stale`); `POST …/approve` with `expectedHeadCommitId`
   answers 409 `head_moved`; authors and draft owners get 403 `self_review`.
 - A service account (#567) never reviews or approves (403 `person_required`), and is never a draft
-  member (409 `ineligible_member`); a manager of the service account that opened a review can't
-  approve it (403 `self_review`).
+  member (409 `ineligible_member`); a manager of the service account that opened a review, or anyone
+  who made a key for it, can't approve it (403 `self_review`): a key outlives its maker's seat.
 - A member who loses access has their staged, uncommitted edits withdrawn at the next checkpoint.
   Groups are looked up only when a group row could raise the caller's role; an unreadable directory
   answers 503 `groups_unavailable`, never a false 403.
