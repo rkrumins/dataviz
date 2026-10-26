@@ -12,6 +12,10 @@
  * A deleted account's keys stop at once. Until `purgesAt`, 30 days on, it can
  * be restored as it was; then its keys are revoked and its roles and managers
  * removed.
+ *
+ * Who else may create one for themselves is the administrators' policy:
+ * nobody, as it ships; anyone who lets people into a workspace; or anyone —
+ * each up to a limit, and perhaps only with a team they're in managing it.
  */
 import { authFetch } from './apiClient'
 
@@ -143,6 +147,31 @@ export interface ServiceAccountList {
     graceDays: number
 }
 
+/** Who may create a service account for themselves: the administrators of
+ *  service accounts alone, anyone who lets people into a workspace, or anyone. */
+export type WhoMayCreate = 'central' | 'granters' | 'everyone'
+
+export interface CreationPolicy {
+    whoMayCreate: WhoMayCreate
+    /** How many live accounts each person may have created. */
+    perPersonLimit: number
+    /** An account someone creates is managed by a team they're in. */
+    requireTeamManager: boolean
+}
+
+/** The policy as it applies to you. */
+export interface MyCreation extends CreationPolicy {
+    mayCreate: boolean
+    /** Why not, when you may not. */
+    reason: string | null
+    /** The live accounts you have created, against `perPersonLimit`. */
+    created: number
+    /** `perPersonLimit` binds you: it doesn't an administrator of service accounts. */
+    limited: boolean
+    /** The teams you're in: any of them may manage an account you create. */
+    teams: { id: string; name: string }[]
+}
+
 export interface ServiceAccountFilters {
     q?: string
     /** `deleted`: those deleted and not yet purged. */
@@ -233,6 +262,26 @@ export const serviceAccountService = {
     /** Move a person's manager seats to a successor — all of them, or `accountIds`. */
     handOver(body: { fromUserId: string; to: ManagerRef; accountIds?: string[] }): Promise<{ handedOver: string[] }> {
         return authFetch(`${ADMIN}/hand-over`, { method: 'POST', body: JSON.stringify(body) })
+    },
+
+    /** Who may create a service account for themselves. */
+    policy(): Promise<CreationPolicy> {
+        return authFetch(`${ADMIN}/policy`)
+    },
+
+    /** Change it; what is left out stays. */
+    setPolicy(body: Partial<CreationPolicy>): Promise<CreationPolicy> {
+        return authFetch(`${ADMIN}/policy`, { method: 'PUT', body: JSON.stringify(body) })
+    },
+
+    /** Whether you may create one, and the teams you may name to manage it. */
+    myCreation(): Promise<MyCreation> {
+        return authFetch(`${MINE}/policy`)
+    },
+
+    /** One you manage — or, named, a team you're in. */
+    createMine(body: { name: string; description?: string; team?: string }): Promise<ServiceAccountDetail> {
+        return authFetch(MINE, { method: 'POST', body: JSON.stringify(body) })
     },
 
     /** The accounts you manage, yourself or through a team, a page at a time —

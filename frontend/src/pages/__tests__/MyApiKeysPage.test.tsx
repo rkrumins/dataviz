@@ -10,8 +10,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { MyApiKeysPage } from '../MyApiKeysPage'
 import { apiKey, inDays, options as opts, usage } from '@/components/apiKeys/__tests__/fixtures'
 
-const { list, options, revoke, get, rotate, notify, feature, account, mine } = vi.hoisted(() => ({
+const { list, options, revoke, get, rotate, notify, feature, account, mine, myCreation, createMine } = vi.hoisted(() => ({
     mine: vi.fn(),
+    myCreation: vi.fn(),
+    createMine: vi.fn(),
     list: vi.fn(),
     options: vi.fn(),
     revoke: vi.fn(),
@@ -26,7 +28,7 @@ vi.mock('@/services/apiKeyService', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/services/apiKeyService')>()),
     apiKeyService: { list, options, revoke, get, rotate, searchResources: vi.fn(), create: vi.fn(), preview: vi.fn() },
 }))
-vi.mock('@/services/serviceAccountService', () => ({ serviceAccountService: { mine } }))
+vi.mock('@/services/serviceAccountService', () => ({ serviceAccountService: { mine, myCreation, createMine } }))
 vi.mock('@/components/account/AccountShell', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/components/account/AccountShell')>()),
     AccountShell: ({ children }: { children?: React.ReactNode }) => <div>{children}</div>,
@@ -52,7 +54,16 @@ beforeEach(() => {
     revoke.mockResolvedValue(undefined)
     get.mockReturnValue(new Promise(() => {}))
     mine.mockResolvedValue({ items: [], total: 0, graceDays: 14 })
+    myCreation.mockResolvedValue(allowance({ mayCreate: false, reason: 'Only an administrator of service accounts can create a service account' }))
 })
+
+/** Whether you may create a service account for yourself: as it ships, no. */
+function allowance(over: Record<string, unknown> = {}) {
+    return {
+        whoMayCreate: 'everyone', perPersonLimit: 10, requireTeamManager: false, mayCreate: true, reason: null,
+        created: 1, limited: true, teams: [{ id: 'grp_data', name: 'Data platform' }], ...over,
+    }
+}
 
 describe('the list', () => {
     it('says what each key can do, on what, and keeps ended keys apart', async () => {
@@ -268,6 +279,60 @@ describe('service accounts you manage', () => {
         expect(await within(card).findByRole('link', { name: /nightly export/i })).toBeInTheDocument()
         expect(mine).toHaveBeenLastCalledWith({ limit: 50, offset: 1 })
         expect(screen.queryByRole('button', { name: /more of/ })).not.toBeInTheDocument()
+    })
+
+    it('can be created where the policy lets you, managed by you or a team you are in', async () => {
+        const assign = vi.fn()
+        const realLocation = window.location
+        Object.defineProperty(window, 'location', { configurable: true, value: { ...realLocation, assign } })
+        myCreation.mockResolvedValue(allowance())
+        createMine.mockResolvedValue({ id: 'svc_new', name: 'Metadata sync' })
+        try {
+            render(<MyApiKeysPage />)
+            const card = await screen.findByRole('region', { name: 'Service accounts you manage' })
+            expect(within(card).getByText(/you manage none yet/i)).toBeInTheDocument()
+            expect(within(card).getByText('1 of 10 created')).toBeInTheDocument()
+            await userEvent.click(within(card).getByRole('button', { name: /create service account/i }))
+            const dialog = await screen.findByRole('dialog', { name: 'Create a service account' })
+            await userEvent.type(within(dialog).getByLabelText('Name'), 'Metadata sync')
+            await userEvent.click(within(dialog).getByRole('radio', { name: /a team you’re in/i }))
+            expect(within(dialog).getByText(/anyone in data platform can make keys that act as it/i)).toBeInTheDocument()
+            await userEvent.click(within(dialog).getByRole('button', { name: /^create$/i }))
+            await waitFor(() => expect(createMine).toHaveBeenCalledWith({ name: 'Metadata sync', description: undefined, team: 'grp_data' }))
+            await waitFor(() => expect(assign).toHaveBeenCalledWith('/service-accounts/svc_new'))
+        } finally {
+            Object.defineProperty(window, 'location', { configurable: true, value: realLocation })
+        }
+    })
+
+    it('can be created only with a team you are in, where the policy asks for one', async () => {
+        myCreation.mockResolvedValue(allowance({ requireTeamManager: true }))
+        const { unmount } = render(<MyApiKeysPage />)
+        await userEvent.click(await screen.findByRole('button', { name: /create service account/i }))
+        let dialog = await screen.findByRole('dialog', { name: 'Create a service account' })
+        expect(within(dialog).queryByRole('radio')).not.toBeInTheDocument()
+        expect(within(dialog).getByLabelText('Team')).toHaveValue('grp_data')
+        unmount()
+
+        myCreation.mockResolvedValue(allowance({ requireTeamManager: true, teams: [] }))
+        render(<MyApiKeysPage />)
+        await userEvent.click(await screen.findByRole('button', { name: /create service account/i }))
+        dialog = await screen.findByRole('dialog', { name: 'Create a service account' })
+        await userEvent.type(within(dialog).getByLabelText('Name'), 'Metadata sync')
+        expect(within(dialog).getByRole('alert')).toHaveTextContent(/you’re in no team/i)
+        expect(within(dialog).getByRole('button', { name: /^create$/i })).toBeDisabled()
+    })
+
+    it('say why you may create no more once you reach the limit', async () => {
+        mine.mockResolvedValue({ items: [ACCOUNT], total: 1, graceDays: 14 })
+        myCreation.mockResolvedValue(allowance({
+            mayCreate: false, created: 10,
+            reason: 'You have created 10 service accounts, the most each person may. Delete one nothing uses any more, or ask an administrator of service accounts',
+        }))
+        render(<MyApiKeysPage />)
+        const card = await screen.findByRole('region', { name: 'Service accounts you manage' })
+        expect(within(card).queryByRole('button', { name: /create service account/i })).not.toBeInTheDocument()
+        expect(within(card).getByText(/you have created 10 service accounts, the most each person may/i)).toBeInTheDocument()
     })
 
     it('are left out for someone who manages none', async () => {

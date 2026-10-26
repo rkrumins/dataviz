@@ -15,10 +15,13 @@
  * that an administrator holds, to those a person or a team manages, and to
  * those with a role in a workspace; Deleted lists those that can still be
  * restored, until they are purged 30 days on.
+ *
+ * The page also says who else may create a service account for themselves —
+ * nobody, as it ships — and lets the administrators change that.
  */
 import { useCallback, useEffect, useState } from 'react'
 import {
-    AlertCircle, ArrowRightLeft, Bot, Briefcase, Plus, RefreshCw, Search, ShieldCheck, Users, X,
+    AlertCircle, ArrowRightLeft, Bot, Briefcase, Plus, RefreshCw, Search, ShieldCheck, UserPlus, Users, X,
 } from 'lucide-react'
 
 import { formatDay } from '@/components/apiKeys/apiKeyFormat'
@@ -38,10 +41,12 @@ import { serviceAccountHref } from '@/lib/serviceAccounts'
 import { cn } from '@/lib/utils'
 import {
     serviceAccountService,
+    type CreationPolicy,
     type ServiceAccount,
     type ServiceAccountDetail,
     type ServiceAccountFilters,
     type ServiceAccountList,
+    type WhoMayCreate,
 } from '@/services/serviceAccountService'
 import { workspaceService } from '@/services/workspaceService'
 
@@ -82,6 +87,13 @@ export function AdminServiceAccounts() {
     const [error, setError] = useState<string | null>(null)
     const [creating, setCreating] = useState(false)
     const [handingOver, setHandingOver] = useState(false)
+    const [policy, setPolicy] = useState<CreationPolicy | null>(null)
+    const [editingPolicy, setEditingPolicy] = useState(false)
+    useEffect(() => {
+        let live = true
+        serviceAccountService.policy().then((p) => { if (live) setPolicy(p) }).catch(() => {})
+        return () => { live = false }
+    }, [])
 
     const request = JSON.stringify([search, tab, standing, manager?.id, workspace?.id, page, version])
     const loading = answered !== request
@@ -153,6 +165,14 @@ export function AdminServiceAccounts() {
                         {' '}Teams as managers, and handing over when someone leaves, keep it from coming to that.
                     </span>
                 </p>
+            )}
+
+            {policy && (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-muted max-w-3xl -mt-3">
+                    <UserPlus className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                    <span>{policySentence(policy)}</span>
+                    <Button variant="ghost" size="sm" onClick={() => setEditingPolicy(true)}>Change…</Button>
+                </div>
             )}
 
             {error && (
@@ -274,7 +294,116 @@ export function AdminServiceAccounts() {
                 />
             )}
             {handingOver && <HandOverDialog onClose={() => setHandingOver(false)} onDone={() => { setHandingOver(false); reload() }} />}
+            {editingPolicy && policy && (
+                <PolicyDialog
+                    policy={policy}
+                    onClose={() => setEditingPolicy(false)}
+                    onSaved={(saved) => { setPolicy(saved); setEditingPolicy(false) }}
+                />
+            )}
         </PageContainer>
+    )
+}
+
+const WHO: { value: WhoMayCreate; label: string; detail: string }[] = [
+    { value: 'central', label: 'Only administrators of service accounts', detail: 'Super admins and org admins create every account, as here.' },
+    { value: 'granters', label: 'Anyone who lets people into a workspace', detail: 'Its admins and stewards — who decide what any account may do there.' },
+    { value: 'everyone', label: 'Anyone', detail: 'Any active person. An account gets access only as a workspace gives it.' },
+]
+
+/** "Anyone may create up to 10 service accounts for themselves." */
+function policySentence(policy: CreationPolicy): string {
+    if (policy.whoMayCreate === 'central') return 'Only administrators of service accounts create them.'
+    const who = policy.whoMayCreate === 'granters' ? 'Anyone who lets people into a workspace' : 'Anyone'
+    return `${who} may create up to ${policy.perPersonLimit} for themselves${policy.requireTeamManager ? ', managed by a team they’re in' : ''}.`
+}
+
+/** Who else may create a service account for themselves, how many each, and
+ *  whether a team they're in must manage it. */
+function PolicyDialog({ policy, onClose, onSaved }: {
+    policy: CreationPolicy
+    onClose: () => void
+    onSaved: (policy: CreationPolicy) => void
+}) {
+    const { notify } = useAppNotifications()
+    const [who, setWho] = useState<WhoMayCreate>(policy.whoMayCreate)
+    const [limit, setLimit] = useState(String(policy.perPersonLimit))
+    const [team, setTeam] = useState(policy.requireTeamManager)
+    const [busy, setBusy] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+    const number = Number(limit)
+    const valid = Number.isInteger(number) && number >= 1 && number <= 1000
+    const others = who !== 'central'
+
+    async function save() {
+        setBusy(true)
+        setError(null)
+        try {
+            const saved = await serviceAccountService.setPolicy({
+                whoMayCreate: who, ...(others ? { perPersonLimit: number, requireTeamManager: team } : {}),
+            })
+            notify('success', 'Who may create service accounts is saved')
+            onSaved(saved)
+        } catch (err) {
+            setError(message(err, 'The policy could not be saved.'))
+            setBusy(false)
+        }
+    }
+
+    return (
+        <KeyDialog
+            icon={UserPlus}
+            title="Who may create service accounts"
+            subtitle="For themselves, to manage. An account gets access only as a workspace gives it."
+            onClose={onClose}
+            footer={(
+                <>
+                    <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+                    <Button variant="primary" size="sm" disabled={others && !valid} loading={busy} onClick={() => void save()}>
+                        Save
+                    </Button>
+                </>
+            )}
+        >
+            <div className="space-y-4">
+                <fieldset className="space-y-2">
+                    <legend className="sr-only">Who may create one</legend>
+                    {WHO.map((o) => (
+                        <label key={o.value} className="flex items-start gap-2.5 text-sm text-ink">
+                            <input type="radio" name="who-may-create" className="mt-1" checked={who === o.value} onChange={() => setWho(o.value)} />
+                            <span>
+                                <span className="block font-medium">{o.label}</span>
+                                <span className="block text-xs text-ink-muted">{o.detail}</span>
+                            </span>
+                        </label>
+                    ))}
+                </fieldset>
+                <div className={cn('space-y-3', !others && 'opacity-50')}>
+                    <label className="flex items-center gap-2 text-sm text-ink">
+                        Each may have created up to
+                        <input
+                            type="number"
+                            aria-label="Accounts each person may create"
+                            min={1}
+                            max={1000}
+                            value={limit}
+                            disabled={!others}
+                            onChange={(e) => setLimit(e.target.value)}
+                            className={cn(FIELD, 'w-20')}
+                        />
+                        live accounts
+                    </label>
+                    <label className="flex items-start gap-2 text-sm text-ink">
+                        <input type="checkbox" className="mt-1" checked={team} disabled={!others} onChange={(e) => setTeam(e.target.checked)} />
+                        <span>
+                            A team they’re in manages each one
+                            <span className="block text-xs text-ink-muted">So it outlives any one person. Without it, they manage it themselves, or a team they choose.</span>
+                        </span>
+                    </label>
+                </div>
+                {error && <p role="alert" className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
+            </div>
+        </KeyDialog>
     )
 }
 

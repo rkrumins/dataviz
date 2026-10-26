@@ -14,7 +14,7 @@ import { inDays } from '@/components/apiKeys/__tests__/fixtures'
 import type { ServiceAccount, ServiceAccountDetail } from '@/services/serviceAccountService'
 
 const { sa, searchDirectory, notify, listPage } = vi.hoisted(() => ({
-    sa: { list: vi.fn(), create: vi.fn(), handOver: vi.fn() },
+    sa: { list: vi.fn(), create: vi.fn(), handOver: vi.fn(), policy: vi.fn(), setPolicy: vi.fn() },
     searchDirectory: vi.fn(),
     notify: vi.fn(),
     listPage: vi.fn(),
@@ -68,6 +68,7 @@ beforeEach(() => {
     })
     searchDirectory.mockResolvedValue({ users: [], groups: [{ id: 'grp_data', name: 'Data platform', memberCount: 4 }] })
     listPage.mockResolvedValue({ items: [{ id: 'ws_sales', name: 'Sales' }], totalCount: 1 })
+    sa.policy.mockResolvedValue({ whoMayCreate: 'central', perPersonLimit: 10, requireTeamManager: false })
 })
 
 afterEach(() => {
@@ -136,6 +137,29 @@ describe('narrowing it', () => {
         await userEvent.click(screen.getByRole('tab', { name: 'Deleted' }))
         expect(await screen.findByText('Nothing deleted lately')).toBeInTheDocument()
         expect(screen.queryByRole('button', { name: /clear filters/i })).not.toBeInTheDocument()
+    })
+})
+
+describe('who else may create one', () => {
+    it('says so, and an administrator changes it', async () => {
+        sa.setPolicy.mockResolvedValue({ whoMayCreate: 'granters', perPersonLimit: 5, requireTeamManager: true })
+        render(<AdminServiceAccounts />)
+        expect(await screen.findByText('Only administrators of service accounts create them.')).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: /^change…$/i }))
+        const dialog = await screen.findByRole('dialog', { name: 'Who may create service accounts' })
+        expect(within(dialog).getByLabelText('Accounts each person may create')).toBeDisabled()
+        await userEvent.click(within(dialog).getByRole('radio', { name: /anyone who lets people into a workspace/i }))
+        const limit = within(dialog).getByLabelText('Accounts each person may create')
+        await userEvent.clear(limit)
+        await userEvent.type(limit, '5')
+        await userEvent.click(within(dialog).getByRole('checkbox', { name: /a team they’re in manages each one/i }))
+        await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+        await waitFor(() => expect(sa.setPolicy).toHaveBeenCalledWith({
+            whoMayCreate: 'granters', perPersonLimit: 5, requireTeamManager: true,
+        }))
+        expect(await screen.findByText(
+            'Anyone who lets people into a workspace may create up to 5 for themselves, managed by a team they’re in.',
+        )).toBeInTheDocument()
     })
 })
 
