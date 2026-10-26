@@ -14,6 +14,9 @@ import { useDraftPredicate } from '@/store/searchStore'
 
 import { QueryStatusBar } from '../builder/QueryStatusBar'
 
+import { isRowIncomplete } from './ConditionRow'
+import { topLevelConditions } from './predicateComposition'
+
 
 export interface CypherDisclosureProps {
     viewId: string
@@ -23,7 +26,9 @@ export interface CypherDisclosureProps {
 export const CypherDisclosure: FC<CypherDisclosureProps> = ({ viewId }) => {
     const [open, setOpen] = useState(false)
     const draftPredicate = useDraftPredicate()
-    const ready = draftPredicate !== null
+    // Every row filled in: an incomplete one is left out of a run, and its
+    // compiled query, until it is.
+    const ready = draftPredicate !== null && !topLevelConditions(draftPredicate).some(isRowIncomplete)
 
     return (
         <div className={cn(

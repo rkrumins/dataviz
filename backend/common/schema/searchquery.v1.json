@@ -120,6 +120,35 @@
       "title": "AncestorRef",
       "type": "object"
     },
+    "CountSpec": {
+      "description": "How many related entities must meet a relationship's condition.",
+      "properties": {
+        "op": {
+          "default": "gte",
+          "enum": [
+            "eq",
+            "neq",
+            "gt",
+            "gte",
+            "lt",
+            "lte"
+          ],
+          "title": "Op",
+          "type": "string"
+        },
+        "value": {
+          "maximum": 1000000,
+          "minimum": 0,
+          "title": "Value",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "value"
+      ],
+      "title": "CountSpec",
+      "type": "object"
+    },
     "DegreePredicate": {
       "description": "Match nodes by their edge degree.\n\nPowers structural questions like \"find datasets with zero incoming\nlineage edges\" (UC-1 orphan finder), \"find tables with > 5 children\",\nor \"find views that produce >= 1 downstream artifact\".\n\nThe edge type set is resolved from the live ontology at compile time\nvia the provider's ``_get_lineage_edge_types`` /\n``_get_containment_edge_types`` helpers, so no hardcoded names ever\nleak into Cypher. ``edge_types`` lets a caller pin a specific subset\n(e.g. ``['PRODUCES']`` only); when omitted, the ``edge_class`` chooses\nthe default set.",
       "properties": {
@@ -194,7 +223,7 @@
       "type": "object"
     },
     "DescendantOfPredicate": {
-      "description": "Clamp matches to the subtree(s) rooted at ``urns``.\n\nLives as a predicate (not on ``SearchScope``) so it can sit inside\nOR groups \u2014 e.g. ``(under Customers OR under Orders) AND tag=PII``.\nThe single-subtree case is also expressible via ``scope.root_urns``,\nwhich the provider may push down as a tighter Cypher anchor.",
+      "description": "Clamp matches to the subtree(s) rooted at ``urns`` and ``refs``.\n\nLives as a predicate (not on ``SearchScope``) so it can sit inside\nOR groups \u2014 e.g. ``(under Customers OR under Orders) AND tag=PII``.\nThe single-subtree case is also expressible via ``scope.root_urns``,\nwhich the provider may push down as a tighter Cypher anchor.",
       "properties": {
         "kind": {
           "const": "descendantOf",
@@ -216,19 +245,32 @@
           "default": null,
           "title": "Maxdepth"
         },
+        "refs": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/NodeRef"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Refs"
+        },
         "urns": {
           "items": {
             "type": "string"
           },
           "maxItems": 64,
-          "minItems": 1,
           "title": "Urns",
           "type": "array"
         }
       },
-      "required": [
-        "urns"
-      ],
       "title": "DescendantOfPredicate",
       "type": "object"
     },
@@ -583,12 +625,14 @@
                 "hasIncoming": "#/$defs/HasIncomingPredicate",
                 "hasOutgoing": "#/$defs/HasOutgoingPredicate",
                 "hasProperty": "#/$defs/HasPropertyPredicate",
+                "is": "#/$defs/IsPredicate",
                 "isLeaf": "#/$defs/IsLeafPredicate",
                 "isOrphan": "#/$defs/IsOrphanPredicate",
                 "isRoot": "#/$defs/IsRootPredicate",
                 "layer": "#/$defs/LayerPredicate",
                 "path": "#/$defs/PathPredicate",
                 "property": "#/$defs/PropertyPredicate",
+                "related": "#/$defs/RelatedPredicate",
                 "tag": "#/$defs/TagPredicate",
                 "text": "#/$defs/TextPredicate",
                 "withinHops": "#/$defs/WithinHopsPredicate"
@@ -643,6 +687,12 @@
               },
               {
                 "$ref": "#/$defs/MatchAllPredicate"
+              },
+              {
+                "$ref": "#/$defs/IsPredicate"
+              },
+              {
+                "$ref": "#/$defs/RelatedPredicate"
               },
               {
                 "$ref": "#/$defs/GroupPredicate"
@@ -874,6 +924,31 @@
       "title": "IsOrphanPredicate",
       "type": "object"
     },
+    "IsPredicate": {
+      "description": "The entities themselves: matches an entity a reference names \u2014\n``Country / United Kingdom``, or a URN.",
+      "properties": {
+        "kind": {
+          "const": "is",
+          "default": "is",
+          "title": "Kind",
+          "type": "string"
+        },
+        "refs": {
+          "items": {
+            "$ref": "#/$defs/NodeRef"
+          },
+          "maxItems": 64,
+          "minItems": 1,
+          "title": "Refs",
+          "type": "array"
+        }
+      },
+      "required": [
+        "refs"
+      ],
+      "title": "IsPredicate",
+      "type": "object"
+    },
     "IsRootPredicate": {
       "description": "Sugar: nodes with zero incoming edges of the given class\n(\"nobody produces this\"). Normalises to\n``DegreePredicate(direction='in', op='eq', value=0)``.",
       "properties": {
@@ -948,6 +1023,286 @@
       "title": "MatchAllPredicate",
       "type": "object"
     },
+    "NativeQueryErrorDetail": {
+      "description": "The ``detail`` of every refusal and failure of a native query.",
+      "properties": {
+        "code": {
+          "title": "Code",
+          "type": "string"
+        },
+        "message": {
+          "title": "Message",
+          "type": "string"
+        },
+        "permission": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Permission"
+        },
+        "position": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where in the query the problem is, in characters, when known.",
+          "title": "Position"
+        },
+        "requestId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requestid"
+        },
+        "retryAfterSeconds": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Retryafterseconds"
+        }
+      },
+      "required": [
+        "code",
+        "message"
+      ],
+      "title": "NativeQueryErrorDetail",
+      "type": "object"
+    },
+    "NativeQueryRequest": {
+      "description": "A person's own read-only query, in the data source's language\n(``POST /graph/search/native``).",
+      "properties": {
+        "limit": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The most rows to show. Held to the server's maximum (``NATIVE_QUERY_MAX_ROWS``); its default when omitted.",
+          "title": "Limit"
+        },
+        "query": {
+          "description": "Cypher. One statement; reads only. Values are written in \u2014 no parameters.",
+          "maxLength": 20000,
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "timeoutMs": {
+          "anyOf": [
+            {
+              "minimum": 100,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How long it may run. Held to the server's maximum (``NATIVE_QUERY_MAX_TIMEOUT_MS``); its default when omitted.",
+          "title": "Timeoutms"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "title": "NativeQueryRequest",
+      "type": "object"
+    },
+    "NativeQueryResponse": {
+      "description": "What a native query answered. Each cell is a plain string, number,\ntrue/false or null, or an object with a ``kind`` \u2014 node, edge, path, map,\nlist, temporal, point, bytes, number, string, truncated.",
+      "properties": {
+        "columns": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Columns",
+          "type": "array"
+        },
+        "elapsedMs": {
+          "title": "Elapsedms",
+          "type": "integer"
+        },
+        "engine": {
+          "enum": [
+            "falkordb",
+            "neo4j"
+          ],
+          "title": "Engine",
+          "type": "string"
+        },
+        "executedQuery": {
+          "description": "What ran: the query with its row limit written in.",
+          "title": "Executedquery",
+          "type": "string"
+        },
+        "limitApplied": {
+          "description": "The row limit it ran under.",
+          "title": "Limitapplied",
+          "type": "integer"
+        },
+        "notes": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Notes",
+          "type": "array"
+        },
+        "queryHash": {
+          "title": "Queryhash",
+          "type": "string"
+        },
+        "requestId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Requestid"
+        },
+        "rowCount": {
+          "title": "Rowcount",
+          "type": "integer"
+        },
+        "rows": {
+          "items": {
+            "items": {},
+            "type": "array"
+          },
+          "title": "Rows",
+          "type": "array"
+        },
+        "timeoutMs": {
+          "description": "The time limit it ran under.",
+          "title": "Timeoutms",
+          "type": "integer"
+        },
+        "truncated": {
+          "description": "More rows matched than are shown.",
+          "title": "Truncated",
+          "type": "boolean"
+        },
+        "truncatedReason": {
+          "anyOf": [
+            {
+              "enum": [
+                "rows",
+                "size"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "``rows``: past the row limit. ``size``: past the size an answer may be.",
+          "title": "Truncatedreason"
+        }
+      },
+      "required": [
+        "engine",
+        "columns",
+        "rows",
+        "rowCount",
+        "truncated",
+        "limitApplied",
+        "timeoutMs",
+        "executedQuery",
+        "queryHash",
+        "elapsedMs"
+      ],
+      "title": "NativeQueryResponse",
+      "type": "object"
+    },
+    "NodeRef": {
+      "description": "An entity named by its URN, or by its path of display names.\n\nA path starts at a top-level entity of the data source (one inside no\nother) and steps down one containment level per segment:\n``[\"Country\", \"United Kingdom\"]``. ``\"**\"`` stands for any number of\nlevels, none included \u2014 ``[\"Country\", \"**\", \"London\"]`` is a London\nanywhere under Country \u2014 and a leading ``\"**\"`` starts anywhere in the\nsearch's scope, so a name unique within the view (or the layer a\nsearch is scoped to) is enough. Names compare with the display name,\nexactly unless ``caseSensitive`` is false (only paths without ``\"**\"``\nmay ignore case); ``entityType`` narrows the last step. A path that\nnames several entities refers to all of them, at most 64.\n\nUnlike a URN, a path means the same thing in every environment, so a\nsaved query or rule that uses one survives a library or view moving\nbetween them.",
+      "properties": {
+        "caseSensitive": {
+          "default": true,
+          "title": "Casesensitive",
+          "type": "boolean"
+        },
+        "entityType": {
+          "anyOf": [
+            {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Entitytype"
+        },
+        "path": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 12,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Path"
+        },
+        "urn": {
+          "anyOf": [
+            {
+              "maxLength": 2048,
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Urn"
+        }
+      },
+      "title": "NodeRef",
+      "type": "object"
+    },
     "PathHit": {
       "description": "One returned path: an ordered alternating sequence of nodes and\nedges, with the hop count for sorting / display.\n\nConstraint: ``len(nodes) == len(edges) + 1`` always. The first\nnode is one of the ``source_urns`` and the last is one of the\n``target_urns`` (after direction normalisation).",
       "properties": {
@@ -980,7 +1335,7 @@
       "type": "object"
     },
     "PathPredicate": {
-      "description": "Find paths between source and target nodes.\n\nTop-level AND only \u2014 the compiler raises CompileError if it\nappears inside an OR or NOT group. When present, ``options.results``\nmust be ``'paths'``; the response carries ordered node\u2192edge\u2192node\nsequences instead of (or in addition to) flat hits / aggregates.\n\nPowers UC3: \"find all paths from dataset:orders to dataset:reporting\ngoing through \u22644 lineage hops\".",
+      "description": "Find paths between source and target nodes.\n\nTop-level AND only \u2014 the compiler raises CompileError if it\nappears inside an OR or NOT group. When present, ``options.results``\nmust be ``'paths'``; the response carries ordered node\u2192edge\u2192node\nsequences instead of (or in addition to) flat hits / aggregates.\n\nPowers UC3: \"find all paths from dataset:orders to dataset:reporting\ngoing through \u22644 lineage hops\". Either end may be a condition instead\n(``sourceWhere``, ``targetWhere``) \u2014 \"every route from a topic to a\ndataset through edges in stream mode\". A route passes no entity twice.",
       "properties": {
         "direction": {
           "default": "outgoing",
@@ -1074,15 +1429,145 @@
           "title": "Maxpaths",
           "type": "integer"
         },
+        "sourceRefs": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/NodeRef"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Starting nodes by name path (or URN).",
+          "title": "Sourcerefs"
+        },
         "sourceUrns": {
           "description": "Starting nodes. The provider runs a variable-length match outward (or inward) from each.",
           "items": {
             "type": "string"
           },
           "maxItems": 8,
-          "minItems": 1,
           "title": "Sourceurns",
           "type": "array"
+        },
+        "sourceWhere": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "all": "#/$defs/MatchAllPredicate",
+                  "degree": "#/$defs/DegreePredicate",
+                  "descendantOf": "#/$defs/DescendantOfPredicate",
+                  "entityType": "#/$defs/EntityTypePredicate",
+                  "group": "#/$defs/GroupPredicate",
+                  "hasIncoming": "#/$defs/HasIncomingPredicate",
+                  "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+                  "hasProperty": "#/$defs/HasPropertyPredicate",
+                  "is": "#/$defs/IsPredicate",
+                  "isLeaf": "#/$defs/IsLeafPredicate",
+                  "isOrphan": "#/$defs/IsOrphanPredicate",
+                  "isRoot": "#/$defs/IsRootPredicate",
+                  "layer": "#/$defs/LayerPredicate",
+                  "path": "#/$defs/PathPredicate",
+                  "property": "#/$defs/PropertyPredicate",
+                  "related": "#/$defs/RelatedPredicate",
+                  "tag": "#/$defs/TagPredicate",
+                  "text": "#/$defs/TextPredicate",
+                  "withinHops": "#/$defs/WithinHopsPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/TextPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/TagPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DescendantOfPredicate"
+                },
+                {
+                  "$ref": "#/$defs/WithinHopsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EntityTypePredicate"
+                },
+                {
+                  "$ref": "#/$defs/LayerPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DegreePredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsOrphanPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsLeafPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsRootPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasIncomingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasOutgoingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PathPredicate"
+                },
+                {
+                  "$ref": "#/$defs/MatchAllPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/RelatedPredicate"
+                },
+                {
+                  "$ref": "#/$defs/GroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The starting nodes as a condition instead of named: any entity meeting it \u2014 or, when the targets are a condition too, any in the search's scope.",
+          "title": "Sourcewhere"
+        },
+        "targetRefs": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/NodeRef"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Endpoint nodes by name path (or URN).",
+          "title": "Targetrefs"
         },
         "targetUrns": {
           "description": "Endpoint nodes. Paths terminate here.",
@@ -1090,15 +1575,105 @@
             "type": "string"
           },
           "maxItems": 8,
-          "minItems": 1,
           "title": "Targeturns",
           "type": "array"
+        },
+        "targetWhere": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "all": "#/$defs/MatchAllPredicate",
+                  "degree": "#/$defs/DegreePredicate",
+                  "descendantOf": "#/$defs/DescendantOfPredicate",
+                  "entityType": "#/$defs/EntityTypePredicate",
+                  "group": "#/$defs/GroupPredicate",
+                  "hasIncoming": "#/$defs/HasIncomingPredicate",
+                  "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+                  "hasProperty": "#/$defs/HasPropertyPredicate",
+                  "is": "#/$defs/IsPredicate",
+                  "isLeaf": "#/$defs/IsLeafPredicate",
+                  "isOrphan": "#/$defs/IsOrphanPredicate",
+                  "isRoot": "#/$defs/IsRootPredicate",
+                  "layer": "#/$defs/LayerPredicate",
+                  "path": "#/$defs/PathPredicate",
+                  "property": "#/$defs/PropertyPredicate",
+                  "related": "#/$defs/RelatedPredicate",
+                  "tag": "#/$defs/TagPredicate",
+                  "text": "#/$defs/TextPredicate",
+                  "withinHops": "#/$defs/WithinHopsPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/TextPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/TagPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DescendantOfPredicate"
+                },
+                {
+                  "$ref": "#/$defs/WithinHopsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EntityTypePredicate"
+                },
+                {
+                  "$ref": "#/$defs/LayerPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DegreePredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsOrphanPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsLeafPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsRootPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasIncomingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasOutgoingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PathPredicate"
+                },
+                {
+                  "$ref": "#/$defs/MatchAllPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/RelatedPredicate"
+                },
+                {
+                  "$ref": "#/$defs/GroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "The endpoint nodes as a condition instead of named.",
+          "title": "Targetwhere"
         }
       },
-      "required": [
-        "sourceUrns",
-        "targetUrns"
-      ],
       "title": "PathPredicate",
       "type": "object"
     },
@@ -1217,6 +1792,292 @@
       "title": "QueryExplain",
       "type": "object"
     },
+    "RelatedPredicate": {
+      "description": "Entities whose related entities meet a condition.\n\n``axis`` says which relatives: up the containment tree (``parent``, any\n``ancestor``, the top-level container ``root``), down it (``child``, any\n``descendant``), or along lineage \u2014 ``upstream`` (what feeds it),\n``downstream`` (what it feeds), ``neighbor`` (either way) \u2014 one step, or\n``minHops`` to ``maxHops``. ``where`` is the condition a relative must\nmeet: any predicate, relationships included, so conditions chain (\"feeds\na dashboard whose parent is Finance\"); without one, any relative will\ndo. A lineage relationship may also require every edge it walks to meet\n``edge``, and walk only ``edgeTypes`` (by default every lineage type but\nthe rollups).\n\n``quantifier``: ``any`` relative meets the condition, ``none`` does, or\n``all`` do \u2014 and there is at least one. ``count`` compares how many\ndistinct relatives meet it instead. An entity is never its own relative,\na cycle notwithstanding.",
+      "properties": {
+        "axis": {
+          "enum": [
+            "parent",
+            "child",
+            "ancestor",
+            "descendant",
+            "root",
+            "upstream",
+            "downstream",
+            "neighbor"
+          ],
+          "title": "Axis",
+          "type": "string"
+        },
+        "count": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/CountSpec"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "edge": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "edgeGroup": "#/$defs/EdgeGroupPredicate",
+                  "edgeHasProperty": "#/$defs/EdgeHasPropertyPredicate",
+                  "edgeProperty": "#/$defs/EdgePropertyPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/EdgePropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgeHasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgeGroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edge"
+        },
+        "edgeTypes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Edgetypes"
+        },
+        "kind": {
+          "const": "related",
+          "default": "related",
+          "title": "Kind",
+          "type": "string"
+        },
+        "maxHops": {
+          "anyOf": [
+            {
+              "maximum": 20,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Maxhops"
+        },
+        "minHops": {
+          "default": 1,
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Minhops",
+          "type": "integer"
+        },
+        "quantifier": {
+          "default": "any",
+          "enum": [
+            "any",
+            "none",
+            "all"
+          ],
+          "title": "Quantifier",
+          "type": "string"
+        },
+        "where": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "all": "#/$defs/MatchAllPredicate",
+                  "degree": "#/$defs/DegreePredicate",
+                  "descendantOf": "#/$defs/DescendantOfPredicate",
+                  "entityType": "#/$defs/EntityTypePredicate",
+                  "group": "#/$defs/GroupPredicate",
+                  "hasIncoming": "#/$defs/HasIncomingPredicate",
+                  "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+                  "hasProperty": "#/$defs/HasPropertyPredicate",
+                  "is": "#/$defs/IsPredicate",
+                  "isLeaf": "#/$defs/IsLeafPredicate",
+                  "isOrphan": "#/$defs/IsOrphanPredicate",
+                  "isRoot": "#/$defs/IsRootPredicate",
+                  "layer": "#/$defs/LayerPredicate",
+                  "path": "#/$defs/PathPredicate",
+                  "property": "#/$defs/PropertyPredicate",
+                  "related": "#/$defs/RelatedPredicate",
+                  "tag": "#/$defs/TagPredicate",
+                  "text": "#/$defs/TextPredicate",
+                  "withinHops": "#/$defs/WithinHopsPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/TextPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/TagPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DescendantOfPredicate"
+                },
+                {
+                  "$ref": "#/$defs/WithinHopsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EntityTypePredicate"
+                },
+                {
+                  "$ref": "#/$defs/LayerPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DegreePredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsOrphanPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsLeafPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsRootPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasIncomingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasOutgoingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PathPredicate"
+                },
+                {
+                  "$ref": "#/$defs/MatchAllPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/RelatedPredicate"
+                },
+                {
+                  "$ref": "#/$defs/GroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Where"
+        }
+      },
+      "required": [
+        "axis"
+      ],
+      "title": "RelatedPredicate",
+      "type": "object"
+    },
+    "ResolvedEntity": {
+      "description": "One entity a reference names, with the containers it sits in.",
+      "properties": {
+        "ancestorPath": {
+          "description": "Top-level container first, parent last.",
+          "items": {
+            "$ref": "#/$defs/AncestorRef"
+          },
+          "title": "Ancestorpath",
+          "type": "array"
+        },
+        "displayName": {
+          "title": "Displayname",
+          "type": "string"
+        },
+        "entityType": {
+          "title": "Entitytype",
+          "type": "string"
+        },
+        "urn": {
+          "title": "Urn",
+          "type": "string"
+        }
+      },
+      "required": [
+        "urn",
+        "displayName",
+        "entityType"
+      ],
+      "title": "ResolvedEntity",
+      "type": "object"
+    },
+    "ResolvedRef": {
+      "description": "One name reference in a predicate, and what it named.",
+      "properties": {
+        "ambiguous": {
+          "description": "It names more than one.",
+          "title": "Ambiguous",
+          "type": "boolean"
+        },
+        "at": {
+          "description": "Where it sits: ``$.children[0].refs[1]``.",
+          "title": "At",
+          "type": "string"
+        },
+        "count": {
+          "description": "How many entities it names.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "ref": {
+          "description": "As people read it: \"Country / United Kingdom\".",
+          "title": "Ref",
+          "type": "string"
+        },
+        "samples": {
+          "description": "The first few it names (up to 5).",
+          "items": {
+            "$ref": "#/$defs/AncestorRef"
+          },
+          "title": "Samples",
+          "type": "array"
+        }
+      },
+      "required": [
+        "at",
+        "ref",
+        "count",
+        "ambiguous"
+      ],
+      "title": "ResolvedRef",
+      "type": "object"
+    },
     "ScopeDiagnostics": {
       "description": "Resolved-scope information returned on every search response.\n\nSurfaces the values the server actually applied \u2014 both the\n``ViewScopeResolver``'s output and the ontology-resolved edge type\nsets. Lets the FE explain zero-result responses (\"your view scope\nresolved to no roots\", \"your ontology has no lineage edges\")\nwithout the user having to read the compiled Cypher.\n\nNone of the fields here change query semantics; this is pure\ninstrumentation. The cost is one extra dict per response.",
       "properties": {
@@ -1278,6 +2139,14 @@
             "type": "string"
           },
           "title": "Notes",
+          "type": "array"
+        },
+        "resolvedRefs": {
+          "description": "What each name reference in the predicate named \u2014 how many entities, and the first few \u2014 so a reference that names none, or several, can be seen.",
+          "items": {
+            "$ref": "#/$defs/ResolvedRef"
+          },
+          "title": "Resolvedrefs",
           "type": "array"
         }
       },
@@ -1836,6 +2705,26 @@
           "title": "Sampled",
           "type": "integer"
         },
+        "storedAs": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "enum": [
+                  "native",
+                  "json"
+                ],
+                "type": "string"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Where the edge keeps each key: ``native`` \u2014 the platform's own fields, every operator applies \u2014 or ``json``, a user's property kept in the edge's JSON, which a condition can test with is set, is, is not and is one of.",
+          "title": "Storedas"
+        },
         "valueSamplesByKey": {
           "anyOf": [
             {
@@ -2007,6 +2896,19 @@
           "title": "Hoisted Root Urns",
           "type": "array"
         },
+        "inlinedCypher": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "`hits_cypher` with every parameter written as its value \u2014 a statement that runs on its own, to copy or edit. Null when a value has no Cypher literal.",
+          "title": "Inlinedcypher"
+        },
         "notes": {
           "description": "Human-readable diagnostics (e.g. 'predicate hoisted to candidate seed').",
           "items": {
@@ -2076,12 +2978,14 @@
               "hasIncoming": "#/$defs/HasIncomingPredicate",
               "hasOutgoing": "#/$defs/HasOutgoingPredicate",
               "hasProperty": "#/$defs/HasPropertyPredicate",
+              "is": "#/$defs/IsPredicate",
               "isLeaf": "#/$defs/IsLeafPredicate",
               "isOrphan": "#/$defs/IsOrphanPredicate",
               "isRoot": "#/$defs/IsRootPredicate",
               "layer": "#/$defs/LayerPredicate",
               "path": "#/$defs/PathPredicate",
               "property": "#/$defs/PropertyPredicate",
+              "related": "#/$defs/RelatedPredicate",
               "tag": "#/$defs/TagPredicate",
               "text": "#/$defs/TextPredicate",
               "withinHops": "#/$defs/WithinHopsPredicate"
@@ -2136,6 +3040,12 @@
             },
             {
               "$ref": "#/$defs/MatchAllPredicate"
+            },
+            {
+              "$ref": "#/$defs/IsPredicate"
+            },
+            {
+              "$ref": "#/$defs/RelatedPredicate"
             },
             {
               "$ref": "#/$defs/GroupPredicate"
@@ -2628,12 +3538,14 @@
               "hasIncoming": "#/$defs/HasIncomingPredicate",
               "hasOutgoing": "#/$defs/HasOutgoingPredicate",
               "hasProperty": "#/$defs/HasPropertyPredicate",
+              "is": "#/$defs/IsPredicate",
               "isLeaf": "#/$defs/IsLeafPredicate",
               "isOrphan": "#/$defs/IsOrphanPredicate",
               "isRoot": "#/$defs/IsRootPredicate",
               "layer": "#/$defs/LayerPredicate",
               "path": "#/$defs/PathPredicate",
               "property": "#/$defs/PropertyPredicate",
+              "related": "#/$defs/RelatedPredicate",
               "tag": "#/$defs/TagPredicate",
               "text": "#/$defs/TextPredicate",
               "withinHops": "#/$defs/WithinHopsPredicate"
@@ -2690,6 +3602,12 @@
               "$ref": "#/$defs/MatchAllPredicate"
             },
             {
+              "$ref": "#/$defs/IsPredicate"
+            },
+            {
+              "$ref": "#/$defs/RelatedPredicate"
+            },
+            {
               "$ref": "#/$defs/GroupPredicate"
             }
           ],
@@ -2704,6 +3622,98 @@
         "scope"
       ],
       "title": "SearchQuery",
+      "type": "object"
+    },
+    "SearchRefResolution": {
+      "properties": {
+        "count": {
+          "description": "How many entities the reference names.",
+          "title": "Count",
+          "type": "integer"
+        },
+        "error": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the reference can't be used \u2014 it names too many.",
+          "title": "Error"
+        },
+        "matches": {
+          "description": "The first few, up to 10.",
+          "items": {
+            "$ref": "#/$defs/ResolvedEntity"
+          },
+          "title": "Matches",
+          "type": "array"
+        }
+      },
+      "required": [
+        "count"
+      ],
+      "title": "SearchRefResolution",
+      "type": "object"
+    },
+    "SearchResolveRequest": {
+      "description": "``POST /search/resolve``: which entities each name reference names\nin the view's scope \u2014 what the reference picker checks as it is\ntyped, and how it learns the shortest path that names one entity.",
+      "properties": {
+        "refs": {
+          "items": {
+            "$ref": "#/$defs/NodeRef"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Refs",
+          "type": "array"
+        },
+        "scope": {
+          "$ref": "#/$defs/SearchScope"
+        }
+      },
+      "required": [
+        "scope",
+        "refs"
+      ],
+      "title": "SearchResolveRequest",
+      "type": "object"
+    },
+    "SearchResolveResult": {
+      "properties": {
+        "dataVersion": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Dataversion"
+        },
+        "elapsedMs": {
+          "default": 0,
+          "title": "Elapsedms",
+          "type": "integer"
+        },
+        "results": {
+          "description": "One per requested reference, in the same order.",
+          "items": {
+            "$ref": "#/$defs/SearchRefResolution"
+          },
+          "title": "Results",
+          "type": "array"
+        }
+      },
+      "required": [
+        "results"
+      ],
+      "title": "SearchResolveResult",
       "type": "object"
     },
     "SearchResultPage": {
@@ -2995,12 +4005,14 @@
               "hasIncoming": "#/$defs/HasIncomingPredicate",
               "hasOutgoing": "#/$defs/HasOutgoingPredicate",
               "hasProperty": "#/$defs/HasPropertyPredicate",
+              "is": "#/$defs/IsPredicate",
               "isLeaf": "#/$defs/IsLeafPredicate",
               "isOrphan": "#/$defs/IsOrphanPredicate",
               "isRoot": "#/$defs/IsRootPredicate",
               "layer": "#/$defs/LayerPredicate",
               "path": "#/$defs/PathPredicate",
               "property": "#/$defs/PropertyPredicate",
+              "related": "#/$defs/RelatedPredicate",
               "tag": "#/$defs/TagPredicate",
               "text": "#/$defs/TextPredicate",
               "withinHops": "#/$defs/WithinHopsPredicate"
@@ -3055,6 +4067,12 @@
             },
             {
               "$ref": "#/$defs/MatchAllPredicate"
+            },
+            {
+              "$ref": "#/$defs/IsPredicate"
+            },
+            {
+              "$ref": "#/$defs/RelatedPredicate"
             },
             {
               "$ref": "#/$defs/GroupPredicate"
@@ -3421,18 +4439,33 @@
           "title": "Kind",
           "type": "string"
         },
+        "refs": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/NodeRef"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Refs"
+        },
         "urns": {
           "items": {
             "type": "string"
           },
           "maxItems": 64,
-          "minItems": 1,
           "title": "Urns",
           "type": "array"
         }
       },
       "required": [
-        "urns",
         "hops"
       ],
       "title": "WithinHopsPredicate",
@@ -3441,6 +4474,39 @@
   },
   "description": "Bundle root that wraps every API-surface shape in one model.\n\nExists purely as a code-generation seed: ``model_json_schema()`` on\nthis class produces a single JSON Schema document whose ``$defs``\ncontain every type the FE / AI agents need. The frontend's\n``gen:search-schema`` script feeds this schema into\n``json-schema-to-typescript`` to produce the canonical TS types.\n\nNot used at runtime \u2014 no endpoint sends or receives this shape.\nFields are kept ``Optional`` so a default constructor produces a\nvalid (empty) instance for tooling that needs one.",
   "properties": {
+    "nativeQueryError": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NativeQueryErrorDetail"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "nativeQueryRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NativeQueryRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "nativeQueryResponse": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/NativeQueryResponse"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
     "scopeDiagnostics": {
       "anyOf": [
         {
@@ -3588,6 +4654,28 @@
       "anyOf": [
         {
           "$ref": "#/$defs/SearchQuery"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchResolveRequest": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchResolveRequest"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null
+    },
+    "searchResolveResult": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SearchResolveResult"
         },
         {
           "type": "null"

@@ -1304,6 +1304,14 @@ class ViewAccessInfo(BaseModel):
     # the option rather than disabling it: a choice nobody here can ever
     # make is noise, not information.
     enterprise_available: bool = Field(True, alias="enterpriseAvailable")
+    # May run their own read-only queries on the view's data source — as a
+    # reader of the workspace's sources, or through a share that opts in.
+    can_query_data_source: bool = Field(False, alias="canQueryDataSource")
+    # May tick "can query its data source" on a share of this view.
+    can_grant_source_query: bool = Field(False, alias="canGrantSourceQuery")
+    # The engine those queries run on — 'falkordb' | 'neo4j' — when the
+    # caller may run them and the source takes them; null otherwise.
+    native_query_engine: Optional[str] = Field(None, alias="nativeQueryEngine")
     # 'owner' | 'admin' | 'grant' | 'workspace' | 'enterprise'
     access_via: str = Field(alias="accessVia")
     # 'full' | 'readonly'

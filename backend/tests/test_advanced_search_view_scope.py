@@ -1325,6 +1325,8 @@ async def test_explain_takes_the_same_path_for_large_entity_type_allow_list(
 
     assert result["resolvedScope"]["entityTypes"] == sorted(entity_types)
     assert "cypher" in result
+    # The statement to copy: its values written in (none here).
+    assert result["inlinedCypher"] == "MATCH (n) RETURN n"
 
 
 async def test_resolver_scope_hash_changes_with_view_edit(db_session: AsyncSession):

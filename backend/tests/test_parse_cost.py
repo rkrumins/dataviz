@@ -4,9 +4,9 @@ libcypher-parser reads an operand with no operator after it twice, so every
 level of such nesting doubles the time to parse a statement — ``NOT (`` four
 times over — and no timeout bounds that time (``native_query.parse_cost``).
 Here: the estimate follows the parser's rule, the forms that keep a nested
-condition linear mean what they replace, the provider refuses what is over
-the budget, and the search compiler's statements for the deepest predicates
-the service allows grow linearly. ``tests/integration/test_parse_cost_live.py``
+condition linear mean what they replace, the guards refuse what is over the
+budget, and the search compiler's statements for the deepest predicates the
+service allows grow linearly. ``tests/integration/test_parse_cost_live.py``
 holds the estimate to FalkorDB's own times.
 """
 from __future__ import annotations
@@ -16,9 +16,10 @@ import random
 import pytest
 from pydantic import TypeAdapter
 
-from backend.app.providers.falkordb_deep_search import _Compiler
+from backend.app.providers.falkordb_deep_search import _Compiler, tail_clauses
 from backend.app.providers.falkordb_provider import _refuse_slow_parse
 from backend.app.services.deep_search import CompileError
+from backend.app.services.native_query.guard import FALKORDB, NEO4J, check
 from backend.app.services.native_query.parse_cost import (
     MAX_PARSE_COST,
     grouped,
@@ -27,6 +28,7 @@ from backend.app.services.native_query.parse_cost import (
     operand,
     parse_cost,
 )
+from backend.common.interfaces.native_query import NativeQueryRefused
 from backend.common.models.search import Predicate
 
 P = TypeAdapter(Predicate).validate_python
@@ -121,6 +123,15 @@ class TestLinearForms:
 
 
 class TestGuards:
+    def test_a_native_query_falkordb_would_take_too_long_to_parse_is_refused(self):
+        deep = nest(lambda e: f"NOT ({e})", 11, "n.x = 1").replace("MATCH (x)", "MATCH (n)")
+        assert parse_cost(deep) > MAX_PARSE_COST
+        with pytest.raises(NativeQueryRefused, match="nests too deeply"):
+            check(deep, engine=FALKORDB)
+        check(deep, engine=NEO4J)               # Neo4j's parser doesn't backtrack so
+        linear = nest(lambda e: f"({e}) = false", 11, "n.x = 1").replace("MATCH (x)", "MATCH (n)")
+        assert check(linear, engine=FALKORDB)
+
     def test_a_views_many_rules_go_in_statements_under_the_budget(self, monkeypatch):
         """Rule membership answers every rule in one statement per label — split where the
         rules' columns would cost FalkorDB more than a quarter of the budget to parse."""
@@ -159,15 +170,27 @@ def OR(*c):
     return {"kind": "group", "op": "or", "children": list(c)}
 
 
+def rel(axis, where, **kw):
+    return {"kind": "related", "axis": axis, "where": where, **kw}
+
+
 def statement(predicate) -> str:
     c = _Compiler(lineage_edge_types={"FLOWS_TO"}, containment_edge_types={"CONTAINS"})
-    return f"MATCH (n) WHERE {c.compile(P(predicate))} RETURN n"
+    head = c.compile(P(predicate))
+    return f"MATCH (n) WHERE {head} {tail_clauses(c.tail)} RETURN n"
 
 
 def nots(depth):
     p = ALICE
     for _ in range(depth):
         p = NOT(p)
+    return p
+
+
+def rels(depth):
+    p = ALICE
+    for axis in ("upstream", "child", "downstream")[:depth]:
+        p = rel(axis, p)
     return p
 
 
@@ -179,8 +202,11 @@ def tree(depth):
 
 
 class TestCompiledStatements:
-    def test_nesting_grows_the_parse_linearly(self):
-        a, b = parse_cost(statement(nots(2))), parse_cost(statement(nots(5)))
+    @pytest.mark.parametrize("shape, shallow, deep", [
+        (nots, 2, 5), (rels, 1, 3),
+    ], ids=["NOT", "relationships"])
+    def test_nesting_grows_the_parse_linearly(self, shape, shallow, deep):
+        a, b = parse_cost(statement(shape(shallow))), parse_cost(statement(shape(deep)))
         # Plain, each level doubled or quadrupled it: NOT five deep cost 2.8M.
         assert b - a < 500 and b < 60_000
 
@@ -197,3 +223,9 @@ class TestCompiledStatements:
         # A group in a group holding one: a one-item comprehension's WHERE.
         assert statement(OR(ALICE, AND(ALICE, OR(ALICE, ALICE)))).count("ANY(_xg") == 1
         assert "IN [0] WHERE NOT (" in statement(OR(ALICE, NOT(NOT(ALICE))))
+
+    def test_a_relationships_test_of_each_relative_is_written_to_parse_once(self):
+        s = statement(rel("upstream", OR(rel("child", ALICE), NOT(rel("parent", ALICE)))))
+        assert "] + [] WHERE" in s and ") = false" in s
+        # A test with nothing nested in it is left as it was.
+        assert "+ []" not in statement(rel("upstream", ALICE))

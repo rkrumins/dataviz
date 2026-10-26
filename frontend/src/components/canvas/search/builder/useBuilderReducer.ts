@@ -234,14 +234,14 @@ function validate(tree: GroupPredicate): ValidationIssue[] {
                     message: 'Enter search text.',
                 })
             }
-            if (c.kind === 'withinHops' && c.urns.length === 0) {
+            if (c.kind === 'withinHops' && !c.urns?.length && !c.refs?.length) {
                 issues.push({
                     path: childPath,
                     severity: 'warn',
                     message: 'Add at least one anchor URN.',
                 })
             }
-            if (c.kind === 'descendantOf' && c.urns.length === 0) {
+            if (c.kind === 'descendantOf' && !c.urns?.length && !c.refs?.length) {
                 issues.push({
                     path: childPath,
                     severity: 'warn',
@@ -249,14 +249,14 @@ function validate(tree: GroupPredicate): ValidationIssue[] {
                 })
             }
             if (c.kind === 'path') {
-                if (c.sourceUrns.length === 0) {
+                if (!c.sourceUrns?.length && !c.sourceRefs?.length && !c.sourceWhere) {
                     issues.push({
                         path: childPath,
                         severity: 'warn',
                         message: 'Add at least one source URN.',
                     })
                 }
-                if (c.targetUrns.length === 0) {
+                if (!c.targetUrns?.length && !c.targetRefs?.length && !c.targetWhere) {
                     issues.push({
                         path: childPath,
                         severity: 'warn',

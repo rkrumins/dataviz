@@ -6,12 +6,15 @@
  * user guessing why it is there. The backend answers with `highlights`;
  * the row states the field in the user's words and shows the snippet.
  */
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it } from 'vitest'
 
-import type { SearchHit } from '@/types/search'
+import { urnDisplayName } from '@/lib/urnLabels'
+import { useSearchStore } from '@/store/searchStore'
+import type { Predicate, SearchHit } from '@/types/search'
 
 import { SearchHitRow, markRanges } from '../SearchHitRow'
+import { ShownQueryContext } from '../session/shownQueryContext'
 
 
 function hitWith(highlights: Array<{ field: string; snippet: string }>): SearchHit {
@@ -136,5 +139,36 @@ describe('SearchHitRow — where the words landed', () => {
 
         expect(container.querySelector('mark')).toBeNull()
         expect(screen.getByText('orders')).toBeInTheDocument()
+    })
+})
+
+
+describe('SearchHitRow — how it matches', () => {
+    const FEEDS_A_DASHBOARD: Predicate = { kind: 'related', axis: 'downstream',
+        where: { kind: 'entityType', op: 'in', values: ['dashboard'] } }
+
+    it('runs the routes from the match to the relatives it was matched by', () => {
+        useSearchStore.setState({ pendingRunPredicate: null })
+        render(
+            <ShownQueryContext.Provider value={FEEDS_A_DASHBOARD}>
+                <SearchHitRow hit={hitWith([])} index={0} />
+            </ShownQueryContext.Provider>,
+        )
+        fireEvent.click(screen.getByRole('button', { name: /How it matches/ }))
+        expect(useSearchStore.getState().pendingRunPredicate).toMatchObject({
+            kind: 'path', sourceUrns: ['a'], direction: 'outgoing',
+            targetWhere: { kind: 'entityType', values: ['dashboard'] },
+        })
+        // So the routes' sentence and chips name it, not its URN.
+        expect(urnDisplayName('a')).toBe('orders')
+    })
+
+    it('offers nothing for a query matched without lineage', () => {
+        render(
+            <ShownQueryContext.Provider value={{ kind: 'entityType', op: 'in', values: ['dataset'] }}>
+                <SearchHitRow hit={hitWith([])} index={0} />
+            </ShownQueryContext.Provider>,
+        )
+        expect(screen.queryByRole('button', { name: /How it matches/ })).not.toBeInTheDocument()
     })
 })

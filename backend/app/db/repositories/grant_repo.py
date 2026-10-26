@@ -44,8 +44,11 @@ async def create_grant(
     subject_id: str,
     role_name: str,
     granted_by: Optional[str] = None,
+    can_query_source: bool = False,
 ) -> ResourceGrantORM:
     _validate(resource_type, subject_type, role_name)
+    if can_query_source and resource_type != "view":
+        raise ValueError("Only a view share can let its holder query the data source")
     grant = ResourceGrantORM(
         resource_type=resource_type,
         resource_id=resource_id,
@@ -53,6 +56,7 @@ async def create_grant(
         subject_id=subject_id,
         role_name=role_name,
         granted_by=granted_by,
+        can_query_source=can_query_source,
     )
     session.add(grant)
     await session.flush()
@@ -126,6 +130,27 @@ async def list_grants_for_user_with_groups(
         stmt = stmt.where(ResourceGrantORM.resource_type == resource_type)
     result = await session.execute(stmt)
     return list(result.scalars().all())
+
+
+async def has_source_query_grant(
+    session: AsyncSession, *, view_id: str, user_id: str, group_ids: list[str],
+) -> bool:
+    """Whether a share of ``view_id`` — to the user, or to a group they are
+    in — lets them query the view's data source."""
+    holders = and_(ResourceGrantORM.subject_type == "user", ResourceGrantORM.subject_id == user_id)
+    if group_ids:
+        holders = or_(holders, and_(
+            ResourceGrantORM.subject_type == "group", ResourceGrantORM.subject_id.in_(group_ids),
+        ))
+    result = await session.execute(
+        select(ResourceGrantORM.id).where(
+            ResourceGrantORM.resource_type == "view",
+            ResourceGrantORM.resource_id == view_id,
+            ResourceGrantORM.can_query_source.is_(True),
+            holders,
+        ).limit(1)
+    )
+    return result.first() is not None
 
 
 async def find_grant(

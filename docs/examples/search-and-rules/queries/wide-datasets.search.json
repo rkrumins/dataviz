@@ -1,0 +1,17 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      { "kind": "entityType", "op": "in", "values": ["dataset"] },
+      {
+        "kind": "related",
+        "axis": "child",
+        "where": { "kind": "entityType", "op": "in", "values": ["column"] },
+        "count": { "op": "gt", "value": 100 }
+      }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": { "results": "hits", "pageSize": 200, "includeAncestorPath": true }
+}

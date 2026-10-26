@@ -37,17 +37,22 @@
 import { motion } from 'framer-motion'
 import {
     AlignLeft,
+    ArrowUpToLine,
     Asterisk,
     Boxes,
+    Crosshair,
     Equal,
     Flag,
+    FolderTree,
     GitBranchPlus,
     GitMerge,
     Hash,
     KeyRound,
     GitBranch,
     Layers,
+    ListTree,
     Milestone,
+    Network,
     Parentheses,
     Plus,
     Radar,
@@ -58,12 +63,14 @@ import {
     Tag,
     Type,
     Unplug,
+    Workflow,
     type LucideIcon,
 } from 'lucide-react'
 import {
     type FC,
     memo,
     useCallback,
+    useContext,
     useEffect,
     useLayoutEffect,
     useMemo,
@@ -77,12 +84,18 @@ import type { Predicate, EdgeClass } from '@/types/search'
 
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
 import { topLevelConditions } from './predicateComposition'
+import { RelationContext } from './relationContext'
+import { newRelation, RELATION_DEPTH_MAX } from './relations'
 
 
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
 
+/** Entries that scope the whole search, which a relationship's condition
+ *  can't hold. */
+const SCOPE_ENTRIES = new Set(['root-in-view', 'inside-subtree', 'inside-named', 'path', 'within-hops'])
+
 /** The condition kinds with no visual editor: authored as JSON in Code. */
-export type CodeKind = 'path' | 'withinHops' | 'degree'
+export type CodeKind = 'withinHops' | 'degree'
 
 
 /**
@@ -169,7 +182,7 @@ export interface AddFilterPaletteProps {
     onOpenAdvanced?: () => void
     /** Open the Code (JSON) editor with a stub of the named predicate
      *  kind appended to the current draft. Used by the "Code-only"
-     *  Advanced entries (path, withinHops, degree) — visual editors for
+     *  Advanced entries (withinHops, degree) — visual editors for
      *  these shapes don't exist; the user authors them in JSON instead.
      *  Omit to drop those entries (no Code mode in the rule editor). */
     onOpenCode?: (kind: CodeKind) => void
@@ -197,7 +210,7 @@ interface PaletteEntry {
      *    - ``emit``: build a predicate and add it to the query.
      *    - ``advanced``: open the Advanced drawer (groups, options).
      *    - ``code``: open the JSON editor with a stub of ``codeKind``
-     *      appended to the current draft (path / withinHops / degree). */
+     *      appended to the current draft (withinHops / degree). */
     action: 'emit' | 'advanced' | 'code'
     build?: () => Predicate
     codeKind?: CodeKind
@@ -209,6 +222,9 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
 }) => {
     const [open, setOpen] = useState(false)
     const [query, setQuery] = useState('')
+    // How many relationships this builder's conditions sit inside, and
+    // whether it is a display rule's (a rule tests one entity: no routes).
+    const { depth: relationDepth, rule } = useContext(RelationContext)
     const wrapperRef = useRef<HTMLDivElement>(null)
     const buttonRef = useRef<HTMLButtonElement>(null)
     const popoverRef = useRef<HTMLDivElement>(null)
@@ -483,18 +499,93 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
             ],
         },
         {
+            label: 'Relationships',
+            entries: [
+                {
+                    id: 'rel-parent',
+                    icon: ArrowUpToLine, tone: 'structure',
+                    label: 'Parent is…',
+                    description: 'A condition on the container one level up — "datasets whose parent is a domain"',
+                    action: 'emit',
+                    build: () => newRelation('parent', { kind: 'entityType', op: 'in', values: [] }),
+                },
+                {
+                    id: 'rel-root',
+                    icon: Network, tone: 'structure',
+                    label: 'Top-level container is…',
+                    description: 'A condition on the container at the top of its tree',
+                    action: 'emit',
+                    build: () => newRelation('root', {
+                        kind: 'text', value: '', target: 'name', match: 'exact',
+                        caseSensitive: false, boost: 1.0,
+                    }),
+                },
+                {
+                    id: 'rel-ancestor',
+                    icon: ListTree, tone: 'structure',
+                    label: 'Any container above it…',
+                    description: 'A condition on any ancestor — "inside anything with region = EMEA"',
+                    action: 'emit',
+                    build: () => newRelation('ancestor', { kind: 'property', key: '', op: 'eq', value: '' }),
+                },
+                {
+                    id: 'rel-child',
+                    icon: FolderTree, tone: 'structure',
+                    label: 'Contains…',
+                    description: 'A condition on what it contains — "tables with a PII column"; every one, none, or how many',
+                    action: 'emit',
+                    build: () => newRelation('child', { kind: 'entityType', op: 'in', values: [] }),
+                },
+                {
+                    id: 'rel-upstream',
+                    icon: GitMerge, tone: 'lineage-present',
+                    label: 'Fed by…',
+                    description: 'A condition on its sources, one hop or several, through edges you choose',
+                    action: 'emit',
+                    build: () => newRelation('upstream', { kind: 'entityType', op: 'in', values: [] }),
+                },
+                {
+                    id: 'rel-downstream',
+                    icon: Workflow, tone: 'lineage-present',
+                    label: 'Feeds…',
+                    description: 'A condition on its targets — "feeds a dashboard within 3 hops"',
+                    action: 'emit',
+                    build: () => newRelation('downstream', { kind: 'entityType', op: 'in', values: [] }),
+                },
+                {
+                    id: 'is-named',
+                    icon: Crosshair, tone: 'structure',
+                    label: 'Is a named entity…',
+                    description: 'By its path of names — "Sales / orders" — or a URN',
+                    action: 'emit',
+                    build: () => ({ kind: 'is', refs: [] }),
+                },
+                {
+                    id: 'inside-named',
+                    icon: FolderTree, tone: 'structure',
+                    label: 'Inside a container named…',
+                    description: 'Under "Country / United Kingdom" — names, not URNs, so it works in every environment',
+                    action: 'emit',
+                    build: () => ({ kind: 'descendantOf', urns: [], uiScope: 'name' } as Predicate),
+                },
+            ] as PaletteEntry[],
+        },
+        {
             label: 'Advanced',
             entries: [
                 {
                     id: 'path',
                     icon: Route, tone: 'group',
-                    label: 'Path from A to B',
+                    label: 'Paths from A to B',
                     description:
-                        'Lineage paths between two URN sets — Code only. '
-                        + 'Opens the JSON editor with a stub; fill in '
-                        + 'sourceUrns and targetUrns.',
-                    action: 'code',
-                    codeKind: 'path',
+                        'Every route from named entities — or any entity meeting a '
+                        + 'condition — to others, through edges you choose. '
+                        + 'The results become the routes.',
+                    action: 'emit',
+                    build: () => ({
+                        kind: 'path', sourceUrns: [], targetUrns: [], maxHops: 4,
+                        edgeClass: 'lineage', direction: 'outgoing',
+                    } as Predicate),
                 },
                 {
                     id: 'within-hops',
@@ -555,7 +646,7 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
     ], [counts])
 
     // Drop entries whose handoff isn't wired in this context: ``code``
-    // entries (path / withinHops / degree) need ``onOpenCode``; ``advanced``
+    // entries (withinHops / degree) need ``onOpenCode``; ``advanced``
     // entries need ``onOpenAdvanced``. In the Property Manager rule
     // editor neither is supplied, so those entries are hidden and
     // now-empty categories collapse — group authoring still works via
@@ -565,13 +656,19 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
             .map((cat) => ({
                 ...cat,
                 entries: cat.entries.filter((e) => {
+                    // A relationship's condition is about the relative: the
+                    // scope of the search is the query's alone, and
+                    // relationships nest only so deep.
+                    if (relationDepth > 0 && SCOPE_ENTRIES.has(e.id)) return false
+                    if (rule && e.id === 'path') return false
+                    if (relationDepth >= RELATION_DEPTH_MAX && e.id.startsWith('rel-')) return false
                     if (e.action === 'code') return !!onOpenCode
                     if (e.action === 'advanced') return !!onOpenAdvanced
                     return true
                 }),
             }))
             .filter((cat) => cat.entries.length > 0)
-    }, [categories, onOpenCode, onOpenAdvanced])
+    }, [categories, onOpenCode, onOpenAdvanced, relationDepth, rule])
 
     const filteredCategories = useMemo(() => {
         const q = query.trim().toLowerCase()

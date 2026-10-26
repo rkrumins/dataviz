@@ -1,0 +1,16 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      { "kind": "entityType", "op": "in", "values": ["dataset"] },
+      {
+        "kind": "related",
+        "axis": "child",
+        "where": { "kind": "tag", "op": "hasAny", "values": ["PII", "GDPR-Sensitive"] }
+      }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": { "results": "hits", "pageSize": 200, "includeAncestorPath": true }
+}

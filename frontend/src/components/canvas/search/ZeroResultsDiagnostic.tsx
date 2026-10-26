@@ -21,6 +21,7 @@
  *   - effectiveRootUrns is empty (search ran unclamped — usually a
  *     non-issue, just informational)
  *   - droppedRootUrns is non-empty (client URNs were filtered out)
+ *   - a name path in the query names no entity (it is then false)
  *   - the query carries a `descendantOf` scope row, so it is only
  *     looking inside one container (the most common cause by far —
  *     one click on a result group adds it, and it then applies to
@@ -58,6 +59,7 @@ import type {
 
 import { CypherDisclosure } from './panel/CypherDisclosure'
 import { findScopeCondition } from './panel/predicateComposition'
+import { refLabel } from './panel/relations'
 import type { QuickMatch } from './session/quickPredicate'
 
 
@@ -88,6 +90,8 @@ export const ZeroResultsDiagnostic: FC<ZeroResultsDiagnosticProps> = ({
 }) => {
     const causes = useMemo(() => diagnose(result, query), [result, query])
     const text = useMemo(() => firstTextLeaf(query.predicate), [query.predicate])
+    const unnamed = useMemo(() => (result.scopeDiagnostics?.resolvedRefs ?? [])
+        .filter((r) => r.count === 0).map((r) => r.ref), [result.scopeDiagnostics])
 
     return (
         <div className="flex flex-col gap-2">
@@ -96,7 +100,7 @@ export const ZeroResultsDiagnostic: FC<ZeroResultsDiagnosticProps> = ({
                 how a slow property search looked like a broken one. */}
             {result.deadlineExceeded
                 ? <TimedOutLead />
-                : <MissLead text={text} onSwitchMatch={onSwitchMatch} />}
+                : <MissLead text={text} onSwitchMatch={onSwitchMatch} unnamed={unnamed} />}
 
             <TechnicalDetails>
                 {causes.map((c, i) => (
@@ -159,10 +163,12 @@ function TimedOutLead() {
 
 
 function MissLead({
-    text, onSwitchMatch,
+    text, onSwitchMatch, unnamed = [],
 }: {
     text: TextPredicate | null
     onSwitchMatch?: (match: QuickMatch) => void
+    /** Name paths in the query that name no entity. */
+    unnamed?: string[]
 }) {
     const mode = MATCH_MODES.find((m) => m.value === text?.match)
     // A query with no text leaf — a builder query about tags, types or
@@ -183,6 +189,13 @@ function MissLead({
                     ? <>Nothing in this view {mode.verb} “<span className="font-mono font-medium">{text.value}</span>”.</>
                     : <>Nothing in this view matched what you asked for.</>}
             </p>
+            {unnamed.length > 0 && (
+                <p className="mt-1.5 text-[11.5px] leading-snug text-cyan-900/85 dark:text-cyan-100/90">
+                    {unnamed.map((n) => `“${n}”`).join(', ')} {unnamed.length === 1 ? 'names' : 'name'} no
+                    entity. A name path starts at a top-level entity and spells each container on the way
+                    down; ** stands for any number of levels.
+                </p>
+            )}
             {others.length > 0 && (
                 <div className="mt-2 flex items-center gap-1.5 flex-wrap">
                     <span className="text-[11.5px] text-cyan-900/85 dark:text-cyan-100/90">
@@ -376,10 +389,11 @@ function diagnose(result: SearchResultPage, query: SearchQuery): Cause[] {
     // result group and then applies to every query composed afterwards
     // — so it must be named before the vaguer content-level causes.
     const scope = findScopeCondition(query.predicate)
-    if (scope && scope.urns.length > 0 && causes.length === 0) {
-        const where = scope.urns.length === 1
-            ? formatUrnLabel(scope.urns[0])
-            : `${scope.urns.length} containers`
+    const anchors = scope
+        ? [...scope.urns.map((u) => formatUrnLabel(u)), ...(scope.refs ?? []).map(refLabel)]
+        : []
+    if (anchors.length > 0 && causes.length === 0) {
+        const where = anchors.length === 1 ? anchors[0] : `${anchors.length} containers`
         causes.push({
             severity: 'warn',
             title: `Your query only looks inside ${where}.`,

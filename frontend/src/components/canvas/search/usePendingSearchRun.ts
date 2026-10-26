@@ -40,6 +40,11 @@ const BRIDGE_RUN_OPTIONS: SearchQuery['options'] = {
 }
 
 
+function isPathQuery(p: Predicate): boolean {
+    return p.kind === 'path' || (p.kind === 'group' && p.children.some((c) => c.kind === 'path'))
+}
+
+
 export function usePendingSearchRun(
     runPredicate: (predicate: Predicate, options?: SearchQuery['options']) => Promise<void>,
     commitDraft: (predicate: Predicate) => void,
@@ -51,7 +56,8 @@ export function usePendingSearchRun(
             const p = useSearchStore.getState().consumePendingRun()
             if (!p) return
             commitDraft(p)
-            void runPredicate(p, BRIDGE_RUN_OPTIONS)
+            // Routes come back as routes: the run picks paths for a path.
+            void runPredicate(p, isPathQuery(p) ? undefined : BRIDGE_RUN_OPTIONS)
         }, 0)
         return () => clearTimeout(t)
     }, [pendingRunPredicate, runPredicate, commitDraft])

@@ -11,6 +11,17 @@
       "predicate": { "kind": "tag", "op": "hasAny", "values": ["PII", "GDPR-Sensitive"] }
     },
     {
+      "name": "Holds PII",
+      "color": "#dc2626",
+      "icon": "Lock",
+      "enabled": true,
+      "predicate": {
+        "kind": "related",
+        "axis": "child",
+        "where": { "kind": "tag", "op": "hasAny", "values": ["PII", "GDPR-Sensitive"] }
+      }
+    },
+    {
       "name": "Needs owner",
       "color": "#f59e0b",
       "icon": "AlertTriangle",

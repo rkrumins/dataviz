@@ -15,7 +15,11 @@ import pytest
 
 from backend.app.providers.falkordb_deep_search import _Compiler
 from backend.app.services import view_library
-from backend.app.services.advanced_search_service import _count_and_validate
+from backend.app.services.advanced_search_service import (
+    _count_and_validate,
+    _path_refs,
+    _with_resolved_refs,
+)
 from backend.common.models.search import SearchQuery
 from backend.common.models.view_library import (
     PACK_FORMAT,
@@ -42,7 +46,11 @@ def test_the_examples_are_there():
 def test_a_search_example_is_a_query_the_server_runs(path: Path):
     query = SearchQuery.model_validate(_load(path))
     _count_and_validate(query)   # depth, leaves, OR width, typed values, sub-aggregations
-    _Compiler(lineage_edge_types={"_"}, containment_edge_types={"_"}).compile(query.predicate)
+    # A name path is resolved against the graph the query runs on; each
+    # stands in as one urn here, the way a rule's shape is checked.
+    predicate = _with_resolved_refs(
+        query.predicate, {id(ref): ["urn:stand-in"] for _, ref in _path_refs(query.predicate)})
+    _Compiler(lineage_edge_types={"_"}, containment_edge_types={"_"}).compile(predicate)
     # The guides tell readers to send a group at the root, as the panel does.
     assert query.predicate.kind == "group"
 

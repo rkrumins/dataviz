@@ -24,6 +24,13 @@ class DeepSearchSettings:
     max_tree_depth: int
     max_leaf_count: int
     max_or_branch: int
+    # Relationships nest: "a source whose parent's top-level container…" is
+    # three. Each level multiplies the entities a candidate's test reads.
+    max_relation_depth: int
+    # Lineage hops a relationship may follow when its far end is a
+    # condition, tested per candidate. Named by a reference instead, it is
+    # walked from the named entities and may go as far as withinHops (10).
+    relation_max_hops: int
 
     # --- Per-query execution caps ---
     candidate_cap: int
@@ -98,6 +105,8 @@ class DeepSearchSettings:
             max_tree_depth=_read_int("DEEP_SEARCH_MAX_TREE_DEPTH", 6),
             max_leaf_count=_read_int("DEEP_SEARCH_MAX_LEAF_COUNT", 64),
             max_or_branch=_read_int("DEEP_SEARCH_MAX_OR_BRANCH", 24),
+            max_relation_depth=max(1, _read_int("DEEP_SEARCH_MAX_RELATION_DEPTH", 3)),
+            relation_max_hops=max(1, min(6, _read_int("DEEP_SEARCH_RELATION_MAX_HOPS", 3))),
             candidate_cap=_read_int("DEEP_SEARCH_CANDIDATE_CAP", 10000),
             candidate_cap_max=_read_int("DEEP_SEARCH_CANDIDATE_CAP_MAX", 100000),
             default_soft_deadline_ms=_read_int(

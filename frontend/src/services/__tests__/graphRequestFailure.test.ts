@@ -160,6 +160,10 @@ describe('isIdempotentGraphRead', () => {
     expect(isIdempotentGraphRead('POST', `${ws}/save`)).toBe(false)
     expect(isIdempotentGraphRead('DELETE', `${ws}/nodes/x`)).toBe(false)
   })
+
+  it('never a native query: each run that reaches the server is recorded', () => {
+    expect(isIdempotentGraphRead('POST', `${ws}/search/native?dataSourceId=ds&viewId=v`)).toBe(false)
+  })
 })
 
 describe('an error thrown by code is not a provider state', () => {

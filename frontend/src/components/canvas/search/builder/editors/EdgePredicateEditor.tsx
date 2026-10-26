@@ -1,7 +1,7 @@
 /**
  * EdgePredicateEditor — author ``edge_predicate`` filters that the
  * compiler attaches to ``PathPredicate`` and ``WithinHopsPredicate``
- * (W2.3 / UC3).
+ * (W2.3 / UC3), and a lineage relationship's ``edge``.
  *
  * Three predicate kinds:
  *
@@ -37,6 +37,8 @@ import type {
     PropertyOp,
 } from '@/types/search'
 
+import { operatorLabel } from '../../typed/operators'
+
 import { FieldLabel, NumberField, SelectField, TextField } from './shared'
 import { UnifiedPicker, type PickerOption } from './UnifiedPicker'
 
@@ -54,29 +56,24 @@ const MAX_EDGE_GROUP_DEPTH = 3
  *  ``PROPERTY_OPS`` minus the ones that only make sense on node
  *  values (``contains`` / ``startsWith`` / ``endsWith`` on a
  *  confidence number is nonsensical — we surface them anyway,
- *  same as the node editor, but a future refinement could prune). */
-const EDGE_PROPERTY_OPS: { value: PropertyOp; label: string }[] = [
-    { value: 'eq', label: '=' },
-    { value: 'neq', label: '≠' },
-    { value: 'gt', label: '>' },
-    { value: 'gte', label: '≥' },
-    { value: 'lt', label: '<' },
-    { value: 'lte', label: '≤' },
-    { value: 'in', label: 'is one of' },
-    { value: 'notIn', label: 'is not one of' },
-    { value: 'contains', label: 'contains' },
-    { value: 'startsWith', label: 'starts with' },
-    { value: 'endsWith', label: 'ends with' },
-    { value: 'between', label: 'between' },
-]
+ *  same as the node editor, but a future refinement could prune).
+ *  Said in the property rows' words: "is at least", not "≥". */
+const EDGE_PROPERTY_OPS: { value: PropertyOp; label: string }[] = (
+    ['eq', 'neq', 'gt', 'gte', 'lt', 'lte', 'in', 'notIn', 'contains', 'startsWith', 'endsWith', 'between'] as const
+).map((value) => ({ value, label: operatorLabel(value, 'string') }))
+
+/** What a key kept in the edge's JSON of user properties can be asked:
+ *  equality (its presence is "edge has property"). */
+const EDGE_JSON_OPS = EDGE_PROPERTY_OPS.filter((o) => ['eq', 'neq', 'in', 'notIn'].includes(o.value))
+const isJsonOp = (op: PropertyOp | undefined) => EDGE_JSON_OPS.some((o) => o.value === (op ?? 'eq'))
 
 type EdgeKind = NonNullable<EdgePredicateNode['kind']>
 type EdgeGroupOp = NonNullable<EdgeGroupPredicate['op']>
 
 const EDGE_KIND_OPTIONS: ReadonlyArray<{ value: EdgeKind; label: string }> = [
-    { value: 'edgeProperty', label: 'edge property' },
-    { value: 'edgeHasProperty', label: 'edge has property' },
-    { value: 'edgeGroup', label: 'group (AND / OR / NOT)' },
+    { value: 'edgeProperty', label: 'Compare an edge property' },
+    { value: 'edgeHasProperty', label: 'Edge has a property' },
+    { value: 'edgeGroup', label: 'Group of edge conditions' },
 ]
 
 const GROUP_OPS: ReadonlyArray<{ value: EdgeGroupOp; label: string }> = [
@@ -137,7 +134,7 @@ export const EdgePredicateEditor: FC<EdgePredicateEditorProps> = ({
         <div className="flex flex-col gap-2 rounded-md border border-glass-border bg-canvas-base/40 px-2.5 py-2">
             <div className="flex items-center justify-between gap-2">
                 <div className="flex-1 min-w-0">
-                    <FieldLabel>Edge filter kind</FieldLabel>
+                    <FieldLabel>Edge condition</FieldLabel>
                     <SelectField
                         value={value.kind}
                         onChange={(nextKind) => {
@@ -239,6 +236,7 @@ function EdgePropertyFields({
     }, [ctx, edgeTypeHint, value.key])
 
     const isMultiValue = value.op === 'in' || value.op === 'notIn'
+    const jsonHeld = ctx.edgeKeyStoredAs?.[value.key] === 'json'
 
     return (
         <div className="flex flex-col gap-2">
@@ -246,7 +244,12 @@ function EdgePropertyFields({
                 <FieldLabel>Edge property</FieldLabel>
                 <UnifiedPicker
                     value={value.key}
-                    onChange={(next) => onChange({ ...value, key: next as string })}
+                    onChange={(next) => {
+                        const key = next as string
+                        // A key kept in the JSON compares by equality only.
+                        const json = ctx.edgeKeyStoredAs?.[key] === 'json'
+                        onChange({ ...value, key, ...(json && !isJsonOp(value.op) ? { op: 'eq' } : {}) })
+                    }}
                     options={keyOptions}
                     placeholder={
                         keyOptions.length > 0
@@ -262,7 +265,7 @@ function EdgePropertyFields({
                     <SelectField
                         value={value.op}
                         onChange={(op) => onChange({ ...value, op })}
-                        options={EDGE_PROPERTY_OPS}
+                        options={jsonHeld ? EDGE_JSON_OPS : EDGE_PROPERTY_OPS}
                     />
                 </div>
                 <div className="col-span-2">
@@ -315,6 +318,11 @@ function EdgePropertyFields({
                     )}
                 </div>
             </div>
+            {jsonHeld && (
+                <p className="text-[10.5px] text-ink-muted">
+                    Kept with the edge's own properties: compared by equality.
+                </p>
+            )}
         </div>
     )
 }

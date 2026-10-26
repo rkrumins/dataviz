@@ -37,7 +37,9 @@ from backend.app.providers.falkordb_search.raw_properties import (
     RawLeaf, answered, empty_params, evaluate_rows, graph_raw_labels, probe_condition,
 )
 from backend.app.services.deep_search import CompileError
-from backend.app.services.native_query.parse_cost import MAX_PARSE_COST, operand, parse_cost
+from backend.app.services.native_query.parse_cost import (
+    MAX_PARSE_COST, grouped, operand, parse_cost,
+)
 from backend.common.models.search import SearchScope
 
 
@@ -184,10 +186,15 @@ def _compile(provider, items, errors, *, raw: bool = False
     for item_id, predicate in items:
         compiler = _build_compiler_for_provider(provider)
         compiler._param_counter = counter
+        # Every rule is a column of the RETURN: a projection, where degree
+        # needs its comprehension form, and no hop continuation can run.
+        compiler.projected = True
+        compiler.anchor_lineage = False
         if raw:
             compiler.raw_leaves = []
         try:
-            where = compiler.compile(predicate)
+            where = " AND ".join(grouped(w) for w in [compiler.compile(predicate),
+                                                      *compiler.tail] if w != "true")
         except CompileError as exc:
             errors[item_id] = str(exc)
             continue

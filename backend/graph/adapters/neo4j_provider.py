@@ -24,6 +24,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from collections import OrderedDict, defaultdict
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
@@ -87,6 +88,51 @@ def _edge_from_row(source_urn: str, target_urn: str, rel_type: str, props: Dict[
         confidence=props.get("confidence"),
         properties=json.loads(props["properties"]) if isinstance(props.get("properties"), str) else (props.get("properties") or {}),
     )
+
+
+_EXPLAIN = "EXPLAIN "
+_WHERE = re.compile(r"\(line (\d+), column (\d+) \(offset: (\d+)\)\)")
+
+
+def native_query_error(exc: Any, timeout_s: float, *, shift: int = 0) -> Optional[Exception]:
+    """What Neo4j said about a native query, as the error a person reads — or
+    None when it is about the database, not the query. ``shift``: characters
+    put in front of the query before Neo4j read it."""
+    from backend.common.interfaces.native_query import (
+        NativeQueryError,
+        NativeQuerySyntaxError,
+        NativeQueryTimeout,
+        NativeQueryTooLarge,
+        NativeQueryWriteRefused,
+    )
+
+    code = getattr(exc, "code", None) or ""
+    message = (getattr(exc, "message", None) or str(exc)).strip()
+    if code == "Neo.ClientError.Statement.AccessMode":
+        return NativeQueryWriteRefused("The query writes to the graph, and native queries only read.")
+    if code.startswith("Neo.ClientError.Transaction.TransactionTimedOut"):
+        return NativeQueryTimeout(
+            f"The query ran past its {timeout_s:g}s limit. Narrow what it matches, or allow it "
+            f"more time.")
+    if "MemoryPoolOutOfMemoryError" in code or "TransactionMemoryLimit" in code:
+        return NativeQueryTooLarge(
+            "The query needs more memory than one query may use. Narrow what it matches, or "
+            "return less.")
+    if code == "Neo.ClientError.Statement.SyntaxError":
+        # The first line says what and where; the quoted line and caret
+        # after it are the console's to draw, at ``position``.
+        first = message.split("\n", 1)[0]
+        where = _WHERE.search(first)
+        if where is None:
+            return NativeQuerySyntaxError(first)
+        line, column, offset = (int(g) for g in where.groups())
+        offset = max(0, offset - shift)
+        column = max(1, column - shift) if line == 1 else column
+        first = first[:where.start()] + f"(line {line}, column {column})" + first[where.end():]
+        return NativeQuerySyntaxError(first, position=offset)
+    if code.startswith("Neo.ClientError."):
+        return NativeQueryError(message)
+    return None
 
 
 def build_neo4j_cache_client(*, provider_id: str, extra_config: dict, credentials: dict):
@@ -348,6 +394,86 @@ class Neo4jProvider(GraphDataProvider):
                 if type(e).__name__ in ("ServiceUnavailable", "SessionExpired"):
                     self._driver = None
                 raise
+
+    # ------------------------------------------------------------------ #
+    # Native read-only queries                                             #
+    # ------------------------------------------------------------------ #
+
+    native_query_engine = "neo4j"
+
+    async def run_readonly_cypher(
+        self, query: str, *, row_cap: int, timeout_ms: int, max_reply_bytes: int,
+    ):
+        """A person's own read-only Cypher, in one READ transaction:
+
+        1. ``EXPLAIN`` first — Neo4j says from the plan whether the query only
+           reads (``query_type == "r"``); anything else never runs;
+        2. the query itself, ``row_cap`` rows pulled and no more
+           (``fetch_size`` keeps the server from streaming past them);
+        3. always rolled back.
+
+        An unmanaged transaction, so the driver never retries it, under
+        Neo4j's own transaction timeout. ``max_reply_bytes`` can't be held
+        here — the driver has no byte cap — so a single huge row falls to the
+        server's ``db.memory.transaction.max``, which the operator guide asks
+        for.
+        """
+        from neo4j import READ_ACCESS
+        from neo4j.exceptions import Neo4jError, ServiceUnavailable, SessionExpired
+
+        from backend.app.services.native_query.cells import to_cell
+        from backend.common.interfaces.native_query import (
+            NativeQueryResult,
+            NativeQueryTimeout,
+            NativeQueryWriteRefused,
+        )
+
+        timeout_s = timeout_ms / 1000
+        driver = await self._get_driver()
+
+        async def _run() -> NativeQueryResult:
+            async with driver.session(
+                database=self._database, default_access_mode=READ_ACCESS,
+                fetch_size=max(1, min(row_cap, 1000)),
+            ) as session:
+                tx = await session.begin_transaction(timeout=timeout_s)
+                try:
+                    try:
+                        plan = await (await tx.run(_EXPLAIN + query)).consume()
+                    except Neo4jError as exc:
+                        # Where it points, it points into "EXPLAIN …".
+                        mapped = native_query_error(exc, timeout_s, shift=len(_EXPLAIN))
+                        if mapped is None:
+                            raise
+                        raise mapped from exc
+                    if plan.query_type != "r":
+                        raise NativeQueryWriteRefused(
+                            "The query writes to the graph, and native queries only read.")
+                    result = await tx.run(query)
+                    columns = list(result.keys())
+                    records = await result.fetch(row_cap)
+                    rows = [[to_cell(value) for value in record.values()] for record in records]
+                    return NativeQueryResult(columns=columns, rows=rows)
+                finally:
+                    try:
+                        await tx.close()
+                    except Exception:                     # noqa: BLE001 — the answer stands
+                        pass
+
+        try:
+            return await asyncio.wait_for(_run(), timeout=timeout_s + 2.0)
+        except asyncio.TimeoutError as exc:
+            raise NativeQueryTimeout(
+                f"The query ran past its {timeout_s:g}s limit. Narrow what it matches, or allow "
+                f"it more time.") from exc
+        except (ServiceUnavailable, SessionExpired):
+            self._driver = None
+            raise
+        except Neo4jError as exc:
+            mapped = native_query_error(exc, timeout_s)
+            if mapped is None:
+                raise
+            raise mapped from exc
 
     async def _run_write(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> list:
         """Execute a write transaction with automatic transient-error retry."""

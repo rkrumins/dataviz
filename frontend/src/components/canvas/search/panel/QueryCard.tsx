@@ -1,7 +1,7 @@
 /**
  * QueryCard — the single Query Lens that holds the entire active query.
  *
- *   ╭─ Query · 3 filters ──────────── 🅥 Visual  </> Code ╮
+ *   ╭─ Query · 3 filters ─────── 🅥 Visual  </> Code  >_ Cypher ╮
  *   │ ⌕  name contains   [ customer       ]              │
  *   │ #  tag is          [ #PII ] [ + ]                  │
  *   │ ◇  type is in      [ dataset, schemaField   ▾ ]    │
@@ -13,8 +13,7 @@
  * every top-level condition as a ConditionRow. Editing a row commits
  * back through ``upsertCondition`` and triggers a debounced auto-run.
  * The Visual ↔ Code toggle does NOT lose state — both modes write the
- * same draft. Code mode is a plain textarea with live "parsed N
- * filters" feedback; CodeMirror upgrade is deferred.
+ * same draft, and Cypher shows the Cypher that draft runs as.
  *
  * Discovery telemetry shows next to the Add-filter button as a passive
  * chip ("12 tags · 37 keys · 4 types") so the user sees what
@@ -26,13 +25,13 @@ import {
     Eye,
     Loader2,
     AlertCircle,
-    CheckCircle2,
     Sparkles,
     ArrowRight,
     Play,
     Zap,
     Hand,
     Search,
+    Terminal,
     Box,
     Tag as TagIcon,
     Layers,
@@ -50,11 +49,12 @@ import {
     useCallback,
     useEffect,
     useMemo,
-    useRef,
     useState,
 } from 'react'
 
 import { cn } from '@/lib/utils'
+import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useActiveView, useSchemaStore } from '@/store/schema'
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import {
@@ -73,12 +73,18 @@ import { SEARCH_OPTIONS } from '../searchOptions'
 import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
 import { entityTypesInView, layerOptions, type LayerOption } from './layerOptions'
-import type { CodeKind } from './AddFilterPalette'
+import { AddFilterPalette, type CodeKind } from './AddFilterPalette'
+import { CypherView } from './CypherView'
+import { isNativeResult } from './native/nativeCells'
+import { CodeMode } from './dsl/CodeMode'
+import type { DslVocabulary } from './dsl/dslLanguage'
+import { namePathFor, searchEntitiesByName } from './entityNames'
 import { appendCondition, topLevelConditions } from './predicateComposition'
-import { parsePredicate, stringifyPredicate } from './predicateDsl'
+import { stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
 import { SearchOmnibox } from './omnibox/SearchOmnibox'
 import { SaveQueryDialog } from './SaveQueryDialog'
+import { RelationProvider } from './RelationshipEditor'
 import { VisualQueryBuilder } from './VisualQueryBuilder'
 
 
@@ -99,7 +105,7 @@ export interface QueryCardProps {
 }
 
 
-type ViewMode = 'visual' | 'code'
+type ViewMode = 'visual' | 'code' | 'cypher'
 
 
 export const QueryCard: FC<QueryCardProps> = ({
@@ -126,6 +132,14 @@ export const QueryCard: FC<QueryCardProps> = ({
     // pushed by clicking "Clear all".
     const clearSearchResults = useSearchStore((s) => s.clearSearchResults)
     const discovery = useDiscovery(viewId)
+    // What a relationship row's edge filter offers: the discovered edge keys.
+    const edgeDiscovery = useMemo(() => ({
+        edgeTypes: discovery.edgeTypes,
+        keysByEdgeType: discovery.keysByEdgeType,
+        getEdgeValueSamples: discovery.getEdgeValueSamples,
+        edgeKeyStoredAs: discovery.edgeKeyStoredAs,
+    }), [discovery.edgeTypes, discovery.keysByEdgeType, discovery.getEdgeValueSamples,
+        discovery.edgeKeyStoredAs])
     const knownEntityTypes = useEntityTypeNames()
     // What the omnibox and the first-run examples offer: the types this
     // view's data holds, most common first — every "Everything of type …"
@@ -138,35 +152,43 @@ export const QueryCard: FC<QueryCardProps> = ({
     // ``layerAssignment`` values entities carry, named from the view's
     // reference-layout config, or else the view's configured layers.
     const discoveredLayers = useViewLayerOptions(discovery.getValueSamples)
+    // What Code mode's editor completes from: the view's own types, tags,
+    // layers and keys, values and names from the server as they're typed.
+    const provider = useGraphProviderIfAvailable()
+    const remote = provider instanceof RemoteGraphProvider ? provider : null
+    const vocabulary = useMemo<DslVocabulary>(() => ({
+        entityTypes: presentEntityTypes,
+        tags: discovery.tagValues,
+        layers: discoveredLayers.map((l) => l.value),
+        propertyKeys: discovery.allKeys,
+        edgeKeys: [...new Set(Object.values(discovery.keysByEdgeType).flat())].sort(),
+        suggestValues: discovery.suggestValues,
+        names: remote ? {
+            search: (word, signal) => searchEntitiesByName(remote, viewId, word, { signal }),
+            pathFor: (entity) => namePathFor(remote, viewId, entity),
+        } : undefined,
+    }), [presentEntityTypes, discovery.tagValues, discoveredLayers, discovery.allKeys,
+        discovery.keysByEdgeType, discovery.suggestValues, remote, viewId])
 
-    const [mode, setMode] = useState<ViewMode>('visual')
+    const [mode, setMode] = useEditorMode()
 
     /**
-     * Code-only palette entries (path, withinHops, degree) hand off to the
+     * Code-only palette entries (withinHops, degree) hand off to the
      * main panel's Code view rather than the AdvancedDrawer JSON tab.
      * Seed a stub predicate of the chosen kind into the draft
      * (preserving existing work via AND-wrap), then flip the local
      * mode to 'code' so the user lands directly in the DSL editor.
      */
     const handleOpenCode = useCallback((kind: CodeKind) => {
-        const stub: Predicate = kind === 'path'
-            ? ({
-                kind: 'path',
-                sourceUrns: [],
-                targetUrns: [],
-                maxHops: 4,
+        const stub: Predicate = kind === 'degree'
+            ? { kind: 'degree', direction: 'both', op: 'gte', value: 1, edgeClass: 'lineage' }
+            : ({
+                kind: 'withinHops',
+                urns: [],
+                hops: 2,
+                direction: 'both',
                 edgeClass: 'lineage',
-                direction: 'outgoing',
             } as unknown as Predicate)
-            : kind === 'degree'
-                ? { kind: 'degree', direction: 'both', op: 'gte', value: 1, edgeClass: 'lineage' }
-                : ({
-                    kind: 'withinHops',
-                    urns: [],
-                    hops: 2,
-                    direction: 'both',
-                    edgeClass: 'lineage',
-                } as unknown as Predicate)
         const current = useSearchStore.getState().draftPredicate
         let next: Predicate
         if (!current) {
@@ -184,7 +206,7 @@ export const QueryCard: FC<QueryCardProps> = ({
         }
         commitDraft(next)
         setMode('code')
-    }, [commitDraft])
+    }, [commitDraft, setMode])
     // ─── Run mode (auto vs manual) + dispatch ──────────────────────
     // Auto: dispatch a debounced run on every complete draft change
     //       (snappy, original behaviour — the default).
@@ -215,8 +237,10 @@ export const QueryCard: FC<QueryCardProps> = ({
         // populated draft even after the canvas has gone dim.
         if (runnable === null) {
             // ``queryHash`` is the "results are published" sentinel —
-            // only clear when there's actually something to drop.
-            if (useSearchStore.getState().queryHash !== null) clearSearchResults()
+            // only clear when there's actually something to drop, and
+            // never a native query's highlight, which no draft produced.
+            const published = useSearchStore.getState().queryHash
+            if (published !== null && !isNativeResult(published)) clearSearchResults()
             return
         }
         // Manual mode: wait for the explicit Run click.
@@ -291,6 +315,32 @@ export const QueryCard: FC<QueryCardProps> = ({
         if (!complete) setFreshRowKind(predicate.kind ?? null)
     }, [commitDraft])
 
+    // The empty hero's way to every kind of filter: the palette the rows
+    // end with once something is composed, fed the way VisualQueryBuilder
+    // feeds it.
+    const paletteCounts = useMemo(() => ({
+        entityTypes: knownEntityTypes.length,
+        tags: discovery.tagValues.length,
+        propertyKeys: discovery.allKeys.length,
+        layers: discoveredLayers.length,
+    }), [knownEntityTypes, discovery.tagValues, discovery.allKeys, discoveredLayers])
+    const paletteSamples = useMemo(() => ({
+        entityTypes: knownEntityTypes.slice(0, 8),
+        tags: discovery.tagValues.slice(0, 8),
+        propertyKeys: discovery.allKeys.slice(0, 8),
+        layers: discoveredLayers.slice(0, 8).map((o) => o.label),
+    }), [knownEntityTypes, discovery.tagValues, discovery.allKeys, discoveredLayers])
+    const handleAddFromPalette = useCallback((predicate: Predicate) => {
+        handleAddFromOmnibox(predicate, !isRowIncomplete(predicate))
+    }, [handleAddFromOmnibox])
+    const handleAddManyFromPalette = useCallback((predicates: Predicate[]) => {
+        let next = useSearchStore.getState().draftPredicate
+        for (const p of predicates) next = appendCondition(next, p)
+        commitDraft(next)
+        const last = predicates[predicates.length - 1]
+        if (last && isRowIncomplete(last)) setFreshRowKind(last.kind ?? null)
+    }, [commitDraft])
+
     // Property-value samples, flattened across every discovered key so
     // the omnibox can match a bare token against values as well as
     // names. The corpus is bounded server-side (20 values per key, 64
@@ -338,7 +388,6 @@ export const QueryCard: FC<QueryCardProps> = ({
         <SearchOmnibox
             variant={isEmptyVisual ? 'hero' : 'inline'}
             onAdd={handleAddFromOmnibox}
-            onBrowseAll={onOpenAdvanced}
             entityTypes={presentEntityTypes}
             tagValues={discovery.tagValues}
             propertyKeys={discovery.allKeys}
@@ -364,7 +413,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                 "manage this query" UI reads as one premium block at
                 the top of the card. Body sits cleanly below.
                 Two rows internally so the layout breathes:
-                  Row 1 — Title · filter status               · Visual│Code
+                  Row 1 — Title · filter status               · Visual│Code│Cypher
                   Row 2 — [↺ Back] [↶][↷] [Auto│Manual]          [🗑] [▷ Run]
             */}
             {showHeader && (
@@ -390,7 +439,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                 </span>
                             ) : (
                                 <span className="text-[11px] text-ink-muted/80 italic truncate">
-                                    · Code mode · paste DSL
+                                    {mode === 'cypher' ? '· Cypher' : '· Code mode · paste DSL'}
                                 </span>
                             )}
                         </div>
@@ -404,6 +453,9 @@ export const QueryCard: FC<QueryCardProps> = ({
                             </ToggleBtn>
                             <ToggleBtn active={mode === 'code'} onClick={() => setMode('code')}>
                                 <Code2 className="w-3 h-3" /> Code
+                            </ToggleBtn>
+                            <ToggleBtn active={mode === 'cypher'} onClick={() => setMode('cypher')}>
+                                <Terminal className="w-3 h-3" /> Cypher
                             </ToggleBtn>
                         </div>
                     </div>
@@ -432,7 +484,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                 </div>
             )}
 
-            {/* Body — Visual / Code */}
+            {/* Body — Visual / Code / Cypher */}
             <div className={cn(
                 'flex flex-col gap-2',
                 isEmptyVisual ? 'p-0' : 'p-2.5',
@@ -441,6 +493,17 @@ export const QueryCard: FC<QueryCardProps> = ({
                     isEmptyVisual ? (
                         <PremiumEmptyHero
                             omnibox={omnibox}
+                            palette={
+                                <AddFilterPalette
+                                    counts={paletteCounts}
+                                    samples={paletteSamples}
+                                    onAdd={handleAddFromPalette}
+                                    onAddMany={handleAddManyFromPalette}
+                                    onOpenAdvanced={onOpenAdvanced}
+                                    onOpenCode={handleOpenCode}
+                                    disabled={isRunning}
+                                />
+                            }
                             onSeed={(p) => commitDraft(p)}
                             onUseCodeMode={() => setMode('code')}
                             discoveredEntityTypes={presentEntityTypes}
@@ -452,40 +515,45 @@ export const QueryCard: FC<QueryCardProps> = ({
                         />
                     ) : (
                         <>
-                            <VisualQueryBuilder
-                                predicate={draftPredicate}
-                                onSeed={seedDraftPredicate}
-                                onCommit={commitDraft}
-                                discovery={{
-                                    allKeys: discovery.allKeys,
-                                    keysByEntityType: discovery.keysByEntityType,
-                                    tagValues: discovery.tagValues,
-                                    getValueSamples: discovery.getValueSamples,
-                                    suggestValues: discovery.suggestValues,
-                                }}
-                                knownEntityTypes={knownEntityTypes}
-                                discoveredLayers={discoveredLayers}
-                                isRunning={isRunning}
-                                discoveryLoading={discovery.isInitialLoading}
-                                discoveryError={discovery.error}
-                                freshKind={freshRowKind}
-                                onSubmit={dispatchRun}
-                                onOpenAdvanced={onOpenAdvanced}
-                                onOpenCode={handleOpenCode}
-                                enableRowSelection
-                            />
+                            <RelationProvider viewId={viewId} edges={edgeDiscovery}>
+                                <VisualQueryBuilder
+                                    predicate={draftPredicate}
+                                    onSeed={seedDraftPredicate}
+                                    onCommit={commitDraft}
+                                    discovery={{
+                                        allKeys: discovery.allKeys,
+                                        keysByEntityType: discovery.keysByEntityType,
+                                        tagValues: discovery.tagValues,
+                                        getValueSamples: discovery.getValueSamples,
+                                        suggestValues: discovery.suggestValues,
+                                    }}
+                                    knownEntityTypes={knownEntityTypes}
+                                    discoveredLayers={discoveredLayers}
+                                    isRunning={isRunning}
+                                    discoveryLoading={discovery.isInitialLoading}
+                                    discoveryError={discovery.error}
+                                    freshKind={freshRowKind}
+                                    onSubmit={dispatchRun}
+                                    onOpenAdvanced={onOpenAdvanced}
+                                    onOpenCode={handleOpenCode}
+                                    enableRowSelection
+                                />
+                            </RelationProvider>
                             {/* Same surface, compact: the omnibox is how
                                 you add the 2nd filter as well as the 1st,
                                 so there's one thing to learn. */}
                             {omnibox}
                         </>
                     )
-                ) : (
+                ) : mode === 'code' ? (
                     <CodeMode
                         draft={draftPredicate}
                         isRunning={isRunning}
-                        onCommit={(p) => commitDraft(p)}
+                        onCommit={commitDraft}
+                        vocabulary={vocabulary}
                     />
+                ) : (
+                    <CypherView viewId={viewId} />
                 )}
             </div>
 
@@ -535,172 +603,6 @@ export const QueryCard: FC<QueryCardProps> = ({
 
 
 // ---------------------------------------------------------------------------
-// Code mode — DSL textarea with live parse feedback
-// ---------------------------------------------------------------------------
-
-function CodeMode({
-    draft, isRunning, onCommit,
-}: {
-    draft: Predicate | null
-    isRunning: boolean
-    onCommit: (p: Predicate | null) => void
-}) {
-    const [text, setText] = useState(() => stringifyPredicate(draft))
-    const lastDraftStr = useRef<string>(stringifyPredicate(draft))
-
-    // Mirror external draft → text only when the user hasn't edited.
-    useEffect(() => {
-        const canonical = stringifyPredicate(draft)
-        if (text === lastDraftStr.current) {
-            setText(canonical)
-        }
-        lastDraftStr.current = canonical
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [draft])
-
-    const parsed = useMemo(() => parsePredicate(text), [text])
-    const commit = useCallback(() => {
-        onCommit(parsed.predicate)
-    }, [parsed, onCommit])
-
-    return (
-        <div className="flex flex-col gap-1.5">
-            <textarea
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                onKeyDown={(e) => {
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                        e.preventDefault()
-                        commit()
-                    }
-                }}
-                onBlur={commit}
-                disabled={isRunning}
-                spellCheck={false}
-                rows={4}
-                placeholder='t2 AND (account OR opp) OR NOT T1'
-                className={cn(
-                    'w-full px-3 py-2 rounded-lg resize-none',
-                    'bg-canvas-base/60 border border-glass-border',
-                    'text-[12.5px] font-mono text-ink placeholder:text-ink-muted/60',
-                    'focus:outline-none focus:border-accent-lineage/60',
-                )}
-            />
-            <ParseFeedback
-                recognized={parsed.recognized.length}
-                fallback={parsed.fallbackText.length}
-                isEmpty={!parsed.predicate}
-                error={parsed.error}
-            />
-            <CodeModeCheatsheet />
-            <div className="text-[10.5px] text-ink-muted/70 px-1">
-                <kbd className="px-1 rounded bg-glass/40 text-ink-muted">⌘↵</kbd> or blur to apply ·{' '}
-                use <span className="font-mono text-ink">AND</span> /{' '}
-                <span className="font-mono text-ink">OR</span> /{' '}
-                <span className="font-mono text-ink">NOT</span> with parentheses
-            </div>
-        </div>
-    )
-}
-
-
-function CodeModeCheatsheet() {
-    const [open, setOpen] = useState(false)
-    return (
-        <div className={cn(
-            'rounded-md border border-glass-border/50',
-            'bg-canvas-base/40 overflow-hidden',
-        )}>
-            <button
-                type="button"
-                onClick={() => setOpen((v) => !v)}
-                className={cn(
-                    'w-full flex items-center justify-between gap-2',
-                    'px-2.5 py-1.5 text-[10.5px] text-ink-muted',
-                    'hover:bg-canvas-base/70 transition-colors',
-                )}
-            >
-                <span className="inline-flex items-center gap-1.5">
-                    <Code2 className="w-3 h-3" /> Cheat-sheet
-                </span>
-                <ArrowRight className={cn('w-3 h-3 transition-transform', open && 'rotate-90')} />
-            </button>
-            {open && (
-                <div className="px-3 py-2 text-[10.5px] text-ink-muted/95 leading-relaxed">
-                    <div className="font-mono whitespace-pre-wrap">
-{`t2                       text in name contains "t2"
-"customer orders"        quoted phrase
-name CONTAINS foo        text in name
-qname:foo                in qualifiedName
-description:foo          in description
-type:dataset             entityType IN [dataset]
-type IN (dataset, schemaField)
-tag:PII                  tag hasAny [PII]
-tag:PII,GDPR             tag hasAny [PII, GDPR]
-layer:Source             layer = "Source"
-rowCount > 1000          property gt 1000
-rowCount != 0
-hasProperty:owner        node has property "owner"
-noUpstream / noDownstream / noLineage
-hasUpstream / hasDownstream
-
-Combine with: AND, OR, NOT, parentheses, !
-
-  t2 AND (account OR opp) OR NOT T1
-  NOT tag:PII AND type:dataset
-  (rowCount > 0) AND noUpstream`}
-                    </div>
-                </div>
-            )}
-        </div>
-    )
-}
-
-
-function ParseFeedback({
-    recognized, fallback, isEmpty, error,
-}: { recognized: number; fallback: number; isEmpty: boolean; error?: string }) {
-    if (error) {
-        return (
-            <div className="flex items-start gap-1.5 px-1 text-[10.5px] text-rose-300">
-                <AlertCircle className="w-3 h-3 mt-0.5 shrink-0" />
-                <span className="leading-snug">{error}</span>
-            </div>
-        )
-    }
-    if (isEmpty) {
-        return (
-            <div className="flex items-center gap-1.5 px-1 text-[10.5px] text-ink-muted/70">
-                <AlertCircle className="w-3 h-3" />
-                Empty query — type something or paste DSL.
-            </div>
-        )
-    }
-    const parts: ReactNode[] = []
-    if (recognized > 0) {
-        parts.push(
-            <span key="r" className="inline-flex items-center gap-1 text-emerald-400/90">
-                <CheckCircle2 className="w-3 h-3" />
-                {recognized} structured filter{recognized === 1 ? '' : 's'}
-            </span>,
-        )
-    }
-    if (fallback > 0) {
-        parts.push(
-            <span key="f" className="inline-flex items-center gap-1 text-ink-muted">
-                · {fallback} word{fallback === 1 ? '' : 's'} as substring text
-            </span>,
-        )
-    }
-    return (
-        <div className="flex items-center flex-wrap gap-1 px-1 text-[10.5px]">
-            {parts}
-        </div>
-    )
-}
-
-
-// ---------------------------------------------------------------------------
 // Premium empty hero — the entire QueryCard when no filters exist
 // ---------------------------------------------------------------------------
 
@@ -716,13 +618,15 @@ function ParseFeedback({
  * working query against THEIR data, not a placeholder.
  */
 function PremiumEmptyHero({
-    omnibox, onSeed, onUseCodeMode,
+    omnibox, palette, onSeed, onUseCodeMode,
     discoveredEntityTypes, discoveredTags, discoveredLayers,
     discoveryLoading, discoveryError, propertyKeyCount,
 }: {
     /** The SearchOmnibox, owned by QueryCard so the same instance can
      *  also render beneath the rows once the query is non-empty. */
     omnibox: ReactNode
+    /** Every kind of filter, by category — the "+ Add filter" palette. */
+    palette: ReactNode
     onSeed: (p: Predicate) => void
     onUseCodeMode: () => void
     discoveredEntityTypes: string[]
@@ -860,8 +764,9 @@ function PremiumEmptyHero({
                 shape at once. It replaced a name-only quick search,
                 which was why reaching a property filter used to mean
                 composing a text search and then deleting it. */}
-            <div className="relative px-5 pb-3">
+            <div className="relative px-5 pb-3 flex flex-col gap-2">
                 {omnibox}
+                <div>{palette}</div>
             </div>
 
             {/* Examples — the teaching surface. The omnibox above is
@@ -1465,7 +1370,28 @@ function RunButton({
 // ---------------------------------------------------------------------------
 
 const RUN_MODE_KEY = 'synodic.advancedSearch.runMode'
+const EDITOR_MODE_KEY = 'synodic.advancedSearch.editorMode'
 type RunMode = 'auto' | 'manual'
+
+/** Visual, Code or Cypher, as this browser last left it — the card
+ *  remounts each time the Advanced drawer closes, and a power user's Code
+ *  mode with it. */
+function useEditorMode(): [ViewMode, (next: ViewMode) => void] {
+    const [mode, setMode] = useState<ViewMode>(() => {
+        try {
+            const saved = localStorage.getItem(EDITOR_MODE_KEY)
+            return saved === 'code' || saved === 'cypher' ? saved : 'visual'
+        } catch {
+            return 'visual'
+        }
+    })
+    const update = useCallback((next: ViewMode) => {
+        setMode(next)
+        try { localStorage.setItem(EDITOR_MODE_KEY, next) } catch { /* ignore */ }
+    }, [])
+    return [mode, update]
+}
+
 
 function useRunMode(): [RunMode, (next: RunMode) => void] {
     const [mode, setMode] = useState<RunMode>(() => {

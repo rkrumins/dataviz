@@ -299,6 +299,39 @@ class TestSafePropertyName:
 # ---------------------------------------------------------------------------
 
 class TestServiceValidator:
+    @staticmethod
+    def _hops_with_edge_filter(edge):
+        return SearchQuery(
+            predicate=GroupPredicate(op="and", children=[
+                WithinHopsPredicate.model_validate(
+                    {"urns": ["urn:a"], "hops": 2, "edgePredicate": edge}),
+            ]),
+            scope=_TEST_SCOPE,
+        )
+
+    def test_edge_filters_nest_three_groups_deep(self):
+        leaf = {"kind": "edgeHasProperty", "key": "k"}
+        three = {"kind": "edgeGroup", "children": [
+            {"kind": "edgeGroup", "children": [
+                {"kind": "edgeGroup", "children": [leaf]}]}]}
+        _count_and_validate(self._hops_with_edge_filter(three))
+        four = {"kind": "edgeGroup", "children": [three]}
+        with pytest.raises(ValidationError, match=r"edgePredicate.*nests edge groups"):
+            _count_and_validate(self._hops_with_edge_filter(four))
+
+    def test_edge_filters_hold_at_most_sixteen_conditions(self):
+        leaves = [{"kind": "edgeHasProperty", "key": f"k{i}"} for i in range(17)]
+        with pytest.raises(ValidationError, match=r"17 conditions \(max 16\)"):
+            _count_and_validate(self._hops_with_edge_filter(
+                {"kind": "edgeGroup", "op": "or", "children": leaves}))
+
+    def test_a_not_edge_group_takes_one_condition(self):
+        with pytest.raises(ValidationError, match="exactly one"):
+            _count_and_validate(self._hops_with_edge_filter(
+                {"kind": "edgeGroup", "op": "not", "children": [
+                    {"kind": "edgeHasProperty", "key": "a"},
+                    {"kind": "edgeHasProperty", "key": "b"}]}))
+
     def test_leaf_only_passes(self):
         q = SearchQuery(
             predicate=TextPredicate(value="x", target="name"),
@@ -1260,24 +1293,85 @@ class TestCompilerPath:
         ))
         assert c.hoisted_path["direction"] == "incoming"
 
+    @staticmethod
+    def _path(direction="outgoing", max_hops=4, edge_where="", **ends):
+        return {"direction": direction, "max_hops": max_hops, "edge_types": ["A", "B"],
+                "edge_where": edge_where, "source_where": None, "target_where": None,
+                **ends}
+
     def test_path_cypher_outgoing(self):
         from backend.app.providers.falkordb_deep_search import _build_path_cypher
-        cy = _build_path_cypher(direction="outgoing", max_hops=4)
-        # Direction-aware pattern, edge filter is in WHERE not in the
-        # pattern (avoids the "filtered alias" FalkorDB issue).
-        assert "(s)-[*1..4]->(t)" in cy
-        assert "type(rel) IN $_pathEdgeTypes" in cy
+        cy = _build_path_cypher(self._path(max_hops=4), anchor="sources")
+        # The named sources sought by ID, the edge types walked in the
+        # pattern, the named targets by ID; a route passes no entity twice.
+        assert cy.startswith("UNWIND $_pathSrcIds AS _ps MATCH (s) WHERE ID(s) = _ps "
+                             "MATCH p = (s)-[:A|B*1..4]->(t) WHERE size(nodes(p)) = ")
+        assert "ID(t) IN $_pathTgtIds" in cy
 
     def test_path_cypher_incoming(self):
         from backend.app.providers.falkordb_deep_search import _build_path_cypher
-        cy = _build_path_cypher(direction="incoming", max_hops=3)
-        assert "(s)<-[*1..3]-(t)" in cy
+        cy = _build_path_cypher(self._path("incoming", 3), anchor="sources")
+        assert "(s)<-[:A|B*1..3]-(t)" in cy
 
     def test_path_cypher_any(self):
         from backend.app.providers.falkordb_deep_search import _build_path_cypher
-        cy = _build_path_cypher(direction="any", max_hops=2)
+        cy = _build_path_cypher(self._path("any", 2), anchor="sources")
         # Undirected variable-length pattern
-        assert "(s)-[*1..2]-(t)" in cy
+        assert "(s)-[:A|B*1..2]-(t)" in cy
+
+    def test_a_path_from_a_condition_starts_at_its_named_targets(self):
+        from backend.app.providers.falkordb_deep_search import _build_path_cypher
+        cy = _build_path_cypher(self._path(source_where=["S0", "S1"]), anchor="targets")
+        assert cy.startswith("UNWIND $_pathTgtIds AS _pt MATCH (t) WHERE ID(t) = _pt "
+                             "MATCH p = (s)-[:A|B*1..4]->(t) WHERE ")
+        assert ("WITH p, s, t, S0 AS _xz0 WHERE _xz0 WITH p, s, t, S1 AS _xz1 WHERE _xz1 "
+                "WITH p, s, t WITH p LIMIT $_pathMaxPaths") in cy
+        assert "$_pathSrcIds" not in cy
+
+    def test_a_path_between_conditions_starts_in_the_scope(self):
+        from backend.app.providers.falkordb_deep_search import _build_path_cypher
+        cy = _build_path_cypher(self._path(source_where=["S"], target_where=["T"]),
+                                anchor="scope", scope_head="SCOPE")
+        assert cy.startswith("SCOPE WITH s, S AS _xa0 WHERE _xa0 WITH s MATCH p = ")
+        assert "WITH p, s, t, T AS _xz0 WHERE _xz0" in cy and "_pathTgtIds" not in cy
+
+    def test_edge_filter_values_reach_the_path_query(self):
+        """A value edge filter compiles to ``$pN``: the path statement must
+        bind it, or FalkorDB refuses the query for a missing parameter."""
+        import re
+
+        from backend.app.providers.falkordb_deep_search import execute_deep_search
+        from backend.common.models.search import EdgePropertyPredicate
+
+        sent = []
+
+        class _Provider:
+            def _get_lineage_edge_types(self):
+                return ["LINEAGE"]
+
+            def _get_containment_edge_types(self):
+                return ["CONTAINS"]
+
+            async def _ro_query(self, cypher, *, params=None, timeout=None):
+                sent.append((cypher, params or {}))
+                # One label, and every urn found: the path statement runs.
+                rows = ([["L"]] if "db.labels" in cypher
+                        else [[1]] if "RETURN ID(r)" in cypher else [])
+                return type("R", (), {"result_set": rows})()
+
+        query = SearchQuery(
+            predicate=PathPredicate(
+                source_urns=["urn:a"], target_urns=["urn:b"],
+                edgePredicate=EdgePropertyPredicate(
+                    key="confidence", op="gte", value=0.9, valueType="number"),
+            ),
+            scope=_TEST_SCOPE, options=SearchOptions(results="paths"),
+        )
+        asyncio.run(execute_deep_search(_Provider(), query))
+        cypher, params = sent[-1]
+        assert cypher.startswith("UNWIND $_pathSrcIds")
+        wanted = set(re.findall(r"\$(p\d+)", cypher))
+        assert wanted and wanted <= set(params)
 
 
 class TestCompilerGroups:
@@ -1858,6 +1952,20 @@ class TestCandidateCypher:
         assert "MATCH (n) WHERE" not in cypher
         assert "n.tags CONTAINS" in cypher
         assert f"WITH n LIMIT {CANDIDATE_CAP}" in cypher
+
+    def test_within_hops_narrows_before_the_cap(self):
+        """After the cap, the hop check would drop capped candidates and
+        never see the matches past the cap."""
+        hops = ("MATCH _whP0 = (anchor)-[:LINEAGE*1..2]->(n) "
+                "WHERE anchor.urn IN $_whUrns0 WITH DISTINCT n")
+        cypher = _build_candidate_cypher(
+            where_fragment="n.x = $p0",
+            entity_types_param=False,
+            candidate_cap=CANDIDATE_CAP,
+            within_hops_continuation=hops,
+        )
+        assert cypher == (f"MATCH (n) WHERE n.x = $p0 {hops} "
+                          f"WITH n LIMIT {CANDIDATE_CAP}")
 
 
 # ---------------------------------------------------------------------------
@@ -2489,11 +2597,11 @@ class TestEdgePredicateCompile:
             "rel.`confidence`", "eq", 0.5)
         assert c.params == {"p0": 0.5}
 
-    def test_edge_property_predicate_with_spaces(self):
-        """Per-call-site coverage: EdgePropertyPredicate (compile
-        site at falkordb_deep_search.py line ~650). Edge properties
-        with spaces — e.g. ``Edge Weight`` from a Looker / Tableau
-        export — must work the same as node properties."""
+    def test_a_users_edge_property_is_read_from_the_edges_json(self):
+        """An edge keeps a user's properties as JSON text (ADR-026): equal
+        is ``"key": <value>`` followed by a comma or ending the object — a
+        key with spaces, like ``Edge Weight`` from a Looker export,
+        included."""
         c = _degree_compiler()
         c.compile(PathPredicate.model_validate({
             "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
@@ -2501,9 +2609,48 @@ class TestEdgePredicateCompile:
                               "key": "Edge Weight", "op": "eq",
                               "value": 0.5},
         }))
-        assert (c.hoisted_path["edge_where"], c.params) == _typed(
-            "rel.`Edge Weight`", "eq", 0.5)
-        assert c.params == {"p0": 0.5}
+        raw = "coalesce(rel.properties, '')"
+        assert c.hoisted_path["edge_where"] == (
+            f"({raw} CONTAINS $p0 OR {raw} ENDS WITH $p1)")
+        assert c.params == {"p0": '"Edge Weight": 0.5,', "p1": '"Edge Weight": 0.5}'}
+
+    def test_a_whole_number_and_ignoring_case(self):
+        c = _degree_compiler()
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {"kind": "edgeGroup", "op": "and", "children": [
+                {"kind": "edgeProperty", "key": "rows", "op": "eq", "value": 5,
+                 "valueType": "number"},
+                {"kind": "edgeProperty", "key": "mode", "op": "in",
+                 "value": ["Stream", "batch"], "valueType": "string"}]},
+        }))
+        rows, mode = c.hoisted_path["edge_where"][1:-1].split(" AND ")
+        assert rows.count("CONTAINS") == 2      # 5 and 5.0
+        assert mode.startswith("(toLower(coalesce(rel.properties, '')) CONTAINS $p")
+        assert {'"mode": "stream",', '"mode": "batch"}'} <= set(c.params.values())
+
+    def test_is_not_passes_a_missing_key_only_when_asked(self):
+        def where(include_missing):
+            c = _degree_compiler()
+            c.compile(PathPredicate.model_validate({
+                "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+                "edgePredicate": {"kind": "edgeProperty", "key": "mode", "op": "neq",
+                                  "value": "x", "includeMissing": include_missing},
+            }))
+            return c.hoisted_path["edge_where"]
+
+        assert where(True).startswith("NOT (toLower(")
+        assert where(False).startswith(
+            "(coalesce(rel.properties, '') CONTAINS $p2 AND NOT (toLower(")
+
+    def test_a_users_edge_property_takes_presence_and_equality_only(self):
+        c = _degree_compiler()
+        with pytest.raises(CompileError, match="kept in the edge's JSON.*'gt'"):
+            c.compile(PathPredicate.model_validate({
+                "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+                "edgePredicate": {"kind": "edgeProperty", "key": "rows", "op": "gt",
+                                  "value": 5},
+            }))
 
     def test_edge_property_between(self):
         c = _degree_compiler()
@@ -2534,7 +2681,16 @@ class TestEdgePredicateCompile:
             "edgePredicate": {"kind": "edgeHasProperty",
                               "key": "verified"},
         }))
-        assert c.hoisted_path["edge_where"] == "EXISTS(rel.`verified`)"
+        assert c.hoisted_path["edge_where"] == "coalesce(rel.properties, '') CONTAINS $p0"
+        assert c.params == {"p0": '"verified": '}
+
+    def test_a_native_edge_field_is_tested_where_it_is_stored(self):
+        c = _degree_compiler()
+        c.compile(PathPredicate.model_validate({
+            "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
+            "edgePredicate": {"kind": "edgeHasProperty", "key": "confidence"},
+        }))
+        assert c.hoisted_path["edge_where"] == "EXISTS(rel.`confidence`)"
 
     def test_edge_has_property_negate(self):
         c = _degree_compiler()
@@ -2543,21 +2699,20 @@ class TestEdgePredicateCompile:
             "edgePredicate": {"kind": "edgeHasProperty",
                               "key": "verified", "negate": True},
         }))
-        assert c.hoisted_path["edge_where"] == "NOT (EXISTS(rel.`verified`))"
+        assert c.hoisted_path["edge_where"] == (
+            "NOT (coalesce(rel.properties, '') CONTAINS $p0)")
 
     def test_edge_has_property_predicate_with_spaces(self):
-        """Per-call-site coverage: EdgeHasPropertyPredicate (compile
-        site at falkordb_deep_search.py line ~683). Edge attributes
-        like ``Last Verified`` (timestamp) need the same backtick
-        treatment as node properties — common in lineage edges
-        annotated with audit timestamps."""
+        """Edge attributes like ``Last Verified`` (timestamp) — common in
+        lineage edges annotated with audit timestamps — are found by their
+        JSON key, spaces and all."""
         c = _degree_compiler()
         c.compile(PathPredicate.model_validate({
             "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"],
             "edgePredicate": {"kind": "edgeHasProperty",
                               "key": "Last Verified"},
         }))
-        assert c.hoisted_path["edge_where"] == "EXISTS(rel.`Last Verified`)"
+        assert c.params == {"p0": '"Last Verified": '}
 
     def test_edge_group_and(self):
         c = _degree_compiler()
@@ -2573,7 +2728,8 @@ class TestEdgePredicateCompile:
             },
         }))
         typed, _ = _typed("rel.`confidence`", "gt", 0.9)
-        assert c.hoisted_path["edge_where"] == f"({typed} AND EXISTS(rel.`producedBy`))"
+        assert c.hoisted_path["edge_where"] == (
+            f"({typed} AND coalesce(rel.properties, '') CONTAINS $p1)")
 
     def test_edge_group_or(self):
         c = _degree_compiler()
@@ -2598,32 +2754,20 @@ class TestEdgePredicateCompile:
                 "children": [{"kind": "edgeHasProperty", "key": "stale"}],
             },
         }))
-        assert c.hoisted_path["edge_where"] == "NOT (EXISTS(rel.`stale`))"
+        assert c.hoisted_path["edge_where"] == (
+            "NOT (coalesce(rel.properties, '') CONTAINS $p0)")
 
     def test_path_cypher_injects_edge_predicate(self):
         from backend.app.providers.falkordb_deep_search import _build_path_cypher
         cy = _build_path_cypher(
-            direction="outgoing", max_hops=3,
-            edge_where="rel.confidence > $p0",
-        )
-        # The edge predicate is AND-joined with the type filter inside
-        # the single ALL(rel IN relationships(p) WHERE …) clause — keeps
-        # us to one pass over the path's edges.
-        assert (
-            "ALL(rel IN relationships(p) WHERE type(rel) IN "
-            "$_pathEdgeTypes AND (rel.confidence > $p0))"
-        ) in cy
+            TestCompilerPath._path(max_hops=3, edge_where="rel.confidence > $p0"),
+            anchor="sources")
+        assert "ALL(rel IN relationships(p) WHERE rel.confidence > $p0)" in cy
 
     def test_path_cypher_without_edge_predicate(self):
-        # Regression: an empty edge_where leaves the existing Cypher
-        # unchanged so callers that don't pass it see no behaviour shift.
         from backend.app.providers.falkordb_deep_search import _build_path_cypher
-        cy = _build_path_cypher(direction="outgoing", max_hops=3, edge_where="")
-        assert (
-            "ALL(rel IN relationships(p) WHERE type(rel) IN "
-            "$_pathEdgeTypes)"
-        ) in cy
-        assert " AND (" not in cy.split("ALL(rel IN")[1].split(")")[0]
+        cy = _build_path_cypher(TestCompilerPath._path(max_hops=3), anchor="sources")
+        assert "ALL(rel IN relationships(p)" not in cy
 
     def test_within_hops_continuation_named_path(self):
         # When edge_predicate is present, the variable-length pattern

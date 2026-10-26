@@ -33,6 +33,7 @@ import { PathResultPanel } from '../PathResultPanel'
 import { HIT_ROW_ID_PREFIX } from '../SearchHitRow'
 import { ZeroResultsDiagnostic } from '../ZeroResultsDiagnostic'
 import { useViewSearchSessionOptional } from '../session/ViewSearchSessionContext'
+import { ShownQueryContext } from '../session/shownQueryContext'
 
 import { ErrorView } from './ErrorView'
 import { HitsByLayer, groupHitsByLayer } from './HitsByLayer'
@@ -155,19 +156,21 @@ function Dispatch({
             return <ErrorView message={view.message} />
         case 'results':
             return (
-                <ResultsContent
-                    view={view}
-                    viewId={viewId}
-                    onScopeToGroup={onScopeToGroup}
-                    onReveal={onReveal}
-                    onOpen={onOpen}
-                    onLoadMore={onLoadMore}
-                    isLoadingMore={isLoadingMore}
-                    onLoadAll={onLoadAll}
-                    isLoadingAll={isLoadingAll}
-                    onCancelLoadAll={onCancelLoadAll}
-                    scrollElementRef={scrollElementRef}
-                />
+                <ShownQueryContext.Provider value={view.query.predicate}>
+                    <ResultsContent
+                        view={view}
+                        viewId={viewId}
+                        onScopeToGroup={onScopeToGroup}
+                        onReveal={onReveal}
+                        onOpen={onOpen}
+                        onLoadMore={onLoadMore}
+                        isLoadingMore={isLoadingMore}
+                        onLoadAll={onLoadAll}
+                        isLoadingAll={isLoadingAll}
+                        onCancelLoadAll={onCancelLoadAll}
+                        scrollElementRef={scrollElementRef}
+                    />
+                </ShownQueryContext.Provider>
             )
         default:
             return null

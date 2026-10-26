@@ -88,3 +88,15 @@ describe('ZeroResultsDiagnostic — a search that ran out of time', () => {
         expect(screen.queryByText(/Nothing in this view/)).not.toBeInTheDocument()
     })
 })
+
+
+describe('ZeroResultsDiagnostic — a name that names nothing', () => {
+    it('says which name path named no entity, and how paths are spelled', () => {
+        renderCard(undefined, { ...EMPTY, scopeDiagnostics: {
+            effectiveRootUrns: [], droppedRootUrns: [], lineageEdgeTypes: ['FLOWS_TO'],
+            containmentEdgeTypes: ['CONTAINS'], effectiveEntityTypes: [], effectiveMaxDepth: 12, notes: [],
+            resolvedRefs: [{ at: '$.refs[0]', ref: 'Contry / UK', count: 0, ambiguous: false }],
+        } } as unknown as SearchResultPage)
+        expect(screen.getByText(/“Contry \/ UK” names no/)).toBeInTheDocument()
+    })
+})

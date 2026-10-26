@@ -59,6 +59,9 @@ GOLDEN = {
                     {"kind": "withinHops", "urns": ["urn:pred-hops"], "hops": 2, "edgeTypes": ["FEEDS"]},
                     {"kind": "path", "sourceUrns": ["urn:pred-src"], "targetUrns": ["urn:pred-dst"]},
                     {"kind": "entityType", "op": "in", "values": ["report"]},
+                    {"kind": "is", "refs": [
+                        {"urn": "urn:pred-is"},
+                        {"path": ["Country", "United Kingdom"], "entityType": "region"}]},
                 ]},
             }],
         },
@@ -70,7 +73,7 @@ def test_collect_finds_every_location():
     refs = collect(GOLDEN)
     assert set(refs.urns) == {
         "urn:a", "urn:b", "urn:anchor", "urn:exact-rule", "urn:node-rule", "urn:root",
-        "urn:pred-desc", "urn:pred-hops", "urn:pred-src", "urn:pred-dst",
+        "urn:pred-desc", "urn:pred-hops", "urn:pred-src", "urn:pred-dst", "urn:pred-is",
     }
     assert refs.urns["urn:anchor"] == {"anchor"}
     assert refs.urns["urn:exact-rule"] == {"rule"}
@@ -79,7 +82,7 @@ def test_collect_finds_every_location():
     assert refs.urn_patterns == {"urn:li:*"}
     assert refs.entity_types == {
         "domain", "dataset", "column", "dashboard", "system", "table", "schema", "platform",
-        "job", "pipeline", "task", "report",
+        "job", "pipeline", "task", "report", "region",
     }
     assert refs.relationship_types == {"CONTAINS", "PRODUCES", "BELONGS_TO", "HAS_CHILD", "SKIP", "FEEDS"}
     assert urns_of_kind(refs, "assignment") == ["urn:a", "urn:b"]
@@ -117,6 +120,26 @@ def test_drop_removes_urns_but_never_empties_a_predicate():
     assert desc["urns"] == ["urn:pred-desc"], "predicates are remapped, never pruned"
 
 
+def test_name_paths_travel_as_they_are():
+    """A path of names means the same thing in the target environment; only
+    the type narrowing it follows the type map."""
+    out = rewrite(GOLDEN, Rewrite(urn_map={"urn:pred-is": "urn:pred-is-prod"},
+                                  type_map={"region": "Region"}))
+    refs = out["layout"]["referenceLayout"]["displayRules"][0]["predicate"]["children"][-1]["refs"]
+    assert refs == [{"urn": "urn:pred-is-prod"},
+                    {"path": ["Country", "United Kingdom"], "entityType": "Region"}]
+
+
+def test_nested_conditions_are_walked():
+    definition = copy.deepcopy(GOLDEN)
+    definition["layout"]["referenceLayout"]["displayRules"][0]["predicate"] = {
+        "kind": "related", "axis": "parent",
+        "where": {"kind": "group", "children": [{"kind": "is", "refs": [{"urn": "urn:inner"}]}]}}
+    assert "urn:inner" in collect(definition).urns
+    out = rewrite(definition, Rewrite(urn_map={"urn:inner": "urn:inner-prod"}))
+    assert "urn:inner-prod" in collect(out).urns
+
+
 def test_remap_onto_an_assigned_urn_keeps_the_existing_placement():
     out = rewrite(GOLDEN, Rewrite(urn_map={"urn:a": "urn:b"}))
     assignments = out["layout"]["referenceLayout"]["assignments"]
@@ -148,7 +171,7 @@ def test_stats():
     stats = definition_stats(GOLDEN)
     assert stats == {
         "layers": 1, "assignments": 2, "anchors": 1, "rules": 4, "logicalNodes": 2,
-        "displayRules": 1, "entityTypes": 12, "relationshipTypes": 6,
+        "displayRules": 1, "entityTypes": 13, "relationshipTypes": 6,
     }
 
 

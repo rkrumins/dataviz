@@ -43,6 +43,8 @@ import {
     type CanvasFilterMode,
 } from '@/store/searchStore'
 
+import { readableSearchError } from './errorPaths'
+
 
 export interface MatchBarProps {
     /** Total matches reported by the backend (may exceed
@@ -379,9 +381,9 @@ function CountReadout({
             ) : isError ? (
                 <span
                     className="text-[12px] text-rose-600 dark:text-rose-300 truncate font-medium"
-                    title={errorMessage ?? ''}
+                    title={errorMessage ? readableSearchError(errorMessage) : ''}
                 >
-                    Error · {errorMessage}
+                    Error · {errorMessage && readableSearchError(errorMessage)}
                 </span>
             ) : count !== null ? (
                 <>

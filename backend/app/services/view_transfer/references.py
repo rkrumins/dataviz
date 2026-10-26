@@ -38,6 +38,11 @@ URN_KIND_ROOT = "root"
 URN_KIND_PREDICATE = "predicate"
 
 _PREDICATE_URN_KEYS = ("urns", "sourceUrns", "source_urns", "targetUrns", "target_urns")
+# Name references: a URN in one is remapped like any predicate URN, and its
+# entity type like any type; a name path travels as it is — the point of one.
+_PREDICATE_REF_KEYS = ("refs", "sourceRefs", "source_refs", "targetRefs", "target_refs")
+# Where a predicate nests another (a relationship's condition, a path's ends).
+_PREDICATE_NESTED_KEYS = ("where", "targetWhere", "target_where", "sourceWhere", "source_where")
 _PREDICATE_EDGE_TYPE_KEYS = ("edgeTypes", "edge_types")
 _RULE_CRITERIA = ("entityTypes", "tags", "propertyMatch", "conditions")
 
@@ -125,8 +130,14 @@ def _each_predicate_node(definition: Any) -> Iterable[dict]:
         if isinstance(node, dict):
             yield node
             stack.extend(_list(node.get("children")))
+            stack.extend(node[key] for key in _PREDICATE_NESTED_KEYS if isinstance(node.get(key), dict))
         elif isinstance(node, list):
             stack.extend(node)
+
+
+def _predicate_refs(node: dict) -> Iterable[dict]:
+    for key in _PREDICATE_REF_KEYS:
+        yield from (ref for ref in _list(node.get(key)) if isinstance(ref, dict))
 
 
 # ── collect ─────────────────────────────────────────────────────────────────
@@ -184,6 +195,10 @@ def collect(definition: Any) -> References:
         for key in _PREDICATE_URN_KEYS:
             for urn in _list(node.get(key)):
                 refs.add_urn(urn, URN_KIND_PREDICATE)
+        for ref in _predicate_refs(node):
+            refs.add_urn(ref.get("urn"), URN_KIND_PREDICATE)
+            if isinstance(ref.get("entityType"), str) and ref["entityType"]:
+                refs.entity_types.add(ref["entityType"])
         if node.get("kind") == "entityType":
             refs.entity_types.update(t for t in _list(node.get("values")) if isinstance(t, str) and t)
         for key in _PREDICATE_EDGE_TYPE_KEYS:
@@ -321,6 +336,11 @@ def rewrite(definition: Any, rw: Rewrite) -> dict:
     for node in _each_predicate_node(d):
         for key in _PREDICATE_URN_KEYS:
             _map_predicate_list(node, key, rw.urn_map)
+        for ref in _predicate_refs(node):
+            if ref.get("urn") in rw.urn_map:
+                ref["urn"] = rw.urn_map[ref["urn"]]
+            if ref.get("entityType") in rw.type_map:
+                ref["entityType"] = rw.type_map[ref["entityType"]]
         if node.get("kind") == "entityType":
             _map_predicate_list(node, "values", rw.type_map)
         for key in _PREDICATE_EDGE_TYPE_KEYS:
