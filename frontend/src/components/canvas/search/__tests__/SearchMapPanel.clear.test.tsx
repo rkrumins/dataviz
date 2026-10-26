@@ -10,6 +10,7 @@
  * never asks again. Clear has to be the session's own teardown.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 
 import { ProviderOverride } from '@/providers/GraphProviderContext'
@@ -54,6 +55,7 @@ function renderPanel(onClear?: () => void) {
         onClear={onClear}
       />
     </ProviderOverride>,
+        { wrapper: MemoryRouter },
   )
 }
 

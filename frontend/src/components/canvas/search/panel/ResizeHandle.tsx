@@ -5,6 +5,9 @@
  *
  * The handle is invisible by default and surfaces a subtle accent
  * stripe on hover/drag — premium feel without visual noise.
+ *
+ * From the keyboard it is a window splitter: the arrows step it (Shift
+ * for bigger steps), Home and End take it to the narrowest and widest.
  */
 import { type FC, useCallback, useEffect, useRef, useState } from 'react'
 
@@ -15,6 +18,8 @@ const STORAGE_KEY = 'advanced-search:panel-width'
 const MIN_WIDTH = 380
 const MAX_WIDTH = 900
 const DEFAULT_WIDTH = 480
+const KEY_STEP = 16
+const KEY_STEP_BIG = 80
 
 
 /** Persisted user-chosen width, clamped on read so a bad localStorage
@@ -95,24 +100,48 @@ export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize }) => {
         }
     }, [dragging, onResize])
 
+    const handleKeyDown = (e: React.KeyboardEvent) => {
+        const step = e.shiftKey ? KEY_STEP_BIG : KEY_STEP
+        const target = e.key === 'ArrowRight' ? width + step
+            : e.key === 'ArrowLeft' ? width - step
+                : e.key === 'Home' ? MIN_WIDTH
+                    : e.key === 'End' ? MAX_WIDTH
+                        : null
+        if (target === null) return
+        e.preventDefault()
+        const next = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, target))
+        onResize(next)
+        try {
+            window.localStorage.setItem(STORAGE_KEY, String(next))
+        } catch {
+            // ignore
+        }
+    }
+
     return (
         <div
             role="separator"
             aria-orientation="vertical"
             aria-label="Resize search panel"
+            aria-valuenow={width}
+            aria-valuemin={MIN_WIDTH}
+            aria-valuemax={MAX_WIDTH}
+            aria-valuetext={`${width} pixels wide`}
+            tabIndex={0}
             onPointerDown={handlePointerDown}
+            onKeyDown={handleKeyDown}
             className={cn(
                 "absolute top-0 right-0 z-30 h-full",
                 "w-1.5 -mr-0.5 cursor-col-resize",
                 "group flex items-center justify-center",
-                "select-none touch-none",
+                "select-none touch-none focus-visible:outline-none",
             )}
         >
             <div className={cn(
                 "h-16 w-0.5 rounded-full transition-all",
                 dragging
                     ? "bg-accent-lineage shadow-[0_0_8px_rgba(99,102,241,0.6)]"
-                    : "bg-transparent group-hover:bg-accent-lineage/40",
+                    : "bg-transparent group-hover:bg-accent-lineage/40 group-focus-visible:bg-accent-lineage",
             )} />
         </div>
     )

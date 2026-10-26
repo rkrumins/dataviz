@@ -84,6 +84,9 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     // page offers to MINT a key, and offering one the server then refuses is
     // worse than a Create button that appears a moment late.
     apiKeysEnabled: false,
+    // Fail CLOSED, as the server does: offering Edit and run only for the
+    // server to refuse it is worse than a button that appears a moment late.
+    nativeQueryEnabled: false,
     toursEnabled: false,                  // experimental preview — ships OFF
     canvasLayerFoldEnabled: false,        // experimental preview — ships OFF
     placementContractEnabled: false,      // experimental preview — ships OFF

@@ -138,6 +138,7 @@ class CompiledRule:
     glob: Optional[re.Pattern]
     comparisons: Tuple[Tuple[str, Comparison], ...]
     cascades_soft: bool             # inheritsFromParent !== false
+    urn_pattern: Optional[str] = None  # the glob ``glob`` was compiled from
 
     def matches(self, facts: NodeFacts) -> bool:
         if self.types is not None and fold_case(facts.entity_type) not in self.types:
@@ -187,7 +188,8 @@ class PlacementSpec:
                 priority = _num(rule.get("priority"))
                 rules.append(CompiledRule(
                     rule_id, layer_id, priority, (-priority, order, position, index), *criteria,
-                    cascades_soft=rule.get("inheritsFromParent") is not False))
+                    cascades_soft=rule.get("inheritsFromParent") is not False,
+                    urn_pattern=rule["urnPattern"] if criteria[2] is not None else None))
             # layer.entityTypes: priority-0 rules after the layer's authored ones.
             for offset, t in enumerate(dict.fromkeys(_strings(raw.get("entityTypes")))):
                 rules.append(CompiledRule(
@@ -222,6 +224,15 @@ class PlacementSpec:
 
     def with_scope(self, scope: str) -> "PlacementSpec":
         return replace(self, scope=scope)
+
+
+@dataclass(frozen=True)
+class LayerTarget:
+    """A search's layer filter resolved against its view: the view's compiled placement and the
+    layer the filter names. ``digest`` identifies the placement's inputs, for result caches."""
+    spec: PlacementSpec
+    layer_id: str
+    digest: str
 
 
 def _num(v: Any) -> Any:

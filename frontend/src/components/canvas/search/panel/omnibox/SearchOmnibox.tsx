@@ -29,15 +29,18 @@
  * (``AddFilterPalette``) is 871 lines with no keyboard navigation at all.
  */
 import { Command } from 'cmdk'
-import { CornerDownLeft, Search, SlidersHorizontal, X } from 'lucide-react'
+import { CornerDownLeft, Search, X } from 'lucide-react'
 import { type FC, useCallback, useMemo, useRef, useState } from 'react'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { HighlightedText } from '@/components/ui/HighlightedText'
+import { edgeTypeCopy } from '@/lib/relationshipLabel'
 import { cn } from '@/lib/utils'
+import { useContainmentEdgeTypes, useRelationshipTypes } from '@/store/schema'
 import type { Predicate } from '@/types/search'
 
 import type { LayerOption } from '../layerOptions'
+import { edgeTypeName } from '../vocabulary/edgeWords'
 
 import {
     BROWSE_FACETS,
@@ -53,9 +56,6 @@ export interface SearchOmniboxProps {
      *  predicate still wants a value, so the caller can focus the new
      *  row's editor. */
     onAdd: (predicate: Predicate, complete: boolean) => void
-    /** Open the full filter taxonomy (AddFilterPalette) for the long
-     *  tail this fast path deliberately doesn't carry. */
-    onBrowseAll?: () => void
     entityTypes: ReadonlyArray<string>
     tagValues: ReadonlyArray<string>
     propertyKeys: ReadonlyArray<string>
@@ -74,7 +74,7 @@ export interface SearchOmniboxProps {
 
 
 export const SearchOmnibox: FC<SearchOmniboxProps> = ({
-    onAdd, onBrowseAll, entityTypes, tagValues, propertyKeys,
+    onAdd, entityTypes, tagValues, propertyKeys,
     valueSamples, layers, variant = 'hero', initialQuery = '',
     discoveryLoading = false, disabled = false,
 }) => {
@@ -82,11 +82,20 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
     const [activeGroup, setActiveGroup] = useState<SuggestionGroup | null>(null)
     const [focused, setFocused] = useState(false)
     const inputRef = useRef<HTMLInputElement>(null)
+    // The edge types a connection can walk: every one but the hierarchy's.
+    const relationshipTypes = useRelationshipTypes()
+    const containment = useContainmentEdgeTypes()
+    const edgeTypes = useMemo(() => {
+        const contains = new Set(containment.map((t) => t.toUpperCase()))
+        return relationshipTypes
+            .filter((rt) => !rt.isContainment && !contains.has(rt.id.toUpperCase()))
+            .map((rt) => ({ id: rt.id, name: edgeTypeCopy(rt.id)?.label ?? (rt.name || edgeTypeName(rt.id)) }))
+    }, [relationshipTypes, containment])
 
     const sections = useMemo(() => suggestFilters({
         query, entityTypes, tagValues, propertyKeys, valueSamples,
-        layers, activeGroup,
-    }), [query, entityTypes, tagValues, propertyKeys, valueSamples, layers, activeGroup])
+        layers, edgeTypes, activeGroup,
+    }), [query, entityTypes, tagValues, propertyKeys, valueSamples, layers, edgeTypes, activeGroup])
 
     const handleSelect = useCallback((item: FilterSuggestion) => {
         onAdd(item.predicate, item.complete)
@@ -217,21 +226,6 @@ export const SearchOmnibox: FC<SearchOmniboxProps> = ({
                                     {facet.label}
                                 </button>
                             ))}
-                            {onBrowseAll && (
-                                <button
-                                    type="button"
-                                    onClick={onBrowseAll}
-                                    className={cn(
-                                        'inline-flex items-center gap-1 h-6 px-2 rounded-md ml-auto',
-                                        'text-[10.5px] font-medium',
-                                        'text-ink-muted hover:text-ink hover:bg-glass/70',
-                                        'transition-colors',
-                                    )}
-                                >
-                                    <SlidersHorizontal className="w-3 h-3" />
-                                    All filters
-                                </button>
-                            )}
                         </div>
                     )}
 

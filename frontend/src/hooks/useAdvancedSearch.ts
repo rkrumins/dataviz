@@ -61,6 +61,7 @@ import {
     type SearchTemplate,
 } from '@/components/canvas/search/searchTemplates'
 import { stringifyPredicate } from '@/components/canvas/search/panel/predicateDsl'
+import { currentScope, requestPredicate } from '@/components/canvas/search/searchRequest'
 import { recordEvent } from '@/services/telemetryService'
 
 
@@ -74,7 +75,7 @@ const RECENTABLE_KINDS = new Set([
     'group', 'text', 'property', 'tag', 'hasProperty',
     'entityType', 'layer', 'descendantOf', 'withinHops',
     'degree', 'isOrphan', 'isLeaf', 'isRoot',
-    'hasIncoming', 'hasOutgoing',
+    'hasIncoming', 'hasOutgoing', 'related', 'is',
 ])
 
 function isRecentablePredicate(p: Predicate): boolean {
@@ -571,48 +572,13 @@ export function useAdvancedSearch(
          inputs: Record<string, string | number>): SearchQuery => {
             const raw = template.build(inputs)
             // ALWAYS stamp the viewId — the backend's ViewScopeResolver
-            // requires it on every request.
-            const scopeMode = useSearchStore.getState().scopeMode
-
-            // Read live canvas state at call time so we don't capture
-            // stale closures.
-            const canvas = useCanvasStore.getState()
-
-            // Collect the visible URN set straight from the canvas
-            // store. Always attach when mode='visible' so the backend
-            // doesn't have to guess.
-            const visibleUrns = scopeMode === 'visible'
-                ? Array.from(new Set(
-                    canvas.nodes
-                        .map((n) => n.id ?? n.data?.urn)
-                        .filter((u): u is string => typeof u === 'string' && u.length > 0),
-                ))
-                : undefined
-
-            // No rootUrns hint for the view itself: the backend
-            // resolves the view's roots from ``scope.viewId`` and only
-            // ever intersects a client hint with them. A template that
-            // targets a specific container still rides through the
-            // ``raw.scope`` spread below.
-            const scope: SearchScope = {
-                ...(raw.scope ?? {}),
-                viewId,
-                scopeMode,
-                ...(visibleUrns ? { visibleUrns } : {}),
+            // requires it on every request. Scope and the root wrap are
+            // ``searchRequest``'s, the same the Cypher tab shows.
+            return {
+                ...raw,
+                predicate: requestPredicate(raw.predicate),
+                scope: currentScope(viewId, raw.scope),
             }
-            // Defensive normalisation: the backend's predicate compiler
-            // currently mishandles bare top-level leaf predicates
-            // (text / isOrphan / isLeaf / …) — they evaluate to zero
-            // results even when an equivalent group-wrapped version
-            // returns the expected hits. Wrap leaf-rooted predicates in
-            // a single-child AND group so every outgoing request has the
-            // shape the compiler is happy with. No-op when the root is
-            // already a group.
-            const predicate = raw.predicate.kind === 'group'
-                ? raw.predicate
-                : { kind: 'group' as const, op: 'and' as const,
-                    children: [raw.predicate] }
-            return { ...raw, predicate, scope }
         },
         [viewId],
     )
@@ -738,8 +704,9 @@ export function useAdvancedSearch(
             // explicit Run button still forces a retry.
             if (runKey) setRunState({ hash: runKey, status: 'failed' })
             // On error, drop any previously-published result-set so the
-            // canvas doesn't keep highlighting stale matches.
-            useSearchStore.getState().clear()
+            // canvas doesn't keep highlighting stale matches — but keep the
+            // query itself, so the user can fix it.
+            useSearchStore.getState().clearSearchResults()
         }
     }, [provider, stampScope, viewId])
 
@@ -918,8 +885,9 @@ export function useAdvancedSearch(
     const cancel = useCallback(() => {
         abortRef.current?.abort()
         // Drop any published result-set so the canvas doesn't keep
-        // highlighting matches from a query the user explicitly killed.
-        useSearchStore.getState().clear()
+        // highlighting matches from a query the user explicitly killed —
+        // the query stays, to adjust and run again.
+        useSearchStore.getState().clearSearchResults()
         // An aborted run never reports an outcome, so clear the run
         // state here — otherwise it would sit at 'running' forever and
         // the editor would think the draft was already dispatched.

@@ -32,6 +32,7 @@ import { useDiscovery } from '../search/builder/useDiscovery'
 import { fieldClass } from '../search/builder/editors/shared'
 import { isRowIncomplete } from '../search/panel/ConditionRow'
 import { topLevelConditions } from '../search/panel/predicateComposition'
+import { RelationProvider } from '../search/panel/RelationshipEditor'
 import { VisualQueryBuilder } from '../search/panel/VisualQueryBuilder'
 
 
@@ -103,7 +104,12 @@ export function DisplayRuleEditor({
 
     const {
         allKeys, keysByEntityType, tagValues, getValueSamples, suggestValues,
+        edgeTypes, keysByEdgeType, getEdgeValueSamples, edgeKeyStoredAs,
     } = useDiscovery(viewId)
+    const edgeDiscovery = useMemo(
+        () => ({ edgeTypes, keysByEdgeType, getEdgeValueSamples, edgeKeyStoredAs }),
+        [edgeTypes, keysByEdgeType, getEdgeValueSamples, edgeKeyStoredAs],
+    )
 
     // Layer names → picker options. Memoised so the builder's row props stay
     // referentially stable across keystrokes.
@@ -294,15 +300,18 @@ export function DisplayRuleEditor({
                 <label className="block text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-muted">
                     Apply this tag to entities where…
                 </label>
-                <VisualQueryBuilder
-                    predicate={predicate}
-                    onSeed={setPredicate}
-                    onCommit={setPredicate}
-                    discovery={{ allKeys, keysByEntityType, tagValues, getValueSamples, suggestValues }}
-                    knownEntityTypes={knownEntityTypes}
-                    discoveredLayers={layerOptions}
-                    onSubmit={() => void runPreview()}
-                />
+                {/* A rule follows lineage one hop: it is asked of every entity on the canvas. */}
+                <RelationProvider rule viewId={viewId} edges={edgeDiscovery}>
+                    <VisualQueryBuilder
+                        predicate={predicate}
+                        onSeed={setPredicate}
+                        onCommit={setPredicate}
+                        discovery={{ allKeys, keysByEntityType, tagValues, getValueSamples, suggestValues }}
+                        knownEntityTypes={knownEntityTypes}
+                        discoveredLayers={layerOptions}
+                        onSubmit={() => void runPreview()}
+                    />
+                </RelationProvider>
             </div>
 
             {/* Live preview row */}

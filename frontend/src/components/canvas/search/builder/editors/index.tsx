@@ -88,6 +88,9 @@ export interface EditorContext {
     keysByEdgeType: Record<string, string[]>
     /** Look up sample values for an edge property key. */
     getEdgeValueSamples: (edgeType: string, propertyKey: string) => unknown[]
+    /** Where each edge key is kept (``useDiscovery``); one kept in the
+     *  edge's JSON of user properties takes presence and equality only. */
+    edgeKeyStoredAs?: Record<string, 'native' | 'json'>
 }
 
 
@@ -563,7 +566,7 @@ function DescendantOfEditor({ value, onChange }: EditorProps<DescendantOfPredica
             <div>
                 <FieldLabel>Ancestor URNs</FieldLabel>
                 <ChipInput
-                    values={value.urns}
+                    values={value.urns ?? []}
                     onChange={(urns) => onChange({ ...value, urns })}
                     placeholder="urn:li:dataset:foo"
                 />
@@ -589,7 +592,7 @@ function WithinHopsEditor({ value, onChange, ctx }: EditorProps<WithinHopsPredic
             <div>
                 <FieldLabel>Anchor URNs</FieldLabel>
                 <ChipInput
-                    values={value.urns}
+                    values={value.urns ?? []}
                     onChange={(urns) => onChange({ ...value, urns })}
                     placeholder="urn:li:dataset:orders"
                 />
@@ -658,7 +661,7 @@ function PathEditor({ value, onChange, ctx }: EditorProps<PathPredicate>) {
             <div>
                 <FieldLabel>Source URNs</FieldLabel>
                 <ChipInput
-                    values={value.sourceUrns}
+                    values={value.sourceUrns ?? []}
                     onChange={(urns) => onChange({ ...value, sourceUrns: urns })}
                     placeholder="urn:li:dataset:orders"
                 />
@@ -666,7 +669,7 @@ function PathEditor({ value, onChange, ctx }: EditorProps<PathPredicate>) {
             <div>
                 <FieldLabel>Target URNs</FieldLabel>
                 <ChipInput
-                    values={value.targetUrns}
+                    values={value.targetUrns ?? []}
                     onChange={(urns) => onChange({ ...value, targetUrns: urns })}
                     placeholder="urn:li:dataset:reporting"
                 />

@@ -1,0 +1,13 @@
+{
+  "predicate": {
+    "kind": "group",
+    "op": "and",
+    "children": [
+      { "kind": "descendantOf", "refs": [{ "path": ["Sales"] }] },
+      { "kind": "entityType", "op": "in", "values": ["dataset"] },
+      { "kind": "tag", "op": "hasAny", "values": ["PII"] }
+    ]
+  },
+  "scope": { "viewId": "YOUR_VIEW_ID", "scopeMode": "view" },
+  "options": { "results": "hits", "pageSize": 200, "includeAncestorPath": true }
+}

@@ -7,6 +7,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import AsyncIterator, Awaitable, Callable, List, Optional, Dict, Any
 
+from .native_query import NativeQueryResult
 from ..models.graph import (
     GraphNode, GraphEdge, NodeQuery, EdgeQuery,
     LineageResult, GraphSchemaStats, OntologyMetadata,
@@ -786,6 +787,24 @@ class GraphDataProvider(ABC):
         Returns empty list by default.
         """
         return []
+
+    # ==========================================
+    # Native read-only queries
+    # ==========================================
+
+    #: The engine a person's own read-only query runs on — "falkordb" or
+    #: "neo4j" — or None when this provider takes none.
+    native_query_engine: Optional[str] = None
+
+    async def run_readonly_cypher(
+        self, query: str, *, row_cap: int, timeout_ms: int, max_reply_bytes: int,
+    ) -> "NativeQueryResult":
+        """Run ``query`` — already through the guard, its LIMIT in place —
+        read-only, and answer at most ``row_cap`` rows within ``timeout_ms``,
+        reading no more than ``max_reply_bytes`` of reply. Never retried and
+        never re-run elsewhere. Raises a ``NativeQueryError`` for anything
+        about the query itself."""
+        raise NotImplementedError("Native queries aren't available on this data source.")
 
     async def close(self) -> None:
         """

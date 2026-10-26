@@ -186,6 +186,24 @@ shared with you are listed under **Shared** in the Explorer.
 > **Tip:** Share as narrowly as the need requires. It's easy to widen later and
 > awkward to claw back.
 
+### Let someone query the data source
+
+A share can also let its holder write and run their own read-only queries on
+the View's data source, from the search panel's
+[Cypher tab](/guide/advanced-search#your-own-cypher). Turn on **Query data** on
+their row of the **Share View** dialog; the person is told in the share's
+notification.
+
+- **Query data reaches everything in the data source**, not just this View —
+  the dialog says so, naming the source. Turn it on only for someone who may see
+  the whole source.
+- You can turn it on only if you may query the data source yourself. Anyone
+  who manages the View's shares can turn it off.
+- It stays on until someone turns it off. Visibility never grants it: a View
+  open to the workspace or to everyone lets no one query its data source.
+- It shows only on data sources that take native queries (FalkorDB and Neo4j),
+  and only while **Native read-only queries** is on.
+
 ### Owners and co-owners
 
 A View's creator stays its owner — there is no way to hand a View over to

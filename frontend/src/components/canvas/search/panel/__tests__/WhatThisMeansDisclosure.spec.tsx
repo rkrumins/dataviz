@@ -3,7 +3,8 @@
  * summarises: the optional ``predicate`` prop (store-decoupled, used by
  * VisualQueryBuilder) takes precedence; when omitted it falls back to the
  * singleton ``draftPredicate`` so the live Advanced-Search panel keeps
- * working with zero-arg call sites.
+ * working with zero-arg call sites. A relationship's or a route end's
+ * nested builder doesn't repeat it.
  */
 import { render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -11,6 +12,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { useSearchStore } from '@/store/searchStore'
 import type { Predicate } from '@/types/search'
 
+import { RelationContext } from '../relationContext'
 import { WhatThisMeansDisclosure } from '../WhatThisMeansDisclosure'
 
 
@@ -44,5 +46,14 @@ describe('WhatThisMeansDisclosure', () => {
         useSearchStore.setState({ draftPredicate: twoFilterAnd })
         render(<WhatThisMeansDisclosure predicate={null} />)
         expect(screen.getByText(/No filters yet/i)).toBeInTheDocument()
+    })
+
+    it('stays out of a nested condition, which the query’s own disclosure reads', () => {
+        const { container } = render(
+            <RelationContext.Provider value={{ depth: 1, rule: false, viewId: 'v1' }}>
+                <WhatThisMeansDisclosure predicate={twoFilterAnd} />
+            </RelationContext.Provider>,
+        )
+        expect(container).toBeEmptyDOMElement()
     })
 })

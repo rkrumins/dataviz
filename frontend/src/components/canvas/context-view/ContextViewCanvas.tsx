@@ -80,6 +80,7 @@ import {
 } from '@/lib/placement/placement'
 import { buildWizardPlacement } from '@/components/views/ViewWizard/effectivePlacement'
 import { primeRevealSpine } from '@/lib/primeRevealSpine'
+import { rememberUrnLabels } from '@/lib/urnLabels'
 import { buildPlacements, type PlacementInfo } from './placement'
 import type { PlacedReason } from './FlatTreeItem'
 import {
@@ -117,7 +118,7 @@ import { getEdgeTypeDefinition, getEdgeTypeFromSchema, type EdgeTypeDefinition }
 // UX-first interaction components
 import { CanvasContextMenu, type ContextMenuAction } from '../CanvasContextMenu'
 import { InlineNodeEditor } from '../InlineNodeEditor'
-import { CommandPalette } from '../CommandPalette'
+import { CommandPalette, type CommandItem } from '../CommandPalette'
 import { useEdgeConnect } from '../edge-create/useEdgeConnect'
 import { ConnectionDragLayer } from '../edge-create/ConnectionDragLayer'
 import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
@@ -305,6 +306,7 @@ import {
   useViewSearchSessionController,
   type ViewSearchSession,
 } from '../search/session/useViewSearchSessionController'
+import { questionsFromHere } from '../search/session/queryFromHere'
 import { PropertyManagerDrawer } from '../property-manager/PropertyManagerDrawer'
 import { OrphansDrawer } from './OrphansDrawer'
 import { useDisplayRuleEngine } from '@/hooks/useDisplayRuleEngine'
@@ -1912,6 +1914,38 @@ export function ContextViewCanvas({
     revealHit: revealHitForSearch,
     prefetchHit: prefetchSearchHitSpine,
   })
+  // Search, from the command palette: a question in plain words, or the
+  // panel opened out into Search Studio.
+  const { closeCommandPalette } = interactions
+  const { openPanel: openSearchPanel } = search
+  const searchCommands = useMemo<CommandItem[]>(() => [
+    {
+      id: 'search:ask',
+      label: 'Ask about this view',
+      description: 'A question in plain words — see what it reads as before it runs',
+      icon: 'Sparkles',
+      category: 'action',
+      keywords: ['search', 'find', 'query', 'question'],
+      onSelect: () => {
+        closeCommandPalette()
+        openSearchPanel()
+        useSearchStore.getState().requestAskFocus()
+      },
+    },
+    {
+      id: 'search:studio',
+      label: 'Open Search Studio',
+      description: 'The search opened out over the canvas, with room to work',
+      icon: 'Maximize2',
+      category: 'action',
+      keywords: ['search', 'expand', 'table', 'results', 'recipes'],
+      onSelect: () => {
+        closeCommandPalette()
+        openSearchPanel()
+        useSearchStore.getState().setStudioOpen(true)
+      },
+    },
+  ], [closeCommandPalette, openSearchPanel])
   // Side panels (EntityDrawer, EdgeDetailPanel, Advanced Search, the
   // hierarchy builder/build rails) are OVERLAYS that reserve canvas space
   // via padding — a change that does NOT resize the observed node cards,
@@ -3455,6 +3489,37 @@ export function ContextViewCanvas({
     ]
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [interactions.state.contextMenu.target, nodeSortingEnabled, isDraft, traceActive, displayMap, parentMap, nodeLayerMap, nodesByLayer, nudgeReorder])
+
+  // Right-click questions about a node — or about the selection it is part
+  // of — each opening the search panel on its query (queryFromHere). A
+  // shared link's session may only search inside its view.
+  const queryMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const target = interactions.state.contextMenu.target
+    if (!target || target.type !== 'node' || !isSelectableNode(target.id)) return []
+    const selection = selectedNodeIds.filter(isSelectableNode)
+    const urns = selection.length > 1 && selection.includes(target.id) ? selection : [target.id]
+    // Entities holding others: their lineage questions take in what is inside.
+    const containers = new Set(urns.filter((urn) => Number(displayMap.get(urn)?.data?.childCount ?? 0) > 0))
+    return questionsFromHere(urns, { readOnly, containers }).map((q) => ({
+      id: `query-${q.id}`, label: q.label, icon: q.icon as ContextMenuAction['icon'],
+      onClick: () => {
+        // Named before the query is committed, so its sentence and chips
+        // say what each entity is called rather than its URN.
+        rememberUrnLabels(urns.map((urn) => ({ urn, displayName: canvasDisplayName(urn) }))
+          .filter((e) => e.displayName !== e.urn))
+        const store = useSearchStore.getState()
+        if (q.refine) {
+          store.commitDraft(q.predicate)
+          search.refine()
+        } else {
+          store.requestSearchRun(q.predicate)
+          search.openPanel()
+        }
+        interactions.closeContextMenu()
+      },
+    }))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.state.contextMenu.target, selectedNodeIds, readOnly, search.refine, search.openPanel, displayMap])
 
   // Handler for adding child entities
   const handleAddChildEntity = useCallback((parentId: string) => {
@@ -7231,6 +7296,7 @@ export function ContextViewCanvas({
         layers={sortedLayers}
         onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
         customActions={reorderMenuActions}
+        queryActions={queryMenuActions}
       />
 
       {/* Inline Node Editor - Double-click to edit names */}
@@ -7249,6 +7315,7 @@ export function ContextViewCanvas({
       <CommandPalette
         isOpen={interactions.state.commandPalette.isOpen}
         onClose={interactions.closeCommandPalette}
+        commands={searchCommands}
         onCreateEntity={canEditGraph ? (typeId) => {
           interactions.closeCommandPalette()
           useHierarchyBuilderStore.getState().open({ initialTypeId: typeId })

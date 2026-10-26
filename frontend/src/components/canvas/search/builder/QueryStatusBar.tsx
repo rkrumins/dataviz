@@ -13,9 +13,9 @@
  *   - error    → red message inline
  *
  * The "Show technical details" toggle expands a panel showing the
- * compiled Cypher + bound parameters + diagnostic notes. Debounced
- * 400ms; aborts in-flight calls on tree change. Power-user surface,
- * collapsed by default.
+ * compiled Cypher + bound parameters + diagnostic notes — asked through
+ * ``useCompiledQuery``, with the very request a run sends. Power-user
+ * surface, collapsed by default.
  */
 import {
     AlertCircle,
@@ -26,22 +26,12 @@ import {
     Loader2,
     Terminal,
 } from 'lucide-react'
-import { useEffect, useRef, useState } from 'react'
+import { useState } from 'react'
 
 import { cn } from '@/lib/utils'
-import { useGraphProvider } from '@/providers/GraphProviderContext'
-import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
-import type { Predicate, SearchExplainResult, SearchQuery } from '@/types/search'
+import type { Predicate } from '@/types/search'
 
-
-const DEBOUNCE_MS = 400
-
-
-interface ExplainState {
-    status: 'idle' | 'running' | 'ok' | 'error'
-    result?: SearchExplainResult
-    error?: string
-}
+import { useCompiledQuery } from '../panel/native/useCompiledQuery'
 
 
 export interface QueryStatusBarProps {
@@ -55,50 +45,16 @@ export interface QueryStatusBarProps {
 }
 
 
-export function QueryStatusBar({ predicate, viewId, ready }: QueryStatusBarProps) {
-    const provider = useGraphProvider()
+export function QueryStatusBar({ predicate, viewId, ready: complete }: QueryStatusBarProps) {
     const [open, setOpen] = useState(false)
-    const [state, setState] = useState<ExplainState>({ status: 'idle' })
-    const abortRef = useRef<AbortController | null>(null)
-    const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-
-    useEffect(() => {
-        // Only call /explain when the tree is well-formed. Calling
-        // with incomplete leaves causes a backend 422 (min_length
-        // violations on empty keys / value lists).
-        if (!ready) {
-            abortRef.current?.abort()
-            setState({ status: 'idle' })
-            return
-        }
-        if (!(provider instanceof RemoteGraphProvider) || !viewId) {
-            setState({ status: 'idle' })
-            return
-        }
-        if (timerRef.current) clearTimeout(timerRef.current)
-        timerRef.current = setTimeout(() => {
-            abortRef.current?.abort()
-            const controller = new AbortController()
-            abortRef.current = controller
-            setState({ status: 'running' })
-            const query: SearchQuery = { predicate, scope: { viewId } }
-            provider.searchExplain(query)
-                .then((result) => {
-                    if (controller.signal.aborted) return
-                    setState({ status: 'ok', result })
-                })
-                .catch((e: unknown) => {
-                    if (controller.signal.aborted) return
-                    setState({
-                        status: 'error',
-                        error: e instanceof Error ? e.message : String(e),
-                    })
-                })
-        }, DEBOUNCE_MS)
-        return () => {
-            if (timerRef.current) clearTimeout(timerRef.current)
-        }
-    }, [ready, provider, predicate, viewId])
+    // Only asked when the tree is well-formed: incomplete leaves would 422.
+    const compiled = useCompiledQuery(complete ? predicate : null, viewId)
+    const ready = complete && compiled.status !== 'empty'
+    const state = {
+        status: compiled.status === 'compiling' ? 'running' : compiled.status,
+        result: compiled.status === 'ok' ? compiled.result : undefined,
+        error: compiled.status === 'error' ? compiled.message : undefined,
+    }
 
     return (
         <div className={cn(
@@ -120,10 +76,12 @@ export function QueryStatusBar({ predicate, viewId, ready }: QueryStatusBarProps
                     </>
                 )}
 
-                {ready && state.status === 'idle' && (
+                {ready && state.status === 'unsupported' && (
                     <>
-                        <Loader2 className="w-3.5 h-3.5 shrink-0 text-ink-muted" strokeWidth={2.2} />
-                        <span className="text-[11.5px] text-ink-muted">Preparing…</span>
+                        <AlertCircle className="w-3.5 h-3.5 shrink-0 text-ink-muted" strokeWidth={2.2} />
+                        <span className="text-[11.5px] text-ink-muted">
+                            This data source doesn't show a compiled query.
+                        </span>
                     </>
                 )}
 

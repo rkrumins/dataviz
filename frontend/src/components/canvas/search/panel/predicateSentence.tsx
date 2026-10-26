@@ -21,14 +21,18 @@
  * Pure presentation — never mutates the predicate tree. Mounted by
  * WhatThisMeansDisclosure.
  */
-import { type ReactNode } from 'react'
+import { Fragment, type ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
-import { formatUrnLabel } from '@/lib/urnLabels'
 import type { GroupPredicate, Predicate } from '@/types/search'
 
-import { arityOf, isNegative, operatorLabel, predicateType } from '../typed/operators'
-import { describeDuration } from '../typed/valueCodec'
+import {
+    connector,
+    isOrInside,
+    isOrInsideSegments,
+    leafSegments,
+    type Segment,
+} from './vocabulary/sentenceGrammar'
 
 
 // ---------------------------------------------------------------------------
@@ -39,6 +43,9 @@ export interface SentenceOptions {
     /** First word — defaults to "Show me entities". Keeps room for a
      *  future "Find" / "List" variant. */
     leadIn?: string
+    /** The lead-in names one thing ("Anything"), so the verb after it
+     *  agrees: "Anything that has…", not "…that have…". */
+    singular?: boolean
 }
 
 
@@ -54,7 +61,7 @@ export function formatPredicateAsSentence(
             </p>
         )
     }
-    return renderTop(predicate, leadIn)
+    return renderTop(predicate, leadIn, !opts.singular)
 }
 
 
@@ -62,11 +69,11 @@ export function formatPredicateAsSentence(
 // Top-level (decides the framing sentence)
 // ---------------------------------------------------------------------------
 
-function renderTop(p: Predicate, leadIn: string): ReactNode {
+function renderTop(p: Predicate, leadIn: string, many: boolean): ReactNode {
     if (p.kind !== 'group') {
         return (
             <p>
-                {leadIn} where <Inline>{leafSentence(p)}</Inline>.
+                {leadIn} {connector(p, many)} <Inline>{leafSentence(p, many)}</Inline>.
             </p>
         )
     }
@@ -87,7 +94,7 @@ function renderTop(p: Predicate, leadIn: string): ReactNode {
             return (
                 <div>
                     <p>
-                        {leadIn} that <strong className="text-rose-300">do NOT</strong>{' '}
+                        {leadIn} that <strong className="text-rose-300">{many ? 'do' : 'does'} NOT</strong>{' '}
                         match {innerOp === 'or' ? 'any of:' : 'all of:'}
                     </p>
                     <BulletList items={inner.children.map((c) => renderInner(c, /*indent*/ 1))} />
@@ -96,7 +103,7 @@ function renderTop(p: Predicate, leadIn: string): ReactNode {
         }
         return (
             <p>
-                {leadIn} that <strong className="text-rose-300">do NOT</strong>{' '}
+                {leadIn} that <strong className="text-rose-300">{many ? 'do' : 'does'} NOT</strong>{' '}
                 match <Inline>{leafSentence(inner)}</Inline>.
             </p>
         )
@@ -110,7 +117,7 @@ function renderTop(p: Predicate, leadIn: string): ReactNode {
     }
     if (p.children.length === 1) {
         // Single-child group is functionally a leaf — descend.
-        return renderTop(p.children[0], leadIn)
+        return renderTop(p.children[0], leadIn, many)
     }
     const lead = op === 'or'
         ? <>where <strong className="text-amber-300">any</strong> of these is true:</>
@@ -161,6 +168,8 @@ function renderInner(p: Predicate, depth: number): ReactNode {
         return <Inline><em>empty {op === 'or' ? 'ANY' : 'ALL'} group</em></Inline>
     }
     if (p.children.length === 1) return renderInner(p.children[0], depth)
+    const inside = isOrInside(p)
+    if (inside) return <Inline><Segments segments={isOrInsideSegments(inside)} /></Inline>
     // 2+ children — render as inline conjunction when all children are
     // leaves (keeps single-clause bullets compact); otherwise break
     // into a nested bullet list.
@@ -210,151 +219,47 @@ function inlineConjunction(g: GroupPredicate): ReactNode {
 
 
 // ---------------------------------------------------------------------------
-// Leaf → English phrase
+// Leaf → English phrase (the words: vocabulary/sentenceGrammar)
 // ---------------------------------------------------------------------------
 
 /**
  * Render one predicate leaf as a natural-language phrase fragment.
  * Returns a fragment so the caller composes it inside its own
- * sentence ("their **name contains 't2'**").
+ * sentence ("their **name contains 't2'**"). ``many``: it describes
+ * several entities, so its verb agrees ("have a parent").
  */
-function leafSentence(p: Predicate): ReactNode {
-    switch (p.kind) {
-        case 'text': {
-            const target = p.target ?? 'name'
-            const op = p.match ?? 'substring'
-            const field =
-                target === 'name' ? 'name'
-                    : target === 'qualifiedName' ? 'qualified name'
-                        : target === 'description' ? 'description'
-                            : target === 'tags' ? 'tags'
-                                : target === 'any' ? 'any text field'
-                                    : target
-            const verb =
-                op === 'exact' ? 'is exactly'
-                    : op === 'prefix' ? 'starts with'
-                        : op === 'suffix' ? 'ends with'
-                            : 'contains'
-            return (
-                <>
-                    {field} {verb} <Value>{p.value}</Value>
-                </>
-            )
-        }
-        case 'entityType': {
-            const verb = p.op === 'notIn' ? 'is not' : 'is'
-            return (
-                <>
-                    type {verb} {p.values.length === 1
-                        ? <Value>{p.values[0]}</Value>
-                        : <>one of {p.values.map((v, i) => (
-                            <span key={v}>
-                                {i > 0 && ' / '}<Value>{v}</Value>
-                            </span>
-                        ))}</>}
-                </>
-            )
-        }
-        case 'tag': {
-            const op = p.op ?? 'hasAny'
-            const verb =
-                op === 'hasAll' ? 'tagged with all of'
-                    : op === 'notHas' ? 'NOT tagged with'
-                        : 'tagged'
-            return (
-                <>
-                    {verb} {p.values.map((v, i) => (
-                        <span key={v}>
-                            {i > 0 && ', '}<Value>#{v}</Value>
-                        </span>
-                    ))}
-                </>
-            )
-        }
-        case 'layer':
-            return <>layer is <Value>{p.layerAssignment}</Value></>
-        case 'hasProperty': {
-            const has = p.negate ? 'does not have' : 'has'
-            if (p.keyMatch === 'prefix' || p.keyMatch === 'contains') {
-                return <>{has} a property whose name {p.keyMatch === 'prefix' ? 'starts with' : 'contains'} <Value>{p.key}</Value></>
-            }
-            return <>{has} a <Value>{p.key}</Value> property</>
-        }
-        case 'property': {
-            const op = p.op ?? 'eq'
-            const arity = arityOf(op)
-            const type = predicateType(p)
-            return (
-                <>
-                    <Value>{p.key}</Value> {operatorLabel(op, type)}
-                    {arity === 'duration' && <> <Value quoted={false}>{describeDuration(p.value) ?? '…'}</Value></>}
-                    {arity !== 'none' && arity !== 'duration' && (
-                        <>{' '}<PropertyValue value={p.value} between={op === 'between'}
-                                              bare={BARE_TYPES.has(type) && !TEXT_OPS.has(op)} /></>
-                    )}
-                    {p.caseSensitive && arity !== 'none' && <span className="text-ink-muted"> (match case)</span>}
-                    {p.includeMissing && isNegative(op) && <span className="text-ink-muted"> (or not set)</span>}
-                </>
-            )
-        }
-        case 'isRoot':       return <>has no upstream lineage</>
-        case 'isLeaf':       return <>has no downstream lineage</>
-        case 'isOrphan':     return <>has no lineage edges</>
-        case 'hasIncoming':  return <>has incoming lineage edges</>
-        case 'hasOutgoing':  return <>has outgoing lineage edges</>
-        case 'descendantOf':
-            return <>is inside {p.urns.length === 1
-                ? <Value>{formatUrnLabel(p.urns[0])}</Value>
-                : <><Value>{p.urns.length}</Value> subtrees</>}</>
-        case 'withinHops': {
-            const dirText =
-                p.direction === 'in' ? 'upstream of'
-                    : p.direction === 'out' ? 'downstream of'
-                        : 'within'
-            return <>is ≤ {p.hops} hop{p.hops === 1 ? '' : 's'} {dirText} <Value>{p.urns[0] ?? '…'}</Value></>
-        }
-        case 'path':
-            return <>lies on a path from <Value>{p.sourceUrns[0] ?? '…'}</Value> to <Value>{p.targetUrns[0] ?? '…'}</Value> (≤ {p.maxHops} hops)</>
-        case 'degree':
-            return <>has {p.direction ?? 'any'} edges {p.op} {p.value}</>
-        case 'all':
-            return <>every entity is included</>
-        case 'group':
-            return <>(nested group)</>
-        default:
-            return <>(unknown filter)</>
-    }
+function leafSentence(p: Predicate, many = false): ReactNode {
+    return <Segments segments={leafSegments(p, many)} />
 }
 
 
-/** Compared as these, a value reads bare — unless the operator reads its
- *  text ("contains 74" means the digits). */
-const BARE_TYPES = new Set(['number', 'boolean'])
-const TEXT_OPS = new Set(['contains', 'notContains', 'startsWith', 'endsWith'])
+function leafOrGroup(p: Predicate, many = false): ReactNode {
+    if (p.kind !== 'group') return leafSentence(p, many)
+    const inside = isOrInside(p)
+    return inside ? <Segments segments={isOrInsideSegments(inside, many)} /> : renderInner(p, 1)
+}
 
 
-/** A property value as the query will compare it: text quoted, numbers and
- *  booleans bare, a list as its items, a range as both ends, and an empty
- *  value as a gap waiting to be filled — never as `""`, which read as "equals
- *  the empty string". */
-function PropertyValue({ value, between, bare }: {
-    value: unknown
-    between?: boolean
-    /** A number or true/false: bare even when it travels as text (a 64-bit
-     *  integer does, to keep its digits). */
-    bare?: boolean
-}) {
-    const one = (v: unknown, key?: number) => {
-        if (v === null || v === undefined || v === '') {
-            return <span key={key} className="text-ink-muted">…</span>
-        }
-        if (typeof v === 'string') return <Value key={key} quoted={!bare}>{v}</Value>
-        return <Value key={key} quoted={false}>{typeof v === 'object' ? JSON.stringify(v) : String(v)}</Value>
+const EMPHASIS: Record<string, string> = { not: 'text-rose-300', every: 'text-accent-lineage' }
+
+/** Segments as the sentence prints them: picked values set off, gaps as
+ *  an ellipsis, a relative's condition joined by its connecting word. */
+function Segments({ segments }: { segments: Segment[] }) {
+    return <>{segments.map((s, i) => <Fragment key={i}>{renderSegment(s)}</Fragment>)}</>
+}
+
+
+function renderSegment(s: Segment): ReactNode {
+    switch (s.t) {
+        case 'text': return s.text
+        case 'value': return <Value quoted={s.quoted}>{s.text}</Value>
+        case 'gap': return <span className="text-ink-muted">…</span>
+        case 'em': return <strong className={EMPHASIS[s.tone]}>{s.text}</strong>
+        case 'note': return <span className="text-ink-muted">{s.text}</span>
+        case 'cond': return s.lead === 'connector'
+            ? <>{connector(s.predicate, s.many)} {leafOrGroup(s.predicate, s.many)}</>
+            : leafOrGroup(s.predicate, s.many)
     }
-    if (!Array.isArray(value)) return one(value)
-    if (between) return <>{one(value[0], 0)} and {one(value[1], 1)}</>
-    if (value.length === 0) return one(undefined)
-    return <>{value.map((v, i) => <span key={i}>{i > 0 && ', '}{one(v)}</span>)}</>
 }
 
 

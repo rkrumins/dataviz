@@ -95,7 +95,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/services/INSIGHTS.md"
   },
   "services-search": {
-    "updated": "2026-09-29",
+    "updated": "2026-10-24",
     "path": "docs/services/SEARCH.md"
   },
   "services-context-engine": {
@@ -273,6 +273,10 @@ export const docMeta: Record<string, DocMeta> = {
   "read-path-performance": {
     "updated": "2026-10-10",
     "path": "docs/read-path-performance/README.md"
+  },
+  "native-queries": {
+    "updated": "2026-10-24",
+    "path": "docs/NATIVE_QUERIES.md"
   }
 }
 export const guideMeta: Record<string, DocMeta> = {
@@ -301,7 +305,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "advanced-search": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-25",
     "path": "docs/guide/ADVANCED_SEARCH.md"
   },
   "lineage-lens": {
@@ -321,7 +325,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/CREATING_VIEWS.md"
   },
   "managing-views": {
-    "updated": "2026-10-13",
+    "updated": "2026-10-24",
     "path": "docs/guide/MANAGING_VIEWS.md"
   },
   "display-rules": {

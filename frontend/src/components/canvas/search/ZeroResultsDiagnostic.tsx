@@ -21,6 +21,7 @@
  *   - effectiveRootUrns is empty (search ran unclamped — usually a
  *     non-issue, just informational)
  *   - droppedRootUrns is non-empty (client URNs were filtered out)
+ *   - a name path in the query names no entity (it is then false)
  *   - the query carries a `descendantOf` scope row, so it is only
  *     looking inside one container (the most common cause by far —
  *     one click on a result group adds it, and it then applies to
@@ -58,6 +59,8 @@ import type {
 
 import { CypherDisclosure } from './panel/CypherDisclosure'
 import { findScopeCondition } from './panel/predicateComposition'
+import { axisMeta, refLabel, throughOf } from './panel/relations'
+import { ZeroResultRescue } from './panel/rescue/ZeroResultRescue'
 import type { QuickMatch } from './session/quickPredicate'
 
 
@@ -72,6 +75,11 @@ export interface ZeroResultsDiagnosticProps {
      *  no quick query to switch — the lead then states the miss without
      *  offering the one-click fixes. */
     onSwitchMatch?: (match: QuickMatch) => void
+    /** The query as the builder holds it, and how to change it: with
+     *  both, the lead names the line where the matches run out and
+     *  offers the fixes that find something. */
+    draft?: Predicate | null
+    onApplyFix?: (next: Predicate) => void
 }
 
 
@@ -84,10 +92,12 @@ interface Cause {
 
 
 export const ZeroResultsDiagnostic: FC<ZeroResultsDiagnosticProps> = ({
-    result, query, viewId, onSwitchMatch,
+    result, query, viewId, onSwitchMatch, draft, onApplyFix,
 }) => {
     const causes = useMemo(() => diagnose(result, query), [result, query])
     const text = useMemo(() => firstTextLeaf(query.predicate), [query.predicate])
+    const unnamed = useMemo(() => (result.scopeDiagnostics?.resolvedRefs ?? [])
+        .filter((r) => r.count === 0).map((r) => r.ref), [result.scopeDiagnostics])
 
     return (
         <div className="flex flex-col gap-2">
@@ -96,7 +106,10 @@ export const ZeroResultsDiagnostic: FC<ZeroResultsDiagnosticProps> = ({
                 how a slow property search looked like a broken one. */}
             {result.deadlineExceeded
                 ? <TimedOutLead />
-                : <MissLead text={text} onSwitchMatch={onSwitchMatch} />}
+                : draft && onApplyFix
+                    ? <ZeroResultRescue viewId={viewId} draft={draft} onApply={onApplyFix}
+                                        fallback={<MissLead text={text} onSwitchMatch={onSwitchMatch} unnamed={unnamed} />} />
+                    : <MissLead text={text} onSwitchMatch={onSwitchMatch} unnamed={unnamed} />}
 
             <TechnicalDetails>
                 {causes.map((c, i) => (
@@ -159,10 +172,12 @@ function TimedOutLead() {
 
 
 function MissLead({
-    text, onSwitchMatch,
+    text, onSwitchMatch, unnamed = [],
 }: {
     text: TextPredicate | null
     onSwitchMatch?: (match: QuickMatch) => void
+    /** Name paths in the query that name no entity. */
+    unnamed?: string[]
 }) {
     const mode = MATCH_MODES.find((m) => m.value === text?.match)
     // A query with no text leaf — a builder query about tags, types or
@@ -183,6 +198,13 @@ function MissLead({
                     ? <>Nothing in this view {mode.verb} “<span className="font-mono font-medium">{text.value}</span>”.</>
                     : <>Nothing in this view matched what you asked for.</>}
             </p>
+            {unnamed.length > 0 && (
+                <p className="mt-1.5 text-[11.5px] leading-snug text-cyan-900/85 dark:text-cyan-100/90">
+                    {unnamed.map((n) => `“${n}”`).join(', ')} {unnamed.length === 1 ? 'names' : 'name'} no
+                    entity. A name path starts at a top-level entity and spells each container on the way
+                    down; ** stands for any number of levels.
+                </p>
+            )}
             {others.length > 0 && (
                 <div className="mt-2 flex items-center gap-1.5 flex-wrap">
                     <span className="text-[11.5px] text-cyan-900/85 dark:text-cyan-100/90">
@@ -376,10 +398,11 @@ function diagnose(result: SearchResultPage, query: SearchQuery): Cause[] {
     // result group and then applies to every query composed afterwards
     // — so it must be named before the vaguer content-level causes.
     const scope = findScopeCondition(query.predicate)
-    if (scope && scope.urns.length > 0 && causes.length === 0) {
-        const where = scope.urns.length === 1
-            ? formatUrnLabel(scope.urns[0])
-            : `${scope.urns.length} containers`
+    const anchors = scope
+        ? [...scope.urns.map((u) => formatUrnLabel(u)), ...(scope.refs ?? []).map(refLabel)]
+        : []
+    if (anchors.length > 0 && causes.length === 0) {
+        const where = anchors.length === 1 ? anchors[0] : `${anchors.length} containers`
         causes.push({
             severity: 'warn',
             title: `Your query only looks inside ${where}.`,
@@ -699,11 +722,14 @@ function DiscoverTable({ result }: { result: SearchDiscoverResult }) {
 
 function predicateUsesLineage(p: Predicate): boolean {
     if (p.kind === 'isOrphan' || p.kind === 'isLeaf' || p.kind === 'isRoot'
-        || p.kind === 'hasIncoming' || p.kind === 'hasOutgoing') {
-        return p.edgeClass === 'lineage' || p.edgeClass === 'any'
+        || p.kind === 'hasIncoming' || p.kind === 'hasOutgoing' || p.kind === 'degree') {
+        // Every link and every edge are whatever the graph holds, flagged
+        // lineage or not; named edge types are their own.
+        return !p.edgeTypes && (p.edgeClass ?? 'lineage') === 'lineage'
     }
-    if (p.kind === 'degree') {
-        return p.edgeClass === 'lineage' || p.edgeClass === 'any'
+    if (p.kind === 'related') {
+        return (axisMeta(p.axis).lineage && throughOf(p) === 'lineage')
+            || (!!p.where && predicateUsesLineage(p.where))
     }
     if (p.kind === 'withinHops') {
         // withinHops doesn't have explicit edgeClass; it uses edgeTypes
@@ -723,7 +749,10 @@ function predicateUsesContainment(p: Predicate): boolean {
     if (p.kind === 'isOrphan' || p.kind === 'isLeaf' || p.kind === 'isRoot'
         || p.kind === 'hasIncoming' || p.kind === 'hasOutgoing'
         || p.kind === 'degree') {
-        return p.edgeClass === 'containment' || p.edgeClass === 'any'
+        return !p.edgeTypes && p.edgeClass === 'containment'
+    }
+    if (p.kind === 'related') {
+        return !axisMeta(p.axis).lineage || (!!p.where && predicateUsesContainment(p.where))
     }
     if (p.kind === 'group') {
         return p.children.some(predicateUsesContainment)

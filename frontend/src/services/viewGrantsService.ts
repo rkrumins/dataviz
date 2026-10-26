@@ -12,6 +12,9 @@ export interface ViewGrantResponse {
     grantedAt: string
     grantedBy: string | null
     subject: MemberSubject
+    /** The share also lets its holder run their own read-only queries on
+     *  the view's data source. */
+    canQuerySource?: boolean
 }
 
 export interface ViewGrantCreateRequest {
@@ -47,6 +50,15 @@ export const viewGrantsService = {
         return authFetch<ViewGrantResponse>(url(viewId, `/${grantId}`), {
             method: 'PUT',
             body: JSON.stringify({ role }),
+        })
+    },
+
+    /** Let a share query the view's data source, or stop it. Turning it on
+     *  takes being able to query that source yourself. */
+    setSourceQuery(viewId: string, grantId: string, canQuerySource: boolean): Promise<ViewGrantResponse> {
+        return authFetch<ViewGrantResponse>(url(viewId, `/${grantId}`), {
+            method: 'PUT',
+            body: JSON.stringify({ canQuerySource }),
         })
     },
 

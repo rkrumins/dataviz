@@ -15,6 +15,9 @@ are in docs/search-engine/S0_FINDINGS.md.
 ``walk``    Roots and everything under them: the roots are sought by ID
             (never ``root.urn IN`` on an unlabelled node — a scan of every
             node, §7) and walked down the containment edges.
+``ids``     Entities by ID: those a lineage relationship's walk out from
+            the entities it names reaches (``reach_plan``), already checked
+            against the scope.
 
 A node carrying two labels in scope is read under the first only
 (``NOT n:Earlier``), so it is counted once.
@@ -34,18 +37,26 @@ How a view's roots bound the search (§7):
 """
 from __future__ import annotations
 
+import asyncio
 import math
 from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Awaitable, Callable, Dict, FrozenSet, List, Optional, Sequence, Tuple
 
 from backend.app.providers.falkordb_deep_search import (
+    KEY_COMPARISON_NOTE,
     _build_within_hops_continuation,
+    _placements_of,
     _scope_urn_sets_with_depths,
     _sanitize_label,
     _searchable_labels,
+    tail_clauses,
+    within_hops_parts,
+    within_hops_walk,
 )
 from backend.app.providers.falkordb_search.keys import SortSpec
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf, probe_condition
+from backend.app.services.deep_search import CompileError
+from backend.app.services.native_query.parse_cost import grouped
 
 #: Root sets up to this size clamp range units with an ``IN`` list. The
 #: check costs (ancestor rows) × (roots): 50 roots cost 2× an unclamped
@@ -53,21 +64,37 @@ from backend.app.providers.falkordb_search.raw_properties import RawLeaf, probe_
 CLAMP_MAX_ROOTS = 64
 #: Roots per walk bucket.
 WALK_BUCKET_ROOTS = 32
+#: A lineage relationship's walk out from the entities it names drives the
+#: plan when it reaches at most this many entities, from at most
+#: ``REACH_ANCHORS_MAX`` (a container with more inside it): past either,
+#: the scope is read as usual and every candidate walks its own routes —
+#: which on a graph of millions does not finish (45 s statements, timing
+#: out one after another). So the bounds are what a plan may hold, the
+#: reached IDs travelling in the session at about 8 bytes each, not what
+#: one statement answers: on 2M nodes and 6M edges a database's 50,021
+#: entities walk 3 hops out to 436,750 in about a second.
+REACH_MAX = 500_000
+REACH_ANCHORS_MAX = 200_000
+#: Anchors one walk statement starts from, so each stays short.
+REACH_STEP = 20_000
 
 Run = Callable[[str, Dict[str, Any]], Awaitable[Any]]
 
 
 @dataclass
 class Unit:
-    kind: str                          # "range" | "visible" | "walk"
+    kind: str                          # "range" | "visible" | "walk" | "ids"
     label: Optional[str] = None
     lo: Optional[int] = None           # None = from the first ID
     hi: Optional[int] = None           # None = open-ended
-    roots: Optional[List[int]] = None  # walk: the root IDs walked
+    roots: Optional[List[int]] = None  # walk: the root IDs walked; ids: the IDs
     exclude: Tuple[str, ...] = ()      # in-scope labels read before this one
     size: int = 1                      # estimated nodes, for progress
     span: int = 0                      # open-ended range: IDs it likely covers
     depth: Optional[int] = None        # walk: how far below its roots (None: the scope's)
+    # ids: the hoisted lineage walk (its index) every one of them is known
+    # to meet, so its continuation is left out.
+    satisfies: Optional[int] = None
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -98,6 +125,11 @@ class Unit:
             half = max(1, self.size // 2)
             return [Unit("walk", roots=self.roots[:mid], size=half, depth=self.depth),
                     Unit("walk", roots=self.roots[mid:], size=half, depth=self.depth)]
+        if self.kind == "ids" and self.roots and len(self.roots) > 1:
+            mid = len(self.roots) // 2
+            return [Unit("ids", roots=self.roots[:mid], size=mid, satisfies=self.satisfies),
+                    Unit("ids", roots=self.roots[mid:], size=len(self.roots) - mid,
+                         satisfies=self.satisfies)]
         return None
 
 
@@ -134,6 +166,12 @@ class Context:
     max_depth: int
     visible: Optional[List[str]] = None
     within_hops: str = ""
+    # ``within_hops`` one hoisted walk at a time, so an ``ids`` unit can
+    # leave out the one it already meets.
+    hop_parts: Tuple[str, ...] = ()
+    # The predicate's relationship stages (``_Compiler.tail``), run on what
+    # the head, the clamps and the hops keep.
+    tail: Tuple[str, ...] = ()
     # A first page's units also tally their matches' containment ancestors
     # (the search asked for the ``ancestor`` facet: the canvas's badges).
     tally: bool = False
@@ -151,14 +189,35 @@ class Context:
 # Planning
 # ---------------------------------------------------------------------------
 
+#: How many times more a layer filter as the canvas places costs an entity
+#: than most tests: it reads the entity's ancestors and each one's rules (a
+#: 50,000-node unit took 4.4 s on 200,000 catalog entities, a relationship's
+#: 0.7 s), so its units hold that many times fewer nodes.
+_LAYER_COST = 8
+
+
+def unit_width(width: int, predicate) -> int:
+    """The nodes a unit holds, so it ends in well under a second: ``width``,
+    or fewer for a query holding a layer filter as the canvas places it."""
+    return max(1_000, width // _LAYER_COST) if _placements_of(predicate) else width
+
+
 async def make_plan(provider, query, compiler, *, run: Run, width: int,
                     walk_max: int, timeout_s: float) -> Plan:
     """The units ``query`` reads. ``run(cypher, params)`` executes one
     statement under the caller's admission and budget."""
+    width = unit_width(width, query.predicate)
     labels = await _searchable_labels(provider, timeout_s=timeout_s)
-    stats = await _label_stats(run, labels)
     containment = _containment(provider)
     notes: List[str] = []
+    # Values kept raw (``raw_leaves`` collects them) aren't compared key to key.
+    if compiler.compares_keys and compiler.raw_leaves is not None:
+        notes.append(KEY_COMPARISON_NOTE)
+    reach = await reach_plan(run, provider, query, compiler, labels, containment,
+                             width=width, notes=notes)
+    if reach is not None:
+        return reach
+    stats = await _label_stats(run, labels)
 
     root_sets, depths = _scope_urn_sets_with_depths(query, compiler)
     if query.scope.scope_mode == "visible" and query.scope.visible_urns:
@@ -326,6 +385,226 @@ def _rel(containment: Sequence[str]) -> str:
     return "|".join(_sanitize_label(t) for t in containment)
 
 
+async def reach_plan(run: Run, provider, query, compiler, labels: Sequence[str],
+                     containment: Tuple[str, ...], *, width: int,
+                     notes: List[str]) -> Optional[Plan]:
+    """Read only what the first hoisted lineage walk reaches.
+
+    "What X feeds" asked of a view of millions means, read the usual way,
+    every candidate walking its own routes back towards X. Here the walk
+    runs once, out from X — or from everything inside X — and the entities
+    it reaches that are in scope become ``ids`` units, which leave that
+    walk's continuation out: they are exactly the candidates it keeps (the
+    same walk, ``within_hops_walk``, from the other end).
+
+    None — read the scope as usual — when there is no such walk, or it
+    starts from more than ``REACH_ANCHORS_MAX`` entities, reaches more than
+    ``REACH_MAX`` or runs out of time. A relationship traced from its far
+    end plans the search instead (``trace_plan``)."""
+    if compiler.hoisted_trace is not None:
+        return await trace_plan(run, provider, query, compiler, labels, containment,
+                                width=width, notes=notes)
+    entries = compiler.hoisted_within_hops
+    if not entries or not entries[0]["edge_types"]:
+        return None
+    entry = entries[0]
+    try:
+        anchors = await _anchor_ids(run, labels, entry)
+        if anchors is None:
+            return None
+        if not anchors:
+            notes.append("the entities the query names are not in the graph, "
+                         "so nothing is related to them")
+            return Plan([], notes=notes)
+        reached = await _reached_ids(run, anchors, entry, compiler.params)
+        if reached is None:
+            return None
+        ids = await _in_scope(run, provider, query, compiler, labels, containment, reached)
+    except Exception as exc:                                  # noqa: BLE001
+        if not _timed_out(exc):
+            raise
+        return None
+    return Plan([Unit("ids", roots=chunk, size=len(chunk), satisfies=0)
+                 for chunk in (ids[i:i + width] for i in range(0, len(ids), max(1, width)))],
+                notes=notes)
+
+
+async def trace_plan(run: Run, provider, query, compiler, labels: Sequence[str],
+                     containment: Tuple[str, ...], *, width: int,
+                     notes: List[str]) -> Plan:
+    """Read only what the relationship traced from its far end reaches.
+
+    Past the hops a candidate tests itself, "fed within ten hops by an
+    uncertified dataset" can't be asked of every candidate: its routes
+    multiply with each hop. So the entities the far end matches are found
+    across the data source, a band of a label at a time; the walk runs once,
+    out from them (``_reached_ids`` — ``within_hops_walk``, as from named
+    entities); and the entities it reaches that are in scope become ``ids``
+    units, which are the relationship's whole test. There is no reading the
+    scope the usual way instead: past ``REACH_ANCHORS_MAX`` matches,
+    ``REACH_MAX`` entities reached or a statement's time, it is refused."""
+    trace, hops = compiler.hoisted_trace, compiler.trace_beyond
+    try:
+        anchors = await _far_end_ids(run, labels, trace, compiler.params, width)
+        if anchors is None:
+            raise CompileError(
+                f"More than {REACH_ANCHORS_MAX:,} entities match the far end this search "
+                f"follows more than {hops} hops to — narrow what it matches, or follow at "
+                f"most {hops} hops.")
+        reached = await _reached_ids(run, anchors, trace, compiler.params) if anchors else []
+        if reached is None:
+            raise CompileError(
+                f"Following more than {hops} hops from what this search's far end matches "
+                f"reaches more than {REACH_MAX:,} entities — narrow what it matches, or "
+                f"follow fewer hops.")
+        ids = await _in_scope(run, provider, query, compiler, labels, containment, reached)
+    except Exception as exc:                                  # noqa: BLE001
+        if not _timed_out(exc):
+            raise
+        raise CompileError(
+            f"Following more than {hops} hops from what this search's far end matches took "
+            "too long — narrow what it matches, or follow fewer hops.") from exc
+    if not anchors:
+        notes.append("nothing in the data source matches the far end the search follows "
+                     "lineage to, so nothing is related to it")
+    return Plan([Unit("ids", roots=chunk, size=len(chunk))
+                 for chunk in (ids[i:i + width] for i in range(0, len(ids), max(1, width)))],
+                notes=notes)
+
+
+async def _far_end_ids(run: Run, labels: Sequence[str], trace: Dict[str, Any],
+                       params: Dict[str, Any], width: int) -> Optional[List[int]]:
+    """The node IDs of every entity a traced relationship's far end
+    matches: under each label its condition can hold (``types``), in bands
+    of about ``width`` nodes — so no statement holds a query thread long.
+    None past ``REACH_ANCHORS_MAX``."""
+    wanted = set(trace.get("types") or ())
+    scanned = sorted(lbl for lbl in labels if not wanted or lbl.lower() in wanted)
+    stats = await _label_stats(run, scanned)
+    tail = tail_clauses(list(trace["far_end"]))
+    ids: set = set()
+    for unit in _range_units(scanned, stats, width):
+        conds: List[str] = []
+        bounds: Dict[str, Any] = {}
+        if unit.lo is not None:
+            conds.append("ID(n) >= $_lo")
+            bounds["_lo"] = unit.lo
+        if unit.hi is not None:
+            conds.append("ID(n) < $_hi")
+            bounds["_hi"] = unit.hi
+        if unit.exclude:
+            conds.append("NOT (" + " OR ".join(
+                f"n:`{_sanitize_label(lbl)}`" for lbl in unit.exclude) + ")")
+        conds.append("n.urn IS NOT NULL")
+        res = await run(
+            f"MATCH (n:`{_sanitize_label(unit.label or '')}`) WHERE {' AND '.join(conds)} "
+            f"{tail} WITH n LIMIT $_lim RETURN collect(ID(n))",
+            {**params, **bounds, "_lim": REACH_ANCHORS_MAX + 1 - len(ids)},
+        )
+        ids |= _collected(res)
+        if len(ids) > REACH_ANCHORS_MAX:
+            return None
+    return sorted(ids)
+
+
+def _timed_out(exc: BaseException) -> bool:
+    """A statement that ran out of time — the walk is then too big to plan by."""
+    return isinstance(exc, (asyncio.TimeoutError, TimeoutError)) or "timed out" in str(exc).lower()
+
+
+async def _anchor_ids(run: Run, labels: Sequence[str], entry: Dict[str, Any]
+                      ) -> Optional[List[int]]:
+    """The node IDs the walk starts from: the named entities, or what lies
+    their groups' levels below them. None past ``REACH_ANCHORS_MAX``."""
+    groups = entry.get("groups") or [{"urns": entry["urns"], "lo": 0, "hi": 0}]
+    rel = _rel(entry.get("containment") or ())
+    ids: set = set()
+    for group in groups:
+        roots = await _ids_of(run, labels, group["urns"])
+        if roots and int(group["hi"]) == 0:
+            ids.update(roots)
+        elif roots:
+            res = await run(
+                "UNWIND $_ids AS _wi MATCH (_w) WHERE ID(_w) = _wi "
+                f"MATCH (_w)-[:{rel}*{int(group['lo'])}..{int(group['hi'])}]->(_a) "
+                "WITH DISTINCT _a LIMIT $_lim RETURN collect(ID(_a))",
+                {"_ids": roots, "_lim": REACH_ANCHORS_MAX + 1},
+            )
+            ids.update(_collected(res))
+        if len(ids) > REACH_ANCHORS_MAX:
+            return None
+    return sorted(ids)
+
+
+async def _reached_ids(run: Run, anchors: List[int], entry: Dict[str, Any],
+                       params: Dict[str, Any]) -> Optional[List[int]]:
+    """Every entity the walk reaches from ``anchors``, or None past
+    ``REACH_MAX``. ``params``: the compiler's — the edge filter's values."""
+    pattern, conds = within_hops_walk(entry, 0)
+    where = (" WHERE " + " AND ".join(conds)) if conds else ""
+    reached: set = set()
+    for i in range(0, len(anchors), REACH_STEP):
+        res = await run(
+            "UNWIND $_anchors AS _ai MATCH (anchor) WHERE ID(anchor) = _ai "
+            f"MATCH {pattern}{where} WITH DISTINCT n LIMIT $_lim RETURN collect(ID(n))",
+            {**params, "_anchors": anchors[i:i + REACH_STEP], "_lim": REACH_MAX + 1},
+        )
+        reached |= _collected(res)
+        if len(reached) > REACH_MAX:
+            return None
+    return sorted(reached)
+
+
+def _collected(res) -> set:
+    """The IDs a ``RETURN collect(ID(…))`` answered. One row however many:
+    FalkorDB cuts a reply at ``RESULTSET_SIZE`` rows (10,000 on the stock
+    image) without saying so, which one row per ID would hit."""
+    rows = res.result_set or []
+    return {int(i) for i in ((rows[0][0] if rows and rows[0] else None) or []) if i is not None}
+
+
+async def _in_scope(run: Run, provider, query, compiler, labels: Sequence[str],
+                    containment: Tuple[str, ...], ids: List[int]) -> List[int]:
+    """Which of ``ids`` the scope holds — what the scope's own units would
+    read: a searchable label (one the view's entity types name, when the
+    scope has no roots), on the canvas in ``visible`` mode, and inside each
+    root set within its depth."""
+    root_sets, depths = _scope_urn_sets_with_depths(query, compiler)
+    visible = (set(query.scope.visible_urns or ())
+               if query.scope.scope_mode == "visible" and query.scope.visible_urns else None)
+    clamps: List[set] = []
+    if root_sets and containment:
+        for urns in root_sets:
+            found = await _ids_of(run, labels, urns)
+            if not found:
+                return []                    # nothing is inside roots that aren't there
+            clamps.append(set(found))
+        allowed = set(labels)
+    elif visible is not None:
+        allowed = set(labels)
+    else:
+        allowed = set(_labels_in_scope(provider, labels, query.scope.entity_types))
+    rel = _rel(containment)
+    deepest = max(depths) if clamps else 0
+    up = (f"OPTIONAL MATCH _sp = (n)<-[:{rel}*0..{int(deepest)}]-(_r) "
+          "RETURN ID(n), n.urn, labels(n), collect([ID(_r), length(_sp)])"
+          if clamps else "RETURN ID(n), n.urn, labels(n), []")
+    kept: List[int] = []
+    step = 5_000
+    for i in range(0, len(ids), step):
+        res = await run(f"UNWIND $_ids AS _ii MATCH (n) WHERE ID(n) = _ii {up}",
+                        {"_ids": ids[i:i + step]})
+        for nid, urn, node_labels, ancestors in res.result_set or []:
+            if urn is None or not allowed.intersection(node_labels or ()):
+                continue
+            if visible is not None and urn not in visible:
+                continue
+            if all(any(a and a[0] in clamp and a[1] <= depth for a in ancestors or ())
+                   for clamp, depth in zip(clamps, depths)):
+                kept.append(int(nid))
+    return sorted(kept)
+
+
 async def _walk_size(run: Run, ids: List[int], rel: str, max_depth: int, limit: int) -> int:
     """How many nodes the roots contain, counting no further than
     ``limit + 1`` — a bounded walk stops early (57 ms to learn a 1M
@@ -364,13 +643,17 @@ def match_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
     the predicate's parameters bound."""
     params: Dict[str, Any] = dict(ctx.params)
     rel = _rel(ctx.containment)
-    where = [] if ctx.where in ("", "true") else [f"({ctx.where})"]
+    where = [] if ctx.where in ("", "true") else [grouped(ctx.where)]
     if unit.kind == "walk":
         params["_walk"] = list(unit.roots or [])
         head = ("UNWIND $_walk AS _wi MATCH (_w) WHERE ID(_w) = _wi "
                 f"MATCH (_w)-[:{rel}*0..{int(unit.depth or ctx.max_depth)}]->(n) "
                 "WITH DISTINCT n "
                 "WHERE " + " AND ".join(["n.urn IS NOT NULL"] + where))
+    elif unit.kind == "ids":
+        params["_ids"] = list(unit.roots or [])
+        head = ("UNWIND $_ids AS _ii MATCH (n) WHERE ID(n) = _ii AND "
+                + " AND ".join(["n.urn IS NOT NULL"] + where))
     else:
         conds: List[str] = []
         if unit.kind == "visible":
@@ -395,8 +678,12 @@ def match_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
         parts.append(f"WITH n MATCH (n)<-[:{rel}*0..{int(depth)}]-(_r{i}) "
                      f"WHERE ID(_r{i}) IN $_roots{i} WITH DISTINCT n")
         params[f"_roots{i}"] = list(ids)
-    if ctx.within_hops:
+    if ctx.hop_parts:
+        parts.extend(p for i, p in enumerate(ctx.hop_parts) if i != unit.satisfies)
+    elif ctx.within_hops:
         parts.append(ctx.within_hops)
+    if ctx.tail:
+        parts.append(tail_clauses(list(ctx.tail)))
     return " ".join(parts), params
 
 
@@ -438,7 +725,7 @@ def raw_probe_statement(unit: Unit, ctx: Context) -> Tuple[str, Dict[str, Any]]:
     predicate's keys raw — the unit's nodes alone: the predicate, the scope's
     clamps and hops belong to the statements that use the answer."""
     head, params = match_statement(
-        unit, replace(ctx, where="", params={}, within_hops=""), [])
+        unit, replace(ctx, where="", params={}, within_hops="", tail=()), [])
     cond, cond_params = probe_condition(ctx.raw_leaves)
     params.update(cond_params)
     return f"{head} WITH n WHERE {cond} RETURN ID(n), n.propertiesRaw", params
@@ -476,10 +763,14 @@ def after_statement(unit: Unit, ctx: Context, clamps: List[List[int]], k: int,
             params)
 
 
-def within_hops(compiler) -> Tuple[str, Dict[str, Any]]:
+def within_hops(compiler) -> Tuple[str, Dict[str, Any], Tuple[str, ...]]:
     """The predicate's ``withinHops`` anchors as continuations — the capped
-    engine's own (``_build_within_hops_continuation``)."""
-    fragment, params, _ = _build_within_hops_continuation(
+    engine's own (``_build_within_hops_continuation``) — and the same one
+    walk at a time (``Context.hop_parts``)."""
+    fragment, _, _ = _build_within_hops_continuation(
         compiler.hoisted_within_hops, compiler._param_counter,
     )
-    return fragment, params
+    # The parts' parameters: every walk's, even when one over no edges cuts
+    # the joined fragment short.
+    parts, params, _ = within_hops_parts(compiler.hoisted_within_hops, compiler._param_counter)
+    return fragment, params, tuple(parts)

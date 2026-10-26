@@ -53,6 +53,8 @@ const REQUIRED_INPUT_FILLERS: Record<string, string | number> = {
     sourceUrn: 'urn:li:dataset:source',
     targetUrn: 'urn:li:dataset:target',
     propertyKey: 'layerAssignment',
+    containerPath: 'Country / United Kingdom',
+    entityPath: 'Sales / orders',
 }
 
 

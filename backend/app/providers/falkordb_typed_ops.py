@@ -91,10 +91,26 @@ _BOOLEAN = ("CASE typeOf(_e) WHEN 'Boolean' THEN _e "
 _DATE_TEXT = ("CASE WHEN typeOf(_e) IN ['String', 'Date', 'Datetime'] "
               "THEN toStringOrNull(_e) END")
 
+
+def padded(text: str) -> str:
+    """The text with ten zeros after it, for reading characters by position.
+
+    FalkorDB's ``substring`` reads beyond the end of a multi-byte string
+    asked to start past its last character, and that read can crash the
+    server (4.18). Read from here, no slice up to ten characters in starts
+    past the end. The date shape below reads its dashes and the digits
+    after them this way, and the zeros change nothing it decides: a text
+    too short for a dash fails either way, and zeros after the digits of a
+    text that has both dashes are still digits. A slice from 0 is always
+    safe, so a date's key is cut from the text itself."""
+    return f"{text} + '0000000000'"
+
+
 # "YYYY-MM-DD…": dashes where ISO puts them and eight digits around them
 # that print back as themselves (FalkorDB has no regex).
-_DIGITS = "substring(_s, 0, 4) + substring(_s, 5, 2) + substring(_s, 8, 2)"
-_ISO_DAY_SHAPE = (f"substring(_s, 4, 1) = '-' AND substring(_s, 7, 1) = '-' "
+_DIGITS = (f"substring(_s, 0, 4) + substring({padded('_s')}, 5, 2) "
+           f"+ substring({padded('_s')}, 8, 2)")
+_ISO_DAY_SHAPE = (f"substring({padded('_s')}, 4, 1) = '-' AND substring({padded('_s')}, 7, 1) = '-' "
                   f"AND toStringOrNull(toIntegerOrNull({_DIGITS})) = {_DIGITS}")
 
 _SECOND_TEMPLATE = "0000-00-00T00:00:00"
@@ -120,6 +136,36 @@ def compile_comparison(col: str, cmp: Comparison, bind: Bind) -> str:
     if cmp.include_missing:
         return f"({col} IS NULL OR NOT {test})"
     return f"({col} IS NOT NULL AND NOT {test})"
+
+
+def compile_key_comparison(left: str, right: str, cmp: Comparison) -> str:
+    """A WHERE fragment true exactly where ``search_semantics.evaluate_keys``
+    is, for two stored values of one entity (``n.`a``` and ``n.`b```).
+    Both sides' keys are built side by side in one list, never one inside
+    the other's comprehension, and then compared pair by pair."""
+    positive = POSITIVE_OF.get(cmp.op)
+    test = _pair_test(positive or cmp.op, cmp)
+
+    def keys(col: str) -> str:
+        return _keys_of(f"CASE WHEN typeOf({col}) = 'List' THEN {col} ELSE [{col}] END", cmp)
+
+    pairs = (f"ANY(_kp IN [[{keys(left)}, {keys(right)}]] WHERE "
+             f"ANY(_ka IN _kp[0] WHERE ANY(_kb IN _kp[1] WHERE {test('_ka', '_kb')})))")
+    if positive is None:
+        return pairs
+    return f"({left} IS NOT NULL AND {right} IS NOT NULL AND NOT {pairs})"
+
+
+def _pair_test(op: str, cmp: Comparison):
+    """``a <op> b`` for two keys of the comparison's type. Numbers are
+    ordered by sign first and compared raw only where the signs agree, so
+    FalkorDB's wrapping integer order (``_number_order``) never decides."""
+    if cmp.type == "number" and op != "eq":
+        neg = "lt" if op in ("lt", "lte") else "gt"
+        first = "({a} < 0 AND {b} >= 0)" if neg == "lt" else "({a} >= 0 AND {b} < 0)"
+        return lambda a, b: (f"({first.format(a=a, b=b)} OR "
+                             f"(({a} >= 0) = ({b} >= 0) AND {a} {_SYMBOL[op]} {b}))")
+    return lambda a, b: f"{a} {_SYMBOL[op]} {b}"
 
 
 def _match(col: str, op: str, cmp: Comparison, bind: Bind) -> str:
@@ -150,9 +196,13 @@ _TEXT_KINDS = "['String', 'Integer', 'Boolean', 'Date', 'Datetime', 'Duration', 
 
 
 def _decimal_of(text: str) -> str:
-    """"12.5" as 125 * 1.0 / 10.0 ^ 1 — see ``_TEXT_NUMBER``."""
-    return (f"[_p IN [split({text}, '.')] | CASE WHEN size(_p) = 2 "
-            f"THEN toIntegerOrNull(_p[0] + _p[1]) * 1.0 / 10.0 ^ size(_p[1]) END][0]")
+    """"12.5" as 125 * 1.0 / 10.0 ^ 1, for text holding one point — see
+    ``_TEXT_NUMBER``. Written out, not bound in a comprehension: FalkorDB's
+    time to plan a statement multiplies with each list function nested in
+    another, and a comparison inside a relationship already sits in a few
+    (500 ms for one number comparison, against 150 written out)."""
+    parts = f"split({text}, '.')"
+    return f"(toIntegerOrNull({parts}[0] + {parts}[1]) * 1.0 / 10.0 ^ size({parts}[1]))"
 
 
 def _scalar_branches(col: str, cmp: Comparison, test) -> list:
@@ -162,14 +212,15 @@ def _scalar_branches(col: str, cmp: Comparison, test) -> list:
     if cmp.type == "number":
         text = f"toStringOrNull({col})"
         whole = f"toIntegerOrNull({text})"
+        decimal = _decimal_of(text)
         return [
             # A NaN equals nothing, not even itself — yet FalkorDB's IN finds
             # it equal to every value; ``= itself`` keeps it out.
             f"(typeOf({col}) IN ['Integer', 'Float'] AND {col} = {col} AND {test(col)})",
             f"(typeOf({col}) = 'String' AND NOT {text} CONTAINS '.' "
             f"AND {whole} IS NOT NULL AND {test(whole)})",
-            f"(typeOf({col}) = 'String' AND {text} CONTAINS '.' AND ANY(_x IN "
-            f"[_k IN [{_decimal_of(text)}] WHERE _k IS NOT NULL] WHERE {test('_x')}))",
+            f"(typeOf({col}) = 'String' AND {text} CONTAINS '.' "
+            f"AND size(split({text}, '.')) = 2 AND {decimal} IS NOT NULL AND {test(decimal)})",
         ]
     if cmp.type == "string":
         text = f"toStringOrNull({col})"
@@ -187,7 +238,8 @@ def _scalar_branches(col: str, cmp: Comparison, test) -> list:
             f"(typeOf({col}) = 'String' AND {parsed} IS NOT NULL AND {test(parsed)})",
         ]
     text = f"toStringOrNull({col})"
-    digits = f"substring({text}, 0, 4) + substring({text}, 5, 2) + substring({text}, 8, 2)"
+    digits = (f"substring({text}, 0, 4) + substring({padded(text)}, 5, 2) "
+              f"+ substring({padded(text)}, 8, 2)")
     if cmp.grain == "day":
         key = f"substring({text}, 0, 10)"
     else:
@@ -199,7 +251,7 @@ def _scalar_branches(col: str, cmp: Comparison, test) -> list:
     # every entity before the digits are checked.
     return [
         f"(typeOf({col}) IN ['String', 'Date', 'Datetime'] "
-        f"AND substring({text}, 4, 1) = '-' AND substring({text}, 7, 1) = '-' "
+        f"AND substring({padded(text)}, 4, 1) = '-' AND substring({padded(text)}, 7, 1) = '-' "
         f"AND {test(key)} AND toStringOrNull(toIntegerOrNull({digits})) = {digits})",
     ]
 

@@ -14,6 +14,7 @@
  * and "87,432+" over an exact 87,432 is a number the user cannot trust.
  */
 import { render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { describe, expect, it, vi } from 'vitest'
 
 import { ProviderOverride } from '@/providers/GraphProviderContext'
@@ -64,6 +65,7 @@ function renderPanel(result: Record<string, unknown>, options?: Record<string, u
                 session={stubAdvanced({ view: resultsView(result, options) })}
             />
         </ProviderOverride>,
+        { wrapper: MemoryRouter },
     )
 }
 

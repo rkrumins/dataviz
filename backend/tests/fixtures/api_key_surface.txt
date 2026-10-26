@@ -170,6 +170,7 @@ POST /api/v1/{ws_id}/graph/search/counts resource reads-only
 POST /api/v1/{ws_id}/graph/search/explain resource reads-only
 POST /api/v1/{ws_id}/graph/search/exports resource reads-only
 POST /api/v1/{ws_id}/graph/search/membership resource reads-only
+POST /api/v1/{ws_id}/graph/search/resolve resource reads-only
 POST /api/v1/{ws_id}/graph/trace resource reads-only
 POST /api/v1/{ws_id}/graph/trace/closure resource reads-only
 POST /api/v1/{ws_id}/graph/trace/expand resource reads-only

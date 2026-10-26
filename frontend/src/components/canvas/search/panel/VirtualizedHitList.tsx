@@ -87,6 +87,8 @@ export interface VirtualizedHitListProps {
     scrollElementRef: RefObject<HTMLElement | null>
     onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
     onOpen?: (urn: string) => void
+    /** A breadcrumb clicked: look inside that container. */
+    onAncestorClick?: (ancestor: AncestorRef) => void
     /** Estimated row height in px, until the virtualizer measures the real
      *  ones. Defaults to {@link HIT_ROW_ESTIMATE_PX}. */
     estimatedRowHeightPx?: number
@@ -97,7 +99,7 @@ export interface VirtualizedHitListProps {
 
 
 export const VirtualizedHitList: FC<VirtualizedHitListProps> = ({
-    hits, rows, estimateRowSize, renderRow, scrollElementRef, onReveal, onOpen,
+    hits, rows, estimateRowSize, renderRow, scrollElementRef, onReveal, onOpen, onAncestorClick,
     estimatedRowHeightPx = HIT_ROW_ESTIMATE_PX, overscan = 6,
 }) => {
 
@@ -245,6 +247,7 @@ export const VirtualizedHitList: FC<VirtualizedHitListProps> = ({
                                     index={vRow.index}
                                     onReveal={onReveal}
                                     onOpen={onOpen}
+                                    onAncestorClick={onAncestorClick}
                                 />
                             )}
                     </div>

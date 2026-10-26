@@ -6,6 +6,7 @@
  */
 import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import type { ReactNode } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 const notify = vi.hoisted(() => vi.fn())
@@ -14,9 +15,23 @@ vi.mock('@/components/ui/notifications', () => ({
 }))
 
 import type { SavedViewQuery } from '@/services/viewLibraryService'
+import { ProviderOverride } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useViewLibraryStore, type ViewLibraryState } from '@/store/viewLibraryStore'
 
 import { LibraryPopover } from '../LibraryPopover'
+
+
+/** The view the Recipes tab reads, through a provider that never answers. */
+const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
+function ViewProvider({ children }: { children: ReactNode }) {
+    return (
+        <ProviderOverride value={{ provider, isLoading: false, error: null, scopeKind: 'ready',
+            workspaceId: 'ws', dataSourceId: null, providerReady: true, providerVersion: 1 } as never}>
+            {children}
+        </ProviderOverride>
+    )
+}
 
 
 const tables: SavedViewQuery = {
@@ -33,11 +48,11 @@ function library(over: Partial<ViewLibraryState> = {}) {
 
 function renderPopover(over: Partial<React.ComponentProps<typeof LibraryPopover>> = {}) {
     const props = {
-        open: true, onOpenChange: vi.fn(), recentQueries: [], onSeedTemplate: vi.fn(),
+        open: true, onOpenChange: vi.fn(), recentQueries: [], viewId: 'view-1', onPickRecipe: vi.fn(),
         onLoadRecent: vi.fn(), onTogglePinRecent: vi.fn(), onRemoveRecent: vi.fn(),
         onSaveAs: vi.fn(), onLoadSaved: vi.fn(), activeDraft: false, ...over,
     }
-    render(<LibraryPopover {...props}><button type="button">Library</button></LibraryPopover>)
+    render(<LibraryPopover {...props}><button type="button">Library</button></LibraryPopover>, { wrapper: ViewProvider })
     return props
 }
 

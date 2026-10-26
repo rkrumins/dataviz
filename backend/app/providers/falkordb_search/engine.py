@@ -43,6 +43,7 @@ from backend.app.providers.falkordb_deep_search import (
     _run_aggregation,
     decode_cursor,
     encode_cursor,
+    refuse_trace,
 )
 from backend.app.providers.falkordb_search.keys import build_sort_spec
 from backend.app.providers.falkordb_search.keys import SortKey, SortSpec
@@ -140,7 +141,7 @@ async def execute_session_search(
     where = compiler.compile(query.predicate)
     if compiler.hoisted_path is not None:
         raise CompileError("path search is not run by the uncapped engine")
-    hops, hop_params = within_hops(compiler)
+    hops, hop_params, hop_parts = within_hops(compiler)
     name_key = getattr(provider, "_name_property", None)
     relevance = None
     if options.sort == "relevance" and not options.sort_property:
@@ -153,7 +154,7 @@ async def execute_session_search(
         containment=containment, max_depth=int(query.scope.max_depth or 12),
         visible=(list(query.scope.visible_urns or [])
                  if query.scope.scope_mode == "visible" else None),
-        within_hops=hops,
+        within_hops=hops, hop_parts=hop_parts, tail=tuple(compiler.tail),
         tally=(options.results == "both" and bool(containment)
                and any(a.by == "ancestor" for a in options.aggregations or [])),
         raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
@@ -235,14 +236,14 @@ async def execute_count_session(
     where = compiler.compile(query.predicate)
     if compiler.hoisted_path is not None:
         raise CompileError("a path search has no count")
-    hops, hop_params = within_hops(compiler)
+    hops, hop_params, hop_parts = within_hops(compiler)
     ctx = Context(
         where=where, params={**compiler.params, **hop_params},
         sort=SortSpec((SortKey("n.urn"),)), containment=_containment(provider),
         max_depth=int(query.scope.max_depth or 12),
         visible=(list(query.scope.visible_urns or [])
                  if query.scope.scope_mode == "visible" else None),
-        within_hops=hops,
+        within_hops=hops, hop_parts=hop_parts, tail=tuple(compiler.tail),
         raw_leaves=tuple(compiler.raw_leaves or ()), raw_labels=raw_labels,
     )
     query_id = query_identity(query, context.scope_hash, 0)
@@ -538,8 +539,10 @@ async def unit_context(unit: Unit, ctx: Context, run, timeout_s: float) -> Conte
         cypher, params = raw_probe_statement(unit, ctx)
         res = await run(cypher, params, timeout_s)
         lists = evaluate_rows(res.result_set or [], ctx.raw_leaves)
-    return dataclasses.replace(ctx, where=answered(ctx.where, ctx.raw_leaves, lists),
-                               params={**ctx.params, **lists})
+    return dataclasses.replace(
+        ctx, where=answered(ctx.where, ctx.raw_leaves, lists),
+        tail=tuple(answered(t, ctx.raw_leaves, lists) for t in ctx.tail),
+        params={**ctx.params, **lists})
 
 
 async def _run_unit(unit: Unit, session: Session, ctx: Context, run, timeout_s: float
@@ -621,6 +624,16 @@ async def _compute_facets(provider, query: SearchQuery, specs, sid: str, store: 
     compiler = _build_compiler_for_provider(provider)
     where = compiler.compile(query.predicate)
     params: Dict[str, Any] = dict(compiler.params)
+    try:
+        refuse_trace(compiler)
+    except CompileError as exc:
+        # Expected, not a failure: the capped statements can't count a trace's matches.
+        try:
+            await store.save_facets(sid, {"error": _describe(exc), "refused": str(exc)},
+                                    settings.session_ttl_seconds)
+        except Exception as save_exc:             # noqa: BLE001
+            logger.warning("search session %s: facets not stored: %r", sid, save_exc)
+        return
     capped, uncapped = _candidate_prefixes(
         provider, query, compiler, where, params,
         _resolve_candidate_cap(query, settings),
@@ -678,8 +691,9 @@ async def _facet_models(query: SearchQuery, session: Session, store: SessionStor
     if capped and facets is None:
         return None, notes
     if isinstance(facets, dict):
-        # Why is in the server's log (``_compute_facets``), not on the page.
-        notes.append("facets could not be computed")
+        # Why is in the server's log (``_compute_facets``), not on the page —
+        # unless it is the query's own limit, said in the user's terms.
+        notes.append(facets.get("refused") or "facets could not be computed")
         facets = [[] for _ in capped]
     if len(capped) < len(specs) and session.status != COMPLETE:
         return None, notes
