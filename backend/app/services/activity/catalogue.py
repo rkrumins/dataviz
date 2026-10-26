@@ -679,6 +679,21 @@ def _summary_refresh(p: dict) -> str:
     return f"Requested {what} of {_subject(p)}"
 
 
+_WHO_MAY_CREATE = {
+    "granters": "Anyone who lets people into a workspace",
+    "everyone": "Anyone",
+}
+
+
+def _summary_sa_policy(p: dict) -> str:
+    to = _detail(p, "to") or {}
+    who = _WHO_MAY_CREATE.get(to.get("whoMayCreate"))
+    if who is None:
+        return "Only administrators of service accounts may create service accounts"
+    team = ", managed by a team they're in" if to.get("requireTeamManager") else ""
+    return f"{who} may create up to {to.get('perPersonLimit')} service accounts each{team}"
+
+
 def _summary_flag(p: dict) -> str:
     key = _detail(p, "key") or _subject(p)
     value = _detail(p, "value")
@@ -759,6 +774,7 @@ _EVENT_META.update({
     # ── platform
     "platform.feature_flag.changed": ("info", _summary_flag),
     "platform.profiling_policy.updated": ("info", lambda p: "Changed profiling retention and alerting"),
+    "platform.service_account_policy.updated": ("info", _summary_sa_policy),
     "platform.node_identity.updated": ("info", lambda p: "Changed the platform's node-identity default"),
     "platform.activity.exported": ("info", lambda p: (
         f"Exported the activity of {_subject(p)} as CSV" if p.get("workspace_id")
@@ -816,6 +832,7 @@ LABELS: dict[str, str] = {
     "provider.connection.deleted": "Deleted a provider",
     "platform.feature_flag.changed": "Changed a feature flag",
     "platform.profiling_policy.updated": "Changed profiling policy",
+    "platform.service_account_policy.updated": "Changed who may create service accounts",
     "platform.node_identity.updated": "Changed node identity",
     "platform.activity.exported": "Exported activity",
     "rbac.group.member_added": "Added to a group",

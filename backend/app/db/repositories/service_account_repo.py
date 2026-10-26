@@ -431,6 +431,17 @@ async def update_details(
     await session.flush()
 
 
+async def count_created_by(session: AsyncSession, user_id: str) -> int:
+    """How many live service accounts this person created — what the
+    per-person limit counts. A deleted one no longer does."""
+    return int((await session.execute(
+        select(func.count())
+        .select_from(ServiceAccountORM)
+        .join(UserORM, UserORM.id == ServiceAccountORM.user_id)
+        .where(ServiceAccountORM.created_by == user_id, UserORM.deleted_at.is_(None))
+    )).scalar() or 0)
+
+
 async def due_for_purge(session: AsyncSession, *, before: datetime, limit: int) -> list[tuple[str, str]]:
     """Accounts deleted before ``before`` and not yet purged — id and name,
     the longest deleted first — locked until the transaction ends, skipping
@@ -753,6 +764,17 @@ async def teams_through(
     )).all() if wanted else []:
         out[account_id].append(name)
     return out
+
+
+async def teams_of(session: AsyncSession, user_id: str) -> list[tuple[str, str]]:
+    """The live teams a person is in, by name: ``(id, name)``. Those are the
+    teams they may name to manage an account they create."""
+    return [(group_id, name) for group_id, name in (await session.execute(
+        select(GroupORM.id, GroupORM.name)
+        .join(GroupMemberORM, GroupMemberORM.group_id == GroupORM.id)
+        .where(GroupMemberORM.user_id == user_id, GroupORM.deleted_at.is_(None))
+        .order_by(func.lower(GroupORM.name), GroupORM.id)
+    )).all()]
 
 
 async def accounts_managed_by_team(session: AsyncSession, group_id: str) -> list[str]:

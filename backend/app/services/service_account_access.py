@@ -12,6 +12,10 @@ it — reaches everything it reaches. So making someone able to must not give
 them anything the person doing it couldn't have given them directly: for each
 of the account's roles, either they hold it already or the appointer could
 grant it there (:func:`appointment_refusal`).
+
+Who may create one for themselves is a policy the administrators set
+(:func:`creation_policy`): nobody but them, as it ships; anyone who lets
+people into a workspace; or anyone. Creating one gives it no access.
 """
 from __future__ import annotations
 
@@ -23,7 +27,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.app.db.models import RoleBindingORM, ServiceAccountORM, UserORM
+from backend.app.db.models import PlatformSettingsORM, RoleBindingORM, ServiceAccountORM, UserORM
 from backend.app.db.repositories import role_repo, service_account_repo, user_repo
 from backend.app.db.repositories.binding_repo import _is_expired
 from backend.app.services import permission_service, workspace_access
@@ -33,6 +37,12 @@ from backend.common.roles import role_label
 MANAGE = "system:service-accounts:manage"
 #: Who may make an account's keys without managing it.
 MINT_ANY = "system:users:manage"
+#: Who may create a service account for themselves: the administrators of
+#: service accounts alone, anyone who lets people into a workspace, or anyone.
+WHO_MAY_CREATE = ("central", "granters", "everyone")
+#: How many live service accounts a person may have created for themselves
+#: when the policy names no number.
+DEFAULT_PER_PERSON_LIMIT = 10
 
 
 @dataclass(frozen=True)
@@ -159,6 +169,47 @@ async def require(
 
         await assert_session_alive_or_503(claims, permission=MANAGE, user_id=user_id)
     return found
+
+
+# ── Who may create one ──────────────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class CreationPolicy:
+    who: str = "central"
+    per_person_limit: int = DEFAULT_PER_PERSON_LIMIT
+    #: An account someone creates for themselves is managed by a team they
+    #: are in, so it outlives any one of them.
+    require_team: bool = False
+
+
+async def creation_policy(session: AsyncSession) -> CreationPolicy:
+    """Who may create a service account for themselves, as the
+    administrators of service accounts set it. Unset, only they may."""
+    row = await session.get(PlatformSettingsORM, 1)
+    if row is None:
+        return CreationPolicy()
+    return CreationPolicy(
+        who=row.sa_who_may_create if row.sa_who_may_create in WHO_MAY_CREATE else "central",
+        per_person_limit=row.sa_per_person_limit or DEFAULT_PER_PERSON_LIMIT,
+        require_team=bool(row.sa_require_team_manager),
+    )
+
+
+def creation_refusal(policy: CreationPolicy, claims: PermissionClaims) -> Optional[str]:
+    """Why the caller may not create a service account for themselves, or
+    ``None`` when they may. The administrators of service accounts always
+    may."""
+    if policy.who == "everyone" or has_permission(claims, MANAGE):
+        return None
+    if policy.who == "granters":
+        if any(workspace_access.tier(claims, ws) for ws in claims.ws_perms):
+            return None
+        return (
+            "Only someone who lets people into a workspace — one of its admins or stewards — "
+            "can create a service account"
+        )
+    return "Only an administrator of service accounts can create a service account"
 
 
 # ── Who may come to act as an account ───────────────────────────────

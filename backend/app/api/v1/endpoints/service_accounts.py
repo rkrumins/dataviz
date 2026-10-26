@@ -2,7 +2,9 @@
 
 ``/admin/service-accounts`` is where super and org admins
 (``system:service-accounts:manage``) create them, list them all, give them
-workspace roles, and hand a leaver's accounts over to a successor. Each
+workspace roles, hand a leaver's accounts over to a successor, and say who
+else may create one for themselves (``/policy``) — at
+``POST /me/service-accounts``, managing it themselves or through a team. Each
 account's own routes, ``/admin/service-accounts/{id}``, are its managers' as
 well: they rename it, disable and enable it, delete and restore it — unless an
 administrator holds it — appoint and remove its managers, and take its roles
@@ -30,8 +32,9 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
+from backend.app.db.advisory import hold_for_transaction
 from backend.app.db.engine import get_db_session
-from backend.app.db.models import RoleBindingORM, WorkspaceORM
+from backend.app.db.models import PlatformSettingsORM, RoleBindingORM, WorkspaceORM
 from backend.app.db.repositories import (
     access_request_repo,
     api_key_repo,
@@ -43,6 +46,7 @@ from backend.app.db.repositories import (
     user_repo,
 )
 from backend.app.services import service_account_access, service_account_standing, workspace_access
+from backend.app.services.activity import recorder
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.service_account_access import MANAGE, MINT_ANY
 from backend.auth_service.interface import User
@@ -220,6 +224,54 @@ class CreateServiceAccountRequest(_Model):
     managers: List[ManagerRef] = Field(..., min_length=1, max_length=20)
 
 
+class CreateMyServiceAccountRequest(_Model):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    name: str = Field(..., min_length=1, max_length=80)
+    description: Optional[str] = Field(None, max_length=500)
+    #: A team you are in, to manage it instead of you.
+    team: Optional[str] = Field(None, min_length=1, max_length=64)
+
+
+WhoMayCreate = Literal["central", "granters", "everyone"]
+
+
+class CreationPolicyOut(_Model):
+    """Who may create a service account for themselves: the administrators
+    of service accounts alone (``central``), anyone who lets people into a
+    workspace (``granters``), or anyone (``everyone``)."""
+    who_may_create: WhoMayCreate = Field(alias="whoMayCreate")
+    #: How many live accounts each person may have created.
+    per_person_limit: int = Field(alias="perPersonLimit")
+    #: An account someone creates is managed by a team they are in.
+    require_team_manager: bool = Field(alias="requireTeamManager")
+
+
+class CreationPolicyUpdate(_Model):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    who_may_create: Optional[WhoMayCreate] = Field(None, alias="whoMayCreate")
+    per_person_limit: Optional[int] = Field(None, alias="perPersonLimit", ge=1, le=1000)
+    require_team_manager: Optional[bool] = Field(None, alias="requireTeamManager")
+
+
+class TeamRef(_Model):
+    id: str
+    name: str
+
+
+class MyCreation(CreationPolicyOut):
+    """The policy as it applies to you."""
+    may_create: bool = Field(alias="mayCreate")
+    #: Why not, when you may not.
+    reason: Optional[str] = None
+    #: The live accounts you have created, against ``perPersonLimit`` —
+    #: which binds everyone but the administrators of service accounts.
+    created: int
+    #: ``perPersonLimit`` binds you.
+    limited: bool
+    #: The teams you are in: any of them may manage an account you create.
+    teams: List[TeamRef]
+
+
 class UpdateServiceAccountRequest(_Model):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
     name: Optional[str] = Field(None, min_length=1, max_length=80)
@@ -373,6 +425,37 @@ async def _may_appoint(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
 
 
+async def _create(
+    session: AsyncSession, *, name: str, description: Optional[str],
+    subjects: list[tuple[Optional[str], Optional[str], str]], actor_id: str, via: Optional[str] = None,
+) -> str:
+    """A new, enabled account managed by ``subjects`` (``_manager_subject``),
+    recorded as made by ``actor_id``. Returns its id."""
+    description = (description or "").strip() or None
+    account_id = await service_account_repo.create(
+        session, name=name, description=description, created_by=actor_id,
+    )
+    await _record(
+        session, "created", account_id, name, created_by=actor_id, description=description,
+        **({"via": via} if via else {}),
+    )
+    for user_id, group_id, manager_name in subjects:
+        await _appoint(
+            session, account_id, name, user_id=user_id, group_id=group_id,
+            manager_name=manager_name, actor_id=actor_id,
+        )
+    await service_account_standing.refresh(session, [account_id])
+    logger.info("Service account %s created by %s", account_id, actor_id)
+    return account_id
+
+
+def _policy_out(policy: service_account_access.CreationPolicy) -> CreationPolicyOut:
+    return CreationPolicyOut(
+        who_may_create=policy.who, per_person_limit=policy.per_person_limit,
+        require_team_manager=policy.require_team,
+    )
+
+
 async def _record(session: AsyncSession, verb: str, account_id: str, name: str, **payload) -> None:
     await outbox_event_repo.emit(
         session,
@@ -505,22 +588,49 @@ async def create_service_account(
     if not name:
         raise HTTPException(status_code=422, detail="A service account needs a name")
     subjects = [await _manager_subject(session, ref) for ref in body.managers]
-    account_id = await service_account_repo.create(
-        session, name=name, description=(body.description or "").strip() or None,
-        created_by=admin.id,
+    account_id = await _create(
+        session, name=name, description=body.description, subjects=subjects, actor_id=admin.id,
     )
-    await _record(
-        session, "created", account_id, name, created_by=admin.id,
-        description=(body.description or "").strip() or None,
-    )
-    for user_id, group_id, manager_name in subjects:
-        await _appoint(
-            session, account_id, name, user_id=user_id, group_id=group_id,
-            manager_name=manager_name, actor_id=admin.id,
-        )
-    await service_account_standing.refresh(session, [account_id])
-    logger.info("Service account %s created by %s", account_id, admin.id)
     return await _detail(session, account_id, admin.id, claims)
+
+
+@admin_router.get("/policy", response_model=CreationPolicyOut, dependencies=[Depends(requires(MANAGE))])
+async def get_creation_policy(session: AsyncSession = Depends(get_db_session)):
+    """Who may create a service account for themselves, how many each, and
+    whether a team they are in must manage it."""
+    return _policy_out(await service_account_access.creation_policy(session))
+
+
+@admin_router.put("/policy", response_model=CreationPolicyOut)
+async def set_creation_policy(
+    body: CreationPolicyUpdate,
+    admin: User = Depends(requires(MANAGE)),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Change who may create a service account for themselves, how many
+    each, or whether a team must manage it. What is left out stays."""
+    before = await service_account_access.creation_policy(session)
+    row = await session.get(PlatformSettingsORM, 1)
+    if row is None:
+        row = PlatformSettingsORM(id=1)
+        session.add(row)
+    if body.who_may_create is not None:
+        row.sa_who_may_create = body.who_may_create
+    if body.per_person_limit is not None:
+        row.sa_per_person_limit = body.per_person_limit
+    if body.require_team_manager is not None:
+        row.sa_require_team_manager = body.require_team_manager
+    row.updated_at = datetime.now(timezone.utc).isoformat()
+    row.updated_by = admin.id
+    await session.flush()
+    after = await service_account_access.creation_policy(session)
+    if after != before:
+        await recorder.record_for_request(
+            session, "platform.service_account_policy.updated",
+            details={"from": _policy_out(before).model_dump(by_alias=True),
+                     "to": _policy_out(after).model_dump(by_alias=True)},
+        )
+    return _policy_out(after)
 
 
 @admin_router.post("/hand-over", response_model=HandOverResult)
@@ -920,6 +1030,96 @@ async def revoke_role(
 
 
 # ── Managers ────────────────────────────────────────────────────────
+
+
+@me_router.get("/policy", response_model=MyCreation)
+async def my_creation_policy(
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Whether you may create a service account for yourself, how many you
+    have, and the teams you may name to manage one."""
+    policy = await service_account_access.creation_policy(session)
+    created = await service_account_repo.count_created_by(session, user.id)
+    reason = service_account_access.creation_refusal(policy, claims) or _over_limit(policy, claims, created)
+    return MyCreation(
+        **_policy_out(policy).model_dump(), may_create=reason is None, reason=reason, created=created,
+        limited=not has_permission(claims, MANAGE),
+        teams=[TeamRef(id=i, name=n) for i, n in await service_account_repo.teams_of(session, user.id)],
+    )
+
+
+def _over_limit(
+    policy: service_account_access.CreationPolicy, claims: PermissionClaims, created: int,
+) -> Optional[str]:
+    """Why someone who has created ``created`` accounts may create no more —
+    never an administrator of service accounts."""
+    if created < policy.per_person_limit or has_permission(claims, MANAGE):
+        return None
+    return (
+        f"You have created {created} service accounts, the most each person may. Delete one "
+        "nothing uses any more, or ask an administrator of service accounts"
+    )
+
+
+async def _creation_policy(
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> service_account_access.CreationPolicy:
+    """A route dependency: the creation policy, when it lets the caller
+    create a service account for themselves."""
+    policy = await service_account_access.creation_policy(session)
+    refusal = service_account_access.creation_refusal(policy, claims)
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
+    return policy
+
+
+_creation_policy.service_account_gate = (  # type: ignore[attr-defined]
+    "system:service-accounts:manage, or whoever the creation policy admits, up to its limit (in handler)"
+)
+
+
+@me_router.post("", response_model=ServiceAccountDetail, status_code=status.HTTP_201_CREATED)
+async def create_my_service_account(
+    body: CreateMyServiceAccountRequest,
+    policy: service_account_access.CreationPolicy = Depends(_creation_policy),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A service account for one of your integrations, when the policy lets
+    you create one: you manage it, or a team you are in does. It holds no
+    roles until a workspace gives it some."""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="A service account needs a name")
+    if body.team is None and policy.require_team:
+        raise HTTPException(
+            status_code=422,
+            detail="Name a team you're in to manage it, so it outlives any one person",
+        )
+    # You must be someone who may manage one, whoever is named.
+    creator = await _manager_subject(session, ManagerRef(type="user", id=user.id))
+    if body.team is None:
+        subject = creator
+    elif body.team in {team for team, _name in await service_account_repo.teams_of(session, user.id)}:
+        subject = await _manager_subject(session, ManagerRef(type="group", id=body.team))
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Only a team you're in can manage an account you create",
+        )
+    # Two at once must not both pass the limit.
+    await hold_for_transaction(session, f"service-accounts-created:{user.id}")
+    over = _over_limit(policy, claims, await service_account_repo.count_created_by(session, user.id))
+    if over:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=over)
+    account_id = await _create(
+        session, name=name, description=body.description, subjects=[subject], actor_id=user.id,
+        via="self_service",
+    )
+    return await _detail(session, account_id, user.id, claims)
 
 
 @me_router.get("", response_model=ServiceAccountList)

@@ -284,6 +284,13 @@ class PlatformSettingsORM(Base):
     history_alerts_enabled = Column(Boolean, nullable=True)
     history_alert_min_severity = Column(Text, nullable=True)
     history_alert_cooldown_secs = Column(Integer, nullable=True)
+    # Who may create a service account for themselves, how many each, and
+    # whether a team they are in must manage it
+    # (``service_account_access.creation_policy``). Same NULL-means-unset
+    # semantics: only the administrators of service accounts create them.
+    sa_who_may_create = Column(Text, nullable=True)
+    sa_per_person_limit = Column(Integer, nullable=True)
+    sa_require_team_manager = Column(Boolean, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 

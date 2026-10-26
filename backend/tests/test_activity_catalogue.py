@@ -345,6 +345,22 @@ def test_a_service_accounts_retirement_reads_plainly():
     })[1] == "API key “sync” (nxsat_ab12…) revoked as its deleted service account was purged"
 
 
+def test_who_may_create_service_accounts_reads_plainly():
+    def said(**to) -> str:
+        return catalogue.summarize("platform.service_account_policy.updated", {"details": {"to": to}})[1]
+
+    assert said(whoMayCreate="central", perPersonLimit=10, requireTeamManager=False) == (
+        "Only administrators of service accounts may create service accounts"
+    )
+    assert said(whoMayCreate="granters", perPersonLimit=3, requireTeamManager=True) == (
+        "Anyone who lets people into a workspace may create up to 3 service accounts each, "
+        "managed by a team they're in"
+    )
+    assert said(whoMayCreate="everyone", perPersonLimit=10, requireTeamManager=False) == (
+        "Anyone may create up to 10 service accounts each"
+    )
+
+
 _TRANSFER = {
     "target_label": "Orders",
     "details": {"fromWorkspaceId": "ws_a", "fromWorkspaceName": "Finance",

@@ -5,7 +5,8 @@ accounts, give them workspace roles, and hand a leaver's accounts over to a
 successor. Each account's managers run it too: they rename it, disable and
 enable it, delete it and restore it within 30 days — unless an administrator
 holds it — appoint and remove its managers, and take its roles away. A deleted
-account is purged after 30 days. Nobody may make someone able to act as an
+account is purged after 30 days. Who else may create one for themselves is a
+policy the administrators set. Nobody may make someone able to act as an
 account who would gain what the appointer couldn't grant. A workspace lets an
 account in as it does a person: its admins and stewards add it, or answer a
 request one of its managers makes for it. A service account is never a
@@ -30,6 +31,7 @@ from backend.app.db.models import (
     GroupORM,
     NotificationORM,
     OutboxEventORM,
+    PlatformSettingsORM,
     RoleBindingORM,
     ServiceAccountORM,
     UserORM,
@@ -702,6 +704,136 @@ async def test_whoever_stops_managing_it_hears_of_it(test_client, db_session, pe
     assert await _told(db_session, "service_account_manager_removed") == [
         ("usr_ada", "You no longer manage Metadata sync", None),
     ]
+
+
+# ── Who may create one ──────────────────────────────────────────────
+
+MINE = "/api/v1/me/service-accounts"
+POLICY = f"{BASE}/policy"
+
+
+async def _set_policy(client, **policy) -> dict:
+    with claims("system:service-accounts:manage"):
+        answer = await client.put(POLICY, json=policy)
+    assert answer.status_code == 200, answer.text
+    return answer.json()
+
+
+async def test_only_its_administrators_say_who_may_create_one(test_client, db_session, people):
+    # A deployment that set another of the platform's settings, and not this.
+    db_session.add(PlatformSettingsORM(id=1, identity_property="urn"))
+    await db_session.commit()
+    with claims("system:service-accounts:manage"):
+        shipped = (await test_client.get(POLICY)).json()
+    assert shipped == {"whoMayCreate": "central", "perPersonLimit": 10, "requireTeamManager": False}
+    with claims(ws_perms={"ws_x": ("workspace:admin",)}):
+        assert (await test_client.get(POLICY)).status_code == 403
+        assert (await test_client.put(POLICY, json={"whoMayCreate": "everyone"})).status_code == 403
+    assert await _set_policy(test_client, whoMayCreate="granters", perPersonLimit=3) == {
+        "whoMayCreate": "granters", "perPersonLimit": 3, "requireTeamManager": False,
+    }
+    # What is left out stays; nothing changed, nothing recorded.
+    assert (await _set_policy(test_client, requireTeamManager=True))["perPersonLimit"] == 3
+    await _set_policy(test_client, requireTeamManager=True)
+    with claims("system:service-accounts:manage"):
+        assert (await test_client.put(POLICY, json={"whoMayCreate": "nobody"})).status_code == 422
+        assert (await test_client.put(POLICY, json={"perPersonLimit": 0})).status_code == 422
+    changes = [p["details"]["to"] for _e, p in await _events(db_session, "platform.service_account_policy.")]
+    assert changes == [
+        {"whoMayCreate": "granters", "perPersonLimit": 3, "requireTeamManager": False},
+        {"whoMayCreate": "granters", "perPersonLimit": 3, "requireTeamManager": True},
+    ]
+
+
+async def test_as_it_ships_only_its_administrators_create_one(test_client, people):
+    with claims(ws_perms={"ws_x": ("workspace:admin",)}):
+        mine = (await test_client.get(f"{MINE}/policy")).json()
+        refused = await test_client.post(MINE, json={"name": "Metadata sync"})
+    assert (mine["mayCreate"], mine["reason"]) == (
+        False, "Only an administrator of service accounts can create a service account",
+    )
+    assert (refused.status_code, refused.json()["detail"]) == (403, mine["reason"])
+    # An administrator may, here too — past the limit, which is for everyone
+    # else — and manages what they create.
+    await _set_policy(test_client, perPersonLimit=1)
+    with claims("system:service-accounts:manage"):
+        made = await test_client.post(MINE, json={"name": "Metadata sync"})
+        again = await test_client.post(MINE, json={"name": "Nightly export"})
+    assert (made.status_code, again.status_code) == (201, 201), again.text
+    assert [(m["type"], m["id"]) for m in made.json()["managers"]] == [("user", ADMIN)]
+
+
+async def test_where_those_who_let_people_in_may_create_one_they_manage_it(
+    test_client, db_session, people,
+):
+    await _set_policy(test_client, whoMayCreate="granters")
+    with claims():
+        refused = await test_client.post(MINE, json={"name": "Metadata sync"})
+    assert (refused.status_code, refused.json()["detail"]) == (403, (
+        "Only someone who lets people into a workspace — one of its admins or stewards — can "
+        "create a service account"
+    ))
+    with claims(ws_perms={"ws_x": ("workspace:members:add",)}):
+        made = await test_client.post(MINE, json={
+            "name": " Metadata sync ", "description": "Reads graph metadata on a schedule",
+        })
+    assert made.status_code == 201, made.text
+    body = made.json()
+    assert (body["name"], body["roles"], body["can"]["edit"]) == ("Metadata sync", [], True)
+    assert [(m["type"], m["id"]) for m in body["managers"]] == [("user", ADMIN)]
+    [(_, created)] = await _events(db_session, "identity.service_account.created")
+    assert (created["created_by"], created["via"]) == (ADMIN, "self_service")
+
+
+async def test_where_anyone_may_each_creates_up_to_their_limit(test_client, db_session, people):
+    await _set_policy(test_client, whoMayCreate="everyone", perPersonLimit=2)
+    with claims():
+        first = (await test_client.post(MINE, json={"name": "Metadata sync"})).json()
+        assert (await test_client.post(MINE, json={"name": "Nightly export"})).status_code == 201
+        mine = (await test_client.get(f"{MINE}/policy")).json()
+        over = await test_client.post(MINE, json={"name": "Weekly report"})
+        assert (mine["created"], mine["mayCreate"]) == (2, False)
+        assert (over.status_code, over.json()["detail"]) == (409, mine["reason"])
+        assert mine["reason"].startswith("You have created 2 service accounts, the most each person may")
+        # One deleted no longer counts.
+        deleted = await test_client.delete(f"{BASE}/{first['id']}")
+        assert deleted.status_code == 200
+        assert (await test_client.post(MINE, json={"name": "Weekly report"})).status_code == 201
+    # Nor may a break-glass account create one: it can't manage one.
+    (await db_session.get(UserORM, ADMIN)).is_system_account = True
+    await db_session.commit()
+    await _set_policy(test_client, perPersonLimit=10)
+    with claims():
+        refused = await test_client.post(MINE, json={"name": "Break glass"})
+    assert (refused.status_code, refused.json()["detail"]) == (
+        409, "Only an active person who is not a break-glass account can manage a service account",
+    )
+
+
+async def test_a_team_they_are_in_may_manage_it_and_the_policy_may_ask_for_one(
+    test_client, db_session, people,
+):
+    await _set_policy(test_client, whoMayCreate="everyone", requireTeamManager=True)
+    with claims():
+        alone = await test_client.post(MINE, json={"name": "Metadata sync"})
+        not_theirs = await test_client.post(MINE, json={"name": "Metadata sync", "team": "grp_ops"})
+    assert (alone.status_code, alone.json()["detail"]) == (
+        422, "Name a team you're in to manage it, so it outlives any one person",
+    )
+    assert (not_theirs.status_code, not_theirs.json()["detail"]) == (
+        403, "Only a team you're in can manage an account you create",
+    )
+    db_session.add(GroupMemberORM(group_id="grp_ops", user_id=ADMIN))
+    await db_session.commit()
+    with claims():
+        assert (await test_client.get(f"{MINE}/policy")).json()["teams"] == [
+            {"id": "grp_ops", "name": "Operations"},
+        ]
+        made = await test_client.post(MINE, json={"name": "Metadata sync", "team": "grp_ops"})
+        assert made.status_code == 201, made.text
+        assert [(m["type"], m["id"]) for m in made.json()["managers"]] == [("group", "grp_ops")]
+        # They manage it through the team.
+        assert (await test_client.get(f"{BASE}/{made.json()['id']}")).json()["can"]["edit"] is True
 
 
 # ── A workspace lets it in ──────────────────────────────────────────
