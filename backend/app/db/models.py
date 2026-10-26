@@ -284,6 +284,13 @@ class PlatformSettingsORM(Base):
     history_alerts_enabled = Column(Boolean, nullable=True)
     history_alert_min_severity = Column(Text, nullable=True)
     history_alert_cooldown_secs = Column(Integer, nullable=True)
+    # Who may create a service account for themselves, how many each, and
+    # whether a team they are in must manage it
+    # (``service_account_access.creation_policy``). Same NULL-means-unset
+    # semantics: only the administrators of service accounts create them.
+    sa_who_may_create = Column(Text, nullable=True)
+    sa_per_person_limit = Column(Integer, nullable=True)
+    sa_require_team_manager = Column(Boolean, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
@@ -3147,6 +3154,9 @@ class AccessRequestORM(Base):
     # on to the Org Admins.
     reminded_at = Column(Text, nullable=True)
     escalated_at = Column(Text, nullable=True)
+    # A request for a service account: the person who asked for it, one of its
+    # managers. ``requester_id`` is the account, the one the request grants to.
+    requested_by = Column(Text, nullable=True)
 
     __table_args__ = (
         Index(
@@ -3638,9 +3648,13 @@ class ServiceAccountORM(Base):
     # When the administrators were told its keys pause soon. Cleared with
     # ``unmanaged_since``.
     pause_reminded_at = Column(Text, nullable=True)
-    # An administrator of service accounts disabled it: only one of them
-    # enables it again, not its managers.
+    # An administrator of service accounts disabled or deleted it: only one of
+    # them enables or restores it again, not its managers.
     admin_hold = Column(Boolean, nullable=False, default=False, server_default="false")
+    # When the hourly pass purged it, 30 days after it was deleted
+    # (``users.deleted_at``): its keys revoked, its roles and managers removed.
+    # NULL while it is live, or deleted and still restorable.
+    purged_at = Column(Text, nullable=True)
 
 
 class ServiceAccountManagerORM(Base):

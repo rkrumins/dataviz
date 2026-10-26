@@ -10,8 +10,9 @@
  * Admins after a week — and one to keep access says when that access ends.
  */
 import { useState } from 'react'
-import { Clock, Inbox, KeyRound, Loader2, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react'
+import { Bot, Clock, Inbox, KeyRound, Loader2, ShieldAlert, ShieldCheck, XCircle } from 'lucide-react'
 
+import { ServiceAccountBadge } from '@/components/serviceAccounts/parts'
 import { Segmented } from '@/components/ui/Segmented'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -21,6 +22,7 @@ import { timeAgo } from '@/lib/timeAgo'
 import { useNow } from '@/lib/useNow'
 import { cn } from '@/lib/utils'
 import { ApproveRequestDialog } from './ApproveRequestDialog'
+import { ServiceAccountFacts } from './ServiceAccountFacts'
 import { STATUS_META, roleLabel } from './accessRequestCopy'
 
 export function ReviewRequestsPanel({ workspaceId, hideWhenEmpty = false }: {
@@ -109,11 +111,18 @@ function RequestRow({ request: r, showWorkspace, onReview }: {
 
     return (
         <li className="px-5 py-3.5 flex items-start gap-3">
-            <UserAvatar userId={r.requester.id} name={who} shape="gradient" className="w-9 h-9 text-xs font-bold shrink-0" />
+            {r.serviceAccount ? (
+                <span className="w-9 h-9 rounded-full bg-sky-500/10 border border-sky-500/20 text-sky-600 dark:text-sky-400 flex items-center justify-center shrink-0">
+                    <Bot className="w-4 h-4" aria-hidden />
+                </span>
+            ) : (
+                <UserAvatar userId={r.requester.id} name={who} shape="gradient" className="w-9 h-9 text-xs font-bold shrink-0" />
+            )}
             <div className="min-w-0 flex-1">
                 <div className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <p className="text-sm font-semibold text-ink truncate">{who}</p>
-                    {r.requester.email && r.requester.email !== who && (
+                    {r.serviceAccount && <ServiceAccountBadge />}
+                    {!r.serviceAccount && r.requester.email && r.requester.email !== who && (
                         <p className="text-xs text-ink-muted truncate">{r.requester.email}</p>
                     )}
                     <span className="text-xs text-ink-muted">
@@ -145,6 +154,7 @@ function RequestRow({ request: r, showWorkspace, onReview }: {
                     )}
                 </div>
                 {r.justification && <p className="text-xs text-ink-secondary mt-1 break-words">“{r.justification}”</p>}
+                <ServiceAccountFacts request={r} />
                 <p className="text-[10px] text-ink-muted mt-1 flex flex-wrap items-center gap-1.5">
                     <span className={cn('inline-flex items-center gap-1 rounded-full border px-1.5 py-px font-semibold', meta.pill)}>
                         <StatusIcon className="w-2.5 h-2.5" /> {meta.label}

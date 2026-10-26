@@ -115,6 +115,10 @@ its admins to add you.
 had already asked to join, the dialog says so and shows your open request —
 you can have one open request per workspace.
 
+> **Tip:** To ask for a [service account](/guide/service-accounts) you manage,
+> choose **Ask a workspace for access** on its page. Its request waits there,
+> not on My access.
+
 ### From Find a workspace
 
 Click **Request access** on a workspace's card — see [Find a workspace](#find-a-workspace).
@@ -320,6 +324,14 @@ admins only: it stays an exception, and **No end date** isn't offered.
 
 To decline, click **Deny** on the request, write a reason (the requester sees
 it), and click **Decline**.
+
+A request marked **Service account** is one its managers made for an
+integration. It says what the account is for, who manages it, and who asked:
+approving lets them act here through it. Grant it a role; it never joins a
+team, and it isn't pointed to a group — the identity provider doesn't know it.
+So where the provider decides who is in, only admins approve one, and its role
+isn't an exception. Nobody answers a request for an account they manage, or
+one they asked for. See [Service Accounts](/guide/service-accounts#for-workspaces).
 
 > **Note:** A **Steward** grants **Viewer** or **Member**. Admins can grant any
 > level whose permissions they hold themselves. Nobody answers their own
