@@ -22,6 +22,7 @@ const { sa, client, keysOf, notify, feature, perms, searchDirectory, listPage, r
         sa: {
             get: vi.fn(), update: vi.fn(), disable: vi.fn(), enable: vi.fn(), addManager: vi.fn(),
             removeManager: vi.fn(), grantRole: vi.fn(), revokeRole: vi.fn(), delete: vi.fn(), restore: vi.fn(),
+            grantOrgRead: vi.fn(), revokeOrgRead: vi.fn(),
         },
         client, keysOf: vi.fn(() => client), notify: vi.fn(), feature: { on: true, directory: false },
         perms: new Set<string>(),
@@ -57,7 +58,7 @@ vi.mock('@/store/auth', () => ({ usePermission: (perm: string) => perms.has(perm
 /** What one of its managers may do. */
 const MANAGER: ServiceAccountCan = {
     view: true, edit: true, disable: true, enable: true, managers: true, keys: true, grant: false, revoke: true,
-    request: true, delete: true, restore: false,
+    request: true, delete: true, restore: false, orgRead: false,
 }
 
 const ADA = {
@@ -79,6 +80,7 @@ function account(over: Partial<ServiceAccountDetail> = {}): ServiceAccountDetail
         managed: true, singleManager: true, unmanagedSince: null, pausesAt: null, adminHold: false, deletedAt: null,
         purgesAt: null, handOver: null,
         roles: [{ bindingId: 'rb_1', workspaceId: 'ws1', workspaceName: 'Finance', role: 'workspace_viewer', grantedAt: null, expiresAt: null }],
+        orgRead: null,
         requests: [],
         liveKeys: 1,
         can: MANAGER,
@@ -155,6 +157,7 @@ describe('running it', () => {
         const about = await screen.findByRole('region', { name: 'About this service account' })
         expect(within(about).getByRole('button', { name: /rename or describe/i })).toBeInTheDocument()
         expect(within(about).queryByRole('button', { name: /give role/i })).not.toBeInTheDocument()
+        expect(within(about).queryByRole('button', { name: /let it read every workspace/i })).not.toBeInTheDocument()
 
         await userEvent.click(within(about).getByRole('button', { name: /^disable$/i }))
         await waitFor(() => expect(sa.disable).toHaveBeenCalledWith('svc_sync'))
@@ -356,6 +359,48 @@ describe('its access', () => {
         expect(roles).toHaveTextContent(/until/)
         await userEvent.click(within(roles).getByRole('button', { name: /^keep$/i }))
         await waitFor(() => expect(ar.extend).toHaveBeenCalledWith({ bindingId: 'rb_1' }))
+    })
+
+    it('lets an administrator who reads every workspace let it read them all, saying first what that is', async () => {
+        const central = { ...MANAGER, grant: true, orgRead: true }
+        sa.get.mockResolvedValue(account({ can: central }))
+        sa.grantOrgRead.mockResolvedValue(account({ can: central, orgRead: { grantedAt: '2026-10-26T00:00:00+00:00' } }))
+        renderPage()
+        const about = await screen.findByRole('region', { name: 'About this service account' })
+        await userEvent.click(within(about).getByRole('button', { name: /let it read every workspace/i }))
+        const dialog = await screen.findByRole('dialog', { name: 'Let it read every workspace?' })
+        expect(dialog).toHaveTextContent('“Metadata sync”, for an integration that reads across the whole organization.')
+        expect(dialog).toHaveTextContent(/those created later too/i)
+        expect(dialog).toHaveTextContent(/the audit log, role bindings and analytics stay out of its reach/i)
+        expect(sa.grantOrgRead).not.toHaveBeenCalled()
+        await userEvent.click(within(dialog).getByRole('button', { name: /let it read them all/i }))
+        await waitFor(() => expect(sa.grantOrgRead).toHaveBeenCalledWith('svc_sync'))
+        expect(await within(about).findByText('Reads every workspace')).toBeInTheDocument()
+        expect(within(about).queryByRole('button', { name: /let it read every workspace/i })).not.toBeInTheDocument()
+        await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    })
+
+    it('shows its managers that it reads every workspace, and lets them take that away', async () => {
+        sa.get.mockResolvedValue(account({ roles: [], orgRead: { grantedAt: '2026-10-26T00:00:00+00:00' } }))
+        sa.revokeOrgRead.mockResolvedValue(account({ roles: [] }))
+        renderPage()
+        const about = await screen.findByRole('region', { name: 'About this service account' })
+        expect(within(about).getByText('Reads every workspace')).toBeInTheDocument()
+        expect(within(about).queryByText(/no roles yet/i)).not.toBeInTheDocument()
+        expect(within(about).queryByRole('button', { name: /let it read every workspace/i })).not.toBeInTheDocument()
+        await userEvent.click(within(about).getByRole('button', { name: 'Take away read access to every workspace' }))
+        await waitFor(() => expect(sa.revokeOrgRead).toHaveBeenCalledWith('svc_sync'))
+        expect(await within(about).findByText(/no roles yet/i)).toBeInTheDocument()
+    })
+
+    it('shows whoever may not take it away that it reads every workspace, and nothing more', async () => {
+        sa.get.mockResolvedValue(account({
+            orgRead: { grantedAt: '2026-10-26T00:00:00+00:00' }, can: { ...MANAGER, revoke: false },
+        }))
+        renderPage()
+        const about = await screen.findByRole('region', { name: 'About this service account' })
+        expect(within(about).getByText('Reads every workspace')).toBeInTheDocument()
+        expect(within(about).queryByRole('button', { name: /take away read access/i })).not.toBeInTheDocument()
     })
 })
 

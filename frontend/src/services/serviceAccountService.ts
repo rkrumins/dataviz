@@ -16,6 +16,10 @@
  * Who else may create one for themselves is the administrators' policy:
  * nobody, as it ships; anyone who lets people into a workspace; or anyone —
  * each up to a limit, and perhaps only with a team they're in managing it.
+ *
+ * Besides its roles in workspaces, an account can read every workspace
+ * (`orgRead`): an administrator who reads every workspace gives it that, and
+ * its managers can take it away.
  */
 import { authFetch } from './apiClient'
 
@@ -122,8 +126,11 @@ export interface ServiceAccountCan {
     keys: boolean
     /** Give it workspace roles from its page. */
     grant: boolean
-    /** Take its roles away. */
+    /** Take its roles away, and its reading every workspace. */
     revoke: boolean
+    /** Let it read every workspace: an administrator of service accounts who
+     *  reads every workspace themselves. */
+    orgRead: boolean
     /** Ask a workspace for access for it, or to keep access that ends. */
     request: boolean
     /** Its keys stop at once; it can be restored for 30 days. */
@@ -134,6 +141,9 @@ export interface ServiceAccountCan {
 
 export interface ServiceAccountDetail extends ServiceAccount {
     roles: ServiceAccountRole[]
+    /** It reads every workspace — those created later too — as far as each
+     *  key reaches, and changes nothing there; `null` while it doesn't. */
+    orgRead: { grantedAt: string | null } | null
     /** Requests for its access still waiting on a workspace. */
     requests: ServiceAccountRequest[]
     liveKeys: number
@@ -257,6 +267,16 @@ export const serviceAccountService = {
 
     revokeRole(id: string, bindingId: string): Promise<void> {
         return authFetch(`${one(id)}/roles/${encodeURIComponent(bindingId)}`, { method: 'DELETE' })
+    },
+
+    /** Let it read every workspace. */
+    grantOrgRead(id: string): Promise<ServiceAccountDetail> {
+        return authFetch(`${one(id)}/org-read`, { method: 'PUT' })
+    },
+
+    /** Stop it reading every workspace; its roles in workspaces stay. */
+    revokeOrgRead(id: string): Promise<ServiceAccountDetail> {
+        return authFetch(`${one(id)}/org-read`, { method: 'DELETE' })
     },
 
     /** Move a person's manager seats to a successor — all of them, or `accountIds`. */

@@ -5,8 +5,9 @@
  * Its managers run it here: they rename it, disable and enable it, appoint and
  * remove its managers, take away roles it no longer needs, and make its keys.
  * The administrators of service accounts can do all of that and give it
- * roles; someone who may make any account's keys sees it for those. What each
- * may do is the server's `can`, and the page offers nothing more.
+ * roles — and, reading every workspace themselves, let it read every
+ * workspace; someone who may make any account's keys sees it for those. What
+ * each may do is the server's `can`, and the page offers nothing more.
  *
  * The keys act as the account, never as you: they reach what the account's
  * own roles give it, count against its own limit, and keep working when you
@@ -20,8 +21,8 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
-    AlertCircle, ArrowLeft, Bot, Clock, Code2, ExternalLink, History, KeySquare, Plus, Power, RefreshCw, RotateCcw,
-    Send, ShieldAlert, Trash2, Users, X,
+    AlertCircle, ArrowLeft, Bot, Clock, Code2, ExternalLink, Globe, History, KeySquare, Plus, Power, RefreshCw,
+    RotateCcw, Send, ShieldAlert, Trash2, Users, X,
 } from 'lucide-react'
 
 import { AccountCard, AccountShell } from '@/components/account/AccountShell'
@@ -211,6 +212,40 @@ function DeleteDialog({ account, held, busy, onClose, onDelete }: {
     )
 }
 
+/** Letting it read every workspace, said before it is done: what it reaches,
+ *  and what it doesn't. */
+function OrgReadDialog({ account, busy, onClose, onGive }: {
+    account: ServiceAccountDetail
+    busy: boolean
+    onClose: () => void
+    onGive: () => void
+}) {
+    return (
+        <KeyDialog
+            icon={Globe}
+            title="Let it read every workspace?"
+            subtitle={`“${account.name}”, for an integration that reads across the whole organization.`}
+            onClose={onClose}
+            footer={(
+                <>
+                    <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+                    <Button variant="primary" size="sm" leftIcon={Globe} loading={busy} onClick={onGive}>Let it read them all</Button>
+                </>
+            )}
+        >
+            <ul className="space-y-2 text-sm text-ink-secondary list-disc pl-5">
+                <li>
+                    Its keys can read the views, data sources, semantic layers, catalog and providers of every
+                    workspace, those created later too, as far as each key reaches.
+                </li>
+                <li>It can change nothing more than before, and the audit log, role bindings and analytics stay out of its reach.</li>
+                <li>Whoever manages it can read every workspace through it, so its managers can appoint only someone who already reads every workspace.</li>
+                <li>Its managers can take it away.</li>
+            </ul>
+        </KeyDialog>
+    )
+}
+
 /** What keeps its keys working — its standing, who manages it, where it has a
  *  role — and, for whoever may, the means to change each. */
 function AboutAccount({ account, central, busy, change, reload }: {
@@ -231,6 +266,7 @@ function AboutAccount({ account, central, busy, change, reload }: {
     const [description, setDescription] = useState('')
     const [removingLast, setRemovingLast] = useState(false)
     const [deleting, setDeleting] = useState(false)
+    const [givingOrgRead, setGivingOrgRead] = useState(false)
     const last = account.managers.length === 1
     const teams = account.managers.filter((m) => m.type === 'group').map((m) => m.name)
 
@@ -395,10 +431,35 @@ function AboutAccount({ account, central, busy, change, reload }: {
             )}
 
             <h3 className="mt-5 mb-2 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Where it has a role</h3>
+            {account.orgRead && (
+                <div className="flex flex-wrap items-center gap-2 mb-3 px-3 py-2 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.06] text-xs text-ink-secondary">
+                    <Globe className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400 shrink-0" aria-hidden />
+                    <span className="min-w-0 flex-1">
+                        <span className="font-semibold text-ink">Reads every workspace</span>, those created later too, as
+                        far as each key reaches. It changes nothing there.
+                    </span>
+                    {can.revoke && (
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={busy}
+                            aria-label="Take away read access to every workspace"
+                            onClick={() => void change(
+                                () => serviceAccountService.revokeOrgRead(account.id),
+                                'It no longer reads every workspace',
+                            )}
+                        >
+                            Take away
+                        </Button>
+                    )}
+                </div>
+            )}
             {account.roles.length === 0 ? (
-                <p className="text-xs text-ink-muted mb-3">
-                    No roles yet: its keys reach nothing until a workspace gives it one.
-                </p>
+                !account.orgRead && (
+                    <p className="text-xs text-ink-muted mb-3">
+                        No roles yet: its keys reach nothing until a workspace gives it one.
+                    </p>
+                )
             ) : (
                 <ul className="flex flex-wrap gap-2 mb-3" aria-label="Roles">
                     {account.roles.map((r) => (
@@ -460,6 +521,22 @@ function AboutAccount({ account, central, busy, change, reload }: {
             )}
             {can.grant && (
                 <RoleGrant busy={busy} onGrant={(workspaceId, role) => change(() => serviceAccountService.grantRole(account.id, { workspaceId, role }), 'Role given')} />
+            )}
+            {can.orgRead && !account.orgRead && (
+                <Button variant="ghost" size="sm" leftIcon={Globe} className="mt-3" onClick={() => setGivingOrgRead(true)}>
+                    Let it read every workspace…
+                </Button>
+            )}
+            {givingOrgRead && (
+                <OrgReadDialog
+                    account={account}
+                    busy={busy}
+                    onClose={() => setGivingOrgRead(false)}
+                    onGive={() => void change(
+                        () => serviceAccountService.grantOrgRead(account.id),
+                        `“${account.name}” now reads every workspace`,
+                    ).then(() => setGivingOrgRead(false))}
+                />
             )}
             {can.request && (
                 <Button variant="secondary" size="sm" leftIcon={Send} className="mt-3" onClick={() => setAsking(true)}>
