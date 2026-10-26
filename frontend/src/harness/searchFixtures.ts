@@ -285,6 +285,18 @@ export const SEARCH_FIXTURES: Record<string, SearchFixture> = {
         note: 'The same query as a sentence: datasets that feed a chart in Finance.',
         draft: formDraft,
     },
+    formSimple: {
+        editorMode: 'form',
+        note: 'Simple conditions in the Form, each one line: certified datasets over 100k rows, with an owner, that feed something — and a connection, which keeps its card.',
+        draft: { kind: 'group', op: 'and', children: [
+            type('dataset'),
+            { kind: 'tag', op: 'hasAny', values: ['Certified'] },
+            { kind: 'property', key: 'rowCount', op: 'gt', value: 100000 } as Predicate,
+            { kind: 'hasProperty', key: 'owner', negate: false },
+            { kind: 'hasOutgoing', edgeClass: 'lineage' },
+            feedsFinanceChart,
+        ] },
+    },
     sentenceFlat: {
         editorMode: 'sentence',
         note: 'Clauses narrowing the matches: certified datasets with over 100k rows and an owner.',

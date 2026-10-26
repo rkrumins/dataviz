@@ -168,6 +168,10 @@ export interface ParseResult {
     /** Every token, in order, with the part it played — what an editor
      *  highlights, so its colours always agree with what is parsed. */
     tokens: DslToken[]
+    /** Where each condition and group sits, nested ones included — what an
+     *  editor selects when asked for a whole condition. Those read before
+     *  an error are kept. */
+    spans: DslSpan[]
 }
 
 /** The part a token plays: ``prefixed`` is ``key:value`` in one token. */
@@ -183,13 +187,20 @@ export interface DslToken {
     text: string
 }
 
+/** A condition or a group of them, as character offsets. */
+export interface DslSpan {
+    from: number
+    to: number
+}
+
 
 export function parsePredicate(input: string): ParseResult {
     const tokens = lex(input)
     const recognized: string[] = []
     const fallbackText: string[] = []
+    let spans: DslSpan[] = []
     const result = (rest: Pick<ParseResult, 'predicate' | 'error' | 'errorAt'>): ParseResult => ({
-        ...rest, recognized, fallbackText, tokens: tokens.map(publicToken),
+        ...rest, recognized, fallbackText, tokens: tokens.map(publicToken), spans,
     })
     if (tokens.length === 0) return result({ predicate: null })
     const unclosed = tokens.find((t) => t.unclosed)
@@ -205,6 +216,7 @@ export function parsePredicate(input: string): ParseResult {
         })
     }
     const p = new Parser(tokens, recognized, fallbackText, input.length)
+    spans = p.spans
     try {
         const pred = p.parseExpr()
         if (p.pos < tokens.length) {
@@ -392,7 +404,7 @@ function relationSpelling(p: RelatedPredicate): string {
         if (meta.lineage) {
             hops = lo === 1 && hi === 1 ? '' : lo === hi ? `*${hi}` : lo === 1 ? `*..${hi}` : `*${lo}..${hi}`
         } else if (p.maxHops) {
-            hops = lo === 1 ? `*..${hi}` : `*${lo}..${hi}`
+            hops = lo === hi ? `*${hi}` : lo === 1 ? `*..${hi}` : `*${lo}..${hi}`
         } else if (lo > 1) {
             hops = `*${lo}..`
         }
@@ -412,7 +424,7 @@ function relationSpelling(p: RelatedPredicate): string {
 function relationWord(p: RelatedPredicate): string {
     if (!axisMeta(p.axis).lineage) return p.axis
     const link = LINK_WORDS[p.axis as keyof typeof LINK_WORDS]
-    if (p.edgeTypes) return `${link}[${p.edgeTypes.join(', ')}]`
+    if (p.edgeTypes) return `${link}[${edgeTypeList(p.edgeTypes)}]`
     if (p.edgeClass === 'links') return link
     return p.axis === 'upstream' ? 'fedBy' : p.axis === 'downstream' ? 'feeds' : 'linkedTo[lineage]'
 }
@@ -433,7 +445,7 @@ const SHAPE_SPELLINGS: Record<ShapeKind, { lineage: string; links: string }> = {
 function shapeSpelling(kind: ShapeKind, c: { edgeClass?: EdgeClass | null; edgeTypes?: string[] | null }): string {
     const words = SHAPE_SPELLINGS[kind]
     const neutral = kind === 'isOrphan' ? 'noEdges' : words.links
-    if (c.edgeTypes) return `${neutral}[${c.edgeTypes.join(', ')}]`
+    if (c.edgeTypes) return `${neutral}[${edgeTypeList(c.edgeTypes)}]`
     const set = c.edgeClass ?? DEFAULT_EDGE_CLASS
     if (set === 'lineage' || set === 'links') return words[set]
     return kind === 'isOrphan' && set === 'any' ? 'noEdges' : `${neutral}[${set}]`
@@ -441,7 +453,7 @@ function shapeSpelling(kind: ShapeKind, c: { edgeClass?: EdgeClass | null; edgeT
 
 /** ``edges(out) > 10`` — any link unless the brackets say otherwise. */
 function degreeSpelling(c: DegreePredicate): string {
-    const set = c.edgeTypes ? `[${c.edgeTypes.join(', ')}]`
+    const set = c.edgeTypes ? `[${edgeTypeList(c.edgeTypes)}]`
         : c.edgeClass === 'links' ? '' : `[${c.edgeClass ?? DEFAULT_EDGE_CLASS}]`
     return `edges${set}(${c.direction ?? 'both'}) ${COUNT_SYMBOLS[c.op ?? 'eq']} ${c.value}`
 }
@@ -795,14 +807,28 @@ const SHAPE_CLASSES: readonly EdgeClass[] = ['lineage', 'links', 'any', 'contain
 function readEdgeSet(content: string, classes: readonly EdgeClass[]): { edgeClass?: EdgeClass; edgeTypes?: string[] } {
     const names = content.split(',').map((n) => n.trim()).filter(Boolean)
     if (!names.length) throw new Error('Name edge types between the brackets: outgoing[PRODUCES](…)')
-    const named = names.map((n) => n.toLowerCase()).filter((n) => SHAPE_CLASSES.includes(n as EdgeClass))
-    if (!named.length) return { edgeTypes: names }
+    // A name in quotes is an edge type, never a class: how one called
+    // LINEAGE, LINKS, ANY or CONTAINMENT is named.
+    const quoted = (n: string) => n.length > 1 && n.startsWith('"') && n.endsWith('"')
+    const named = names.filter((n) => !quoted(n)).map((n) => n.toLowerCase())
+        .filter((n) => SHAPE_CLASSES.includes(n as EdgeClass))
+    if (!named.length) {
+        const types = names.map((n) => (quoted(n) ? n.slice(1, -1).trim() : n))
+        if (types.some((t) => !t)) throw new Error('Name an edge type between the quotes: outgoing["LINEAGE"](…)')
+        return { edgeTypes: types }
+    }
     const list = classes.map((c) => `[${c}]`).join(', ')
     if (names.length > 1) throw new Error(`Name edge types, or one of ${list} — not both`)
     if (!classes.includes(named[0] as EdgeClass)) {
         throw new Error(`A connection follows ${list} or edge types, not [${named[0]}]`)
     }
     return { edgeClass: named[0] as EdgeClass }
+}
+
+/** Edge types as the brackets spell them: one named like a class
+ *  (LINEAGE, LINKS…) in quotes, or it would read as the class. */
+function edgeTypeList(types: readonly string[]): string {
+    return types.map((t) => (SHAPE_CLASSES.includes(t.toLowerCase() as EdgeClass) ? `"${t}"` : t)).join(', ')
 }
 
 /** A call that opens a relationship — not count(, .via( or edges(. */
@@ -850,6 +876,8 @@ function jsonEnd(input: string, start: number): number {
 
 class Parser {
     pos = 0
+    /** Where each condition and group read so far sits. */
+    readonly spans: DslSpan[] = []
     constructor(
         readonly tokens: Token[],
         readonly recognized: string[],
@@ -887,11 +915,17 @@ class Parser {
         }
     }
 
+    /** Note the source range of the tokens read since ``start``. */
+    noteSpan(start: number): void {
+        if (this.pos > start) this.spans.push({ from: this.tokens[start].from, to: this.tokens[this.pos - 1].to })
+    }
+
     parseExpr(): Predicate {
         return this.parseOr()
     }
 
     parseOr(): Predicate {
+        const start = this.pos
         const left = this.parseAnd()
         const parts: Predicate[] = [left]
         while (this.peek()?.kind === TokenKind.OrKw) {
@@ -899,10 +933,12 @@ class Parser {
             parts.push(this.parseAnd())
         }
         if (parts.length === 1) return parts[0]
+        this.noteSpan(start)
         return { kind: 'group', op: 'or', children: parts }
     }
 
     parseAnd(): Predicate {
+        const start = this.pos
         const left = this.parseNot()
         const parts: Predicate[] = [left]
         while (true) {
@@ -927,14 +963,17 @@ class Parser {
             parts.push(next)
         }
         if (parts.length === 1) return parts[0]
+        this.noteSpan(start)
         return { kind: 'group', op: 'and', children: parts }
     }
 
     parseNot(): Predicate {
         const t = this.peek()
         if (t?.kind === TokenKind.NotKw) {
+            const start = this.pos
             this.consume()
             const inner = this.parseNot()
+            this.noteSpan(start)
             return { kind: 'group', op: 'not', children: [inner] }
         }
         return this.parseAtom()
@@ -957,6 +996,7 @@ class Parser {
     parseAtom(): Predicate {
         const t = this.peek()
         if (!t) this.fail('The query ends too soon: a condition should follow', null)
+        const start = this.pos
         if (t.kind === TokenKind.LParen) {
             this.consume()
             const inner = this.parseExpr()
@@ -965,10 +1005,13 @@ class Parser {
                 this.fail('Missing ")" to close this "("', t)
             }
             this.consume()
+            this.noteSpan(start)
             return inner
         }
         // Predicate token — may consume up to 3 tokens (e.g. `name CONTAINS x`).
-        return this.parsePredicateToken()
+        const atom = this.parsePredicateToken()
+        this.noteSpan(start)
+        return atom
     }
 
     parsePredicateToken(): Predicate {

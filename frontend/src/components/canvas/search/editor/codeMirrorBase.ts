@@ -19,6 +19,8 @@ import { type Extension, RangeSetBuilder } from '@codemirror/state'
 import {
     Decoration,
     type DecorationSet,
+    drawSelection,
+    dropCursor,
     EditorView,
     keymap,
     placeholder as placeholderText,
@@ -98,8 +100,13 @@ export const editorChrome = EditorView.theme({
     },
     '.cm-line': { padding: '0 10px' },
     '.cm-cursor, .cm-dropCursor': { borderLeftColor: 'var(--nx-text-primary)' },
-    '&.cm-focused .cm-selectionBackground, .cm-selectionBackground, ::selection': {
-        backgroundColor: 'rgba(var(--nx-accent-lineage-rgb), 0.22)',
+    // The channel variables hold space-separated triples, so the alpha
+    // goes after a slash: ``rgba(var(--x), a)`` is invalid and paints
+    // nothing, which left every selection invisible. The first selector
+    // matches the one CodeMirror's own theme colours a focused selection
+    // with, so this one wins.
+    '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground, .cm-selectionBackground, .cm-content ::selection': {
+        backgroundColor: 'rgb(var(--nx-accent-lineage-rgb) / 0.22)',
     },
     '.cm-placeholder': { color: 'var(--nx-text-muted)' },
     '.cm-gutters': {
@@ -107,7 +114,7 @@ export const editorChrome = EditorView.theme({
         borderRight: '1px solid var(--nx-border-subtle)',
         color: 'var(--nx-text-muted)',
     },
-    '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'rgba(var(--nx-divider-rgb), 0.04)' },
+    '.cm-activeLine, .cm-activeLineGutter': { backgroundColor: 'rgb(var(--nx-divider-rgb) / 0.04)' },
     '.cm-tooltip': {
         backgroundColor: 'var(--nx-bg-elevated)',
         color: 'var(--nx-text-primary)',
@@ -119,7 +126,7 @@ export const editorChrome = EditorView.theme({
     '.cm-tooltip-autocomplete > ul': { fontFamily: 'inherit', maxHeight: '16em' },
     '.cm-tooltip-autocomplete > ul > li': { padding: '3px 8px' },
     '.cm-tooltip-autocomplete > ul > li[aria-selected]': {
-        backgroundColor: 'rgba(var(--nx-accent-lineage-rgb), 0.16)',
+        backgroundColor: 'rgb(var(--nx-accent-lineage-rgb) / 0.16)',
         color: 'var(--nx-text-primary)',
     },
     '.cm-completionDetail': { color: 'var(--nx-text-muted)', fontStyle: 'normal', marginLeft: '8px' },
@@ -142,6 +149,10 @@ export function baseExtensions({ placeholder, ariaLabel, complete }: {
 }): Extension[] {
     return [
         history(),
+        // The selection drawn behind the text, so it stays in view when
+        // focus moves to a menu, and a caret where dragged text will land.
+        drawSelection(),
+        dropCursor(),
         closeBrackets(),
         EditorView.lineWrapping,
         EditorView.contentAttributes.of({ 'aria-label': ariaLabel }),

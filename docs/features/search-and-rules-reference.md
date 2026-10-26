@@ -45,7 +45,7 @@ restrictions, [below](#what-a-rules-predicate-may-not-use)).
 A script authenticates with an **API key** or with a **cookie session** signed
 in with a password. Either way it acts as you — or, with a
 [service account](/guide/service-accounts)'s key, as that account. Every endpoint
-on this page takes a key.
+on this page takes a key unless its row says otherwise.
 
 **With an API key.** Create one under **Account → API keys** (a service
 account's, on its page) — **Data: read**
@@ -266,7 +266,9 @@ child(description IS NOT EMPTY)`, `count(child(type:column)) > 100`,
 `feeds*..3(type:dashboard).via(confidence >= 0.8)`,
 `outgoing[PRODUCES](type:dataset)`, `linkedTo(type:glossaryTerm)`,
 `@"Country/United Kingdom"`, `inside @"Country/**/London"`; see
-[Code mode](/guide/advanced-search#code-mode).
+[Code mode](/guide/advanced-search#code-mode). An edge type named like a class
+(`LINEAGE`, `LINKS`, `ANY`, `CONTAINMENT`) is quoted there,
+`outgoing["LINEAGE"](…)`; bare, the word names the class.
 
 ### Path patterns
 
@@ -543,6 +545,7 @@ the branch.
 | Method · path | Body → answer | Needs |
 | --- | --- | --- |
 | `GET /library[?branchId]` | → `{viewId, branchId, displayRules, savedQueries, canEdit}` | Read |
+| `GET /library/from-other-views` | → `[{viewId, viewName, sameSource, query}]`: the saved queries of the workspace's other Views the caller can read — those over this View's data source first (`sameSource`), then by View name — at most 500. Not for API keys: a script reads each View's `GET /library` | Read |
 | `PUT /library/rules/{ruleId}[?branchId]` | a rule → the View's rules | Edit |
 | `DELETE /library/rules/{ruleId}[?branchId]` | → the View's rules (no error when already gone) | Edit |
 | `PUT /library/rules[?branchId]` | `{"ids": [...]}` → the rules, in that order (rules not named follow) | Edit |
@@ -896,8 +899,9 @@ curl -s -b "$JAR" -o pii.csv \
 - **No live updates**: other open sessions see a rule change when they next
   load the View.
 - **An import's dry run needs edit permission**: readers can't preview one.
-- **`layer` doesn't follow the View's layers**: it compares a stored node
-  property. Use `descendantOf` on the layer's roots.
+- **A condition can't name the entity's own layer**: "feeds a layer other than
+  its own" names the layer — `layer:"Finance" feeds(NOT layer:"Finance")` —
+  with one such condition per layer, joined by `or`, for every layer at once.
 - **No per-user rate limit on search** (`DEEP_SEARCH_RATE_LIMIT_PER_MIN` is not
   enforced): load is shed with `429` when the graph is busy.
 - **The panel's Options tab** (page size, candidate cap, grouping) doesn't

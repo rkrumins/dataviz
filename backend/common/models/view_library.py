@@ -18,6 +18,8 @@ from pydantic import BaseModel, ConfigDict, Field
 
 LIBRARY_RULES_MAX = 200
 LIBRARY_QUERIES_MAX = 500
+#: The most queries listed from a workspace's other views at once.
+OTHER_VIEW_QUERIES_MAX = 500
 
 PACK_FORMAT = "synodic.view-library"
 PACK_VERSION = 1
@@ -55,6 +57,18 @@ class SavedQueryInput(_Base):
     name: str = Field(min_length=1, max_length=120)
     description: Optional[str] = Field(None, max_length=500)
     predicate: Dict[str, Any]
+
+
+class OtherViewQuery(_Base):
+    """A query saved on another view of the workspace the caller may open —
+    to load into this one, copy into its library or make a rule of."""
+    view_id: str = Field(alias="viewId")
+    view_name: str = Field(alias="viewName")
+    same_source: bool = Field(
+        alias="sameSource",
+        description="The other view reads this one's data source, so the query's names, "
+                    "types and layers mean what they meant there.")
+    query: SavedQuery
 
 
 class LibraryOrder(_Base):

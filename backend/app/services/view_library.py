@@ -23,11 +23,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, FrozenSet, List, Optional, Tuple
 
 from pydantic import TypeAdapter, ValidationError as PydanticValidationError
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import ColumnElement, case, delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.attributes import set_committed_value
 
-from backend.app.db.models import ViewLayoutOverlayORM, ViewORM, ViewSavedQueryORM
+from backend.app.db.models import ViewLayoutOverlayORM, ViewORM, ViewSavedQueryORM, view_is_live
 from backend.app.db.repositories import view_repo
 from backend.app.services.advanced_search_service import (
     ValidationError as SearchValidationError,
@@ -41,12 +41,14 @@ from backend.common.models.search import Predicate
 from backend.common.models.view_library import (
     LIBRARY_QUERIES_MAX,
     LIBRARY_RULES_MAX,
+    OTHER_VIEW_QUERIES_MAX,
     DisplayRule,
     ImportStrategy,
     LibraryImportItem,
     LibraryImportResult,
     LibraryPack,
     LibraryPackSource,
+    OtherViewQuery,
     SavedQuery,
     SavedQueryInput,
     ViewLibrary,
@@ -308,6 +310,37 @@ async def _query_rows(session: AsyncSession, view_id: str) -> List[ViewSavedQuer
 
 async def read_queries(session: AsyncSession, view_id: str) -> List[SavedQuery]:
     return [_query_of(row) for row in await _query_rows(session, view_id)]
+
+
+async def read_queries_elsewhere(
+    session: AsyncSession, view: ViewORM, readable: Optional[ColumnElement[bool]],
+    *, limit: int = OTHER_VIEW_QUERIES_MAX,
+) -> List[OtherViewQuery]:
+    """The queries saved on the workspace's other live views that
+    ``readable`` lets the caller open — every one with no clause (RBAC off)
+    — those over this view's data source first, then by view name, each
+    view's in its own order."""
+    same_source = (
+        case((ViewORM.data_source_id == view.data_source_id, 0), else_=1)
+        if view.data_source_id else None
+    )
+    stmt = (
+        select(ViewSavedQueryORM, ViewORM.name, ViewORM.data_source_id)
+        .join(ViewORM, ViewORM.id == ViewSavedQueryORM.view_id)
+        .where(ViewORM.workspace_id == view.workspace_id, ViewORM.id != view.id, view_is_live())
+    )
+    if readable is not None:
+        stmt = stmt.where(readable)
+    order = [func.lower(ViewORM.name), ViewORM.id, ViewSavedQueryORM.position, ViewSavedQueryORM.created_at]
+    stmt = stmt.order_by(*([same_source] if same_source is not None else []), *order).limit(limit)
+    return [
+        OtherViewQuery(
+            view_id=row.view_id, view_name=name,
+            same_source=bool(view.data_source_id) and source == view.data_source_id,
+            query=_query_of(row),
+        )
+        for row, name, source in (await session.execute(stmt)).all()
+    ]
 
 
 async def put_query(session: AsyncSession, view_id: str, query_id: str,

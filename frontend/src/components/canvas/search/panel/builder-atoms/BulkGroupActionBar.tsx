@@ -56,8 +56,13 @@ export const BulkGroupActionBar: FC = () => {
                     animate={{ y: 0, opacity: 1 }}
                     exit={{ y: 32, opacity: 0 }}
                     transition={{ type: 'spring', stiffness: 380, damping: 30 }}
+                    // Centred by the transform framer writes, which animates
+                    // ``y``: an ``-translate-x-1/2`` class is overwritten by
+                    // it, and the bar started at the middle and ran off the
+                    // panel's right edge.
+                    style={{ x: '-50%' }}
                     className={cn(
-                        'absolute bottom-3 left-1/2 -translate-x-1/2 z-30',
+                        'absolute bottom-3 left-1/2 z-30 max-w-[calc(100%-1.5rem)]',
                         'inline-flex items-center gap-2',
                         'rounded-xl border border-accent-lineage/40',
                         'bg-canvas-elevated/95 backdrop-blur-md',

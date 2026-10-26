@@ -67,6 +67,8 @@ function Harness({ initial, samples, onChange, suggestValues }: {
     )
 }
 
+/** A finished row reads as one line; its card holds every option. */
+const openCard = () => userEvent.click(screen.getByRole('button', { name: 'Show all options' }))
 const last = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls[fn.mock.calls.length - 1][0] as PropertyPredicate
 // The key picker renders first, the value picker second.
 const valueCombobox = () => screen.getAllByRole('combobox').at(-1)!
@@ -116,6 +118,7 @@ describe('property row values', () => {
     it('switching to in keeps the value as a one-item list', async () => {
         const onChange = vi.fn()
         render(<Harness initial={prop({ value: 'gold' })} samples={[]} onChange={onChange} />)
+        await openCard()
         await userEvent.click(screen.getByRole('button', { name: 'Property operator' }))
         await userEvent.click(await screen.findByRole('option', { name: /^is one of/i }))
         expect(last(onChange)).toMatchObject({ op: 'in', value: ['gold'] })
@@ -143,6 +146,7 @@ describe('property row types', () => {
     it('switching the type re-reads the value', async () => {
         const onChange = vi.fn()
         render(<Harness initial={prop({ value: 15, valueType: 'number' })} samples={[10]} onChange={onChange} />)
+        await openCard()
         await userEvent.click(screen.getByRole('button', { name: 'Compare as' }))
         await userEvent.click(await screen.findByRole('option', { name: /^Text/ }))
         expect(last(onChange)).toMatchObject({ value: '15', valueType: 'string', op: 'eq' })
@@ -175,6 +179,7 @@ describe('property row types', () => {
     it('presence operators need no value and run at once', async () => {
         const onChange = vi.fn()
         render(<Harness initial={prop({ value: 'x' })} samples={[]} onChange={onChange} />)
+        await openCard()
         await userEvent.click(screen.getByRole('button', { name: 'Property operator' }))
         await userEvent.click(await screen.findByRole('option', { name: /^is not set/i }))
         expect(last(onChange)).toMatchObject({ op: 'isNotSet' })
@@ -186,6 +191,7 @@ describe('property row types', () => {
     it('a negative operator offers to include entities without the key', async () => {
         const onChange = vi.fn()
         render(<Harness initial={prop({ op: 'neq', value: 'a' })} samples={[]} onChange={onChange} />)
+        await openCard()
         await userEvent.click(screen.getByRole('checkbox', { name: /include entities without/i }))
         expect(last(onChange)).toMatchObject({ op: 'neq', includeMissing: true })
     })

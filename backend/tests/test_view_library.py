@@ -428,3 +428,74 @@ async def test_a_stranger_cannot_tell_the_view_exists(test_client: AsyncClient, 
         put = await test_client.put(f"/api/v1/views/{view_id}/library/rules/r1",
                                     json=_rule("r1", "PII"))
         assert put.status_code == 404
+
+
+# ── queries saved on the workspace's other views ─────────────────────
+
+async def _views_around(db_session) -> None:
+    """The team view, three more in its workspace — over its data source,
+    over another, and one private to someone else — a deleted one, and a
+    view in another workspace; each with a saved query."""
+    from backend.app.db.models import ProviderORM, ViewSavedQueryORM, WorkspaceDataSourceORM
+
+    db_session.add_all([
+        WorkspaceORM(id=WS, name="Library"),
+        WorkspaceORM(id="ws_far", name="Far away"),
+        ProviderORM(id="prov_lib", name="Graph", provider_type="falkordb"),
+        WorkspaceDataSourceORM(id="ds_lib", workspace_id=WS, provider_id="prov_lib", graph_name="g1"),
+        WorkspaceDataSourceORM(id="ds_other", workspace_id=WS, provider_id="prov_lib", graph_name="g2"),
+    ])
+    views = [
+        ("view_team", "team", WS, "ds_lib", "workspace", "usr_owner", None),
+        ("view_zeta", "Zeta", WS, "ds_lib", "workspace", "usr_owner", None),
+        ("view_alpha", "Alpha", WS, "ds_other", "workspace", "usr_owner", None),
+        ("view_secret", "Secret", WS, "ds_lib", "private", "usr_owner", None),
+        ("view_gone", "Gone", WS, "ds_lib", "workspace", "usr_owner", "2026-10-01T00:00:00+00:00"),
+        ("view_far", "Far", "ws_far", None, "workspace", "usr_owner", None),
+    ]
+    for vid, name, ws, ds, visibility, owner, deleted in views:
+        db_session.add(ViewORM(id=vid, name=name, workspace_id=ws, data_source_id=ds,
+                               visibility=visibility, created_by=owner, deleted_at=deleted))
+    await db_session.flush()
+    for vid, *_ in views:
+        for position, name in enumerate((f"{vid} first", f"{vid} second")):
+            db_session.add(ViewSavedQueryORM(
+                id=f"q_{vid}_{position}", view_id=vid, position=position, name=name,
+                description="kept" if position == 0 else None,
+                predicate='{"kind": "hasProperty", "key": "owner"}'))
+    await db_session.commit()
+
+
+async def test_queries_from_other_views_are_the_ones_the_caller_may_open(test_client: AsyncClient, db_session):
+    await _views_around(db_session)
+    reader = PermissionClaims(sid="s_reader", ws_perms={WS: ("workspace:view:read",)})
+    with _as(_user("usr_reader"), reader):
+        resp = await test_client.get("/api/v1/views/view_team/library/from-other-views")
+    assert resp.status_code == 200, resp.text
+    found = resp.json()
+    # Over this view's data source first, then by name; each view's in its
+    # own order. Not this view's own, a private view of someone else's, a
+    # deleted view, or another workspace's.
+    assert [(q["viewName"], q["query"]["name"]) for q in found] == [
+        ("Zeta", "view_zeta first"), ("Zeta", "view_zeta second"),
+        ("Alpha", "view_alpha first"), ("Alpha", "view_alpha second"),
+    ]
+    assert [q["sameSource"] for q in found] == [True, True, False, False]
+    assert found[0]["viewId"] == "view_zeta"
+    assert found[0]["query"]["description"] == "kept"
+    assert found[0]["query"]["predicate"] == {"kind": "hasProperty", "key": "owner"}
+
+
+async def test_the_owner_of_a_private_view_finds_its_queries_too(test_client: AsyncClient, db_session):
+    await _views_around(db_session)
+    owner = PermissionClaims(sid="s_owner", ws_perms={WS: ("workspace:view:read",)})
+    with _as(_user("usr_owner"), owner):
+        found = (await test_client.get("/api/v1/views/view_team/library/from-other-views")).json()
+    assert {q["viewName"] for q in found} == {"Zeta", "Alpha", "Secret"}
+
+
+async def test_a_stranger_finds_no_view_to_list_from(test_client: AsyncClient, db_session):
+    await _views_around(db_session)
+    with _as(_user("usr_stranger"), PermissionClaims(sid="s_stranger")):
+        resp = await test_client.get("/api/v1/views/view_team/library/from-other-views")
+    assert resp.status_code == 404

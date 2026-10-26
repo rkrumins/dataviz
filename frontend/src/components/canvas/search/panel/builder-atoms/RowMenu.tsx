@@ -31,6 +31,8 @@ import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
 
+import { anchorInView } from '../anchorInView'
+
 import { OP_HINTS, TONE_STYLES, type OpTone } from './tones'
 
 
@@ -53,6 +55,8 @@ export const RowMenu: FC<RowMenuProps> = ({
     useLayoutEffect(() => {
         if (!open) { setCoords(null); return }
         const update = () => {
+            // Scrolled out of sight: close rather than float, unattached.
+            if (buttonRef.current && !anchorInView(buttonRef.current)) { setOpen(false); return }
             const r = buttonRef.current?.getBoundingClientRect()
             if (!r) return
             const top = r.bottom + 4
@@ -110,6 +114,8 @@ export const RowMenu: FC<RowMenuProps> = ({
                 <>
                     <motion.div
                         ref={popoverRef}
+                        // Its picks are the row's own: not a click away from it.
+                        data-floating-layer=""
                         initial={{ opacity: 0, y: -4, scale: 0.98 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         transition={{ duration: 0.12 }}

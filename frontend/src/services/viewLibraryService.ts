@@ -32,6 +32,16 @@ export interface SavedViewQueryInput {
     predicate: Predicate
 }
 
+/** A query saved on another view of the workspace that the caller may open. */
+export interface OtherViewQuery {
+    viewId: string
+    viewName: string
+    /** The other view reads this one's data source, so the query's names,
+     *  types and layers mean what they meant there. */
+    sameSource: boolean
+    query: SavedViewQuery
+}
+
 export interface ViewLibrary {
     viewId: string
     branchId?: string | null
@@ -136,6 +146,12 @@ export function deleteViewQuery(viewId: string, queryId: string): Promise<void> 
     return authFetch<void>(libraryUrl(viewId, `/queries/${encodeURIComponent(queryId)}`), {
         method: 'DELETE',
     })
+}
+
+/** The queries saved on the workspace's other views the caller may open —
+ *  those over this view's data source first. */
+export function listQueriesFromOtherViews(viewId: string, signal?: AbortSignal): Promise<OtherViewQuery[]> {
+    return authFetch<OtherViewQuery[]>(libraryUrl(viewId, '/from-other-views'), { signal })
 }
 
 export function exportViewLibrary(viewId: string, branchId?: string | null): Promise<LibraryPack> {

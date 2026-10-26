@@ -39,6 +39,10 @@ export interface LibraryImportDialogProps {
     onClose: () => void
     /** After a real import; the view's library already holds the result. */
     onImported: (result: LibraryImportResult) => void
+    /** A pack already read (a file opened from the library), and its file's
+     *  name: the dialog starts on it instead of asking for a file. */
+    initialPack?: LibraryPack | null
+    initialFileName?: string | null
 }
 
 
@@ -58,9 +62,11 @@ const STRATEGIES: ReadonlyArray<{ value: ImportStrategy; label: string; descript
 ]
 
 
-export function LibraryImportDialog({ viewId, branchId, onClose, onImported }: LibraryImportDialogProps) {
-    const [pack, setPack] = useState<LibraryPack | null>(null)
-    const [fileName, setFileName] = useState<string | null>(null)
+export function LibraryImportDialog({
+    viewId, branchId, onClose, onImported, initialPack = null, initialFileName = null,
+}: LibraryImportDialogProps) {
+    const [pack, setPack] = useState<LibraryPack | null>(initialPack)
+    const [fileName, setFileName] = useState<string | null>(initialFileName)
     const [fileError, setFileError] = useState<string | null>(null)
     const [strategy, setStrategy] = useState<ImportStrategy>('merge')
     const [preview, setPreview] = useState<LibraryImportResult | null>(null)

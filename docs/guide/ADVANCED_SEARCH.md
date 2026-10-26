@@ -152,6 +152,12 @@ match any row (**OR**) instead. Select several rows to **Group as AND / OR** on 
 add a **NOT group** to exclude what it matches.
 **Undo** and **Redo** step through your edits; **New** starts again.
 
+**A finished filter reads as one line** — *Type is Dataset*, *Is tagged
+#Certified* — and each part you picked opens that filter's editor where it is.
+The chevron, **Show all options**, opens the full card. A new or unfinished
+filter opens as its card, and folds once it's complete and you move on.
+Relationships, paths and edge counts keep their cards.
+
 **Text filters** match **Contains**, **Starts with**, **Ends with**, **Is
 exactly**, or a **Wildcard pattern** (`*sales*`, `sales*`, `*_raw`).
 Matching ignores case.
@@ -317,6 +323,25 @@ name or **Any entity where…** a condition: "every route from a topic to a
 dataset, through edges in stream mode". The results become the routes. With an
 end a condition, routes go up to 4 hops; with both, 3.
 
+**A generic ontology.** Many data sources model little more than *Category*
+**has** *Entity* **has** *Entity*, as deep as it goes, and one generic lineage
+edge — `LINEAGE`, `FLOWS_TO` — between any two entities at any level. The data
+source's ontology says which edge types are the hierarchy and which are
+lineage, so every relationship above works the same there:
+
+| Question | Code |
+| --- | --- |
+| Every leaf — an entity that holds nothing | `no child()` (or `noOutgoing[containment]`) |
+| Exactly five levels below a category | `ancestor*5(type:Category)` |
+| Everything under the category *Finance*, at any depth (up to 20 levels) | `ancestor(@"Finance")` |
+| Leaves with a direct `LINEAGE` edge into the *Sales* layer | `no child() outgoing["LINEAGE"](layer:"Sales")` |
+| Leaves in the *Finance* layer feeding any other layer, one step | `layer:"Finance" no child() feeds(NOT layer:"Finance")` |
+| Categories one of whose leaves feeds the *Sales* layer | `type:Category descendant(no child() feeds(layer:"Sales"))` |
+
+A condition can't point back at an entity's own layer, so "into another layer"
+names it, as above; to ask it of every layer at once, join one such condition
+per layer with OR.
+
 ### Code mode
 
 Switch the query card to **Code** to type the query instead. Every mode edits
@@ -339,6 +364,11 @@ The editor helps as you type:
 - **Reads as** says the query in words, and lists any words that will be
   searched as plain text in names.
 - **Examples** insert a ready-made condition at the cursor.
+- **Selecting** works as in any code editor — double-click a word, drag, select
+  all, copy and paste — and takes whole conditions too: double-click the word a
+  condition starts with (`tag` of `tag:PII`, `outgoing`, `NOT`, a property's
+  name) to select all of it, or press `⌘I` / `Ctrl+I` to select the condition
+  around the cursor, then its group, then the whole query.
 
 A query that doesn't read is never applied: the one you had stays until you fix
 it.
@@ -381,7 +411,9 @@ A relationship word counts only when `(` follows it directly — after its
 (exactly two), `*..3` (one to three), `*2..4`, and `*2..` for two levels or
 more up or down the tree. Edge types read in any case — `outgoing[produces]`
 finds the data source's `PRODUCES` — and one it doesn't have is refused,
-naming the nearest it does. A named edge type prints with `outgoing` or
+naming the nearest it does. An edge type named like a class — `LINEAGE`,
+`LINKS`, `ANY`, `CONTAINMENT` — goes in quotes, `outgoing["LINEAGE"](…)`: bare,
+the word is the class. A named edge type prints with `outgoing` or
 `incoming` rather than `feeds` or `fedBy`: an edge's direction isn't always the
 data's. The older words read as they always have: `upstream`, `downstream` and
 `neighbor` are `fedBy`, `feeds` and `linkedTo[lineage]`, and **Code** prints
@@ -562,17 +594,27 @@ query card:
 | **Everyone on this view** | The View's library, on the server | Everyone who can open the View. Only people who can edit the View can save here |
 | **Just me** | This browser | You, in this browser only — it isn't synced or exported |
 
-The **Library** chip opens all three places at once, with one filter box over
+The **Library** chip opens every place at once, with one filter box over
 them:
 
 - **Mine** — your recent, pinned and named searches. **Save with a name**
   (bookmark), **Share with everyone on this view** (if you can edit it),
   **Pin**, **Remove**.
-- **This view** — the searches saved for everyone. Click one to load it.
+- **This view** — the searches saved for everyone. Click one to run it.
   People who can edit the View see **Remove**, which asks once more — it
   removes the search **for everyone**.
+- **Other views** — your own named searches from other Views, then the
+  searches saved for everyone on this workspace's other Views that you can
+  open, View by View: those over this View's data source first, and one over
+  another data source says its names and types may differ here. Click one to
+  run it here; people who can edit this View can **Copy to this view** (a name
+  already taken becomes *Name (from View)*).
 - **Recipes** — ready-made questions in the View's own words (see
   [Recipes gallery](#recipes-gallery)).
+
+Every saved search, in any tab, also has **Download** (it saves as a file of
+its own — see below) and, for people who can edit the View, **Make a display
+rule** ([below](#from-a-search-to-a-display-rule)).
 
 A saved search keeps its **filters**. It doesn't keep the scope or options you
 ran it with: loading it runs it the way the panel runs every search.
@@ -582,12 +624,20 @@ ran it with: loading it runs it the way the panel runs every search.
 The footer of the **Library** holds the View's whole library — its saved
 searches **and** its [display rules](/guide/display-rules) — as a file:
 
+- **Open file…** runs a search from a file: one saved with **Download**, a
+  search's own JSON (`*.search.json`, as the API takes it) or a single
+  condition. A library file of several opens in **Import library…** for people
+  who can edit the View.
 - **Export library** downloads `<view name>.library.json`. Anyone who can open
   the View can export it.
 - **Import library…** (people who can edit the View) brings a library file in.
   Choose how it lands — **Add what's new**, **Add everything** or **Replace** —
   and you see, item by item, what will be added, what's already here and what
   can't be imported, before anything changes.
+
+**Download** on one saved search writes `<search name>.library.json`: a
+library file holding just that search, its name and description kept. It
+opens with **Open file…** in any View, or imports like any library file.
 
 The same actions sit at the bottom of the Property Manager's **Display rules**
 tab. To put one library on every View of a data source, see
@@ -602,6 +652,11 @@ tab. To put one library on every View of a data source, see
 canvas, for everyone who opens the View. It needs at least one complete filter
 and permission to edit the View. A rule can't use *Within N hops*, a *Path*, or
 a lineage relationship of more than one hop.
+
+From the **Library**, **Make a display rule** (the tag) on any saved search —
+this View's, another View's or your own — opens the rule editor on it, named
+after it, without loading it first. The editor counts what it would tag as you
+go, and says before you save if the search is one a rule can't be.
 
 ---
 

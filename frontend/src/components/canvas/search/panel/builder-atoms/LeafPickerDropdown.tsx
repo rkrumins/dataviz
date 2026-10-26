@@ -20,6 +20,7 @@ import { createPortal } from 'react-dom'
 import { cn } from '@/lib/utils'
 
 import { LEAF_KINDS, type LeafKindMeta } from '../../builder/leafKinds'
+import { anchorInView } from '../anchorInView'
 
 
 const CATEGORY_LABELS: Record<LeafKindMeta['category'], string> = {
@@ -72,6 +73,8 @@ export const LeafPickerDropdown: FC<LeafPickerDropdownProps> = ({
     useLayoutEffect(() => {
         if (!open) { setCoords(null); return }
         const update = () => {
+            // Scrolled out of sight: close rather than float, unattached.
+            if (anchorRef.current && !anchorInView(anchorRef.current)) { onDismiss(); return }
             const r = anchorRef.current?.getBoundingClientRect()
             if (!r) return
             const sentinel = anchorRef.current?.closest<HTMLElement>(
@@ -105,7 +108,7 @@ export const LeafPickerDropdown: FC<LeafPickerDropdownProps> = ({
             window.removeEventListener('resize', update)
             window.removeEventListener('scroll', update, true)
         }
-    }, [open, anchorRef])
+    }, [open, anchorRef, onDismiss])
 
     // Focus the search input on open.
     useEffect(() => {

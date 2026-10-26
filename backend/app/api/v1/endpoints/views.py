@@ -65,6 +65,7 @@ from backend.common.models.view_library import (
     LibraryImportResult,
     LibraryOrder,
     LibraryPack,
+    OtherViewQuery,
     SavedQuery,
     SavedQueryInput,
     ViewLibrary,
@@ -1834,6 +1835,22 @@ async def get_view_library(
     await require_branch_scope(session, svc, view_orm, branch_id,
                                actor=_user_id(user), claims=claims, write=False)
     return await view_library.read_library(session, view_orm, branch_id, can_edit=can_edit)
+
+
+@router.get("/{view_id}/library/from-other-views", response_model=List[OtherViewQuery])
+async def list_queries_from_other_views(
+    view_id: str = Path(...),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The queries saved on the workspace's other views the caller may open
+    — those over this view's data source first — to load into this view,
+    copy into its library, or make a display rule of. Not open to API keys:
+    it reaches past the one view a key names."""
+    view_orm, _ = await _library_view(session, view_id, user, claims, edit=False)
+    clause, _scope = await _readable_clause(session, user, claims)
+    return await view_library.read_queries_elsewhere(session, view_orm, clause)
 
 
 @router.put("/{view_id}/library/rules/{rule_id}", response_model=List[dict])

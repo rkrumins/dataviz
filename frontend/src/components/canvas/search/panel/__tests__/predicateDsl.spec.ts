@@ -559,6 +559,8 @@ describe('predicateDsl — relationships and names', () => {
         ['ancestor*2..4(type:domain)', { kind: 'related', axis: 'ancestor', minHops: 2, maxHops: 4,
             where: type('domain') }],
         ['descendant*2..()', { kind: 'related', axis: 'descendant', minHops: 2 }],
+        ['ancestor*5(type:Category)', { kind: 'related', axis: 'ancestor', minHops: 5, maxHops: 5,
+            where: type('Category') }],
         ['feeds(fedBy(@"Sales/orders"))', { kind: 'related', axis: 'downstream',
             where: { kind: 'related', axis: 'upstream', where: named('Sales', 'orders') } }],
         ['@"Country/United Kingdom"', named('Country', 'United Kingdom')],
@@ -842,6 +844,38 @@ describe('predicateDsl — connections, edge types and edge counts', () => {
 })
 
 
+describe('predicateDsl — an edge type named like a class', () => {
+    // A generic ontology may call its lineage edge LINEAGE. Bare in brackets
+    // the word is the class (every lineage type); in quotes, the edge type.
+    it('reads a quoted name as the edge type, a bare one as the class', () => {
+        expect(parsePredicate('outgoing["LINEAGE"](type:x)').predicate).toEqual({
+            kind: 'related', axis: 'downstream', edgeTypes: ['LINEAGE'],
+            where: { kind: 'entityType', op: 'in', values: ['x'] } })
+        expect(parsePredicate('outgoing[LINEAGE](type:x)').predicate).toEqual({
+            kind: 'related', axis: 'downstream', where: { kind: 'entityType', op: 'in', values: ['x'] } })
+        expect(parsePredicate('noIncoming["Links", FLOWS_TO]').predicate).toMatchObject({
+            edgeTypes: ['Links', 'FLOWS_TO'] })
+        expect(parsePredicate('edges["ANY"](out) > 2').predicate).toMatchObject({ edgeTypes: ['ANY'] })
+        expect(parsePredicate('outgoing[""](type:x)').error).toMatch(/between the quotes/)
+    })
+
+    it('writes such a name in quotes, so it reads back as the same edge type', () => {
+        for (const p of [
+            { kind: 'related', axis: 'downstream', edgeTypes: ['LINEAGE'], maxHops: 2 },
+            { kind: 'related', axis: 'neighbor', edgeTypes: ['links', 'PRODUCES'] },
+            { kind: 'isRoot', edgeTypes: ['CONTAINMENT'] },
+            { kind: 'degree', direction: 'out', op: 'gt', value: 2, edgeTypes: ['Any'] },
+        ] as Predicate[]) {
+            const text = stringifyPredicate(p)
+            expect(text).toMatch(/"(LINEAGE|links|CONTAINMENT|Any)"/)
+            expect(parsePredicate(text).predicate).toEqual(p)
+        }
+        expect(stringifyPredicate({ kind: 'related', axis: 'downstream', edgeTypes: ['FLOWS_TO'] }))
+            .toBe('outgoing[FLOWS_TO]()')
+    })
+})
+
+
 describe('predicateDsl — one property against another', () => {
     const parse = (text: string) => parsePredicate(text).predicate
     const keyed = (over: Partial<PropertyPredicate>): Predicate =>
@@ -922,6 +956,17 @@ describe('predicateDsl — what an editor reads off a parse', () => {
             predicate: null, error: 'Close the text with "', errorAt: { from: 14, to: 18 } })
         expect(parsePredicate('upstream(@"Sales/ord')).toMatchObject({
             predicate: null, error: 'Close the name with ": @"…"', errorAt: { from: 9, to: 20 } })
+    })
+
+    it('notes where each condition and group sits, nested ones included', () => {
+        const text = 'NOT tag:PII OR (type:x feeds(owner IS SET))'
+        const spans = parsePredicate(text).spans.map((s) => text.slice(s.from, s.to))
+        expect(new Set(spans)).toEqual(new Set([
+            'tag:PII', 'NOT tag:PII', 'type:x', 'owner IS SET', 'feeds(owner IS SET)',
+            'type:x feeds(owner IS SET)', '(type:x feeds(owner IS SET))', text,
+        ]))
+        // Those read before an error are kept.
+        expect(parsePredicate('tag:PII AND (').spans).toEqual([{ from: 0, to: 7 }])
     })
 
     it('reads a comma list inside prefix:value as one condition', () => {
