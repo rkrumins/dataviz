@@ -21,7 +21,7 @@ const { sa, client, keysOf, notify, feature, perms, searchDirectory, listPage, r
     return {
         sa: {
             get: vi.fn(), update: vi.fn(), disable: vi.fn(), enable: vi.fn(), addManager: vi.fn(),
-            removeManager: vi.fn(), grantRole: vi.fn(), revokeRole: vi.fn(),
+            removeManager: vi.fn(), grantRole: vi.fn(), revokeRole: vi.fn(), delete: vi.fn(), restore: vi.fn(),
         },
         client, keysOf: vi.fn(() => client), notify: vi.fn(), feature: { on: true, directory: false },
         perms: new Set<string>(),
@@ -57,7 +57,7 @@ vi.mock('@/store/auth', () => ({ usePermission: (perm: string) => perms.has(perm
 /** What one of its managers may do. */
 const MANAGER: ServiceAccountCan = {
     view: true, edit: true, disable: true, enable: true, managers: true, keys: true, grant: false, revoke: true,
-    request: true,
+    request: true, delete: true, restore: false,
 }
 
 const ADA = {
@@ -76,7 +76,8 @@ function account(over: Partial<ServiceAccountDetail> = {}): ServiceAccountDetail
                 membersInGoodStanding: 0, addedAt: '2026-10-01T00:00:00+00:00', addedBy: 'usr_admin',
             },
         ],
-        managed: true, singleManager: true, unmanagedSince: null, pausesAt: null, adminHold: false, handOver: null,
+        managed: true, singleManager: true, unmanagedSince: null, pausesAt: null, adminHold: false, deletedAt: null,
+        purgesAt: null, handOver: null,
         roles: [{ bindingId: 'rb_1', workspaceId: 'ws1', workspaceName: 'Finance', role: 'workspace_viewer', grantedAt: null, expiresAt: null }],
         requests: [],
         liveKeys: 1,
@@ -230,6 +231,46 @@ describe('running it', () => {
         expect(within(keys).queryByRole('button', { name: /create key/i })).not.toBeInTheDocument()
         expect(client.list).not.toHaveBeenCalled()
         expect(screen.queryByLabelText('Add a manager')).not.toBeInTheDocument()
+    })
+})
+
+describe('deleting it', () => {
+    /** As its managers see it once deleted: there to restore, and nothing else. */
+    const DELETED = {
+        deletedAt: '2026-10-25T09:00:00+00:00', purgesAt: '2026-11-24T09:00:00+00:00',
+        can: { ...MANAGER, edit: false, disable: false, enable: false, managers: false, keys: false, revoke: false, request: false, delete: false, restore: true },
+    }
+
+    it('says first what stops and how to bring it back, then shows it deleted with the way back', async () => {
+        sa.delete.mockResolvedValue(account(DELETED))
+        sa.restore.mockResolvedValue(account())
+        renderPage()
+        const about = await screen.findByRole('region', { name: 'About this service account' })
+        await userEvent.click(within(about).getByRole('button', { name: /^delete…$/i }))
+        const dialog = await screen.findByRole('dialog', { name: 'Delete “Metadata sync”?' })
+        expect(within(dialog).getByText('Its 1 live key stops working at once.')).toBeInTheDocument()
+        expect(within(dialog).getByText(/its managers can restore it until/i)).toBeInTheDocument()
+        expect(sa.delete).not.toHaveBeenCalled()
+        await userEvent.click(within(dialog).getByRole('button', { name: /^delete$/i }))
+        await waitFor(() => expect(sa.delete).toHaveBeenCalledWith('svc_sync'))
+
+        const deleted = await screen.findByRole('status')
+        expect(deleted).toHaveTextContent(/deleted .* — its keys don’t work/i)
+        expect(deleted).toHaveTextContent(/its managers can restore it until .*, with its keys, roles and managers as they were/i)
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+        expect(within(about).queryByRole('button', { name: /rename or describe/i })).not.toBeInTheDocument()
+        expect(screen.getByText(/1 live key, stopped while it is deleted/i)).toBeInTheDocument()
+        await userEvent.click(within(deleted).getByRole('button', { name: /^restore$/i }))
+        await waitFor(() => expect(sa.restore).toHaveBeenCalledWith('svc_sync'))
+        expect(await within(about).findByRole('button', { name: /rename or describe/i })).toBeInTheDocument()
+    })
+
+    it('offers its managers no way back while an administrator holds it', async () => {
+        sa.get.mockResolvedValue(account({ ...DELETED, adminHold: true, can: { ...DELETED.can, restore: false } }))
+        renderPage()
+        const deleted = await screen.findByRole('status')
+        expect(deleted).toHaveTextContent(/an administrator can restore it until/i)
+        expect(within(deleted).queryByRole('button', { name: /^restore$/i })).not.toBeInTheDocument()
     })
 })
 

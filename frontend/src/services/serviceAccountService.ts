@@ -8,6 +8,10 @@
  * `graceDays` after the last one goes, so an integration keeps running while
  * a successor is appointed. Its keys themselves are `serviceAccountKeys(id)`
  * in apiKeyService.
+ *
+ * A deleted account's keys stop at once. Until `purgesAt`, 30 days on, it can
+ * be restored as it was; then its keys are revoked and its roles and managers
+ * removed.
  */
 import { authFetch } from './apiClient'
 
@@ -67,8 +71,12 @@ export interface ServiceAccount {
     /** Since when nobody has; its keys pause at `pausesAt`. */
     unmanagedSince: string | null
     pausesAt: string | null
-    /** An administrator disabled it: only one of them enables it again. */
+    /** An administrator disabled or deleted it: only one of them enables or
+     *  restores it again. */
     adminHold: boolean
+    /** When it was deleted; it is purged at `purgesAt` unless restored. */
+    deletedAt: string | null
+    purgesAt: string | null
     /** Only when listed by `managedBy`. */
     handOver: HandOverFacts | null
 }
@@ -114,6 +122,10 @@ export interface ServiceAccountCan {
     revoke: boolean
     /** Ask a workspace for access for it, or to keep access that ends. */
     request: boolean
+    /** Its keys stop at once; it can be restored for 30 days. */
+    delete: boolean
+    /** Its managers can't while an administrator holds it. */
+    restore: boolean
 }
 
 export interface ServiceAccountDetail extends ServiceAccount {
@@ -133,7 +145,14 @@ export interface ServiceAccountList {
 
 export interface ServiceAccountFilters {
     q?: string
-    status?: 'active' | 'disabled'
+    /** `deleted`: those deleted and not yet purged. */
+    status?: 'active' | 'disabled' | 'deleted'
+    /** No manager in good standing, or held by an administrator. */
+    standing?: 'unmanaged' | 'held'
+    /** A person, themselves or through a team, or a team. */
+    manager?: string
+    /** Holding a role in this workspace. */
+    workspace?: string
     /** The accounts a person's leaving touches — those they manage, themselves or
      *  through a team, and those they made a key for that still works — with what
      *  it involves. */
@@ -184,6 +203,15 @@ export const serviceAccountService = {
         return authFetch(`${one(id)}/enable`, { method: 'POST' })
     },
 
+    /** Every key it holds stops at once; for 30 days restoring it brings it all back. */
+    delete(id: string): Promise<ServiceAccountDetail> {
+        return authFetch(one(id), { method: 'DELETE' })
+    },
+
+    restore(id: string): Promise<ServiceAccountDetail> {
+        return authFetch(`${one(id)}/restore`, { method: 'POST' })
+    },
+
     addManager(id: string, ref: ManagerRef): Promise<ServiceAccountDetail> {
         return authFetch(manager(id, ref), { method: 'PUT' })
     },
@@ -207,7 +235,8 @@ export const serviceAccountService = {
         return authFetch(`${ADMIN}/hand-over`, { method: 'POST', body: JSON.stringify(body) })
     },
 
-    /** The accounts you manage, yourself or through a team, a page at a time. */
+    /** The accounts you manage, yourself or through a team, a page at a time —
+     *  then those deleted and not yet purged. */
     mine(params: { limit?: number; offset?: number } = {}): Promise<ServiceAccountList> {
         return authFetch(`${MINE}${query(params)}`)
     },
