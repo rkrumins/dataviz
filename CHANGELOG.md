@@ -191,6 +191,78 @@ governance pack.
 
 ---
 
+## [Unreleased] — Service accounts: self-service, from workspace access to reading every workspace
+
+### Added
+
+- **A workspace lets a service account in as it lets a person in.** Its admins and stewards add
+  one on **Members** — **Add member**, then **Service account** — which says what each account is
+  for and who manages it, and give it what they could give a person, among the roles a service
+  account may hold, for a while if they like.
+- **Its managers ask a workspace for access** from the account's page, choosing a workspace, a
+  role and why; the workspace answers as it answers a person, seeing what the account is for, who
+  manages it and who asked. A role given for a while can be asked to be kept, and a request
+  waiting on a workspace is listed on the page, where any of its managers can withdraw it. The
+  activity log names who asked.
+- Nobody answers a request for a service account they manage, or one they asked for. A request
+  for one is never answered with a team or pointed to the identity provider, and where the
+  provider decides who is in a workspace, only its admins give a service account access — not as
+  an exception, which would end within 90 days.
+- **The admins and stewards of a workspace it is in can open its page**, to see what it is for and
+  who manages it, with its roles in the workspaces they can open.
+- An administrator giving it a role through the API (`POST …/service-accounts/{id}/roles`) can end
+  it on a date (`expiresAt`).
+- **Removing someone shows the service accounts they could still act through.** When a workspace
+  admin removes someone who manages a service account — themselves or through a team — whose role
+  there gives more than they would keep, the preview names it, and offers to remove that role too.
+- **A service account can be deleted**, by its managers or an administrator, once nothing runs as
+  it: its keys stop at once and its requests still waiting are withdrawn. For 30 days it can be
+  restored as it was — its keys, roles and managers — from its page, where its managers still find
+  it; then the hourly pass purges it, revoking its keys and removing its roles and managers. Its
+  name stays in the activity log. An administrator's delete holds it, so only an administrator
+  restores it.
+- **Administration → Service accounts** narrows to the accounts that need a manager or that an
+  administrator holds, to those a person or a team manages, and to those with a role in a
+  workspace; **Deleted** lists those that can still be restored.
+- Someone removed as a service account's manager is told, unless they still manage it through a
+  team.
+- **Who else may create a service account is a policy** the administrators of service accounts
+  set under **Administration → Service accounts**: only them, as it ships; anyone who lets people
+  into a workspace; or anyone — each up to a number of live accounts (10 unless set), and, if they
+  choose, only with a team they're in managing it. Where it lets them, people create one under
+  **Account → API keys → Service accounts you manage**, managed by them or a team they're in; it
+  reaches nothing until a workspace gives it a role. Changing the policy is recorded in the
+  activity log. See ADR-029.
+- **A service account can read every workspace**, for an integration that reads across the whole
+  organization: an org admin or a super admin chooses **Let it read every workspace…** on its
+  page. Its keys then read every workspace's views, data sources, semantic layers, catalog and
+  providers — those created later too — as far as each key reaches, and change nothing. Its
+  managers can take that away. It is the new platform role **Org reader** (`org_reader`), which
+  carries `system:org-viewer` alone; of any platform role, a service account keeps only that.
+  Appointing a manager counts it, as it counts the account's roles. See ADR-030.
+
+### Changed
+
+- Adding a service account on a workspace's **Members** tab used to answer `409`; it is added
+  there now, under the rules above.
+- The hourly check of who manages each service account locks only the accounts whose standing it
+  changes, a batch at a time, and skips any a request is changing, rather than locking every
+  account for the whole check.
+
+### Upgrading
+
+- The upgrade job adds nullable columns, and nothing else is to run:
+  - `access_requests.requested_by` (`20261025_1400_sa_requests`): who asked for a request made for
+    a service account;
+  - `service_accounts.purged_at` (`20261025_1600_sa_purge`): when a deleted one was purged;
+  - `platform_settings.sa_who_may_create`, `sa_per_person_limit` and `sa_require_team_manager`
+    (`20261026_1000_sa_policy`): who may create a service account. Unset, only the administrators
+    of service accounts may, as before.
+- It also seeds the **Org reader** role (`20261026_1200_sa_org_read`), with its one grant,
+  `system:org-viewer`. Nobody holds it until an administrator gives it to a service account.
+
+---
+
 ## [Unreleased] — Service accounts: their managers run them
 
 ### Added

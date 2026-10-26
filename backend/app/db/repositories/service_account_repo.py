@@ -11,6 +11,10 @@ which this module keeps current: the routes that change who manages an
 account recompute it at once, and the hourly sweep catches what changes with
 time alone — a sign-in window lapsing, a team's membership synced from the
 identity provider. The request path never evaluates managers.
+
+A deleted account keeps every row, and can be restored as it was, until the
+hourly pass purges it 30 days later (``purged_at``): its keys revoked, its
+roles and managers removed, its rows kept so the activity log still names it.
 """
 from __future__ import annotations
 
@@ -27,6 +31,7 @@ from backend.app.db.models import (
     ApiKeyORM,
     GroupMemberORM,
     GroupORM,
+    RoleBindingORM,
     ServiceAccountManagerORM,
     ServiceAccountORM,
     UserIdentityORM,
@@ -100,6 +105,11 @@ def managed(account_id, *, now: datetime, window_days: Optional[int], passwords_
     )
 
 
+#: How many accounts the hourly pass settles at a time, and the most any one
+#: query names.
+_BATCH = 500
+
+
 async def refresh_standing(
     session: AsyncSession,
     *,
@@ -108,31 +118,69 @@ async def refresh_standing(
     passwords_allowed: bool,
     account_ids: Optional[Iterable[str]] = None,
 ) -> list[str]:
-    """Bring ``unmanaged_since`` up to date — for these accounts, or every one.
-    An account found with no manager in good standing is stamped ``now`` (once:
-    a stamp already there is when it was first noticed); one that has a manager
-    again is cleared, with its reminder. Returns the accounts that have just
-    lost their last manager, so the caller can tell the administrators."""
-    lock = select(ServiceAccountORM.user_id).order_by(ServiceAccountORM.user_id).with_for_update()
-    stmt = select(
-        ServiceAccountORM.user_id, ServiceAccountORM.unmanaged_since,
-        managed(
-            ServiceAccountORM.user_id, now=now, window_days=window_days,
-            passwords_allowed=passwords_allowed,
-        ).label("managed"),
-    )
+    """Bring ``unmanaged_since`` up to date — for these accounts, or every
+    live one. An account found with no manager in good standing is stamped
+    ``now`` (once: a stamp already there is when it was first noticed); one
+    that has a manager again is cleared, with its reminder. A deleted account
+    is left as it is until it is restored: its keys don't work either way.
+    Returns the accounts that have just lost their last manager, so the
+    caller can tell the administrators."""
+    rules = dict(now=now, window_days=window_days, passwords_allowed=passwords_allowed)
     if account_ids is not None:
         wanted = sorted(set(account_ids))
         if not wanted:
             return []
-        lock = lock.where(ServiceAccountORM.user_id.in_(wanted))
-        stmt = stmt.where(ServiceAccountORM.user_id.in_(wanted))
-    # The rows are locked first, always in the same order, and who manages
-    # them read after: that read then sees whatever a concurrent change
-    # committed while this one waited, so no refresh stamps an account from
-    # a list of managers another has just changed.
-    await session.execute(lock)
-    rows = (await session.execute(stmt)).all()
+        # The rows are locked first, always in the same order, and who manages
+        # them read after: that read then sees whatever a concurrent change
+        # committed while this one waited, so no refresh stamps an account from
+        # a list of managers another has just changed.
+        await session.execute(
+            select(ServiceAccountORM.user_id).where(ServiceAccountORM.user_id.in_(wanted))
+            .order_by(ServiceAccountORM.user_id).with_for_update()
+        )
+        return await _settle(session, wanted, **rules)
+    # Every account, a batch at a time, locking only those whose standing has
+    # changed — and skipping any a request holds: it settles them itself.
+    stamped = ServiceAccountORM.unmanaged_since.is_not(None)
+    has_one = managed(ServiceAccountORM.user_id, **rules)
+    lost: list[str] = []
+    after = ""
+    while True:
+        changed = list((await session.execute(
+            select(ServiceAccountORM.user_id)
+            .join(UserORM, UserORM.id == ServiceAccountORM.user_id)
+            .where(
+                UserORM.deleted_at.is_(None), ServiceAccountORM.user_id > after,
+                or_(and_(~stamped, ~has_one), and_(stamped, has_one)),
+            )
+            .order_by(ServiceAccountORM.user_id).limit(_BATCH)
+            .with_for_update(of=ServiceAccountORM, skip_locked=True)
+        )).scalars().all())
+        if changed:
+            lost += await _settle(session, changed, **rules)
+        if len(changed) < _BATCH:
+            return lost
+        after = changed[-1]
+
+
+async def _settle(
+    session: AsyncSession, account_ids: list[str], *,
+    now: datetime, window_days: Optional[int], passwords_allowed: bool,
+) -> list[str]:
+    """Stamp or clear these live accounts, which the caller has locked, by
+    who manages them now. Returns those that have just lost their last
+    manager."""
+    rows = (await session.execute(
+        select(
+            ServiceAccountORM.user_id, ServiceAccountORM.unmanaged_since,
+            managed(
+                ServiceAccountORM.user_id, now=now, window_days=window_days,
+                passwords_allowed=passwords_allowed,
+            ).label("managed"),
+        )
+        .join(UserORM, UserORM.id == ServiceAccountORM.user_id)
+        .where(ServiceAccountORM.user_id.in_(account_ids), UserORM.deleted_at.is_(None))
+    )).all()
     lost = [r.user_id for r in rows if not r.managed and r.unmanaged_since is None]
     regained = [r.user_id for r in rows if r.managed and r.unmanaged_since is not None]
     if lost:
@@ -152,6 +200,12 @@ async def refresh_standing(
     return lost
 
 
+def _batches(ids: list[str]):
+    """A long list of ids, a query's worth at a time."""
+    for start in range(0, len(ids), _BATCH):
+        yield ids[start:start + _BATCH]
+
+
 @dataclass(frozen=True)
 class Unmanaged:
     """An enabled service account with no manager, as the administrators are
@@ -165,19 +219,18 @@ async def unmanaged_accounts(
     session: AsyncSession, account_ids: Iterable[str],
 ) -> list[Unmanaged]:
     """These accounts, where they are enabled and still have no manager."""
-    wanted = sorted(set(account_ids))
-    if not wanted:
-        return []
-    rows = (await session.execute(
-        select(ServiceAccountORM.user_id, UserORM.first_name, ServiceAccountORM.unmanaged_since)
-        .join(UserORM, UserORM.id == ServiceAccountORM.user_id)
-        .where(
-            ServiceAccountORM.user_id.in_(wanted),
-            ServiceAccountORM.unmanaged_since.is_not(None),
-            UserORM.status == "active", UserORM.deleted_at.is_(None),
-        )
-    )).all()
-    return [Unmanaged(id=r[0], name=r[1], unmanaged_since=r[2]) for r in rows]
+    found = []
+    for batch in _batches(sorted(set(account_ids))):
+        found += (await session.execute(
+            select(ServiceAccountORM.user_id, UserORM.first_name, ServiceAccountORM.unmanaged_since)
+            .join(UserORM, UserORM.id == ServiceAccountORM.user_id)
+            .where(
+                ServiceAccountORM.user_id.in_(batch),
+                ServiceAccountORM.unmanaged_since.is_not(None),
+                UserORM.status == "active", UserORM.deleted_at.is_(None),
+            )
+        )).all()
+    return [Unmanaged(id=r[0], name=r[1], unmanaged_since=r[2]) for r in found]
 
 
 async def due_pause_reminder(
@@ -218,14 +271,13 @@ def _aware(value: str) -> datetime:
 
 
 async def mark_pause_reminded(session: AsyncSession, account_ids: list[str], *, now: datetime) -> None:
-    if not account_ids:
-        return
-    await session.execute(
-        update(ServiceAccountORM)
-        .where(ServiceAccountORM.user_id.in_(account_ids))
-        .values(pause_reminded_at=now.isoformat())
-        .execution_options(synchronize_session=False)
-    )
+    for batch in _batches(account_ids):
+        await session.execute(
+            update(ServiceAccountORM)
+            .where(ServiceAccountORM.user_id.in_(batch))
+            .values(pause_reminded_at=now.isoformat())
+            .execution_options(synchronize_session=False)
+        )
 
 
 # ── The accounts ────────────────────────────────────────────────────
@@ -256,20 +308,29 @@ async def create(
     return account_id
 
 
-async def get(session: AsyncSession, account_id: str) -> Optional[tuple[UserORM, ServiceAccountORM]]:
+async def get(
+    session: AsyncSession, account_id: str, *, deleted: bool = False, for_update: bool = False,
+) -> Optional[tuple[UserORM, ServiceAccountORM]]:
     """The account's ``users`` row and its own, or ``None`` for anything that
-    is not a live service account."""
+    is not a live service account — or, with ``deleted``, one deleted and not
+    yet purged too. ``for_update`` locks both rows until the transaction
+    ends, so deleting, restoring and purging an account never interleave."""
     if not is_service_account(account_id):
         return None
-    row = (await session.execute(
+    stmt = (
         select(UserORM, ServiceAccountORM)
         .join(ServiceAccountORM, ServiceAccountORM.user_id == UserORM.id)
-        .where(UserORM.id == account_id, UserORM.deleted_at.is_(None))
+        .where(
+            UserORM.id == account_id,
+            # A purged account was deleted first.
+            ServiceAccountORM.purged_at.is_(None) if deleted else UserORM.deleted_at.is_(None),
+        )
         .options(_NO_PICTURE)
         # Fresh from the database: ``refresh_standing`` writes around the
         # session, and an answer must show what it just did.
         .execution_options(populate_existing=True)
-    )).first()
+    )
+    row = (await session.execute(stmt.with_for_update() if for_update else stmt)).first()
     return (row[0], row[1]) if row else None
 
 
@@ -278,25 +339,41 @@ async def list_page(
     *,
     q: Optional[str] = None,
     status: Optional[str] = None,
+    standing: Optional[str] = None,
     managed_by: Optional[str] = None,
+    workspace_id: Optional[str] = None,
     leaving: Optional[str] = None,
+    with_deleted: bool = False,
     limit: int = 50,
     offset: int = 0,
 ) -> tuple[list[tuple[UserORM, ServiceAccountORM]], int]:
-    """Service accounts by name: those matching ``q`` (name or description),
-    ``active`` or ``disabled``; those a person manages, themselves or through
-    a live team (``managed_by``); or those a person's leaving touches
-    (``leaving``): the ones they manage, and the ones they made a key for
-    that still works."""
+    """Service accounts by name: the live ones; with ``status`` ``deleted``,
+    those deleted and not yet purged; ``with_deleted``, both, the live ones
+    first. Narrowed to those matching ``q`` (name or description); ``active``
+    or ``disabled``; with no manager in good standing (``standing``
+    ``unmanaged``) or held by an administrator (``held``); managed by a
+    person, themselves or through a live team, or by a team (``managed_by``);
+    holding a role in a workspace (``workspace_id``); or those a person's
+    leaving touches (``leaving``): the ones they manage, and the ones they
+    made a key for that still works."""
     stmt = (
         select(UserORM, ServiceAccountORM)
         .join(ServiceAccountORM, ServiceAccountORM.user_id == UserORM.id)
-        .where(UserORM.deleted_at.is_(None))
     )
+    if status == "deleted":
+        stmt = stmt.where(UserORM.deleted_at.is_not(None), ServiceAccountORM.purged_at.is_(None))
+    elif with_deleted:
+        stmt = stmt.where(ServiceAccountORM.purged_at.is_(None))
+    else:
+        stmt = stmt.where(UserORM.deleted_at.is_(None))
     if status == "active":
         stmt = stmt.where(UserORM.status == "active")
     elif status == "disabled":
         stmt = stmt.where(UserORM.status != "active")
+    if standing == "unmanaged":
+        stmt = stmt.where(ServiceAccountORM.unmanaged_since.is_not(None))
+    elif standing == "held":
+        stmt = stmt.where(ServiceAccountORM.admin_hold.is_(True))
     if q:
         pattern = f"%{q.strip().lower()}%"
         stmt = stmt.where(or_(
@@ -307,6 +384,21 @@ async def list_page(
         stmt = stmt.where(or_(
             ServiceAccountORM.user_id.in_(_seats(managed_by)),
             ServiceAccountORM.user_id.in_(_team_seats(managed_by)),
+            ServiceAccountORM.user_id.in_(
+                select(ServiceAccountManagerORM.service_account_id)
+                .where(ServiceAccountManagerORM.group_id == managed_by)
+            ),
+        ))
+    if workspace_id:
+        stmt = stmt.where(ServiceAccountORM.user_id.in_(
+            select(RoleBindingORM.subject_id).where(
+                RoleBindingORM.subject_type == "user", RoleBindingORM.scope_type == "workspace",
+                RoleBindingORM.scope_id == workspace_id,
+                or_(
+                    RoleBindingORM.expires_at.is_(None),
+                    RoleBindingORM.expires_at > datetime.now(timezone.utc).isoformat(),
+                ),
+            )
         ))
     if leaving:
         stmt = stmt.where(or_(
@@ -320,7 +412,7 @@ async def list_page(
         select(func.count()).select_from(stmt.subquery())
     )).scalar() or 0)
     rows = (await session.execute(
-        stmt.order_by(func.lower(UserORM.first_name), UserORM.id)
+        stmt.order_by(UserORM.deleted_at.is_not(None), func.lower(UserORM.first_name), UserORM.id)
         .limit(limit).offset(offset).options(_NO_PICTURE)
         .execution_options(populate_existing=True)
     )).all()
@@ -337,6 +429,51 @@ async def update_details(
     if set_description:
         (await session.get(ServiceAccountORM, account_id)).description = description or None
     await session.flush()
+
+
+async def count_created_by(session: AsyncSession, user_id: str) -> int:
+    """How many live service accounts this person created — what the
+    per-person limit counts. A deleted one no longer does."""
+    return int((await session.execute(
+        select(func.count())
+        .select_from(ServiceAccountORM)
+        .join(UserORM, UserORM.id == ServiceAccountORM.user_id)
+        .where(ServiceAccountORM.created_by == user_id, UserORM.deleted_at.is_(None))
+    )).scalar() or 0)
+
+
+async def due_for_purge(session: AsyncSession, *, before: datetime, limit: int) -> list[tuple[str, str]]:
+    """Accounts deleted before ``before`` and not yet purged — id and name,
+    the longest deleted first — locked until the transaction ends, skipping
+    any being restored at this moment."""
+    return [(account_id, name) for account_id, name in (await session.execute(
+        select(ServiceAccountORM.user_id, UserORM.first_name)
+        .join(UserORM, UserORM.id == ServiceAccountORM.user_id)
+        .where(
+            UserORM.deleted_at.is_not(None), UserORM.deleted_at < before.isoformat(),
+            ServiceAccountORM.purged_at.is_(None),
+        )
+        .order_by(UserORM.deleted_at, ServiceAccountORM.user_id)
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )).all()]
+
+
+async def purge(session: AsyncSession, account_id: str, *, now: datetime) -> int:
+    """Remove a deleted account's managers and mark it purged. Its keys and
+    roles are the caller's to end. Returns how many managers it had."""
+    removed = await session.execute(
+        delete(ServiceAccountManagerORM)
+        .where(ServiceAccountManagerORM.service_account_id == account_id)
+        .execution_options(synchronize_session=False)
+    )
+    await session.execute(
+        update(ServiceAccountORM)
+        .where(ServiceAccountORM.user_id == account_id)
+        .values(purged_at=now.isoformat())
+        .execution_options(synchronize_session=False)
+    )
+    return removed.rowcount or 0
 
 
 # ── Managers ────────────────────────────────────────────────────────
@@ -523,6 +660,33 @@ async def remove_manager(
     return bool(result.rowcount)
 
 
+async def manager_names(
+    session: AsyncSession, account_ids: Iterable[str],
+) -> dict[str, list[tuple[str, str, bool]]]:
+    """Per account, who manages it, by name — ``(type, name, from_idp)``,
+    people then teams; a team's ``from_idp`` when the identity provider keeps
+    its members."""
+    wanted = sorted(set(account_ids))
+    out: dict[str, list[tuple[str, str, bool]]] = {a: [] for a in wanted}
+    if not wanted:
+        return out
+    for account_id, display, first, last in (await session.execute(
+        select(ServiceAccountManagerORM.service_account_id, UserORM.display_name, UserORM.first_name, UserORM.last_name)
+        .join(UserORM, UserORM.id == ServiceAccountManagerORM.user_id)
+        .where(ServiceAccountManagerORM.service_account_id.in_(wanted))
+        .order_by(func.lower(UserORM.first_name), UserORM.id)
+    )).all():
+        out[account_id].append(("user", resolve_display_name(display, first, last), False))
+    for account_id, name, source in (await session.execute(
+        select(ServiceAccountManagerORM.service_account_id, GroupORM.name, GroupORM.source)
+        .join(GroupORM, GroupORM.id == ServiceAccountManagerORM.group_id)
+        .where(ServiceAccountManagerORM.service_account_id.in_(wanted), GroupORM.deleted_at.is_(None))
+        .order_by(func.lower(GroupORM.name), GroupORM.id)
+    )).all():
+        out[account_id].append(("group", name, (source or "local") != "local"))
+    return out
+
+
 async def seat_holders(session: AsyncSession, account_id: str) -> set[tuple[Optional[str], Optional[str]]]:
     """Who holds a seat on the account: ``(person, None)`` or ``(None, team)``."""
     return {
@@ -600,6 +764,17 @@ async def teams_through(
     )).all() if wanted else []:
         out[account_id].append(name)
     return out
+
+
+async def teams_of(session: AsyncSession, user_id: str) -> list[tuple[str, str]]:
+    """The live teams a person is in, by name: ``(id, name)``. Those are the
+    teams they may name to manage an account they create."""
+    return [(group_id, name) for group_id, name in (await session.execute(
+        select(GroupORM.id, GroupORM.name)
+        .join(GroupMemberORM, GroupMemberORM.group_id == GroupORM.id)
+        .where(GroupMemberORM.user_id == user_id, GroupORM.deleted_at.is_(None))
+        .order_by(func.lower(GroupORM.name), GroupORM.id)
+    )).all()]
 
 
 async def accounts_managed_by_team(session: AsyncSession, group_id: str) -> list[str]:

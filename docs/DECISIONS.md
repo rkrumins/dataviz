@@ -843,17 +843,18 @@ Details: [API Keys](/guide/api-keys), the [Security Overview](/docs/security-ove
 
 ## ADR-028: Service accounts answer to their managers
 
-**Status:** Accepted — extends [ADR-027](#adr-027-personal-api-keys-scoped-per-resource). Record updated 2026-10-25: an account's managers now run it — everything but giving it roles — an administrator's disable holds it until an administrator enables it, and appointing a manager, or adding someone to a managing team, may give them only what they hold already or what the appointer could grant, in place of being able to grant each of its roles and of the team gate's `system:service-accounts:manage`.
+**Status:** Accepted — extends [ADR-027](#adr-027-personal-api-keys-scoped-per-resource). Record updated 2026-10-25: an account's managers now run it — everything but giving it roles — an administrator's disable holds it until an administrator enables it, and appointing a manager, or adding someone to a managing team, may give them only what they hold already or what the appointer could grant, in place of being able to grant each of its roles and of the team gate's `system:service-accounts:manage`. Also: each workspace gives it access as it gives a person — its admins and stewards add it, or approve a request its managers make — never through a team or the identity provider. And it can be deleted: its keys stop at once, it can be restored as it was for 30 days, and then the hourly pass purges it.
 **Date:** 2026-10-23
 **Context:** Every API key acted as a person (ADR-027), so an integration ran as whoever set it up: its keys paused at the end of that person's sign-in window and stopped when they were suspended, and the integration stopped with them. A team running a scheduled job needs a principal that outlives any one of its members — without becoming a credential nobody answers for, which is what a shared "robot" person account turns into.
 
 **Decision:**
 - **A principal that never signs in.** A service account is a `users` row whose id starts `svc_`, with an unroutable `<id>@service-account.invalid` address and no usable password. Everything keyed on a user — role bindings, claims, the key machinery, audit, inventory, `/api-keys/self` — works unchanged, and the prefix lets pure code tell it apart. Every sign-in path refuses it (the session backstop in `_mint_recorded_refresh`), an identity provider cannot link to it, and it is left out of people lists, pickers, the directory, analytics and inboxes. The routes about a person answer `404` for one.
-- **Its own roles, and only those.** It holds workspace roles given on its own page — any that neither administers a workspace nor lets people in — never a platform role or a team's roles: `permission_service.resolve` keeps only its direct workspace bindings, whatever else a row might say, and drops from them what `is_requestable` refuses, so a role later widened to administer brings it none of that. Nothing else is shared with it — a view, a template or a draft answer `409` — a view it made is its own only while it holds a role in that view's workspace, and in a workspace whose identity provider decides access its role is not an exception and doesn't end: the provider doesn't know the account, so the role is the administrator's decision.
+- **Its own roles, and only those.** It holds the workspace roles each workspace gives it, as it gives a person — any that neither administers a workspace nor lets people in — never a platform role or a team's roles: `permission_service.resolve` keeps only its direct workspace bindings, whatever else a row might say, and drops from them what `is_requestable` refuses, so a role later widened to administer brings it none of that. Nothing else is shared with it — a view, a template or a draft answer `409` — a view it made is its own only while it holds a role in that view's workspace, and in a workspace whose identity provider decides access its role is not an exception and doesn't end unless given until a date: the provider doesn't know the account, so the role is the workspace admins' decision, and stewards give it none there.
 - **Managers answer for it.** One or more people or teams (`service_account_managers`, exactly one of `user_id` or `group_id`). A manager — or a member of a managing team — may make, rotate, rename and revoke its keys, confirming it is them as for their own; a key records them as its maker and acts as the account. Appointing a manager delegates the account's access: they may do whatever it can, even where they cannot, so appointing one — or handing an account over — may give them only what they hold already or what the appointer could grant them there (`can_grant`); a team holds what its own roles give every member. Whoever controls a managing team's membership controls that too, so adding someone to such a team is held to the same rule — an access-request approval never adds anyone — and its managers are told; a team the identity provider keeps follows the provider. Its managers run the account itself: they rename and describe it, disable and enable it, appoint and remove managers (never the last), and take its roles away. Holders of `system:users:manage` may act for any account without managing it, and its managers are told. It neither reviews nor approves a pull request, nor does anyone approve one opened through an account they manage — its managers would be approving through it. What is said to it (`notify`) reaches its direct managers and, about a key, the key's maker while they can act for it; failing those, up to 25 members of its managing teams, the most recently active first; and while nobody can act for it, its administrators — naming it.
-- **Keys work while it is enabled and someone in good standing manages it.** A person is in good standing when the rule a personal key applies to its owner passes (`person_refusal`): active, not break-glass, and able to sign in now. A team is, when it is live and one of its members is. The request path reads one stored fact, `service_accounts.unmanaged_since`, set when the account is first found with no such manager — and refuses a key whose account row is missing: the routes that change who manages an account recompute it at once, and the hourly API key housekeeping sweep catches what changes with time alone. Each recomputation locks the accounts' rows first, in one order, before it reads who manages them, so two at once can't leave a managed account marked unmanaged. The sweep checks standing first, each of its steps committed and counted on its own (`api_key_housekeeping_steps_total`), so a failing reminder can't stop the check that pauses keys. Keys keep working for a grace period after that (`serviceAccountUnmanagedGrace`, 14 days by default), then answer `401 api_key_unmanaged`, shown as paused, until a manager is appointed. A disabled account's keys answer `api_key_owner_inactive`.
+- **Keys work while it is enabled and someone in good standing manages it.** A person is in good standing when the rule a personal key applies to its owner passes (`person_refusal`): active, not break-glass, and able to sign in now. A team is, when it is live and one of its members is. The request path reads one stored fact, `service_accounts.unmanaged_since`, set when the account is first found with no such manager — and refuses a key whose account row is missing: the routes that change who manages an account recompute it at once, and the hourly API key housekeeping sweep catches what changes with time alone. A route's recomputation locks the accounts' rows first, in one order, before it reads who manages them, so two at once can't leave a managed account marked unmanaged; the sweep locks only the accounts whose standing it is about to change, a batch at a time, skipping any a request holds, and reads them again once locked. The sweep checks standing first, each of its steps committed and counted on its own (`api_key_housekeeping_steps_total`), so a failing reminder can't stop the check that pauses keys. Keys keep working for a grace period after that (`serviceAccountUnmanagedGrace`, 14 days by default), then answer `401 api_key_unmanaged`, shown as paused, until a manager is appointed. A disabled or deleted account's keys answer `api_key_owner_inactive`.
 - **Leaving is planned for.** The users page's suspend dialog lists every account a person's leaving touches — the seats they hold themselves, which it hands to a successor first; those they manage through a team, which keeps its seat; and those they made a key for that still works — and offers to revoke the keys they made, which they may have kept (`POST /admin/users/{id}/api-keys/revoke-made`). Whenever someone who made keys that still work stops answering for an account, those who still answer are told. When an account loses its last manager, every super and org admin is told once — in one notice when more than five go at once — and reminded three days before its keys pause, again if the grace period moves the day. The admin list marks accounts that depend on a single person.
-- **Administered apart from people.** `system:service-accounts:manage`, granted to super and org admins, creates accounts, appoints managers and grants roles, and holds an account it disabled so that its managers can't enable it. It makes no keys itself: an administrator who wants one must first appoint themselves a manager, which the activity log records.
+- **Deleted, then purged.** Deleting an account sets `users.deleted_at`, which the key check already refuses, and withdraws its open requests; nothing else changes, so restoring it within 30 days brings back its keys, roles and managers. Then the hourly pass purges it (`service_accounts.purged_at`): its keys revoked, its role bindings and manager seats removed, its rows kept so the activity log still names it. Its managers delete and restore it, as they disable and enable it.
+- **Administered apart from people.** `system:service-accounts:manage`, granted to super and org admins, creates accounts, appoints managers and grants roles, and holds an account it disabled or deleted so that its managers can't enable or restore it — deleting never lets go of a hold, and an administrator's restoring it does only when it comes back enabled. It makes no keys itself: an administrator who wants one must first appoint themselves a manager, which the activity log records.
 
 **Reasoning:** Building the account on the existing principal model means every control on keys — scope, fence, claims, audit, rate limits — applies to it with no new path to get wrong. Tying its keys to living management rather than to a creator is what makes it outlive people without becoming ownerless: a team synced from the identity provider keeps it managed as people come and go, and the grace period turns the one failure left — a leaver nobody handed over — into an alert with time to act rather than a stopped integration. Keeping the request path to one stored column keeps a key check one cheap query.
 
@@ -864,7 +865,7 @@ Details: [API Keys](/guide/api-keys), the [Security Overview](/docs/security-ove
 - (-) A managing team's members can all act as the account; the team's membership is part of the account's security, which is why adding to it is held to the rule for appointing a manager.
 - (-) Standing is recomputed on change and hourly, so a lapse that comes with time alone — and a manager signing in again after one — takes up to an hour to reach the keys.
 - (-) Good standing is defined twice, in Python for a key's owner and in SQL for managers; a parity test across the full matrix of facts keeps them equal.
-- (-) Accounts are disabled rather than deleted, so they accumulate.
+- (-) A purged account's rows are kept for good, so the activity log can name it; only its keys, roles and managers go.
 
 **Alternatives considered:**
 - A robot person account shared by a team — a password or identity nobody owns, and no record of who acted.
@@ -874,6 +875,65 @@ Details: [API Keys](/guide/api-keys), the [Security Overview](/docs/security-ove
 - OAuth client credentials — still available later; the bearer format leaves room, and an account would be its client.
 
 Details: [Service Accounts](/guide/service-accounts), [API Keys](/guide/api-keys), the [Security Overview](/docs/security-overview#api-keys) and [RBAC](/docs/rbac).
+
+---
+
+## ADR-029: Who may create a service account is a policy, and it ships closed
+
+**Status:** Accepted — extends [ADR-028](#adr-028-service-accounts-answer-to-their-managers).
+**Date:** 2026-10-26
+**Context:** Only the administrators of service accounts — super and org admins — could create one, so every integration in every workspace waited on that one team. Once a workspace could give an account access as it gives a person (ADR-028's record), creating the account was the last step that needed them. Opening it has a cost an enterprise's security team should weigh: an account's keys outlive the person who made them, and accounts pile up.
+
+**Decision:**
+- **A policy, set in the app.** The administrators of service accounts (`system:service-accounts:manage`) choose who else may create one for themselves: nobody (`central`), anyone who lets people into a workspace — its admins and stewards (`granters`) — or any active person (`everyone`). It is kept on the one `platform_settings` row (`sa_who_may_create`, `sa_per_person_limit`, `sa_require_team_manager`) and changed with `PUT /api/v1/admin/service-accounts/policy`, which the activity log records (`platform.service_account_policy.updated`). Unset is `central`, so upgrading changes nothing.
+- **Creating one gives it nothing.** `POST /api/v1/me/service-accounts` makes an account with no roles: its access comes from each workspace, as before. Its creator manages it, or names a team they are in, which keeps it managed as people come and go — and the policy may ask for a team.
+- **A limit per person.** Each may have created up to `sa_per_person_limit` live accounts (10 unless set), counted by `service_accounts.created_by`; a deleted one no longer counts. The administrators of service accounts aren't limited. Two requests at once can't both pass the limit: each holds an advisory lock for its creator while it counts.
+- **Its own route, not the platform settings route or a feature switch.** The platform settings route takes `system:admin`, which only super admins hold, and feature switches cover the whole deployment, edited by super admins alone. The policy belongs to the people who look after service accounts, org admins among them.
+
+**Reasoning:** The account model already makes creation safe to open: an account holds only what workspaces give it, and appointing a manager can give nobody more than the appointer could grant. What remains is a judgement each enterprise makes — whether its people should hold credentials that outlive them — so it is a setting, closed until someone opens it, rather than a default this product chooses for them.
+
+**Trade-offs:**
+- (+) The central team stops being a queue for every integration, once it chooses to.
+- (+) Shipping closed means an upgrade never changes who may create credentials.
+- (-) The limit is a guardrail, not a boundary: restoring a deleted account isn't refused for it.
+- (-) Opened, creation means more accounts to look after; the inventory's filters, deleting and the hourly standing check keep that in hand.
+
+**Alternatives considered:**
+- Opening creation to everyone by default — what self-service asked for; left to each enterprise instead.
+- Approving each new account — rejected: an account gets no access when it is created, so approving that would add a queue and no safety. The approval that matters is each workspace's.
+- A feature switch — rejected: switches are the super admins', and this is the org admins' call too.
+
+Details: [Service Accounts](/guide/service-accounts#who-else-may-create-one).
+
+---
+
+## ADR-030: A service account may read every workspace, and do nothing else across them
+
+**Status:** Accepted — extends [ADR-028](#adr-028-service-accounts-answer-to-their-managers).
+**Date:** 2026-10-26
+**Context:** A service account held only the roles each workspace gave it, and any platform role attached to one was dropped. An integration that reads across the whole tenancy — a catalogue export, a lineage crawler — needed a role in every workspace, and another each time a workspace was created. People have Org Auditor for this, but it also reads the audit log, every role binding and the analytics, which no integration needs.
+
+**Decision:**
+- **One platform role, `org_reader`.** It carries `system:org-viewer` alone: every workspace's views, data sources, semantic layers, catalog and providers, read only, in workspaces created later too. Fresh installs seed it; migration `20261026_1200_sa_org_read` adds it to an existing database.
+- **An allow-list, where there was a ban.** An account's claims keep, of whatever platform roles are attached to it, only the permissions in `SERVICE_ACCOUNT_GLOBAL_PERMISSIONS` (`backend/common/service_accounts.py`) — today `system:org-viewer` — as they keep no workspace permission that administers a workspace or lets people in.
+- **Who gives it, and who takes it away.** An administrator of service accounts who reads every workspace themselves — an org admin or a super admin — with `PUT /api/v1/admin/service-accounts/{id}/org-read`. Its managers can take it away, as can the administrators (`DELETE`). The activity log records both (`identity.service_account.org_read_granted` and `…org_read_revoked`).
+- **Appointing a manager counts it.** Whoever manages an account can act as it, so an appointment that would give someone read access to every workspace is refused unless they read every workspace already, or the appointer could give the account that access. The same applies to handing accounts over and to joining a team that manages them.
+- **Keys narrow it.** A key reaches other workspaces through it only as far as its own selection and profile allow, and only to read.
+
+**Reasoning:** Reading across the tenancy is the one cross-workspace need integrations commonly have. Administering across workspaces is not, and each workspace should go on deciding who changes its data. One permission on an allow-list keeps the fence explicit: widening it takes one entry, and an ADR saying why.
+
+**Trade-offs:**
+- (+) A tenancy-wide reader needs one grant rather than one per workspace, and it reaches new workspaces as they are created.
+- (+) No workspace's admins can grant it, so it stays the decision of the people who look after service accounts.
+- (-) Workspaces don't consent to it one by one — as they don't to an Org Auditor.
+- (-) A workspace's removal preview lists only the roles held in that workspace. Read access to every workspace is for the administrators of service accounts, or the account's managers, to take away.
+
+**Alternatives considered:**
+- Reusing `org_auditor` — rejected: it also reads the audit log, every binding and the analytics.
+- A role in each workspace — what was possible before. It misses every workspace created later.
+- Letting a workspace's admins grant it — rejected: it reaches workspaces they don't run.
+
+Details: [Service Accounts](/guide/service-accounts#reading-every-workspace).
 
 ---
 
@@ -908,7 +968,9 @@ Details: [Service Accounts](/guide/service-accounts), [API Keys](/guide/api-keys
 | 025 | PostgreSQL-only management DB, schema owned by an upgrade job | Accepted | Low |
 | 026 | Property storage in a PostgreSQL side index | Accepted, partly built (slice A only) | Medium (not wired in) |
 | 027 | Personal API keys scoped per resource | Accepted (extended by ADR-028) | Medium (surface registry upkeep) |
-| 028 | Service accounts answer to their managers | Accepted | Medium (team membership is part of an account's security) |
+| 028 | Service accounts answer to their managers | Accepted (extended by ADR-029 and ADR-030) | Medium (team membership is part of an account's security) |
+| 029 | Who may create a service account is a policy, shipped closed | Accepted | Low |
+| 030 | A service account may read every workspace, and do nothing else across them | Accepted | Medium (reach across every workspace) |
 
 ---
 

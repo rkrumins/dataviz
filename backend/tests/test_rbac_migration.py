@@ -44,6 +44,8 @@ _SERVICE_ACCOUNTS_MIGRATION_PATH = _VERSIONS_DIR / "20261023_1200_service_accoun
 # Native queries added workspace:native-query:read — running one's own
 # read-only queries on a workspace's data sources.
 _NATIVE_QUERY_MIGRATION_PATH = _VERSIONS_DIR / "20261024_1000_native_query.py"
+# Org-wide read for service accounts added the org_reader role.
+_ORG_READ_MIGRATION_PATH = _VERSIONS_DIR / "20261026_1200_sa_org_read.py"
 
 
 def _load_migration(path: Path, name: str):
@@ -368,6 +370,27 @@ def test_native_query_permission_reaches_an_existing_database():
         reads = "workspace:datasource:read" in spec.permissions
         assert (perm in spec.permissions) == reads, role
     assert perm in _WORKSPACE_CATEGORY_LEAVES
+
+
+def test_the_org_reader_role_reaches_an_existing_database():
+    """``org_reader`` is seeded by the migration AND ``rbac_seed``, with the
+    same text and its one grant, and "Reset to default" restores it: fresh
+    installs and migrated databases must agree on what reading every
+    workspace gives a service account — ``system:org-viewer``, the one
+    platform permission an account's claims keep, and nothing else."""
+    from backend.app.config import rbac_seed
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+    from backend.common.service_accounts import SERVICE_ACCOUNT_GLOBAL_PERMISSIONS
+
+    role = "org_reader"
+    assert _ORG_READ_MIGRATION_PATH.exists(), f"missing migration: {_ORG_READ_MIGRATION_PATH}"
+    mod = _load_migration(_ORG_READ_MIGRATION_PATH, "_org_read_migration")
+    assert mod._ROLE == role
+    seed_role = next(r for r in rbac_seed.SYSTEM_ROLES if r["name"] == role)
+    assert (seed_role["scope_type"], seed_role["description"]) == ("global", mod._ROLE_DESCRIPTION)
+    assert set(mod._ROLE_PERMISSIONS) == {(role, "system:org-viewer")}
+    assert {(r, p) for r, p in rbac_seed.ROLE_GRANTS if r == role} == set(mod._ROLE_PERMISSIONS)
+    assert SYSTEM_ROLE_DEFAULTS[role].permissions == SERVICE_ACCOUNT_GLOBAL_PERMISSIONS
 
 
 def test_the_analytics_permission_is_offered_to_the_client():

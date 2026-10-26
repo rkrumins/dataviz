@@ -11,13 +11,20 @@
  * Every row says how its account stands, most pressing first: no manager left
  * and when its keys pause, or a single person it depends on. The grace period
  * is the deployment's (`serviceAccountUnmanagedGrace`), as the server reports
- * it with the list.
+ * it with the list. The list narrows to the accounts that need a manager or
+ * that an administrator holds, to those a person or a team manages, and to
+ * those with a role in a workspace; Deleted lists those that can still be
+ * restored, until they are purged 30 days on.
+ *
+ * The page also says who else may create a service account for themselves —
+ * nobody, as it ships — and lets the administrators change that.
  */
 import { useCallback, useEffect, useState } from 'react'
 import {
-    AlertCircle, ArrowRightLeft, Bot, Plus, RefreshCw, Search, ShieldCheck, Users, X,
+    AlertCircle, ArrowRightLeft, Bot, Briefcase, Plus, RefreshCw, Search, ShieldCheck, UserPlus, Users, X,
 } from 'lucide-react'
 
+import { formatDay } from '@/components/apiKeys/apiKeyFormat'
 import { KeyDialog } from '@/components/apiKeys/KeyDialog'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { HandOverPanel, holdsSeats, useManagedBy } from '@/components/serviceAccounts/HandOver'
@@ -34,20 +41,33 @@ import { serviceAccountHref } from '@/lib/serviceAccounts'
 import { cn } from '@/lib/utils'
 import {
     serviceAccountService,
+    type CreationPolicy,
     type ServiceAccount,
     type ServiceAccountDetail,
+    type ServiceAccountFilters,
     type ServiceAccountList,
+    type WhoMayCreate,
 } from '@/services/serviceAccountService'
+import { workspaceService } from '@/services/workspaceService'
 
 const PAGE_SIZE = 25
 
-type Tab = 'all' | 'active' | 'disabled'
+type Tab = 'all' | 'active' | 'disabled' | 'deleted'
 
 const TABS: { value: Tab; label: string }[] = [
     { value: 'all', label: 'All' },
     { value: 'active', label: 'Active' },
     { value: 'disabled', label: 'Disabled' },
+    { value: 'deleted', label: 'Deleted' },
 ]
+
+const STANDINGS: { value: NonNullable<ServiceAccountFilters['standing']> | ''; label: string }[] = [
+    { value: '', label: 'Any standing' },
+    { value: 'unmanaged', label: 'Needs a manager' },
+    { value: 'held', label: 'Held by an administrator' },
+]
+
+const FIELD = 'h-9 px-2.5 rounded-xl border border-black/[0.08] dark:border-white/[0.10] bg-canvas text-sm text-ink outline-none focus:border-indigo-500'
 
 const message = (err: unknown, fallback: string) => (err instanceof Error && err.message ? err.message : fallback)
 
@@ -55,6 +75,10 @@ export function AdminServiceAccounts() {
     const [tab, setTab] = useState<Tab>('all')
     const [q, setQ] = useState('')
     const search = useDebouncedValue(q.trim(), 250)
+    const [standing, setStanding] = useState<ServiceAccountFilters['standing'] | ''>('')
+    const [manager, setManager] = useState<Subject | null>(null)
+    const [workspace, setWorkspace] = useState<{ id: string; name: string } | null>(null)
+    const [picking, setPicking] = useState<'manager' | 'workspace' | null>(null)
     const [page, setPage] = useState(0)
     const [version, setVersion] = useState(0)
     const reload = useCallback(() => setVersion((v) => v + 1), [])
@@ -63,21 +87,44 @@ export function AdminServiceAccounts() {
     const [error, setError] = useState<string | null>(null)
     const [creating, setCreating] = useState(false)
     const [handingOver, setHandingOver] = useState(false)
+    const [policy, setPolicy] = useState<CreationPolicy | null>(null)
+    const [editingPolicy, setEditingPolicy] = useState(false)
+    useEffect(() => {
+        let live = true
+        serviceAccountService.policy().then((p) => { if (live) setPolicy(p) }).catch(() => {})
+        return () => { live = false }
+    }, [])
 
-    const request = JSON.stringify([search, tab, page, version])
+    const request = JSON.stringify([search, tab, standing, manager?.id, workspace?.id, page, version])
     const loading = answered !== request
+    const narrowed = Boolean(search || standing || manager || workspace || tab === 'active' || tab === 'disabled')
+    const clearFilters = () => {
+        setQ(''); setTab('all'); setStanding(''); setManager(null); setWorkspace(null); setPicking(null); setPage(0)
+    }
+    const empty = narrowed ? {
+        title: 'No service accounts match',
+        description: 'Nothing fits these filters.',
+        action: { label: 'Clear filters', onClick: clearFilters },
+    } : tab === 'deleted' ? {
+        title: 'Nothing deleted lately',
+        description: 'A deleted service account stays here for 30 days, while it can be restored.',
+    } : {
+        title: 'No service accounts yet',
+        description: 'Create one for each integration that should keep running whoever set it up — and give it a team as its manager.',
+        action: { label: 'Create service account', onClick: () => setCreating(true) },
+    }
     useEffect(() => {
         let live = true
         serviceAccountService.list({
-            q: search || undefined, status: tab === 'all' ? undefined : tab,
-            limit: PAGE_SIZE, offset: page * PAGE_SIZE,
+            q: search || undefined, status: tab === 'all' ? undefined : tab, standing: standing || undefined,
+            manager: manager?.id, workspace: workspace?.id, limit: PAGE_SIZE, offset: page * PAGE_SIZE,
         })
             .then((res) => { if (live) { setList(res); setError(null); setAnswered(request) } })
             .catch((err: unknown) => {
                 if (live) { setError(message(err, 'The service accounts could not be loaded.')); setAnswered(request) }
             })
         return () => { live = false }
-    }, [search, tab, page, request])
+    }, [search, tab, standing, manager, workspace, page, request])
 
     const items = list?.items ?? []
     const total = list?.total ?? 0
@@ -120,6 +167,14 @@ export function AdminServiceAccounts() {
                 </p>
             )}
 
+            {policy && (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-muted max-w-3xl -mt-3">
+                    <UserPlus className="w-3.5 h-3.5 shrink-0" aria-hidden />
+                    <span>{policySentence(policy)}</span>
+                    <Button variant="ghost" size="sm" onClick={() => setEditingPolicy(true)}>Change…</Button>
+                </div>
+            )}
+
             {error && (
                 <div role="alert" className="flex items-start gap-2 p-3 rounded-xl border border-rose-500/25 bg-rose-500/[0.06] text-rose-700 dark:text-rose-300 text-sm">
                     <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
@@ -157,18 +212,46 @@ export function AdminServiceAccounts() {
                         ))}
                     </div>
                 </div>
+                <div className="flex flex-wrap items-center gap-2 px-4 py-2.5 border-b border-black/[0.07] dark:border-white/[0.08]">
+                    <select
+                        aria-label="Standing"
+                        value={standing}
+                        onChange={(e) => { setStanding(e.target.value as typeof standing); setPage(0) }}
+                        className={FIELD}
+                    >
+                        {STANDINGS.map((o) => <option key={o.value} value={o.value}>{o.label}</option>)}
+                    </select>
+                    {manager ? (
+                        <FilterChip label={`Managed by ${manager.name}`} onClear={() => { setManager(null); setPage(0) }} />
+                    ) : (
+                        <Button variant="ghost" size="sm" leftIcon={Users} onClick={() => setPicking((p) => (p === 'manager' ? null : 'manager'))}>
+                            Managed by…
+                        </Button>
+                    )}
+                    {workspace ? (
+                        <FilterChip label={`In ${workspace.name}`} onClear={() => { setWorkspace(null); setPage(0) }} />
+                    ) : (
+                        <Button variant="ghost" size="sm" leftIcon={Briefcase} onClick={() => setPicking((p) => (p === 'workspace' ? null : 'workspace'))}>
+                            In a workspace…
+                        </Button>
+                    )}
+                </div>
+                {picking === 'manager' && (
+                    <div className="px-4 py-3 border-b border-black/[0.07] dark:border-white/[0.08]">
+                        <SubjectPicker
+                            label="Managed by — a person or a team"
+                            onPick={(s) => { setManager(s); setPicking(null); setPage(0) }}
+                        />
+                    </div>
+                )}
+                {picking === 'workspace' && (
+                    <div className="px-4 py-3 border-b border-black/[0.07] dark:border-white/[0.08]">
+                        <WorkspaceFinder onPick={(w) => { setWorkspace(w); setPicking(null); setPage(0) }} />
+                    </div>
+                )}
 
                 {items.length === 0 && !loading ? (
-                    <EmptyState
-                        icon={Bot}
-                        title={search || tab !== 'all' ? 'No service accounts match' : 'No service accounts yet'}
-                        description={search || tab !== 'all'
-                            ? 'Nothing fits these filters.'
-                            : 'Create one for each integration that should keep running whoever set it up — and give it a team as its manager.'}
-                        action={search || tab !== 'all'
-                            ? { label: 'Clear filters', onClick: () => { setQ(''); setTab('all'); setPage(0) } }
-                            : { label: 'Create service account', onClick: () => setCreating(true) }}
-                    />
+                    <EmptyState icon={Bot} {...empty} />
                 ) : items.length === 0 ? (
                     <div className="p-4 space-y-3" aria-busy="true">
                         {[0, 1, 2].map((i) => <Skeleton key={i} className="h-12 rounded-xl" />)}
@@ -189,7 +272,9 @@ export function AdminServiceAccounts() {
                                         <span className="block text-xs text-ink-muted truncate">{managerSummary(a)}</span>
                                     </span>
                                     <StandingChip account={a} />
-                                    <span className="hidden lg:block w-28 text-xs text-ink-muted"><DateTime at={a.createdAt} prefix="Created " /></span>
+                                    <span className="hidden lg:block w-36 text-xs text-ink-muted">
+                                        {a.purgesAt ? `Restore by ${formatDay(a.purgesAt)}` : <DateTime at={a.createdAt} prefix="Created " />}
+                                    </span>
                                 </a>
                             </li>
                         ))}
@@ -209,7 +294,173 @@ export function AdminServiceAccounts() {
                 />
             )}
             {handingOver && <HandOverDialog onClose={() => setHandingOver(false)} onDone={() => { setHandingOver(false); reload() }} />}
+            {editingPolicy && policy && (
+                <PolicyDialog
+                    policy={policy}
+                    onClose={() => setEditingPolicy(false)}
+                    onSaved={(saved) => { setPolicy(saved); setEditingPolicy(false) }}
+                />
+            )}
         </PageContainer>
+    )
+}
+
+const WHO: { value: WhoMayCreate; label: string; detail: string }[] = [
+    { value: 'central', label: 'Only administrators of service accounts', detail: 'Super admins and org admins create every account, as here.' },
+    { value: 'granters', label: 'Anyone who lets people into a workspace', detail: 'Its admins and stewards — who decide what any account may do there.' },
+    { value: 'everyone', label: 'Anyone', detail: 'Any active person. An account gets access only as a workspace gives it.' },
+]
+
+/** "Anyone may create up to 10 service accounts for themselves." */
+function policySentence(policy: CreationPolicy): string {
+    if (policy.whoMayCreate === 'central') return 'Only administrators of service accounts create them.'
+    const who = policy.whoMayCreate === 'granters' ? 'Anyone who lets people into a workspace' : 'Anyone'
+    return `${who} may create up to ${policy.perPersonLimit} for themselves${policy.requireTeamManager ? ', managed by a team they’re in' : ''}.`
+}
+
+/** Who else may create a service account for themselves, how many each, and
+ *  whether a team they're in must manage it. */
+function PolicyDialog({ policy, onClose, onSaved }: {
+    policy: CreationPolicy
+    onClose: () => void
+    onSaved: (policy: CreationPolicy) => void
+}) {
+    const { notify } = useAppNotifications()
+    const [who, setWho] = useState<WhoMayCreate>(policy.whoMayCreate)
+    const [limit, setLimit] = useState(String(policy.perPersonLimit))
+    const [team, setTeam] = useState(policy.requireTeamManager)
+    const [busy, setBusy] = useState(false)
+    const [error, setError] = useState<string | null>(null)
+    const number = Number(limit)
+    const valid = Number.isInteger(number) && number >= 1 && number <= 1000
+    const others = who !== 'central'
+
+    async function save() {
+        setBusy(true)
+        setError(null)
+        try {
+            const saved = await serviceAccountService.setPolicy({
+                whoMayCreate: who, ...(others ? { perPersonLimit: number, requireTeamManager: team } : {}),
+            })
+            notify('success', 'Who may create service accounts is saved')
+            onSaved(saved)
+        } catch (err) {
+            setError(message(err, 'The policy could not be saved.'))
+            setBusy(false)
+        }
+    }
+
+    return (
+        <KeyDialog
+            icon={UserPlus}
+            title="Who may create service accounts"
+            subtitle="For themselves, to manage. An account gets access only as a workspace gives it."
+            onClose={onClose}
+            footer={(
+                <>
+                    <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+                    <Button variant="primary" size="sm" disabled={others && !valid} loading={busy} onClick={() => void save()}>
+                        Save
+                    </Button>
+                </>
+            )}
+        >
+            <div className="space-y-4">
+                <fieldset className="space-y-2">
+                    <legend className="sr-only">Who may create one</legend>
+                    {WHO.map((o) => (
+                        <label key={o.value} className="flex items-start gap-2.5 text-sm text-ink">
+                            <input type="radio" name="who-may-create" className="mt-1" checked={who === o.value} onChange={() => setWho(o.value)} />
+                            <span>
+                                <span className="block font-medium">{o.label}</span>
+                                <span className="block text-xs text-ink-muted">{o.detail}</span>
+                            </span>
+                        </label>
+                    ))}
+                </fieldset>
+                <div className={cn('space-y-3', !others && 'opacity-50')}>
+                    <label className="flex items-center gap-2 text-sm text-ink">
+                        Each may have created up to
+                        <input
+                            type="number"
+                            aria-label="Accounts each person may create"
+                            min={1}
+                            max={1000}
+                            value={limit}
+                            disabled={!others}
+                            onChange={(e) => setLimit(e.target.value)}
+                            className={cn(FIELD, 'w-20')}
+                        />
+                        live accounts
+                    </label>
+                    <label className="flex items-start gap-2 text-sm text-ink">
+                        <input type="checkbox" className="mt-1" checked={team} disabled={!others} onChange={(e) => setTeam(e.target.checked)} />
+                        <span>
+                            A team they’re in manages each one
+                            <span className="block text-xs text-ink-muted">So it outlives any one person. Without it, they manage it themselves, or a team they choose.</span>
+                        </span>
+                    </label>
+                </div>
+                {error && <p role="alert" className="text-sm text-rose-600 dark:text-rose-400">{error}</p>}
+            </div>
+        </KeyDialog>
+    )
+}
+
+function FilterChip({ label, onClear }: { label: string; onClear: () => void }) {
+    return (
+        <span className="inline-flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-lg text-xs font-semibold bg-indigo-500/10 text-indigo-700 dark:text-indigo-300">
+            {label}
+            <button type="button" onClick={onClear} aria-label={`Stop showing only those ${label.charAt(0).toLowerCase()}${label.slice(1)}`} className="p-0.5 rounded hover:bg-indigo-500/15">
+                <X className="w-3 h-3" />
+            </button>
+        </span>
+    )
+}
+
+/** How many workspaces the finder offers at once; more are found by name. */
+const WORKSPACES_SHOWN = 20
+
+/** A workspace, found by name, to see the accounts with a role in it. */
+function WorkspaceFinder({ onPick }: { onPick: (workspace: { id: string; name: string }) => void }) {
+    const [find, setFind] = useState('')
+    const search = useDebouncedValue(find.trim(), 250)
+    const [found, setFound] = useState<{ id: string; name: string }[] | null>(null)
+    useEffect(() => {
+        let live = true
+        workspaceService.listPage({ limit: WORKSPACES_SHOWN, search })
+            .then((page) => { if (live) setFound(page.items.map((w) => ({ id: w.id, name: w.name }))) })
+            .catch(() => { if (live) setFound([]) })
+        return () => { live = false }
+    }, [search])
+    return (
+        <div>
+            <input
+                type="search"
+                aria-label="Find a workspace"
+                placeholder="Find a workspace"
+                value={find}
+                onChange={(e) => setFind(e.target.value)}
+                className={cn(FIELD, 'w-full max-w-sm')}
+            />
+            <ul aria-label="Workspaces" className="mt-2 flex flex-wrap gap-1.5">
+                {found === null ? (
+                    <li className="text-xs text-ink-muted">Loading workspaces…</li>
+                ) : found.length === 0 ? (
+                    <li className="text-xs text-ink-muted">No workspace by that name.</li>
+                ) : found.map((w) => (
+                    <li key={w.id}>
+                        <button
+                            type="button"
+                            onClick={() => onPick(w)}
+                            className="px-2.5 py-1 rounded-lg text-xs font-semibold bg-black/[0.04] dark:bg-white/[0.06] text-ink-secondary hover:bg-indigo-500/10 hover:text-indigo-700 dark:hover:text-indigo-300"
+                        >
+                            {w.name}
+                        </button>
+                    </li>
+                ))}
+            </ul>
+        </div>
     )
 }
 

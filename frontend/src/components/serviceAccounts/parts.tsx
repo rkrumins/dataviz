@@ -11,7 +11,8 @@
  * Whether the keys work follows `pausesAt`, as the server decides it: set
  * when the account was found with nobody — at once by any change to its
  * managers, within the hour when a manager's sign-in lapses or comes back.
- * `managed` is who can act this minute, which can run ahead of it.
+ * `managed` is who can act this minute, which can run ahead of it. A deleted
+ * account's keys don't work whatever its standing, until it is restored.
  */
 import { User, Users } from 'lucide-react'
 
@@ -31,11 +32,19 @@ export interface Standing {
     detail: string
 }
 
+type Standable = Pick<ServiceAccount, 'status' | 'managed' | 'singleManager' | 'pausesAt' | 'adminHold'>
+    & Partial<Pick<ServiceAccount, 'deletedAt' | 'purgesAt'>>
+
 /** The one thing to know about an account, most pressing first. */
-export function standingOf(
-    account: Pick<ServiceAccount, 'status' | 'managed' | 'singleManager' | 'pausesAt' | 'adminHold'>,
-    now: Date = new Date(),
-): Standing {
+export function standingOf(account: Standable, now: Date = new Date()): Standing {
+    if (account.deletedAt) {
+        const until = account.purgesAt ? ` until ${formatDay(account.purgesAt, now)}` : ''
+        return {
+            tone: 'neutral',
+            label: 'Deleted',
+            detail: `Its keys stopped when it was deleted. ${account.adminHold ? 'An administrator' : 'Its managers'} can restore it${until}, with everything as it was; after that its keys are revoked, and its roles and managers removed.`,
+        }
+    }
     if (account.status === 'disabled') {
         return {
             tone: 'neutral',
@@ -75,10 +84,7 @@ export function standingOf(
     return { tone: 'success', label: 'Managed', detail: 'Someone answers for it, and its keys work.' }
 }
 
-export function StandingChip({ account, now }: {
-    account: Pick<ServiceAccount, 'status' | 'managed' | 'singleManager' | 'pausesAt' | 'adminHold'>
-    now?: Date
-}) {
+export function StandingChip({ account, now }: { account: Standable; now?: Date }) {
     const standing = standingOf(account, now)
     return (
         <HoverTip label={standing.label} detail={standing.detail} className="shrink-0">
