@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.sql import Select
 
 from backend.app.db.models import (
@@ -305,6 +306,69 @@ async def test_standing_is_read_only_once_the_accounts_are_locked(db_session, mo
     assert isinstance(read, Select) and read._for_update_arg is None
 
 
+async def test_the_sweep_locks_only_the_accounts_whose_standing_changed(db_session, monkeypatch):
+    """The hourly pass reads every account's standing without locking any,
+    and locks — skipping any a request holds, which settles them itself —
+    only those it is about to stamp or clear. A deleted account is left as it
+    is until it is restored."""
+    db_session.add(_person("usr_ok"))
+    db_session.add_all(_account("svc_ok") + _account("svc_lost") + _account("svc_back", since=_ago(2)))
+    db_session.add_all(_account("svc_gone"))
+    await db_session.flush()
+    for account in ("svc_ok", "svc_back"):
+        db_session.add(ServiceAccountManagerORM(service_account_id=account, user_id="usr_ok"))
+    (await db_session.get(UserORM, "svc_gone")).deleted_at = _ago(1)
+    await db_session.commit()
+    seen, settled = [], []
+    execute, settle = db_session.execute, service_account_repo._settle
+
+    async def _recording(statement, *args, **kwargs):
+        seen.append(statement)
+        return await execute(statement, *args, **kwargs)
+
+    async def _settling(session, account_ids, **rules):
+        settled.append(account_ids)
+        return await settle(session, account_ids, **rules)
+
+    monkeypatch.setattr(db_session, "execute", _recording)
+    monkeypatch.setattr(service_account_repo, "_settle", _settling)
+    lost = await service_account_repo.refresh_standing(
+        db_session, now=NOW, window_days=30, passwords_allowed=True,
+    )
+    monkeypatch.undo()
+    assert lost == ["svc_lost"]
+    assert settled == [["svc_back", "svc_lost"]]
+    lock = seen[0]
+    assert isinstance(lock, Select) and lock._for_update_arg.skip_locked
+    assert "FOR UPDATE OF service_accounts SKIP LOCKED" in str(lock.compile(dialect=postgresql.dialect()))
+    standing = {
+        row.user_id: row.unmanaged_since
+        for row in (await db_session.execute(select(ServiceAccountORM))).scalars()
+    }
+    assert standing["svc_ok"] is None and standing["svc_back"] is None
+    assert standing["svc_lost"] == NOW.isoformat()
+    assert standing["svc_gone"] is None
+    # Nor does a change to who manages it — a team's, say — stamp it.
+    assert await service_account_repo.refresh_standing(
+        db_session, now=NOW, window_days=30, passwords_allowed=True, account_ids=["svc_gone"],
+    ) == []
+    assert (await db_session.get(ServiceAccountORM, "svc_gone")).unmanaged_since is None
+
+
+async def test_the_sweep_settles_every_account_a_batch_at_a_time(db_session, monkeypatch):
+    monkeypatch.setattr(service_account_repo, "_BATCH", 2)
+    accounts = [f"svc_{i}" for i in range(5)]
+    for account in accounts:
+        db_session.add_all(_account(account))
+    await db_session.commit()
+    assert await service_account_repo.refresh_standing(
+        db_session, now=NOW, window_days=30, passwords_allowed=True,
+    ) == accounts
+    assert {
+        row.unmanaged_since for row in (await db_session.execute(select(ServiceAccountORM))).scalars()
+    } == {NOW.isoformat()}
+
+
 async def test_the_hourly_pass_checks_standing_first_and_a_failing_step_stops_nothing(
     db_session, monkeypatch,
 ):
@@ -317,6 +381,10 @@ async def test_the_hourly_pass_checks_standing_first_and_a_failing_step_stops_no
 
     async def _reminders(_session):
         ran.append("expiry_reminders")
+        return 0
+
+    async def _purge(_session):
+        ran.append("service_account_purge")
         return 0
 
     async def _prune(_session):
@@ -335,6 +403,7 @@ async def test_the_hourly_pass_checks_standing_first_and_a_failing_step_stops_no
 
     monkeypatch.setattr(service_account_standing, "sweep", _standing_fails)
     monkeypatch.setattr(api_key_housekeeping, "remind_once", _reminders)
+    monkeypatch.setattr(api_key_housekeeping, "purge_deleted", _purge)
     monkeypatch.setattr(api_key_housekeeping.api_key_usage_repo, "prune", _prune)
     monkeypatch.setattr(
         api_key_housekeeping, "metrics_increment",
@@ -343,10 +412,11 @@ async def test_the_hourly_pass_checks_standing_first_and_a_failing_step_stops_no
     await asyncio.wait_for(
         api_key_housekeeping.run_sweeper(_transaction, shutdown, interval=3600), timeout=10,
     )
-    assert ran == ["service_accounts", "expiry_reminders", "usage_prune"]
+    assert ran == ["service_accounts", "expiry_reminders", "service_account_purge", "usage_prune"]
     assert counted == [
         ("api_key_housekeeping_steps_total", "service_accounts", "failed"),
         ("api_key_housekeeping_steps_total", "expiry_reminders", "done"),
+        ("api_key_housekeeping_steps_total", "service_account_purge", "done"),
         ("api_key_housekeeping_steps_total", "usage_prune", "done"),
     ]
 
@@ -463,6 +533,19 @@ async def test_a_disabled_service_accounts_keys_stop_at_once(client, db_session)
     await db_session.commit()
     refused = await client.get("/api/v1/views/v_a_ws", headers=key.headers)
     assert (refused.status_code, error(refused)) == (401, "api_key_owner_inactive")
+
+
+async def test_a_deleted_service_accounts_keys_stop_at_once_and_work_again_restored(client, db_session):
+    await _managed_account(db_session)
+    key = await _service_key(db_session)
+    account = await db_session.get(UserORM, "svc_job")
+    account.deleted_at = days_ago(1)
+    await db_session.commit()
+    refused = await client.get("/api/v1/views/v_a_ws", headers=key.headers)
+    assert (refused.status_code, error(refused)) == (401, "api_key_owner_inactive")
+    account.deleted_at = None
+    await db_session.commit()
+    assert (await client.get("/api/v1/views/v_a_ws", headers=key.headers)).status_code == 200
 
 
 async def test_a_service_accounts_keys_stop_when_its_record_is_gone(client, db_session):

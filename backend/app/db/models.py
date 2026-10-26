@@ -3633,9 +3633,13 @@ class ServiceAccountORM(Base):
     # When the administrators were told its keys pause soon. Cleared with
     # ``unmanaged_since``.
     pause_reminded_at = Column(Text, nullable=True)
-    # An administrator of service accounts disabled it: only one of them
-    # enables it again, not its managers.
+    # An administrator of service accounts disabled or deleted it: only one of
+    # them enables or restores it again, not its managers.
     admin_hold = Column(Boolean, nullable=False, default=False, server_default="false")
+    # When the hourly pass purged it, 30 days after it was deleted
+    # (``users.deleted_at``): its keys revoked, its roles and managers removed.
+    # NULL while it is live, or deleted and still restorable.
+    purged_at = Column(Text, nullable=True)
 
 
 class ServiceAccountManagerORM(Base):

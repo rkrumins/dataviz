@@ -54,19 +54,28 @@ class Can:
     revoke: bool = False
     #: Ask a workspace for access for it, or to keep access that is ending.
     request: bool = False
+    #: Its keys stop at once; it can be restored for 30 days.
+    delete: bool = False
+    #: Its managers can't while an administrator holds it.
+    restore: bool = False
 
 
 def _can(
-    *, central: bool, manager: bool, mint_any: bool, held: bool, in_my_workspace: bool = False,
+    *, central: bool, manager: bool, mint_any: bool, held: bool, deleted: bool = False,
+    in_my_workspace: bool = False,
 ) -> Can:
     if not (central or manager or mint_any):
         # The admins and stewards of a workspace it holds a role in see it,
         # to know whose integration it is.
         return Can(view=in_my_workspace)
+    if deleted:
+        # Nothing about a deleted account changes but its coming back.
+        return Can(view=True, restore=central or (manager and not held))
     runs = central or manager
     return Can(
         view=True, edit=runs, disable=runs, enable=central or (manager and not held),
         managers=runs, keys=manager or mint_any, grant=central, revoke=runs, request=runs,
+        delete=runs,
     )
 
 
@@ -90,6 +99,7 @@ async def decide(
         central=has_permission(claims, MANAGE),
         manager=await service_account_repo.is_manager(session, user.id, user_id),
         mint_any=has_permission(claims, MINT_ANY), held=row.admin_hold,
+        deleted=user.deleted_at is not None,
     )
     if not any((facts["central"], facts["manager"], facts["mint_any"])):
         facts["in_my_workspace"] = await _in_my_workspace(session, claims, user.id)
@@ -102,6 +112,10 @@ _REFUSED = {
         "accounts can enable it"
     ),
     "grant": "Only an administrator of service accounts can give it a role here",
+    "restore": (
+        "An administrator holds this service account, so only an administrator of service "
+        "accounts can restore it"
+    ),
 }
 
 
@@ -109,13 +123,16 @@ async def require(
     session: AsyncSession, user_id: str, claims: PermissionClaims, account_id: str, action: str,
 ) -> tuple[UserORM, ServiceAccountORM]:
     """The account, when the caller may take ``action`` on it. Anyone who
-    can't see it is told it doesn't exist; anyone who can, but not this, why."""
-    found = await service_account_repo.get(session, account_id)
+    can't see it is told it doesn't exist; anyone who can, but not this, why.
+    A deleted account, until it is purged, can be seen and restored, and
+    nothing else."""
+    found = await service_account_repo.get(session, account_id, deleted=True)
     if found is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service account not found")
     facts = dict(
         manager=await service_account_repo.is_manager(session, account_id, user_id),
         mint_any=has_permission(claims, MINT_ANY), held=found[1].admin_hold,
+        deleted=found[0].deleted_at is not None,
     )
     central = has_permission(claims, MANAGE)
     if not (central or facts["manager"] or facts["mint_any"]):
@@ -123,6 +140,13 @@ async def require(
     can = _can(central=central, **facts)
     if not can.view:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service account not found")
+    if facts["deleted"] and action not in ("view", "restore"):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This service account is deleted: restore it first",
+        )
+    if action == "restore" and not facts["deleted"]:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This service account isn't deleted")
     if not getattr(can, action):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

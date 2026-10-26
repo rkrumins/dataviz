@@ -176,6 +176,12 @@ def test_a_moved_source_is_filed_under_where_it_went():
     ("identity.api_key.expiring", {"user_id": "usr_1", "key_id": "apk_1"}, None, "system", "usr_1"),
     ("identity.api_key.rejected", {"user_id": "usr_1", "key_id": "apk_1", "reason": "expired"},
      None, "anonymous", "usr_1"),
+    # The hourly pass purges a deleted service account, revoking its keys.
+    ("identity.service_account.purged", {"user_id": "svc_0123456789ab", "name": "Metadata sync"},
+     None, "system", "svc_0123456789ab"),
+    ("identity.api_key.revoked",
+     {"user_id": "svc_0123456789ab", "key_id": "apk_1", "revoked_by": None, "reason": "purged"},
+     None, "system", "svc_0123456789ab"),
 ])
 def test_who_acted_and_who_it_happened_to(event_type, payload, actor, kind, subject):
     out = catalogue.project(event_type=event_type, payload=payload)
@@ -321,6 +327,22 @@ def test_outage_session_and_break_glass_events_read_plainly():
     assert catalogue.label_of("auth.config.password_fallback_extended") == (
         "Extended emergency password access"
     )
+
+
+def test_a_service_accounts_retirement_reads_plainly():
+    account = {"user_id": "svc_0123456789ab", "name": "Metadata sync"}
+    assert catalogue.summarize("identity.service_account.deleted", account) == (
+        "warning", "Service account “Metadata sync” deleted",
+    )
+    assert catalogue.summarize("identity.service_account.restored", account) == (
+        "info", "Service account “Metadata sync” restored",
+    )
+    assert catalogue.summarize("identity.service_account.purged", account)[1] == (
+        "Service account “Metadata sync” purged: its keys revoked, its roles and managers removed"
+    )
+    assert catalogue.summarize("identity.api_key.revoked", {
+        "key_name": "sync", "token_prefix": "nxsat_ab12", "reason": "purged",
+    })[1] == "API key “sync” (nxsat_ab12…) revoked as its deleted service account was purged"
 
 
 _TRANSFER = {

@@ -4,11 +4,15 @@
 (``system:service-accounts:manage``) create them, list them all, give them
 workspace roles, and hand a leaver's accounts over to a successor. Each
 account's own routes, ``/admin/service-accounts/{id}``, are its managers' as
-well: they rename it, disable and enable it — unless an administrator holds it
-disabled — appoint and remove its managers, and take its roles away
-(``service_account_access`` says who may do what). ``/me/service-accounts`` is
-where a manager finds the accounts they answer for; their keys are made under
-``/me/service-accounts/{id}/api-keys``.
+well: they rename it, disable and enable it, delete and restore it — unless an
+administrator holds it — appoint and remove its managers, and take its roles
+away (``service_account_access`` says who may do what). ``/me/service-accounts``
+is where a manager finds the accounts they answer for; their keys are made
+under ``/me/service-accounts/{id}/api-keys``.
+
+A deleted account's keys stop at once. For 30 days it can be restored with
+everything as it was; then the hourly pass purges it
+(``api_key_housekeeping``).
 
 An account's keys work while it has a manager in good standing, and for a
 grace period after its last one goes (``service_account_standing``): every
@@ -40,10 +44,10 @@ from backend.app.db.repositories import (
 )
 from backend.app.services import service_account_access, service_account_standing, workspace_access
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services.service_account_access import MANAGE
+from backend.app.services.service_account_access import MANAGE, MINT_ANY
 from backend.auth_service.interface import User
 from backend.common.display_name import resolve_display_name
-from backend.common.service_accounts import is_service_account
+from backend.common.service_accounts import RESTORE_DAYS, is_service_account
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +63,7 @@ _GATES = {
         "system:service-accounts:manage or system:users:manage (in handler)"
     ),
     "enable": "manages it unless an administrator holds it, or system:service-accounts:manage (in handler)",
+    "restore": "manages it unless an administrator holds it, or system:service-accounts:manage (in handler)",
     "grant": "system:service-accounts:manage (in handler)",
 }
 _RUNS_IT = "manages it, or system:service-accounts:manage (in handler)"
@@ -167,8 +172,12 @@ class ServiceAccountOut(_Model):
     #: When it was found with no manager; its keys pause at ``pausesAt``.
     unmanaged_since: Optional[str] = Field(None, alias="unmanagedSince")
     pauses_at: Optional[str] = Field(None, alias="pausesAt")
-    #: An administrator disabled it: only one of them enables it again.
+    #: An administrator disabled or deleted it: only one of them enables or
+    #: restores it again.
     admin_hold: bool = Field(alias="adminHold")
+    #: When it was deleted; it is purged at ``purgesAt`` unless restored.
+    deleted_at: Optional[str] = Field(None, alias="deletedAt")
+    purges_at: Optional[str] = Field(None, alias="purgesAt")
     #: With ``managedBy``: what that person's leaving involves.
     hand_over: Optional[HandOverFacts] = Field(None, alias="handOver")
 
@@ -184,6 +193,8 @@ class AccountCan(_Model):
     grant: bool
     revoke: bool
     request: bool
+    delete: bool
+    restore: bool
 
 
 class ServiceAccountDetail(ServiceAccountOut):
@@ -238,13 +249,13 @@ class HandOverResult(_Model):
 # ── Building answers ────────────────────────────────────────────────
 
 
-def _pauses_at(unmanaged_since: Optional[str], grace_days: int) -> Optional[str]:
-    if not unmanaged_since:
+def _days_after(instant: Optional[str], days: int) -> Optional[str]:
+    if not instant:
         return None
-    since = datetime.fromisoformat(unmanaged_since)
+    since = datetime.fromisoformat(instant)
     if since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
-    return (since + timedelta(days=grace_days)).isoformat()
+    return (since + timedelta(days=days)).isoformat()
 
 
 async def _accounts_out(
@@ -285,14 +296,15 @@ async def _accounts_out(
             managers=[ManagerOut(**m.__dict__) for m in managers[user.id]],
             managed=bool(people), single_manager=len(people) == 1,
             unmanaged_since=account.unmanaged_since,
-            pauses_at=_pauses_at(account.unmanaged_since, rules.grace_days),
-            admin_hold=account.admin_hold, hand_over=hand_over,
+            pauses_at=_days_after(account.unmanaged_since, rules.grace_days),
+            admin_hold=account.admin_hold, deleted_at=user.deleted_at,
+            purges_at=_days_after(user.deleted_at, RESTORE_DAYS), hand_over=hand_over,
         ))
     return out, rules.grace_days
 
 
 async def _account_or_404(session: AsyncSession, account_id: str):
-    found = await service_account_repo.get(session, account_id)
+    found = await service_account_repo.get(session, account_id, deleted=True)
     if found is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service account not found")
     return found
@@ -314,7 +326,10 @@ async def _detail(
     can = await service_account_access.decide(session, user_id, claims, found)
     bindings = await _roles(session, account_id)
     asked = await access_request_repo.list_for_requester(session, requester_id=account_id, status="open")
-    if not (can.edit or can.keys):
+    if not (
+        has_permission(claims, MANAGE) or has_permission(claims, MINT_ANY)
+        or await service_account_repo.is_manager(session, account_id, user_id)
+    ):
         # Seen from a workspace it is in: only the workspaces the caller can
         # open, and nothing it has asked for.
         bindings = [b for b in bindings if workspace_access.can_open(claims, b.scope_id)]
@@ -430,6 +445,13 @@ async def _dismiss(
             manager_type="user" if user_id else "group", manager_id=user_id or group_id,
             manager_name=manager_name, via=via,
         )
+        if user_id and not await service_account_repo.is_manager(session, account_id, user_id):
+            await notification_repo.notify(
+                session, user_ids=[user_id], kind="service_account_manager_removed",
+                title=f"You no longer manage {account_name}",
+                body="You don't answer for this service account any more, and can't make, rotate or revoke its keys.",
+                actor_id=actor_id, resource_type="service_account", resource_id=account_id,
+            )
         await service_account_standing.tell_keys_outlive(
             session, [account_id], person=user_id, team=group_id, actor_id=actor_id,
         )
@@ -442,18 +464,27 @@ async def _dismiss(
 @admin_router.get("", response_model=ServiceAccountList, dependencies=[Depends(requires(MANAGE))])
 async def list_service_accounts(
     q: Optional[str] = Query(None, max_length=200),
-    status_filter: Optional[Literal["active", "disabled"]] = Query(None, alias="status"),
+    status_filter: Optional[Literal["active", "disabled", "deleted"]] = Query(None, alias="status"),
+    standing: Optional[Literal["unmanaged", "held"]] = Query(None),
+    manager: Optional[str] = Query(None, max_length=64),
+    workspace: Optional[str] = Query(None, max_length=64),
     managed_by: Optional[str] = Query(None, alias="managedBy", max_length=64),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0, le=100_000),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Every service account, with who answers for each and whether its keys
-    are about to pause. ``managedBy`` lists the accounts a person's leaving
-    touches — those they manage, themselves or through a team, and those they
-    made a key for that still works — with what it involves."""
+    are about to pause — or, ``status=deleted``, those deleted and not yet
+    purged. Narrowed to those with no manager in good standing
+    (``standing=unmanaged``) or held by an administrator (``held``); those a
+    person manages, themselves or through a team, or a team manages
+    (``manager``); and those holding a role in a workspace (``workspace``).
+    ``managedBy`` lists the accounts a person's leaving touches — those they
+    manage, themselves or through a team, and those they made a key for that
+    still works — with what it involves."""
     rows, total = await service_account_repo.list_page(
-        session, q=q, status=status_filter, leaving=managed_by, limit=limit, offset=offset,
+        session, q=q, status=status_filter, standing=standing, managed_by=manager,
+        workspace_id=workspace, leaving=managed_by, limit=limit, offset=offset,
     )
     items, grace = await _accounts_out(session, rows, managed_by=managed_by)
     return ServiceAccountList(items=items, total=total, grace_days=grace)
@@ -630,6 +661,104 @@ async def enable_service_account(
     return await _detail(session, account_id, actor.id, claims)
 
 
+@admin_router.delete("/{account_id}", response_model=ServiceAccountDetail)
+async def delete_service_account(
+    account_id: str = Path(..., max_length=64),
+    _found=Depends(_account("delete")),
+    actor: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Retire an account: every key it holds stops at once, and its requests
+    still waiting on a workspace are withdrawn. Nothing else changes, and for
+    30 days restoring it brings it back as it was; then it is purged — its
+    keys revoked, its roles and managers removed. Deleted by an
+    administrator of service accounts, it is held: its managers can't
+    restore it."""
+    found = await service_account_repo.get(session, account_id, for_update=True)
+    if found is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Already deleted")
+    user, account = found
+    central = has_permission(claims, MANAGE)
+    now = datetime.now(timezone.utc)
+    user.deleted_at = now.isoformat()
+    account.admin_hold = account.admin_hold or central
+    await session.flush()
+    for request in await access_request_repo.list_for_requester(
+        session, requester_id=account_id, status="open",
+    ):
+        try:
+            await access_request_repo.resolve(
+                session, request_id=request.id, new_status="withdrawn", resolver_id=actor.id,
+                note="Its service account was deleted",
+            )
+        except ValueError:
+            continue  # answered meanwhile
+        await user_repo.create_outbox_event(
+            session,
+            event_type="rbac.access_request.withdrawn",
+            payload={
+                "request_id": request.id,
+                "requester_id": account_id,
+                "target_type": request.target_type,
+                "target_id": request.target_id,
+                "workspace_id": request.target_id,
+                "requested_role": request.requested_role,
+                "actor_id": actor.id,
+            },
+        )
+    await _record(session, "deleted", account_id, user.first_name, changed_by=actor.id, held=account.admin_hold)
+    purges = (now + timedelta(days=RESTORE_DAYS)).date().isoformat()
+    await notification_repo.notify(
+        session, user_ids=[account_id], kind="service_account_deleted",
+        title=f"{'An administrator' if central else actor.display_name} deleted it, and its keys have stopped",
+        body=(
+            f"{'An administrator' if account.admin_hold else 'Its managers'} can restore it until "
+            f"{purges}, with everything as it was. After that its keys are revoked, and its roles "
+            "and managers removed."
+        ),
+        actor_id=actor.id, resource_type="service_account", resource_id=account_id,
+    )
+    return await _detail(session, account_id, actor.id, claims)
+
+
+@admin_router.post("/{account_id}/restore", response_model=ServiceAccountDetail)
+async def restore_service_account(
+    account_id: str = Path(..., max_length=64),
+    _found=Depends(_account("restore")),
+    actor: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Bring a deleted account back as it was — its keys, roles and
+    managers — until it is purged. An administrator's restoring it lets go
+    of its hold, unless it comes back disabled."""
+    found = await service_account_repo.get(session, account_id, deleted=True, for_update=True)
+    if found is None or found[0].deleted_at is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="It was restored or purged meanwhile")
+    user, account = found
+    user.deleted_at = None
+    if user.status == "active":
+        # Only a disabled account stays held.
+        account.admin_hold = False
+    await session.flush()
+    await _record(session, "restored", account_id, user.first_name, changed_by=actor.id)
+    await service_account_standing.refresh(session, [account_id])
+    who = "An administrator" if has_permission(claims, MANAGE) else actor.display_name
+    await notification_repo.notify(
+        session, user_ids=[account_id], kind="service_account_restored",
+        title=f"{who} restored it",
+        body=(
+            "Its keys, roles and managers are as they were before it was deleted."
+            if user.status == "active" else
+            "Its roles and managers are as they were before it was deleted. It is still disabled, "
+            "so its keys don't work until it is enabled."
+        ),
+        actor_id=actor.id, resource_type="service_account", resource_id=account_id,
+    )
+    return await _detail(session, account_id, actor.id, claims)
+
+
 @admin_router.put("/{account_id}/managers/{kind}/{subject_id}", response_model=ServiceAccountDetail)
 async def appoint_manager(
     account_id: str = Path(..., max_length=64),
@@ -801,9 +930,10 @@ async def list_my_service_accounts(
     session: AsyncSession = Depends(get_db_session),
 ):
     """The service accounts you answer for, yourself or through a team, a
-    page at a time."""
+    page at a time — and after them those deleted and not yet purged, which
+    you may restore."""
     rows, total = await service_account_repo.list_page(
-        session, managed_by=user.id, limit=limit, offset=offset,
+        session, managed_by=user.id, with_deleted=True, limit=limit, offset=offset,
     )
     items, grace = await _accounts_out(session, rows)
     return ServiceAccountList(items=items, total=total, grace_days=grace)

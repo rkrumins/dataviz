@@ -335,7 +335,7 @@ def _api_key_label(p: dict) -> str:
 
 _API_KEY_REVOKED_BY = {
     "owner": "by its owner", "self": "with itself", "admin": "by an admin",
-    "manager": "by a manager",
+    "manager": "by a manager", "purged": "as its deleted service account was purged",
 }
 
 
@@ -490,6 +490,10 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     ),
     "rbac.workspace.access_review_cancelled": ("warning", _summary_access_review("cancelled")),
     "identity.service_account.disabled": ("warning", _summary_service_account("disabled")),
+    "identity.service_account.deleted": ("warning", _summary_service_account("deleted")),
+    "identity.service_account.purged": (
+        "warning", _summary_service_account("purged: its keys revoked, its roles and managers removed"),
+    ),
     "identity.service_account.manager_removed": (
         "warning", _summary_service_account_manager(added=False),
     ),
@@ -565,6 +569,7 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "identity.service_account.created": ("info", _summary_service_account("created")),
     "identity.service_account.updated": ("info", _summary_service_account("edited")),
     "identity.service_account.enabled": ("info", _summary_service_account("enabled")),
+    "identity.service_account.restored": ("info", _summary_service_account("restored")),
     "identity.service_account.manager_added": (
         "info", _summary_service_account_manager(added=True),
     ),
@@ -872,6 +877,9 @@ LABELS: dict[str, str] = {
     "identity.service_account.updated": "Edited a service account",
     "identity.service_account.disabled": "Disabled a service account",
     "identity.service_account.enabled": "Enabled a service account",
+    "identity.service_account.deleted": "Deleted a service account",
+    "identity.service_account.restored": "Restored a service account",
+    "identity.service_account.purged": "Purged a deleted service account",
     "identity.service_account.manager_added": "Appointed a service account's manager",
     "identity.service_account.manager_removed": "Removed a service account's manager",
     "visualization.view.created": "Created a view",
