@@ -47,6 +47,7 @@ describe('a row naming entities', () => {
                 />
             </RelationContext.Provider>,
         )
+        fireEvent.click(screen.getByRole('button', { name: 'Show all options' }))
         expect(await screen.findByRole('button', { name: 'Use its name' })).toBeInTheDocument()
         expect(screen.getByRole('group', { name: 'Entities' })).toBeInTheDocument()
         fireEvent.click(screen.getByText('orders'))

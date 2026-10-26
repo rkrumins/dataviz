@@ -10,7 +10,7 @@
  * Incomplete state (a leaf with missing required fields) replaces the
  * border with the existing amber-dashed style.
  */
-import type { FC, ReactNode } from 'react'
+import { type ReactNode, forwardRef } from 'react'
 
 import { cn } from '@/lib/utils'
 
@@ -30,12 +30,12 @@ export interface RowCardProps {
 }
 
 
-export const RowCard: FC<RowCardProps> = ({
+export const RowCard = forwardRef<HTMLDivElement, RowCardProps>(function RowCard({
     tone, children, className, incomplete, bgOverride,
-}) => {
+}, ref) {
     const styles = TONE_STYLES[tone]
     return (
-        <div className={cn(
+        <div ref={ref} className={cn(
             'relative rounded-xl border bg-gradient-to-br backdrop-blur-sm',
             'transition-colors',
             // Outer padding — pl stays at 4 (the accent stripe needs
@@ -59,4 +59,4 @@ export const RowCard: FC<RowCardProps> = ({
             {children}
         </div>
     )
-}
+})

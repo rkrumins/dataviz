@@ -152,6 +152,12 @@ match any row (**OR**) instead. Select several rows to **Group as AND / OR** on 
 add a **NOT group** to exclude what it matches.
 **Undo** and **Redo** step through your edits; **New** starts again.
 
+**A finished filter reads as one line** — *Type is Dataset*, *Is tagged
+#Certified* — and each part you picked opens that filter's editor where it is.
+The chevron, **Show all options**, opens the full card. A new or unfinished
+filter opens as its card, and folds once it's complete and you move on.
+Relationships, paths and edge counts keep their cards.
+
 **Text filters** match **Contains**, **Starts with**, **Ends with**, **Is
 exactly**, or a **Wildcard pattern** (`*sales*`, `sales*`, `*_raw`).
 Matching ignores case.
