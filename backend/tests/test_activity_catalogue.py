@@ -149,6 +149,9 @@ def test_a_moved_source_is_filed_under_where_it_went():
 @pytest.mark.parametrize("event_type, payload, actor, kind, subject", [
     # The requester IS the actor of a request — under a key of its own.
     ("rbac.access_request.created", {"requester_id": "usr_r"}, "usr_r", "user", "usr_r"),
+    # One for a service account is the account's, asked for by its manager.
+    ("rbac.access_request.created", {"requester_id": "svc_0123456789ab", "requested_by": "usr_r"},
+     "usr_r", "user", "svc_0123456789ab"),
     # An admin editing someone's identity is not that person editing it.
     ("user.identity_updated", {"user_id": "usr_2", "updated_by": "usr_admin"}, "usr_admin", "user", "usr_2"),
     ("user.logged_in", {"user_id": "usr_1"}, "usr_1", "user", "usr_1"),
@@ -173,6 +176,12 @@ def test_a_moved_source_is_filed_under_where_it_went():
     ("identity.api_key.expiring", {"user_id": "usr_1", "key_id": "apk_1"}, None, "system", "usr_1"),
     ("identity.api_key.rejected", {"user_id": "usr_1", "key_id": "apk_1", "reason": "expired"},
      None, "anonymous", "usr_1"),
+    # The hourly pass purges a deleted service account, revoking its keys.
+    ("identity.service_account.purged", {"user_id": "svc_0123456789ab", "name": "Metadata sync"},
+     None, "system", "svc_0123456789ab"),
+    ("identity.api_key.revoked",
+     {"user_id": "svc_0123456789ab", "key_id": "apk_1", "revoked_by": None, "reason": "purged"},
+     None, "system", "svc_0123456789ab"),
 ])
 def test_who_acted_and_who_it_happened_to(event_type, payload, actor, kind, subject):
     out = catalogue.project(event_type=event_type, payload=payload)
@@ -332,6 +341,53 @@ def test_outage_session_and_break_glass_events_read_plainly():
     })[1] == "usr_1 made a break-glass account from the server's command line"
     assert catalogue.label_of("auth.config.password_fallback_extended") == (
         "Extended emergency password access"
+    )
+
+
+def test_a_service_accounts_retirement_reads_plainly():
+    account = {"user_id": "svc_0123456789ab", "name": "Metadata sync"}
+    assert catalogue.summarize("identity.service_account.deleted", account) == (
+        "warning", "Service account “Metadata sync” deleted",
+    )
+    assert catalogue.summarize("identity.service_account.restored", account) == (
+        "info", "Service account “Metadata sync” restored",
+    )
+    assert catalogue.summarize("identity.service_account.purged", account)[1] == (
+        "Service account “Metadata sync” purged: its keys revoked, its roles and managers removed"
+    )
+    assert catalogue.summarize("identity.api_key.revoked", {
+        "key_name": "sync", "token_prefix": "nxsat_ab12", "reason": "purged",
+    })[1] == "API key “sync” (nxsat_ab12…) revoked as its deleted service account was purged"
+
+
+def test_reading_every_workspace_reads_plainly():
+    account = {"user_id": "svc_0123456789ab", "name": "Metadata sync", "changed_by": "usr_admin"}
+    assert catalogue.summarize("identity.service_account.org_read_granted", account) == (
+        "warning", "Service account “Metadata sync” can now read every workspace",
+    )
+    assert catalogue.summarize("identity.service_account.org_read_revoked", account) == (
+        "info", "Service account “Metadata sync” no longer reads every workspace",
+    )
+    assert catalogue.label_of("identity.service_account.org_read_granted") == (
+        "Let a service account read every workspace"
+    )
+    out = catalogue.project(event_type="identity.service_account.org_read_revoked", payload=account)
+    assert (out["actor_id"], out["subject_id"]) == ("usr_admin", "svc_0123456789ab")
+
+
+def test_who_may_create_service_accounts_reads_plainly():
+    def said(**to) -> str:
+        return catalogue.summarize("platform.service_account_policy.updated", {"details": {"to": to}})[1]
+
+    assert said(whoMayCreate="central", perPersonLimit=10, requireTeamManager=False) == (
+        "Only administrators of service accounts may create service accounts"
+    )
+    assert said(whoMayCreate="granters", perPersonLimit=3, requireTeamManager=True) == (
+        "Anyone who lets people into a workspace may create up to 3 service accounts each, "
+        "managed by a team they're in"
+    )
+    assert said(whoMayCreate="everyone", perPersonLimit=10, requireTeamManager=False) == (
+        "Anyone may create up to 10 service accounts each"
     )
 
 

@@ -37,6 +37,21 @@ export interface AccessRequestRequester {
  *  provider's groups. */
 export type WorkspaceAccessMode = 'app' | 'idp'
 
+/** Someone who answers for a service account: a person, or a team — and
+ *  whether the identity provider keeps that team's members. */
+export interface AccessRequestManager {
+    type: 'user' | 'group'
+    name: string
+    fromIdp: boolean
+}
+
+/** A request for a service account: what it is for and who answers for it —
+ *  whoever approves lets them act in the workspace through it. */
+export interface AccessRequestServiceAccount {
+    description: string | null
+    managers: AccessRequestManager[]
+}
+
 export interface AccessRequestTarget {
     type: 'workspace'
     id: string
@@ -75,6 +90,10 @@ export interface AccessRequestResponse {
      *  Org Admins for want of an answer. */
     remindedAt?: string | null
     escalatedAt?: string | null
+    /** A request for a service account (the requester): what it is for and
+     *  who manages it, and the person who asked. */
+    serviceAccount?: AccessRequestServiceAccount | null
+    requestedBy?: AccessRequestRequester | null
 }
 
 export interface AccessRequestCreateRequest {
@@ -82,6 +101,8 @@ export interface AccessRequestCreateRequest {
     targetId: string
     requestedRole: string
     justification?: string | null
+    /** Ask for a service account you manage, rather than for yourself. */
+    serviceAccountId?: string
 }
 
 export interface AccessRequestResolveRequest {
@@ -111,6 +132,9 @@ export interface RequestableRole {
     name: string
     description: string | null
     isSystem: boolean
+    /** It neither administers the workspace nor lets people in: it may be
+     *  asked for, and a service account may hold it. */
+    requestable?: boolean
 }
 
 /** How a workspace takes requests: its approvers decide, anyone may join

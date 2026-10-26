@@ -31,8 +31,10 @@ import {
     LayoutTemplate,
     Megaphone,
     Share2,
+    RotateCcw,
     ShieldAlert,
     Sparkles,
+    Trash2,
     Undo2,
     UserMinus,
     UserPlus,
@@ -237,10 +239,11 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         tile: 'bg-rose-500/10',
     },
     // Service accounts: one left with nobody answering for it, its keys
-    // about to pause, a new manager, a key made by someone who isn't one,
-    // an administrator disabling or enabling it, someone joining a team
-    // that manages it, a key revoked by whoever held it, and keys that
-    // still work made by someone who no longer answers for it.
+    // about to pause, a new manager and one no longer managing it, a key
+    // made by someone who isn't one, an administrator disabling or enabling
+    // it, someone deleting or restoring it, someone joining a team that
+    // manages it, a key revoked by whoever held it, and keys that still work
+    // made by someone who no longer answers for it.
     service_account_unmanaged: {
         Icon: ShieldAlert,
         icon: 'text-amber-500',
@@ -256,6 +259,11 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         icon: 'text-emerald-500',
         tile: 'bg-emerald-500/10',
     },
+    service_account_manager_removed: {
+        Icon: UserMinus,
+        icon: 'text-slate-500',
+        tile: 'bg-slate-500/10',
+    },
     service_account_key_created: {
         Icon: KeySquare,
         icon: 'text-sky-500',
@@ -268,6 +276,16 @@ const KIND_VISUALS: Record<string, KindVisual> = {
     },
     service_account_enabled: {
         Icon: CheckCircle2,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    service_account_deleted: {
+        Icon: Trash2,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    service_account_restored: {
+        Icon: RotateCcw,
         icon: 'text-emerald-500',
         tile: 'bg-emerald-500/10',
     },
