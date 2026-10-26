@@ -9,7 +9,7 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
-## [Unreleased] — Service accounts: workspaces give them access, and they can be deleted
+## [Unreleased] — Service accounts: self-service, from workspace access to creation
 
 ### Added
 
@@ -44,6 +44,13 @@ limitations** — a changelog that only lists good news is not worth reading.
   workspace; **Deleted** lists those that can still be restored.
 - Someone removed as a service account's manager is told, unless they still manage it through a
   team.
+- **Who else may create a service account is a policy** the administrators of service accounts
+  set under **Administration → Service accounts**: only them, as it ships; anyone who lets people
+  into a workspace; or anyone — each up to a number of live accounts (10 unless set), and, if they
+  choose, only with a team they're in managing it. Where it lets them, people create one under
+  **Account → API keys → Service accounts you manage**, managed by them or a team they're in; it
+  reaches nothing until a workspace gives it a role. Changing the policy is recorded in the
+  activity log. See ADR-029.
 
 ### Changed
 
@@ -55,10 +62,13 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Upgrading
 
-- The upgrade job adds `access_requests.requested_by` (`20261025_1400_sa_requests`), who asked
-  for a request made for a service account, and `service_accounts.purged_at`
-  (`20261025_1600_sa_purge`), when a deleted one was purged. Both are nullable. Nothing else to
-  run.
+- The upgrade job adds nullable columns, and nothing else is to run:
+  - `access_requests.requested_by` (`20261025_1400_sa_requests`): who asked for a request made for
+    a service account;
+  - `service_accounts.purged_at` (`20261025_1600_sa_purge`): when a deleted one was purged;
+  - `platform_settings.sa_who_may_create`, `sa_per_person_limit` and `sa_require_team_manager`
+    (`20261026_1000_sa_policy`): who may create a service account. Unset, only the administrators
+    of service accounts may, as before.
 
 ---
 

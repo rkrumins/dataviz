@@ -238,6 +238,8 @@ is restored, and its key routes `404`.
 | Route | Answers |
 |---|---|
 | `GET /api/v1/me/service-accounts?limit=&offset=` | The accounts you manage, yourself or through a team, by name, then those deleted and not yet purged: `{items, total, graceDays}` (`limit` up to 200) |
+| `GET /api/v1/me/service-accounts/policy` | Whether you may create one for yourself: the policy (`whoMayCreate`, `perPersonLimit`, `requireTeamManager`), with `mayCreate`, `reason` (why not), `created` (the live accounts you have created), `limited` (whether `perPersonLimit` binds you) and `teams` (the teams you're in, `{id, name}`) |
+| `POST /api/v1/me/service-accounts` | Create one, where the policy lets you: `{name, description, team}`. You manage it — or `team`, one you're in, does; the policy may require one. `403` where it doesn't let you, `409` past your limit or for a break-glass account, `422` without a team it requires. It answers as `GET` does, `201` |
 | `GET /api/v1/me/service-accounts/{account_id}` | One of them — or any, for an administrator of service accounts or anyone holding `system:users:manage` — with its `roles`, `requests`, `liveKeys` and `can`. An admin or steward of a workspace it holds a role in reads it too: its roles in the workspaces they can open, and no `requests` |
 
 Each account: `id`, `name`, `description`, `status` (`active` or `disabled`), `adminHold` (an
@@ -260,6 +262,7 @@ are under `/api/v1/admin/service-accounts`:
 |---|---|---|
 | `GET ?q=&status=&standing=&manager=&workspace=&managedBy=&limit=&offset=` | Administrators | Every account, or with `status=deleted` those deleted and not yet purged. `status` also takes `active` or `disabled`; `standing`, `unmanaged` (no manager in good standing) or `held` (by an administrator); `manager`, a person — themselves or through a team — or a team; `workspace`, a workspace it holds a role in. `managedBy` lists what a person's leaving touches |
 | `POST` | Administrators | Create one: `{name, description, managers: [{type: "user"\|"group", id}]}` |
+| `GET`, `PUT /policy` | Administrators | Who else may create one for themselves: `whoMayCreate` — `central` (nobody else, unset), `granters` (anyone who lets people into a workspace) or `everyone` — `perPersonLimit` (1 to 1000, 10 unset) and `requireTeamManager`. `PUT` changes what it names |
 | `GET`, `PATCH /{id}` | Managers, administrators | Read one, with `can`; rename or describe it. `GET` also answers anyone holding `system:users:manage` |
 | `POST /{id}/disable`, `/{id}/enable` | Managers, administrators | Stop every key it holds, or let them work again. An administrator's disable holds it (`adminHold`): then only an administrator enables it |
 | `DELETE /{id}` | Managers, administrators | Delete it: every key stops at once, and its requests still waiting are withdrawn. For 30 days nothing else changes; then the hourly pass purges it — its keys revoked, its roles and managers removed. An administrator's delete holds it |

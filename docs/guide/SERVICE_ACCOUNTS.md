@@ -15,7 +15,8 @@ it up, and goes on running when they move on.
 ## How it works
 
 - An administrator **creates** it and names at least one **manager** — a
-  person or a team. Creating it gives it no access.
+  person or a team — or, where the administrators allow it, someone creates
+  one for themselves. Creating it gives it no access.
 - Each **workspace** decides what it may do there, as it does for a person:
   its admins and stewards add it on **Members**, or answer a request its
   managers make for it.
@@ -81,6 +82,24 @@ away and the view is out of its reach too.
 Wherever access is listed — a workspace's members, everyone with access,
 access reviews, the activity log — it is marked as a service account, and
 links here. It is never counted among people.
+
+### Who else may create one
+
+Below the grace period, the page says who else may create a service account
+for themselves, and **Change…** sets it:
+
+- **Only administrators of service accounts** — as it ships, so upgrading
+  changes nothing;
+- **Anyone who lets people into a workspace** — its admins and stewards, who
+  already decide what any account may do there;
+- **Anyone** — any active person.
+
+Each may have created up to **10** live accounts unless you choose another
+number; a deleted one no longer counts, and administrators of service
+accounts aren't limited. You can also ask that **a team they're in manages
+each one**, so it outlives any one person. Whoever creates one manages it,
+or the team they name; it reaches nothing until a workspace gives it a role.
+Changes are recorded in the activity log.
 
 ### Teams as managers
 
@@ -164,7 +183,11 @@ decision, and it lasts until it is taken away, or until the end they chose.
 ## For managers
 
 The accounts you manage — yourself, or through a team — are listed under
-**Account → API keys → Service accounts you manage**. Each opens on its own
+**Account → API keys → Service accounts you manage**. Where your
+administrators allow it, **Create service account** there makes one for an
+integration of yours: name it, say what it is for, and choose who manages it
+— you, or a team you're in. It shows how many you have created of the most
+you may. Each opens on its own
 page: how it stands, who manages it and where it has a role, and its keys.
 **Create key** opens the same wizard as for your own keys: what you choose is
 checked against what the **account** can reach, and you confirm it's you
@@ -247,8 +270,10 @@ Three things keep an integration from stopping because its person left.
 
 ## For integrators
 
-To get one, ask a super admin or org admin to create it — named for what it
-does — with you, or better your team, as its manager. Then, from its page, ask
+To get one, create it under **Account → API keys → Service accounts you
+manage**, where your administrators allow it — or ask a super admin or org
+admin to. Name it for what it does, with you, or better your team, as its
+manager. Then, from its page, ask
 each workspace it works in for access — or ask their admins to add it — and
 make its key under **Account → API keys → Service accounts you manage**.
 

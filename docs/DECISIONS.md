@@ -878,6 +878,35 @@ Details: [Service Accounts](/guide/service-accounts), [API Keys](/guide/api-keys
 
 ---
 
+## ADR-029: Who may create a service account is a policy, and it ships closed
+
+**Status:** Accepted — extends [ADR-028](#adr-028-service-accounts-answer-to-their-managers).
+**Date:** 2026-10-26
+**Context:** Only the administrators of service accounts — super and org admins — could create one, so every integration in every workspace waited on that one team. Once a workspace could give an account access as it gives a person (ADR-028's record), creating the account was the last step that needed them. Opening it has a cost an enterprise's security team should weigh: an account's keys outlive the person who made them, and accounts pile up.
+
+**Decision:**
+- **A policy, set in the app.** The administrators of service accounts (`system:service-accounts:manage`) choose who else may create one for themselves: nobody (`central`), anyone who lets people into a workspace — its admins and stewards (`granters`) — or any active person (`everyone`). It is kept on the one `platform_settings` row (`sa_who_may_create`, `sa_per_person_limit`, `sa_require_team_manager`) and changed with `PUT /api/v1/admin/service-accounts/policy`, which the activity log records (`platform.service_account_policy.updated`). Unset is `central`, so upgrading changes nothing.
+- **Creating one gives it nothing.** `POST /api/v1/me/service-accounts` makes an account with no roles: its access comes from each workspace, as before. Its creator manages it, or names a team they are in, which keeps it managed as people come and go — and the policy may ask for a team.
+- **A limit per person.** Each may have created up to `sa_per_person_limit` live accounts (10 unless set), counted by `service_accounts.created_by`; a deleted one no longer counts. The administrators of service accounts aren't limited. Two requests at once can't both pass the limit: each holds an advisory lock for its creator while it counts.
+- **Its own route, not the platform settings route or a feature switch.** The platform settings route takes `system:admin`, which only super admins hold, and feature switches cover the whole deployment, edited by super admins alone. The policy belongs to the people who look after service accounts, org admins among them.
+
+**Reasoning:** The account model already makes creation safe to open: an account holds only what workspaces give it, and appointing a manager can give nobody more than the appointer could grant. What remains is a judgement each enterprise makes — whether its people should hold credentials that outlive them — so it is a setting, closed until someone opens it, rather than a default this product chooses for them.
+
+**Trade-offs:**
+- (+) The central team stops being a queue for every integration, once it chooses to.
+- (+) Shipping closed means an upgrade never changes who may create credentials.
+- (-) The limit is a guardrail, not a boundary: restoring a deleted account isn't refused for it.
+- (-) Opened, creation means more accounts to look after; the inventory's filters, deleting and the hourly standing check keep that in hand.
+
+**Alternatives considered:**
+- Opening creation to everyone by default — what self-service asked for; left to each enterprise instead.
+- Approving each new account — rejected: an account gets no access when it is created, so approving that would add a queue and no safety. The approval that matters is each workspace's.
+- A feature switch — rejected: switches are the super admins', and this is the org admins' call too.
+
+Details: [Service Accounts](/guide/service-accounts#who-else-may-create-one).
+
+---
+
 ## Decision Summary
 
 | # | Decision | Status | Risk Level |
@@ -909,7 +938,8 @@ Details: [Service Accounts](/guide/service-accounts), [API Keys](/guide/api-keys
 | 025 | PostgreSQL-only management DB, schema owned by an upgrade job | Accepted | Low |
 | 026 | Property storage in a PostgreSQL side index | Accepted, partly built (slice A only) | Medium (not wired in) |
 | 027 | Personal API keys scoped per resource | Accepted (extended by ADR-028) | Medium (surface registry upkeep) |
-| 028 | Service accounts answer to their managers | Accepted | Medium (team membership is part of an account's security) |
+| 028 | Service accounts answer to their managers | Accepted (extended by ADR-029) | Medium (team membership is part of an account's security) |
+| 029 | Who may create a service account is a policy, shipped closed | Accepted | Low |
 
 ---
 

@@ -98,7 +98,7 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `system:groups:manage` | system | Create, edit, delete groups and manage their members. | `super_admin`, `org_admin` |
 | `system:org-admin` | system | Cross-workspace operator; implies every workspace permission. | `super_admin`, `org_admin` |
 | `system:org-viewer` | system | Read-only operator across every workspace in the tenancy. | `super_admin`, `org_auditor` |
-| `system:service-accounts:manage` | system | Create service accounts, choose who manages them, and grant them workspace roles. | `super_admin`, `org_admin` |
+| `system:service-accounts:manage` | system | Create service accounts, choose who manages them, grant them workspace roles, and say who else may create one. | `super_admin`, `org_admin` |
 | `system:templates:manage` | system | Curate the organization's layout templates and the built-in ones. | `super_admin`, `org_admin` |
 | `system:users:manage` | system | Create, approve, suspend, and change roles for users. | `super_admin` |
 | `system:workspaces:create` | system | Create new workspaces. | `super_admin`, `org_admin` |
@@ -534,8 +534,10 @@ one of its data sources is.
   adding someone to a team that manages a service account is held to the same rule on top of
   `system:groups:manage`, and an access-request approval never adds anyone to one. A holder of
   `system:users:manage` can make an account's keys without managing it, and its managers are
-  told; `system:service-accounts:manage` alone makes none. Deleting an account stops its keys at
-  once; for 30 days it can be restored as it was, then it is purged — its keys revoked, its
+  told; `system:service-accounts:manage` alone makes none. Who else may create an account for
+  themselves — nobody unless set, anyone who lets people into a workspace, or anyone — is that
+  permission's to decide, with a per-person limit; creating one gives it no access. Deleting an
+  account stops its keys at once; for 30 days it can be restored as it was, then it is purged — its keys revoked, its
   bindings and manager seats removed. See [Service Accounts](/guide/service-accounts).
 
 ## 403 body

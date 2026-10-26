@@ -49,13 +49,15 @@ An integration acts as someone, and everything it changes is recorded as them. C
 
 ### Get a service account
 
-Ask a super admin or an org admin (**Administration → Service accounts**) to:
+Create it under **Account → API keys → Service accounts you manage**, where your administrators
+allow it — otherwise ask a super admin or an org admin (**Administration → Service accounts**):
 
-1. **Create it**, named for what it does — "Metadata sync", say — with a line on what it is for.
+1. **Name it** for what it does — "Metadata sync", say — with a line on what it is for.
 2. **Make you, or better your team, its manager.** Managers make, rotate and revoke its keys.
-3. **Give it a role in each workspace it works in**: Workspace viewer to read, Workspace member
-   or Data engineer to change data. A service account never holds a role that administers a
-   workspace or lets people in.
+3. **Ask each workspace it works in for a role**, from its page: Workspace viewer to read,
+   Workspace member or Data engineer to change data. Each workspace's admins and stewards answer,
+   or add it themselves. A service account never holds a role that administers a workspace or
+   lets people in.
 
 It then appears under **Account → API keys → Service accounts you manage**. What it is and who
 answers for it: [Service Accounts](/guide/service-accounts).
