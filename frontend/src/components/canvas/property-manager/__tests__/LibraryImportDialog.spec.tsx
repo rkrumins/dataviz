@@ -90,6 +90,14 @@ describe('LibraryImportDialog', () => {
         expect(sent.savedQueries[0].predicate.value).toBe('-3746471915534727999')
     })
 
+    it('starts on a library it is handed — one opened from the search library', async () => {
+        importViewLibrary.mockResolvedValueOnce(preview())
+        render(<LibraryImportDialog viewId="v1" branchId={null} onClose={vi.fn()} onImported={vi.fn()}
+                                    initialPack={pack as never} initialFileName="opened.library.json" />)
+        expect(await screen.findByText("1 to add · 1 already here · 1 can't be imported")).toBeInTheDocument()
+        expect(importViewLibrary).toHaveBeenCalledWith('v1', pack, { strategy: 'merge', dryRun: true, branchId: null })
+    })
+
     it('asks again when the way it lands changes — and a replace says what it removes', async () => {
         importViewLibrary.mockResolvedValueOnce(preview())
             .mockResolvedValueOnce(preview({ strategy: 'replace', removed: 3 }))

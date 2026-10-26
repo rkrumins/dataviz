@@ -62,7 +62,8 @@ Hierarchy canvases (a Graph card at its smallest zoom leaves them out).
   lists the View's rules; its **Properties** tab lists every property the
   View's entities carry.
 - **Tag** on the Advanced Search query card turns the current search into a
-  rule.
+  rule, and **Make a display rule** in its **Library** turns any saved search
+  into one.
 
 ---
 
@@ -80,6 +81,9 @@ rule for that tag the same way. Rename it, choose a colour, save.
 — visually or in Code mode — and choose **Tag** on the query card. The
 **Create display rule** window opens with the search as its criteria. This is
 also the way to write criteria as text: the rule editor itself is visual only.
+A search someone saved — on this View or another you can open — needs no
+loading: in the **Library**, **Make a display rule** (the tag) on it opens the
+same window, named after the search.
 
 `Esc` cancels the editor; `⌘↵` / `Ctrl+Enter` saves.
 

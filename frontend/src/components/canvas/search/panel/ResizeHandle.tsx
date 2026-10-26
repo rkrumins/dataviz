@@ -1,6 +1,7 @@
 /**
  * Drag handle on the right edge of the panel that lets the user
- * resize it. Width is clamped to [MIN, MAX] and persisted to
+ * resize it. Width is clamped to [MIN, max] — `max` is MAX, or less
+ * when the canvas beside the panel needs the room — and persisted to
  * localStorage so the panel re-opens at the user's chosen width.
  *
  * The handle is invisible by default and surfaces a subtle accent
@@ -43,10 +44,15 @@ export interface ResizeHandleProps {
     width: number
     /** Called continuously during drag with the new (clamped) width. */
     onResize: (next: number) => void
+    /** The widest it may go now; MAX when not given. */
+    max?: number
+    /** A drag starts or ends — the panel follows the pointer without
+     *  easing while one is under way. */
+    onDragChange?: (dragging: boolean) => void
 }
 
 
-export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize }) => {
+export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize, max = MAX_WIDTH, onDragChange }) => {
     const [dragging, setDragging] = useState(false)
     const startXRef = useRef(0)
     const startWidthRef = useRef(width)
@@ -56,7 +62,8 @@ export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize }) => {
         startXRef.current = e.clientX
         startWidthRef.current = width
         setDragging(true)
-    }, [width])
+        onDragChange?.(true)
+    }, [width, onDragChange])
 
     // Track move + release on window so the user can drag past the
     // handle without losing focus.
@@ -66,31 +73,26 @@ export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize }) => {
             const dx = e.clientX - startXRef.current
             const next = Math.max(
                 MIN_WIDTH,
-                Math.min(MAX_WIDTH, startWidthRef.current + dx),
+                Math.min(max, startWidthRef.current + dx),
             )
             onResize(next)
         }
-        const handleUp = () => {
-            setDragging(false)
-            try {
-                window.localStorage.setItem(STORAGE_KEY, String(startWidthRef.current))
-            } catch {
-                // localStorage may be unavailable (e.g. in incognito); silently ignore.
-            }
-        }
-        // Persist on release; read final width via a closure-stable ref.
+        // Persist the width it was let go at. (This once wrote the width
+        // the drag STARTED from straight after, so a dragged width was
+        // never remembered.)
         const persist = (e: PointerEvent) => {
             const dx = e.clientX - startXRef.current
             const next = Math.max(
                 MIN_WIDTH,
-                Math.min(MAX_WIDTH, startWidthRef.current + dx),
+                Math.min(max, startWidthRef.current + dx),
             )
             try {
                 window.localStorage.setItem(STORAGE_KEY, String(next))
             } catch {
-                // ignore
+                // localStorage may be unavailable (e.g. in incognito); silently ignore.
             }
-            handleUp()
+            setDragging(false)
+            onDragChange?.(false)
         }
         window.addEventListener('pointermove', handleMove)
         window.addEventListener('pointerup', persist)
@@ -98,18 +100,18 @@ export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize }) => {
             window.removeEventListener('pointermove', handleMove)
             window.removeEventListener('pointerup', persist)
         }
-    }, [dragging, onResize])
+    }, [dragging, onResize, max, onDragChange])
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         const step = e.shiftKey ? KEY_STEP_BIG : KEY_STEP
         const target = e.key === 'ArrowRight' ? width + step
             : e.key === 'ArrowLeft' ? width - step
                 : e.key === 'Home' ? MIN_WIDTH
-                    : e.key === 'End' ? MAX_WIDTH
+                    : e.key === 'End' ? max
                         : null
         if (target === null) return
         e.preventDefault()
-        const next = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, target))
+        const next = Math.max(MIN_WIDTH, Math.min(max, target))
         onResize(next)
         try {
             window.localStorage.setItem(STORAGE_KEY, String(next))
@@ -125,7 +127,7 @@ export const ResizeHandle: FC<ResizeHandleProps> = ({ width, onResize }) => {
             aria-label="Resize search panel"
             aria-valuenow={width}
             aria-valuemin={MIN_WIDTH}
-            aria-valuemax={MAX_WIDTH}
+            aria-valuemax={max}
             aria-valuetext={`${width} pixels wide`}
             tabIndex={0}
             onPointerDown={handlePointerDown}

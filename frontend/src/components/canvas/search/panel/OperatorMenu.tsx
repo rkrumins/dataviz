@@ -40,6 +40,8 @@ import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
 
+import { anchorInView, followAnchor } from './anchorInView'
+
 
 export interface OperatorOption<T extends string> {
     value: T
@@ -94,6 +96,8 @@ export function OperatorMenu<T extends string>({
     useLayoutEffect(() => {
         if (!open) { setCoords(null); return }
         const update = () => {
+            // Scrolled out of sight: close rather than float, unattached.
+            if (buttonRef.current && !anchorInView(buttonRef.current)) { setOpen(false); return }
             const r = buttonRef.current?.getBoundingClientRect()
             if (!r) return
             const menuW = Math.max(r.width, 200)
@@ -105,15 +109,10 @@ export function OperatorMenu<T extends string>({
             const flipped = spaceBelow < desiredMenuH && spaceAbove > spaceBelow
             const top = flipped ? r.top - 4 : r.bottom + 4
             const left = Math.max(8, Math.min(r.left, viewportW - menuW - 8))
-            setCoords({ top, left, width: menuW, flipped })
+            setCoords((prev) => prev && prev.top === top && prev.left === left && prev.width === menuW
+                && prev.flipped === flipped ? prev : { top, left, width: menuW, flipped })
         }
-        update()
-        window.addEventListener('resize', update)
-        window.addEventListener('scroll', update, true)
-        return () => {
-            window.removeEventListener('resize', update)
-            window.removeEventListener('scroll', update, true)
-        }
+        return followAnchor(update)
     }, [open, options.length])
 
     // Outside click + Escape.

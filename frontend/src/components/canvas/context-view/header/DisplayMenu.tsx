@@ -23,6 +23,7 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { usePreferencesStore, type CanvasDensity, type LineageRenderMode } from '@/store/preferences'
 import { DisplaySettingsSections, isDefaultState } from '../DisplaySettingsPopover'
 import { LineageDisplaySections } from '../LineageDisplayPopover'
+import { useFolded } from './toolbarFold'
 
 export interface DisplayMenuProps {
   // Canvas — zoom / density / badges / tree lines
@@ -79,6 +80,7 @@ export function DisplayMenu({
   const subtleTreeLines = subtleTreeLinesRaw ?? false
 
   const [open, setOpen] = useState(false)
+  const folded = useFolded('display')
   const [anchor, setAnchor] = useState<{ top: number; right: number } | null>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const popoverRef = useRef<HTMLDivElement>(null)
@@ -141,15 +143,17 @@ export function DisplayMenu({
         onClick={() => setOpen(o => !o)}
         aria-haspopup="dialog"
         aria-expanded={open}
+        data-toolbar-item="display"
         className={cn(
-          'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300',
+          'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition duration-300',
           open
             ? 'bg-accent-lineage/15 border border-accent-lineage/35 text-ink shadow-sm shadow-accent-lineage/10 dark:bg-accent-lineage/20 dark:border-accent-lineage/30'
             : 'bg-black/[0.04] border border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08] dark:hover:bg-white/[0.08]',
+          folded && 'px-2.5',
         )}
       >
         <SlidersHorizontal className="w-4 h-4" strokeWidth={2.2} />
-        <span>Display</span>
+        <span data-toolbar-label className={folded ? 'sr-only' : undefined}>Display</span>
         <ChevronDown className={cn('w-3.5 h-3.5 transition-transform duration-200', open && 'rotate-180')} />
       </button>
       </HoverTip>

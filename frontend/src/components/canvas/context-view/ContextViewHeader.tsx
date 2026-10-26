@@ -27,8 +27,10 @@
  * separate layout slot from the right-rail EntityDrawer.
  */
 
+import { useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import { Loader2 } from 'lucide-react'
+import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import type { CanvasDensity, LineageRenderMode } from '@/store/preferences'
 import { BranchSwitcher } from '@/features/versioning/components/BranchSwitcher'
@@ -37,6 +39,7 @@ import { ViewerActions } from './header/ViewerActions'
 import type { ViewFileActions } from './header/ImportExportMenu'
 import type { TraceHistoryPanelEntry } from './header/TraceHistoryPanel'
 import { EditorActions } from './header/EditorActions'
+import { ToolbarFoldProvider, useToolbarFold } from './header/toolbarFold'
 
 export interface ContextViewHeaderProps {
   // Lineage flow
@@ -208,6 +211,14 @@ export function ContextViewHeader({
   onFitToWidth,
   onOpenOrphans,
 }: ContextViewHeaderProps) {
+  // The actions fold their words away, least-used first, when the row can't
+  // hold them beside the search box — and move under it when even that
+  // isn't enough (see header/toolbarFold.ts).
+  const rowRef = useRef<HTMLDivElement>(null)
+  const leadRef = useRef<HTMLDivElement>(null)
+  const actionsRef = useRef<HTMLDivElement>(null)
+  const fold = useToolbarFold(rowRef, leadRef, actionsRef)
+
   // Shared comprehension cluster — identical in both modes (see
   // header/ViewerActions.tsx for the rationale).
   const comprehensionProps = {
@@ -285,13 +296,19 @@ export function ContextViewHeader({
         )}
       </AnimatePresence>
 
-      <div className="grid grid-cols-[auto_1fr_auto] items-center gap-4 relative">
+      <div
+        ref={rowRef}
+        className={cn(
+          'grid items-center gap-4 relative',
+          fold.stacked ? 'grid-cols-[auto_1fr]' : 'grid-cols-[auto_1fr_auto]',
+        )}
+      >
         {/* Zone 1 — which version am I on, and did my layout save. The view's
             name, type count and metadata actions all live in the page header
             now; what is left here is the branch switcher (moved down out of
             CanvasVersioningBar) and the blueprint-sync signal that used to
             ride the title's subline. */}
-        <div className="flex items-center gap-2 min-w-0">
+        <div ref={leadRef} className="flex items-center gap-2 min-w-0">
           {branchWorkspaceId && (
             <BranchSwitcher
               workspaceId={branchWorkspaceId}
@@ -336,12 +353,18 @@ export function ContextViewHeader({
 
         {/* Zone 3 — Actions. Comprehension tools render identically in
             both modes; only the tail changes (Edit ↔ authoring cluster).
-            Fast tween cross-fade — deliberately calm, no spring. */}
+            Fast tween cross-fade — deliberately calm, no spring. Stacked,
+            they take a line of their own and wrap if even that is short. */}
+        <div
+          ref={actionsRef}
+          className={cn(fold.stacked && 'col-span-full justify-self-end max-w-full')}
+        >
+        <ToolbarFoldProvider value={fold.folded}>
         <AnimatePresence mode="wait" initial={false}>
           {isDraft ? (
             <motion.div
               key="editor-actions"
-              className="flex items-center gap-3"
+              className="flex flex-wrap items-center justify-end gap-3"
               initial={{ opacity: 0, y: 3 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -3 }}
@@ -361,7 +384,7 @@ export function ContextViewHeader({
           ) : (
             <motion.div
               key="viewer-actions"
-              className="flex items-center gap-3"
+              className="flex flex-wrap items-center justify-end gap-3"
               initial={{ opacity: 0, y: 3 }}
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -3 }}
@@ -376,6 +399,8 @@ export function ContextViewHeader({
             </motion.div>
           )}
         </AnimatePresence>
+        </ToolbarFoldProvider>
+        </div>
       </div>
     </div>
   )

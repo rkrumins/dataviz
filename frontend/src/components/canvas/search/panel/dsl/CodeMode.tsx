@@ -101,7 +101,9 @@ export function CodeMode({
             <div className="text-[10.5px] text-ink-muted/70 px-1">
                 <kbd className="px-1 rounded bg-glass/40 text-ink-muted">⌘↵</kbd> or click away to apply ·{' '}
                 <kbd className="px-1 rounded bg-glass/40 text-ink-muted">Esc</kbd> to undo your edit ·{' '}
-                <kbd className="px-1 rounded bg-glass/40 text-ink-muted">Ctrl Space</kbd> for suggestions
+                <kbd className="px-1 rounded bg-glass/40 text-ink-muted">Ctrl Space</kbd> for suggestions ·{' '}
+                double-click a filter's first word, or{' '}
+                <kbd className="px-1 rounded bg-glass/40 text-ink-muted">⌘I</kbd>, to select the whole filter
             </div>
             {onOpenCypher && (
                 <div className="text-[10.5px] text-ink-muted px-1">

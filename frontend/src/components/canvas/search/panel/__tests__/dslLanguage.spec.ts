@@ -4,10 +4,12 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
     completionContextAt,
+    conditionAtHead,
     type DslVocabulary,
     dslCompletionSource,
     dslDiagnostics,
     dslRanges,
+    widerCondition,
 } from '../dsl/dslLanguage'
 
 
@@ -147,5 +149,67 @@ describe('dslLanguage — completion', () => {
         expect(r?.options.map((o) => [o.label, o.detail])).toEqual([
             ['Sales', 'domain'], ['Sales', 'dataset · Finance']])
         expect(await complete('@"|', { ...VOCAB, names: { search, pathFor: vi.fn() } })).toBeNull()
+    })
+})
+
+
+describe('dslLanguage — selecting a whole condition', () => {
+    /** What a double-click at ``|`` selects whole — null where it selects a word. */
+    const atHead = (doc: string) => {
+        const [text, pos] = cursor(doc)
+        const span = conditionAtHead(text, pos)
+        return span && text.slice(span.from, span.to)
+    }
+
+    it.each([
+        ['t|ag:PII type:dataset', 'tag:PII'],
+        ['tag:PII ty|pe:dataset', 'type:dataset'],
+        ['ou|tgoing[PRODUCES](type:dataset) AND tag:PII', 'outgoing[PRODUCES](type:dataset)'],
+        ['type:x N|OT tag:PII', 'NOT tag:PII'],
+        ['own|er = "Ann" tag:PII', 'owner = "Ann"'],
+        ['notes IS N|OT EMPTY', 'notes IS NOT EMPTY'],
+        ['type:x A|ND tag:PII', 'type:x AND tag:PII'],
+        ['fedBy(type:x).v|ia(confidence >= 0.8)', 'fedBy(type:x).via(confidence >= 0.8)'],
+        ['noIn|coming[PRODUCES] tag:PII', 'noIncoming[PRODUCES]'],
+        ['ev|ery child(tag:PII)', 'every child(tag:PII)'],
+    ])('a double-click on the start of a condition (%s) selects all of it', (doc, whole) => {
+        expect(atHead(doc)).toBe(whole)
+    })
+
+    it('a double-click on any other word selects the word', () => {
+        expect(atHead('tag:P|II')).toBeNull()
+        expect(atHead('owner = "A|nn"')).toBeNull()
+        expect(atHead('rev|enue')).toBeNull()
+        expect(atHead('@"Fin|ance"')).toBeNull()
+    })
+
+    it('widens from the cursor a condition, then a group, at a time, out to the whole query', () => {
+        const text = 'type:dataset AND (tag:PII OR owner IS SET)'
+        const steps: string[] = []
+        let from = text.indexOf('PII') + 1
+        let to = from
+        for (let span = widerCondition(text, from, to); span; span = widerCondition(text, from, to)) {
+            ({ from, to } = span)
+            steps.push(text.slice(from, to))
+        }
+        expect(steps).toEqual(['tag:PII', 'tag:PII OR owner IS SET', '(tag:PII OR owner IS SET)', text])
+    })
+})
+
+
+describe('dslLanguage — an edge type named like a class', () => {
+    const generic: DslVocabulary = { ...VOCAB, edgeTypes: [{ id: 'LINEAGE' }, { id: 'HAS', containment: true }] }
+
+    it('completes it in quotes, so it is not read as the class', async () => {
+        const r = await complete('outgoing[|', generic)
+        expect(r?.options.find((o) => o.label === 'LINEAGE' && o.type === 'constant')?.apply).toBe('"LINEAGE"')
+        // The class itself is still offered, bare.
+        expect(r?.options.find((o) => o.label === 'lineage')?.apply).toBeUndefined()
+    })
+
+    it('warns only about a quoted name the data source lacks', () => {
+        expect(dslDiagnostics('outgoing["LINEAGE"](type:x)', generic.edgeTypes)).toEqual([])
+        expect(dslDiagnostics('outgoing["NOPE"](type:x)', generic.edgeTypes)).toEqual([
+            expect.objectContaining({ severity: 'warning', from: 10, to: 14 })])
     })
 })

@@ -9,6 +9,69 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Search at any width, saved searches across Views, and Code mode that edits like an editor
+
+### Added
+
+**Saved searches from other Views.** The Advanced Search **Library** has an **Other views** tab: your
+own named searches from other Views, then the searches saved on the workspace's other Views that you
+can open — those over the same data source first. Click one to run it here; people who can edit the
+View can **Copy** it in. In the API, `GET /api/v1/views/{view_id}/library/from-other-views`.
+
+**A search as a file.** **Download** on any saved search writes `<name>.library.json`, a library
+file holding just that search. **Open file…** runs one in any View — or a search's own JSON, or a
+single condition; a file of several opens in **Import library…**.
+
+**A display rule from any saved search.** **Make a display rule** on a saved search, in any tab of the
+Library, opens the rule editor on it, named after it, without loading it first.
+
+**Select as in a code editor.** Code mode shows its selection, in light and dark. Double-click selects
+a word — and, on the word a condition starts with (`tag`, `outgoing`, `NOT`, a property's name), the
+whole condition. `⌘I` / `Ctrl+I` selects the condition around the cursor, then its group, then the
+whole query. Dragging, copy, paste and undo work as anywhere.
+
+**Generic ontologies, worked through.** A data source that models only *Category* **has** *Entity*
+**has** *Entity*, as deep as it goes, with one lineage edge between anything (`LINEAGE`, `FLOWS_TO`),
+takes every relationship: every leaf (`no child()`), exactly five levels down (`ancestor*5(…)`),
+leaves with a direct `LINEAGE` edge into another layer. A new live test asks these of FalkorDB on
+every engine and checks them against the reference semantics; the guide has the examples.
+
+### Changed
+
+- **The header's actions fold their words away** — least-used first, keeping their icons, tooltips and
+  accessible names — when the row can't hold them beside the search box, and move to a line of their
+  own under it when even that doesn't fit. They used to run past the canvas, out of reach.
+- **The Advanced Search panel leaves the canvas at least 480 px.** Its edge follows the pointer without
+  lag, and the width you let go at is the one remembered.
+- **Menus close when what opened them scrolls out of sight**, instead of floating over the panel's
+  header, and **Add filter** opens upward when there's more room above.
+- **Search Studio's results and the query card fit narrow widths**: columns shrink before they
+  overlap, and the card's title row wraps.
+- **Loading a saved search runs it**, from any tab. It used to fill the card only, with nothing on
+  screen to run it when the builder was folded away.
+- Code mode writes an exact depth as `ancestor*5(…)`, not `ancestor*5..5(…)`.
+
+### Fixed
+
+- An edge type named `LINEAGE`, `LINKS`, `ANY` or `CONTAINMENT` couldn't be named in Code mode: the
+  word was read as the class. Quote it — `outgoing["LINEAGE"](…)` — as completion and the printer now
+  do.
+- A list in a filter's editor — the types, tags or values to pick — opened in the window's top-left
+  corner, over the app's header, and after a scroll stayed where the editor had been. It opens on its
+  field now, below it while five rows fit there (not over the editor's own controls), and follows it.
+- Code mode's selection was invisible: its colour wasn't a valid CSS value.
+- The Property Manager's coachmark showed through Search Studio.
+- The **Group as AND / OR** bar sat off-centre.
+
+### Known limitations
+
+- "Feeds a layer other than its own" names the layer; for every layer at once, join one such
+  condition per layer with OR.
+- **Other views** lists at most 500 saved searches. Your own named searches there are the ones kept in
+  this browser. API keys can't list them: a script reads each View's `GET /library`.
+
+---
+
 ## [Unreleased] — Search in Views with layers and hand placements
 
 ### Fixed

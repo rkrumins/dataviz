@@ -10,7 +10,7 @@
  * the suggestions remain one ArrowDown away.
  */
 import React, { useState } from 'react'
-import { render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
@@ -148,5 +148,49 @@ describe('UnifiedPicker multi-select', () => {
         render(<Multi onChange={onChange} />)
         await userEvent.type(screen.getByRole('combobox'), '74{Enter}')
         expect(onChange).toHaveBeenLastCalledWith(['74'])
+    })
+})
+
+
+describe('UnifiedPicker — an open list in a portal', () => {
+    it('follows its field when the field moves without a scroll', () => {
+        // In a filter's editor popover the field moves as the popover is
+        // placed: the list measured once was left where the field had been.
+        vi.useFakeTimers({ toFake: ['requestAnimationFrame', 'cancelAnimationFrame'] })
+        let rect = { top: 100, bottom: 130, left: 50, right: 350, width: 300, height: 30 }
+        const spy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+            .mockImplementation(() => ({ ...rect, x: rect.left, y: rect.top, toJSON: () => ({}) }) as DOMRect)
+        try {
+            render(<UnifiedPicker options={SAMPLES} value={[]} multiple portal onChange={() => {}} placeholder="types" />)
+            fireEvent.focus(screen.getByPlaceholderText('types'))
+            expect(screen.getByRole('listbox').style.top).toBe('134px')
+
+            rect = { ...rect, top: 300, bottom: 330 }
+            act(() => { vi.advanceTimersToNextFrame() })
+            expect(screen.getByRole('listbox').style.top).toBe('334px')
+        } finally {
+            spy.mockRestore()
+            vi.useRealTimers()
+        }
+    })
+
+    it.each([
+        // 230px below the field: five rows fit, so below, as tall as the room.
+        [500, { top: '534px', bottom: '', maxHeight: '230px' }],
+        // 110px below, 612px above: above it, at its tallest.
+        [620, { top: '', bottom: `${768 - 616}px`, maxHeight: '288px' }],
+    ])('opens below while five rows fit there, else above (field at %ipx)', (fieldTop, expected) => {
+        const rect = { top: fieldTop, bottom: fieldTop + 30, left: 50, right: 350, width: 300, height: 30 }
+        const spy = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+            .mockImplementation(() => ({ ...rect, x: rect.left, y: rect.top, toJSON: () => ({}) }) as DOMRect)
+        try {
+            expect(window.innerHeight).toBe(768)
+            render(<UnifiedPicker options={SAMPLES} value={[]} multiple portal onChange={() => {}} placeholder="types" />)
+            fireEvent.focus(screen.getByPlaceholderText('types'))
+            const { top, bottom, maxHeight } = screen.getByRole('listbox').style
+            expect({ top, bottom, maxHeight }).toEqual(expected)
+        } finally {
+            spy.mockRestore()
+        }
     })
 })

@@ -152,7 +152,8 @@ jobs:
             tests/integration/test_native_query_live.py \
             tests/integration/test_parse_cost_live.py \
             tests/integration/test_search_crash_guard_live.py \
-            tests/integration/test_search_layers_live.py -q
+            tests/integration/test_search_layers_live.py \
+            tests/integration/test_search_generic_ontology_live.py -q
 
   full-suite:
     name: Full backend suite (informational)

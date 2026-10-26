@@ -28,7 +28,9 @@ const ROW_PX = 36
 /** "Keep only these" names entities one by one, and one condition names at
  *  most this many (the server's limit) — past it, narrow first. */
 export const KEEP_MAX = 64
-const COLUMNS = 'grid-cols-[28px_minmax(10rem,2fr)_7rem_minmax(9rem,2fr)_minmax(8rem,1.4fr)_4.5rem]'
+/** Narrow enough for Search Studio's results column at a laptop's width
+ *  (about 560px) — each cell truncates, its whole text the tip. */
+const COLUMNS = 'grid-cols-[28px_minmax(8rem,2fr)_5rem_minmax(6rem,1.5fr)_minmax(5rem,1.5fr)_4.5rem]'
 
 
 export interface ResultsTableProps {

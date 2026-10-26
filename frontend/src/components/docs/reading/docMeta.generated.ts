@@ -95,7 +95,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/services/INSIGHTS.md"
   },
   "services-search": {
-    "updated": "2026-10-24",
+    "updated": "2026-10-25",
     "path": "docs/services/SEARCH.md"
   },
   "services-context-engine": {
@@ -103,7 +103,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/services/CONTEXT_ENGINE.md"
   },
   "services-assignments": {
-    "updated": "2026-10-04",
+    "updated": "2026-10-25",
     "path": "docs/services/ASSIGNMENTS.md"
   },
   "feature-aggregation-reconciliation": {
@@ -119,7 +119,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/features/view-portability.md"
   },
   "feature-search-and-rules-reference": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/features/search-and-rules-reference.md"
   },
   "top-level-nodes-performance": {
@@ -193,6 +193,10 @@ export const docMeta: Record<string, DocMeta> = {
   "rbac": {
     "updated": "2026-10-26",
     "path": "docs/RBAC.md"
+  },
+  "native-queries": {
+    "updated": "2026-10-25",
+    "path": "docs/NATIVE_QUERIES.md"
   },
   "sso": {
     "updated": "2026-10-14",
@@ -273,10 +277,6 @@ export const docMeta: Record<string, DocMeta> = {
   "read-path-performance": {
     "updated": "2026-10-10",
     "path": "docs/read-path-performance/README.md"
-  },
-  "native-queries": {
-    "updated": "2026-10-24",
-    "path": "docs/NATIVE_QUERIES.md"
   }
 }
 export const guideMeta: Record<string, DocMeta> = {
@@ -305,7 +305,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "advanced-search": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/guide/ADVANCED_SEARCH.md"
   },
   "lineage-lens": {
@@ -329,7 +329,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/MANAGING_VIEWS.md"
   },
   "display-rules": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-26",
     "path": "docs/guide/DISPLAY_RULES.md"
   },
   "semantic-layer": {
