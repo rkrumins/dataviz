@@ -558,6 +558,27 @@ describe('useViewSearchSessionController — resolveLayer', () => {
 
         expect(result.current.resolveLayer(hit)).toBe('L1')
     })
+
+    it('a view set to hold everything places an unplaced hit by type, whatever it places by hand', () => {
+        const layers: ViewLayerConfig[] = [
+            { id: 'L1', name: 'L1', entityTypes: [], order: 0 },
+            { id: 'L2', name: 'L2', entityTypes: ['database'], order: 1 },
+        ]
+        const assignments: Record<string, LayerAssignmentEntry> = {
+            'urn:db:other': { layerId: 'L1', inheritsChildren: true },
+        }
+        const hit = {
+            node: { urn: 'urn:col:total', entityType: 'column', displayName: 'total', properties: {} },
+            ancestorPath: [{ urn: 'urn:db:orders', entityType: 'database', displayName: 'Orders' }],
+        } as SearchHit
+
+        const open = renderHook(() => useViewSearchSessionController({
+            viewId: VIEW_ID, layers, assignments, curated: false, ...canvas,
+        }))
+        expect(open.result.current.resolveLayer(hit)).toBe('L2')
+        // Unsaid, its placements make it curated: the hit is not on the canvas.
+        expect(renderSession(layers, assignments).result.current.resolveLayer(hit)).toBeNull()
+    })
 })
 
 
