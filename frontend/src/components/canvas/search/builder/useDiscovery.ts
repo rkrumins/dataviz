@@ -62,6 +62,10 @@ export interface UseDiscoveryResult {
     keysByEdgeType: Record<string, string[]>
     /** Look up known sample values for an edge property key. */
     getEdgeValueSamples: (edgeType: string, propertyKey: string) => unknown[]
+    /** Where each edge key is kept: as an edge's own field, or in its JSON
+     *  of user properties — kept there by any edge type, it takes presence
+     *  and equality only. */
+    edgeKeyStoredAs: Record<string, 'native' | 'json'>
     /** A property's most common values counted across the whole view —
      *  not the sample `getValueSamples` reads — narrowed by typed text.
      *  Resolves null when the backend cannot answer (a share link, a
@@ -239,6 +243,16 @@ export function useDiscovery(viewId: string | null): UseDiscoveryResult {
         }
     }, [discovery])
 
+    const edgeKeyStoredAs = useMemo(() => {
+        const out: Record<string, 'native' | 'json'> = {}
+        for (const info of Object.values(discovery?.edges ?? {})) {
+            for (const [key, where] of Object.entries(info.storedAs ?? {})) {
+                if (out[key] !== 'json') out[key] = where
+            }
+        }
+        return out
+    }, [discovery])
+
     const suggestValues = useCallback<ValueSuggester>((propertyKey, q) => {
         if (!viewId || !propertyKey || !(provider instanceof RemoteGraphProvider)) {
             return Promise.resolve(null)
@@ -258,6 +272,7 @@ export function useDiscovery(viewId: string | null): UseDiscoveryResult {
         edgeTypes,
         keysByEdgeType,
         getEdgeValueSamples,
+        edgeKeyStoredAs,
         suggestValues,
     }
 }

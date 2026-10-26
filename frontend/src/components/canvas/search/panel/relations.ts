@@ -1,0 +1,295 @@
+/**
+ * relations — the words and rules of relationship conditions, shared by
+ * the row editor, the sentence, the palette and Code mode.
+ *
+ * A relationship (`kind: 'related'`) matches entities by the entities
+ * related to them: up the containment tree (parent, any ancestor, the
+ * top-level container), down it (child, any descendant), or along lineage —
+ * what feeds it (upstream), what it feeds (downstream), either. Its
+ * `where` is any condition, relationships included, so conditions chain.
+ * The server's model (`backend/common/models/search.py`, RelatedPredicate)
+ * is the authority on shapes; these mirror its caps so the editor never
+ * offers what the server would refuse.
+ */
+import type { NodeRef, Predicate, RelatedPredicate } from '@/types/search'
+
+import { formatUrnLabel } from '@/lib/urnLabels'
+
+import { edgeSetPhrase } from './vocabulary/edgeWords'
+
+
+export type RelationAxis = RelatedPredicate['axis']
+export type Quantifier = NonNullable<RelatedPredicate['quantifier']>
+
+export interface AxisMeta {
+    axis: RelationAxis
+    /** The Form's verb for it — what the entity does to its relative,
+     *  "Feeds", "Is inside" — never "has a target". */
+    label: string
+    /** The verb as a sentence reads it, describing one entity and several. */
+    verb: [one: string, many: string]
+    /** Its section of the verb menu: the containment tree, or connections. */
+    group: 'hierarchy' | 'connected'
+    /** What the relative is called, singular and plural: "parent",
+     *  "parents"; for lineage, "source" — never in/out, so the direction
+     *  can't be misread. */
+    noun: string
+    plural: string
+    /** Link axes walk edges — lineage, unless edge types or every link are
+     *  chosen — so take hops, edge types and an edge filter; containment
+     *  axes walk the tree. */
+    lineage: boolean
+    /** Whether a hop range applies (one-step axes and `root` take none). */
+    hops: boolean
+    description: string
+}
+
+export const AXES: AxisMeta[] = [
+    { axis: 'parent', label: 'Is directly inside', verb: ['is directly inside', 'are directly inside'],
+      group: 'hierarchy', noun: 'parent', plural: 'parents', lineage: false, hops: false,
+      description: 'Its container, one level up' },
+    { axis: 'ancestor', label: 'Is inside', verb: ['is inside', 'are inside'], group: 'hierarchy',
+      noun: 'ancestor', plural: 'ancestors', lineage: false, hops: true,
+      description: 'Any container above it' },
+    { axis: 'root', label: 'Sits under', verb: ['sits under', 'sit under'], group: 'hierarchy',
+      noun: 'top-level container', plural: 'top-level containers', lineage: false, hops: false,
+      description: 'Its top-level container — the one at the top of its tree' },
+    { axis: 'child', label: 'Directly contains', verb: ['directly contains', 'directly contain'],
+      group: 'hierarchy', noun: 'child', plural: 'children', lineage: false, hops: false,
+      description: 'What it holds, one level down' },
+    { axis: 'descendant', label: 'Contains', verb: ['contains', 'contain'], group: 'hierarchy',
+      noun: 'descendant', plural: 'descendants', lineage: false, hops: true,
+      description: 'Anything inside it, at any depth' },
+    { axis: 'downstream', label: 'Feeds', verb: ['feeds', 'feed'], group: 'connected',
+      noun: 'target', plural: 'targets', lineage: true, hops: true,
+      description: 'What it feeds, through lineage' },
+    { axis: 'upstream', label: 'Is fed by', verb: ['is fed by', 'are fed by'], group: 'connected',
+      noun: 'source', plural: 'sources', lineage: true, hops: true,
+      description: 'What feeds it, through lineage' },
+    { axis: 'neighbor', label: 'Is linked to', verb: ['is linked to', 'are linked to'],
+      group: 'connected', noun: 'linked entity', plural: 'linked entities', lineage: true,
+      hops: true, description: 'Anything it is linked to — any edge type, either way' },
+]
+
+const BY_AXIS: Record<string, AxisMeta> = Object.fromEntries(AXES.map((a) => [a.axis, a]))
+
+export function axisMeta(axis: RelationAxis): AxisMeta {
+    return BY_AXIS[axis] ?? AXES[0]
+}
+
+/** Which edges a link relationship walks: lineage (the default), every
+ *  link — any edge but the hierarchy's — or the edge types it names. */
+export type Through = 'lineage' | 'links' | 'types'
+
+export function throughOf(p: RelatedPredicate): Through {
+    if (p.edgeTypes) return 'types'
+    return p.edgeClass === 'links' ? 'links' : 'lineage'
+}
+
+/** How a link relationship reads: lineage forwards (feeds), backwards (is
+ *  fed by), or a link — lineage either way, every link or named edge
+ *  types, whose direction is said apart. None for the tree's axes. */
+export type LinkVerb = 'feeds' | 'fedBy' | 'linked'
+
+export function linkVerb(p: RelatedPredicate): LinkVerb | null {
+    if (!axisMeta(p.axis).lineage) return null
+    if (throughOf(p) !== 'lineage' || p.axis === 'neighbor') return 'linked'
+    return p.axis === 'downstream' ? 'feeds' : 'fedBy'
+}
+
+/** Which way a link is followed from the entity — its axis. */
+export type LinkDirection = 'out' | 'in' | 'both'
+
+export const DIRECTION_AXIS: Record<LinkDirection, RelationAxis> = {
+    out: 'downstream', in: 'upstream', both: 'neighbor',
+}
+
+export function linkDirection(axis: RelationAxis): LinkDirection {
+    return axis === 'downstream' ? 'out' : axis === 'upstream' ? 'in' : 'both'
+}
+
+const DIRECTION_WORDS: Record<LinkDirection, string> = { out: 'outgoing', in: 'incoming', both: 'either way' }
+
+/** How deep relationships nest (`DEEP_SEARCH_MAX_RELATION_DEPTH`). */
+export const RELATION_DEPTH_MAX = 3
+/** Lineage hops tested from every candidate (`DEEP_SEARCH_RELATION_MAX_HOPS`). */
+export const RELATION_MAX_HOPS = 3
+/** Lineage hops walked from a relationship's far end (as withinHops). */
+export const RELATION_FAR_END_MAX_HOPS = 10
+/** How far up or down the tree an ancestor / descendant looks by default. */
+export const TREE_DEPTH_MAX = 20
+
+/** The hops a relationship follows, fewest and most, as the server reads
+ *  them (`RelatedPredicate.hop_range`). */
+export function hopRange(p: RelatedPredicate): [number, number] {
+    const meta = axisMeta(p.axis)
+    if (!meta.hops) return p.axis === 'root' ? [1, TREE_DEPTH_MAX] : [1, 1]
+    const lo = p.minHops ?? 1
+    if (meta.lineage) return [lo, p.maxHops ?? lo]
+    return [lo, p.maxHops ?? TREE_DEPTH_MAX]
+}
+
+/** The most lineage hops this relationship may follow where it stands: at
+ *  the top of the query, asking for at least one relative, it is walked from
+ *  its far end — the entities it names, or those its condition matches (the
+ *  server's `anchor_groups`, `traced_from_far_end`) — as far as within-hops
+ *  goes; anywhere else, what every candidate tests itself. */
+export function maxHopsFor(p: RelatedPredicate, { topLevel, rule }: {
+    topLevel: boolean
+    rule: boolean
+}): number {
+    if (rule) return 1
+    const fromFarEnd = topLevel && (p.quantifier ?? 'any') === 'any' && !p.count
+    return fromFarEnd ? RELATION_FAR_END_MAX_HOPS : RELATION_MAX_HOPS
+}
+
+/** Its hops cut to what the server allows where it stands. */
+export function withinHopCap(p: RelatedPredicate, where: {
+    topLevel: boolean
+    rule: boolean
+}): RelatedPredicate {
+    if (!axisMeta(p.axis).lineage) return p
+    const cap = maxHopsFor(p, where)
+    const min = Math.min(p.minHops ?? 1, cap)
+    const max = p.maxHops && Math.min(p.maxHops, cap)
+    const { minHops: _lo, maxHops: _hi, ...rest } = p
+    return { ...rest, ...(min > 1 ? { minHops: min } : {}), ...(max && max > 1 ? { maxHops: max } : {}) }
+}
+
+/** What a relationship's More options hold, in a few words: "1–3 steps ·
+ *  lineage", "1 step · Produces edges · outgoing", "2–4 levels". None for
+ *  one step of the tree, which has no options. */
+export function optionsSummary(p: RelatedPredicate): string | null {
+    const meta = axisMeta(p.axis)
+    const [lo, hi] = hopRange(p)
+    if (meta.lineage) {
+        const through = throughOf(p)
+        return [
+            lo === hi ? `${hi} step${hi === 1 ? '' : 's'}` : `${lo}–${hi} steps`,
+            through === 'lineage' ? 'lineage' : edgeSetPhrase(p),
+            ...(through !== 'lineage' ? [DIRECTION_WORDS[linkDirection(p.axis)]] : []),
+            ...(p.edge ? ['only edges that meet conditions'] : []),
+        ].join(' · ')
+    }
+    if (!meta.hops) return null
+    if (!p.maxHops) return lo > 1 ? `${lo} levels down or more` : 'any depth'
+    return lo === hi ? `${hi} level${hi === 1 ? '' : 's'}` : `${lo}–${hi} levels`
+}
+
+/** The entity types a relative's condition names, if it names any. */
+export function farEndTypes(where: Predicate | undefined): string[] {
+    if (!where) return []
+    if (where.kind === 'entityType') return where.op === 'notIn' ? [] : where.values
+    if (where.kind === 'group' && (where.op ?? 'and') === 'and') {
+        for (const c of where.children) {
+            const types = farEndTypes(c)
+            if (types.length) return types
+        }
+    }
+    return []
+}
+
+/** A new relationship along ``axis``: no condition yet (any relative). */
+export function newRelation(axis: RelationAxis, where?: Predicate): RelatedPredicate {
+    return where ? { kind: 'related', axis, where } : { kind: 'related', axis }
+}
+
+/** How many relationships deep a predicate goes. */
+export function relationDepth(p: Predicate | null | undefined): number {
+    if (!p) return 0
+    if (p.kind === 'group') return Math.max(0, ...p.children.map(relationDepth))
+    if (p.kind === 'related') return 1 + relationDepth(p.where ?? null)
+    if (p.kind === 'path') {
+        return Math.max(relationDepth(p.sourceWhere ?? null), relationDepth(p.targetWhere ?? null))
+    }
+    return 0
+}
+
+
+// ---------------------------------------------------------------------------
+// Names
+// ---------------------------------------------------------------------------
+
+/** ``**`` in a name path: any number of levels. */
+export const ANY_DEPTH = '**'
+
+/** A reference as people read it: its name path joined with " / ", or
+ *  the URN's label. */
+export function refLabel(ref: NodeRef): string {
+    if (ref.path && ref.path.length) {
+        const text = ref.path.join(' / ')
+        return ref.entityType ? `${text} (${ref.entityType})` : text
+    }
+    return ref.urn ? formatUrnLabel(ref.urn, 48) : '…'
+}
+
+/** A reference as a token or the map shows it: by name, without the
+ *  "anywhere" (``**``) its path may start with. */
+export function refName(ref: NodeRef): string {
+    return refLabel(ref.path && ref.path.length > 1 && ref.path[0] === '**' ? { ...ref, path: ref.path.slice(1) } : ref)
+}
+
+/** A name path typed as text: segments split on "/", "\/" a slash in a
+ *  name and "\\" a backslash, each trimmed; empty segments dropped. */
+export function parseNamePath(text: string): string[] {
+    const out: string[] = []
+    let current = ''
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i]
+        if (ch === '\\' && (text[i + 1] === '/' || text[i + 1] === '\\')) {
+            current += text[i + 1]
+            i += 1
+        } else if (ch === '/') {
+            out.push(current.trim())
+            current = ''
+        } else {
+            current += ch
+        }
+    }
+    out.push(current.trim())
+    return out.filter(Boolean)
+}
+
+/** A name as a path holds it: its slashes and backslashes escaped. */
+function escapeName(name: string): string {
+    return name.replace(/[\\/]/g, '\\$&')
+}
+
+/** A name path as text: the inverse of ``parseNamePath``. */
+export function formatNamePath(path: string[]): string {
+    return path.map(escapeName).join('/')
+}
+
+/** The paths of names that could name one entity, fewest names first: its
+ *  name anywhere in the view (``** / name``), then with each container
+ *  above it, and its whole path from the top, which reads first of two as
+ *  long. Names a reference can't hold (blank, padded, longer than 256, or
+ *  ``**`` itself) and paths past 12 names are left out. */
+export function pathCandidates(name: string, ancestors: string[]): string[][] {
+    const ok = (s: string) => s.length > 0 && s.length <= 256 && s.trim() === s && s !== ANY_DEPTH
+    if (!ok(name)) return []
+    const candidates: string[][] = []
+    for (let k = 0; k <= ancestors.length; k++) {
+        const above = ancestors.slice(ancestors.length - k)
+        if (above.every(ok) && k + 2 <= 12) candidates.push([ANY_DEPTH, ...above, name])
+    }
+    if (ancestors.every(ok) && ancestors.length < 12) candidates.push([...ancestors, name])
+    return candidates.sort((a, b) =>
+        a.length - b.length || Number(a[0] === ANY_DEPTH) - Number(b[0] === ANY_DEPTH))
+}
+
+/** The text a reference is typed as in the name picker. */
+export function refText(ref: NodeRef | null | undefined): string {
+    if (!ref) return ''
+    if (ref.urn) return ref.urn
+    return (ref.path ?? []).map(escapeName).join(' / ')
+}
+
+/** The reference typed text names: a URN, or a name path. */
+export function textToRef(text: string): NodeRef | null {
+    const trimmed = text.trim()
+    if (!trimmed) return null
+    if (/^urn:/i.test(trimmed)) return { urn: trimmed }
+    const path = parseNamePath(trimmed)
+    return path.length ? { path } : null
+}

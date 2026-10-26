@@ -670,12 +670,16 @@ async def due_for_expiry_reminder(
     session: AsyncSession, *, within: timedelta, batch: int,
 ) -> list[ApiKeyORM]:
     """Active keys expiring inside ``within`` that the sweep has not looked
-    at yet. The sweep decides which deserve a reminder and marks every row it
-    took, so each key is considered once."""
+    at yet — not those of a deleted owner, such as a service account deleted
+    and not yet purged, which can't be rotated. The sweep decides which
+    deserve a reminder and marks every row it took, so each key is
+    considered once."""
     now = _now()
     return list((await session.execute(
         select(ApiKeyORM)
+        .join(UserORM, UserORM.id == ApiKeyORM.user_id)
         .where(
+            UserORM.deleted_at.is_(None),
             _active_clause(now.isoformat()),
             # Bounded on both sides in one place, so the expiry index serves
             # the range instead of every expired key ever made.

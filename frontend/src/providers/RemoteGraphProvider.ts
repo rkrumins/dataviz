@@ -61,6 +61,8 @@ import type {
     SearchDiscoverResult,
     SearchValuesResult,
     SearchMembershipRequest,
+    SearchResolveRequest,
+    SearchResolveResult,
     SearchMembershipResult,
     SearchCountsRequest,
     SearchCountsResult,
@@ -70,6 +72,8 @@ import type {
     SearchCatalogResult,
     SearchExportRequest,
     SearchExportResult,
+    NativeQueryRequest,
+    NativeQueryResponse,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 
@@ -289,7 +293,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
     // Internal Fetch Helper
     // ==========================================
 
-    private async fetch<T>(path: string, options?: RequestInit & { extraParams?: Record<string, string>, timeoutMs?: number, apiVersion?: 'v1' | 'v2' }): Promise<T> {
+    private async fetch<T>(path: string, options?: RequestInit & { extraParams?: Record<string, string>, timeoutMs?: number, apiVersion?: 'v1' | 'v2', silent403?: boolean }): Promise<T> {
         const { extraParams, timeoutMs, apiVersion, ...fetchOptions } = options ?? {}
         const method = (fetchOptions.method ?? 'GET').toUpperCase()
         const url = this.buildUrl(path, extraParams, apiVersion)
@@ -582,6 +586,22 @@ export class RemoteGraphProvider implements GraphDataProvider {
     }
 
     /**
+     * Which entities each name reference names, in the view's scope — POST
+     * /search/resolve: every match counted, the first few with their
+     * containers. The picker shows "1 entity", "3 entities", "not found"
+     * as a name path is typed.
+     */
+    async resolveSearchRefs(
+        body: SearchResolveRequest, opts?: { signal?: AbortSignal },
+    ): Promise<SearchResolveResult> {
+        return await this.fetch<SearchResolveResult>('/search/resolve', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+        })
+    }
+
+    /**
      * Each display rule's exact total in the view — POST /search/counts.
      * A large view takes several calls: send the returned sessions back
      * until every count is complete (``services/ruleCounts.ts``).
@@ -680,10 +700,30 @@ export class RemoteGraphProvider implements GraphDataProvider {
      * button and is the first stop when a query silently returns 0
      * results.
      */
-    async searchExplain(query: SearchQuery): Promise<SearchExplainResult> {
+    async searchExplain(query: SearchQuery, opts?: { signal?: AbortSignal }): Promise<SearchExplainResult> {
         return await this.fetch<SearchExplainResult>('/search/explain', {
             method: 'POST',
             body: JSON.stringify(query),
+            signal: opts?.signal,
+        })
+    }
+
+    /**
+     * A person's own read-only Cypher on the view's data source.
+     *
+     * Never retried — every run that reaches the server is recorded in the
+     * activity log, so a replay would be a second run — which is why
+     * ``/search/native`` is absent from the idempotent read list. The
+     * request may take as long as the query is allowed, and a little more.
+     * A refusal is the console's to show, so a 403 opens no global notice.
+     */
+    async runNativeQuery(body: NativeQueryRequest, opts?: { signal?: AbortSignal }): Promise<NativeQueryResponse> {
+        return await this.fetch<NativeQueryResponse>('/search/native', {
+            method: 'POST',
+            body: JSON.stringify(body),
+            signal: opts?.signal,
+            timeoutMs: (body.timeoutMs ?? 10_000) + 15_000,
+            silent403: true,
         })
     }
 

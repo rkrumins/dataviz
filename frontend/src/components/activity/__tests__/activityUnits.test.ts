@@ -123,7 +123,7 @@ describe('where an event links to', () => {
         }))
         expect(account).toEqual([{
             key: 'service-account', label: 'Open the service account',
-            href: '/admin/service-accounts?account=svc_0123456789ab',
+            href: '/service-accounts/svc_0123456789ab',
         }])
     })
 })

@@ -2,6 +2,7 @@
  * Workspace Members Service — list and manage role bindings scoped to
  * one workspace. Maps to ``/api/v1/admin/workspaces/{ws}/members``.
  */
+import type { AccessRequestManager } from './accessRequestsService'
 import { authFetch } from './apiClient'
 import { withReason, type ActivityOpts } from './activityReason'
 import type { ImpactPreviewResponse } from './permissionsService'
@@ -123,7 +124,9 @@ export interface WorkspaceMemberExpiryUpdateRequest {
 export interface WorkspaceGrantOptions {
     tier: 'admin' | 'steward'
     accessMode: 'app' | 'idp'
-    roles: { name: string; description: string | null; isSystem: boolean }[]
+    /** ``requestable``: neither administers the workspace nor lets people in —
+     *  the roles a service account may hold. */
+    roles: { name: string; description: string | null; isSystem: boolean; requestable?: boolean }[]
     /** App-managed teams bound here whose every role the caller could grant. */
     groups: { id: string; name: string; memberCount: number; roles: string[] }[]
     /** Identity-provider groups whose members reach the workspace. */
@@ -144,6 +147,14 @@ function url(wsId: string, suffix: string = ''): string {
 }
 
 
+/** A service account that may be added here: what it is for, and who manages it. */
+export interface ServiceAccountCandidate {
+    id: string
+    name: string
+    description: string | null
+    managers: AccessRequestManager[]
+}
+
 export const workspaceMembersService = {
     list(wsId: string): Promise<WorkspaceMemberResponse[]> {
         return authFetch<WorkspaceMemberResponse[]>(url(wsId))
@@ -159,6 +170,12 @@ export const workspaceMembersService = {
     /** The roles, teams and identity-provider groups the caller may grant here. */
     grantOptions(wsId: string): Promise<WorkspaceGrantOptions> {
         return authFetch<WorkspaceGrantOptions>(url(wsId, '/grant-options'))
+    },
+
+    /** Enabled service accounts matching ``q``, to add here like a person. */
+    serviceAccountCandidates(wsId: string, q: string): Promise<ServiceAccountCandidate[]> {
+        const search = q ? `?q=${encodeURIComponent(q)}` : ''
+        return authFetch<ServiceAccountCandidate[]>(url(wsId, `/service-accounts${search}`))
     },
 
     create(

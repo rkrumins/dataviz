@@ -137,4 +137,32 @@ describe('countRules', () => {
         expect(searchCounts).toHaveBeenCalledTimes(600)
         expect(updates[updates.length - 1].get('a')?.error).toMatch(/^The count stopped/)
     })
+
+    it('counts a search being built in its own scope, held to a search\'s limits', async () => {
+        const { provider, searchCounts } = providerAnswering(
+            { counts: { a: { count: 4, status: 'complete' } } },
+        )
+        const scope = { viewId: 'v', scopeMode: 'visible' as const, visibleUrns: ['u1', 'u2'] }
+        await countRules(provider, 'v', [{ id: 'a', predicate: group }], { scope, purpose: 'search' })
+        const [body] = searchCounts.mock.calls[0]
+        expect(body.scope).toEqual(scope)
+        expect(body.purpose).toBe('search')
+    })
+
+    it('sends no purpose for a display rule, as before', async () => {
+        const { provider, searchCounts } = providerAnswering({ counts: { a: { count: 1, status: 'complete' } } })
+        await countRules(provider, 'v', [{ id: 'a', predicate: group }])
+        expect(searchCounts.mock.calls[0][0]).not.toHaveProperty('purpose')
+    })
+
+    it('answers with the counts so far when asked to stop early', async () => {
+        const searchCounts = vi.fn(async () => ({
+            counts: { a: { count: 7, status: 'running' as const, sessionId: 's',
+                progress: { scanned: 10, total: 100, matched: 7 } } },
+        }))
+        const provider = { searchCounts } as unknown as RemoteGraphProvider
+        const final = await countRules(provider, 'v', [{ id: 'a', predicate: group }], { maxRequests: 2 })
+        expect(searchCounts).toHaveBeenCalledTimes(2)
+        expect(final.get('a')).toEqual({ count: 7, complete: false, percent: 10 })
+    })
 })

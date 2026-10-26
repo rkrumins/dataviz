@@ -12,12 +12,14 @@ const BANNER_TONE = {
     warn: { box: 'border-amber-500/30 bg-amber-500/[0.07]', icon: 'bg-amber-500/15 text-amber-600 dark:text-amber-400', title: 'text-amber-800 dark:text-amber-200' },
 }
 
-/** Something about the deployment, or this page, that holds for every key. */
-export function Banner({ tone, icon: Icon, title, children }: {
+/** Something about the deployment, or this page, that holds for every key —
+ *  with what to do about it, when there is something (`action`). */
+export function Banner({ tone, icon: Icon, title, children, action }: {
     tone: keyof typeof BANNER_TONE
     icon: LucideIcon
     title: string
     children: React.ReactNode
+    action?: React.ReactNode
 }) {
     const t = BANNER_TONE[tone]
     return (
@@ -29,6 +31,7 @@ export function Banner({ tone, icon: Icon, title, children }: {
                 <p className={cn('text-sm font-semibold', t.title)}>{title}</p>
                 <p className="mt-0.5 text-xs text-ink-secondary leading-relaxed">{children}</p>
             </div>
+            {action && <div className="shrink-0 self-center">{action}</div>}
         </div>
     )
 }

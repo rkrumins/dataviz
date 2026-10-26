@@ -393,12 +393,20 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   read the posture and has none cached takes passwords as on, as its sign-in page does.
 - **Service accounts.** A key can belong to a service account: a principal nobody signs in
   as, which every sign-in path refuses and no identity provider can link to. It holds only the
-  workspace roles given on its own page — never a platform role, a team's roles, or one that
-  administers a workspace. Its managers, people or members of managing teams, make its keys
-  after the same step-up and are recorded as having made them. So can a holder of
+  workspace roles a workspace gives it — its admins and stewards, as they give a person, or an
+  administrator of service accounts — never a team's roles, or one that administers a workspace
+  or lets people in. Of a platform role it keeps only `system:org-viewer`: reading every
+  workspace, which only an administrator of service accounts who reads every workspace gives it
+  (`org_reader`, ADR-030). Its managers, people or members of managing teams,
+  make its keys after the same step-up and are recorded as having made them. So can a holder of
   `system:users:manage` (a super admin) while their session is known to be alive, and the
-  account's managers are told; `system:service-accounts:manage` alone makes no keys. Its keys stop while it is
-  disabled (`api_key_owner_inactive`) and pause once nobody in good standing has managed it for
+  account's managers are told; `system:service-accounts:manage` alone makes no keys. Its
+  managers run the account too and ask workspaces for access for it, but answer no request for
+  it, and may appoint a manager only who would gain nothing they couldn't grant; one an
+  administrator disabled or deleted stays so until an administrator enables or restores it. Its keys
+  stop while it is disabled or deleted (`api_key_owner_inactive`) — a deleted one is purged after 30
+  days, its keys revoked and its roles and managers removed — and pause once nobody in good
+  standing has managed it for
   the grace period, 14 days by default (`401 api_key_unmanaged`); every super and org admin is
   told when it loses its last manager. See [Service Accounts](/guide/service-accounts) and
   ADR-028.
@@ -514,6 +522,26 @@ the product. Security switches such as **Self-registration** do the opposite and
 
 **Where in the code.** `backend/app/api/v1/feature_gate.py` (`require_feature`,
 `feature_disabled`), `backend/app/config/features_seed.py`.
+
+### Native read-only queries
+
+**How it works.** People who may query a data source can run their own read-only
+Cypher on FalkorDB and Neo4j sources, from the search panel. It reads the whole
+data source, so it has its own permission (`workspace:native-query:read`, which
+every role that reads data sources has until an administrator removes it) or a
+share's **Query data** opt-in — never a View's visibility, never an API key. The
+engines run it read-only, Neo4j checks its plan first, and a guard in front of
+both refuses writes, `LOAD CSV`, other databases, plugins and parameters. Rows,
+time, reply size and how often are bounded, and every run is recorded before a
+row is returned.
+
+**How to configure it.** The **Native read-only queries** switch, the permission
+per role, and the database settings in
+[Native read-only queries: security](/docs/native-queries#operator-hardening).
+
+**Where in the code.** `backend/app/services/native_query/`,
+`backend/app/providers/falkordb_native.py`, `backend/graph/adapters/neo4j_provider.py`
+(`run_readonly_cypher`).
 
 ## Secrets
 
@@ -878,3 +906,6 @@ didn't. The policy itself is `.github/SECURITY.md` in the repository.
   invitations and access.
 - [API Keys](/guide/api-keys) — when you want a person's side of keys: creating, limiting,
   rotating and revoking them.
+- [Native read-only queries: security](/docs/native-queries) — when you review
+  people running their own Cypher: what may run, the limits, the record, and database
+  hardening.

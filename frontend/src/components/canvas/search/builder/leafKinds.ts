@@ -13,6 +13,8 @@
  */
 import type { EdgeClass, Predicate } from '@/types/search'
 
+import { filterKindById } from '../panel/vocabulary/filterKinds'
+
 
 export type LeafKind =
     | 'property'
@@ -30,6 +32,8 @@ export type LeafKind =
     | 'descendantOf'
     | 'withinHops'
     | 'path'
+    | 'related'
+    | 'is'
 
 
 export interface LeafKindMeta {
@@ -50,7 +54,7 @@ export interface LeafKindMeta {
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
 
 
-export const LEAF_KINDS: readonly LeafKindMeta[] = [
+const OWN_WORDS: readonly LeafKindMeta[] = [
     // -- property facet --------------------------------------------------
     {
         kind: 'property',
@@ -105,8 +109,8 @@ export const LEAF_KINDS: readonly LeafKindMeta[] = [
     },
     {
         kind: 'layer',
-        label: 'Layer',
-        description: 'Pipeline layer (Source / Staging / Refinery / Report).',
+        label: 'In layer',
+        description: 'In one of the view\'s layers, the way the canvas places it.',
         icon: 'Layers',
         category: 'identity',
         makeEmpty: () => ({
@@ -197,10 +201,32 @@ export const LEAF_KINDS: readonly LeafKindMeta[] = [
         makeEmpty: () => ({
             kind: 'degree',
             direction: 'both',
-            op: 'eq',
-            value: 0,
-            edgeClass: DEFAULT_EDGE_CLASS,
+            op: 'gt',
+            value: 5,
+            edgeClass: 'links',
         }),
+    },
+
+    // -- relationships -----------------------------------------------------
+    {
+        kind: 'related',
+        label: 'Relationship',
+        description: 'A condition on its parent, top-level container, children, sources or targets.',
+        icon: 'Network',
+        category: 'identity',
+        makeEmpty: () => ({
+            kind: 'related',
+            axis: 'parent',
+            where: { kind: 'entityType', op: 'in', values: [] },
+        }),
+    },
+    {
+        kind: 'is',
+        label: 'A named entity',
+        description: 'An entity by its path of names — "Sales / orders" — or by URN.',
+        icon: 'Crosshair',
+        category: 'identity',
+        makeEmpty: () => ({ kind: 'is', refs: [] }),
     },
 
     // -- scope -----------------------------------------------------------
@@ -245,6 +271,24 @@ export const LEAF_KINDS: readonly LeafKindMeta[] = [
         }),
     },
 ]
+
+
+/** The kinds the "+ Add filter" palette offers too, by its id: the in-group
+ *  picker calls them what the palette does, so one condition never goes by
+ *  two names ("Dead-end nodes" here, "No downstream lineage" there). */
+const PALETTE_ID: Partial<Record<LeafKind, string>> = {
+    property: 'property', hasProperty: 'has-property', tag: 'tag', entityType: 'entity-type',
+    isOrphan: 'no-lineage', isLeaf: 'no-downstream', isRoot: 'no-upstream',
+    hasIncoming: 'has-upstream', hasOutgoing: 'has-downstream', degree: 'degree',
+    is: 'is-named', path: 'path', withinHops: 'within-hops',
+}
+
+
+export const LEAF_KINDS: readonly LeafKindMeta[] = OWN_WORDS.map((meta) => {
+    const id = PALETTE_ID[meta.kind]
+    const palette = id ? filterKindById(id) : undefined
+    return palette ? { ...meta, label: palette.label } : meta
+})
 
 
 export function findLeafKind(kind: LeafKind): LeafKindMeta | undefined {

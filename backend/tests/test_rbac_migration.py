@@ -46,6 +46,11 @@ _WS_ACCESS_MIGRATION_PATH = _VERSIONS_DIR / "20261019_1000_ws_access.py"
 # Service accounts added system:service-accounts:manage — creating them,
 # choosing their managers and granting their workspace roles.
 _SERVICE_ACCOUNTS_MIGRATION_PATH = _VERSIONS_DIR / "20261023_1200_service_accounts.py"
+# Native queries added workspace:native-query:read — running one's own
+# read-only queries on a workspace's data sources.
+_NATIVE_QUERY_MIGRATION_PATH = _VERSIONS_DIR / "20261024_1000_native_query.py"
+# Org-wide read for service accounts added the org_reader role.
+_ORG_READ_MIGRATION_PATH = _VERSIONS_DIR / "20261026_1200_sa_org_read.py"
 
 
 def _load_migration(path: Path, name: str):
@@ -229,7 +234,7 @@ def test_datasource_publish_seed_convergence():
         _DATASOURCE_PUBLISH_MIGRATION_PATH, "_ds_publish_migration"
     )
     assert (mod.revision, mod.down_revision) == (
-        "20261017_1000_datasource_publish", "20261023_1200_service_accounts",
+        "20261017_1000_datasource_publish", "20261024_1000_native_query",
     )
 
     # Permission row: the same text in both paths.
@@ -462,7 +467,9 @@ def test_members_add_permission_and_steward_reach_an_existing_database():
     assert seed_role["description"] == mod._ROLE_DESCRIPTION
 
     migration_grants = set(mod._ROLE_PERMISSIONS)
-    seed_grants = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm or r == role}
+    # Less what a later revision granted the role too.
+    later = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == "workspace:native-query:read"}
+    seed_grants = {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm or r == role} - later
     assert seed_grants == migration_grants
     for granted_role, granted in migration_grants:
         assert granted in SYSTEM_ROLE_DEFAULTS[granted_role].permissions, granted_role
@@ -498,6 +505,59 @@ def test_service_accounts_permission_reaches_an_existing_database():
     assert {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm} == migration_grants
     for role, _ in migration_grants:
         assert perm in SYSTEM_ROLE_DEFAULTS[role].permissions, role
+
+
+def test_native_query_permission_reaches_an_existing_database():
+    """``workspace:native-query:read`` arrives by migration AND ``rbac_seed``,
+    with the same rows, and "Reset to default" restores it: every system role
+    that reads data sources holds it, ``workspace:admin`` implies it in code,
+    and org auditors reach it as a ``:read`` permission."""
+    from backend.app.config import rbac_seed
+    from backend.app.services.permission_service import _WORKSPACE_CATEGORY_LEAVES
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+
+    perm = "workspace:native-query:read"
+    assert _NATIVE_QUERY_MIGRATION_PATH.exists(), f"missing migration: {_NATIVE_QUERY_MIGRATION_PATH}"
+    mod = _load_migration(_NATIVE_QUERY_MIGRATION_PATH, "_native_query_migration")
+    assert mod._PERMISSION == perm
+
+    seed_perm = next(p for p in rbac_seed.PERMISSIONS if p["id"] == perm)
+    assert (seed_perm["description"], seed_perm["long_description"]) == (
+        mod._DESCRIPTION, mod._LONG_DESCRIPTION,
+    )
+    migration_grants = set(mod._ROLE_PERMISSIONS)
+    # workspace_publisher comes later, with 20261017_1000_datasource_publish, which grants it too.
+    publish = _load_migration(_DATASOURCE_PUBLISH_MIGRATION_PATH, "_ds_publish_migration")
+    later = {(r, p) for r, p in publish._NEW_ROLE_PERMISSIONS if p == perm}
+    assert later == {("workspace_publisher", perm)}
+    assert migration_grants | later == {(r, perm) for r, p in rbac_seed.ROLE_GRANTS if p == perm}
+    readers = {r for r, p in rbac_seed.ROLE_GRANTS if p == "workspace:datasource:read"}
+    assert {r for r, _ in migration_grants | later} == readers
+    for role, spec in SYSTEM_ROLE_DEFAULTS.items():
+        reads = "workspace:datasource:read" in spec.permissions
+        assert (perm in spec.permissions) == reads, role
+    assert perm in _WORKSPACE_CATEGORY_LEAVES
+
+
+def test_the_org_reader_role_reaches_an_existing_database():
+    """``org_reader`` is seeded by the migration AND ``rbac_seed``, with the
+    same text and its one grant, and "Reset to default" restores it: fresh
+    installs and migrated databases must agree on what reading every
+    workspace gives a service account — ``system:org-viewer``, the one
+    platform permission an account's claims keep, and nothing else."""
+    from backend.app.config import rbac_seed
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+    from backend.common.service_accounts import SERVICE_ACCOUNT_GLOBAL_PERMISSIONS
+
+    role = "org_reader"
+    assert _ORG_READ_MIGRATION_PATH.exists(), f"missing migration: {_ORG_READ_MIGRATION_PATH}"
+    mod = _load_migration(_ORG_READ_MIGRATION_PATH, "_org_read_migration")
+    assert mod._ROLE == role
+    seed_role = next(r for r in rbac_seed.SYSTEM_ROLES if r["name"] == role)
+    assert (seed_role["scope_type"], seed_role["description"]) == ("global", mod._ROLE_DESCRIPTION)
+    assert set(mod._ROLE_PERMISSIONS) == {(role, "system:org-viewer")}
+    assert {(r, p) for r, p in rbac_seed.ROLE_GRANTS if r == role} == set(mod._ROLE_PERMISSIONS)
+    assert SYSTEM_ROLE_DEFAULTS[role].permissions == SERVICE_ACCOUNT_GLOBAL_PERMISSIONS
 
 
 def test_the_analytics_permission_is_offered_to_the_client():

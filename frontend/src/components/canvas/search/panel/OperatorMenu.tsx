@@ -28,6 +28,7 @@ import { motion } from 'framer-motion'
 import { Check, ChevronDown } from 'lucide-react'
 import {
     type FC,
+    Fragment,
     type ReactNode,
     useCallback,
     useEffect,
@@ -44,6 +45,8 @@ export interface OperatorOption<T extends string> {
     value: T
     label: string
     description?: string
+    /** A heading the menu shows above the first option of each group. */
+    group?: string
 }
 
 
@@ -200,6 +203,9 @@ export function OperatorMenu<T extends string>({
                     {open && renderCoords && (
                         <motion.div
                             ref={menuRef}
+                            // A floating layer: a popover holding this menu
+                            // doesn't treat a pick in it as a click outside.
+                            data-floating-layer=""
                             initial={{ opacity: 0, y: renderCoords.flipped ? 4 : -4, scale: 0.97 }}
                             animate={{ opacity: 1, y: 0, scale: 1 }}
                             transition={{ duration: 0.12 }}
@@ -220,11 +226,18 @@ export function OperatorMenu<T extends string>({
                             )}
                             role="listbox"
                         >
-                            {options.map((opt) => {
+                            {options.map((opt, i) => {
                                 const active = opt.value === value
+                                const heading = opt.group && opt.group !== options[i - 1]?.group
                                 return (
+                                    <Fragment key={opt.value}>
+                                    {heading && (
+                                        <div role="presentation"
+                                             className="px-3 pt-2 pb-1 text-[10px] font-mono uppercase tracking-[0.14em] text-ink-muted">
+                                            {opt.group}
+                                        </div>
+                                    )}
                                     <button
-                                        key={opt.value}
                                         type="button"
                                         role="option"
                                         aria-selected={active}
@@ -252,6 +265,7 @@ export function OperatorMenu<T extends string>({
                                             )}
                                         </div>
                                     </button>
+                                    </Fragment>
                                 )
                             })}
                         </motion.div>

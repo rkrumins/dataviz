@@ -35,6 +35,7 @@ import { useAnswerActions, useGrantOptions } from '@/hooks/useWorkspaceAccess'
 import type { AccessRequestResponse } from '@/services/accessRequestsService'
 import { cn } from '@/lib/utils'
 import { roleLabel } from './accessRequestCopy'
+import { ServiceAccountFacts } from './ServiceAccountFacts'
 import { WorkspaceReachNote } from './WorkspaceReachNote'
 
 type Decision = 'role' | 'team' | 'route' | 'exception'
@@ -64,10 +65,18 @@ export function ApproveRequestDialog({ request, onClose }: {
     const steward = options?.tier === 'steward'
     // Keeping an exception going is the admins' call, and it keeps an end.
     const keepsException = extension && !!request.idpException
+    // A service account gets a role — never a team, the identity provider's
+    // group or an exception, since the provider doesn't know it. Where the
+    // provider decides who is in, only the workspace's admins give it one.
+    const account = !!request.serviceAccount
+    const accountRefused = account && idp && steward
 
     const [decision, setDecision] = useState<Decision | null>(null)
-    const chosen: Decision = decision ?? (idp ? 'route' : 'role')
-    const roles = useMemo(() => options?.roles ?? [], [options])
+    const chosen: Decision = decision ?? (idp && !account ? 'route' : 'role')
+    const roles = useMemo(
+        () => (options?.roles ?? []).filter(r => !account || r.requestable !== false),
+        [options, account],
+    )
     const [role, setRole] = useState<string | null>(null)
     const pickedRole = role
         ?? (roles.some(r => r.name === request.requestedRole) ? request.requestedRole : roles[0]?.name ?? null)
@@ -87,9 +96,11 @@ export function ApproveRequestDialog({ request, onClose }: {
     const [note, setNote] = useState('')
 
     const pending = approve.isPending || route.isPending
-    const ready = extension
-        ? !(keepsException && steward)
-        : chosen === 'team' ? !!groupId : chosen === 'route' ? !!pickedGroup : !!pickedRole
+    const ready = accountRefused
+        ? false
+        : extension
+            ? !(keepsException && steward)
+            : chosen === 'team' ? !!groupId : chosen === 'route' ? !!pickedGroup : !!pickedRole
 
     const submit = async () => {
         const trimmed = note.trim() || null
@@ -125,7 +136,9 @@ export function ApproveRequestDialog({ request, onClose }: {
         }
     }
 
-    const choices = idp
+    const choices = account
+        ? []
+        : idp
         ? [
             { value: 'route' as const, label: 'Point to a group', icon: KeyRound },
             ...(steward ? [] : [{ value: 'exception' as const, label: 'Grant an exception', icon: AlertTriangle }]),
@@ -175,8 +188,15 @@ export function ApproveRequestDialog({ request, onClose }: {
                                 “{request.justification}”
                             </blockquote>
                         )}
+                        <ServiceAccountFacts request={request} />
 
-                        {extension && keepsException && steward ? (
+                        {accountRefused ? (
+                            <p role="alert" className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] px-3 py-2.5 text-xs text-amber-800 dark:text-amber-300">
+                                <AlertTriangle className="w-4 h-4 shrink-0" />
+                                Its identity provider decides who is in {where}, so only the workspace’s admins give a
+                                service account access here.
+                            </p>
+                        ) : extension && keepsException && steward ? (
                             <p role="alert" className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.07] px-3 py-2.5 text-xs text-amber-800 dark:text-amber-300">
                                 <AlertTriangle className="w-4 h-4 shrink-0" />
                                 This access is an exception to the identity provider. Only the workspace’s admins can keep

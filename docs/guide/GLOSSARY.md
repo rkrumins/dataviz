@@ -68,7 +68,7 @@ screen.
 
 | Term | What it means | Read more |
 |---|---|---|
-| **Manager** (of a service account) | A person, or a team, who answers for a service account and makes, rotates and revokes its keys. Appointed by an administrator. | [Service Accounts](/guide/service-accounts) |
+| **Manager** (of a service account) | A person, or a team, who answers for a service account: runs it on its own page, and makes, rotates and revokes its keys. Appointed by an administrator, or by another of its managers. | [Service Accounts](/guide/service-accounts) |
 | **Merge** | Apply a reviewed draft's changes to the published version, from its review. | [The Review Center](/guide/review-center) |
 | **Merge request** | A request to merge a draft, opened with **Submit for review**. A reviewer can **Approve**, **Merge** or **Dismiss** it. | [The Review Center](/guide/review-center) |
 | **Multi-entity trace** | A trace started from several entities at once: choose **Select**, pick the entities, then **Trace N Entities** (for example **Trace 3 Entities**). | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
@@ -101,7 +101,7 @@ screen.
 | **Scope** | Where a role applies: the whole organisation, or one workspace. | [Users & Access](/guide/users-access) |
 | **Search** | The search box in the top bar (⌘K / Ctrl-K) — find pages, views, workspaces and documentation. Inside a view, **Advanced search** (⌘⇧F / Ctrl-Shift-F) finds every match on the canvas. | [Advanced Search](/guide/advanced-search) |
 | **Semantic layer** | The definitions of what your data means — its entity types, relationship types and how they nest. Managed under **Semantic Layers**; a published version's definitions never change — editing them creates a new version. | [The Semantic Layer](/guide/semantic-layer) |
-| **Service account** | An account nobody signs in as, for an integration that must outlive whoever set it up: its managers make its API keys, and it holds only the workspace roles an administrator gives it. Not a Google Cloud service account, which a provider connection may use. | [Service Accounts](/guide/service-accounts) |
+| **Service account** | An account nobody signs in as, for an integration that must outlive whoever set it up: its managers make its API keys, and it holds only the workspace roles each workspace gives it. Not a Google Cloud service account, which a provider connection may use. | [Service Accounts](/guide/service-accounts) |
 | **Stage changes** | The button at the foot of an editing drawer that keeps your edit for **Review & Save** (⌘S / Ctrl-S). Nothing is saved yet. | [Editing in a Draft](/guide/editing-in-a-draft) |
 | **Steward** | A workspace role for the people who let others in: a **Member** who also adds people as viewers or members and answers their access requests. | [Workspace Admin](/guide/workspace-admin#giving-people-access-the-members-tab) |
 | **Sync chip** | The chip next to the data source's name in a view's header that says whether the view reads the latest data — for example **In sync · v12** or **1 version behind**. | [Data Freshness & Ingestion](/guide/data-freshness) |

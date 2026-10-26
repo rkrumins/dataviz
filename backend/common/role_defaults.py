@@ -70,6 +70,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:datasource:manage",
             "workspace:datasource:publish",
             "workspace:datasource:read",
+            "workspace:native-query:read",
             "workspace:members:add",
             "workspace:ontology:manage",
             "workspace:ontology:read",
@@ -100,6 +101,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:datasource:manage",
             "workspace:datasource:publish",
             "workspace:datasource:read",
+            "workspace:native-query:read",
             "workspace:members:add",
             "workspace:ontology:manage",
             "workspace:ontology:read",
@@ -121,6 +123,18 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "system:analytics:read",
             "system:audit:read",
             "system:bindings:read",
+            "system:org-viewer",
+        }),
+    ),
+    RoleName.ORG_READER.value: SystemRoleDefault(
+        description=(
+            "Reads every workspace — views, data sources, semantic layers, "
+            "catalog and providers — and nothing else: not the audit log, "
+            "role bindings or analytics. For a service account that reads "
+            "across the whole tenancy."
+        ),
+        scope_type="global",
+        permissions=frozenset({
             "system:org-viewer",
         }),
     ),
@@ -146,6 +160,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:datasource:manage",
             "workspace:datasource:publish",
             "workspace:datasource:read",
+            "workspace:native-query:read",
             "workspace:ontology:manage",
             "workspace:ontology:read",
             "workspace:provider:read",
@@ -162,6 +177,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:catalog:read",
             "workspace:datasource:manage",
             "workspace:datasource:read",
+            "workspace:native-query:read",
             "workspace:ontology:read",
             "workspace:provider:read",
             "workspace:view:create",
@@ -181,6 +197,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:datasource:manage",
             "workspace:datasource:publish",
             "workspace:datasource:read",
+            "workspace:native-query:read",
             "workspace:ontology:read",
             "workspace:provider:read",
             "workspace:view:create",
@@ -199,6 +216,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "workspace:catalog:read",
             "workspace:datasource:manage",
             "workspace:datasource:read",
+            "workspace:native-query:read",
             "workspace:members:add",
             "workspace:ontology:read",
             "workspace:provider:read",
@@ -216,6 +234,7 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
         permissions=frozenset({
             "workspace:catalog:read",
             "workspace:datasource:read",
+            "workspace:native-query:read",
             "workspace:ontology:read",
             "workspace:provider:read",
             "workspace:view:read",

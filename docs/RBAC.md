@@ -2,7 +2,7 @@
 
 *For administrators granting access, and engineers writing permission checks.*
 
-The authorization reference for {brand}: the nine built-in roles and the default `user`
+The authorization reference for {brand}: the ten built-in roles and the default `user`
 tier, every permission the platform seeds, how a permission check is decided, the typed 403
 body, and the machinery around them — custom roles, invitations, time-bound bindings, session
 revocation and the activity log.
@@ -19,8 +19,8 @@ security picture, see the [Security Overview](/docs/security-overview).
 
 ## TL;DR
 
-* Nine built-in roles: three platform roles (`super_admin`, `org_admin`, `org_auditor`)
-  and six workspace roles. Any account without a platform role is in the default `user`
+* Ten built-in roles: four platform roles (`super_admin`, `org_admin`, `org_auditor`,
+  `org_reader`) and six workspace roles. Any account without a platform role is in the default `user`
   tier, which stores nothing and grants nothing.
 * Permissions are namespaced by category — `system:*` or `workspace:*`. The resolver only
   emits permissions whose category matches the binding's scope; cross-category ones are
@@ -38,6 +38,7 @@ security picture, see the [Security Overview](/docs/security-overview).
 | Super Admin | `super_admin` | Platform | Platform owner or SRE break-glass. Bind sparingly. |
 | Org Admin | `org_admin` | Platform | Org-wide operator who curates workspaces, but doesn't manage users or SSO. |
 | Org Auditor | `org_auditor` | Platform | Compliance or audit reviewer: sees every workspace, every binding and the activity log, and changes nothing. |
+| Org Reader | `org_reader` | Platform | A service account that reads across the whole tenancy: every workspace, read only, and nothing else. Only an administrator of service accounts who reads every workspace gives it. |
 | Workspace Admin | `workspace_admin` | A workspace | Workspace owner who manages its members and settings. |
 | Data Engineer | `workspace_data_engineer` | A workspace | Owns the data products in a workspace — data sources, views, semantic layers, catalog — without managing members or settings, or publishing views to everyone. |
 | Member | `workspace_member` | A workspace | Standard contributor: edits views and manages data sources. |
@@ -49,7 +50,7 @@ security picture, see the [Security Overview](/docs/security-overview).
 platform role: no platform permissions, and no workspace access until a workspace binding
 grants it.
 
-All nine roles are stored once, at `scope_type='global'` with `scope_id=NULL`. The three
+All ten roles are stored once, at `scope_type='global'` with `scope_id=NULL`. The four
 platform roles are bound at global scope. The six workspace roles are templates you bind to a
 specific workspace (`scope_type='workspace'`, `scope_id=<workspace id>`); bound at global
 scope they grant nothing, because the resolver's category filter drops every `workspace:*`
@@ -61,15 +62,16 @@ Exactly what `ROLE_GRANTS` in `backend/app/config/rbac_seed.py` stores for each 
 
 | Role | Count | Permissions granted |
 |---|---|---|
-| `super_admin` | 27 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:service-accounts:manage`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
-| `org_admin` | 21 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:service-accounts:manage`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `super_admin` | 28 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:service-accounts:manage`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
+| `org_admin` | 22 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:service-accounts:manage`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
 | `org_auditor` | 4 | `system:analytics:read`, `system:audit:read`, `system:bindings:read`, `system:org-viewer` |
+| `org_reader` | 1 | `system:org-viewer` |
 | `workspace_admin` | 1 | `workspace:admin` |
-| `workspace_data_engineer` | 12 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
-| `workspace_member` | 9 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
-| `workspace_publisher` | 10 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
-| `workspace_steward` | 10 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
-| `workspace_viewer` | 5 | `workspace:catalog:read`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:read` |
+| `workspace_data_engineer` | 13 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_member` | 10 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_publisher` | 11 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:publish`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_steward` | 11 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
+| `workspace_viewer` | 6 | `workspace:catalog:read`, `workspace:datasource:read`, `workspace:native-query:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:read` |
 
 What a role can actually do differs from its stored grants in four places, all covered in
 [Resolver behaviour](#resolver-behaviour):
@@ -78,7 +80,7 @@ What a role can actually do differs from its stored grants in four places, all c
   reach a session. Their workspace powers come from the shortcuts: `system:admin` passes every
   check, and `system:org-admin` passes every workspace-scoped check in every workspace.
 * `org_auditor` reads every workspace through `system:org-viewer`, which passes any
-  workspace-scoped `:read` check.
+  workspace-scoped `:read` check. `org_reader` carries that alone, for a service account.
 * `workspace_admin` stores only `workspace:admin`, which the resolver expands to every
   `workspace:*` permission in that workspace.
 * `workspace_data_engineer` has neither `workspace:admin` nor `workspace:view:publish`, so it
@@ -99,8 +101,8 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `system:bindings:read` | system | List role bindings and per-user effective access cross-workspace. | `super_admin`, `org_auditor` |
 | `system:groups:manage` | system | Create, edit, delete groups and manage their members. | `super_admin`, `org_admin` |
 | `system:org-admin` | system | Cross-workspace operator; implies every workspace permission. | `super_admin`, `org_admin` |
-| `system:org-viewer` | system | Read-only operator across every workspace in the tenancy. | `super_admin`, `org_auditor` |
-| `system:service-accounts:manage` | system | Create service accounts, choose who manages them, and grant them workspace roles. | `super_admin`, `org_admin` |
+| `system:org-viewer` | system | Read-only operator across every workspace in the tenancy. | `super_admin`, `org_auditor`, `org_reader` |
+| `system:service-accounts:manage` | system | Create service accounts, choose who manages them, grant them workspace roles, and say who else may create one. | `super_admin`, `org_admin` |
 | `system:templates:manage` | system | Curate the organization's layout templates and the built-in ones. | `super_admin`, `org_admin` |
 | `system:users:manage` | system | Create, approve, suspend, and change roles for users. | `super_admin` |
 | `system:workspaces:create` | system | Create new workspaces. | `super_admin`, `org_admin` |
@@ -111,6 +113,7 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `workspace:datasource:publish` | workspace | Advance a versioned data source's Published version: publish a draft, merge a review, revert, restore and sync. Checked on top of `workspace:datasource:manage`. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_publisher` |
 | `workspace:datasource:read` | workspace | List and use workspace data sources in views. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
 | `workspace:members:add` | workspace | Answer access requests and add people to a workspace. | `super_admin`, `org_admin`, `workspace_steward` |
+| `workspace:native-query:read` | workspace | Run your own read-only queries on a workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
 | `workspace:ontology:manage` | workspace | Create, edit, version, publish, and delete ontologies in the workspace. | `super_admin`, `org_admin`, `workspace_data_engineer` |
 | `workspace:ontology:read` | workspace | Read ontologies (semantic layers) that the workspace's data sources reference. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
 | `workspace:provider:read` | workspace | Read providers (database connections) that back the workspace's data sources. | `super_admin`, `org_admin`, `workspace_data_engineer`, `workspace_member`, `workspace_publisher`, `workspace_steward`, `workspace_viewer` |
@@ -354,6 +357,46 @@ Access is given back the usual way — a role or group in the destination, or an
 mapping where the provider decides — never by copying it, which would outlive the provider removing
 someone. A pending publication request is put to the destination's publishers.
 
+### Native queries
+
+`workspace:native-query:read` lets a person write their own read-only Cypher and
+run it on a workspace's FalkorDB and Neo4j data sources, from the search panel's
+**Cypher** tab. A native query reads **the whole data source**, not only the View
+it starts from, which is why it is a permission of its own rather than following
+from `workspace:datasource:read`:
+
+* **Who has it.** Every built-in role that reads data sources stores it, and
+  `workspace:admin` implies it; so do the organisation-wide shortcuts, including
+  `system:org-viewer` (it is a `:read` permission), so Org Auditors can run them.
+  Migration `20261024_1000_native_query` gave it to every custom role that held
+  `workspace:datasource:read`.
+* **Taking it away.** Remove it from a role in **Administration → Permissions**;
+  readers keep everything else. The check is the permission **and**
+  `workspace:datasource:read` in the same workspace
+  (`view_access.may_query_sources`).
+* **Never through an API key.** It is not in `KEY_GRANTABLE_PERMISSIONS`, the
+  route is off the API-key surface, and the check refuses a key's claims anyway.
+* **Through a share.** A direct share of a View — to a person or a group — can
+  opt in to **Query data** (`resource_grants.can_query_source`, allowed only on
+  View shares). It lets the share's holder run native queries on that View's own
+  data source, and nothing else: visibility never does, so a View open to the
+  organization or the workspace lets no one query its source. Turning it **on**
+  needs the right to manage the View's shares **and** to query its data source
+  yourself (`can_grant_source_query`), so no one hands on a reach they don't
+  have; turning it **off** needs only the right to manage the shares
+  (`POST` / `PUT /api/v1/views/{view_id}/grants` with `canQuerySource`). It is
+  recorded in the share's outbox event, the View's activity and the recipient's
+  notification, and stays until someone turns it off — even if the person who
+  turned it on later loses their own access.
+* **What the UI is told.** A View's access envelope carries
+  `canQueryDataSource`, `canGrantSourceQuery` and, when the first is true and the
+  source takes native queries, `nativeQueryEngine` (`falkordb` or `neo4j`). The
+  UI offers **Edit and run** and the **Query data** switch from these alone.
+
+The switch **Native read-only queries** (`nativeQueryEnabled`) turns the whole
+feature off. What may run, the limits and the audit record are in
+[Native read-only queries: security](/docs/native-queries).
+
 ## Resolver behaviour
 
 A permission check resolves through a fixed short-circuit ladder — the three global
@@ -531,19 +574,33 @@ of its data sources is.
   registered it as one, which kept the owner's session index growing for as long as a key
   was busy.
 - **A service account's keys.** A service account (an id starting `svc_`) is resolved like a
-  person, but keeps only its direct workspace bindings: no groups and no global roles, so no
-  shortcut reaches its keys whatever a row says. It may hold any workspace role that neither
+  person, but keeps only its direct bindings, and no groups. Of a global role it keeps only
+  the permissions in `SERVICE_ACCOUNT_GLOBAL_PERMISSIONS` (`backend/common/service_accounts.py`)
+  — today `system:org-viewer`, which the `org_reader` role carries — so no shortcut but
+  reading every workspace reaches its keys, whatever a row says. An administrator of service
+  accounts who reads every workspace gives it that (`PUT
+  /api/v1/admin/service-accounts/{id}/org-read`), and its managers can take it away. It may hold any workspace role that neither
   administers the workspace nor lets people in, and what is requestable is applied again at
   resolution, so a role later widened to administer brings it none of that. Its managers make
-  keys that act as it, whatever they can reach themselves: appointing a manager delegates the
-  account's access, so it takes being able to grant each of the account's roles; and whoever
-  controls a managing team's membership controls that delegation, so adding someone to a team
-  that manages a service account takes `system:service-accounts:manage` as well as
+  keys that act as it, whatever they can reach themselves, run the account itself, and ask
+  workspaces for access for it; each workspace's admins and stewards give it roles there as they
+  give people ([Access requests](#access-requests)), and `system:service-accounts:manage` can
+  anywhere. Appointing a manager delegates
+  the account's access, so it may give the appointee only what they hold already or what the
+  appointer could grant them: for each of the account's roles, the appointee holds every
+  permission it gives the account there (a team, through its own roles), or the appointer could
+  grant it there; and if the account reads every workspace, the appointee does too, or the
+  appointer could give it that. Whoever controls a managing team's membership controls that delegation too, so
+  adding someone to a team that manages a service account is held to the same rule on top of
   `system:groups:manage`, and an access-request approval never adds anyone to one. A holder of
   `system:users:manage` can make an account's keys without managing it, and its managers are
-  told; `system:service-accounts:manage` alone makes none. When the account holds Publisher (or
-  Data Engineer), its keys write a versioned graph's `main` directly, since that check reads the
-  account's own roles; like every key, they never publish, merge, revert, restore or sync. See
+  told; `system:service-accounts:manage` alone makes none. Who else may create an account for
+  themselves — nobody unless set, anyone who lets people into a workspace, or anyone — is that
+  permission's to decide, with a per-person limit; creating one gives it no access. Deleting an
+  account stops its keys at once; for 30 days it can be restored as it was, then it is purged — its keys revoked, its
+  bindings and manager seats removed. When the account holds Publisher (or Data Engineer), its keys
+  write a versioned graph's `main` directly, since that check reads the account's own roles; like
+  every key, they never publish, merge, revert, restore or sync. See
   [Service Accounts](/guide/service-accounts).
 
 ## 403 body
@@ -660,6 +717,7 @@ user's display role and resolved claims always agree. `PUT
 set — `user`, `org_auditor`, `org_admin` and `super_admin`
 (`GLOBAL_ASSIGNABLE_ROLES` in `backend/common/roles.py`). Assigning `user`
 clears the account's platform role and leaves its workspace bindings alone.
+`org_reader` isn't among them: it is given to a service account, on its own page.
 Workspace roles (`workspace_admin`, `workspace_data_engineer`,
 `workspace_member`, `workspace_publisher`, `workspace_viewer`) are bound
 through the workspace-members endpoint, which supplies the workspace context
@@ -864,6 +922,47 @@ binding's role, and writes `rbac.workspace.member_expiry_updated` beside
 `rbac.access_request.approved`. `PUT …/members/{binding}/expiry` answers it
 too, as approved by the admin.
 
+**For a service account.** A workspace gives one access as it gives a
+person, with two differences: only the roles a service account may hold —
+requestable ones — and never through a team or the identity provider, which
+doesn't know it.
+
+* Its managers — and the administrators of service accounts — ask: `POST
+  /access-requests` with `serviceAccountId` (`can.request`; 404 to whoever
+  can't see the account, 403 to whoever can but may not ask) records the
+  request as the account's, `requester_id`, and who asked,
+  `access_requests.requested_by`, whom the activity log names as its actor.
+  The account holds one open request per workspace, any of its managers
+  withdraws it, and `POST /access-requests/extend` takes the account's
+  `bindingId` from them. A `closed` workspace refuses it as for a person;
+  under `open`, `/join` admits only the caller, so an account's Viewer is
+  asked for too.
+* A request names it: `serviceAccount` (`description`, and `managers`, each
+  `type`, `name` and `fromIdp` — a team the identity provider keeps) and
+  `requestedBy`.
+* Answering: nobody who manages the account or asked for it (403). Approve
+  with `role` only — `groupId` is 422, and so is a role it may not hold — and
+  `route` is 409. Where the identity provider decides (`access_mode =
+  'idp'`), only `workspace:admin` approves one (403 for a steward), and the
+  grant is not an exception: no `exception`, no 90-day limit.
+* The Members tab adds one as it adds a person (`subjectId` the account's
+  `svc_` id), under the same rules: one of the workspace's roles that is
+  requestable (422), within the caller's ceiling (403), and in an `idp`
+  workspace `workspace:admin` only (403), never as an exception. `GET
+  …/members/service-accounts?q=` (`workspace:members:add`) finds up to 20
+  enabled accounts by name or purpose, each with its `description` and
+  `managers`; `grant-options` marks each role `requestable`.
+* The admins and stewards of a workspace it holds a role in read the account
+  (`GET /admin/service-accounts/{id}`) — its roles in the workspaces they can
+  open — to know whose it is.
+* Removing someone: `POST …/members/{binding}/preview-revoke` names, as
+  `serviceAccounts`, each account those losing access manage — themselves or
+  through a team — with its bindings in the workspace that give more than
+  they would keep (`id`, `name`, `managedBy`, `bindings` of `bindingId` and
+  `role`), read with `resolve(…, excluded_binding_id=…)`. Through those
+  accounts' keys they could still act there; the Members tab offers to
+  remove the bindings too.
+
 **Reminders** (`backend/app/services/access_housekeeping.py`, an hourly
 control-plane sweeper under an advisory lock):
 
@@ -999,7 +1098,8 @@ audience.
 The workspace audience is an explicit allow-list: member bindings and role
 cascades in the workspace, access requests for it, view grants, its
 aggregation runs and source operations, and its data-source and
-version-control changes. Everything else is platform audience. The
+version-control changes — native query runs (`workspace.data_source.native_query_run`,
+with the query's text) among them. Everything else is platform audience. The
 workspace scope is forced on the server, so no query parameter widens it.
 
 Each family serves `events` (keyset pages, 50 by default and 200 at most),
@@ -1073,6 +1173,7 @@ last 7 days. Through the API:
 | Activity explorer UI                   | `frontend/src/components/activity/`                           |
 | Permission catalogue / categories      | `backend/app/db/repositories/permission_repo.py`              |
 | View visibility and publishing         | `backend/app/services/view_access.py`                         |
+| Native queries: who may run one        | `backend/app/services/native_query/access.py`, `backend/app/services/view_access.py` (`may_query_sources`, `can_grant_source_query`) |
 | API key claims and scope               | `backend/app/services/permission_service.py` (`resolve_for_api_key`, `KeyScope`), `backend/app/services/api_key_service.py` (`claims_for_key`) |
 | Frontend `checkPermission`             | `frontend/src/store/auth.ts`                                  |
 | Workspace-aware role badge             | `frontend/src/components/layout/TopBar.tsx`                   |
@@ -1116,6 +1217,12 @@ and CI holds the two paths to the same result.
 with one open request per person per workspace, the workspace access
 settings (`directory_listed`, `access_mode`, `access_note`), and the records
 of how a grant came about (`access_request_id`, `idp_exception`).
+
+`20261024_1000_native_query` added `workspace:native-query:read`, granted it to
+every role that held `workspace:datasource:read`, and added the **Query data**
+opt-in on View shares (`resource_grants.can_query_source`).
+`20261017_1000_datasource_publish`, which follows it, gives it to
+`workspace_publisher` too.
 
 ## See also
 

@@ -1,35 +1,28 @@
 /**
  * Administration → Service accounts: each account with how it stands — no
- * manager left and when its keys pause, or one person it depends on — and
- * creating one, which takes a name and at least one manager, a person or a
- * team (whose members may then act as it, which the page says).
+ * manager left and when its keys pause, or one person it depends on — each
+ * opening on its own page, and creating one, which takes a name and at least
+ * one manager, a person or a team (whose members may then act as it, which
+ * the page says). The list narrows by standing, manager and workspace, and
+ * Deleted lists those that can still be restored.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { inDays } from '@/components/apiKeys/__tests__/fixtures'
 import type { ServiceAccount, ServiceAccountDetail } from '@/services/serviceAccountService'
 
-const { sa, searchDirectory, can, notify, listPage, requestableRoles } = vi.hoisted(() => ({
-    listPage: vi.fn(),
-    requestableRoles: vi.fn(),
-    sa: {
-        list: vi.fn(), get: vi.fn(), create: vi.fn(), update: vi.fn(), disable: vi.fn(), enable: vi.fn(),
-        addManager: vi.fn(), removeManager: vi.fn(), grantRole: vi.fn(), revokeRole: vi.fn(), handOver: vi.fn(),
-    },
+const { sa, searchDirectory, notify, listPage } = vi.hoisted(() => ({
+    sa: { list: vi.fn(), create: vi.fn(), handOver: vi.fn(), policy: vi.fn(), setPolicy: vi.fn() },
     searchDirectory: vi.fn(),
-    can: { mintAny: false },
     notify: vi.fn(),
+    listPage: vi.fn(),
 }))
 
 vi.mock('@/services/serviceAccountService', () => ({ serviceAccountService: sa }))
 vi.mock('@/services/userDirectoryService', () => ({ searchDirectory }))
 vi.mock('@/services/workspaceService', () => ({ workspaceService: { listPage } }))
-vi.mock('@/services/accessRequestsService', () => ({ accessRequestsService: { requestableRoles } }))
-vi.mock('@/store/auth', () => ({
-    usePermission: (perm: string) => (perm === 'system:users:manage' ? can.mintAny : true),
-}))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify }) }))
 
 import { AdminServiceAccounts } from '../AdminServiceAccounts'
@@ -43,17 +36,28 @@ function account(over: Partial<ServiceAccount> = {}): ServiceAccount {
     return {
         id: 'svc_sync', name: 'Metadata sync', description: null, status: 'active',
         createdAt: '2026-10-01T00:00:00+00:00', createdBy: null, managers: [ADA], managed: true,
-        singleManager: true, unmanagedSince: null, pausesAt: null, handOver: null, ...over,
+        singleManager: true, unmanagedSince: null, pausesAt: null, adminHold: false, deletedAt: null, purgesAt: null,
+        handOver: null, ...over,
     }
 }
 
 function detail(over: Partial<ServiceAccountDetail> = {}): ServiceAccountDetail {
-    return { ...account(), roles: [], liveKeys: 2, ...over }
+    return {
+        ...account(), roles: [], orgRead: null, requests: [], liveKeys: 2,
+        can: {
+            view: true, edit: true, disable: true, enable: true, managers: true, keys: false, grant: true, revoke: true,
+            request: true, delete: true, restore: false, orgRead: true,
+        },
+        ...over,
+    }
 }
+
+const realLocation = window.location
+const assign = vi.fn()
 
 beforeEach(() => {
     vi.clearAllMocks()
-    can.mintAny = false
+    Object.defineProperty(window, 'location', { configurable: true, value: { ...realLocation, assign } })
     sa.list.mockResolvedValue({
         items: [
             account(),
@@ -62,10 +66,13 @@ beforeEach(() => {
         ],
         total: 3, graceDays: 14,
     })
-    sa.get.mockResolvedValue(detail())
-    listPage.mockResolvedValue({ items: [], totalCount: 0 })
-    requestableRoles.mockResolvedValue({ roles: [{ name: 'workspace_viewer', description: null, isSystem: true }] })
     searchDirectory.mockResolvedValue({ users: [], groups: [{ id: 'grp_data', name: 'Data platform', memberCount: 4 }] })
+    listPage.mockResolvedValue({ items: [{ id: 'ws_sales', name: 'Sales' }], totalCount: 1 })
+    sa.policy.mockResolvedValue({ whoMayCreate: 'central', perPersonLimit: 10, requireTeamManager: false })
+})
+
+afterEach(() => {
+    Object.defineProperty(window, 'location', { configurable: true, value: realLocation })
 })
 
 describe('the list', () => {
@@ -77,12 +84,88 @@ describe('the list', () => {
         expect(within(rows).getByText('Retired job').closest('li')).toHaveTextContent('Disabled')
         expect(screen.getByText(/keep working for 14 days after its last manager goes/i)).toBeInTheDocument()
     })
+
+    it('opens each account on its own page', async () => {
+        render(<AdminServiceAccounts />)
+        const rows = await screen.findByRole('list', { name: 'Service accounts' })
+        expect(within(rows).getByText('Metadata sync').closest('a')).toHaveAttribute('href', '/service-accounts/svc_sync')
+    })
+})
+
+describe('narrowing it', () => {
+    /** The filters the latest list was read with. */
+    const lastAsked = () => sa.list.mock.calls[sa.list.mock.calls.length - 1][0]
+
+    it('by standing, by who manages them, and by the workspace they have a role in', async () => {
+        render(<AdminServiceAccounts />)
+        await screen.findByRole('list', { name: 'Service accounts' })
+        await userEvent.selectOptions(screen.getByLabelText('Standing'), 'Needs a manager')
+        await waitFor(() => expect(lastAsked()).toMatchObject({ standing: 'unmanaged' }))
+
+        await userEvent.click(screen.getByRole('button', { name: /managed by…/i }))
+        await userEvent.type(screen.getByLabelText(/^managed by — /i), 'data')
+        await userEvent.click(await screen.findByRole('button', { name: /data platform/i }))
+        await waitFor(() => expect(lastAsked()).toMatchObject({ standing: 'unmanaged', manager: 'grp_data' }))
+        expect(screen.getByText('Managed by Data platform')).toBeInTheDocument()
+
+        await userEvent.click(screen.getByRole('button', { name: /in a workspace…/i }))
+        await userEvent.click(await screen.findByRole('button', { name: 'Sales' }))
+        await waitFor(() => expect(lastAsked()).toMatchObject({ manager: 'grp_data', workspace: 'ws_sales' }))
+
+        await userEvent.click(screen.getByRole('button', { name: /stop showing only those managed by data platform/i }))
+        await waitFor(() => expect(lastAsked()).toMatchObject({ manager: undefined, workspace: 'ws_sales' }))
+    })
+
+    it('lists the deleted accounts that can still be restored, and until when', async () => {
+        render(<AdminServiceAccounts />)
+        await screen.findByRole('list', { name: 'Service accounts' })
+        sa.list.mockResolvedValue({
+            items: [account({ deletedAt: inDays(-2), purgesAt: inDays(28) })], total: 1, graceDays: 14,
+        })
+        await userEvent.click(screen.getByRole('tab', { name: 'Deleted' }))
+        await waitFor(() => expect(lastAsked()).toMatchObject({ status: 'deleted' }))
+        const rows = await screen.findByRole('list', { name: 'Service accounts' })
+        const row = within(rows).getByText('Metadata sync').closest('li')
+        expect(row).toHaveTextContent('Deleted')
+        expect(row).toHaveTextContent(/restore by /i)
+    })
+
+    it('says deleted accounts wait there for 30 days when there are none', async () => {
+        render(<AdminServiceAccounts />)
+        await screen.findByRole('list', { name: 'Service accounts' })
+        sa.list.mockResolvedValue({ items: [], total: 0, graceDays: 14 })
+        await userEvent.click(screen.getByRole('tab', { name: 'Deleted' }))
+        expect(await screen.findByText('Nothing deleted lately')).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /clear filters/i })).not.toBeInTheDocument()
+    })
+})
+
+describe('who else may create one', () => {
+    it('says so, and an administrator changes it', async () => {
+        sa.setPolicy.mockResolvedValue({ whoMayCreate: 'granters', perPersonLimit: 5, requireTeamManager: true })
+        render(<AdminServiceAccounts />)
+        expect(await screen.findByText('Only administrators of service accounts create them.')).toBeInTheDocument()
+        await userEvent.click(screen.getByRole('button', { name: /^change…$/i }))
+        const dialog = await screen.findByRole('dialog', { name: 'Who may create service accounts' })
+        expect(within(dialog).getByLabelText('Accounts each person may create')).toBeDisabled()
+        await userEvent.click(within(dialog).getByRole('radio', { name: /anyone who lets people into a workspace/i }))
+        const limit = within(dialog).getByLabelText('Accounts each person may create')
+        await userEvent.clear(limit)
+        await userEvent.type(limit, '5')
+        await userEvent.click(within(dialog).getByRole('checkbox', { name: /a team they’re in manages each one/i }))
+        await userEvent.click(within(dialog).getByRole('button', { name: /^save$/i }))
+        await waitFor(() => expect(sa.setPolicy).toHaveBeenCalledWith({
+            whoMayCreate: 'granters', perPersonLimit: 5, requireTeamManager: true,
+        }))
+        expect(await screen.findByText(
+            'Anyone who lets people into a workspace may create up to 5 for themselves, managed by a team they’re in.',
+        )).toBeInTheDocument()
+    })
 })
 
 describe('creating one', () => {
     it('takes a name and a manager, says what a team as manager means, and opens the new account', async () => {
         sa.create.mockResolvedValue(detail({ id: 'svc_new', name: 'Nightly export' }))
-        sa.get.mockResolvedValue(detail({ id: 'svc_new', name: 'Nightly export' }))
         render(<AdminServiceAccounts />)
         await userEvent.click(await screen.findByRole('button', { name: /create service account/i }))
         const dialog = await screen.findByRole('dialog', { name: 'Create a service account' })
@@ -98,70 +181,6 @@ describe('creating one', () => {
         await waitFor(() => expect(sa.create).toHaveBeenCalledWith({
             name: 'Nightly export', description: undefined, managers: [{ type: 'group', id: 'grp_data' }],
         }))
-        expect(await screen.findByRole('dialog', { name: 'Nightly export' })).toBeInTheDocument()
-    })
-})
-
-describe('one account', () => {
-    it('opens straight onto the account a link names', async () => {
-        window.history.pushState({}, '', '/admin/service-accounts?account=svc_sync')
-        try {
-            render(<AdminServiceAccounts />)
-            expect(await screen.findByRole('dialog', { name: 'Metadata sync' })).toBeInTheDocument()
-            expect(sa.get).toHaveBeenCalledWith('svc_sync')
-        } finally {
-            window.history.pushState({}, '', '/')
-        }
-    })
-
-    it('asks before removing its last manager', async () => {
-        sa.removeManager.mockResolvedValue(detail({ managers: [], managed: false, singleManager: false }))
-        render(<AdminServiceAccounts />)
-        await userEvent.click(await screen.findByText('Metadata sync'))
-        const dialog = await screen.findByRole('dialog', { name: 'Metadata sync' })
-        await userEvent.click(await within(dialog).findByRole('button', { name: 'Stop Ada Lovelace managing it' }))
-        expect(sa.removeManager).not.toHaveBeenCalled()
-        expect(within(dialog).getByText(/that is its last manager/i)).toBeInTheDocument()
-        await userEvent.click(within(dialog).getByRole('button', { name: 'Remove Ada Lovelace, the last manager?' }))
-        await waitFor(() => expect(sa.removeManager).toHaveBeenCalledWith('svc_sync', ADA))
-    })
-
-    it('links to making its keys only for those who may make any account’s', async () => {
-        render(<AdminServiceAccounts />)
-        await userEvent.click(await screen.findByText('Metadata sync'))
-        const dialog = await screen.findByRole('dialog', { name: 'Metadata sync' })
-        expect(await within(dialog).findByRole('link', { name: /see them/i })).toHaveAttribute('href', '/admin/api-keys?ownerId=svc_sync')
-        expect(within(dialog).queryByRole('link', { name: /make or revoke its keys/i })).not.toBeInTheDocument()
-    })
-
-    it('finds the workspace to give a role in by name, a page at a time', async () => {
-        listPage.mockImplementation(({ search }: { search?: string }) => Promise.resolve(search
-            ? { items: [{ id: 'ws_sales', name: 'Sales' }], totalCount: 1 }
-            : { items: Array.from({ length: 20 }, (_, n) => ({ id: `ws_${n}`, name: `Workspace ${n}` })), totalCount: 312 }))
-        sa.grantRole.mockResolvedValue({ bindingId: 'rb_1', workspaceId: 'ws_sales', role: 'workspace_viewer' })
-        render(<AdminServiceAccounts />)
-        await userEvent.click(await screen.findByText('Metadata sync'))
-        const dialog = await screen.findByRole('dialog', { name: 'Metadata sync' })
-        expect(await within(dialog).findByText('Showing 20 of 312 workspaces — find others by name.')).toBeInTheDocument()
-        expect(listPage).toHaveBeenCalledWith({ limit: 20, search: '' })
-
-        await userEvent.type(within(dialog).getByLabelText('Find a workspace'), 'sales')
-        await within(dialog).findByRole('option', { name: 'Sales' })
-        expect(listPage).toHaveBeenLastCalledWith({ limit: 20, search: 'sales' })
-        await userEvent.selectOptions(within(dialog).getByLabelText('Workspace'), 'ws_sales')
-        await within(dialog).findByRole('option', { name: 'Workspace viewer' })
-        await userEvent.selectOptions(within(dialog).getByLabelText('Role'), 'workspace_viewer')
-        await userEvent.click(within(dialog).getByRole('button', { name: /give role/i }))
-        await waitFor(() => expect(sa.grantRole).toHaveBeenCalledWith('svc_sync', { workspaceId: 'ws_sales', role: 'workspace_viewer' }))
-    })
-
-    it('stops every key at once when disabled', async () => {
-        sa.disable.mockResolvedValue(detail({ status: 'disabled' }))
-        render(<AdminServiceAccounts />)
-        await userEvent.click(await screen.findByText('Metadata sync'))
-        const dialog = await screen.findByRole('dialog', { name: 'Metadata sync' })
-        await userEvent.click(await within(dialog).findByRole('button', { name: /^disable$/i }))
-        await waitFor(() => expect(sa.disable).toHaveBeenCalledWith('svc_sync'))
-        expect(await within(dialog).findByRole('button', { name: /^enable$/i })).toBeInTheDocument()
+        await waitFor(() => expect(assign).toHaveBeenCalledWith('/service-accounts/svc_new'))
     })
 })

@@ -78,6 +78,7 @@ tests/test_controlplane_loops_wiring.py
 tests/test_cors_expose_headers.py
 tests/test_count_alerts.py
 tests/test_cube_estimate_calibration.py
+tests/test_cypher_text.py
 tests/test_data_source_list_versioning.py
 tests/test_data_source_move.py
 tests/test_data_source_transfers.py
@@ -102,6 +103,7 @@ tests/test_falkordb_edges_pair_binding.py
 tests/test_falkordb_failloud.py
 tests/test_falkordb_materialize.py
 tests/test_falkordb_native_properties.py
+tests/test_falkordb_native_query.py
 tests/test_falkordb_no_replicas.py
 tests/test_falkordb_ondemand_pairs.py
 tests/test_falkordb_read_router_evidence.py
@@ -155,13 +157,20 @@ tests/test_loadtest_manifests.py
 tests/test_loadtest_protection_gate.py
 tests/test_loadtest_retry_model.py
 tests/test_metrics_backend.py
+tests/test_native_query_api.py
+tests/test_native_query_cells.py
+tests/test_native_query_guard.py
+tests/test_native_query_limit.py
+tests/test_native_query_sharing.py
 tests/test_nav_catalogue.py
+tests/test_neo4j_native_query.py
 tests/test_node_property_hygiene.py
 tests/test_object_store.py
 tests/test_outbox_relay.py
 tests/test_package_ndjson_cursor.py
 tests/test_package_new_source_api.py
 tests/test_package_seed_rows.py
+tests/test_parse_cost.py
 tests/test_permission_implications.py
 tests/test_permission_service.py
 tests/test_placement_conformance.py
@@ -206,6 +215,7 @@ tests/test_reconcile_detectors.py
 tests/test_reconcile_edge_check.py
 tests/test_reconcile_sweeper.py
 tests/test_refresh_wait_deadline.py
+tests/test_reply_capped_parser.py
 tests/test_request_body_limit.py
 tests/test_rollup_health.py
 tests/test_rollup_rebuild_hook_proxy.py
@@ -214,8 +224,12 @@ tests/test_s3_object_store.py
 tests/test_saved_view_filters.py
 tests/test_schema_upgrades.py
 tests/test_search_catalog.py
+tests/test_search_edge_properties.py
 tests/test_search_engine.py
 tests/test_search_export.py
+tests/test_search_paths.py
+tests/test_search_refs.py
+tests/test_search_relations.py
 tests/test_search_rules.py
 tests/test_search_rules_examples.py
 tests/test_search_schema_endpoint.py

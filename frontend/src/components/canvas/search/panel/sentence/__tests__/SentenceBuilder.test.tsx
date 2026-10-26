@@ -1,0 +1,156 @@
+/**
+ * The Sentence builder edits the same draft as the Form cards, through the
+ * same two writes: a value changed seeds the draft (no undo step), a change
+ * of shape commits it. The words joining the clauses are themselves the
+ * all/any choice, the map opens the sentence's tokens, and what no
+ * builder edits hands over to Code. With live counts off it says so where
+ * the numbers would be.
+ */
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { useState, type ComponentType, type ReactNode } from 'react'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
+
+import { ProviderOverride } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import type { Predicate, SearchCountsRequest } from '@/types/search'
+
+import { LIVE_COUNTS_KEY } from '../../counts/liveCounts'
+import { SentenceBuilder } from '../SentenceBuilder'
+
+
+const type = (...values: string[]): Predicate => ({ kind: 'entityType', op: 'in', values })
+const tag = (...values: string[]): Predicate => ({ kind: 'tag', op: 'hasAny', values })
+const all = (...children: Predicate[]): Predicate => ({ kind: 'group', op: 'and', children })
+const any = (...children: Predicate[]): Predicate => ({ kind: 'group', op: 'or', children })
+
+const discovery = { allKeys: [], keysByEntityType: {}, tagValues: ['PII', 'GDPR'], getValueSamples: () => [] }
+
+/** A graph that counts every condition as 7. */
+function counting() {
+    const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
+    const searchCounts = vi.fn(async (body: SearchCountsRequest) => ({
+        counts: Object.fromEntries(body.items.map((i) => [i.id, { count: 7, status: 'complete' }])),
+    }))
+    Object.assign(provider, { searchCounts })
+    const wrapper = ({ children }: { children: ReactNode }) => (
+        <ProviderOverride value={{ provider, isLoading: false, error: null, scopeKind: 'ready',
+            workspaceId: 'ws', dataSourceId: null, providerReady: true, providerVersion: 1 } as never}>
+            {children}
+        </ProviderOverride>
+    )
+    return { searchCounts, wrapper }
+}
+
+function setup(initial: Predicate | null, wrapper?: ComponentType<{ children: ReactNode }>) {
+    const onSeed = vi.fn()
+    const onCommit = vi.fn()
+    const onEditInCode = vi.fn()
+    function Harness() {
+        const [draft, setDraft] = useState(initial)
+        return (
+            <SentenceBuilder viewId="view-a" predicate={draft} discovery={discovery}
+                             knownEntityTypes={['dataset', 'chart']} presentEntityTypes={['dataset', 'chart']}
+                             discoveredLayers={[]} onEditInCode={onEditInCode}
+                             onSeed={(next) => { onSeed(next); setDraft(next) }}
+                             onCommit={(next) => { onCommit(next); setDraft(next) }} />
+        )
+    }
+    const { unmount } = render(<Harness />, { wrapper })
+    return { onSeed, onCommit, onEditInCode, unmount }
+}
+
+
+describe('SentenceBuilder', () => {
+    beforeEach(() => localStorage.clear())
+
+    it('reads the query as a sentence of tokens', () => {
+        setup(all(type('dataset'), tag('PII')))
+        const sentence = screen.getByRole('list', { name: 'The query, as a sentence' })
+        expect(within(sentence).getByText('Find')).toBeInTheDocument()
+        expect(within(sentence).getByRole('button', { name: 'What the query finds: datasets' })).toBeInTheDocument()
+        expect(within(sentence).getByRole('button', { name: 'Which tags: #PII' })).toBeInTheDocument()
+        // No relationship, no route: nothing to draw.
+        expect(screen.queryByRole('figure', { name: "The query's shape" })).not.toBeInTheDocument()
+    })
+
+    it('changes a value without an undo step', async () => {
+        const { onSeed, onCommit } = setup(all(type('dataset'), tag('PII')))
+        fireEvent.click(screen.getByRole('button', { name: 'What the query finds: datasets' }))
+        await userEvent.click(await screen.findByRole('option', { name: /chart/ }))
+        expect(onSeed).toHaveBeenLastCalledWith(all(type('dataset', 'chart'), tag('PII')))
+        expect(onCommit).not.toHaveBeenCalled()
+    })
+
+    it('joins the clauses by any when its "and" is changed to "or"', async () => {
+        const { onCommit } = setup(all(type('dataset'), tag('PII'), { kind: 'isLeaf' }))
+        fireEvent.click(screen.getByRole('button', { name: 'How the conditions combine: and' }))
+        await userEvent.click(screen.getByRole('option', { name: /Any of them/ }))
+        expect(onCommit).toHaveBeenLastCalledWith(all(type('dataset'), any(tag('PII'), { kind: 'isLeaf' })))
+        // Still listed as the subject's clauses — now joined by "or".
+        expect(screen.getByRole('button', { name: 'How the conditions combine: or' })).toBeInTheDocument()
+        fireEvent.click(screen.getByRole('button', { name: 'How the conditions combine: or' }))
+        await userEvent.click(screen.getByRole('option', { name: /All of them/ }))
+        expect(onCommit).toHaveBeenLastCalledWith(all(type('dataset'), tag('PII'), { kind: 'isLeaf' }))
+    })
+
+    it('puts a new subject before clauses joined by any, keeping them so', async () => {
+        const { onCommit } = setup(any(tag('PII'), tag('GDPR')))
+        fireEvent.click(screen.getByRole('button', { name: 'What the query finds: anything' }))
+        await userEvent.click(await screen.findByRole('option', { name: /dataset/ }))
+        expect(onCommit).toHaveBeenLastCalledWith(all(type('dataset'), any(tag('PII'), tag('GDPR'))))
+    })
+
+    it('removes a clause from its line\'s menu, as a change of shape', async () => {
+        const { onCommit } = setup(all(type('dataset'), tag('PII'), { kind: 'isLeaf' }))
+        const user = userEvent.setup()
+        await user.click(screen.getAllByRole('button', { name: 'Line actions' })[0])
+        await user.click(await screen.findByRole('menuitem', { name: 'Remove' }))
+        expect(onCommit).toHaveBeenLastCalledWith(all(type('dataset'), { kind: 'isLeaf' }))
+    })
+
+    it('draws the shape of a relationship, and its nodes open the sentence\'s tokens', async () => {
+        setup(all(type('dataset'), { kind: 'related', axis: 'downstream', maxHops: 3, where: type('chart') }))
+        expect(screen.getByRole('figure', { name: "The query's shape" })).toBeInTheDocument()
+        fireEvent.click(screen.getByRole('button', { name: /^Change which relatives: chart/ }))
+        expect(await screen.findByRole('dialog', { name: 'Which types' })).toBeInTheDocument()
+    })
+
+    it('follows lineage past 3 steps only while every listed clause must hold', async () => {
+        const feeds: Predicate = { kind: 'related', axis: 'downstream', maxHops: 3, where: type('chart') }
+        const steps = async () => {
+            fireEvent.click(screen.getByRole('button', { name: /^How far:/ }))
+            await userEvent.click(await screen.findByRole('button', { name: /More options/ }))
+            return within(screen.getByRole('radiogroup', { name: 'How many steps' }))
+                .getAllByRole('radio').map((r) => r.textContent)
+        }
+        const view = setup(all(type('dataset'), feeds, tag('PII')))
+        expect(await steps()).toEqual(['1 step', 'Up to 2', 'Up to 3', 'Up to 5', 'Up to 10'])
+        view.unmount()
+        setup(all(type('dataset'), any(feeds, tag('PII'))))
+        expect(await steps()).toEqual(['1 step', 'Up to 2', 'Up to 3'])
+    })
+
+    it('hands a condition no builder edits over to Code', async () => {
+        const { onEditInCode } = setup({ kind: 'degree', direction: 'out', op: 'gt', value: 3 } as Predicate)
+        fireEvent.click(screen.getAllByRole('button', { name: /more than 3 outgoing lineage edges/ })[0])
+        await userEvent.click(await screen.findByRole('button', { name: 'Edit in Code' }))
+        expect(onEditInCode).toHaveBeenCalled()
+    })
+
+    it('says the counts are off where the numbers would be, and turns them back on', async () => {
+        localStorage.setItem(LIVE_COUNTS_KEY, 'off')
+        const { searchCounts, wrapper } = counting()
+        setup(all(type('dataset'), tag('PII')), wrapper)
+        const turnOn = screen.getByRole('button', { name: 'Counts off · Turn on' })
+        await new Promise((r) => setTimeout(r, 700))
+        expect(searchCounts).not.toHaveBeenCalled()
+        expect(screen.queryByText('7')).not.toBeInTheDocument()
+
+        fireEvent.click(turnOn)
+        expect(localStorage.getItem(LIVE_COUNTS_KEY)).toBeNull()
+        expect(screen.queryByRole('button', { name: 'Counts off · Turn on' })).not.toBeInTheDocument()
+        await waitFor(() => expect(searchCounts).toHaveBeenCalled(), { timeout: 2000 })
+        expect((await screen.findAllByText('7', {}, { timeout: 2000 })).length).toBeGreaterThan(0)
+    })
+})

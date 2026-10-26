@@ -62,9 +62,11 @@ async def create(
     requested_role: str,
     justification: Optional[str] = None,
     binding_id: Optional[str] = None,
+    requested_by: Optional[str] = None,
 ) -> tuple[AccessRequestORM, bool]:
     """Open a request, or return the person's open one for this target.
-    ``binding_id`` makes it a request to keep that grant beyond its end.
+    ``binding_id`` makes it a request to keep that grant beyond its end;
+    ``requested_by`` is who asked, when the requester is a service account.
 
     Returns ``(row, created)``. One open request per person per target is a
     unique index, so two submits racing each other end with one row: the
@@ -90,6 +92,7 @@ async def create(
         justification=(justification.strip() if justification else None) or None,
         status="pending",
         binding_id=binding_id,
+        requested_by=requested_by,
     )
     try:
         async with session.begin_nested():

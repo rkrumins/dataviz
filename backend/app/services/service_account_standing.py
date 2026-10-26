@@ -61,9 +61,9 @@ def _window_days(value) -> Optional[int]:
     return days if days > 0 else None
 
 
-def _admin_link(account_id: str) -> str:
-    """The administrators' Service accounts page, opened on the account."""
-    return f"/admin/service-accounts?account={account_id}"
+def account_link(account_id: str) -> str:
+    """The account's own page — its managers' and its administrators' alike."""
+    return f"/service-accounts/{account_id}"
 
 
 async def policy(session: AsyncSession) -> Policy:
@@ -132,7 +132,7 @@ async def refresh(
                 )
             await notification_repo.notify(
                 session, user_ids=admins, kind="service_account_unmanaged",
-                title="A service account has no manager left", body=body, link=_admin_link(account.id),
+                title="A service account has no manager left", body=body, link=account_link(account.id),
                 resource_type="service_account", resource_id=account.id, dedupe_unread=True,
             )
     return lost
@@ -188,7 +188,7 @@ async def remind_pausing(
                     else f"“{account.name}” still has no manager, so its keys stopped working on "
                     f"{day}. Appoint one and they work again at once."
                 ),
-                link=_admin_link(account.id), resource_type="service_account", resource_id=account.id,
+                link=account_link(account.id), resource_type="service_account", resource_id=account.id,
             )
     await service_account_repo.mark_pause_reminded(session, [a.id for a in due], now=now)
     return len(due)
@@ -300,7 +300,7 @@ async def key_audience(
     and while nobody can act for it, the administrators who appoint them."""
     if not is_service_account(owner_id):
         return KeyAudience({owner_id}, "/me/api-keys")
-    found = await service_account_repo.get(session, owner_id)
+    found = await service_account_repo.get(session, owner_id, deleted=True)
     name = found[0].first_name if found else owner_id
     rules = await policy(session)
     people = await service_account_repo.who_answers(
@@ -308,5 +308,5 @@ async def key_audience(
         window_days=rules.window_days, passwords_allowed=rules.passwords_allowed,
     )
     if people:
-        return KeyAudience(people, f"/me/service-accounts/{owner_id}", name)
-    return KeyAudience(await binding_repo.platform_admin_user_ids(session), _admin_link(owner_id), name)
+        return KeyAudience(people, account_link(owner_id), name)
+    return KeyAudience(await binding_repo.platform_admin_user_ids(session), account_link(owner_id), name)

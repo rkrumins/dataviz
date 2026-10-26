@@ -27,6 +27,8 @@
  */
 import type { SearchQuery, SearchScope } from '@/types/search'
 
+import { parseNamePath } from './panel/relations'
+
 
 /**
  * Templates emit a query *without* the required ``scope.viewId`` field —
@@ -69,11 +71,7 @@ export interface TemplateContext {
     knownEntityTypes: string[]
 }
 
-/** Section taxonomy. The picker groups templates by this field rather
- *  than maintaining a hardcoded ID list — adding a template only
- *  requires setting ``section`` on the new entry, never touching
- *  TemplatePicker. New section ids: register display metadata in
- *  ``SECTION_META`` in TemplatePicker.tsx. */
+/** Section taxonomy: what kind of question a template answers. */
 export type TemplateSection =
     | 'overview'    // counts and distributions
     | 'find'        // locate specific entities
@@ -93,18 +91,6 @@ export interface SearchTemplate {
     /** Which section the picker groups this template under. */
     section: TemplateSection
     inputs: TemplateInput[]
-    /**
-     * Surfaced as a one-click chip on the AskBar. Only set this for templates
-     * that can run with their default inputs — featured chips submit directly
-     * without showing a form, so any required field needs a usable default.
-     */
-    featured?: boolean
-    /**
-     * Short label used on the AskBar chip when ``featured`` is true. Falls
-     * back to ``label`` if omitted. Chips are tight on space — prefer
-     * 1-3 words.
-     */
-    chipLabel?: string
     /** Compile the filled inputs into a scope-less search request. The
      *  ``useAdvancedSearch`` hook stamps ``scope.viewId`` on top so the
      *  backend's ViewScopeResolver can enforce view boundaries. */
@@ -120,8 +106,6 @@ export const TEMPLATES: SearchTemplate[] = [
         description: 'Count every node in scope, grouped by what kind of entity it is.',
         icon: 'PieChart',
         section: 'overview',
-        featured: true,
-        chipLabel: 'Overview',
         inputs: [],
         build: () => ({
             predicate: { kind: 'hasProperty', key: 'urn' },
@@ -167,8 +151,6 @@ export const TEMPLATES: SearchTemplate[] = [
         description: 'List every node of a chosen type — datasets, containers, etc.',
         icon: 'List',
         section: 'find',
-        featured: true,
-        chipLabel: 'All datasets',
         inputs: [
             {
                 name: 'entityType',
@@ -213,6 +195,35 @@ export const TEMPLATES: SearchTemplate[] = [
             options: {
                 results: 'hits',
                 pageSize: 50,
+                includeAncestorPath: true,
+            },
+        }),
+    },
+    {
+        id: 'inside-named-container',
+        label: 'Everything inside a named container',
+        description:
+            'Name the container by its path — "Country / United Kingdom" — ' +
+            'instead of its URN, so the query works in every environment.',
+        icon: 'FolderTree',
+        section: 'find',
+        inputs: [
+            {
+                name: 'containerPath',
+                kind: 'text',
+                label: 'Container (names from the top, / between)',
+                placeholder: 'Country / United Kingdom',
+            },
+        ],
+        build: (inputs) => ({
+            predicate: {
+                kind: 'descendantOf', urns: [],
+                refs: [{ path: parseNamePath(String(inputs.containerPath || '')) }],
+            },
+            options: {
+                results: 'both',
+                pageSize: 50,
+                aggregations: [{ by: 'entityType' }],
                 includeAncestorPath: true,
             },
         }),
@@ -312,8 +323,6 @@ export const TEMPLATES: SearchTemplate[] = [
         description: 'All nodes tagged with a value, rolled up by domain.',
         icon: 'Tag',
         section: 'find',
-        featured: true,
-        chipLabel: 'PII tagged',
         inputs: [
             {
                 name: 'tag',
@@ -384,8 +393,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'Lineage edges are resolved from the ontology of the data source.',
         icon: 'CircleOff',
         section: 'lineage',
-        featured: true,
-        chipLabel: 'No lineage',
         inputs: [
             {
                 name: 'entityType',
@@ -423,8 +430,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'Lineage edges are resolved from the ontology.',
         icon: 'CornerDownRight',
         section: 'lineage',
-        featured: true,
-        chipLabel: 'No downstream',
         inputs: [],
         build: () => ({
             predicate: { kind: 'isLeaf', edgeClass: 'lineage' },
@@ -444,8 +449,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'Lineage edges are resolved from the ontology.',
         icon: 'CornerLeftUp',
         section: 'lineage',
-        featured: true,
-        chipLabel: 'No upstream',
         inputs: [],
         build: () => ({
             predicate: { kind: 'isRoot', edgeClass: 'lineage' },
@@ -456,6 +459,85 @@ export const TEMPLATES: SearchTemplate[] = [
                 includeAncestorPath: true,
             },
         }),
+    },
+    {
+        id: 'feeds-a-type',
+        label: 'What feeds a kind of entity',
+        description:
+            'Entities whose lineage reaches an entity of the chosen type ' +
+            'within a few hops — every route counts.',
+        icon: 'Workflow',
+        section: 'lineage',
+        inputs: [
+            {
+                name: 'targetType',
+                kind: 'select',
+                label: 'Feeds a',
+                options: [],
+                defaultValue: 'dataset',
+            },
+            {
+                name: 'hops',
+                kind: 'number',
+                label: 'Within hops',
+                defaultValue: 2, min: 1, max: 3,
+            },
+        ],
+        build: (inputs) => {
+            const hops = Math.max(1, Math.min(3, Number(inputs.hops) || 2))
+            return {
+                predicate: {
+                    kind: 'related', axis: 'downstream',
+                    ...(hops > 1 ? { maxHops: hops } : {}),
+                    where: { kind: 'entityType', op: 'in', values: [String(inputs.targetType || 'dataset')] },
+                },
+                options: {
+                    results: 'both',
+                    pageSize: 50,
+                    aggregations: [{ by: 'entityType' }],
+                    includeAncestorPath: true,
+                },
+            }
+        },
+    },
+    {
+        id: 'upstream-of-named',
+        label: 'Everything that feeds a named entity',
+        description:
+            'The sources of one entity, named by its path, up to ten hops ' +
+            'upstream — uncapped and counted exactly.',
+        icon: 'GitMerge',
+        section: 'lineage',
+        inputs: [
+            {
+                name: 'entityPath',
+                kind: 'text',
+                label: 'Entity (names from the top, / between)',
+                placeholder: 'Sales / orders',
+            },
+            {
+                name: 'hops',
+                kind: 'number',
+                label: 'Up to hops',
+                defaultValue: 3, min: 1, max: 10,
+            },
+        ],
+        build: (inputs) => {
+            const hops = Math.max(1, Math.min(10, Number(inputs.hops) || 3))
+            return {
+                predicate: {
+                    kind: 'related', axis: 'downstream',
+                    ...(hops > 1 ? { maxHops: hops } : {}),
+                    where: { kind: 'is', refs: [{ path: parseNamePath(String(inputs.entityPath || '')) }] },
+                },
+                options: {
+                    results: 'both',
+                    pageSize: 50,
+                    aggregations: [{ by: 'entityType' }],
+                    includeAncestorPath: true,
+                },
+            }
+        },
     },
     {
         id: 'within-hops-of',
@@ -625,8 +707,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'so you can see which business areas hold sensitive data.',
         icon: 'ShieldAlert',
         section: 'governance',
-        featured: true,
-        chipLabel: 'PII spread',
         inputs: [
             {
                 name: 'tags',
@@ -656,6 +736,48 @@ export const TEMPLATES: SearchTemplate[] = [
                 },
             }
         },
+    },
+    {
+        id: 'containers-with-tagged-child',
+        label: 'Entities holding something tagged',
+        description:
+            'Entities of a type with at least one child carrying a tag — ' +
+            '"datasets with a PII column".',
+        icon: 'FolderLock',
+        section: 'governance',
+        inputs: [
+            {
+                name: 'entityType',
+                kind: 'select',
+                label: 'Entity type',
+                options: [],
+                defaultValue: 'dataset',
+            },
+            {
+                name: 'tag',
+                kind: 'text',
+                label: 'Child tagged',
+                placeholder: 'PII',
+                defaultValue: 'PII',
+            },
+        ],
+        build: (inputs) => ({
+            predicate: {
+                kind: 'group', op: 'and', children: [
+                    { kind: 'entityType', op: 'in', values: [String(inputs.entityType || 'dataset')] },
+                    {
+                        kind: 'related', axis: 'child',
+                        where: { kind: 'tag', op: 'hasAny', values: [String(inputs.tag || 'PII').trim()] },
+                    },
+                ],
+            },
+            options: {
+                results: 'both',
+                pageSize: 50,
+                aggregations: [{ by: 'ancestorType', ancestorEntityTypes: ['domain'], maxBuckets: 20 }],
+                includeAncestorPath: true,
+            },
+        }),
     },
     {
         id: 'untagged-datasets',
@@ -716,8 +838,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'domain. Drives the ownership-gap report.',
         icon: 'UserX',
         section: 'governance',
-        featured: true,
-        chipLabel: 'No owner',
         inputs: [
             {
                 name: 'ownerKey',
@@ -764,8 +884,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'by domain so you can see which areas have incomplete lineage.',
         icon: 'Unplug',
         section: 'lineage',
-        featured: true,
-        chipLabel: 'Lineage gaps',
         inputs: [],
         build: () => ({
             predicate: {
@@ -937,8 +1055,6 @@ export const TEMPLATES: SearchTemplate[] = [
             'disconnected data.',
         icon: 'Disc',
         section: 'discovery',
-        featured: true,
-        chipLabel: 'Orphans by layer',
         inputs: [],
         build: () => ({
             predicate: {
@@ -992,11 +1108,6 @@ export function findTemplate(id: string): SearchTemplate {
     const t = TEMPLATES.find((t) => t.id === id)
     if (!t) throw new Error(`Unknown template: ${id}`)
     return t
-}
-
-/** Templates surfaced as one-click chips on the AskBar. Order is preserved. */
-export function featuredTemplates(): readonly SearchTemplate[] {
-    return TEMPLATES.filter((t) => t.featured === true)
 }
 
 /** Initial input values for a template (driven by per-input defaults). */

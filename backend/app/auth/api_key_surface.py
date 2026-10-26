@@ -145,7 +145,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "get_edges_beneath", "get_aggregated_edges",
         "search_nodes", "search_advanced", "search_counts", "search_catalog",
         "search_explain", "search_membership", "search_ancestor_counts",
-        "search_export",
+        "search_export", "search_resolve",
         "get_lineage_trace_deprecated", "trace_v2", "trace_closure",
         "trace_expand", "trace_expand_batch",
         reads_only=True,

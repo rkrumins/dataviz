@@ -15,8 +15,15 @@ Within that:
   columns and a constant default, swaps a CHECK and creates two empty
   tables; ``20261020_1000_ds_transfers`` adds an empty table with its indexes
   and swaps ``view_activity_log``'s action CHECK; ``20261023_1200_service_accounts``
-  creates two empty tables and seeds a permission), since on a database
-  upgrading through them the lock is also held while they run;
+  creates two empty tables and seeds a permission; ``20261025_1200_sa_admin_hold``
+  adds a column with a constant default and holds the few disabled accounts;
+  ``20261025_1400_sa_requests`` and ``20261025_1600_sa_purge`` each add a
+  nullable column, ``20261026_1000_sa_policy`` adds three to the one-row
+  ``platform_settings``, ``20261026_1200_sa_org_read`` seeds a role, and
+  ``20261024_1000_native_query`` adds a column with a constant default to the
+  small ``resource_grants``, swaps a CHECK and seeds a permission and its
+  grants), since on a database upgrading through them the lock is also held
+  while they run;
 * a revision that locks a table other requests use bounds how long it waits
   for that lock (``lock_timeout``), so a long-running reader makes the
   upgrade give up, to be run again, instead of queueing every later query
@@ -41,10 +48,16 @@ _LAST = "20261014_1200_aal_api_key.py"
 #: The cheap revisions right after the ledger's, in order.
 _NEXT = "20261018_1200_layout_templates"
 _THEN = "20261018_1300_tpl_lifecycle"
-_THIRD = "20261019_1000_ws_access"
-_FOURTH = "20261019_1600_access_life"
-_FIFTH = "20261020_1000_ds_transfers"
-_SIXTH = "20261023_1200_service_accounts"
+_AFTER = "20261019_1000_ws_access"
+_LATER = "20261019_1600_access_life"
+_RECENT = "20261020_1000_ds_transfers"
+_NEWER = "20261023_1200_service_accounts"
+_HOLD = "20261025_1200_sa_admin_hold"
+_ASKED = "20261025_1400_sa_requests"
+_PURGE = "20261025_1600_sa_purge"
+_POLICY = "20261026_1000_sa_policy"
+_ORG_READ = "20261026_1200_sa_org_read"
+_QUERY = "20261024_1000_native_query"
 #: Every revision that locks a table other requests use, and in which
 #: direction: ``users`` for the key's foreign key, ``user_identities``, and
 #: the ledger.
@@ -55,10 +68,16 @@ _ON_LIVE_TABLES = {
     _LAST: ("upgrade", "downgrade"),
     f"{_NEXT}.py": ("upgrade", "downgrade"),
     f"{_THEN}.py": ("upgrade", "downgrade"),
-    f"{_THIRD}.py": ("upgrade", "downgrade"),
-    f"{_FOURTH}.py": ("upgrade", "downgrade"),
-    f"{_FIFTH}.py": ("upgrade", "downgrade"),
-    f"{_SIXTH}.py": ("upgrade", "downgrade"),
+    f"{_AFTER}.py": ("upgrade", "downgrade"),
+    f"{_LATER}.py": ("upgrade", "downgrade"),
+    f"{_RECENT}.py": ("upgrade", "downgrade"),
+    f"{_NEWER}.py": ("upgrade", "downgrade"),
+    f"{_HOLD}.py": ("upgrade", "downgrade"),
+    f"{_ASKED}.py": ("upgrade", "downgrade"),
+    f"{_PURGE}.py": ("upgrade", "downgrade"),
+    f"{_POLICY}.py": ("upgrade", "downgrade"),
+    f"{_ORG_READ}.py": ("upgrade", "downgrade"),
+    f"{_QUERY}.py": ("upgrade", "downgrade"),
     # graphver.projection_state, which every projection pass writes.
     "20261017_1500_gv_ps_keys.py": ("upgrade", "downgrade"),
     "20261017_1550_gv_ps_fencing.py": ("upgrade", "downgrade"),
@@ -170,12 +189,18 @@ def test_the_chain_ends_at_the_ledger_revision():
     ] == []
     # The cheap revisions right after the ledger's stay in order, so the ledger's lock still
     # covers only them before the ones that follow.
+    assert scripts.get_revision(_QUERY).down_revision == _ORG_READ
+    assert scripts.get_revision(_ORG_READ).down_revision == _POLICY
+    assert scripts.get_revision(_POLICY).down_revision == _PURGE
+    assert scripts.get_revision(_PURGE).down_revision == _ASKED
+    assert scripts.get_revision(_ASKED).down_revision == _HOLD
+    assert scripts.get_revision(_HOLD).down_revision == _NEWER
+    assert scripts.get_revision(_NEWER).down_revision == _RECENT
+    assert scripts.get_revision(_RECENT).down_revision == _LATER
+    assert scripts.get_revision(_LATER).down_revision == _AFTER
+    assert scripts.get_revision(_AFTER).down_revision == _THEN
     assert scripts.get_revision(_THEN).down_revision == _NEXT
     assert scripts.get_revision(_NEXT).down_revision == _LAST[:-3]
-    assert scripts.get_revision(_THIRD).down_revision == _THEN
-    assert scripts.get_revision(_FOURTH).down_revision == _THIRD
-    assert scripts.get_revision(_FIFTH).down_revision == _FOURTH
-    assert scripts.get_revision(_SIXTH).down_revision == _FIFTH
 
 
 @pytest.mark.parametrize("name", sorted(_ON_LIVE_TABLES))

@@ -194,3 +194,53 @@ describe('ApproveRequestDialog — what a grant opens', () => {
         expect(note).toHaveTextContent('Any role here reads all 2 data sources in this workspace, restricted ones included: HR warehouse, Ledger.')
     })
 })
+
+const FOR_AN_ACCOUNT: AccessRequestResponse = {
+    ...REQUEST,
+    requester: { id: 'svc_sync', email: 'svc_sync@service-account.invalid', displayName: 'Metadata sync' },
+    serviceAccount: {
+        description: 'Reads graph metadata nightly',
+        managers: [
+            { type: 'user', name: 'Ada Lovelace', fromIdp: false },
+            { type: 'group', name: 'Data platform', fromIdp: true },
+        ],
+    },
+    requestedBy: { id: 'usr_ada', email: 'ada@x.io', displayName: 'Ada Lovelace' },
+}
+
+describe('ApproveRequestDialog — for a service account', () => {
+    it('says whose it is, and grants only a role it may hold — never a team', async () => {
+        const user = userEvent.setup()
+        members.grantOptions.mockResolvedValue(options({
+            groups: [{ id: 'grp_1', name: 'Analysts', memberCount: 3, roles: ['workspace_member'] }],
+            roles: [
+                { name: 'workspace_admin', description: 'Everything', isSystem: true, requestable: false },
+                { name: 'workspace_viewer', description: 'Read-only', isSystem: true, requestable: true },
+                { name: 'workspace_member', description: 'Contributor', isSystem: true, requestable: true },
+            ],
+        }))
+        renderDialog(FOR_AN_ACCOUNT)
+
+        expect(screen.getByText('Service account: Reads graph metadata nightly')).toBeInTheDocument()
+        expect(screen.getByText(/Managed by Ada Lovelace, Data platform \(from your identity provider\)/)).toBeInTheDocument()
+        expect(screen.getByText('Asked by Ada Lovelace')).toBeInTheDocument()
+        expect(await screen.findByRole('radio', { name: /Member/ })).toHaveAttribute('aria-checked', 'true')
+        expect(screen.queryByRole('radio', { name: /Admin/ })).not.toBeInTheDocument()
+        expect(screen.queryByRole('radio', { name: /Add to a team/ })).not.toBeInTheDocument()
+        await user.click(screen.getByRole('button', { name: 'Approve' }))
+        await waitFor(() => expect(requests.approve).toHaveBeenCalledWith('ar_1', {
+            role: 'workspace_member', expiresIn: null, exception: false, note: null,
+        }))
+    })
+
+    it('leaves it to the admins where the identity provider decides, never pointing to a group', async () => {
+        members.grantOptions.mockResolvedValue(options({ tier: 'steward', accessMode: 'idp' }))
+        renderDialog({ ...FOR_AN_ACCOUNT, target: { ...REQUEST.target, accessMode: 'idp' } })
+
+        expect(await screen.findByRole('alert')).toHaveTextContent(
+            'only the workspace’s admins give a service account access here',
+        )
+        expect(screen.queryByRole('radio', { name: /Point to a group/ })).not.toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'Approve' })).toBeDisabled()
+    })
+})

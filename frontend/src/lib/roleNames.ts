@@ -18,6 +18,9 @@ export const ROLE_NAMES = {
     SUPER_ADMIN: 'super_admin',
     ORG_ADMIN: 'org_admin',
     ORG_AUDITOR: 'org_auditor',
+    /** Reads every workspace and nothing else: the platform role a service
+     *  account may hold. */
+    ORG_READER: 'org_reader',
     /** Default tier for any user without an explicit global role. */
     USER: 'user',
 

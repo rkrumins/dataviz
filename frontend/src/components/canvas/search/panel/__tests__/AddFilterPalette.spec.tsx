@@ -1,7 +1,7 @@
 /**
  * AddFilterPalette — verifies the two behaviours iteration 3 depends on:
  *
- *   1. The Advanced / Code-only entries (Path, Within N hops) are hidden
+ *   1. The Advanced / Code-only entries (Within N hops) are hidden
  *      when their handoff callback isn't wired — exactly the case in the
  *      Property Manager rule editor, which has no Advanced drawer / Code
  *      mode. The ``emit`` group entries stay so grouping still works.
@@ -16,6 +16,7 @@ import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 
 import { AddFilterPalette } from '../AddFilterPalette'
+import { RelationContext } from '../relationContext'
 
 
 vi.mock('framer-motion', () => {
@@ -57,9 +58,9 @@ describe('AddFilterPalette', () => {
         await user.click(screen.getByRole('button', { name: /add filter/i }))
 
         // Code-only entries require onOpenCode → hidden here.
-        expect(screen.queryByText(/Path from A to B/i)).not.toBeInTheDocument()
         expect(screen.queryByText(/Within N hops of/i)).not.toBeInTheDocument()
-        // Emit entries (incl. group authoring) always render.
+        // Emit entries (incl. group authoring and edge counts) always render.
+        expect(screen.getByText(/Number of edges/i)).toBeInTheDocument()
         expect(screen.getByText(/AND group/i)).toBeInTheDocument()
         expect(screen.getByText(/Tag is/i)).toBeInTheDocument()
     })
@@ -70,19 +71,51 @@ describe('AddFilterPalette', () => {
 
         await user.click(screen.getByRole('button', { name: /add filter/i }))
 
-        expect(screen.getByText(/Path from A to B/i)).toBeInTheDocument()
         expect(screen.getByText(/Within N hops of/i)).toBeInTheDocument()
+        expect(screen.getByText(/Number of edges/i)).toBeInTheDocument()
     })
 
-    it('offers a degree condition as a Code entry, handing it off', async () => {
+    it('builds an edge count in the Form, never handing it to Code', async () => {
         const user = userEvent.setup()
+        const onAdd = vi.fn()
         const onOpenCode = vi.fn()
-        render(<AddFilterPalette {...baseProps} onOpenCode={onOpenCode} />)
+        render(<AddFilterPalette {...baseProps} onAdd={onAdd} onOpenCode={onOpenCode} />)
 
         await user.click(screen.getByRole('button', { name: /add filter/i }))
         await user.click(screen.getByText(/Number of edges/i))
 
-        expect(onOpenCode).toHaveBeenCalledWith('degree')
+        expect(onAdd).toHaveBeenCalledWith({ kind: 'degree', direction: 'both', op: 'gt', value: 5, edgeClass: 'links' })
+        expect(onOpenCode).not.toHaveBeenCalled()
+    })
+
+    it('offers every link and every edge, connections and edge types', async () => {
+        const user = userEvent.setup()
+        const onAdd = vi.fn()
+        render(<AddFilterPalette {...baseProps} onAdd={onAdd} />)
+
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        await user.click(screen.getByText('No edges at all'))
+        expect(onAdd).toHaveBeenLastCalledWith({ kind: 'isOrphan', edgeClass: 'any' })
+
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        await user.click(screen.getByText('No links at all'))
+        expect(onAdd).toHaveBeenLastCalledWith({ kind: 'isOrphan', edgeClass: 'links' })
+
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        await user.click(screen.getByText('Is linked to…'))
+        expect(onAdd).toHaveBeenLastCalledWith(expect.objectContaining(
+            { kind: 'related', axis: 'neighbor', edgeClass: 'links' }))
+
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        await user.click(screen.getByText('Connected through an edge type…'))
+        expect(onAdd).toHaveBeenLastCalledWith(expect.objectContaining(
+            { kind: 'related', axis: 'neighbor', edgeTypes: [] }))
+
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        await user.click(screen.getByText('Something inside it feeds…'))
+        expect(onAdd).toHaveBeenLastCalledWith(expect.objectContaining({
+            kind: 'related', axis: 'descendant',
+            where: expect.objectContaining({ kind: 'related', axis: 'downstream', maxHops: 3 }) }))
     })
 
     it('offers every entity as a condition of its own', async () => {
@@ -112,5 +145,80 @@ describe('AddFilterPalette', () => {
         const emitted = onAddMany.mock.calls[0][0]
         expect(emitted).toHaveLength(2)
         expect(emitted.map((p: { kind: string }) => p.kind).sort()).toEqual(['entityType', 'tag'])
+    })
+
+    it('offers relationships, and builds one along the chosen axis', async () => {
+        const user = userEvent.setup()
+        const onAdd = vi.fn()
+        render(<AddFilterPalette {...baseProps} onAdd={onAdd} />)
+
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        expect(screen.getByText('Relationships')).toBeInTheDocument()
+        await user.click(screen.getByText('Feeds…'))
+
+        // 1–3 steps, as the canvas and Ask read "feeds".
+        expect(onAdd).toHaveBeenCalledWith(expect.objectContaining(
+            { kind: 'related', axis: 'downstream', maxHops: 3 }))
+    })
+
+    it('starts lineage at one step in a display rule, which follows one', async () => {
+        const user = userEvent.setup()
+        const onAdd = vi.fn()
+        render(
+            <RelationContext.Provider value={{ depth: 0, rule: true }}>
+                <AddFilterPalette {...baseProps} onAdd={onAdd} />
+            </RelationContext.Provider>,
+        )
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        await user.click(screen.getByText('Is fed by…'))
+        expect(onAdd).toHaveBeenCalledWith({ kind: 'related', axis: 'upstream',
+            where: { kind: 'entityType', op: 'in', values: [] } })
+    })
+
+    it('inside a relationship, offers no scope of the search, and no relationship past the deepest', async () => {
+        const user = userEvent.setup()
+        const at = (depth: number) => render(
+            <RelationContext.Provider value={{ depth, rule: false }}>
+                <AddFilterPalette {...baseProps} onOpenCode={vi.fn()} />
+            </RelationContext.Provider>,
+        )
+        const { unmount } = at(1)
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        expect(screen.queryByText(/Inside Subtree/i)).not.toBeInTheDocument()
+        expect(screen.queryByText(/Inside a container named/i)).not.toBeInTheDocument()
+        expect(screen.queryByText(/Paths from A to B/i)).not.toBeInTheDocument()
+        expect(screen.getByText('Is directly inside…')).toBeInTheDocument()
+        expect(screen.getByText('Something inside it feeds…')).toBeInTheDocument()
+        unmount()
+
+        // Two relationships deep: one more fits, two don't.
+        const second = at(2)
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        expect(screen.getByText('Is directly inside…')).toBeInTheDocument()
+        expect(screen.queryByText('Something inside it feeds…')).not.toBeInTheDocument()
+        second.unmount()
+
+        at(3)
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        expect(screen.queryByText('Is directly inside…')).not.toBeInTheDocument()
+        expect(screen.getByText('Is a named entity…')).toBeInTheDocument()
+    })
+
+    it('builds paths visually, except in a display rule, which tests one entity', async () => {
+        const user = userEvent.setup()
+        const onAdd = vi.fn()
+        const { unmount } = render(<AddFilterPalette {...baseProps} onAdd={onAdd} />)
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        await user.click(screen.getByText(/Paths from A to B/i))
+        expect(onAdd).toHaveBeenCalledWith(expect.objectContaining({ kind: 'path' }))
+        unmount()
+
+        render(
+            <RelationContext.Provider value={{ depth: 0, rule: true }}>
+                <AddFilterPalette {...baseProps} />
+            </RelationContext.Provider>,
+        )
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        expect(screen.queryByText(/Paths from A to B/i)).not.toBeInTheDocument()
     })
 })

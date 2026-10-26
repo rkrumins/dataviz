@@ -177,7 +177,7 @@ and the projector carries them to FalkorDB; until it has, reads come from Postgr
 ### Upgrading
 
 - Run the migrations this release adds, in this order (the first follows
-  `20261023_1200_service_accounts`; the head is `20261018_1200_gv_lifecycle`):
+  `20261024_1000_native_query`; the head is `20261018_1200_gv_lifecycle`):
   `20261017_1000_datasource_publish` on the management tables (the `workspace:datasource:publish`
   permission and the `workspace_publisher` role), then on the `graphver` schema
   `20261017_1500_gv_ps_keys` (one graph per FalkorDB key: a trashed graph that does not own a
@@ -480,6 +480,425 @@ grants can't be read.
   `allowMassDelete`.
 - A fork in the trash keeps its FalkorDB key until it is purged, and the topology page shows that
   key as unregistered meanwhile, as it does for a data source in the trash.
+
+---
+
+## [Unreleased] — Connections: any edge, either way, and layers as the View places them
+
+### Added
+
+**Connections through any edge.** A relationship follows lineage, **any link** — every edge type but
+the hierarchy's, so tags, glossary terms and jobs too — or the **edge types** you name, in whatever
+case you type them: "jobs that write a PII dataset", "datasets linked to anything in Finance",
+"glossary terms nothing is defined by". An edge type the data source doesn't have is refused,
+naming the nearest it does ("did you mean PRODUCES?"). Edge counts and graph shapes take the same
+choice: **No links at all**, **No edges at all**, **Number of edges…**. In the API,
+`edgeClass: "links"`, and `edgeClass` on a relationship.
+
+**The connection card.** In the Form a relationship reads as a sentence — **Feeds** · **at least
+one** · *dashboard* — with verbs that describe the entity you're finding: *Is directly inside*, *Is
+inside*, *Sits under*, *Directly contains*, *Contains*, *Feeds*, *Is fed by*, *Is linked to*. **More
+options** holds the steps, which edges (*Lineage*, *Any link*, *Edge types* picked from the data
+source's own, each with the entity types it joins), the direction and the conditions every edge
+walked must meet. Edge counts have a Form row. The palette adds *Contains, at any depth*, *Is linked
+to*, *Connected through an edge type* and *Something inside it feeds*, and the canvas menu **What’s
+linked to this**.
+
+**Connections in Code mode.** `feeds(…)`, `fedBy(…)`, `linkedTo(…)`, `outgoing[PRODUCES](…)`,
+`incoming(…)`; `noIncoming`, `noLinks`, `noEdges`, `noIncoming[DEFINED_BY]`;
+`edges[PRODUCES](in) >= 2`. Completion offers the data source's edge types inside `[…]`, and an
+edge type it doesn't know is underlined as you type.
+
+**Compare two properties of the same entity.** "Datasets past their freshness SLA":
+`freshnessHours > {slaHours}` in Code mode, **Compare with → Another property** in the Form,
+`valueKey` in the API. An order compares as numbers and equality as text, unless you say otherwise.
+
+**Layers the way the View places them.** **In layer…** finds what the View places in a layer by the
+shared placement rule — by hand, by the layer's rules, or with its container — not only what was
+created or moved there. The picker lists the View's layers by name; Code mode reads
+`layer:"Reporting layer"`; it works as a relationship's far end too.
+
+**Follow lineage far, to any far end.** A relationship at the top of the query asking for at least
+one relative went up to 10 hops only to entities it names. Now one a query goes as far to a far end
+that is a condition: it is traced from everything that condition matches across the data source.
+"Dashboards fed, within six hops, by an uncertified dataset."
+
+### Changed
+
+- In Code mode, `feeds`, `fedBy`, `linkedTo`, `outgoing` and `incoming` start a relationship when
+  `(` follows (after any `[edge types]` or `*steps`), and `noIncoming`, `noOutgoing`, `noLinks`,
+  `noEdges`, `hasIncoming`, `hasOutgoing` and `edges(…)` are graph shapes and edge counts: they used
+  to be searched for by name. Quote one to search for it. Code mode prints relationships in the new
+  words; `upstream(`, `downstream(` and `neighbor(` read the same as before.
+- **Add filter → Relationships** reads as verbs: *Parent is…* is now *Is directly inside…*, *Any
+  container above it…* *Is inside…*, *Contains…* *Directly contains…*, and *Fed by…* *Is fed by…*.
+  **Number of edges…** moved from **Advanced** to **Graph shape**.
+- **Feeds…** and **Is fed by…** start at up to 3 steps, as the canvas's questions and Ask do; they
+  started at one.
+
+### Upgrading
+
+- `edgeClass: "any"` on an edge count or graph shape now counts every edge type the data source has,
+  not only lineage and containment: an entity whose only edges are a tag or a glossary term no
+  longer counts as having none.
+- A named edge type the data source doesn't have is now a 400 that names the nearest one, where it
+  used to match nothing; a containment type named on a connection is a 400 too.
+- The layer filter now finds what the View places in the layer, not only the `layerAssignment`
+  stamp: a saved search or display rule with a layer filter can match more. A value no layer of the
+  View has keeps matching the stamp, and says so. With *One placement rule for every view surface*
+  off, a few entities can sit in another column on the canvas than the one search finds them in
+  (`docs/services/ASSIGNMENTS.md`).
+
+### Known limitations
+
+- A layer filter follows a View that places at most 1,000 entities by hand, and as many layer rules
+  as FalkorDB parses quickly (some thirty that compare properties); past that it is refused in plain
+  words. In a containment cycle it follows edges the canvas ignores.
+- Ask doesn't read edge types or links yet ("produced by", "linked to"), and the Sentence view hands
+  edge counts to Code mode.
+- **No**, **only** or a count past 3 hops, or more than one relationship traced past 3, are for
+  Cypher (**Cypher tab → Edit and run**).
+
+---
+
+## [Unreleased] — Ask the graph: plain words, Search Studio, relationships, names, routes and your own Cypher
+
+### Added
+
+**Ask in plain words.** Beside its filters, the query card takes a question in plain words: "datasets
+that feed finance dashboards", "unowned datasets", "datasets in Snowflake updated in the last 7 days". Before anything
+changes it reads the question back — what it reads as, and how many that finds — offers the other
+readings of a word that has several, lets you pick among entities sharing a name, and says which
+words it searched for by name. It is rule-based, reading the View's own types, tags, properties and
+layers: nothing is sent to an AI service. **Enter** runs it; starting with "and" adds to the query.
+
+**A query as a sentence, with its map.** The new **Sentence** mode reads the query the way you'd say
+it — *Find* **datasets** *that* **feed** **a dashboard** — every word a token you click to change,
+with a map of the query's shape whenever it has a relationship or a route. The card still opens on
+**Form**, the filter cards, for everyone; Sentence is the guided alternative, a click away.
+
+**Counts as you build.** Each Sentence line says how many still match once it is added, and the map,
+the Ask preview, recipes and type chips carry counts too — all before anything runs. On a very large
+View, **Options → Live counts** turns them off. `POST /search/counts` takes `purpose: "search"` to
+count a search's conditions, lineage of more than one hop included; rules keep their one-hop limit.
+
+**When nothing matches.** The Sentence line where the matches run out is marked before anything
+runs, with up to three fixes, each counted, one click to apply. An empty answer leads with the same,
+whichever builder you use.
+
+**Refine from the answer.** Chips over the results narrow the query to one type, or leave one out,
+each counted; a match's breadcrumb narrows to inside a container; a match says why it matched. Rows
+take their icons and colours from the ontology.
+
+**Search Studio.** The panel opens out over the canvas (**Open Search Studio**, `E`, or the command
+palette): the query; the matches as a table, whose picked rows can be framed on the canvas, kept as
+the only ones, left out or copied; and the View's types, tags and properties, counted exactly, a
+click adding one to the query.
+
+**Recipes.** Ready-made questions by intent — impact, root cause, governance and PII, documentation
+gaps, ownership, cleanup, discovery — in the View's own words, each counted, and offered only when
+the View holds what they name: on the empty query card, in **Library → Recipes** and in an idle
+Studio. One with something to fill in opens at it.
+
+**Guidance.** A first-run tip points at Search Studio, and the guide is a click away. The command
+palette gains **Ask about this view** and **Open Search Studio**. The panel's edge resizes from the
+keyboard, and the Sentence builder tells screen readers its settled total, or where the matches run
+out.
+
+**Search by relationships.** Advanced Search finds entities by the entities related to them: up
+the containment tree (a parent, any ancestor, the top-level container), down it (children, any
+descendant), or along lineage (what feeds it, what it feeds, either way). "Datasets whose parent is
+a domain", "tables with a PII column", "tables where every column is described", "more than 100
+columns", "feeds a dashboard within three hops whose parent is *Finance*". A relationship's
+condition is any filter — other relationships included, three deep — and a lineage relationship
+can require every edge it walks to meet a filter. **Add filter → Relationships** in the panel and in
+the rule editor; `parent(…)`, `every child(…)`, `count(child(…)) > 100` and
+`downstream*..3(…).via(…)` in Code mode; `"kind": "related"` in the API. Every match is found and
+counted exactly, and display rules, counts and exports take relationships too.
+
+**Name entities instead of pasting URNs.** Every filter that names entities — inside a container,
+within N hops, the ends of a path, and the new **Is a named entity** — takes a path of display names
+from the top: `Country / United Kingdom`, `Country / ** / London`, `** / orders`. The picker says
+as you type how many entities a path names, and where they sit. A name means the same in every
+environment, so saved searches, rules and library packs that use names keep working after they
+move. `POST /search/resolve` answers what a path names; every search reports it in
+`scopeDiagnostics.resolvedRefs`.
+
+**Routes between conditions.** Either end of a path can be a condition: "every route from a topic
+to a dataset through edges in stream mode". Paths have a visual editor now (**Add filter →
+Advanced → Paths from A to B**).
+
+**The properties you put on edges.** Edge filters — on paths, within N hops and relationships —
+read the properties users add to edges, not only the platform's own fields: is set, is not set,
+is, is not, is one of, is none of. Discovery says where each edge key is kept
+(`edges[].storedAs`).
+
+**Questions from the canvas.** Right-click an entity for **Everything inside this**, **Its
+children**, **What feeds this**, **What this feeds** or **Routes from this to…**; with several
+selected, **What all N feed** and **What feeds all N**. On a container, the lineage questions take in
+everything inside it — a dataset's lineage often runs through its columns — and the server walks out
+from the container's contents once, so the answer costs what the container's own lineage costs, not
+what the graph does. A match found through lineage offers **How it matches**: its routes to the
+relatives it was matched by.
+
+**A query editor that knows the language.** Code mode is a real editor now: words are coloured by
+how they are read, a red underline marks where a query stops making sense and says why, and
+suggestions offer what fits where the cursor is — entity types, tags, a property's values, edge
+properties inside `.via(`, entities by name after `@"` — from the View's own data. **Reads as**
+says the query in words while you type, and **Examples** insert a ready-made condition. `Esc` undoes
+your edit, and a query that doesn't read is never applied.
+
+**The Cypher tab.** The query card's third mode shows the query in words and the Cypher a search
+runs as — built by the same code that builds the run, so it is exactly what is sent — with its
+parameters and notes. **Copy with values** gives a statement that runs as it is anywhere Cypher
+runs (`inlinedCypher` on `POST /search/explain`).
+
+**Your own read-only Cypher.** On FalkorDB and Neo4j data sources, **Edit and run** on the Cypher tab
+runs your own Cypher on the whole data source, starting from the search's own statement. Answers
+come back as a table of typed values — nodes, edges and paths as chips that open to their
+properties — and **Highlight on canvas** lights up the entities an answer names. It is for everyone
+whose role reads the workspace's data sources (the new `workspace:native-query:read` permission,
+which an administrator can remove from any role), and for someone a View is shared with directly
+when the share turns on **Query data**. Writes, `LOAD CSV`, other databases, plugins and parameters
+are refused before the query runs; rows, time and size are capped; every run is recorded in the
+activity log. The **Native read-only queries** switch turns it off. `POST /search/native`.
+
+**Examples.** Four example queries in `docs/examples/search-and-rules/queries/`, and a **Holds PII**
+rule in the governance pack.
+
+### Changed
+
+- In Code mode, `parent(`, `child(`, `ancestor(`, `descendant(`, `root(`, `upstream(`,
+  `downstream(`, `neighbor(` and `count(` start a relationship, and `@"…"` names an entity — only
+  when `(` or the quote follows directly: `root cause` and `parent (x)` are still a search for the
+  words.
+- A path in a saved search opens in the visual editor instead of as JSON.
+- New settings: `DEEP_SEARCH_MAX_RELATION_DEPTH` (3) and `DEEP_SEARCH_RELATION_MAX_HOPS` (3).
+- An empty query card lists every filter under the search field; the **All filters** link, which
+  opened the drawer's options instead, is gone.
+- The query card reopens on the mode you used last — Form, Sentence, Code or Cypher — and opens in
+  Form until you choose another.
+- **Library → Templates** is now **Recipes**, and recipes replace the empty card's example cards.
+- Over an answer that stopped short, Business reads what it means in plain words, with the engine's
+  account behind **Why?**. The Cypher tab folds its cap, parameters and notes under **Engine
+  details**, open for Technical.
+- Type chips over the results change the query; they used to filter only the rows already loaded.
+- **Enter** on a button in the search panel presses it; it used to reveal the current match.
+- Relationship sentences say the edges a relationship walks after its condition: "has a target that
+  has an ancestor that is Tableau, through edges where logic is Direct Query".
+- The drawer keeps Options and JSON; the compiled Cypher moved to the Cypher tab.
+- The JSON editor follows the light and dark themes.
+- New settings for native queries: `NATIVE_QUERY_DEFAULT_ROWS` (200), `NATIVE_QUERY_MAX_ROWS`
+  (1,000), `NATIVE_QUERY_DEFAULT_TIMEOUT_MS` (10 s), `NATIVE_QUERY_MAX_TIMEOUT_MS` (30 s),
+  `NATIVE_QUERY_RATE` (20 a minute per person), `NATIVE_QUERY_CONCURRENCY` (2 per data source per
+  process) and `NATIVE_QUERY_MAX_REPLY_BYTES` (16 MiB).
+
+### Fixed
+
+- With results showing, the search panel's header pushed **Close** past the panel's edge at its usual
+  width. Its chips now shrink to icons when room runs short, and take a second row at the narrowest.
+- A path with an edge filter on a value (`confidence >= 0.8`) failed: the filter's parameters were
+  never sent with it.
+- On the capped engine (aggregate-only searches, facets), *Within N hops* was applied after the
+  candidate cap, so it missed matches past the cap and counted candidates it then dropped.
+- A display rule using a lineage shape (*No lineage edges*, *No upstream lineage*, …) failed in rule
+  membership with a type mismatch, so its chips never showed.
+- An edge filter on a property a user added to edges matched nothing.
+- Edge filters had no size limit; they now nest at most three groups deep and hold at most 16
+  conditions.
+- A search that failed or was cancelled wiped the query; it now stays in the box.
+- Search errors showed raw server text (`API Error 422: {"detail": …}`); the error card and the match
+  bar now say what is wrong in plain words.
+- In Code mode, clicking away from a query with an error applied an empty query and wiped the one you
+  had; some errors read `[object Object]`; `rowCount >` threw instead of saying what was missing; an
+  unclosed `"` or `@"` went unreported; and `tag:PII,GDPR` was read as three terms instead of either
+  tag.
+- The compiled Cypher the panel showed could differ from what a search ran (its candidate cap,
+  `LIMIT`, scope and incomplete rows), and a late answer could replace a newer one.
+- A date comparison (`updated > 2024-05-01`, *in the last 30 days*) could crash FalkorDB, and with it
+  every user's queries, when it met a short text with an accented letter or an emoji (`Zoë1`):
+  FalkorDB 4.18 reads past the end of such a text when a slice starts at or past its last
+  character. The comparison now reads its positions from the text padded with zeros, which never
+  starts past the end and decides exactly the same.
+- A deeply nested search could hold FalkorDB for seconds before running at all: its parser reads a
+  condition with nothing after it twice, so each level of nesting doubled the time to parse the
+  statement — four times over for a NOT — and no timeout bounds that time. Five NOTs inside each
+  other took over a second a statement, twenty for a count; three relationships inside each other
+  with NOTs between them, as long. The compiler now writes nested conditions so the time grows with
+  the size of the search, not its depth: a relationship's test of each relative carries an
+  operator after it (`= true`, `+ []`), and a group nested in another that holds one is a
+  one-item comprehension's `WHERE`, which FalkorDB's filter still short-circuits. Groups at the
+  top of a search, and groups of plain conditions, are written as before. A statement FalkorDB
+  would still take over half a second to parse is refused in plain words instead of sent.
+
+### Security
+
+- A share link could follow lineage out of its View: a path returned the entities on it, and a
+  hop test answered yes or no about entities the link can't see. Searches, explains and exports
+  that follow lineage or relationships now answer `403` for share links; in rule membership and
+  counts only the rule that does is refused, so the other rules still colour the shared View.
+- A share link's name references are resolved inside its View only.
+- Native queries are read-only three ways: the engine's read-only mode (`GRAPH.RO_QUERY`, a Neo4j
+  `READ` transaction that is always rolled back), Neo4j's own plan check before anything runs, and
+  a guard in front of both that reads the query as tokens. They are never open to API keys, to a
+  View's visibility or to drafts, and a run's activity record is committed before any row is
+  returned — no record, no rows. See
+  [Native read-only queries: security](docs/NATIVE_QUERIES.md).
+- On FalkorDB, a native query may start `substring()` only at 0: started anywhere else it can crash
+  the server on accented text, so one person's query could stop everyone's. `left()` and `right()`
+  do the same job safely, and the refusal says how.
+- On FalkorDB, a native query nested so deeply that FalkorDB would take over half a second just to
+  parse it is refused: twelve `NOT (` inside each other took it over a minute, a thread no one else
+  could use meanwhile. The refusal says how to write the same query to parse at once.
+
+### Upgrading
+
+- **Run the upgrade job.** Migration `20261024_1000_native_query` adds the
+  `workspace:native-query:read` permission, grants it to every built-in and custom role that holds
+  `workspace:datasource:read`, and adds `resource_grants.can_query_source` (the share's **Query
+  data**). Downgrading removes them.
+- **Native read-only queries is on by default.** Turn it off under **Administration → Features**
+  before people can run their own queries, or remove the permission from roles that shouldn't have
+  it.
+- Set FalkorDB's `TIMEOUT_MAX` and `QUERY_MEM_CAPACITY` (and Neo4j's `db.transaction.timeout` and
+  `db.memory.transaction.max`), and limit the database hosts' outbound network: both engines run
+  `LOAD CSV` as a read, so the guard is what stops it. See
+  [Operator hardening](docs/NATIVE_QUERIES.md#operator-hardening).
+- The relationship settings default to what the panel offers.
+
+### Known limitations
+
+- A relationship follows lineage at most 3 hops, except one at the top of the query asking for at
+  least one relative: it goes up to 10, walked from the entities it names, or — one a query —
+  traced from at most 200,000 entities its far end matches. Complete end-to-end lineage stays the
+  Trace feature's job.
+- An edge property users added takes presence and equality only, and a key of a nested object
+  reads as present when it is only nested.
+- A relationship's condition tests a relative's native properties; a value kept as raw JSON
+  (`propertiesRaw`) doesn't match there.
+- The first run of a new relationship shape can take up to about half a second longer while
+  FalkorDB plans it (a number comparison in a relationship's edge filter); later runs reuse the
+  plan.
+- **How it matches** draws routes up to 4 hops, and routes a path lists stop at 128.
+- Share links can't use relationships, paths or *Within N hops*.
+- Counts as you build need a FalkorDB data source; on other engines, and through a share link, the
+  numbers don't appear until the query runs.
+- Ask reads the phrasings its rules know; other words are searched for by name, and it says which.
+- The Sentence view hands *Within N hops* and *Number of edges* to Code mode, and Form's **Group as**
+  for several selected rows stays in Form.
+- A native query reads the whole data source, not only the View, including internal bookkeeping
+  such as rollup edges. A share's **Query data** stays on until someone turns it off, even if the
+  person who turned it on later loses their own access.
+- FalkorDB may keep working on a native query past the client's deadline, until its own
+  `TIMEOUT_MAX` stops it; Neo4j can't cap one huge row on the client, so its transaction memory
+  limit is what bounds it.
+- Native queries use the data source's existing login; the engines' read-only modes keep them
+  read-only, not the login's privileges.
+
+---
+
+## [Unreleased] — Service accounts: self-service, from workspace access to reading every workspace
+
+### Added
+
+- **A workspace lets a service account in as it lets a person in.** Its admins and stewards add
+  one on **Members** — **Add member**, then **Service account** — which says what each account is
+  for and who manages it, and give it what they could give a person, among the roles a service
+  account may hold, for a while if they like.
+- **Its managers ask a workspace for access** from the account's page, choosing a workspace, a
+  role and why; the workspace answers as it answers a person, seeing what the account is for, who
+  manages it and who asked. A role given for a while can be asked to be kept, and a request
+  waiting on a workspace is listed on the page, where any of its managers can withdraw it. The
+  activity log names who asked.
+- Nobody answers a request for a service account they manage, or one they asked for. A request
+  for one is never answered with a team or pointed to the identity provider, and where the
+  provider decides who is in a workspace, only its admins give a service account access — not as
+  an exception, which would end within 90 days.
+- **The admins and stewards of a workspace it is in can open its page**, to see what it is for and
+  who manages it, with its roles in the workspaces they can open.
+- An administrator giving it a role through the API (`POST …/service-accounts/{id}/roles`) can end
+  it on a date (`expiresAt`).
+- **Removing someone shows the service accounts they could still act through.** When a workspace
+  admin removes someone who manages a service account — themselves or through a team — whose role
+  there gives more than they would keep, the preview names it, and offers to remove that role too.
+- **A service account can be deleted**, by its managers or an administrator, once nothing runs as
+  it: its keys stop at once and its requests still waiting are withdrawn. For 30 days it can be
+  restored as it was — its keys, roles and managers — from its page, where its managers still find
+  it; then the hourly pass purges it, revoking its keys and removing its roles and managers. Its
+  name stays in the activity log. An administrator's delete holds it, so only an administrator
+  restores it.
+- **Administration → Service accounts** narrows to the accounts that need a manager or that an
+  administrator holds, to those a person or a team manages, and to those with a role in a
+  workspace; **Deleted** lists those that can still be restored.
+- Someone removed as a service account's manager is told, unless they still manage it through a
+  team.
+- **Who else may create a service account is a policy** the administrators of service accounts
+  set under **Administration → Service accounts**: only them, as it ships; anyone who lets people
+  into a workspace; or anyone — each up to a number of live accounts (10 unless set), and, if they
+  choose, only with a team they're in managing it. Where it lets them, people create one under
+  **Account → API keys → Service accounts you manage**, managed by them or a team they're in; it
+  reaches nothing until a workspace gives it a role. Changing the policy is recorded in the
+  activity log. See ADR-029.
+- **A service account can read every workspace**, for an integration that reads across the whole
+  organization: an org admin or a super admin chooses **Let it read every workspace…** on its
+  page. Its keys then read every workspace's views, data sources, semantic layers, catalog and
+  providers — those created later too — as far as each key reaches, and change nothing. Its
+  managers can take that away. It is the new platform role **Org reader** (`org_reader`), which
+  carries `system:org-viewer` alone; of any platform role, a service account keeps only that.
+  Appointing a manager counts it, as it counts the account's roles. See ADR-030.
+
+### Changed
+
+- Adding a service account on a workspace's **Members** tab used to answer `409`; it is added
+  there now, under the rules above.
+- The hourly check of who manages each service account locks only the accounts whose standing it
+  changes, a batch at a time, and skips any a request is changing, rather than locking every
+  account for the whole check.
+
+### Upgrading
+
+- The upgrade job adds nullable columns, and nothing else is to run:
+  - `access_requests.requested_by` (`20261025_1400_sa_requests`): who asked for a request made for
+    a service account;
+  - `service_accounts.purged_at` (`20261025_1600_sa_purge`): when a deleted one was purged;
+  - `platform_settings.sa_who_may_create`, `sa_per_person_limit` and `sa_require_team_manager`
+    (`20261026_1000_sa_policy`): who may create a service account. Unset, only the administrators
+    of service accounts may, as before.
+- It also seeds the **Org reader** role (`20261026_1200_sa_org_read`), with its one grant,
+  `system:org-viewer`. Nobody holds it until an administrator gives it to a service account.
+
+---
+
+## [Unreleased] — Service accounts: their managers run them
+
+### Added
+
+- **Each service account has its own page**, for its managers and for the administrators of
+  service accounts alike: how it stands, who manages it, where it has a role, and its keys. It
+  replaces the account's keys page under **Account → API keys** and its dialog under
+  **Administration → Service accounts**, and links to either open it. Reading an account now says
+  what you may do with it (`can`).
+- **Its managers run it.** Besides making its keys, they rename and describe it, disable and enable
+  it, appoint and remove managers — never the last one — and take away roles it no longer needs.
+  Giving it a role is still an administrator's to do.
+
+### Changed
+
+- **Appointing a manager may give them only what they hold already, or what you could grant
+  them.** For each of the account's roles, the new manager must hold every permission it gives the
+  account there — a team, through its own roles — or you must be able to grant it there. Before,
+  you had to be able to grant every one of its roles yourself. The same rule now decides who may
+  add someone to a team that manages a service account, which used to take
+  `system:service-accounts:manage`.
+- **An administrator's disable holds an account.** Disabled by someone holding
+  `system:service-accounts:manage`, an account stays disabled until one of them enables it; its
+  managers can't.
+- Notices about a service account link to its page.
+
+### Upgrading
+
+- The upgrade job adds `service_accounts.admin_hold` (`20261025_1200_sa_admin_hold`) and holds
+  every account disabled today, since an administrator disabled each of them. Nothing else to run.
 
 ---
 

@@ -1,14 +1,14 @@
 /**
  * AdvancedDrawer — power-user concerns, tucked behind the gear.
  *
- *   ┌── ← Back ────────────── Options | JSON | Cypher ────┐
+ *   ┌── ← Back ─────────────────── Options | JSON ────────┐
  *   │                                                     │
  *   │   {active tab content}                              │
  *   │                                                     │
  *   └─────────────────────────────────────────────────────┘
  *
  * Composing filters happens in the Query card on the main surface
- * (rows + Visual/Code toggle). The drawer holds only the three
+ * (rows + Visual / Code / Cypher). The drawer holds only the two
  * power-user concerns that don't belong on the primary surface:
  *
  *   - **Options** — group-by aggregation, page size, candidate cap,
@@ -16,9 +16,8 @@
  *   - **JSON** — the literal Predicate DSL, validated. Read + edit.
  *     Use this for OR / NOT / path composition the row UI can't
  *     express yet.
- *   - **Cypher** — the exact query FalkorDB will run, with bound
- *     parameters and any diagnostic notes from the resolver.
- *     Always-visible, no nested toggles.
+ *
+ * The compiled Cypher is the Query card's own Cypher tab.
  *
  * The legacy "Builder" tab is gone — the Query card on the main
  * panel is the single visual builder so users learn one pattern
@@ -33,11 +32,10 @@ import { useSchemaStore } from '@/store/schema'
 import { JsonEditorView } from '../JsonEditorView'
 import { useDiscovery } from '../builder/useDiscovery'
 
-import { CypherView } from './CypherView'
 import { OptionsPanel } from './OptionsPanel'
 
 
-export type DrawerTab = 'builder' | 'options' | 'json' | 'cypher'
+export type DrawerTab = 'builder' | 'options' | 'json'
 
 
 export interface AdvancedDrawerProps {
@@ -84,9 +82,6 @@ export const AdvancedDrawer: FC<AdvancedDrawerProps> = ({
                     <TabBtn active={tab === 'json'} onClick={() => setTab('json')}>
                         JSON
                     </TabBtn>
-                    <TabBtn active={tab === 'cypher'} onClick={() => setTab('cypher')}>
-                        Cypher
-                    </TabBtn>
                 </div>
             </div>
 
@@ -107,9 +102,6 @@ export const AdvancedDrawer: FC<AdvancedDrawerProps> = ({
                             isRunning={false}
                         />
                     </div>
-                )}
-                {tab === 'cypher' && (
-                    <CypherView viewId={viewId} />
                 )}
             </div>
         </div>

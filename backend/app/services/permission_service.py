@@ -66,7 +66,7 @@ from backend.auth_service.providers.assurance import (
     at_least as assurance_at_least,
 )
 from backend.common.roles import PLATFORM_ADMIN_ROLES
-from backend.common.service_accounts import is_service_account
+from backend.common.service_accounts import SERVICE_ACCOUNT_GLOBAL_PERMISSIONS, is_service_account
 
 logger = logging.getLogger(__name__)
 
@@ -319,6 +319,7 @@ async def resolve(
     user_id: str,
     *,
     sid: str | None = None,
+    excluded_binding_id: str | None = None,
 ) -> PermissionClaims:
     """Compute the user's effective permissions across all scopes.
 
@@ -349,22 +350,50 @@ async def resolve(
         data sources / edit its views / etc." Lets custom roles
         bundle just ``workspace:admin`` rather than enumerating every
         workspace permission.
+
+    ``excluded_binding_id`` leaves one binding out: what they would hold
+    were it removed (``preview-revoke``).
     """
     sid = sid or new_session_id()
 
-    # A service account holds its own workspace roles and nothing else: no
-    # team's, and no platform role, whatever ends up attached to it.
+    # A service account holds its own roles and nothing else: no team's, and
+    # of a platform role only what an account may hold (``_fold``), whatever
+    # ends up attached to it.
     service = is_service_account(user_id)
     group_ids = [] if service else await user_repo.get_groups_for_user(session, user_id)
     bindings = await binding_repo.list_for_user_with_groups(
         session, user_id=user_id, group_ids=group_ids
     )
+    if excluded_binding_id is not None:
+        bindings = [b for b in bindings if b.id != excluded_binding_id]
     if service:
         bindings = [
-            b for b in bindings if b.scope_type == "workspace" and b.subject_type == "user"
+            b for b in bindings
+            if b.scope_type in ("workspace", "global") and b.subject_type == "user"
         ]
+    return await _fold(session, bindings, sid=sid, service=service)
+
+
+async def resolve_group(session: AsyncSession, group_id: str) -> PermissionClaims:
+    """What a team's own bindings grant: what every one of its members holds
+    through it, whatever else they hold. Expired grants count for nothing, as
+    for a person."""
+    now = datetime.now(timezone.utc)
+    bindings = [
+        b for b in await binding_repo.list_for_subject(session, subject_type="group", subject_id=group_id)
+        if not binding_repo._is_expired(b.expires_at, now=now)
+    ]
+    return await _fold(session, bindings, sid=new_session_id())
+
+
+async def _fold(
+    session: AsyncSession, bindings: list[RoleBindingORM], *, sid: str, service: bool = False,
+) -> PermissionClaims:
+    """Bindings folded into claims, by the invariants ``resolve`` describes."""
+    if service:
         # And never more than it could be given: a role it holds that is later
-        # widened to administer a workspace or let people in brings it none of that.
+        # widened to administer a workspace or let people in brings it none of
+        # that, and a platform role brings only reading every workspace.
         from backend.app.services.workspace_access import is_requestable
 
     # Collect distinct role names so we can fetch role_permissions in
@@ -385,7 +414,13 @@ async def resolve(
     for b in bindings:
         perms_for_role = role_perms.get(b.role_name, [])
         if service:
-            perms_for_role = [p for p in perms_for_role if is_requestable((p,))]
+            perms_for_role = [
+                p for p in perms_for_role
+                if (
+                    p in SERVICE_ACCOUNT_GLOBAL_PERMISSIONS if b.scope_type == "global"
+                    else is_requestable((p,))
+                )
+            ]
         for perm in perms_for_role:
             cat = perm_categories.get(perm, "system")
             if b.scope_type == "global" and cat == "system":
@@ -491,6 +526,8 @@ _WORKSPACE_CATEGORY_LEAVES: frozenset[str] = frozenset({
     "workspace:datasource:manage",
     "workspace:datasource:publish",
     "workspace:datasource:read",
+    # Running one's own read-only queries on the workspace's data sources.
+    "workspace:native-query:read",
     # Answering access requests and adding people: a workspace admin can do
     # whatever a Workspace steward can.
     "workspace:members:add",

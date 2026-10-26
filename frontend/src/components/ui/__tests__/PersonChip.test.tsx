@@ -63,14 +63,14 @@ describe('PersonChip', () => {
             />,
         )
         const link = screen.getByRole('link', { name: 'Metadata sync' })
-        expect(link).toHaveAttribute('href', '/admin/service-accounts?account=svc_0123456789ab')
+        expect(link).toHaveAttribute('href', '/service-accounts/svc_0123456789ab')
         expect(screen.queryByText(/service-account\.invalid/)).not.toBeInTheDocument()
         expect(container.querySelector('img')).toBeNull()
 
         await hover(link)
         const tip = screen.getByRole('tooltip')
         expect(tip).toHaveTextContent('Service account')
-        expect(tip).toHaveTextContent('Opens it in Service accounts.')
+        expect(tip).toHaveTextContent('Opens its own page.')
         expect(peopleById).not.toHaveBeenCalled()
     })
 

@@ -6,6 +6,5 @@ export function isServiceAccountId(id: string | null | undefined): boolean {
     return !!id && id.startsWith('svc_')
 }
 
-/** Where an administrator looks after one: the Service accounts page, opened on it. */
-export const serviceAccountHref = (id: string) =>
-    `/admin/service-accounts?account=${encodeURIComponent(id)}`
+/** Its own page, where its managers and the administrators of service accounts look after it. */
+export const serviceAccountHref = (id: string) => `/service-accounts/${encodeURIComponent(id)}`

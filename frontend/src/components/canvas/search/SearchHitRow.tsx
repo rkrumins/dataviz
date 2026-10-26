@@ -19,14 +19,23 @@
  * visible.
  */
 import { motion } from 'framer-motion'
-import { ChevronRight, ExternalLink, Sparkles } from 'lucide-react'
-import * as LucideIcons from 'lucide-react'
-import { type FC, useMemo } from 'react'
+import { Check, ChevronRight, ExternalLink, Route, Sparkles } from 'lucide-react'
+import { type FC, useContext, useMemo } from 'react'
 
+import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { HighlightedText } from '@/components/ui/HighlightedText'
+import { useEntityTypeLabel, useEntityVisual } from '@/hooks/useEntityVisual'
+import { rememberUrnLabels } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
-import { useIsFocusedMatch } from '@/store/searchStore'
+import { useIsFocusedMatch, useSearchStore } from '@/store/searchStore'
 import type { AncestorRef, SearchHit } from '@/types/search'
+
+import { whyItMatched } from './panel/results/whyItMatched'
+import { buildSentence } from './panel/sentence/clauseModel'
+import { lineText } from './panel/sentence/lineWords'
+import { useTypeName } from './panel/sentence/useTypeName'
+import { howItMatches } from './session/queryFromHere'
+import { ShownQueryContext } from './session/shownQueryContext'
 
 
 /**
@@ -187,14 +196,6 @@ export function styleFor(type: string): EntityTypeStyle {
     return ENTITY_STYLES[type] ?? DEFAULT_STYLE
 }
 
-function lucideIcon(name: string): FC<{ className?: string; strokeWidth?: number }> {
-    const Component = (LucideIcons as unknown as Record<
-        string, FC<{ className?: string; strokeWidth?: number }>
-    >)[name]
-    return Component ?? LucideIcons.Box
-}
-
-
 export interface SearchHitRowProps {
     hit: SearchHit
     /** Stagger index for the entry animation. */
@@ -219,16 +220,29 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
     // focus state flips, not on every MatchBar step — see the
     // useIsFocusedMatch selector doc.
     const isFocused = useIsFocusedMatch(hit.node.urn)
-    const style = useMemo(
-        () => styleFor(hit.node.entityType),
-        [hit.node.entityType],
-    )
-    const IconComp = useMemo(() => lucideIcon(style.icon), [style.icon])
+    // The ontology's own icon, colour and name for the type.
+    const visual = useEntityVisual(hit.node.entityType)
+    const typeLabel = useEntityTypeLabel(hit.node.entityType)
     const ancestors = hit.ancestorPath ?? []
     // Best highlight only. The backend orders them by score, and a row
     // that listed every field a broad word touched would be taller than
     // the hit itself.
     const highlight = hit.highlights?.[0]
+    // Matched through lineage: the routes to the relatives it was matched by.
+    const shownQuery = useContext(ShownQueryContext)
+    const routes = useMemo(() => howItMatches(shownQuery, hit.node.urn), [shownQuery, hit.node.urn])
+    // Which of an any-of query's alternatives brought this row in.
+    const typeName = useTypeName()
+    const met = useMemo(() => {
+        const lines = whyItMatched(shownQuery, hit)
+        if (!lines.length || !shownQuery) return []
+        const sentence = buildSentence(shownQuery)
+        return lines.flatMap((i) => {
+            const line = sentence.lines.find((l) => l.topIndex === i)
+            const text = line ? lineText(line, typeName) : null
+            return text ? [text] : []
+        })
+    }, [shownQuery, hit, typeName])
 
     return (
         <motion.div
@@ -253,16 +267,10 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                 isFocused && "ring-2 ring-accent-lineage/60 ring-inset bg-accent-lineage/10",
             )}
         >
-            {/* Icon — gradient container matching bucket cards */}
-            <div className={cn(
-                "shrink-0 w-10 h-10 rounded-xl flex items-center justify-center",
-                "bg-gradient-to-br border border-glass-border/40",
-                style.iconBg,
-            )}>
-                <IconComp
-                    className={cn("w-[18px] h-[18px]", style.iconText)}
-                    strokeWidth={2}
-                />
+            {/* Icon — the type's own, in its own colour */}
+            <div className="shrink-0 w-10 h-10 rounded-xl flex items-center justify-center border"
+                 style={{ backgroundColor: `${visual.color}1f`, borderColor: `${visual.color}33` }}>
+                <DynamicIcon name={visual.icon} className="w-[18px] h-[18px]" style={{ color: visual.color }} />
             </div>
 
             <div className="flex-1 min-w-0">
@@ -273,11 +281,9 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                         query={query ?? ''}
                         className="text-sm font-display font-semibold text-ink truncate"
                     />
-                    <span className={cn(
-                        "text-[10px] uppercase tracking-[0.1em] font-medium shrink-0",
-                        style.accentText,
-                    )}>
-                        {hit.node.entityType}
+                    <span className="text-[10px] uppercase tracking-[0.1em] font-medium shrink-0"
+                          style={{ color: visual.color }}>
+                        {typeLabel ?? hit.node.entityType}
                     </span>
 
                     {/* Tags */}
@@ -360,8 +366,21 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                     </div>
                 )}
 
+                {/* Row 2c: which alternatives it meets, in an any-of query */}
+                {met.length > 0 && (
+                    <div className="mt-1.5 flex flex-wrap items-center gap-1 text-2xs text-ink-muted">
+                        <Check className="w-3 h-3 text-emerald-600 dark:text-emerald-400" aria-hidden />
+                        <span>meets</span>
+                        {met.map((m) => (
+                            <span key={m} className="rounded-md border border-black/10 px-1.5 py-0.5 text-ink dark:border-white/15">
+                                {m}
+                            </span>
+                        ))}
+                    </div>
+                )}
+
                 {/* Row 3: action chips, hover-revealed */}
-                {(onReveal || onOpen) && (
+                {(onReveal || onOpen || routes) && (
                     <div className={cn(
                         "mt-2.5 flex items-center gap-1.5",
                         "opacity-0 -translate-y-0.5",
@@ -410,6 +429,27 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                                 Inspect
                             </button>
                         )}
+                        {routes && (
+                            <button
+                                onClick={(e) => {
+                                    e.stopPropagation()
+                                    rememberUrnLabels([hit.node])
+                                    useSearchStore.getState().requestSearchRun(routes)
+                                }}
+                                className={cn(
+                                    "inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg",
+                                    "text-[11px] font-medium",
+                                    "bg-glass/50 text-ink-secondary",
+                                    "border border-glass-border",
+                                    "hover:bg-glass/70 hover:text-ink",
+                                    "transition-all",
+                                )}
+                                title="The routes from this entity to the relatives it was matched by — undo to come back to these results"
+                            >
+                                <Route className="w-3 h-3" />
+                                How it matches
+                            </button>
+                        )}
                     </div>
                 )}
             </div>
@@ -427,17 +467,16 @@ function AncestorChip({
     isLast: boolean
     onClick?: () => void
 }) {
-    const style = styleFor(ancestor.entityType)
+    const color = useEntityVisual(ancestor.entityType).color
     const Inner = (
         <span
             className={cn(
                 "inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md",
                 "text-[10.5px] font-medium",
                 "border",
-                style.chipBg,
-                style.chipText,
                 onClick && "hover:brightness-110 transition-all",
             )}
+            style={{ color, backgroundColor: `${color}14`, borderColor: `${color}33` }}
             title={`${ancestor.entityType} · ${ancestor.urn}`}
         >
             <span className="w-1.5 h-1.5 rounded-full bg-current opacity-60" />
@@ -448,7 +487,9 @@ function AncestorChip({
         <span className="inline-flex items-center gap-1">
             {onClick ? (
                 <button
+                    type="button"
                     onClick={(e) => { e.stopPropagation(); onClick() }}
+                    aria-label={`Look inside ${ancestor.displayName}`}
                     className="inline-flex"
                 >
                     {Inner}

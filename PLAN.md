@@ -117,9 +117,9 @@ A short, grounded roadmap. Detail lives in the linked docs.
   step in the kustomize manifests, a Helm chart behind them on tokens and replicas), and a setup
   script that can overwrite live secrets — see
   [`docs/TECHNICAL_DEBT.md`](docs/TECHNICAL_DEBT.md), which also sets the order.
-- **Server-side membership for the placement contract.** Export, scoped replace, the search
-  Layer filter, open-view type feeds and column totals keep the old placement rules until
-  membership moves to the server, which is what lets the flag default on.
+- **Server-side membership for the placement contract.** Export, scoped replace, open-view
+  type feeds and column totals keep the old placement rules until membership moves to the
+  server, which is what lets the flag default on.
 - **Re-sync at any scale.** Re-sync is refused above `GRAPHVER_RESYNC_MAX_ENTITIES`
   (default 250,000). The bounded merge from
   [`docs/versioning/11-resync-at-any-scale.md`](docs/versioning/11-resync-at-any-scale.md)

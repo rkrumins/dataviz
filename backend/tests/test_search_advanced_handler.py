@@ -340,6 +340,49 @@ async def test_capability_identity_cannot_leave_its_view(
     assert slot["acquisitions"] == []
 
 
+@pytest.mark.parametrize("route", [
+    {"kind": "path", "sourceUrns": ["urn:a"], "targetUrns": ["urn:b"]},
+    {"kind": "withinHops", "urns": ["urn:a"], "hops": 2},
+    {"kind": "related", "axis": "upstream", "where": {"kind": "text", "value": "x"}},
+    {"kind": "related", "axis": "parent", "quantifier": "none"},
+])
+async def test_capability_identity_cannot_follow_lineage(route, slot, patched_search):
+    """Lineage leads out of the view: a path returns the entities on it,
+    and a hop test answers yes or no about entities the link can't see —
+    as does a relationship, up the tree as much as along lineage."""
+    query = SearchQuery.model_validate({
+        **_query("view").model_dump(by_alias=True),
+        "predicate": {"kind": "group", "op": "and",
+                      "children": [{"kind": "text", "value": "orders"}, route]},
+    })
+    with pytest.raises(HTTPException) as exc:
+        await graph_mod.search_advanced(
+            query=query,
+            request=_request(view_capability="view-1"),
+            response=Response(),
+            ws_id="ws-1",
+            engine=_FakeEngine(),
+            session=None,
+        )
+
+    assert exc.value.status_code == 403
+    assert exc.value.detail == graph_mod.SHARED_LINK_RELATIONSHIPS
+    assert patched_search == []
+
+
+async def test_members_still_follow_lineage(slot, patched_search):
+    query = SearchQuery.model_validate({
+        **_query("view").model_dump(by_alias=True),
+        "predicate": {"kind": "group", "op": "and", "children": [
+            {"kind": "withinHops", "urns": ["urn:a"], "hops": 2}]},
+    })
+    await graph_mod.search_advanced(
+        query=query, request=_request(), response=Response(),
+        ws_id="ws-1", engine=_FakeEngine(), session=None,
+    )
+    assert len(patched_search) == 1
+
+
 async def test_capability_identity_may_search_its_view(slot, patched_search):
     """``view`` mode is the capability's own scope — always allowed."""
     page = await graph_mod.search_advanced(

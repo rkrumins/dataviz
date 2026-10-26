@@ -335,7 +335,7 @@ def _api_key_label(p: dict) -> str:
 
 _API_KEY_REVOKED_BY = {
     "owner": "by its owner", "self": "with itself", "admin": "by an admin",
-    "manager": "by a manager",
+    "manager": "by a manager", "purged": "as its deleted service account was purged",
 }
 
 
@@ -490,8 +490,16 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     ),
     "rbac.workspace.access_review_cancelled": ("warning", _summary_access_review("cancelled")),
     "identity.service_account.disabled": ("warning", _summary_service_account("disabled")),
+    "identity.service_account.deleted": ("warning", _summary_service_account("deleted")),
+    "identity.service_account.purged": (
+        "warning", _summary_service_account("purged: its keys revoked, its roles and managers removed"),
+    ),
     "identity.service_account.manager_removed": (
         "warning", _summary_service_account_manager(added=False),
+    ),
+    # Its reach across the whole tenancy widens: worth a reviewer's eye.
+    "identity.service_account.org_read_granted": (
+        "warning", _summary_service_account("can now read every workspace"),
     ),
     "user.login_failed": ("warning", _summary_login_failed),
     "user.logged_out": ("warning", lambda p: f"User {p.get('user_id') or '?'} signed out"),
@@ -565,8 +573,12 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "identity.service_account.created": ("info", _summary_service_account("created")),
     "identity.service_account.updated": ("info", _summary_service_account("edited")),
     "identity.service_account.enabled": ("info", _summary_service_account("enabled")),
+    "identity.service_account.restored": ("info", _summary_service_account("restored")),
     "identity.service_account.manager_added": (
         "info", _summary_service_account_manager(added=True),
+    ),
+    "identity.service_account.org_read_revoked": (
+        "info", _summary_service_account("no longer reads every workspace"),
     ),
     "identity.api_key.expiring": (
         "info", lambda p: f"API key {_api_key_label(p)} expires {p.get('expires_at') or 'soon'}",
@@ -674,6 +686,28 @@ def _summary_refresh(p: dict) -> str:
     return f"Requested {what} of {_subject(p)}"
 
 
+def _summary_native_query(p: dict) -> str:
+    outcome = _detail(p, "outcome")
+    if outcome in (None, "ok"):
+        return f"Ran a native query on {_subject(p)}"
+    return f"A native query on {_subject(p)} was not answered ({str(outcome).replace('_', ' ')})"
+
+
+_WHO_MAY_CREATE = {
+    "granters": "Anyone who lets people into a workspace",
+    "everyone": "Anyone",
+}
+
+
+def _summary_sa_policy(p: dict) -> str:
+    to = _detail(p, "to") or {}
+    who = _WHO_MAY_CREATE.get(to.get("whoMayCreate"))
+    if who is None:
+        return "Only administrators of service accounts may create service accounts"
+    team = ", managed by a team they're in" if to.get("requireTeamManager") else ""
+    return f"{who} may create up to {to.get('perPersonLimit')} service accounts each{team}"
+
+
 def _summary_flag(p: dict) -> str:
     key = _detail(p, "key") or _subject(p)
     value = _detail(p, "value")
@@ -728,6 +762,7 @@ _EVENT_META.update({
     "workspace.data_source.restored": ("info", _envelope_summary("Restored data source {}")),
     "workspace.data_source.primary_set": ("info", _envelope_summary("Made {} the primary data source")),
     "workspace.data_source.projection_changed": ("info", _envelope_summary("Changed where {} keeps its rollups")),
+    "workspace.data_source.native_query_run": ("info", _summary_native_query),
     "workspace.data_source.moved": ("info", _transfer_summary(
         "Moved data source {s} to {ws}", "Moved data source {s} in from {ws}")),
     "workspace.data_source.move_undone": ("info", _transfer_summary(
@@ -758,6 +793,7 @@ _EVENT_META.update({
     # ── platform
     "platform.feature_flag.changed": ("info", _summary_flag),
     "platform.profiling_policy.updated": ("info", lambda p: "Changed profiling retention and alerting"),
+    "platform.service_account_policy.updated": ("info", _summary_sa_policy),
     "platform.node_identity.updated": ("info", lambda p: "Changed the platform's node-identity default"),
     "platform.versioning.watermarks_reset": ("warning", lambda p: (
         "Reseeded every versioned graph on FalkorDB provider "
@@ -805,6 +841,7 @@ LABELS: dict[str, str] = {
     "workspace.data_source.restored": "Restored a data source",
     "workspace.data_source.primary_set": "Set the primary data source",
     "workspace.data_source.projection_changed": "Changed rollup placement",
+    "workspace.data_source.native_query_run": "Ran a native query",
     "workspace.data_source.moved": "Moved a data source",
     "workspace.data_source.move_undone": "Undid a data source move",
     "workspace.data_source.transfer_requested": "Requested a data source transfer",
@@ -827,6 +864,7 @@ LABELS: dict[str, str] = {
     "provider.connection.deleted": "Deleted a provider",
     "platform.feature_flag.changed": "Changed a feature flag",
     "platform.profiling_policy.updated": "Changed profiling policy",
+    "platform.service_account_policy.updated": "Changed who may create service accounts",
     "platform.node_identity.updated": "Changed node identity",
     "platform.versioning.watermarks_reset": "Reseeded versioned graphs",
     "platform.versioning.projection_moved": "Moved a versioned graph projection",
@@ -890,8 +928,13 @@ LABELS: dict[str, str] = {
     "identity.service_account.updated": "Edited a service account",
     "identity.service_account.disabled": "Disabled a service account",
     "identity.service_account.enabled": "Enabled a service account",
+    "identity.service_account.deleted": "Deleted a service account",
+    "identity.service_account.restored": "Restored a service account",
+    "identity.service_account.purged": "Purged a deleted service account",
     "identity.service_account.manager_added": "Appointed a service account's manager",
     "identity.service_account.manager_removed": "Removed a service account's manager",
+    "identity.service_account.org_read_granted": "Let a service account read every workspace",
+    "identity.service_account.org_read_revoked": "Stopped a service account reading every workspace",
     "visualization.view.created": "Created a view",
     "visualization.view.deleted": "Deleted a view",
     "visualization.view.admin_viewed": "Opened a private view as an admin",
@@ -992,9 +1035,11 @@ _ACTOR_KEYS: tuple[str, ...] = (
     "regenerated_by", "invited_by", "merged_by", "closed_by", "actor",
 )
 
-#: Event types that name their actor under a key of their own.
-_ACTOR_KEY_BY_TYPE: dict[str, str] = {
-    "rbac.access_request.created": "requester_id",
+#: Event types that name their actor under keys of their own, in the order
+#: they are trusted: a request for a service account is the account's, made
+#: by whoever asked for it.
+_ACTOR_KEY_BY_TYPE: dict[str, tuple[str, ...]] = {
+    "rbac.access_request.created": ("requested_by", "requester_id"),
 }
 
 #: Events a person does to THEMSELVES: with no explicit actor, it is them.
@@ -1028,6 +1073,10 @@ _FAILURE_TYPES = frozenset({
     "identity.api_key.rejected", "identity.api_key.misuse",
 })
 _DENIED_TYPES = frozenset({"user.access_denied"})
+#: A native query refused by the guard or the engine's read-only check —
+#: the attempts an administrator filters for — as opposed to one that
+#: failed to answer.
+_NATIVE_REFUSALS = frozenset({"native_query_refused", "native_query_write_refused"})
 
 #: Verbs that undo or destroy, for event types with no catalogue severity.
 _WARNING_VERBS = (
@@ -1093,9 +1142,10 @@ def _str(value: Any, limit: int = 256) -> Optional[str]:
 
 
 def _actor(event_type: str, p: dict) -> Optional[str]:
-    own_key = _ACTOR_KEY_BY_TYPE.get(event_type)
-    if own_key and _str(p.get(own_key), 128):
-        return _str(p.get(own_key), 128)
+    for key in _ACTOR_KEY_BY_TYPE.get(event_type, ()):
+        found = _str(p.get(key), 128)
+        if found:
+            return found
     for key in _ACTOR_KEYS:
         found = _str(p.get(key), 128)
         if found:
@@ -1209,11 +1259,17 @@ def fallback_projection(event_type: str) -> dict[str, Any]:
     }
 
 
-def _outcome(event_type: str) -> str:
+def _outcome(event_type: str, p: Optional[dict] = None) -> str:
     if event_type in _DENIED_TYPES:
         return "denied"
     if event_type in _FAILURE_TYPES:
         return "failure"
+    if event_type == "workspace.data_source.native_query_run" and p is not None:
+        ran = _detail(p, "outcome")
+        if ran in _NATIVE_REFUSALS:
+            return "denied"
+        if ran not in (None, "ok"):
+            return "failure"
     return "success"
 
 
@@ -1252,7 +1308,7 @@ def _project(
         "category": category_of(event_type),
         "audience": _audience(event_type, p, workspace_id),
         "severity": severity_of(event_type),
-        "outcome": _outcome(event_type),
+        "outcome": _outcome(event_type, p),
         "actor_id": actor_id,
         "actor_kind": actor_kind,
         "subject_id": _subject_user(event_type, p),

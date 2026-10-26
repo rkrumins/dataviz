@@ -1,7 +1,7 @@
 /**
  * QueryCard — the single Query Lens that holds the entire active query.
  *
- *   ╭─ Query · 3 filters ──────────── 🅥 Visual  </> Code ╮
+ *   ╭─ Query · 3 filters ─────── 🅥 Visual  </> Code  >_ Cypher ╮
  *   │ ⌕  name contains   [ customer       ]              │
  *   │ #  tag is          [ #PII ] [ + ]                  │
  *   │ ◇  type is in      [ dataset, schemaField   ▾ ]    │
@@ -13,8 +13,7 @@
  * every top-level condition as a ConditionRow. Editing a row commits
  * back through ``upsertCondition`` and triggers a debounced auto-run.
  * The Visual ↔ Code toggle does NOT lose state — both modes write the
- * same draft. Code mode is a plain textarea with live "parsed N
- * filters" feedback; CodeMirror upgrade is deferred.
+ * same draft, and Cypher shows the Cypher that draft runs as.
  *
  * Discovery telemetry shows next to the Add-filter button as a passive
  * chip ("12 tags · 37 keys · 4 types") so the user sees what
@@ -23,20 +22,14 @@
 import { motion } from 'framer-motion'
 import {
     Code2,
-    Eye,
+    LayoutList,
     Loader2,
     AlertCircle,
-    CheckCircle2,
     Sparkles,
-    ArrowRight,
     Play,
     Zap,
     Hand,
-    Search,
-    Box,
-    Tag as TagIcon,
-    Layers,
-    ArrowDownToLine,
+    Terminal,
     FileCode,
     Save as SaveIcon,
     SquarePen,
@@ -50,12 +43,15 @@ import {
     useCallback,
     useEffect,
     useMemo,
-    useRef,
     useState,
 } from 'react'
 
+import { DocsLink } from '@/components/help/DocsLink'
+import { Segmented } from '@/components/ui/Segmented'
 import { cn } from '@/lib/utils'
-import { useActiveView, useSchemaStore } from '@/store/schema'
+import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
+import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { useSchemaStore } from '@/store/schema'
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import {
     useCanRedo,
@@ -72,13 +68,27 @@ import { SEARCH_OPTIONS } from '../searchOptions'
 
 import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
-import { entityTypesInView, layerOptions, type LayerOption } from './layerOptions'
-import type { CodeKind } from './AddFilterPalette'
+import { entityTypesInView, useViewLayerOptions, type LayerOption } from './layerOptions'
+import { AddFilterPalette, type CodeKind } from './AddFilterPalette'
+import { AskBar } from './ask/AskBar'
+import { useAskVocabulary } from './ask/useAskVocabulary'
+import { useEditorMode, type EditorMode } from './builderMode'
+import { CypherView } from './CypherView'
+import { isNativeResult } from './native/nativeCells'
+import { CodeMode } from './dsl/CodeMode'
+import type { DslVocabulary } from './dsl/dslLanguage'
+import { useEdgeTypeOptions } from './edgeTypeOptions'
+import { namePathFor, searchEntitiesByName } from './entityNames'
 import { appendCondition, topLevelConditions } from './predicateComposition'
-import { parsePredicate, stringifyPredicate } from './predicateDsl'
+import { stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
 import { SearchOmnibox } from './omnibox/SearchOmnibox'
 import { SaveQueryDialog } from './SaveQueryDialog'
+import { RelationProvider } from './RelationshipEditor'
+import { RecipeGallery } from './recipes/RecipeGallery'
+import type { Recipe } from './recipes/recipes'
+import { useRecipes } from './recipes/useRecipes'
+import { SentenceBuilder } from './sentence/SentenceBuilder'
 import { VisualQueryBuilder } from './VisualQueryBuilder'
 
 
@@ -96,14 +106,25 @@ export interface QueryCardProps {
     onRun: (predicate: Predicate, options?: SearchQuery['options']) => void
     /** Open Advanced drawer (for OR/NOT/path authoring). */
     onOpenAdvanced: () => void
+    /** Start from a recipe: one ready to run runs; one with something to
+     *  fill in opens for it. */
+    onPickRecipe: (recipe: Recipe) => void
 }
 
 
-type ViewMode = 'visual' | 'code'
+/** Form (the filter cards, where the card starts) and Sentence (guided)
+ *  build a query by pointing; Code and Cypher by typing. All four edit the
+ *  same draft. */
+const EDITOR_MODES: { value: EditorMode; label: string; icon: typeof Code2 }[] = [
+    { value: 'form', label: 'Form', icon: LayoutList },
+    { value: 'sentence', label: 'Sentence', icon: Sparkles },
+    { value: 'code', label: 'Code', icon: Code2 },
+    { value: 'cypher', label: 'Cypher', icon: Terminal },
+]
 
 
 export const QueryCard: FC<QueryCardProps> = ({
-    viewId, isRunning, runState, onRun, onOpenAdvanced,
+    viewId, isRunning, runState, onRun, onOpenAdvanced, onPickRecipe,
 }) => {
     const draftPredicate = useDraftPredicate()
     const seedDraftPredicate = useSearchStore((s) => s.seedDraftPredicate)
@@ -126,8 +147,16 @@ export const QueryCard: FC<QueryCardProps> = ({
     // pushed by clicking "Clear all".
     const clearSearchResults = useSearchStore((s) => s.clearSearchResults)
     const discovery = useDiscovery(viewId)
+    // What a relationship row's edge filter offers: the discovered edge keys.
+    const edgeDiscovery = useMemo(() => ({
+        edgeTypes: discovery.edgeTypes,
+        keysByEdgeType: discovery.keysByEdgeType,
+        getEdgeValueSamples: discovery.getEdgeValueSamples,
+        edgeKeyStoredAs: discovery.edgeKeyStoredAs,
+    }), [discovery.edgeTypes, discovery.keysByEdgeType, discovery.getEdgeValueSamples,
+        discovery.edgeKeyStoredAs])
     const knownEntityTypes = useEntityTypeNames()
-    // What the omnibox and the first-run examples offer: the types this
+    // What the omnibox, the Ask examples and the recipes offer: the types this
     // view's data holds, most common first — every "Everything of type …"
     // returns something. The ontology's full list until discovery answers.
     const presentEntityTypes = useMemo(
@@ -138,35 +167,48 @@ export const QueryCard: FC<QueryCardProps> = ({
     // ``layerAssignment`` values entities carry, named from the view's
     // reference-layout config, or else the view's configured layers.
     const discoveredLayers = useViewLayerOptions(discovery.getValueSamples)
+    const askVocabulary = useAskVocabulary(discovery, discoveredLayers)
+    const recipes = useRecipes(presentEntityTypes, discovery.tagValues, discovery.allKeys, discoveredLayers)
+    const inStudio = useSearchStore((s) => s.studioOpen)
+    // What Code mode's editor completes from: the view's own types, tags,
+    // layers and keys, values and names from the server as they're typed.
+    const provider = useGraphProviderIfAvailable()
+    const remote = provider instanceof RemoteGraphProvider ? provider : null
+    const edgeTypeOptions = useEdgeTypeOptions(discovery.edgeTypes)
+    const vocabulary = useMemo<DslVocabulary>(() => ({
+        entityTypes: presentEntityTypes,
+        tags: discovery.tagValues,
+        layers: discoveredLayers.map((l) => l.value),
+        propertyKeys: discovery.allKeys,
+        edgeKeys: [...new Set(Object.values(discovery.keysByEdgeType).flat())].sort(),
+        edgeTypes: edgeTypeOptions.map((o) => ({
+            id: o.id, detail: [o.name, o.ends].filter(Boolean).join(' · '), containment: o.containment,
+        })),
+        suggestValues: discovery.suggestValues,
+        names: remote ? {
+            search: (word, signal) => searchEntitiesByName(remote, viewId, word, { signal }),
+            pathFor: (entity) => namePathFor(remote, viewId, entity),
+        } : undefined,
+    }), [presentEntityTypes, discovery.tagValues, discoveredLayers, discovery.allKeys,
+        discovery.keysByEdgeType, edgeTypeOptions, discovery.suggestValues, remote, viewId])
 
-    const [mode, setMode] = useState<ViewMode>('visual')
+    const [mode, setMode] = useEditorMode()
 
     /**
-     * Code-only palette entries (path, withinHops, degree) hand off to the
-     * main panel's Code view rather than the AdvancedDrawer JSON tab.
-     * Seed a stub predicate of the chosen kind into the draft
-     * (preserving existing work via AND-wrap), then flip the local
-     * mode to 'code' so the user lands directly in the DSL editor.
+     * Code-only palette entries (withinHops) hand off to the main panel's
+     * Code view rather than the AdvancedDrawer JSON tab. Seed a stub
+     * predicate into the draft (preserving existing work via AND-wrap),
+     * then flip the local mode to 'code' so the user lands directly in
+     * the DSL editor.
      */
-    const handleOpenCode = useCallback((kind: CodeKind) => {
-        const stub: Predicate = kind === 'path'
-            ? ({
-                kind: 'path',
-                sourceUrns: [],
-                targetUrns: [],
-                maxHops: 4,
-                edgeClass: 'lineage',
-                direction: 'outgoing',
-            } as unknown as Predicate)
-            : kind === 'degree'
-                ? { kind: 'degree', direction: 'both', op: 'gte', value: 1, edgeClass: 'lineage' }
-                : ({
-                    kind: 'withinHops',
-                    urns: [],
-                    hops: 2,
-                    direction: 'both',
-                    edgeClass: 'lineage',
-                } as unknown as Predicate)
+    const handleOpenCode = useCallback((_kind: CodeKind) => {
+        const stub = {
+            kind: 'withinHops',
+            urns: [],
+            hops: 2,
+            direction: 'both',
+            edgeClass: 'lineage',
+        } as unknown as Predicate
         const current = useSearchStore.getState().draftPredicate
         let next: Predicate
         if (!current) {
@@ -184,7 +226,7 @@ export const QueryCard: FC<QueryCardProps> = ({
         }
         commitDraft(next)
         setMode('code')
-    }, [commitDraft])
+    }, [commitDraft, setMode])
     // ─── Run mode (auto vs manual) + dispatch ──────────────────────
     // Auto: dispatch a debounced run on every complete draft change
     //       (snappy, original behaviour — the default).
@@ -207,6 +249,15 @@ export const QueryCard: FC<QueryCardProps> = ({
         onRun(runnable.predicate, SEARCH_OPTIONS)
     }, [runnable, onRun])
 
+    // A question applied is a change of shape, and runs at once: Auto runs
+    // the committed draft itself, Manual is told to.
+    const handleAsk = useCallback((result: Predicate) => {
+        commitDraft(result)
+        if (runMode !== 'manual') return
+        const next = buildRunnablePredicate(result)
+        if (next) onRun(next.predicate, SEARCH_OPTIONS)
+    }, [commitDraft, runMode, onRun])
+
     useEffect(() => {
         // Nothing complete — clear results so the canvas spotlight
         // doesn't lag behind the user's edits (applies to both modes).
@@ -215,8 +266,10 @@ export const QueryCard: FC<QueryCardProps> = ({
         // populated draft even after the canvas has gone dim.
         if (runnable === null) {
             // ``queryHash`` is the "results are published" sentinel —
-            // only clear when there's actually something to drop.
-            if (useSearchStore.getState().queryHash !== null) clearSearchResults()
+            // only clear when there's actually something to drop, and
+            // never a native query's highlight, which no draft produced.
+            const published = useSearchStore.getState().queryHash
+            if (published !== null && !isNativeResult(published)) clearSearchResults()
             return
         }
         // Manual mode: wait for the explicit Run click.
@@ -291,6 +344,32 @@ export const QueryCard: FC<QueryCardProps> = ({
         if (!complete) setFreshRowKind(predicate.kind ?? null)
     }, [commitDraft])
 
+    // The empty hero's way to every kind of filter: the palette the rows
+    // end with once something is composed, fed the way VisualQueryBuilder
+    // feeds it.
+    const paletteCounts = useMemo(() => ({
+        entityTypes: knownEntityTypes.length,
+        tags: discovery.tagValues.length,
+        propertyKeys: discovery.allKeys.length,
+        layers: discoveredLayers.length,
+    }), [knownEntityTypes, discovery.tagValues, discovery.allKeys, discoveredLayers])
+    const paletteSamples = useMemo(() => ({
+        entityTypes: knownEntityTypes.slice(0, 8),
+        tags: discovery.tagValues.slice(0, 8),
+        propertyKeys: discovery.allKeys.slice(0, 8),
+        layers: discoveredLayers.slice(0, 8).map((o) => o.label),
+    }), [knownEntityTypes, discovery.tagValues, discovery.allKeys, discoveredLayers])
+    const handleAddFromPalette = useCallback((predicate: Predicate) => {
+        handleAddFromOmnibox(predicate, !isRowIncomplete(predicate))
+    }, [handleAddFromOmnibox])
+    const handleAddManyFromPalette = useCallback((predicates: Predicate[]) => {
+        let next = useSearchStore.getState().draftPredicate
+        for (const p of predicates) next = appendCondition(next, p)
+        commitDraft(next)
+        const last = predicates[predicates.length - 1]
+        if (last && isRowIncomplete(last)) setFreshRowKind(last.kind ?? null)
+    }, [commitDraft])
+
     // Property-value samples, flattened across every discovered key so
     // the omnibox can match a bare token against values as well as
     // names. The corpus is bounded server-side (20 values per key, 64
@@ -317,28 +396,30 @@ export const QueryCard: FC<QueryCardProps> = ({
         if (runnable) setRuleModalOpen(true)
     }, [runnable])
 
-    // One omnibox instance, rendered in both states — as the hero when
-    // nothing is composed, and as the compact "add another filter" bar
-    // beneath the rows once something is. Before this, the empty state
-    // mounted a name-only quick search and did NOT mount the builder,
-    // so the whole filter palette was unreachable from a cold start and
-    // reaching a property filter meant composing a text search and then
-    // deleting it.
     // ─── Header summary ────────────────────────────────────────────
     const completeCount = conditions.filter((c) => !isRowIncomplete(c)).length
     const incompleteCount = conditions.length - completeCount
 
-    // Empty state in Visual mode gets its own premium hero treatment —
+    // Empty state in Sentence or Form gets its own premium hero treatment —
     // no QUERY header chrome, no run controls (nothing to act on), just
     // a confident "start here" surface with example-led onboarding.
-    const isEmptyVisual = mode === 'visual' && conditions.length === 0
+    const pointing = mode === 'sentence' || mode === 'form'
+    const isEmptyVisual = pointing && conditions.length === 0
     const showHeader = !isEmptyVisual
+
+    // Form is built from filters, as it always was: the empty card opens
+    // on "add a filter" (the omnibox), which stays beneath the rows after,
+    // with the Ask bar a step below as the other way in. Sentence leads
+    // with the Ask bar.
+    const askBar = (variant: 'hero' | 'compact') => (
+        <AskBar viewId={viewId} vocabulary={askVocabulary} draft={draftPredicate} onAsk={handleAsk}
+                presentTypes={presentEntityTypes} variant={variant} disabled={isRunning} />
+    )
 
     const omnibox = (
         <SearchOmnibox
             variant={isEmptyVisual ? 'hero' : 'inline'}
             onAdd={handleAddFromOmnibox}
-            onBrowseAll={onOpenAdvanced}
             entityTypes={presentEntityTypes}
             tagValues={discovery.tagValues}
             propertyKeys={discovery.allKeys}
@@ -364,7 +445,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                 "manage this query" UI reads as one premium block at
                 the top of the card. Body sits cleanly below.
                 Two rows internally so the layout breathes:
-                  Row 1 — Title · filter status               · Visual│Code
+                  Row 1 — Title · filter status               · Visual│Code│Cypher
                   Row 2 — [↺ Back] [↶][↷] [Auto│Manual]          [🗑] [▷ Run]
             */}
             {showHeader && (
@@ -390,22 +471,12 @@ export const QueryCard: FC<QueryCardProps> = ({
                                 </span>
                             ) : (
                                 <span className="text-[11px] text-ink-muted/80 italic truncate">
-                                    · Code mode · paste DSL
+                                    {mode === 'cypher' ? '· Cypher' : '· Code mode · paste DSL'}
                                 </span>
                             )}
                         </div>
-                        <div className={cn(
-                            'inline-flex rounded-md p-0.5 shrink-0',
-                            'bg-black/[0.04] dark:bg-white/[0.04]',
-                            'border border-black/[0.08] dark:border-white/[0.06]',
-                        )}>
-                            <ToggleBtn active={mode === 'visual'} onClick={() => setMode('visual')}>
-                                <Eye className="w-3 h-3" /> Visual
-                            </ToggleBtn>
-                            <ToggleBtn active={mode === 'code'} onClick={() => setMode('code')}>
-                                <Code2 className="w-3 h-3" /> Code
-                            </ToggleBtn>
-                        </div>
+                        <Segmented options={EDITOR_MODES} value={mode} onChange={setMode}
+                                   label="How to build the query" className="shrink-0" />
                     </div>
 
                     {/* Row 2 — action toolbar (skipped in empty hero) */}
@@ -432,16 +503,33 @@ export const QueryCard: FC<QueryCardProps> = ({
                 </div>
             )}
 
-            {/* Body — Visual / Code */}
+            {/* Body — Visual / Code / Cypher */}
             <div className={cn(
                 'flex flex-col gap-2',
                 isEmptyVisual ? 'p-0' : 'p-2.5',
             )}>
-                {mode === 'visual' ? (
+                {pointing ? (
                     isEmptyVisual ? (
                         <PremiumEmptyHero
-                            omnibox={omnibox}
-                            onSeed={(p) => commitDraft(p)}
+                            byFilters={mode === 'form'}
+                            entry={mode === 'form' ? omnibox : askBar('hero')}
+                            orAsk={mode === 'form' ? askBar('compact') : null}
+                            palette={
+                                <AddFilterPalette
+                                    counts={paletteCounts}
+                                    samples={paletteSamples}
+                                    onAdd={handleAddFromPalette}
+                                    onAddMany={handleAddManyFromPalette}
+                                    onOpenAdvanced={onOpenAdvanced}
+                                    onOpenCode={handleOpenCode}
+                                    disabled={isRunning}
+                                />
+                            }
+                            // Search Studio shows every recipe beside the card.
+                            recipes={inStudio ? null : (
+                                <RecipeGallery viewId={viewId} recipes={recipes} variant="starters"
+                                               onPick={onPickRecipe} />
+                            )}
                             onUseCodeMode={() => setMode('code')}
                             discoveredEntityTypes={presentEntityTypes}
                             discoveredTags={discovery.tagValues}
@@ -450,9 +538,11 @@ export const QueryCard: FC<QueryCardProps> = ({
                             discoveryError={discovery.error}
                             propertyKeyCount={discovery.allKeys.length}
                         />
-                    ) : (
-                        <>
-                            <VisualQueryBuilder
+                    ) : mode === 'sentence' ? (
+                        <RelationProvider viewId={viewId} edges={edgeDiscovery}>
+                            {askBar('compact')}
+                            <SentenceBuilder
+                                viewId={viewId}
                                 predicate={draftPredicate}
                                 onSeed={seedDraftPredicate}
                                 onCommit={commitDraft}
@@ -464,28 +554,58 @@ export const QueryCard: FC<QueryCardProps> = ({
                                     suggestValues: discovery.suggestValues,
                                 }}
                                 knownEntityTypes={knownEntityTypes}
+                                presentEntityTypes={presentEntityTypes}
                                 discoveredLayers={discoveredLayers}
                                 isRunning={isRunning}
-                                discoveryLoading={discovery.isInitialLoading}
-                                discoveryError={discovery.error}
-                                freshKind={freshRowKind}
                                 onSubmit={dispatchRun}
                                 onOpenAdvanced={onOpenAdvanced}
                                 onOpenCode={handleOpenCode}
-                                enableRowSelection
+                                onEditInCode={() => setMode('code')}
                             />
+                        </RelationProvider>
+                    ) : (
+                        <>
+                            <RelationProvider viewId={viewId} edges={edgeDiscovery}>
+                                <VisualQueryBuilder
+                                    predicate={draftPredicate}
+                                    onSeed={seedDraftPredicate}
+                                    onCommit={commitDraft}
+                                    discovery={{
+                                        allKeys: discovery.allKeys,
+                                        keysByEntityType: discovery.keysByEntityType,
+                                        tagValues: discovery.tagValues,
+                                        getValueSamples: discovery.getValueSamples,
+                                        suggestValues: discovery.suggestValues,
+                                    }}
+                                    knownEntityTypes={knownEntityTypes}
+                                    discoveredLayers={discoveredLayers}
+                                    isRunning={isRunning}
+                                    discoveryLoading={discovery.isInitialLoading}
+                                    discoveryError={discovery.error}
+                                    freshKind={freshRowKind}
+                                    onSubmit={dispatchRun}
+                                    onOpenAdvanced={onOpenAdvanced}
+                                    onOpenCode={handleOpenCode}
+                                    enableRowSelection
+                                />
+                            </RelationProvider>
                             {/* Same surface, compact: the omnibox is how
                                 you add the 2nd filter as well as the 1st,
                                 so there's one thing to learn. */}
                             {omnibox}
+                            {askBar('compact')}
                         </>
                     )
-                ) : (
+                ) : mode === 'code' ? (
                     <CodeMode
                         draft={draftPredicate}
                         isRunning={isRunning}
-                        onCommit={(p) => commitDraft(p)}
+                        onCommit={commitDraft}
+                        vocabulary={vocabulary}
+                        onOpenCypher={() => setMode('cypher')}
                     />
+                ) : (
+                    <CypherView viewId={viewId} />
                 )}
             </div>
 
@@ -535,195 +655,32 @@ export const QueryCard: FC<QueryCardProps> = ({
 
 
 // ---------------------------------------------------------------------------
-// Code mode — DSL textarea with live parse feedback
-// ---------------------------------------------------------------------------
-
-function CodeMode({
-    draft, isRunning, onCommit,
-}: {
-    draft: Predicate | null
-    isRunning: boolean
-    onCommit: (p: Predicate | null) => void
-}) {
-    const [text, setText] = useState(() => stringifyPredicate(draft))
-    const lastDraftStr = useRef<string>(stringifyPredicate(draft))
-
-    // Mirror external draft → text only when the user hasn't edited.
-    useEffect(() => {
-        const canonical = stringifyPredicate(draft)
-        if (text === lastDraftStr.current) {
-            setText(canonical)
-        }
-        lastDraftStr.current = canonical
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [draft])
-
-    const parsed = useMemo(() => parsePredicate(text), [text])
-    const commit = useCallback(() => {
-        onCommit(parsed.predicate)
-    }, [parsed, onCommit])
-
-    return (
-        <div className="flex flex-col gap-1.5">
-            <textarea
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                onKeyDown={(e) => {
-                    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                        e.preventDefault()
-                        commit()
-                    }
-                }}
-                onBlur={commit}
-                disabled={isRunning}
-                spellCheck={false}
-                rows={4}
-                placeholder='t2 AND (account OR opp) OR NOT T1'
-                className={cn(
-                    'w-full px-3 py-2 rounded-lg resize-none',
-                    'bg-canvas-base/60 border border-glass-border',
-                    'text-[12.5px] font-mono text-ink placeholder:text-ink-muted/60',
-                    'focus:outline-none focus:border-accent-lineage/60',
-                )}
-            />
-            <ParseFeedback
-                recognized={parsed.recognized.length}
-                fallback={parsed.fallbackText.length}
-                isEmpty={!parsed.predicate}
-                error={parsed.error}
-            />
-            <CodeModeCheatsheet />
-            <div className="text-[10.5px] text-ink-muted/70 px-1">
-                <kbd className="px-1 rounded bg-glass/40 text-ink-muted">⌘↵</kbd> or blur to apply ·{' '}
-                use <span className="font-mono text-ink">AND</span> /{' '}
-                <span className="font-mono text-ink">OR</span> /{' '}
-                <span className="font-mono text-ink">NOT</span> with parentheses
-            </div>
-        </div>
-    )
-}
-
-
-function CodeModeCheatsheet() {
-    const [open, setOpen] = useState(false)
-    return (
-        <div className={cn(
-            'rounded-md border border-glass-border/50',
-            'bg-canvas-base/40 overflow-hidden',
-        )}>
-            <button
-                type="button"
-                onClick={() => setOpen((v) => !v)}
-                className={cn(
-                    'w-full flex items-center justify-between gap-2',
-                    'px-2.5 py-1.5 text-[10.5px] text-ink-muted',
-                    'hover:bg-canvas-base/70 transition-colors',
-                )}
-            >
-                <span className="inline-flex items-center gap-1.5">
-                    <Code2 className="w-3 h-3" /> Cheat-sheet
-                </span>
-                <ArrowRight className={cn('w-3 h-3 transition-transform', open && 'rotate-90')} />
-            </button>
-            {open && (
-                <div className="px-3 py-2 text-[10.5px] text-ink-muted/95 leading-relaxed">
-                    <div className="font-mono whitespace-pre-wrap">
-{`t2                       text in name contains "t2"
-"customer orders"        quoted phrase
-name CONTAINS foo        text in name
-qname:foo                in qualifiedName
-description:foo          in description
-type:dataset             entityType IN [dataset]
-type IN (dataset, schemaField)
-tag:PII                  tag hasAny [PII]
-tag:PII,GDPR             tag hasAny [PII, GDPR]
-layer:Source             layer = "Source"
-rowCount > 1000          property gt 1000
-rowCount != 0
-hasProperty:owner        node has property "owner"
-noUpstream / noDownstream / noLineage
-hasUpstream / hasDownstream
-
-Combine with: AND, OR, NOT, parentheses, !
-
-  t2 AND (account OR opp) OR NOT T1
-  NOT tag:PII AND type:dataset
-  (rowCount > 0) AND noUpstream`}
-                    </div>
-                </div>
-            )}
-        </div>
-    )
-}
-
-
-function ParseFeedback({
-    recognized, fallback, isEmpty, error,
-}: { recognized: number; fallback: number; isEmpty: boolean; error?: string }) {
-    if (error) {
-        return (
-            <div className="flex items-start gap-1.5 px-1 text-[10.5px] text-rose-300">
-                <AlertCircle className="w-3 h-3 mt-0.5 shrink-0" />
-                <span className="leading-snug">{error}</span>
-            </div>
-        )
-    }
-    if (isEmpty) {
-        return (
-            <div className="flex items-center gap-1.5 px-1 text-[10.5px] text-ink-muted/70">
-                <AlertCircle className="w-3 h-3" />
-                Empty query — type something or paste DSL.
-            </div>
-        )
-    }
-    const parts: ReactNode[] = []
-    if (recognized > 0) {
-        parts.push(
-            <span key="r" className="inline-flex items-center gap-1 text-emerald-400/90">
-                <CheckCircle2 className="w-3 h-3" />
-                {recognized} structured filter{recognized === 1 ? '' : 's'}
-            </span>,
-        )
-    }
-    if (fallback > 0) {
-        parts.push(
-            <span key="f" className="inline-flex items-center gap-1 text-ink-muted">
-                · {fallback} word{fallback === 1 ? '' : 's'} as substring text
-            </span>,
-        )
-    }
-    return (
-        <div className="flex items-center flex-wrap gap-1 px-1 text-[10.5px]">
-            {parts}
-        </div>
-    )
-}
-
-
-// ---------------------------------------------------------------------------
 // Premium empty hero — the entire QueryCard when no filters exist
 // ---------------------------------------------------------------------------
 
 /**
  * Owns the whole card surface when the draft is empty. Replaces the
  * dense "QUERY · empty" + dormant controls header with a confident
- * onboarding hero: a refined intro, a short stack of concrete example
- * queries (each one explains exactly what it does), and a quiet
- * footer for power users who'd rather paste DSL.
- *
- * Examples are dynamic — they reference real entity types / tags /
- * layers discovered in the active view so a first-time user sees a
- * working query against THEIR data, not a placeholder.
+ * onboarding hero: a refined intro, the way in — "add a filter" in Form,
+ * the Ask bar in Sentence — recipes to start from (in the view's own
+ * words, each with how many it finds), and a quiet footer for power users
+ * who'd rather paste DSL.
  */
 function PremiumEmptyHero({
-    omnibox, onSeed, onUseCodeMode,
+    byFilters, entry, orAsk, palette, recipes, onUseCodeMode,
     discoveredEntityTypes, discoveredTags, discoveredLayers,
     discoveryLoading, discoveryError, propertyKeyCount,
 }: {
-    /** The SearchOmnibox, owned by QueryCard so the same instance can
-     *  also render beneath the rows once the query is non-empty. */
-    omnibox: ReactNode
-    onSeed: (p: Predicate) => void
+    /** Built from filters (Form), or asked in plain words (Sentence). */
+    byFilters: boolean
+    /** The way in: "add a filter", or the Ask bar. */
+    entry: ReactNode
+    /** In Form, the Ask bar as the other way in. */
+    orAsk: ReactNode
+    /** Every kind of filter, by category — the "+ Add filter" palette. */
+    palette: ReactNode
+    /** Recipes to start from. */
+    recipes: ReactNode
     onUseCodeMode: () => void
     discoveredEntityTypes: string[]
     discoveredTags: string[]
@@ -732,91 +689,6 @@ function PremiumEmptyHero({
     discoveryError: Error | null
     propertyKeyCount: number
 }) {
-    type Example = {
-        icon: typeof Search
-        accent: string
-        title: string
-        description: string
-        chips: string[]
-        predicate: Predicate
-    }
-
-    const examples: Example[] = []
-
-    // 1) Search by name — always available, the most universal entry point
-    examples.push({
-        icon: Search,
-        accent: 'text-accent-lineage',
-        title: 'Search by name',
-        description:
-            'Type a word and we surface every node whose display name contains it — try ' +
-            '"account" or "customer" to see how it works.',
-        chips: ['name contains "…"'],
-        predicate: {
-            kind: 'text', value: '', target: 'name',
-            match: 'substring', caseSensitive: false, boost: 1,
-        },
-    })
-
-    // 2) Browse one entity type — when the view has at least one type
-    const primaryType = discoveredEntityTypes.find(
-        (t) => /dataset|table|object/i.test(t),
-    ) ?? discoveredEntityTypes[0]
-    if (primaryType) {
-        examples.push({
-            icon: Box,
-            accent: 'text-cyan-300',
-            title: `Browse all ${primaryType}s`,
-            description:
-                `Open one drawer of the filing cabinet — every ${primaryType} in this view, ` +
-                'unfiltered. Pair with a name filter later to narrow.',
-            chips: [`type: ${primaryType}`],
-            predicate: { kind: 'entityType', op: 'in', values: [primaryType] },
-        })
-    }
-
-    // 3) Where is this tag used — only meaningful when tags exist
-    if (discoveredTags.length > 0) {
-        const tag = discoveredTags[0]
-        examples.push({
-            icon: TagIcon,
-            accent: 'text-fuchsia-300',
-            title: `Trace the "${tag}" tag`,
-            description:
-                `Find every node carrying the ${tag} tag — great for compliance audits or ` +
-                'understanding where a label has spread across the graph.',
-            chips: [`tag: ${tag}`],
-            predicate: { kind: 'tag', op: 'hasAny', values: [tag] },
-        })
-    }
-
-    // 4) Dead-ends — graph-shape, always available
-    examples.push({
-        icon: ArrowDownToLine,
-        accent: 'text-amber-300',
-        title: 'Find dead-ends',
-        description:
-            'Terminal nodes nothing reads from downstream — usually final reports, ' +
-            'one-off exports, or candidates for cleanup.',
-        chips: ['no downstream'],
-        predicate: { kind: 'isLeaf', edgeClass: 'lineage' },
-    })
-
-    // 5) Browse a layer — only when the view has layers configured
-    if (discoveredLayers.length > 0) {
-        const layer = discoveredLayers[0]
-        examples.push({
-            icon: Layers,
-            accent: 'text-emerald-300',
-            title: `Browse the ${layer.label} layer`,
-            description:
-                `Everything this view assigns to the ${layer.label} layer — useful for ` +
-                'understanding the shape of one stage of your pipeline.',
-            chips: [`layer: ${layer.label}`],
-            predicate: { kind: 'layer', layerAssignment: layer.value },
-        })
-    }
-
     return (
         <motion.div
             initial={{ opacity: 0, y: 6 }}
@@ -842,40 +714,36 @@ function PremiumEmptyHero({
                         <Sparkles className="w-5 h-5 text-accent-lineage" />
                     </div>
                     <div className="flex-1 min-w-0">
-                        <div className="text-[15px] font-display font-semibold text-ink leading-tight tracking-tight">
-                            Search this view
+                        <div className="flex items-baseline justify-between gap-2">
+                            <div className="text-[15px] font-display font-semibold text-ink leading-tight tracking-tight">
+                                Search this view
+                            </div>
+                            <DocsLink slug="advanced-search" newTab label="Guide" className="text-xs font-medium" />
                         </div>
                         <p className="mt-1 text-[12px] text-ink-muted leading-snug">
-                            Type anything — a name, a tag, a type, a property, a
-                            value — and pick what you meant. Or browse by category.
-                            Everything offered comes from your real data.
+                            {byFilters
+                                ? 'Add filters — what it is, how it connects, what it\'s tagged — '
+                                    + 'and see what matches as you go. Or ask in plain words.'
+                                : 'Ask in plain words — what it is, how it connects, what it\'s tagged — '
+                                    + 'and see what it reads as before anything changes. Or browse every kind of condition.'}
                         </p>
                     </div>
                 </div>
             </div>
 
-            {/* The omnibox is the entry point: one input that reads
-                what you type against tags, entity types, property
-                keys, sampled property VALUES, layers and lineage
-                shape at once. It replaced a name-only quick search,
-                which was why reaching a property filter used to mean
-                composing a text search and then deleting it. */}
-            <div className="relative px-5 pb-3">
-                {omnibox}
+            {/* The way in — "add a filter" in Form, a question in plain
+                words in Sentence — then every kind of filter. In Form the
+                Ask bar follows, as the other way in. */}
+            <div className="relative px-5 pb-3 flex flex-col gap-2">
+                {entry}
+                <div>{palette}</div>
+                {orAsk}
             </div>
 
-            {/* Examples — the teaching surface. The omnibox above is
-                the fast path; these explain, in a sentence each, what a
-                query of that shape actually does. Trimmed to three now
-                that the omnibox carries its own "start with something
-                real" list. Recents live in the header's Library. */}
-            <div className="relative px-3 pb-3">
-                <div className="flex flex-col gap-1.5">
-                    {examples.slice(0, 3).map((ex, i) => (
-                        <ExampleCard key={i} index={i} example={ex} onSeed={onSeed} />
-                    ))}
-                </div>
-            </div>
+            {/* Recipes — questions people come here with, ready to run
+                against this view. The Ask bar above is the fast path;
+                recents live in the header's Library. */}
+            {recipes && <div className="relative px-3 pb-3">{recipes}</div>}
 
             {/* Footer — discovery telemetry + DSL escape hatch */}
             <div className={cn(
@@ -905,82 +773,6 @@ function PremiumEmptyHero({
         </motion.div>
     )
 }
-
-
-function ExampleCard({
-    index, example, onSeed,
-}: {
-    index: number
-    example: {
-        icon: typeof Search
-        accent: string
-        title: string
-        description: string
-        chips: string[]
-        predicate: Predicate
-    }
-    onSeed: (p: Predicate) => void
-}) {
-    const Icon = example.icon
-    return (
-        <motion.button
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.18, delay: 0.04 * index }}
-            type="button"
-            onClick={() => onSeed(example.predicate)}
-            className={cn(
-                'group/ex relative rounded-xl p-3 text-left',
-                'bg-canvas-base/40 hover:bg-canvas-base/70',
-                'border border-glass-border/60 hover:border-accent-lineage/50',
-                'transition-all duration-150',
-                'hover:shadow-[0_4px_20px_-8px_rgba(45,150,255,0.35)]',
-            )}
-        >
-            <div className="flex items-start gap-2.5">
-                <div className={cn(
-                    'w-8 h-8 rounded-xl flex items-center justify-center shrink-0',
-                    'bg-glass/30 group-hover/ex:bg-glass/50 transition-colors',
-                )}>
-                    <Icon className={cn('w-3.5 h-3.5', example.accent)} />
-                </div>
-                <div className="flex-1 min-w-0">
-                    <div className="flex items-center justify-between gap-2">
-                        <span className="text-[12.5px] font-semibold text-ink">
-                            {example.title}
-                        </span>
-                        <ArrowRight className={cn(
-                            'w-3.5 h-3.5 text-ink-muted/60 shrink-0',
-                            'opacity-0 group-hover/ex:opacity-100 transition-all',
-                            'group-hover/ex:text-accent-lineage',
-                            '-translate-x-1 group-hover/ex:translate-x-0',
-                        )} />
-                    </div>
-                    <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">
-                        {example.description}
-                    </p>
-                    <div className="mt-1.5 flex flex-wrap gap-1">
-                        {example.chips.map((chip, ci) => (
-                            <span
-                                key={ci}
-                                className={cn(
-                                    'inline-flex items-center px-1.5 py-0.5 rounded',
-                                    'text-[10px] font-mono',
-                                    'bg-accent-lineage/10 text-accent-lineage/90',
-                                    'border border-accent-lineage/15',
-                                )}
-                            >
-                                {chip}
-                            </span>
-                        ))}
-                    </div>
-                </div>
-            </div>
-        </motion.button>
-    )
-}
-
-
 
 
 function EmptyDiscoveryHint({
@@ -1543,27 +1335,3 @@ function useEntityTypeNames(): string[] {
 }
 
 
-/**
- * Resolve layer options for the active view.
- *
- * Strategy:
- *   1. Sample DB-stored ``layerAssignment`` values (exactly what the BE
- *      compares against). For each, enrich the label from the view
- *      config when possible.
- *   2. If discovery returns nothing, fall back to the view's reference-
- *      layout config — using ``layer.id`` as value (typical assignment
- *      writer) and ``layer.name`` as label.
- *
- * This handles both common conventions:
- *   - DB stores layer IDs → label is enriched from view config
- *   - DB stores layer names → label IS the value (visibly the same)
- */
-function useViewLayerOptions(
-    getValueSamples: (key: string) => unknown[],
-): LayerOption[] {
-    const activeView = useActiveView()
-    return useMemo<LayerOption[]>(
-        () => layerOptions(activeView?.layout?.referenceLayout?.layers ?? [], getValueSamples),
-        [activeView, getValueSamples],
-    )
-}

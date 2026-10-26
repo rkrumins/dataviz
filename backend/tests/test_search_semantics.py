@@ -21,9 +21,11 @@ from backend.common.search_semantics import (
     SemanticsError,
     element_texts,
     evaluate,
+    evaluate_keys,
     fold_case,
     operator_table,
     resolve_comparison,
+    resolve_key_comparison,
     resolve_predicate,
 )
 
@@ -355,6 +357,69 @@ class TestListsAndAbsence:
         assert matches(stored, "isNotSet") is (not is_set)
         assert matches(stored, "isEmpty") is is_empty
         assert matches(stored, "isNotEmpty") is (not is_empty)
+
+
+# ---------------------------------------------------------------------------
+# One property against another (``value_key``)
+# ---------------------------------------------------------------------------
+
+def compares(left, right, op, value_type="auto", case_sensitive=False):
+    return evaluate_keys(left, right, resolve_key_comparison(
+        op, value_type=value_type, case_sensitive=case_sensitive))
+
+
+class TestKeyComparison:
+    def test_the_model_takes_an_order_or_equality_and_no_value(self):
+        pred = PropertyPredicate.model_validate(
+            {"kind": "property", "key": "freshnessHours", "op": "gt", "valueKey": "slaHours"})
+        assert resolve_predicate(pred) == Comparison("gt", "number")
+        for bad, why in [({"op": "contains"}, "using ="), ({"op": "gt", "value": 3}, "not both"),
+                         ({"op": "neq", "includeMissing": True}, "needs both")]:
+            with pytest.raises(ValueError, match=why):
+                PropertyPredicate.model_validate(
+                    {"kind": "property", "key": "a", "valueKey": "b", **bad})
+
+    def test_auto_orders_as_numbers_and_equates_as_text(self):
+        assert resolve_key_comparison("gte").type == "number"
+        assert resolve_key_comparison("eq").type == "string"
+        assert resolve_key_comparison("lt", value_type="date") == Comparison(
+            "lt", "date", (), "second")
+        with pytest.raises(SemanticsError, match="does not compare boolean"):
+            resolve_key_comparison("gt", value_type="boolean")
+        with pytest.raises(SemanticsError, match="using ="):
+            resolve_key_comparison("between")
+
+    def test_numbers_compare_exactly_whatever_kind_stores_them(self):
+        assert compares(30, 24, "gt")
+        assert compares("30", 24, "gt")               # numeric text is a number
+        assert not compares("12", 24, "gt")
+        assert compares(2 ** 63 - 1, -1, "gt")         # no wrap at the extremes
+        assert compares(-(2 ** 63), 2 ** 63 - 1, "lt")
+        assert compares(15, 15.0, "gte") and compares(15, "15.0", "lte")
+        assert not compares("abc", 1, "gt") and not compares("abc", 1, "lte")
+
+    def test_equality_reads_text_so_any_integer_is_exact(self):
+        assert compares(48, "48", "eq")
+        assert compares("Alice", "alice", "eq")
+        assert not compares("Alice", "alice", "eq", case_sensitive=True)
+        assert compares(-3746471915534727923, "-3746471915534727923", "eq")
+        assert compares(1.5, "1.5", "eq")
+        assert compares(True, "TRUE", "eq", value_type="boolean")
+
+    def test_dates_compare_to_the_second(self):
+        assert compares("2024-05-02", "2024-05-01T23:59:59", "gt", value_type="date")
+        assert compares("2024-05-01", "2024-05-01T00:00:00", "eq", value_type="date")
+        assert not compares("May 1", "2024-05-01", "eq", value_type="date")
+
+    def test_a_list_matches_by_any_element_and_a_missing_key_by_nothing(self):
+        assert compares([1, 30], 24, "gt")
+        assert compares("pii", ["gold", "PII"], "eq")
+        assert not compares(None, 24, "lt") and not compares(24, None, "gt")
+        assert not compares(None, None, "eq")
+        # ≠ needs both: it is "set, and not equal".
+        assert compares("a", "b", "neq")
+        assert not compares("a", None, "neq") and not compares(None, "b", "neq")
+        assert not compares(["x", "y"], "Y", "neq")
 
 
 def test_fold_case_is_per_character():

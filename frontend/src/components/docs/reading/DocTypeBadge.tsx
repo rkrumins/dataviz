@@ -53,6 +53,7 @@ export const DOC_TYPES: Record<string, DocType> = {
   'versioning-graph-lifecycle-v2': 'explanation',
   'versioning-drafts-and-merge': 'explanation',
   'security-overview': 'explanation',
+  'native-queries': 'explanation',
   'property-storage': 'explanation',
   'top-level-nodes-performance': 'explanation',
   // Reference — information-oriented

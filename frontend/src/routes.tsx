@@ -1,5 +1,5 @@
 import { Suspense } from 'react'
-import { createBrowserRouter, Navigate, useParams } from 'react-router-dom'
+import { createBrowserRouter, Navigate, useParams, useSearchParams } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import { CanvasLayout } from '@/components/layout/CanvasLayout'
 import { NotFoundPage } from '@/pages/NotFoundPage'
@@ -23,6 +23,21 @@ function WorkspaceViewsRedirect() {
 function DataSourceHistoryRedirect() {
   const { catalogId } = useParams<{ catalogId: string }>()
   return <Navigate to={`/datasources/${catalogId}?tab=profiling`} replace />
+}
+
+// A service account's keys page became the account's own page, its managers'
+// and its administrators' alike. Redirect old links, notices included.
+function ServiceAccountKeysRedirect() {
+  const { accountId = '' } = useParams<{ accountId: string }>()
+  return <Navigate to={`/service-accounts/${encodeURIComponent(accountId)}`} replace />
+}
+
+// So did the Service accounts list opened on one, ``?account=<id>``.
+function ServiceAccountsAdmin() {
+  const [params] = useSearchParams()
+  const linked = params.get('account')
+  if (linked) return <Navigate to={`/service-accounts/${encodeURIComponent(linked)}`} replace />
+  return <Lazy><AdminServiceAccounts /></Lazy>
 }
 
 // Lazy-load all page-level components so their module code and hooks only
@@ -58,7 +73,7 @@ const OntologySchemaPage = lazyWithRetry(() => import('@/pages/OntologySchemaPag
 const MyAccessPage = lazyWithRetry(() => import('@/pages/MyAccessPage').then(m => ({ default: m.MyAccessPage })))
 const MyIdentitiesPage = lazyWithRetry(() => import('@/pages/MyIdentitiesPage').then(m => ({ default: m.MyIdentitiesPage })))
 const MyApiKeysPage = lazyWithRetry(() => import('@/pages/MyApiKeysPage').then(m => ({ default: m.MyApiKeysPage })))
-const ServiceAccountKeysPage = lazyWithRetry(() => import('@/pages/ServiceAccountKeysPage').then(m => ({ default: m.ServiceAccountKeysPage })))
+const ServiceAccountPage = lazyWithRetry(() => import('@/pages/ServiceAccountPage').then(m => ({ default: m.ServiceAccountPage })))
 const AccountSettingsPage = lazyWithRetry(() => import('@/pages/AccountSettingsPage').then(m => ({ default: m.AccountSettingsPage })))
 const PreferencesPage = lazyWithRetry(() => import('@/pages/PreferencesPage').then(m => ({ default: m.PreferencesPage })))
 const PasswordChangeRequired = lazyWithRetry(() => import('@/pages/PasswordChangeRequired').then(m => ({ default: m.PasswordChangeRequired })))
@@ -222,9 +237,11 @@ export const router = createBrowserRouter([
       // the apiKeysEnabled switch: with keys off you can still see and revoke
       // yours — the page says so and offers nothing new.
       { path: 'me/api-keys', element: <Lazy><MyApiKeysPage /></Lazy> },
-      // A service account's keys, for its managers. The server decides who
-      // may see it: anyone else is told it does not exist.
-      { path: 'me/service-accounts/:accountId', element: <Lazy><ServiceAccountKeysPage /></Lazy> },
+      // One service account — who manages it, where it has a role, its keys —
+      // for its managers and the administrators of service accounts. The
+      // server decides who may see it: anyone else is told it does not exist.
+      { path: 'service-accounts/:accountId', element: <Lazy><ServiceAccountPage /></Lazy> },
+      { path: 'me/service-accounts/:accountId', element: <ServiceAccountKeysRedirect /> },
       // How the app works for you — kept in this browser, ungated like its siblings.
       { path: 'me/preferences', element: <Lazy><PreferencesPage /></Lazy> },
 
@@ -388,7 +405,7 @@ export const router = createBrowserRouter([
             path: 'service-accounts',
             element: (
               <RequireNav group="admin" sectionKey="service-accounts">
-                <Lazy><AdminServiceAccounts /></Lazy>
+                <ServiceAccountsAdmin />
               </RequireNav>
             ),
           },
