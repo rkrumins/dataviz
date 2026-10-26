@@ -9,7 +9,7 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
-## [Unreleased] — Service accounts: workspaces give them access
+## [Unreleased] — Service accounts: workspaces give them access, and they can be deleted
 
 ### Added
 
@@ -33,16 +33,32 @@ limitations** — a changelog that only lists good news is not worth reading.
 - **Removing someone shows the service accounts they could still act through.** When a workspace
   admin removes someone who manages a service account — themselves or through a team — whose role
   there gives more than they would keep, the preview names it, and offers to remove that role too.
+- **A service account can be deleted**, by its managers or an administrator, once nothing runs as
+  it: its keys stop at once and its requests still waiting are withdrawn. For 30 days it can be
+  restored as it was — its keys, roles and managers — from its page, where its managers still find
+  it; then the hourly pass purges it, revoking its keys and removing its roles and managers. Its
+  name stays in the activity log. An administrator's delete holds it, so only an administrator
+  restores it.
+- **Administration → Service accounts** narrows to the accounts that need a manager or that an
+  administrator holds, to those a person or a team manages, and to those with a role in a
+  workspace; **Deleted** lists those that can still be restored.
+- Someone removed as a service account's manager is told, unless they still manage it through a
+  team.
 
 ### Changed
 
 - Adding a service account on a workspace's **Members** tab used to answer `409`; it is added
   there now, under the rules above.
+- The hourly check of who manages each service account locks only the accounts whose standing it
+  changes, a batch at a time, and skips any a request is changing, rather than locking every
+  account for the whole check.
 
 ### Upgrading
 
 - The upgrade job adds `access_requests.requested_by` (`20261025_1400_sa_requests`), who asked
-  for a request made for a service account. Nothing else to run.
+  for a request made for a service account, and `service_accounts.purged_at`
+  (`20261025_1600_sa_purge`), when a deleted one was purged. Both are nullable. Nothing else to
+  run.
 
 ---
 

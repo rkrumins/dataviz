@@ -400,8 +400,10 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   account's managers are told; `system:service-accounts:manage` alone makes no keys. Its
   managers run the account too and ask workspaces for access for it, but answer no request for
   it, and may appoint a manager only who would gain nothing they couldn't grant; one an
-  administrator disabled stays disabled until an administrator enables it. Its keys stop while it is
-  disabled (`api_key_owner_inactive`) and pause once nobody in good standing has managed it for
+  administrator disabled or deleted stays so until an administrator enables or restores it. Its keys
+  stop while it is disabled or deleted (`api_key_owner_inactive`) — a deleted one is purged after 30
+  days, its keys revoked and its roles and managers removed — and pause once nobody in good
+  standing has managed it for
   the grace period, 14 days by default (`401 api_key_unmanaged`); every super and org admin is
   told when it loses its last manager. See [Service Accounts](/guide/service-accounts) and
   ADR-028.

@@ -230,20 +230,23 @@ managers are told about. To anyone else the account doesn't exist: `404`. Admini
 accounts (`system:service-accounts:manage`) doesn't make keys on its own.
 
 **A disabled account** makes and rotates no keys: `409 service_account_disabled`. Its keys answer
-`401 api_key_owner_inactive` until it is enabled.
+`401 api_key_owner_inactive` until it is enabled. **A deleted one**'s keys answer the same until it
+is restored, and its key routes `404`.
 
 **Finding your accounts:**
 
 | Route | Answers |
 |---|---|
-| `GET /api/v1/me/service-accounts?limit=&offset=` | The accounts you manage, yourself or through a team, by name: `{items, total, graceDays}` (`limit` up to 200) |
+| `GET /api/v1/me/service-accounts?limit=&offset=` | The accounts you manage, yourself or through a team, by name, then those deleted and not yet purged: `{items, total, graceDays}` (`limit` up to 200) |
 | `GET /api/v1/me/service-accounts/{account_id}` | One of them — or any, for an administrator of service accounts or anyone holding `system:users:manage` — with its `roles`, `requests`, `liveKeys` and `can`. An admin or steward of a workspace it holds a role in reads it too: its roles in the workspaces they can open, and no `requests` |
 
 Each account: `id`, `name`, `description`, `status` (`active` or `disabled`), `adminHold` (an
-administrator disabled it), `managers` (people and teams, each with `inGoodStanding`), `managed`
-(someone can act for it now), `singleManager`, `unmanagedSince` and `pausesAt` (when nobody has, and
-when its keys pause). One account also says what you may do with it: `can`, with `view`, `edit`,
-`disable`, `enable`, `managers`, `keys`, `grant`, `revoke` and `request`, each `true` or `false`.
+administrator disabled or deleted it), `managers` (people and teams, each with `inGoodStanding`),
+`managed` (someone can act for it now), `singleManager`, `unmanagedSince` and `pausesAt` (when nobody
+has, and when its keys pause), and `deletedAt` and `purgesAt` (when it was deleted, and when it is
+purged unless restored; `null` while it is live). One account also says what you may do with it:
+`can`, with `view`, `edit`, `disable`, `enable`, `managers`, `keys`, `grant`, `revoke`, `request`,
+`delete` and `restore`, each `true` or `false`.
 Each of its `roles` has `bindingId`, `workspaceId`, `workspaceName`, `role`, `grantedAt` and
 `expiresAt` (`null` while it lasts until taken away); each of its `requests` — asked for it and
 still waiting on a workspace — has `id`, `workspaceId`, `workspaceName`, `role`, `createdAt`,
@@ -255,16 +258,20 @@ are under `/api/v1/admin/service-accounts`:
 
 | Route | Who | Does |
 |---|---|---|
-| `GET ?q=&status=&managedBy=&limit=&offset=` | Administrators | Every account; `managedBy` lists what a person's leaving touches |
+| `GET ?q=&status=&standing=&manager=&workspace=&managedBy=&limit=&offset=` | Administrators | Every account, or with `status=deleted` those deleted and not yet purged. `status` also takes `active` or `disabled`; `standing`, `unmanaged` (no manager in good standing) or `held` (by an administrator); `manager`, a person — themselves or through a team — or a team; `workspace`, a workspace it holds a role in. `managedBy` lists what a person's leaving touches |
 | `POST` | Administrators | Create one: `{name, description, managers: [{type: "user"\|"group", id}]}` |
 | `GET`, `PATCH /{id}` | Managers, administrators | Read one, with `can`; rename or describe it. `GET` also answers anyone holding `system:users:manage` |
 | `POST /{id}/disable`, `/{id}/enable` | Managers, administrators | Stop every key it holds, or let them work again. An administrator's disable holds it (`adminHold`): then only an administrator enables it |
+| `DELETE /{id}` | Managers, administrators | Delete it: every key stops at once, and its requests still waiting are withdrawn. For 30 days nothing else changes; then the hourly pass purges it — its keys revoked, its roles and managers removed. An administrator's delete holds it |
+| `POST /{id}/restore` | Managers, administrators | Bring a deleted account back as it was, until it is purged. While it is held, only an administrator restores it; their restoring it lets go of the hold, unless it comes back disabled |
 | `PUT`, `DELETE /{id}/managers/{users\|groups}/{subject_id}` | Managers, administrators | Appoint or remove a manager. Its managers can't remove the last one: `409` |
 | `POST /{id}/roles` | Administrators | Give it a workspace role: `{workspaceId, role}`, and `expiresAt` to end it then |
 | `DELETE /{id}/roles/{binding_id}` | Managers, administrators | Take a role away |
 | `POST /hand-over` | Administrators | Move a person's manager seats to a successor: `{fromUserId, to: {type, id}}`, and `accountIds` to move only some |
 
-To anyone else the account doesn't exist: `404`. Someone who can see it but not do that gets `403`.
+To anyone else the account doesn't exist: `404`, and so is a purged one. Someone who can see it but
+not do that gets `403`. A deleted account can only be read and restored: anything else is `409`, as
+is restoring one that isn't deleted.
 They answer `409` for a manager who isn't an active person or is a break-glass account, `422` for a
 role that administers a workspace or lets people in, and `403` when you couldn't grant that role
 yourself — or, appointing a manager or adding someone to a team that manages the account, when they

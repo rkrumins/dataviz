@@ -20,8 +20,9 @@ it up, and goes on running when they move on.
   its admins and stewards add it on **Members**, or answer a request its
   managers make for it.
 - Its managers **run** it on its own page: they rename it, disable and enable
-  it, appoint and remove managers, ask workspaces for access, and take away
-  roles it no longer needs.
+  it, appoint and remove managers, ask workspaces for access, take away roles
+  it no longer needs, and delete it when nothing runs as it any more — then
+  it can be restored for 30 days.
 - Its managers — or a super admin — **make, rotate and revoke its keys**, each
   confirming it's them exactly as for their own keys. A key is recorded as
   made by the person, and acts as the account.
@@ -37,7 +38,7 @@ it up, and goes on running when they move on.
 | Reaches | What you can | What the account's roles give it |
 | Made by | You | Its managers, or a super admin |
 | Pauses when | You stop signing in through your identity provider | Nobody has managed the account for longer than the grace period |
-| Stops when | Your account is suspended or deleted | The account is disabled |
+| Stops when | Your account is suspended or deleted | The account is disabled or deleted |
 
 A person is **in good standing** when they could sign in now: active, not a
 break-glass account, and either signed in through the identity provider within
@@ -54,8 +55,11 @@ by super admins and org admins (the permission is
 keys: that takes managing the account, or `system:users:manage` (a super
 admin). The list says how each one stands, most
 pressing first: **Needs a manager**, with the day its keys pause; **Single
-manager**, when one person is all it depends on; **Disabled**. Each account
-opens on its own page, the same one its managers use.
+manager**, when one person is all it depends on; **Disabled**. Narrow it to
+the accounts that need a manager or that an administrator holds, to those a
+person or a team manages, or to those with a role in a workspace; **Deleted**
+lists those that can still be restored. Each account opens on its own page,
+the same one its managers use.
 
 ### Creating one
 
@@ -100,14 +104,26 @@ it there. A team holds what its own roles give every member. If someone would
 gain more, the refusal names the roles in the way. The same goes for handing
 an account over.
 
-### Disabling
+### Disabling and deleting
 
 **Disable** stops every key the account holds at once (`api_key_owner_inactive`)
 and refuses new ones; nothing is revoked, and **Enable** brings them back.
 Its managers can disable and enable it too — but when an administrator of
 service accounts disables it, it is **held**: it stays disabled until an
-administrator enables it. Accounts are not deleted: disable one, and revoke
-its keys, instead.
+administrator enables it.
+
+**Delete** retires an account whose integration is gone. Its keys stop at once,
+as when it is disabled, and nobody is reminded that they expire; its requests
+still waiting on a workspace are withdrawn. Nothing else changes. For **30 days** it is listed under
+**Deleted**, and its page offers **Restore**, which brings it back as it was:
+its keys, its roles and its managers. Then the hourly pass **purges** it: its
+keys are revoked, and its roles and managers removed. Its name stays in the
+activity log, by everything it did.
+
+Its managers can delete and restore it too. Deleted by an administrator of
+service accounts, it is held, and only an administrator restores it. Nor does
+deleting let go of a hold: an account held disabled that its managers delete
+comes back only through an administrator, and still disabled.
 
 ---
 
@@ -169,6 +185,9 @@ You run the account there, as any of its managers:
 - **Keep access that's ending**: a role given for a while says when it ends,
   and **Keep** asks the workspace to extend it.
 - **Take away** a role it no longer needs, so it reaches no more than it uses.
+- **Delete** it once nothing runs as it any more: its keys stop at once. It
+  stays on your list, marked **Deleted**, and you can restore it, as it was,
+  for 30 days — unless an administrator holds it.
 
 Someone allowed to manage users (a super admin) can make, rotate and revoke an
 account's keys without managing it; its managers are told when they do.
@@ -179,10 +198,13 @@ they still answer for it. An account managed only through a team tells up to
 25 of its members, the most recently active first, rather than the whole team;
 while nobody answers for it, its administrators are told instead. That covers
 misuse of a key, a key about to expire, a key revoked by an administrator or
-by whatever held it, disabling or enabling the account, and anything said to
+by whatever held it, disabling, enabling, deleting or restoring the account,
+and anything said to
 the account itself, such as an answer to a request for its access, a
 workspace removing that access, an end date set on it or its coming end, or a
 decision on a publication it asked for. Nobody reads the account's own inbox.
+Someone removed as its manager is told too, unless they still manage it
+through a team.
 
 ---
 
@@ -244,7 +266,7 @@ Two refusals say something particular about a service account:
 | Status | `error` | What it means |
 | --- | --- | --- |
 | 401 | `api_key_unmanaged` | Paused: the account has had no manager for longer than the grace period. It works again as soon as one is appointed. |
-| 401 | `api_key_owner_inactive` | The account is disabled. |
+| 401 | `api_key_owner_inactive` | The account is disabled, or deleted. |
 
 Secret scanners find both kinds with `nx[ps]at_[0-9A-Za-z]{38}`.
 
@@ -257,9 +279,10 @@ manage. Both answer `403` with `"type": "access_denied"`.
 
 ## What is recorded
 
-Creating, renaming, disabling and enabling an account, and appointing or
-removing its managers, appear in **Administration → Activity** with who did
-it. Its keys' events name the person who made, rotated or revoked each key,
+Creating, renaming, disabling, enabling, deleting and restoring an account,
+and appointing or removing its managers, appear in **Administration →
+Activity** with who did it, and so does its purge, 30 days after it was
+deleted. Its keys' events name the person who made, rotated or revoked each key,
 with the account as what it was done to, and a request for its access names
 the manager who asked.
 

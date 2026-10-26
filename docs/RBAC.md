@@ -534,8 +534,9 @@ one of its data sources is.
   adding someone to a team that manages a service account is held to the same rule on top of
   `system:groups:manage`, and an access-request approval never adds anyone to one. A holder of
   `system:users:manage` can make an account's keys without managing it, and its managers are
-  told; `system:service-accounts:manage` alone makes none. See [Service
-  Accounts](/guide/service-accounts).
+  told; `system:service-accounts:manage` alone makes none. Deleting an account stops its keys at
+  once; for 30 days it can be restored as it was, then it is purged — its keys revoked, its
+  bindings and manager seats removed. See [Service Accounts](/guide/service-accounts).
 
 ## 403 body
 
