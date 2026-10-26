@@ -293,6 +293,7 @@ export type Op =
     | 'isNotSet'
     | 'isEmpty'
     | 'isNotEmpty'
+export type Valuekey = string | null
 export type Valuetype = 'auto' | 'string' | 'number' | 'boolean' | 'date'
 export type Kind3 = 'tag'
 export type Op1 = 'has' | 'hasAll' | 'hasAny' | 'notHas'
@@ -313,7 +314,7 @@ export type Direction = 'out' | 'in' | 'both'
 /**
  * Default edge-class when ``edge_types`` is omitted. Mirrors DegreePredicate / PathPredicate.
  */
-export type Edgeclass = 'lineage' | 'containment' | 'any'
+export type Edgeclass = 'lineage' | 'containment' | 'links' | 'any'
 /**
  * Optional predicate evaluated against every traversed edge. ANDs with ``edge_types`` / ``edge_class``. Compiles to ``ALL(rel IN relationships(p) WHERE …)``.
  */
@@ -361,7 +362,7 @@ export type Values2 = string[]
 export type Kind11 = 'layer'
 export type Layerassignment1 = string
 export type Direction1 = 'in' | 'out' | 'both'
-export type Edgeclass1 = 'lineage' | 'containment' | 'any'
+export type Edgeclass1 = 'lineage' | 'containment' | 'links' | 'any'
 /**
  * Optional explicit edge-type list. When provided, overrides the default set resolved from ``edge_class``.
  */
@@ -369,26 +370,26 @@ export type Edgetypes1 = string[] | null
 export type Kind12 = 'degree'
 export type Op5 = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'
 export type Value1 = number
-export type Edgeclass2 = 'lineage' | 'containment' | 'any'
+export type Edgeclass2 = 'lineage' | 'containment' | 'links' | 'any'
 export type Edgetypes2 = string[] | null
 export type Kind13 = 'isOrphan'
-export type Edgeclass3 = 'lineage' | 'containment' | 'any'
+export type Edgeclass3 = 'lineage' | 'containment' | 'links' | 'any'
 export type Edgetypes3 = string[] | null
 export type Kind14 = 'isLeaf'
-export type Edgeclass4 = 'lineage' | 'containment' | 'any'
+export type Edgeclass4 = 'lineage' | 'containment' | 'links' | 'any'
 export type Edgetypes4 = string[] | null
 export type Kind15 = 'isRoot'
-export type Edgeclass5 = 'lineage' | 'containment' | 'any'
+export type Edgeclass5 = 'lineage' | 'containment' | 'links' | 'any'
 export type Edgetypes5 = string[] | null
 export type Kind16 = 'hasIncoming'
-export type Edgeclass6 = 'lineage' | 'containment' | 'any'
+export type Edgeclass6 = 'lineage' | 'containment' | 'links' | 'any'
 export type Edgetypes6 = string[] | null
 export type Kind17 = 'hasOutgoing'
 /**
  * ``outgoing`` walks source → target along edge direction; ``incoming`` walks against direction; ``any`` is undirected.
  */
 export type Direction2 = 'outgoing' | 'incoming' | 'any'
-export type Edgeclass7 = 'lineage' | 'containment' | 'any'
+export type Edgeclass7 = 'lineage' | 'containment' | 'links' | 'any'
 /**
  * Optional predicate evaluated against every edge in the returned paths. ANDs with ``edge_types`` / ``edge_class``. Compiles to ``ALL(rel IN relationships(p) WHERE …)``.
  */
@@ -449,6 +450,7 @@ export type Axis =
 export type Op6 = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'
 export type Value2 = number
 export type Edge = (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
+export type Edgeclass8 = ('lineage' | 'links') | null
 export type Edgetypes8 = string[] | null
 export type Kind21 = 'related'
 export type Maxhops1 = number | null
@@ -1210,8 +1212,11 @@ export interface TextPredicate {
  * as its digits in a string with ``value_type='number'``: it is compared
  * exactly. Text comparisons are case-insensitive unless
  * ``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /
- * ``notContains`` match entities without the key. The full contract is
- * ``backend/common/search_semantics``.
+ * ``notContains`` match entities without the key. ``value_key`` compares
+ * with another property of the same entity instead of a value
+ * (``freshnessHours > slaHours``): ``=``, ``≠`` and the orders only, an
+ * order as numbers and equality as text unless ``value_type`` says
+ * otherwise. The full contract is ``backend/common/search_semantics``.
  */
 export interface PropertyPredicate {
     caseSensitive?: Casesensitive1
@@ -1220,6 +1225,7 @@ export interface PropertyPredicate {
     kind?: Kind2
     op?: Op
     value?: unknown
+    valueKey?: Valuekey
     valueType?: Valuetype
 }
 /**
@@ -1357,7 +1363,10 @@ export interface EntityTypePredicate {
     values: Values2
 }
 /**
- * Match the view's layer assignment (Source / Staging / Refinery / …).
+ * In one of the view's layers (Source / Staging / Refinery / …), as the
+ * shared placement rule places entities there (the canvas's own with
+ * ``placementContractEnabled`` on). ``layerAssignment`` names the layer by
+ * id or by name; one the view doesn't have matches the stamp entities carry.
  */
 export interface LayerPredicate {
     kind?: Kind11
@@ -1490,7 +1499,8 @@ export interface IsPredicate {
  * a dashboard whose parent is Finance"); without one, any relative will
  * do. A lineage relationship may also require every edge it walks to meet
  * ``edge``, and walk only ``edgeTypes`` (by default every lineage type but
- * the rollups).
+ * the rollups) — or, with ``edgeClass='links'``, every link: any edge but
+ * the hierarchy's, the rollups aside.
  *
  * ``quantifier``: ``any`` relative meets the condition, ``none`` does, or
  * ``all`` do — and there is at least one. ``count`` compares how many
@@ -1501,6 +1511,7 @@ export interface RelatedPredicate {
     axis: Axis
     count?: CountSpec | null
     edge?: Edge
+    edgeClass?: Edgeclass8
     edgeTypes?: Edgetypes8
     kind?: Kind21
     maxHops?: Maxhops1

@@ -68,9 +68,11 @@ from backend.app.providers.falkordb_provider import (
     _RESERVED_NODE_KEYS,
     platform_property_names,
 )
+from backend.app.providers.falkordb_placement import layer_test
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf
-from backend.app.providers.falkordb_typed_ops import compile_comparison, text_of
+from backend.app.providers.falkordb_typed_ops import compile_comparison, compile_key_comparison, text_of
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
+from backend.app.services.deep_search.edge_types import spell_edge_types
 from backend.app.services.native_query.parse_cost import grouped, negated, operand
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
 from backend.common.edge_properties import (
@@ -90,6 +92,7 @@ from backend.common.search_semantics import (
 from backend.common.models.search import (
     LINEAGE_AXES,
     anchor_groups,
+    traced_from_far_end,
     AggregationSpec,
     AncestorRef,
     DegreePredicate,
@@ -229,6 +232,7 @@ class _Compiler:
         *,
         lineage_edge_types: Optional[Set[str]] = None,
         containment_edge_types: Optional[Set[str]] = None,
+        edge_type_spellings: Optional[Dict[str, List[str]]] = None,
     ):
         self.params: Dict[str, Any] = {}
         self.hoisted_root_urns: List[List[str]] = []
@@ -247,11 +251,18 @@ class _Compiler:
         # compiles them for native values only; a list — set by a caller
         # whose graph keeps anything raw — collects each one's ``RawLeaf``.
         self.raw_leaves: Optional[List[RawLeaf]] = None
+        # Whether a property is compared with another (``value_key``): that
+        # reads native values only, which a graph keeping raw ones is told.
+        self.compares_keys = False
         # Ontology-resolved edge type sets. ``None`` means the caller
         # didn't inject them — predicates that depend on lineage /
         # containment classification will raise CompileError on visit.
         self._lineage_edge_types = lineage_edge_types
         self._containment_edge_types = containment_edge_types
+        # Every edge type the data source has: each one's upper case → how
+        # the graph spells it. What a named type is read through, and what
+        # ``links`` and ``any`` cover; None takes names as given.
+        self._edge_type_spellings = edge_type_spellings
         # Relationships, and any OR / NOT holding one, are evaluated after
         # the head's clause WHERE: each is a boolean expression a caller
         # projects on a WITH and filters by (``tail_clauses``), cheapest
@@ -274,6 +285,12 @@ class _Compiler:
         # A relationship whose far end is named and is lineage becomes a
         # withinHops continuation; off where those can't run (membership).
         self.anchor_lineage = True
+        # The lineage hops a candidate tests itself (``relation_max_hops``):
+        # a top-level relationship past them is traced from its far end —
+        # ``hoisted_trace``, the walk the uncapped engine plans by. None
+        # traces nothing: it is compiled as a candidate's own test.
+        self.trace_beyond: Optional[int] = None
+        self.hoisted_trace: Optional[Dict[str, Any]] = None
 
     def _next(self) -> str:
         n = self._param_counter
@@ -288,9 +305,9 @@ class _Compiler:
 
     def compile(self, predicate) -> str:
         """The head: the WHERE fragment every candidate is filtered by
-        first. Relationships, and any OR / NOT holding one, go to
-        ``self.tail`` — a comprehension fails in a clause's WHERE, and is
-        built for every row that reaches it, so it runs only on what the
+        first. Relationships and edge counts, and any OR / NOT holding one,
+        go to ``self.tail`` — a comprehension fails in a clause's WHERE, and
+        is built for every row that reaches it, so it runs only on what the
         head lets through."""
         if not _has_relation(predicate):
             return self._visit(predicate, in_or=False, at_top_and=True)
@@ -304,6 +321,9 @@ class _Compiler:
                 head.append(self._hoist_anchored(member))
                 if member.axis in LINEAGE_AXES:
                     continue    # the continuation is the whole test
+            elif self._traceable(member):
+                head.append(self._hoist_trace(member))
+                continue        # the walk is the whole test
             stages.append(member)
         for member in sorted(stages, key=_relation_cost):
             self.tail.append(self._projected_stage(member))
@@ -523,8 +543,22 @@ class _Compiler:
         return "(" + " OR ".join(clauses) + ")"
 
     def _visit_property(self, p) -> str:
+        if p.value_key:
+            return self._compare_keys(p)
         return self._raw_value(
             self._compile_comparison(f"{self._var}.{_safe_property_name(p.key)}", p), p)
+
+    def _compare_keys(self, p) -> str:
+        """One property against another of the same entity, as stored
+        natively — a value kept as JSON text isn't probed for this."""
+        try:
+            cmp = resolve_predicate(p)
+        except SemanticsError as exc:
+            raise CompileError(f"property {p.key!r}: {exc}") from exc
+        self.compares_keys = True
+        v = self._var
+        return compile_key_comparison(f"{v}.{_safe_property_name(p.key)}",
+                                      f"{v}.{_safe_property_name(p.value_key)}", cmp)
 
     def _raw_leaf(self, native: str, key: str, cmp, key_match: str) -> str:
         leaf = RawLeaf(key=key, cmp=cmp, key_match=key_match,
@@ -603,6 +637,19 @@ class _Compiler:
         return f"NOT ({clause})" if e.op == "notIn" else clause
 
     def _visit_layer(self, l) -> str:
+        """In the layer the view's canvas places the entity in, when the
+        service resolved the filter against the view (``_placement``) — a
+        test that walks its ancestors, so only ever in a projection
+        (``_has_relation``). Otherwise the stamp the entity carries."""
+        target = getattr(l, "_placement", None)
+        if target is not None:
+            if self._containment_edge_types is None:
+                raise CompileError(
+                    "a layer filter requires the provider's containment edge types — "
+                    "ontology resolution must complete before search.")
+            return layer_test(target, self._var, name=self._name, bind=self._bind,
+                              containment=sorted(_sanitize_label(t)
+                                                 for t in self._containment_edge_types))
         pn = self._next()
         self.params[pn] = l.layer_assignment
         return f"{self._var}.layerAssignment = ${pn}"
@@ -625,7 +672,7 @@ class _Compiler:
         (which would match every node and look like a planner bug).
         """
         if predicate.edge_types:
-            return list(predicate.edge_types)
+            return self._named_edge_types(predicate.edge_types)
         edge_class = predicate.edge_class
         if edge_class == "lineage":
             if self._lineage_edge_types is None:
@@ -643,19 +690,32 @@ class _Compiler:
                     "ontology resolution must complete before search."
                 )
             return sorted(self._containment_edge_types)
-        if edge_class == "any":
-            if (self._lineage_edge_types is None
-                    or self._containment_edge_types is None):
-                raise CompileError(
-                    "degree / withinHops with edgeClass='any' requires both "
-                    "lineage and containment edge types — ontology "
-                    "resolution must complete before search."
-                )
-            combined = set(self._lineage_edge_types) | set(
-                self._containment_edge_types
-            )
-            return sorted(combined)
+        if edge_class in ("links", "any"):
+            every = self._every_edge_type(
+                f"degree / withinHops with edgeClass={edge_class!r}")
+            if edge_class == "any":
+                return sorted(every)
+            contains = {t.upper() for t in self._containment_edge_types}
+            return sorted(t for t in every if t.upper() not in contains)
         raise CompileError(f"unknown edgeClass: {edge_class!r}")
+
+    def _named_edge_types(self, types, *, link: bool = False) -> List[str]:
+        """The edge types a predicate names, as the graph spells them.
+        ``link``: a relationship's, which never walks the hierarchy's."""
+        return spell_edge_types(types, self._edge_type_spellings,
+                                containment=self._containment_edge_types or (), link=link)
+
+    def _every_edge_type(self, what: str) -> Set[str]:
+        """Every edge type the data source has, as the graph spells them."""
+        if self._lineage_edge_types is None or self._containment_edge_types is None:
+            raise CompileError(
+                f"{what} requires both lineage and containment edge types — ontology "
+                "resolution must complete before search."
+            )
+        every = set(self._lineage_edge_types) | set(self._containment_edge_types)
+        for spelled in (self._edge_type_spellings or {}).values():
+            every.update(spelled)
+        return every
 
     def _visit_degree(self, d) -> str:
         edge_types = self._resolve_degree_edge_types(d)
@@ -734,23 +794,11 @@ class _Compiler:
             assert pattern is not None
             return pattern
 
-        # ----- non-trivial counts → size((pattern)) <op> $value -----
-        # NB: FalkorDB has been observed to reject size((pattern)) when
-        # the surrounding context wraps it in NOT and the relationship
-        # pattern uses alternation. The zero/one thresholds above cover
-        # the common cases (IsOrphan/IsLeaf/IsRoot/HasIncoming/
-        # HasOutgoing). Counts of >1 / =5 / etc. still emit size(); if
-        # FalkorDB also rejects those, the next step is to switch to a
-        # list-comprehension that filters on type(r) instead of using
-        # relationship-type alternation in the pattern itself.
-        symbol = {"eq": "=", "neq": "<>", "gt": ">",
-                  "gte": ">=", "lt": "<", "lte": "<="}[d.op]
-        pn = self._next()
-        self.params[pn] = int(d.value)
-        if direction == "both":
-            return f"(size({in_p}) + size({out_p})) {symbol} ${pn}"
-        assert pattern is not None
-        return f"size({pattern}) {symbol} ${pn}"
+        # ----- non-trivial counts -----
+        # Counted only in a projection: a clause's WHERE rejects size() of a
+        # pattern and of a comprehension alike, so ``compile`` sends an edge
+        # count to the tail (``_counts_edges``).
+        return self._projected_degree(d, rel)
 
     def _visit_path(self, p) -> str:
         """Hoist a PathPredicate. Compiles to ``true`` in the WHERE
@@ -864,7 +912,8 @@ class _Compiler:
 
     def _relation_edge_types(self, p) -> List[str]:
         """The edges a relationship walks: containment for the tree's axes;
-        for lineage its own types, else every lineage type but the rollups."""
+        for lineage its own types, every link with ``links``, else every
+        lineage type — the rollups aside unless named."""
         if p.axis not in LINEAGE_AXES:
             if self._containment_edge_types is None:
                 raise CompileError(
@@ -872,7 +921,12 @@ class _Compiler:
                     "edge types — ontology resolution must complete before search.")
             return sorted(self._containment_edge_types)
         if p.edge_types:
-            return list(p.edge_types)
+            return self._named_edge_types(p.edge_types, link=True)
+        if p.edge_class == "links":
+            every = self._every_edge_type(f"an {p.axis} relationship through every link")
+            contains = {t.upper() for t in self._containment_edge_types}
+            return sorted(t for t in every
+                          if t.upper() not in contains and not is_derived_edge_type(t))
         if self._lineage_edge_types is None:
             raise CompileError(
                 f"an {p.axis} relationship requires the provider's lineage edge "
@@ -926,6 +980,36 @@ class _Compiler:
             entry["groups"] = groups
             entry["containment"] = sorted(self._containment_edge_types or ())
         self.hoisted_within_hops.append(entry)
+        return "true"
+
+    def _traceable(self, p) -> bool:
+        """A top-level relationship traced from its far end
+        (``traced_from_far_end``): it goes past the hops a candidate tests
+        itself. Off where a trace can't run (membership) or none is set."""
+        return (self.anchor_lineage and self.trace_beyond is not None
+                and p.kind == "related" and traced_from_far_end(p, self.trace_beyond))
+
+    def _hoist_trace(self, p) -> str:
+        """The relationship as a walk out from the entities its far end
+        matches, to the candidates (``plan.trace_plan``): the far end's
+        condition on ``n``, the stages a scan of the data source filters by,
+        and the walk ``within_hops_walk`` follows. One a query (the service
+        refuses a second)."""
+        if self.hoisted_trace is not None:
+            raise CompileError("a query traces one relationship from its far end at most")
+        types = self._relation_edge_types(p)
+        if not types:
+            return "false"          # nothing to walk: no entity has a relative
+        lo, hi = p.hop_range()
+        self.hoisted_trace = {
+            "hops": hi, "min_hops": lo, "strict": True,
+            # The walk goes from the far end to the candidate.
+            "direction": {"upstream": "out", "downstream": "in", "neighbor": "both"}[p.axis],
+            "edge_types": types,
+            "edge_where": self._emit_edge_predicate_fragment(p.edge),
+            "far_end": self._path_end(p.where, "n") if p.where is not None else [],
+            "types": _required_types(p.where),
+        }
         return "true"
 
     def _visit_related(self, p) -> str:
@@ -1152,9 +1236,25 @@ _SIMPLE_KINDS = frozenset({"text", "property", "tag", "hasProperty", "entityType
 
 
 def _has_relation(p) -> bool:
-    if p.kind == "related":
+    """Whether ``p`` is evaluated in a projection — a relationship, an edge
+    count (``_counts_edges``), a layer as the canvas places it
+    (``_places``) — or is a group holding one."""
+    if p.kind == "related" or _counts_edges(p) or _places(p):
         return True
     return p.kind == "group" and any(_has_relation(c) for c in p.children)
+
+
+def _places(p) -> bool:
+    """A layer filter resolved against the view: it reads the entity's
+    ancestors, which a clause's WHERE can't."""
+    return p.kind == "layer" and getattr(p, "_placement", None) is not None
+
+
+def _counts_edges(p) -> bool:
+    """A degree condition counting edges, not asking whether there are any:
+    a clause's WHERE rejects a count — over a pattern or a comprehension
+    alike — so it is projected, as a relationship is (S0_FINDINGS §15)."""
+    return p.kind == "degree" and not (p.value == 0 or (p.value == 1 and p.op in ("lt", "gte")))
 
 
 def _conjuncts(p) -> List[Any]:
@@ -1164,10 +1264,22 @@ def _conjuncts(p) -> List[Any]:
     return [p]
 
 
+def _required_types(where) -> Optional[List[str]]:
+    """The entity types, lowercased, that everything ``where`` matches has —
+    its top-level AND's type conditions, as ``_visit_entity_type`` reads
+    them (an entity's first label) — or None when it requires none."""
+    types: Optional[Set[str]] = None
+    for m in _conjuncts(where) if where is not None else ():
+        if m.kind == "entityType" and m.op == "in":
+            values = {str(v).lower() for v in m.values}
+            types = values if types is None else types & values
+    return sorted(types) if types is not None else None
+
+
 def _is_simple(p) -> bool:
     if p.kind == "group":
         return all(_is_simple(c) for c in p.children)
-    return p.kind in _SIMPLE_KINDS
+    return p.kind in _SIMPLE_KINDS and not _places(p)
 
 
 def _relation_cost(p) -> int:
@@ -1175,12 +1287,17 @@ def _relation_cost(p) -> int:
     it rejects."""
     if p.kind == "group":
         return sum(_relation_cost(c) for c in p.children)
+    if _places(p):
+        # Every ancestor, and every rule for each.
+        return _AXIS_COST["ancestor"] * 4
     if p.kind != "related":
         return 0
     lo, hi = p.hop_range()
     steps = hi if p.axis in LINEAGE_AXES or p.axis == "descendant" else 1
     nested = _relation_cost(p.where) if p.where is not None else 0
-    return _AXIS_COST[p.axis] * steps * (1 + nested)
+    # Every link fans out wider than lineage: through tags, terms, owners.
+    wide = 2 if p.edge_class == "links" else 1
+    return _AXIS_COST[p.axis] * steps * wide * (1 + nested)
 
 
 def _over_no_relatives(p) -> str:
@@ -1478,10 +1595,45 @@ def _build_compiler_for_provider(provider) -> _Compiler:
         containment = set(provider._get_containment_edge_types())
     except Exception:
         containment = None
-    return _Compiler(
+    compiler = _Compiler(
         lineage_edge_types=lineage,
         containment_edge_types=containment,
+        edge_type_spellings=_edge_type_spellings(provider, lineage, containment),
     )
+    compiler.trace_beyond = get_deep_search_settings().relation_max_hops
+    return compiler
+
+
+def refuse_trace(compiler: _Compiler) -> None:
+    """A relationship traced from its far end runs only where a search is
+    planned by that walk (``plan.trace_plan``) — never in a capped
+    statement, which would leave its test out."""
+    if compiler.hoisted_trace is not None:
+        hops = compiler.trace_beyond
+        raise CompileError(
+            f"Following lineage more than {hops} hops works for a search that lists its "
+            f"matches, not for its group counts. Follow at most {hops}, or use Cypher "
+            "(Cypher tab → Edit and run).")
+
+
+def _edge_type_spellings(provider, *sets) -> Optional[Dict[str, List[str]]]:
+    """Every edge type the data source has — the resolved ontology's (the
+    types it declares and those the graph had when it was resolved), the
+    graph's observed types, the lineage and containment sets — each one's
+    upper case → its spellings in the graph. None before the ontology is
+    resolved: names are then taken as given."""
+    declared = getattr(provider, "_resolved_edge_metadata", None)
+    if declared is None:
+        return None
+    physical = [*(getattr(provider, "_observed_rel_types", None) or ()),
+                *(t for s in sets for t in (s or ()))]
+    spellings = {t: list(provider._alias_rel_types([t]))
+                 for t in sorted({*(str(k).upper() for k in declared),
+                                  *(str(p).upper() for p in physical)})}
+    for p in physical:
+        if p not in spellings[str(p).upper()]:
+            spellings[str(p).upper()].append(p)
+    return spellings
 
 
 def _maybe_add_visible_urns_clause(
@@ -1806,8 +1958,27 @@ def query_hash(query: SearchQuery) -> str:
     invalidation uses ``match_hash`` instead — a page-size change must
     not strand a walk mid-iteration.
     """
-    j = query.model_dump_json(by_alias=True)
+    j = query.model_dump_json(by_alias=True) + _placements_of(query.predicate)
     return hashlib.sha1(j.encode("utf-8")).hexdigest()[:12]
+
+
+def _placements_of(predicate) -> str:
+    """What the query's layer filters were resolved to — the view's placement
+    and the layer — which its JSON doesn't carry: a layout edit must never
+    hand back the matches of the old one."""
+    found = []
+
+    def walk(p) -> None:
+        if _places(p):
+            found.append(f"{p._placement.digest}:{p._placement.layer_id}")
+        for child in getattr(p, "children", None) or ():
+            walk(child)
+        for key in ("where", "source_where", "target_where"):
+            if getattr(p, key, None) is not None:
+                walk(getattr(p, key))
+
+    walk(predicate)
+    return "|".join(found)
 
 
 def match_hash(query: SearchQuery) -> str:
@@ -1833,7 +2004,7 @@ def match_hash(query: SearchQuery) -> str:
             "scope": True,
             "options": {"sort", "sort_dir", "sort_property", "candidate_cap"},
         },
-    )
+    ) + _placements_of(query.predicate)
     return hashlib.sha1(j.encode("utf-8")).hexdigest()[:12]
 
 
@@ -2005,6 +2176,11 @@ async def _hydrate_hits(
 # `/search/explain` endpoint and the dev panel's "Show Cypher" button.
 # ---------------------------------------------------------------------------
 
+#: Said where values may be kept raw: comparing two properties reads native ones.
+KEY_COMPARISON_NOTE = ("Comparing one property with another reads the values the graph stores "
+                       "natively; a value kept as JSON text (propertiesRaw) isn't compared.")
+
+
 def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     """Return the compiled Cypher + bound parameters without executing.
 
@@ -2033,6 +2209,16 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     effective_candidate_cap = _resolve_candidate_cap(query, _s)
     notes: List[str] = []
     compiler = _build_compiler_for_provider(provider)
+    # The statement to read and copy tests each candidate itself, a relationship
+    # traced from its far end too; the engine's walk is said in a note.
+    compiler.trace_beyond = None
+    if any(m.kind == "related" and traced_from_far_end(m, _s.relation_max_hops)
+           for m in _conjuncts(query.predicate)):
+        notes.append(
+            f"A relationship follows lineage more than {_s.relation_max_hops} hops: the "
+            "engine finds what its far end matches across the data source and walks out "
+            "from there. The statement below tests each candidate itself, which can be "
+            "slow on a large graph.")
     where_fragment = compiler.compile(query.predicate)
     base_params: Dict[str, Any] = dict(compiler.params)
 
@@ -2145,6 +2331,8 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     # the candidate cap applies to IN-SCOPE nodes. Feeding the chain as
     # ``scope_continuation`` (post-filter) would cap the graph-wide set first
     # and silently drop in-scope matches for broad predicates.
+    if compiler.compares_keys:
+        notes.append(KEY_COMPARISON_NOTE)
     tail = tail_clauses(compiler.tail)
     if compiler.tail:
         notes.append(
@@ -2961,6 +3149,7 @@ async def execute_deep_search(
     # 1. Compile predicate → Cypher WHERE fragment + scope/withinHops hoisting
     compiler = _build_compiler_for_provider(provider)
     where_fragment = compiler.compile(query.predicate)
+    refuse_trace(compiler)
     base_params: Dict[str, Any] = dict(compiler.params)
 
     # 1a. Path-mode short-circuit. When a PathPredicate is present, the

@@ -28,7 +28,7 @@ describe('EdgePredicateEditor — where an edge keeps a property', () => {
             value={{ kind: 'edgeProperty', key: 'confidence', op: 'gte', value: 0.8 }} />)
         expect(operators()).toContain('between')
         expect(screen.getByDisplayValue('is at least')).toBeInTheDocument()
-        expect(screen.getByDisplayValue('Compare an edge property')).toBeInTheDocument()
+        expect(screen.getByDisplayValue('Edge property is…')).toBeInTheDocument()
     })
 
     it('offers equality only for a key kept in the JSON, and says why', () => {

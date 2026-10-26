@@ -77,6 +77,7 @@ import { CypherView } from './CypherView'
 import { isNativeResult } from './native/nativeCells'
 import { CodeMode } from './dsl/CodeMode'
 import type { DslVocabulary } from './dsl/dslLanguage'
+import { useEdgeTypeOptions } from './edgeTypeOptions'
 import { namePathFor, searchEntitiesByName } from './entityNames'
 import { appendCondition, topLevelConditions } from './predicateComposition'
 import { stringifyPredicate } from './predicateDsl'
@@ -173,39 +174,41 @@ export const QueryCard: FC<QueryCardProps> = ({
     // layers and keys, values and names from the server as they're typed.
     const provider = useGraphProviderIfAvailable()
     const remote = provider instanceof RemoteGraphProvider ? provider : null
+    const edgeTypeOptions = useEdgeTypeOptions(discovery.edgeTypes)
     const vocabulary = useMemo<DslVocabulary>(() => ({
         entityTypes: presentEntityTypes,
         tags: discovery.tagValues,
         layers: discoveredLayers.map((l) => l.value),
         propertyKeys: discovery.allKeys,
         edgeKeys: [...new Set(Object.values(discovery.keysByEdgeType).flat())].sort(),
+        edgeTypes: edgeTypeOptions.map((o) => ({
+            id: o.id, detail: [o.name, o.ends].filter(Boolean).join(' · '), containment: o.containment,
+        })),
         suggestValues: discovery.suggestValues,
         names: remote ? {
             search: (word, signal) => searchEntitiesByName(remote, viewId, word, { signal }),
             pathFor: (entity) => namePathFor(remote, viewId, entity),
         } : undefined,
     }), [presentEntityTypes, discovery.tagValues, discoveredLayers, discovery.allKeys,
-        discovery.keysByEdgeType, discovery.suggestValues, remote, viewId])
+        discovery.keysByEdgeType, edgeTypeOptions, discovery.suggestValues, remote, viewId])
 
     const [mode, setMode] = useEditorMode()
 
     /**
-     * Code-only palette entries (withinHops, degree) hand off to the
-     * main panel's Code view rather than the AdvancedDrawer JSON tab.
-     * Seed a stub predicate of the chosen kind into the draft
-     * (preserving existing work via AND-wrap), then flip the local
-     * mode to 'code' so the user lands directly in the DSL editor.
+     * Code-only palette entries (withinHops) hand off to the main panel's
+     * Code view rather than the AdvancedDrawer JSON tab. Seed a stub
+     * predicate into the draft (preserving existing work via AND-wrap),
+     * then flip the local mode to 'code' so the user lands directly in
+     * the DSL editor.
      */
-    const handleOpenCode = useCallback((kind: CodeKind) => {
-        const stub: Predicate = kind === 'degree'
-            ? { kind: 'degree', direction: 'both', op: 'gte', value: 1, edgeClass: 'lineage' }
-            : ({
-                kind: 'withinHops',
-                urns: [],
-                hops: 2,
-                direction: 'both',
-                edgeClass: 'lineage',
-            } as unknown as Predicate)
+    const handleOpenCode = useCallback((_kind: CodeKind) => {
+        const stub = {
+            kind: 'withinHops',
+            urns: [],
+            hops: 2,
+            direction: 'both',
+            edgeClass: 'lineage',
+        } as unknown as Predicate
         const current = useSearchStore.getState().draftPredicate
         let next: Predicate
         if (!current) {
@@ -599,6 +602,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                         isRunning={isRunning}
                         onCommit={commitDraft}
                         vocabulary={vocabulary}
+                        onOpenCypher={() => setMode('cypher')}
                     />
                 ) : (
                     <CypherView viewId={viewId} />

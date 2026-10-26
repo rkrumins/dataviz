@@ -92,6 +92,11 @@ export function questionsFromHere(
                 predicate: anchored('upstream', urn, FROM_HERE_HOPS, container),
             },
             {
+                // Its tags, glossary terms, jobs — any link, either way.
+                id: 'linked', label: 'What’s linked to this', icon: 'Link2',
+                predicate: { ...anchored('neighbor', urn), edgeClass: 'links' },
+            },
+            {
                 id: 'routes', label: 'Routes from this to…', icon: 'Route', refine: true,
                 predicate: container
                     ? {
@@ -131,7 +136,7 @@ export function howItMatches(predicate: Predicate | null, urn: string): PathPred
         kind: 'path', sourceUrns: [urn], targetUrns: [],
         // Upstream relatives feed the match: the route runs against lineage.
         direction: relation.axis === 'upstream' ? 'incoming' : relation.axis === 'downstream' ? 'outgoing' : 'any',
-        edgeClass: 'lineage',
+        edgeClass: relation.edgeClass === 'links' ? 'links' : 'lineage',
         maxHops: Math.min(hi, ROUTE_MAX_HOPS),
         ...(relation.edgeTypes?.length ? { edgeTypes: relation.edgeTypes } : {}),
         ...(relation.edge ? { edgePredicate: relation.edge } : {}),

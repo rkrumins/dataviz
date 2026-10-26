@@ -22,12 +22,14 @@
  * UnifiedPicker (used for multi-value editors — tags, types, property
  * values) is invoked with ``portal={true}`` for the same reason.
  */
-import { ExternalLink, X } from 'lucide-react'
+import { ExternalLink, KeyRound, Type, X } from 'lucide-react'
 import { type FC, type ReactNode, memo, useEffect, useMemo, useState } from 'react'
 
+import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { formatUrnLabel } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
 import type {
+    DegreePredicate,
     DescendantOfPredicate,
     EntityTypePredicate,
     GroupPredicate,
@@ -45,6 +47,7 @@ import type {
     TextTarget,
 } from '@/types/search'
 
+import { useEntityTypes } from '@/store/schema'
 import { useSearchStore } from '@/store/searchStore'
 
 import { UnifiedPicker } from '../builder/editors/UnifiedPicker'
@@ -55,18 +58,22 @@ import {
     autoTypeOf,
     comparesAs,
     isNegative,
+    KEY_OPS,
     operatorsFor,
+    predicateType,
 } from '../typed/operators'
 import { TypedValueEditor } from '../typed/TypedValueEditor'
 import { useValueSuggestions } from '../typed/useValueSuggestions'
 import { parseDuration, recode, valueProblem } from '../typed/valueCodec'
 import { TYPE_META, VALUE_TYPES, type ValueType, observeType } from '../typed/valueTypes'
 
+import { EdgeCountEditor, EdgeSetField } from './EdgeShapeEditors'
 import { NodeRefList } from './NodeRefPicker'
 import { OperatorMenu } from './OperatorMenu'
 import { PathEditor } from './PathEditor'
 import { RelationshipEditor } from './RelationshipEditor'
 import { axisMeta } from './relations'
+import { shapeLabel } from './vocabulary/edgeWords'
 import { RowCard } from './builder-atoms/RowCard'
 import { RowMenu } from './builder-atoms/RowMenu'
 import { RowSelectionCheckbox } from './builder-atoms/RowSelectionCheckbox'
@@ -266,9 +273,6 @@ function renderEditor(ctx: EditorCtx): ReactNode {
         case 'tag':
             return <TagEditor {...ctx} value={value as TagPredicate} />
         case 'layer':
-            // Legacy LayerPredicate — kept for backward compatibility
-            // with saved queries / JSON pastes that still emit it.
-            // New queries use ``descendantOf`` instead (Root in view).
             return <LayerEditor {...ctx} value={value as LayerPredicate} />
         case 'descendantOf': {
             // Two distinct entry points produce DescendantOfPredicate
@@ -325,15 +329,18 @@ function renderEditor(ctx: EditorCtx): ReactNode {
         case 'isRoot':
         case 'hasIncoming':
         case 'hasOutgoing':
+            // The header names the shape; the body picks the edges it counts.
+            return <EdgeSetField value={value} onChange={ctx.onChange} disabled={ctx.isRunning} />
+        case 'degree':
+            return <EdgeCountEditor value={value as DegreePredicate} onChange={ctx.onChange}
+                                    disabled={ctx.isRunning} />
         case 'all':
-            // Boolean rows: the header label + description already
-            // says everything. No editor body needed.
+            // The header label + description already says everything.
             return null
         case 'withinHops':
-        case 'degree':
-            // No visual editor — these predicate kinds are Code-only.
-            // Saved queries that still contain them render this banner;
-            // editing happens via the JSON view in the Advanced drawer.
+            // No visual editor — Code-only. Saved queries that still
+            // contain it render this banner; editing happens via the JSON
+            // view in the Advanced drawer.
             return <CodeOnlyHint onOpen={ctx.onOpenAdvanced} />
         case 'group': {
             const g = value as GroupPredicate
@@ -514,6 +521,11 @@ const ENTITY_TYPE_OP_OPTIONS: { value: 'in' | 'notIn'; label: string }[] = [
 function EntityTypeEditor({
     value, onChange, knownEntityTypes, autoFocus,
 }: Omit<EditorCtx, 'value'> & { value: EntityTypePredicate }) {
+    // Each type by the name the ontology gives it, not its id.
+    const entityTypes = useEntityTypes()
+    const options = useMemo(() => knownEntityTypes.map((t) => ({
+        value: t, label: entityTypes.find((e) => e.id === t)?.name || t,
+    })), [knownEntityTypes, entityTypes])
     return (
         <div className="flex flex-col gap-3">
             <Field label="Match">
@@ -529,7 +541,7 @@ function EntityTypeEditor({
                     multiple
                     value={value.values}
                     onChange={(next) => onChange({ ...value, values: next })}
-                    options={knownEntityTypes.map((t) => ({ value: t }))}
+                    options={options}
                     placeholder="pick one or more entity types…"
                     emptyHint="No entity types in schema."
                     autoFocus={autoFocus}
@@ -776,11 +788,19 @@ const TYPE_OPTIONS = VALUE_TYPES.map((t) => ({
     value: t, label: TYPE_META[t].label, description: TYPE_META[t].description,
 }))
 
+const COMPARE_WITH: SegmentedOption<'value' | 'key'>[] = [
+    { value: 'value', label: 'A value', icon: Type },
+    { value: 'key', label: 'Another property', icon: KeyRound },
+]
+
 
 /** One property compared to a value — typed. The row compares as a TYPE
  *  (text, number, true/false, date): guessed from the property's values,
  *  overridable, and stamped on the predicate so a saved query keeps its
- *  meaning. The operator menu, the value editor and the checks follow it. */
+ *  meaning. The operator menu, the value editor and the checks follow it.
+ *  Or compared with another property of the same entity ("freshness hours
+ *  is greater than SLA hours"): =, ≠ and the orders, an order as numbers
+ *  and equality as text unless the type says otherwise. */
 function PropertyEditor({
     value, onChange, discovery, activeEntityTypes, autoFocus, onSubmit,
 }: Omit<EditorCtx, 'value'> & { value: PropertyPredicate }) {
@@ -789,13 +809,15 @@ function PropertyEditor({
     const samples = value.key ? discovery.getValueSamples(value.key) : []
     const observed = observeType(samples)
     const declared = value.valueType && value.valueType !== 'auto' ? value.valueType : null
+    // Compared with another property of the same entity rather than a value.
+    const versusKey = value.valueKey != null
     // A row from before types runs as its value decides — show that.
-    const type: ValueType = declared
-        ?? (valueProblem(op, 'auto', value.value) === null && arityOf(op) !== 'none'
+    const type: ValueType = declared ?? (versusKey ? predicateType(value)
+        : valueProblem(op, 'auto', value.value) === null && arityOf(op) !== 'none'
             ? autoTypeOf(op, value.value) : observed.type)
     const kind = comparesAs(op, type)
     const arity = arityOf(op)
-    const problem = value.key.trim() ? valueProblem(op, type, value.value) : null
+    const problem = value.key.trim() && !versusKey ? valueProblem(op, type, value.value) : null
     // The most common values across the whole view, for what is typed —
     // the discovery sample alone showed a handful.
     const [valueQuery, setValueQuery] = useState('')
@@ -808,8 +830,18 @@ function PropertyEditor({
     const retype = (patch: Partial<PropertyPredicate>, nextType: ValueType, list: boolean) => {
         const keep = operatorsFor(nextType, { list }).some((o) => o.value === op)
         const nextOp: PropertyOp = keep ? op : 'eq'
+        if (versusKey) {
+            update({ ...patch, op: KEY_OPS.includes(nextOp) ? nextOp : 'eq' }, nextType)
+            return
+        }
         update({ ...patch, op: nextOp, value: reshapeValue(recode(value.value, nextType), op, nextOp) }, nextType)
     }
+    const compareWith = (target: 'value' | 'key') => {
+        const { value: _v, valueKey: _k, includeMissing: _m, ...rest } = value
+        onChange(target === 'key' ? { ...rest, valueKey: '' } : rest)
+    }
+    const opChoices = operatorsFor(type, { list: observed.list, current: op })
+        .filter((o) => !versusKey || KEY_OPS.includes(o.value))
 
     return (
         <div className="flex flex-col gap-3">
@@ -832,13 +864,32 @@ function PropertyEditor({
                 <Field label="Operator">
                     <OperatorMenu
                         value={op}
-                        onChange={(v) => update({ op: v, value: reshapeValue(value.value, op, v) })}
-                        options={operatorsFor(type, { list: observed.list, current: op })}
+                        onChange={(v) => update(versusKey ? { op: v } : { op: v, value: reshapeValue(value.value, op, v) })}
+                        options={opChoices}
                         ariaLabel="Property operator"
                     />
                 </Field>
             </div>
-            {arity !== 'none' && (
+            {KEY_OPS.includes(op) && (
+                <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-ink-muted">Compare with</span>
+                    <Segmented options={COMPARE_WITH} value={versusKey ? 'key' : 'value'}
+                               onChange={compareWith} label="Compare with" />
+                </div>
+            )}
+            {versusKey ? (
+                <Field label="Other property">
+                    <UnifiedPicker
+                        value={value.valueKey ?? ''}
+                        onChange={(next) => update({ valueKey: next })}
+                        options={keys.filter((k) => k !== value.key).map((k) => ({ value: k }))}
+                        placeholder="the property to compare with…"
+                        emptyHint="No other property keys discovered."
+                        mono
+                        portal
+                    />
+                </Field>
+            ) : arity !== 'none' && (
                 <Field label={arity === 'many' ? 'Values' : arity === 'pair' ? 'Range'
                     : arity === 'duration' ? 'Within the last' : 'Value'}>
                     <TypedValueEditor
@@ -870,7 +921,7 @@ function PropertyEditor({
                         Match case
                     </CheckToggle>
                 )}
-                {isNegative(op) && (
+                {isNegative(op) && !versusKey && (
                     <CheckToggle
                         checked={!!value.includeMissing}
                         onChange={(on) => update({ includeMissing: on })}
@@ -1085,10 +1136,10 @@ function getKindMeta(p: Predicate): KindMeta {
             description: 'Match nodes by their assigned tags.',
         }
         case 'layer': return {
-            icon: '⌬', label: 'Layer (legacy)',
+            icon: '⌬', label: 'In layer',
             description:
-                'Legacy layer-assignment filter. New queries should use '
-                + '"Root in view" instead — same intent, more reliable matching.',
+                'In one of this view\'s layers, the way the canvas places it: '
+                + 'by hand, by the layer\'s rules, or with its container.',
         }
         case 'hasProperty': return {
             icon: '⚑', label: 'Property is set',
@@ -1100,24 +1151,24 @@ function getKindMeta(p: Predicate): KindMeta {
                 + 'contains, greater than, between, within the last, is empty and more.',
         }
         case 'isOrphan': return {
-            icon: '⊘', label: 'No lineage edges',
-            description: 'Disconnected nodes — no upstream producers, no downstream consumers.',
+            icon: '⊘', label: shapeLabel('isOrphan', p),
+            description: 'No edges of these, in or out.',
         }
         case 'isLeaf': return {
-            icon: '↓', label: 'No downstream lineage',
-            description: 'Nodes with no outgoing lineage edges — terminal data products.',
+            icon: '↓', label: shapeLabel('isLeaf', p),
+            description: 'No outgoing edges of these — nothing leaves it.',
         }
         case 'isRoot': return {
-            icon: '↑', label: 'No upstream lineage',
-            description: 'Nodes with no incoming lineage edges — sources of truth.',
+            icon: '↑', label: shapeLabel('isRoot', p),
+            description: 'No incoming edges of these — nothing points to it.',
         }
         case 'hasIncoming': return {
-            icon: '⇣', label: 'Has upstream lineage',
-            description: 'At least one incoming lineage edge.',
+            icon: '⇣', label: shapeLabel('hasIncoming', p),
+            description: 'At least one incoming edge of these.',
         }
         case 'hasOutgoing': return {
-            icon: '⇡', label: 'Has downstream lineage',
-            description: 'At least one outgoing lineage edge.',
+            icon: '⇡', label: shapeLabel('hasOutgoing', p),
+            description: 'At least one outgoing edge of these.',
         }
         case 'descendantOf': {
             // Two entry points, two vocabularies. 'any' is the row the
@@ -1160,7 +1211,7 @@ function getKindMeta(p: Predicate): KindMeta {
         }
         case 'degree': return {
             icon: '#', label: 'Number of edges',
-            description: 'Entities with more, fewer or exactly N edges of a class.',
+            description: 'How many edges it has — which way, and through which edges.',
         }
         case 'all': return {
             icon: '∗', label: 'Every entity',
@@ -1171,12 +1222,13 @@ function getKindMeta(p: Predicate): KindMeta {
             description: 'One entity — or several — by its path of names, or by URN.',
         }
         case 'related': {
-            const meta = axisMeta(p.axis)
+            // The body leads with the verb; the header says what kind it is.
+            const link = axisMeta(p.axis).lineage
             return {
-                icon: meta.lineage ? '⇄' : '⊶',
-                label: `Relationship: ${meta.label.toLowerCase()}`,
-                description: meta.lineage
-                    ? 'A condition on the entities it is linked to by lineage.'
+                icon: link ? '⇄' : '⊶',
+                label: link ? 'Connection' : 'Hierarchy',
+                description: link
+                    ? 'A condition on what it is connected to — steps and edges under More options.'
                     : 'A condition on its containers or what it contains.',
             }
         }
@@ -1227,7 +1279,8 @@ function isIncomplete(p: Predicate): boolean {
         case 'tag':          return p.values.length === 0
         case 'layer':        return !p.layerAssignment.trim()
         case 'hasProperty':  return !p.key.trim()
-        case 'property':     return !p.key.trim() || valueProblem(p.op ?? 'eq', p.valueType ?? 'auto', p.value) !== null
+        case 'property':     return !p.key.trim() || (p.valueKey != null ? !p.valueKey.trim()
+            : valueProblem(p.op ?? 'eq', p.valueType ?? 'auto', p.value) !== null)
         case 'descendantOf': return !p.urns?.length && !p.refs?.length
         case 'withinHops':   return !p.urns?.length && !p.refs?.length
         case 'path':
@@ -1236,7 +1289,14 @@ function isIncomplete(p: Predicate): boolean {
                 || [p.sourceWhere, p.targetWhere].some((w) => !!w && hasIncompleteLeaf(w))
         case 'is':           return !p.refs.length || p.refs.some((r) => !r.urn && !r.path?.length)
         // A relationship with no condition is complete: any relative will do.
-        case 'related':      return !!p.where && hasIncompleteLeaf(p.where)
+        case 'related':      return p.edgeTypes?.length === 0 || (!!p.where && hasIncompleteLeaf(p.where))
+        // Edge types to pick, not picked yet.
+        case 'isOrphan':
+        case 'isLeaf':
+        case 'isRoot':
+        case 'hasIncoming':
+        case 'hasOutgoing':
+        case 'degree':       return p.edgeTypes?.length === 0
         default:             return false
     }
 }

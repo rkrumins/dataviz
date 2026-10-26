@@ -17,6 +17,9 @@ import type { LayerOption } from './layerOptions'
 export interface RelationContextValue {
     /** Relationships this row sits inside (0: the query's own row). */
     depth: number
+    /** Whether a row of the query's own sits in its top-level AND (unset: it
+     *  does) — "any of" and "not" take that away, as the server reads it. */
+    top?: boolean
     /** A display rule's: lineage goes one hop. */
     rule: boolean
     /** The view a name path is resolved in (the name picker's badge). */

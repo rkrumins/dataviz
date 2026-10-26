@@ -173,9 +173,16 @@ in the data ("placed by a layer rule"), and the parent counts it as in another c
 placements still carry their subtree with them.
 
 **Outside the contract in this phase** (unchanged, pinned by their tests): export and scoped
-replace, advanced-search view scope, the search Layer filter and layer aggregation,
-`get_nodes_by_layer`, open-view type feeds and column totals, the anchored-column check
-(`anchorIssueByLayer`) and the drag conflict warnings, which look only at explicit entries.
+replace, advanced-search view scope and layer aggregation, `get_nodes_by_layer`, open-view type
+feeds and column totals, the anchored-column check (`anchorIssueByLayer`) and the drag conflict
+warnings, which look only at explicit entries.
+
+**The search Layer filter** places by the contract whether the flag is on or off
+(`backend/app/providers/falkordb_placement.py` compiles it into the search). With the flag off the
+canvas places by the rules above instead, so the two can disagree: on a child whose own stamp or
+rule names another layer than its parent's, on a rule that sets several criteria (the canvas takes
+any of them, the contract all), on a rule's property conditions (the canvas ignores them) and on
+the case of a URN pattern.
 
 ### Turning it on (runbook)
 

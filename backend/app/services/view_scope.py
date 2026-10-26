@@ -64,7 +64,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories.view_repo import effective_view_config
-from backend.app.services.layout_config import parse_reference_layout
+from backend.app.services.layout_config import derive_entity_scope, parse_reference_layout
+from backend.app.services.view_placement import PlacementSpec, _num
 from backend.common.models.search import SearchScope
 
 logger = logging.getLogger(__name__)
@@ -126,6 +127,16 @@ class EffectiveViewScope:
     source does this view live in?". The search's roots come from the
     view while the engine's provider comes from the request, and only
     this field lets the service check that the two agree."""
+    placement: Optional[PlacementSpec] = None
+    """How the view's canvas places entities in its layers (``view_placement``),
+    from the same branch-effective config; None for a view with no layers.
+    What a layer filter matches."""
+    layers: Tuple[Tuple[str, str], ...] = ()
+    """The view's layers as ``(id, name)``, in board order: what a layer
+    filter's value is read against."""
+    placement_digest: str = ""
+    """Identifies the placement's inputs; folded into ``scope_hash``, so a
+    layout edit — a draft's too — never serves a result placed the old way."""
 
 
 # --------------------------------------------------------------------------- #
@@ -237,6 +248,28 @@ def _collect_content_scope(
     return root_urns, entity_types, max_depth_hint
 
 
+def _placement_inputs(config: Dict[str, Any]) -> Tuple[Optional[PlacementSpec], Tuple[Tuple[str, str], ...], str]:
+    """The view's placement, its layers as ``(id, name)`` in board order and a
+    digest of what decides placement: the layers (their rules, types and
+    fallback), the hand placements and the view's scope."""
+    spec = PlacementSpec.from_config(config)
+    if not spec.layer_ids:
+        return None, (), ""
+    layout = parse_reference_layout(config)
+    ordered = sorted(
+        ((_num(layer.get("order")), i, layer) for i, layer in enumerate(layout.layers)
+         if isinstance(layer, dict) and isinstance(layer.get("id"), str) and layer["id"]),
+        key=lambda item: (item[0], item[1]),
+    )
+    layers = tuple((layer["id"], layer["name"] if isinstance(layer.get("name"), str)
+                    and layer["name"] else layer["id"]) for _, _, layer in ordered)
+    canonical = json.dumps(
+        {"layers": layout.layers, "assignments": layout.assignments,
+         "scope": derive_entity_scope(config)},
+        sort_keys=True, separators=(",", ":"), default=str)
+    return spec, layers, hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
+
+
 def _compute_scope_hash(
     *,
     view_id: str,
@@ -246,6 +279,7 @@ def _compute_scope_hash(
     layer_ids: FrozenSet[str],
     max_depth: int,
     branch_id: Optional[str] = None,
+    placement_digest: str = "",
 ) -> str:
     """Stable 12-char sha1 of every input + the view's ``updated_at``.
 
@@ -267,6 +301,7 @@ def _compute_scope_hash(
         "entity_types": sorted(entity_types),
         "layer_ids": sorted(layer_ids),
         "max_depth": max_depth,
+        "placement": placement_digest,
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:12]
@@ -380,6 +415,7 @@ class ViewScopeResolver:
             requested.entity_types, allowed_entity_types,
         )
 
+        placement, layers, placement_digest = _placement_inputs(config)
         scope_hash = _compute_scope_hash(
             view_id=view.id,
             updated_at=view.updated_at,
@@ -388,6 +424,7 @@ class ViewScopeResolver:
             entity_types=effective_entity_types,
             layer_ids=layer_ids,
             max_depth=effective_max_depth,
+            placement_digest=placement_digest,
         )
 
         if dropped:
@@ -408,6 +445,9 @@ class ViewScopeResolver:
             max_depth=effective_max_depth,
             scope_hash=scope_hash,
             dropped_urns=tuple(dropped),
+            placement=placement,
+            layers=layers,
+            placement_digest=placement_digest,
         )
 
     async def _load_view(self, view_id: str) -> Optional[ViewORM]:

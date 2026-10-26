@@ -109,8 +109,8 @@ const OWN_WORDS: readonly LeafKindMeta[] = [
     },
     {
         kind: 'layer',
-        label: 'Layer',
-        description: 'Pipeline layer (Source / Staging / Refinery / Report).',
+        label: 'In layer',
+        description: 'In one of the view\'s layers, the way the canvas places it.',
         icon: 'Layers',
         category: 'identity',
         makeEmpty: () => ({
@@ -201,9 +201,9 @@ const OWN_WORDS: readonly LeafKindMeta[] = [
         makeEmpty: () => ({
             kind: 'degree',
             direction: 'both',
-            op: 'eq',
-            value: 0,
-            edgeClass: DEFAULT_EDGE_CLASS,
+            op: 'gt',
+            value: 5,
+            edgeClass: 'links',
         }),
     },
 

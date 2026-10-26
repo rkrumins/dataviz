@@ -723,7 +723,8 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         still_allowed=(
             "Saved views are not rewritten — turning this off restores today's placement",
             "Layer rules already saved keep loading, even ones that can never match",
-            "Search's Layer filter, view-scoped export and scoped replace keep today's rules",
+            "View-scoped export and scoped replace keep today's rules",
+            "Search's Layer filter places by the shared rule either way",
         ),
     ),
 }

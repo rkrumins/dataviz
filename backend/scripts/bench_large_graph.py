@@ -9,6 +9,9 @@ fire:
 * "What this feeds" (3 hops) on a field, a dataset, a schema and a database,
   through the uncapped engine the panel uses — its first page, and the exact
   count the panel finishes counting beside it;
+* a relationship traced 6 hops from a far end found by its condition, under
+  one label and under every one, and one refused past what a trace may start
+  from;
 * compiling one, and its Cypher with the values written in;
 * name suggestions as the picker asks for them (a part of a name, eight
   shown, waiting at most 0.8 s), and a name path;
@@ -249,6 +252,40 @@ async def main() -> None:
             f"median {t['median'] * 1000:,.0f} ms")
         t = await _timed(lambda: exact(q), 0)
         say(what + ", exact count", t["result"], f"{t['first'] * 1000:,.0f} ms")
+
+    # Past three hops, a far end that is a condition is traced: what it matches
+    # is found across the data source — only under its type's label when it
+    # names one — and one walk runs out from there.
+    # A dataset that feeds something: the first upstream the seed picked for the
+    # next dataset.
+    source = (nxt * 15485863 % (opts.datasets // LAYERS)) * LAYERS + nxt % LAYERS - 1
+    named = {"kind": "text", "target": "name", "value": f"dataset_{source}", "match": "exact"}
+    for what, where in [
+        ("Fed within 6 hops by a dataset named so (its label scanned)",
+         {"kind": "group", "op": "and", "children": [
+             {"kind": "entityType", "values": ["dataset"]}, named]}),
+        ("Fed within 6 hops by anything named so (every label scanned)", named),
+    ]:
+        q = query({"kind": "related", "axis": "upstream", "maxHops": 6, "where": where})
+        t = await _timed(lambda: complete(q), opts.runs)
+        say(what + ", first page", t["result"], f"first {t['first'] * 1000:,.0f} ms",
+            f"median {t['median'] * 1000:,.0f} ms")
+        t = await _timed(lambda: exact(q), 0)
+        say(what + ", exact count", t["result"], f"{t['first'] * 1000:,.0f} ms")
+
+    async def refused(q: SearchQuery) -> str:
+        from backend.app.services.deep_search import CompileError
+        try:
+            return await complete(q)
+        except CompileError as exc:
+            return f"refused: {str(exc)[:60]}…"
+
+    # A far end matching more than a trace may start from is refused once the
+    # scan passes the bound, not after it has read everything.
+    t = await _timed(lambda: refused(query({
+        "kind": "related", "axis": "upstream", "maxHops": 6,
+        "where": {"kind": "entityType", "values": ["schemaField"]}})), 0)
+    say("Fed within 6 hops by any field", t["result"], f"{t['first'] * 1000:,.0f} ms")
 
     explained = await _timed(lambda: p.deep_search_explain(query(
         feeds(urn("s", middle // PER_SCHEMA), True))), opts.runs)

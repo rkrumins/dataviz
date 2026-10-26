@@ -186,13 +186,18 @@ class TestService:
             await _service(_Counts()).counts(SearchCountsRequest.model_validate(body))
 
     async def test_a_searchs_condition_keeps_a_searchs_limits(self):
-        # Beyond the hops a search tests from every candidate, still a 400.
-        too_far = {"kind": "related", "axis": "downstream", "maxHops": 9}
-        request = SearchCountsRequest.model_validate({
-            "scope": {"viewId": "v"}, "purpose": "search",
-            "items": [{"id": "far", "predicate": too_far}]})
-        with pytest.raises(ValidationError, match="Name the far end"):
-            await _service(StubDeepSearchProvider()).counts(request)
+        # Beyond the hops a search tests from every candidate, a 400 unless
+        # it is traced from its far end, as the search would run it.
+        far = {"kind": "related", "axis": "downstream", "maxHops": 9}
+
+        def request(predicate):
+            return SearchCountsRequest.model_validate({
+                "scope": {"viewId": "v"}, "purpose": "search",
+                "items": [{"id": "far", "predicate": predicate}]})
+        counted = await _service(StubDeepSearchProvider()).counts(request(far))
+        assert counted.counts["far"].error is None
+        with pytest.raises(ValidationError, match="Following more than 3 works"):
+            await _service(StubDeepSearchProvider()).counts(request({**far, "quantifier": "none"}))
 
     async def test_a_rule_the_engine_cannot_count_says_why(self):
         from backend.app.services.deep_search import CompileError

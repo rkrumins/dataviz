@@ -130,7 +130,8 @@ jobs:
       # kept natively. An export of a search's matches must hold each one
       # once, every value exactly as the graph keeps it. The Cypher shapes
       # relationship predicates are built on must keep behaving as pinned,
-      # and no compiled shape that slices text may take the server down.
+      # no compiled shape that slices text may take the server down, and the
+      # layer filter must find what the placement rule puts in each layer.
       # Run whatever the rebuild pipeline step above did: its result says
       # nothing about these.
       - name: Search comparison semantics, the uncapped engine and native queries, against the real engine
@@ -150,7 +151,8 @@ jobs:
             tests/integration/test_search_relations_live.py \
             tests/integration/test_native_query_live.py \
             tests/integration/test_parse_cost_live.py \
-            tests/integration/test_search_crash_guard_live.py -q
+            tests/integration/test_search_crash_guard_live.py \
+            tests/integration/test_search_layers_live.py -q
 
   full-suite:
     name: Full backend suite (informational)

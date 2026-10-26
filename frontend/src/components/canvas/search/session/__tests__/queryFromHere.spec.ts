@@ -13,9 +13,11 @@ const named = (axis: RelatedPredicate['axis'], urn: string, maxHops?: number): R
 describe('questionsFromHere', () => {
     it('asks about one entity by walking from it', () => {
         const qs = questionsFromHere(['urn:x'])
-        expect(qs.map((q) => q.id)).toEqual(['inside', 'children', 'sources', 'targets', 'routes'])
+        expect(qs.map((q) => q.id)).toEqual(['inside', 'children', 'sources', 'targets', 'linked', 'routes'])
         const by = Object.fromEntries(qs.map((q) => [q.id, q]))
         expect(by.children.predicate).toEqual(named('parent', 'urn:x'))
+        // Its tags, glossary terms, jobs: any link, one step, either way.
+        expect(by.linked.predicate).toEqual({ ...named('neighbor', 'urn:x'), edgeClass: 'links' })
         // What feeds X: entities whose targets include X — and the reverse.
         expect(by.sources.predicate).toEqual(named('downstream', 'urn:x', 3))
         expect(by.targets.predicate).toEqual(named('upstream', 'urn:x', 3))
@@ -68,6 +70,13 @@ describe('questionsFromHere', () => {
 
 describe('howItMatches', () => {
     const DASHBOARD: Predicate = { kind: 'entityType', op: 'in', values: ['dashboard'] }
+
+    it('routes along every link when that is what the relationship walked', () => {
+        const TAG: Predicate = { kind: 'entityType', op: 'in', values: ['tag'] }
+        expect(howItMatches({ kind: 'related', axis: 'neighbor', edgeClass: 'links', where: TAG }, 'urn:h'))
+            .toEqual({ kind: 'path', sourceUrns: ['urn:h'], targetUrns: [], direction: 'any',
+                edgeClass: 'links', maxHops: 1, targetWhere: TAG })
+    })
 
     it('routes from the match to what its lineage relationship found', () => {
         const query: Predicate = { kind: 'group', op: 'and', children: [

@@ -141,4 +141,22 @@ describe('Code mode', () => {
         fireEvent.click(screen.getByRole('button', { name: /^Add type:dataset: / }))
         expect(text()).toContain('type:dataset')
     })
+
+    it('offers links through the view’s own edge types, and reads them back as words', () => {
+        render(<CodeMode draft={null} isRunning={false} onCommit={vi.fn()} vocabulary={{
+            ...VOCABULARY, edgeTypes: [{ id: 'CONTAINS', containment: true }, { id: 'DEFINED_BY' }],
+        }} />)
+        fireEvent.click(screen.getByRole('button', { name: /^Add noIncoming\[DEFINED_BY\]: / }))
+        expect(text()).toBe('noIncoming[DEFINED_BY]')
+        expect(screen.getByRole('status')).toHaveTextContent('Reads as:')
+        expect(screen.getByRole('status')).toHaveTextContent(/no incoming Defined by edges/i)
+    })
+
+    it('points at Cypher for what the words can’t say', () => {
+        const onOpenCypher = vi.fn()
+        render(<CodeMode draft={null} isRunning={false} onCommit={vi.fn()} vocabulary={VOCABULARY}
+                         onOpenCypher={onOpenCypher} />)
+        fireEvent.click(screen.getByRole('button', { name: 'Write it in Cypher' }))
+        expect(onOpenCypher).toHaveBeenCalled()
+    })
 })

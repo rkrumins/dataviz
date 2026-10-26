@@ -17,7 +17,7 @@
  */
 import { AnimatePresence, motion } from 'framer-motion'
 import { Sparkles, X } from 'lucide-react'
-import { type FC, memo } from 'react'
+import { type FC, memo, useContext, useMemo } from 'react'
 
 import { cn } from '@/lib/utils'
 import { useSearchStore } from '@/store/searchStore'
@@ -34,6 +34,7 @@ import { RowSelectionCheckbox } from './builder-atoms/RowSelectionCheckbox'
 import { NESTED_TONE_BG, OP_HINTS, TONE_STYLES, type OpTone } from './builder-atoms/tones'
 import { ConditionRow } from './ConditionRow'
 import type { LayerOption } from './layerOptions'
+import { RelationContext } from './relationContext'
 
 
 /** Compose a dot-path: '' + 0 → '0'; '0' + 1 → '0.1'. */
@@ -90,6 +91,10 @@ const NestedGroupCardImpl: FC<NestedGroupCardProps> = ({
     parentPath, index,
 }) => {
     const op: GroupOp = (group.op ?? 'and') as GroupOp
+    // Its rows stand in the query's top-level AND only inside an AND that does.
+    const relationCtx = useContext(RelationContext)
+    const childCtx = useMemo(() => ({ ...relationCtx, top: relationCtx.top !== false && op === 'and' }),
+        [relationCtx, op])
 
     if (depth >= NESTED_GROUP_DEPTH_CAP) {
         return (
@@ -260,59 +265,61 @@ const NestedGroupCardImpl: FC<NestedGroupCardProps> = ({
                 {group.children.length === 0 ? (
                     <EmptyGroupState op={op} />
                 ) : (
-                    <AnimatePresence initial={false}>
-                        <div className="flex flex-col gap-2">
-                            {group.children.map((child, i) => (
-                                <motion.div
-                                    key={`${child.kind}-${i}`}
-                                    initial={{ opacity: 0, y: -4 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    exit={{ opacity: 0, y: -4 }}
-                                    transition={{ duration: 0.12 }}
-                                >
-                                    {i > 0 && op !== 'not' && (
-                                        <RowJoiner op={op === 'and' ? 'and' : 'or'} />
-                                    )}
-                                    {child.kind === 'group' ? (
-                                        <NestedGroupCard
-                                            group={child as GroupPredicate}
-                                            depth={depth + 1}
-                                            onChange={(next) => replaceChild(i, next)}
-                                            onRemove={() => replaceChild(i, null)}
-                                            onWrap={(w) => wrapChildAt(i, w)}
-                                            onDuplicate={() => duplicateChildAt(i)}
-                                            onOpenAdvanced={onOpenAdvanced}
-                                            onSubmit={onSubmit}
-                                            disabled={disabled}
-                                            discovery={discovery}
-                                            knownEntityTypes={knownEntityTypes}
-                                            activeEntityTypes={activeEntityTypes}
-                                            discoveredLayers={discoveredLayers}
-                                            parentPath={childParentPath}
-                                            index={i}
-                                        />
-                                    ) : (
-                                        <ConditionRow
-                                            value={child}
-                                            discovery={discovery}
-                                            knownEntityTypes={knownEntityTypes}
-                                            activeEntityTypes={activeEntityTypes}
-                                            discoveredLayers={discoveredLayers}
-                                            isRunning={disabled ?? false}
-                                            onChange={(next) => replaceChild(i, next)}
-                                            onRemove={() => replaceChild(i, null)}
-                                            onWrap={(w) => wrapChildAt(i, w)}
-                                            onDuplicate={() => duplicateChildAt(i)}
-                                            onOpenAdvanced={onOpenAdvanced}
-                                            onSubmit={onSubmit}
-                                            parentPath={childParentPath}
-                                            index={i}
-                                        />
-                                    )}
-                                </motion.div>
-                            ))}
-                        </div>
-                    </AnimatePresence>
+                    <RelationContext.Provider value={childCtx}>
+                        <AnimatePresence initial={false}>
+                            <div className="flex flex-col gap-2">
+                                {group.children.map((child, i) => (
+                                    <motion.div
+                                        key={`${child.kind}-${i}`}
+                                        initial={{ opacity: 0, y: -4 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        exit={{ opacity: 0, y: -4 }}
+                                        transition={{ duration: 0.12 }}
+                                    >
+                                        {i > 0 && op !== 'not' && (
+                                            <RowJoiner op={op === 'and' ? 'and' : 'or'} />
+                                        )}
+                                        {child.kind === 'group' ? (
+                                            <NestedGroupCard
+                                                group={child as GroupPredicate}
+                                                depth={depth + 1}
+                                                onChange={(next) => replaceChild(i, next)}
+                                                onRemove={() => replaceChild(i, null)}
+                                                onWrap={(w) => wrapChildAt(i, w)}
+                                                onDuplicate={() => duplicateChildAt(i)}
+                                                onOpenAdvanced={onOpenAdvanced}
+                                                onSubmit={onSubmit}
+                                                disabled={disabled}
+                                                discovery={discovery}
+                                                knownEntityTypes={knownEntityTypes}
+                                                activeEntityTypes={activeEntityTypes}
+                                                discoveredLayers={discoveredLayers}
+                                                parentPath={childParentPath}
+                                                index={i}
+                                            />
+                                        ) : (
+                                            <ConditionRow
+                                                value={child}
+                                                discovery={discovery}
+                                                knownEntityTypes={knownEntityTypes}
+                                                activeEntityTypes={activeEntityTypes}
+                                                discoveredLayers={discoveredLayers}
+                                                isRunning={disabled ?? false}
+                                                onChange={(next) => replaceChild(i, next)}
+                                                onRemove={() => replaceChild(i, null)}
+                                                onWrap={(w) => wrapChildAt(i, w)}
+                                                onDuplicate={() => duplicateChildAt(i)}
+                                                onOpenAdvanced={onOpenAdvanced}
+                                                onSubmit={onSubmit}
+                                                parentPath={childParentPath}
+                                                index={i}
+                                            />
+                                        )}
+                                    </motion.div>
+                                ))}
+                            </div>
+                        </AnimatePresence>
+                    </RelationContext.Provider>
                 )}
 
                 {/* Footer */}

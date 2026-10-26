@@ -28,16 +28,18 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from backend.app.services.deep_search import CompileError
 from backend.app.services.deep_search.settings import get_deep_search_settings
+from backend.app.services.view_placement import NodeFacts, place_all
 from backend.common.search_semantics import (
     SemanticsError,
     element_texts,
     evaluate,
+    evaluate_keys,
     fold_case,
     resolve_comparison,
     resolve_predicate,
     value_slot,
 )
-from backend.common.derived_artifacts import DERIVED_EDGE_TYPES
+from backend.common.derived_artifacts import is_derived_edge_type
 from backend.common.edge_properties import EDGE_NATIVE_KEYS, json_holds
 from backend.common.models.search import (
     NODE_REF_ANY_DEPTH,
@@ -114,6 +116,8 @@ class StubDeepSearchProvider:
         self._lineage_types = frozenset(
             lineage_edge_types if lineage_edge_types is not None
             else {e.get("type") for e in self._edges if e.get("type") not in contains})
+        self._every_type = frozenset(
+            {e.get("type") for e in self._edges} | contains | self._lineage_types)
         self._out: Dict[str, List[int]] = {}
         self._in: Dict[str, List[int]] = {}
         for i, e in enumerate(self._edges):
@@ -126,6 +130,7 @@ class StubDeepSearchProvider:
                 self._children.setdefault(e["source"], []).append(e["target"])
                 self._parents.setdefault(e["target"], []).append(e["source"])
         self._by_urn: Dict[str, Dict[str, Any]] = {n["urn"]: n for n in self._nodes}
+        self._placed: Dict[int, Any] = {}
 
     # --- DeepSearchProvider Protocol -----------------------------------------
 
@@ -349,8 +354,7 @@ class StubDeepSearchProvider:
         """Ends of the lineage routes from ``urn`` of ``lo``..``hi`` edges
         that pass no entity twice (``urn`` included), every edge of an
         allowed type and meeting the edge filter."""
-        allowed = (set(p.edge_types) if p.edge_types
-                   else {t for t in self._lineage_types if t not in DERIVED_EDGE_TYPES})
+        allowed = self._edge_types(p.edge_class or "lineage", p.edge_types, walk=True)
         found: set = set()
 
         def steps(at: str):
@@ -368,7 +372,7 @@ class StubDeepSearchProvider:
                 return
             for i, nxt in steps(at):
                 edge = self._edges[i]
-                if (nxt in visited or edge.get("type") not in allowed
+                if (nxt in visited or str(edge.get("type")).upper() not in allowed
                         or not _edge_passes(edge, p.edge)):
                     continue
                 walk(nxt, visited | {nxt}, depth + 1)
@@ -385,14 +389,7 @@ class StubDeepSearchProvider:
         A named end is its entities; a condition, every entity meeting it
         — for the sources, in the search's scope when the targets are a
         condition too."""
-        if p.edge_types:
-            types = set(p.edge_types)
-        elif p.edge_class == "lineage":
-            types = set(self._lineage_types)
-        elif p.edge_class == "containment":
-            types = set(self._containment_types)
-        else:
-            types = set(self._lineage_types) | set(self._containment_types)
+        types = self._edge_types(p.edge_class, p.edge_types)
 
         def named(urns, refs) -> set:
             return {u for u in [*urns, *(r.urn for r in refs or ())] if u in self._by_urn}
@@ -425,7 +422,8 @@ class StubDeepSearchProvider:
                 return
             for i, nxt in steps(nodes[-1]):
                 edge = self._edges[i]
-                if (nxt in nodes or nxt not in self._by_urn or edge.get("type") not in types
+                if (nxt in nodes or nxt not in self._by_urn
+                        or str(edge.get("type")).upper() not in types
                         or not _edge_passes(edge, p.edge_predicate)):
                     continue
                 walk(nodes + [nxt], edges + [i])
@@ -452,20 +450,49 @@ class StubDeepSearchProvider:
                        hop_count=len(edges))
 
     def _degree(self, urn: str, d: DegreePredicate) -> bool:
-        if d.edge_types:
-            types = set(d.edge_types)
-        elif d.edge_class == "lineage":
-            types = set(self._lineage_types)
-        elif d.edge_class == "containment":
-            types = set(self._containment_types)
-        else:
-            types = set(self._lineage_types) | set(self._containment_types)
+        types = self._edge_types(d.edge_class, d.edge_types)
         count = 0
         if d.direction in ("in", "both"):
-            count += sum(1 for i in self._in.get(urn, ()) if self._edges[i].get("type") in types)
+            count += sum(1 for i in self._in.get(urn, ())
+                         if str(self._edges[i].get("type")).upper() in types)
         if d.direction in ("out", "both"):
-            count += sum(1 for i in self._out.get(urn, ()) if self._edges[i].get("type") in types)
+            count += sum(1 for i in self._out.get(urn, ())
+                         if str(self._edges[i].get("type")).upper() in types)
         return _compare(count, d.op, d.value)
+
+    def _edge_types(self, edge_class: str, edge_types, *, walk: bool = False) -> set:
+        """The edge types, in upper case, a predicate counts or walks: those
+        it names, whatever their case, else its class's — ``links`` every
+        type but containment, ``any`` every type. ``walk``: a relationship's,
+        which leaves out the rollups unless it names them."""
+        if edge_types:
+            return {str(t).upper() for t in edge_types}
+        contains = {str(t).upper() for t in self._containment_types}
+        types = {"lineage": self._lineage_types, "containment": self._containment_types,
+                 "any": self._every_type}.get(edge_class)
+        if types is None:   # links
+            types = {t for t in self._every_type if str(t).upper() not in contains}
+        if walk:
+            types = {t for t in types if not is_derived_edge_type(t)}
+        return {str(t).upper() for t in types}
+
+    def _layer_of(self, urn: str, target) -> Optional[str]:
+        """The layer the view's canvas draws ``urn`` in: ``place_all`` itself,
+        over every node and the containment between them, once per view."""
+        placed = self._placed.get(id(target.spec))
+        if placed is None:
+            facts = {n["urn"]: NodeFacts(
+                urn=n["urn"], entity_type=n.get("entityType") or "",
+                display_name=n.get("displayName") or None,
+                tags=frozenset(t for t in n.get("tags") or () if isinstance(t, str)),
+                properties={k: v for k, v in n.items() if k not in _NODE_FIELDS},
+                stamp=(n["layerAssignment"] if isinstance(n.get("layerAssignment"), str)
+                       and n["layerAssignment"] else None),
+            ) for n in self._nodes}
+            layers = {u: p.layer_id for u, p in place_all(target.spec, facts, self._parents).items()}
+            # The spec is kept with its answer, so its id can't be reused while cached.
+            placed = self._placed[id(target.spec)] = (target.spec, layers)
+        return placed[1].get(urn)
 
     def _ancestors(self, node: Dict[str, Any]) -> List[str]:
         """The fixture's ``ancestorUrns`` when it gives them, else every
@@ -758,6 +785,9 @@ def _matches(node: Dict[str, Any], predicate, graph=None) -> bool:
         raise CompileError(f"stub: unsupported entityType op {predicate.op!r}")
 
     if isinstance(predicate, LayerPredicate):
+        target = getattr(predicate, "_placement", None)
+        if target is not None and graph is not None:
+            return graph._layer_of(node["urn"], target) == target.layer_id
         return node.get("layerAssignment") == predicate.layer_assignment
 
     if isinstance(predicate, TextPredicate):
@@ -827,6 +857,8 @@ def _matches(node: Dict[str, Any], predicate, graph=None) -> bool:
             cmp = resolve_predicate(predicate)
         except SemanticsError as exc:
             raise CompileError(f"property {predicate.key!r}: {exc}") from exc
+        if predicate.value_key:
+            return evaluate_keys(node.get(predicate.key), node.get(predicate.value_key), cmp)
         return evaluate(node.get(predicate.key), cmp)
 
     if isinstance(predicate, HasPropertyPredicate):

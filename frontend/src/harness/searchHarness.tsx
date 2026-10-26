@@ -40,7 +40,7 @@ import { useSchemaStore } from '../store/schema'
 import { useSearchStore } from '../store/searchStore'
 import type { WorkspaceSchema } from '../types/schema'
 import { searchFetch, type FakeFetchOptions } from './searchBackend'
-import { ENTITY_TYPES, HARNESS_VIEW_ID, LAYERS, SEARCH_FIXTURES } from './searchFixtures'
+import { ENTITY_TYPES, HARNESS_VIEW_ID, LAYERS, RELATIONSHIP_TYPES, SEARCH_FIXTURES } from './searchFixtures'
 
 
 const params = new URLSearchParams(window.location.search)
@@ -80,7 +80,7 @@ useSchemaStore.setState({
             visual: { icon: t.icon, color: t.color, shape: 'rounded', size: 'md', borderStyle: 'solid', showInMinimap: true },
             fields: [], hierarchy: {}, behavior: {},
         })),
-        relationshipTypes: [],
+        relationshipTypes: RELATIONSHIP_TYPES,
         views: [{
             id: HARNESS_VIEW_ID, name: 'Enterprise lineage',
             content: {}, filters: {}, entityOverrides: {}, isDefault: true, isPublic: false, createdBy: 'harness',
@@ -88,7 +88,7 @@ useSchemaStore.setState({
         }],
         defaultViewId: HARNESS_VIEW_ID,
         containmentEdgeTypes: ['CONTAINS'],
-        lineageEdgeTypes: ['TRANSFORMS'],
+        lineageEdgeTypes: ['TRANSFORMS', 'PRODUCES', 'CONSUMES'],
     } as unknown as WorkspaceSchema,
 } as never)
 

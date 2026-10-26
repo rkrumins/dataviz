@@ -82,7 +82,7 @@ export const DslEditor = forwardRef<DslEditorHandle, DslEditorProps>(function Ds
                         complete: [dslCompletionSource(() => latest.current.vocabulary)],
                     }),
                     roleHighlighting(dslRanges),
-                    dslLint,
+                    dslLint(() => latest.current.vocabulary),
                     editable.of(EditorView.editable.of(!current.disabled)),
                     described.of(current.ariaDescribedBy
                         ? EditorView.contentAttributes.of({ 'aria-describedby': current.ariaDescribedBy })

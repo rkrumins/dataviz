@@ -22,6 +22,8 @@ const SHOTS = process.argv.slice(2).length ? process.argv.slice(2) : [
   'empty', 'empty:dark', 'form', 'form:dark',
   'sentence', 'sentence:dark', 'sentence:w380', 'sentenceFlat', 'sentenceAny',
   'rescue', 'results', 'results:dark', 'empty:intro', 'sentence:nocounts',
+  'connection', 'connection:dark', 'edgeTypes', 'edgeCount', 'sentenceLinks', 'code', 'code:dark',
+  'compareKeys',
 ]
 
 function findChromium() {

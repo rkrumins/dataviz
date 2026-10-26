@@ -26,14 +26,14 @@ export type Uncountable =
 export const UNCOUNTABLE_WORDS: Record<Uncountable, string> = {
     route: 'Routes are found when the search runs',
     unfinished: 'Counted once it is filled in',
-    'too-far': 'Too many hops to count — name the far end to go further',
+    'too-far': 'Too many steps to count — only “at least one” at the top of the search goes past 3',
     'too-deep': 'Nested too deep to count',
 }
 
 
 /** Why ``p`` can't be counted as a search's condition, or null when it can.
  *  ``topLevel``: it stands in the query's top-level AND (where a
- *  relationship naming its far end may walk further). */
+ *  relationship asking for one relative is walked from its far end, further). */
 export function whyUncountable(p: Predicate, topLevel = true): Uncountable | null {
     return walk(p, topLevel, 0)
 }

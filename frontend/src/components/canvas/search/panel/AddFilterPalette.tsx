@@ -274,7 +274,7 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
         } else if (entry.action === 'code' && entry.codeKind) {
             onOpenCode?.(entry.codeKind)
         } else if (entry.build) {
-            onAdd(entry.build())
+            onAdd(entry.build({ rule }))
         }
         setOpen(false)
         setQuery('')

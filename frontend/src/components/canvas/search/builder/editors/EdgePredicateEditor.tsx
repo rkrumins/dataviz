@@ -71,9 +71,9 @@ type EdgeKind = NonNullable<EdgePredicateNode['kind']>
 type EdgeGroupOp = NonNullable<EdgeGroupPredicate['op']>
 
 const EDGE_KIND_OPTIONS: ReadonlyArray<{ value: EdgeKind; label: string }> = [
-    { value: 'edgeProperty', label: 'Compare an edge property' },
-    { value: 'edgeHasProperty', label: 'Edge has a property' },
-    { value: 'edgeGroup', label: 'Group of edge conditions' },
+    { value: 'edgeProperty', label: 'Edge property is…' },
+    { value: 'edgeHasProperty', label: 'Edge has the property…' },
+    { value: 'edgeGroup', label: 'All or any of these edge conditions' },
 ]
 
 const GROUP_OPS: ReadonlyArray<{ value: EdgeGroupOp; label: string }> = [

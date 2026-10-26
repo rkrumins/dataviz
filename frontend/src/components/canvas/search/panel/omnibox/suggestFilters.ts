@@ -21,6 +21,7 @@
 import type { Predicate } from '@/types/search'
 
 import { isRowIncomplete } from '../ConditionRow'
+import { filterKindById } from '../vocabulary/filterKinds'
 
 
 export type SuggestionGroup =
@@ -31,6 +32,7 @@ export type SuggestionGroup =
     | 'propertyValue'
     | 'layer'
     | 'structure'
+    | 'relationship'
 
 
 export interface FilterSuggestion {
@@ -79,6 +81,8 @@ export interface SuggestInput {
     /** Flattened sampled values across every property key. */
     valueSamples: ReadonlyArray<ValueSample>
     layers: ReadonlyArray<{ value: string; label: string }>
+    /** The edge types a connection can walk, each by its name. */
+    edgeTypes?: ReadonlyArray<{ id: string; name: string }>
     /** Narrow to a single facet — set by the browse tiles. */
     activeGroup?: SuggestionGroup | null
     /** Max items per section. */
@@ -111,6 +115,7 @@ const FACET_WEIGHT: Record<SuggestionGroup, number> = {
     propertyValue: 50,
     propertyKey: 40,
     layer: 35,
+    relationship: 30,
     structure: 25,
     text: 20,
 }
@@ -202,7 +207,7 @@ const STRUCTURE_ENTRIES: ReadonlyArray<{
         predicate: { kind: 'isRoot', edgeClass: 'lineage' } as Predicate,
     },
     {
-        keywords: 'orphan disconnected isolated no edges unlinked',
+        keywords: 'orphan disconnected no lineage',
         icon: 'Unplug',
         title: 'Has no lineage at all',
         hint: 'Disconnected — neither upstream nor downstream',
@@ -223,30 +228,65 @@ const STRUCTURE_ENTRIES: ReadonlyArray<{
         predicate: { kind: 'hasOutgoing', edgeClass: 'lineage' } as Predicate,
     },
     {
-        keywords: 'parent container inside under belongs folder domain relationship',
-        icon: 'ArrowUpToLine',
-        title: 'Parent is…',
-        hint: 'A condition on the container one level up',
-        predicate: { kind: 'related', axis: 'parent',
-            where: { kind: 'entityType', op: 'in', values: [] } } as Predicate,
+        keywords: 'no links unlinked not linked untagged lonely',
+        icon: 'Link2Off',
+        title: 'Has no links at all',
+        hint: 'No lineage, tag, glossary term or any other link',
+        predicate: { kind: 'isOrphan', edgeClass: 'links' } as Predicate,
     },
     {
-        keywords: 'contains child children holds column relationship',
-        icon: 'FolderTree',
-        title: 'Contains…',
-        hint: 'A condition on what it contains — every one, none, or how many',
-        predicate: { kind: 'related', axis: 'child',
-            where: { kind: 'entityType', op: 'in', values: [] } } as Predicate,
-    },
-    {
-        keywords: 'feeds downstream target reaches consumer dashboard relationship',
-        icon: 'Workflow',
-        title: 'Feeds…',
-        hint: 'A condition on its targets, one hop or several',
-        predicate: { kind: 'related', axis: 'downstream',
-            where: { kind: 'entityType', op: 'in', values: [] } } as Predicate,
+        keywords: 'no edges at all standalone alone isolated',
+        icon: 'CircleOff',
+        title: 'Has no edges at all',
+        hint: 'No edge of any kind, the hierarchy’s included',
+        predicate: { kind: 'isOrphan', edgeClass: 'any' } as Predicate,
     },
 ]
+
+
+/** The relationships, as the palette names and builds them. */
+const RELATION_ENTRIES: ReadonlyArray<{ id: string; keywords: string; icon: string; hint: string }> = [
+    { id: 'rel-parent', icon: 'ArrowUpToLine',
+      keywords: 'parent container inside under belongs folder domain directly relationship',
+      hint: 'A condition on its container, one level up' },
+    { id: 'rel-ancestor', icon: 'ListTree',
+      keywords: 'inside within under ancestor container anywhere relationship',
+      hint: 'A condition on any container above it' },
+    { id: 'rel-child', icon: 'FolderTree',
+      keywords: 'contains child children holds column relationship',
+      hint: 'A condition on what it holds — every one, none, or how many' },
+    { id: 'rel-descendant', icon: 'PackageSearch',
+      keywords: 'contains descendant deep nested anywhere inside holds relationship',
+      hint: 'A condition on anything inside it, at any depth' },
+    { id: 'rel-downstream', icon: 'Workflow',
+      keywords: 'feeds downstream target reaches consumer dashboard relationship',
+      hint: 'A condition on what it feeds, one step or several' },
+    { id: 'rel-upstream', icon: 'GitMerge',
+      keywords: 'fed by upstream source sourced from producer relationship',
+      hint: 'A condition on what feeds it' },
+    { id: 'rel-linked', icon: 'Link2',
+      keywords: 'linked link connected related associated tag term glossary relationship',
+      hint: 'Anything it is linked to — any edge type, either way' },
+]
+
+function relationSuggestion(entry: typeof RELATION_ENTRIES[number], score: number): FilterSuggestion {
+    const kind = filterKindById(entry.id)!
+    return suggestion({
+        id: `rel:${entry.id}`, group: 'relationship', icon: entry.icon, score,
+        title: kind.label, hint: entry.hint, predicate: kind.build!(),
+    })
+}
+
+/** Connected through one edge type — what is at the other end to pick. */
+function edgeTypeSuggestion(type: { id: string; name: string }, score: number,
+                            match?: string): FilterSuggestion {
+    return suggestion({
+        id: `edge:${type.id}`, group: 'relationship', icon: 'Cable', score, match,
+        title: `Connected through ${type.name}…`, hint: 'an edge type — pick what is at its other end',
+        predicate: { kind: 'related', axis: 'neighbor', edgeTypes: [type.id],
+            where: { kind: 'entityType', op: 'in', values: [] } } as Predicate,
+    })
+}
 
 
 // ---------------------------------------------------------------------------
@@ -262,7 +302,8 @@ const HEADINGS: Record<SuggestionGroup, string> = {
     propertyValue: 'Property values',
     propertyKey: 'Properties',
     layer: 'Layers',
-    structure: 'Lineage shape',
+    structure: 'Graph shape',
+    relationship: 'Relationships',
 }
 
 
@@ -365,6 +406,20 @@ export function suggestFilters(input: SuggestInput): SuggestSection[] {
             score: FACET_WEIGHT.structure + QUALITY_SCORE.substring,
             title: entry.title, hint: entry.hint, predicate: entry.predicate,
         }))
+    }
+
+    for (const entry of RELATION_ENTRIES) {
+        if (scoreFor(entry.keywords, query, 'relationship') === null) continue
+        // Keywords again: one tier.
+        push('relationship', relationSuggestion(entry, FACET_WEIGHT.relationship + QUALITY_SCORE.substring))
+    }
+
+    // An edge type by name — "produces", "defined by" — or by its id.
+    for (const type of input.edgeTypes ?? []) {
+        const score = Math.max(scoreFor(type.name, query, 'relationship') ?? -1,
+                               scoreFor(type.id, query, 'relationship') ?? -1)
+        if (score < 0) continue
+        push('relationship', edgeTypeSuggestion(type, score, query))
     }
 
     // Name-contains is the floor. It always appears, it's the only
@@ -496,6 +551,10 @@ function browseBuckets(
         id: `shape:${entry.title}`, group: 'structure', icon: entry.icon, score: 0,
         title: entry.title, hint: entry.hint, predicate: entry.predicate,
     })))
+    buckets.set('relationship', [
+        ...RELATION_ENTRIES.map((entry) => relationSuggestion(entry, 0)),
+        ...(input.edgeTypes ?? []).slice(0, limit).map((type) => edgeTypeSuggestion(type, 0)),
+    ])
     buckets.set('text', [
         suggestion({
             id: 'text:name', group: 'text', icon: 'Search', score: 0,
@@ -527,5 +586,6 @@ export const BROWSE_FACETS: ReadonlyArray<{
     { group: 'tag', label: 'Tags', icon: 'Tag' },
     { group: 'propertyKey', label: 'Properties', icon: 'KeyRound' },
     { group: 'layer', label: 'Layers', icon: 'Layers' },
-    { group: 'structure', label: 'Lineage', icon: 'Waypoints' },
+    { group: 'structure', label: 'Shape', icon: 'Waypoints' },
+    { group: 'relationship', label: 'Relationships', icon: 'Network' },
 ]

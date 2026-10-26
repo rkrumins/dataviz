@@ -37,6 +37,7 @@ from backend.app.services.deep_search import (
 )
 from backend.app.services.native_query.cypher_text import inline_params
 from backend.app.services.search_downloads import mint_download_token
+from backend.app.services.view_placement import LayerTarget, PlacementSpec
 from backend.app.services.view_scope import (
     EffectiveViewScope,
     ViewNotFound,
@@ -54,6 +55,7 @@ from backend.common.models.search import (
     EdgeGroupPredicate,
     EdgePropertyPredicate,
     GroupPredicate,
+    LayerPredicate,
     MatchAllPredicate,
     NodeRef,
     PathPredicate,
@@ -86,6 +88,7 @@ from backend.common.models.search import (
     TextPredicate,
     WithinHopsPredicate,
     export_columns,
+    traced_from_far_end,
 )
 from backend.common.search_semantics import SemanticsError, resolve_predicate
 
@@ -182,10 +185,12 @@ def _path_ends(predicate: PathPredicate):
 def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool,
                        relations: int, top: bool) -> int:
     """A relationship's caps: how deep relationships nest, how far lineage
-    goes — tested from every candidate, a few hops; walked from entities
-    its condition names (top level: ``anchor_groups`` — an ``is``, inside
-    one, or an OR of those), as far as withinHops; in a display rule, one —
-    and its edge filter's."""
+    goes — tested from every candidate, a few hops; in the top-level AND,
+    asking for at least one relative, walked from its far end as far as
+    withinHops: from the entities it names (``anchor_groups`` — an ``is``,
+    inside one, or an OR of those) or what its condition matches
+    (``traced_from_far_end``, once a query: ``_check_traces``); in a display
+    rule, one — and its edge filter's."""
     s = get_deep_search_settings()
     if relations + 1 > s.max_relation_depth:
         raise ValidationError(
@@ -194,18 +199,21 @@ def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool
         )
     hops = p.hop_range()[1]
     if p.axis in LINEAGE_AXES:
+        walks = "links" if p.edge_class == "links" or p.edge_types else "lineage"
         named = (top and p.quantifier == "any" and p.count is None
                  and anchor_groups(p.where) is not None)
+        traced = top and traced_from_far_end(p, s.relation_max_hops)
         if rule and hops > 1:
             raise ValidationError(
-                f"relationship at {path}: a rule follows lineage one hop — it is "
+                f"relationship at {path}: a rule follows {walks} one hop — it is "
                 "asked of every entity on the canvas"
             )
-        if hops > s.relation_max_hops and not named:
+        if hops > s.relation_max_hops and not (named or traced):
             raise ValidationError(
-                f"relationship at {path} follows lineage {hops} hops, tested from every "
-                f"candidate: at most {s.relation_max_hops}. Name the far end (by name or "
-                "URN) to follow it further."
+                f"relationship at {path} follows {walks} {hops} hops. Following more than "
+                f"{s.relation_max_hops} works for 'at least one' at the top of the query; "
+                "for 'no', 'every' or a count that deep, use Cypher (Cypher tab → Edit "
+                "and run)."
             )
         rollups = [t for t in p.edge_types or () if is_derived_edge_type(t)]
         if rollups and hops > 1:
@@ -290,8 +298,30 @@ def _count_and_validate(query: SearchQuery) -> int:
         raise ValidationError(
             f"predicate has {leaves} leaves (max {max_leaves})"
         )
+    _check_traces(query.predicate)
     _reject_unsupported_sub_aggregation(query)
     return leaves
+
+
+def _check_traces(predicate) -> None:
+    """A query traces one relationship from its far end at most: the search
+    is planned from that walk (``plan.trace_plan``)."""
+    s = get_deep_search_settings()
+    traced = [m for m in _top_conjuncts(predicate) if isinstance(m, RelatedPredicate)
+              and traced_from_far_end(m, s.relation_max_hops)]
+    if len(traced) > 1:
+        raise ValidationError(
+            f"{len(traced)} relationships in this query follow lineage more than "
+            f"{s.relation_max_hops} hops, and one may. Follow the others at most "
+            f"{s.relation_max_hops}, or use Cypher (Cypher tab → Edit and run)."
+        )
+
+
+def _top_conjuncts(predicate) -> list:
+    """The members of the top-level AND, nested ANDs flattened."""
+    if isinstance(predicate, GroupPredicate) and predicate.op == "and":
+        return [m for child in predicate.children for m in _top_conjuncts(child)]
+    return [predicate]
 
 
 def _reject_unsupported_sub_aggregation(query: SearchQuery) -> None:
@@ -509,6 +539,96 @@ def _resolved_ref(where: str, ref, answer: dict) -> ResolvedRef:
     )
 
 
+#: The entities placed by hand a layer filter follows at most. The canvas's
+#: placement is read for every entity a search tests and each of its
+#: ancestors, and FalkorDB looks a URN up in a list by reading it through, so
+#: each one placed by hand costs every read: on 200,000 catalog entities, a
+#: dataset took 48 µs with none, 88 µs with 1,000 and 191 µs with 5,000. (The
+#: rules are bounded by what the test costs to parse: ``falkordb_placement``.)
+LAYER_FILTER_MAX_HAND_PLACED = 1_000
+
+
+def _has_layer(predicate) -> bool:
+    if isinstance(predicate, LayerPredicate):
+        return True
+    if isinstance(predicate, GroupPredicate):
+        return any(_has_layer(c) for c in predicate.children)
+    if isinstance(predicate, RelatedPredicate):
+        return predicate.where is not None and _has_layer(predicate.where)
+    if isinstance(predicate, PathPredicate):
+        return any(w is not None and _has_layer(w)
+                   for w in (predicate.source_where, predicate.target_where))
+    return False
+
+
+def _layer_id(layers, value: str) -> Optional[str]:
+    """The layer ``value`` names among the view's ``(id, name)`` layers: its
+    id, else the one layer with that name, ignoring case; None for none."""
+    if any(value == layer_id for layer_id, _ in layers):
+        return value
+    wanted = value.strip().casefold()
+    named = [layer_id for layer_id, name in layers if name.strip().casefold() == wanted]
+    if len(named) > 1:
+        raise ValidationError(
+            f"{len(named)} layers in this view are called \u201c{value.strip()}\u201d — "
+            f"name the one you mean by its id: {', '.join(named)}.")
+    return named[0] if named else None
+
+
+def _check_layer_limits(spec: PlacementSpec) -> None:
+    hand = sum(1 for entry in spec.explicit.values() if entry.layer_id in spec.layer_ids)
+    if hand > LAYER_FILTER_MAX_HAND_PLACED:
+        raise ValidationError(
+            f"This view places {hand:,} entities by hand, and a layer filter can follow at most "
+            f"{LAYER_FILTER_MAX_HAND_PLACED:,}. Filter by type or by container instead.")
+
+
+def _with_resolved_layers(predicate, eff_scope: EffectiveViewScope, notes: list):
+    """The predicate with each layer filter resolved against the view: the
+    layer it names and how the view's canvas places entities there
+    (``view_placement``), carried on the filter for the engine. A value no
+    layer has keeps matching the stamp entities carry, and says so in
+    ``notes``; a name two layers share, or a view past the limits, is a 400."""
+    if not _has_layer(predicate) or eff_scope.placement is None:
+        return predicate      # no layers: the stamp, as ever
+    if isinstance(predicate, GroupPredicate):
+        return predicate.model_copy(update={"children": [
+            _with_resolved_layers(c, eff_scope, notes) for c in predicate.children]})
+    if isinstance(predicate, RelatedPredicate):
+        return predicate.model_copy(update={
+            "where": _with_resolved_layers(predicate.where, eff_scope, notes)})
+    if isinstance(predicate, PathPredicate):
+        return predicate.model_copy(update={
+            f"{side}_where": _with_resolved_layers(where, eff_scope, notes)
+            for side, where in (("source", predicate.source_where),
+                                ("target", predicate.target_where)) if where is not None})
+    layer_id = _layer_id(eff_scope.layers, predicate.layer_assignment)
+    if layer_id is None:
+        note = (f"No layer in this view is called \u201c{predicate.layer_assignment}\u201d, so the "
+                f"layer filter matched entities whose stored layer is \u201c"
+                f"{predicate.layer_assignment}\u201d.")
+        if note not in notes:
+            notes.append(note)
+        return predicate
+    _check_layer_limits(eff_scope.placement)
+    resolved = predicate.model_copy()
+    resolved._placement = LayerTarget(eff_scope.placement, layer_id, eff_scope.placement_digest)
+    return resolved
+
+
+def _resolve_item_layers(items, eff_scope: EffectiveViewScope):
+    """Each rule with its layer filters resolved, and the rules that can't
+    be, each with why — one rule's problem is its own."""
+    resolved, errors = [], {}
+    for item in items:
+        try:
+            resolved.append(item.model_copy(update={
+                "predicate": _with_resolved_layers(item.predicate, eff_scope, [])}))
+        except ValidationError as exc:
+            errors[item.id] = str(exc)
+    return resolved, errors
+
+
 def _validate_items(items, *, rule: bool = True) -> None:
     """Each rule's predicate, held to the same caps and typed checks as a
     search's — with the path naming the rule. ``rule``: held to a display
@@ -520,6 +640,7 @@ def _validate_items(items, *, rule: bool = True) -> None:
         if leaves > max_leaves:
             raise ValidationError(
                 f"$.items[{i}].predicate has {leaves} leaves (max {max_leaves})")
+        _check_traces(item.predicate)
 
 
 def _returns_hits(query: SearchQuery) -> bool:
@@ -732,10 +853,14 @@ class AdvancedSearchService:
             query, entity_types_capped=entity_types_note is not None,
         )
         query, resolved_refs = await self._resolve_query_refs(query, run_context)
+        layer_notes: list = []
+        query = query.model_copy(update={
+            "predicate": _with_resolved_layers(query.predicate, eff_scope, layer_notes)})
 
         try:
             page = await self._run(query, eff_scope, deadline_ms, run_context)
             extra_notes = [entity_types_note] if entity_types_note else []
+            extra_notes.extend(layer_notes)
             if page.scope_diagnostics is not None:
                 # Notes the engine carried out (a plan's, a facet's failure).
                 extra_notes.extend(page.scope_diagnostics.notes)
@@ -795,7 +920,8 @@ class AdvancedSearchService:
         context = run_context or SearchRunContext()
         items, unusable = await self._resolve_item_refs(
             [item for item in request.items if item.id not in refused], scope, context)
-        refused = {**refused, **unusable}
+        items, unplaced = _resolve_item_layers(items, _eff)
+        refused = {**refused, **unusable, **unplaced}
         out = await op(scope, [(item.id, item.predicate) for item in items],
                        request.urns, context=context)
         return SearchMembershipResult(
@@ -840,7 +966,9 @@ class AdvancedSearchService:
         errors: dict = self._refused_on_a_shared_link(request.items)
         resolved, unusable = await self._resolve_item_refs(
             [item for item in request.items if item.id not in errors], scope, context)
+        resolved, unplaced = _resolve_item_layers(resolved, eff)
         errors.update(unusable)
+        errors.update(unplaced)
         predicates = {item.id: item.predicate for item in resolved}
         for item in request.items:
             if item.id in errors:
@@ -933,6 +1061,7 @@ class AdvancedSearchService:
         context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
         predicate, _resolved = await self._resolve_predicate_refs(
             request.predicate, scope, context, at="$.predicate")
+        predicate = _with_resolved_layers(predicate, eff, [])
         query = SearchQuery(predicate=predicate, scope=scope,
                             options=SearchOptions(results="hits"))
         out = await op(query, context=context, fmt=request.format, columns=request.columns,
@@ -1073,12 +1202,17 @@ class AdvancedSearchService:
             query, entity_types_capped=entity_types_note is not None,
         )
         query, resolved_refs = await self._resolve_query_refs(query, None)
+        layer_notes: list = []
+        query = query.model_copy(update={
+            "predicate": _with_resolved_layers(query.predicate, eff_scope, layer_notes)})
         try:
             result = await self._provider_op("deep_search_explain")(query)
         except CompileError as exc:
             raise ValidationError(str(exc)) from exc
         if isinstance(result, dict) and resolved_refs:
             result["resolvedRefs"] = [r.model_dump(by_alias=True) for r in resolved_refs]
+        if isinstance(result, dict) and layer_notes:
+            result.setdefault("notes", []).extend(layer_notes)
         # Attach the resolved-scope summary so the dev panel can show
         # the user *what their search actually scopes to*. Critical
         # for debugging "why didn't this return anything" — answer is

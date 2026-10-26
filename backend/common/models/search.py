@@ -33,8 +33,9 @@ Design notes
 """
 from typing import Annotated, Any, Dict, List, Literal, NamedTuple, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
+from ..search_semantics import KEY_OPERATORS
 from .graph import GraphNode
 
 
@@ -107,10 +108,12 @@ ValueType = Literal["auto", "string", "number", "boolean", "date"]
 lets the value decide: text compares as text, numbers as numbers — the
 behaviour every predicate written before types existed was built on."""
 
-EdgeClass = Literal["lineage", "containment", "any"]
+EdgeClass = Literal["lineage", "containment", "links", "any"]
 """Edge-class selector shared by DegreePredicate, WithinHopsPredicate,
-PathPredicate. Resolved to a concrete edge-type list at compile time
-via the active ontology — never hardcoded relationship names."""
+PathPredicate: the ontology's lineage types, its containment types,
+``links`` — every type but containment — or ``any`` type at all. Resolved
+to a concrete edge-type list at compile time via the active ontology and
+the graph's own types — never hardcoded relationship names."""
 
 
 class PropertyPredicate(_Base):
@@ -126,16 +129,32 @@ class PropertyPredicate(_Base):
     as its digits in a string with ``value_type='number'``: it is compared
     exactly. Text comparisons are case-insensitive unless
     ``case_sensitive``. ``include_missing`` lets ``neq`` / ``notIn`` /
-    ``notContains`` match entities without the key. The full contract is
-    ``backend/common/search_semantics``.
+    ``notContains`` match entities without the key. ``value_key`` compares
+    with another property of the same entity instead of a value
+    (``freshnessHours > slaHours``): ``=``, ``≠`` and the orders only, an
+    order as numbers and equality as text unless ``value_type`` says
+    otherwise. The full contract is ``backend/common/search_semantics``.
     """
     kind: Literal["property"] = "property"
     key: str = Field(min_length=1, max_length=128)
     op: PropertyOp = "eq"
     value: Any = None
+    value_key: Optional[str] = Field(None, alias="valueKey", min_length=1, max_length=128)
     value_type: ValueType = Field("auto", alias="valueType")
     case_sensitive: bool = Field(False, alias="caseSensitive")
     include_missing: bool = Field(False, alias="includeMissing")
+
+    @model_validator(mode="after")
+    def _against_a_key(self) -> "PropertyPredicate":
+        if self.value_key is None:
+            return self
+        if self.op not in KEY_OPERATORS:
+            raise ValueError("compare one property with another using =, ≠, <, ≤, > or ≥")
+        if self.value is not None:
+            raise ValueError("compare with a value or with another property, not both")
+        if self.include_missing:
+            raise ValueError("comparing two properties needs both: includeMissing doesn't apply")
+        return self
 
 
 class TagPredicate(_Base):
@@ -367,9 +386,15 @@ class EntityTypePredicate(_Base):
 
 
 class LayerPredicate(_Base):
-    """Match the view's layer assignment (Source / Staging / Refinery / …)."""
+    """In one of the view's layers (Source / Staging / Refinery / …), as the
+    shared placement rule places entities there (the canvas's own with
+    ``placementContractEnabled`` on). ``layerAssignment`` names the layer by
+    id or by name; one the view doesn't have matches the stamp entities carry."""
     kind: Literal["layer"] = "layer"
     layer_assignment: str = Field(alias="layerAssignment", min_length=1)
+    #: Set by the search service, never sent: the view's placement and the
+    #: layer this names (``view_placement.LayerTarget``).
+    _placement: Any = PrivateAttr(default=None)
 
 
 # ---------------------------------------------------------------------------
@@ -582,9 +607,10 @@ or ``root`` relationship looks when it names no depth."""
 
 RELATION_ANCHORED_HOPS_MAX = 10
 """The lineage hops a relationship may follow at most — as far as
-``withinHops``. A relationship whose far end is a condition rather than
-named entities is held to ``DEEP_SEARCH_RELATION_MAX_HOPS`` (3) by the
-service: it is tested from every candidate."""
+``withinHops``. Past ``DEEP_SEARCH_RELATION_MAX_HOPS`` (3) the service
+lets only a relationship walked from its far end through
+(``anchor_groups``, ``traced_from_far_end``): a few hops are all that can
+be tested from every candidate."""
 
 
 class CountSpec(_Base):
@@ -605,7 +631,8 @@ class RelatedPredicate(_Base):
     a dashboard whose parent is Finance"); without one, any relative will
     do. A lineage relationship may also require every edge it walks to meet
     ``edge``, and walk only ``edgeTypes`` (by default every lineage type but
-    the rollups).
+    the rollups) — or, with ``edgeClass='links'``, every link: any edge but
+    the hierarchy's, the rollups aside.
 
     ``quantifier``: ``any`` relative meets the condition, ``none`` does, or
     ``all`` do — and there is at least one. ``count`` compares how many
@@ -621,6 +648,7 @@ class RelatedPredicate(_Base):
     max_hops: Optional[int] = Field(None, alias="maxHops", ge=1, le=RELATION_DEPTH_MAX)
     edge_types: Optional[List[str]] = Field(
         None, alias="edgeTypes", min_length=1, max_length=32)
+    edge_class: Optional[Literal["lineage", "links"]] = Field(None, alias="edgeClass")
     edge: Optional[EdgePredicateType] = None
 
     @model_validator(mode="after")
@@ -630,8 +658,12 @@ class RelatedPredicate(_Base):
             raise ValueError(f"{axis} is one step")
         if axis == "root" and (self.min_hops != 1 or hi is not None):
             raise ValueError("root takes no hops: it is the top-level container")
-        if axis in CONTAINMENT_AXES and (self.edge is not None or self.edge_types):
-            raise ValueError("edge filters apply to lineage relationships")
+        if axis in CONTAINMENT_AXES and (self.edge is not None or self.edge_types
+                                         or self.edge_class):
+            raise ValueError("edge types and edge conditions apply to links — feeds, fed by, "
+                             "linked to — not to the hierarchy")
+        if self.edge_types and self.edge_class:
+            raise ValueError("name edge types or an edge class, not both")
         if hi is not None and hi < self.min_hops:
             raise ValueError("maxHops is less than minHops")
         if axis in LINEAGE_AXES and self.hop_range()[1] > RELATION_ANCHORED_HOPS_MAX:
@@ -738,6 +770,19 @@ def anchor_groups(where: Optional["Predicate"]) -> Optional[List[AnchorGroup]]:
             groups.extend(sub)
         return groups
     return None
+
+
+def traced_from_far_end(p: "RelatedPredicate", tested_hops: int) -> bool:
+    """Whether a lineage relationship in the top-level AND is traced from its
+    far end: what its condition matches is found across the data source and
+    walked out from, instead of every candidate testing its own routes. So
+    one that follows more than ``tested_hops`` (what a candidate tests
+    itself), asks for at least one relative and no count, and whose far end
+    isn't named entities (walked from them, ``anchor_groups``) — the
+    service's limits and the compiler both read it here."""
+    return (p.axis in LINEAGE_AXES and p.hop_range()[1] > tested_hops
+            and p.quantifier == "any" and p.count is None
+            and anchor_groups(p.where) is None)
 
 
 # ---------------------------------------------------------------------------

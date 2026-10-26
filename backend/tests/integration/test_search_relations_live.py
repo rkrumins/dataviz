@@ -9,10 +9,12 @@ how many distinct). FalkorDB gets there with pattern comprehensions placed
 where the engine evaluates them correctly (S0_FINDINGS §15), in a tail after
 each statement's head, or walked from the named entities when a relationship
 names its far end. Here, on a graph with a cycle, a diamond, a multi-parent
-entity, duplicate names and a rollup edge, a matrix of relationships — every
-axis, quantifier and count, alone, beside other conditions, under OR and
-NOT, nested three deep — must match exactly the same entities in the
-uncapped engine, the capped one, a rule's count and a rule's membership.
+entity, duplicate names, a rollup edge, links that are not lineage (a tag,
+a glossary term) and lineage the graph spells in lower case, a matrix of
+relationships — every axis, quantifier and count, through lineage, every
+link or named edge types, alone, beside other conditions, under OR and NOT,
+nested three deep — must match exactly the same entities in the uncapped
+engine, the capped one, a rule's count and a rule's membership.
 
 Run:  RUN_FALKOR_LIVE=1 FALKORDB_HOST=localhost FALKORDB_PORT=6379 \\
       python -m pytest tests/integration/test_search_relations_live.py -q
@@ -55,18 +57,22 @@ NODES = [
     (11, "dashboard", "Revenue", {}),
     (12, "dashboard", "Costs", {}),
     (13, "domain", "Sales", {}),
-    (14, "dataset", "orders", {"owner": "alice"}),
+    (14, "dataset", "orders", {"owner": "alice", "freshnessHours": 30, "slaHours": 24}),
     (15, "column", "id", {"description": "pk"}),
     (16, "column", "amount", {"description": ""}),
     (17, "column", "customer", {"description": "who"}),
-    (18, "dataset", "customers", {}),
+    (18, "dataset", "customers", {"freshnessHours": "12", "slaHours": 24}),
     (19, "column", "cid", {"description": "x"}),
     (20, "column", "email", {"description": "y"}),
-    (21, "dataset", "shared", {}),
+    (21, "dataset", "shared", {"freshnessHours": 48, "slaHours": "48"}),
     (22, "topic", "events", {}),
     (23, "dataset", "a", {}), (24, "dataset", "b", {}), (25, "dataset", "c", {}),
     (26, "dataset", "d1", {}), (27, "dataset", "d2", {}), (28, "dataset", "d3", {}),
     (29, "dataset", "d4", {}),
+    (30, "dataJob", "nightly load", {}),
+    (31, "tag", "PII", {}),
+    (32, "glossaryTerm", "Customer", {}),
+    (33, "dataset", "lonely", {}),
 ]
 # parent -> child. "shared" (21) has two parents.
 CONTAINMENT = [
@@ -93,7 +99,16 @@ LINEAGE = [
     # Both ways at once.
     (18, 21, "TRANSFORMS", 0.6, {"job": "j2"}), (21, 18, "FLOWS_TO", 0.6, {}),
 ]
-LINEAGE_TYPES = ["AGGREGATED", "FLOWS_TO", "TRANSFORMS"]
+# Links that are not lineage — a tag, a glossary term — and lineage the graph
+# spells in lower case: the ontology declares PRODUCES, the graph holds
+# ``produces``. "lonely" (33) has no edges at all.
+LINKS = [
+    (30, 14, "produces", 0.9, {"job": "nightly"}), (30, 18, "produces", 0.7, {}),
+    (14, 31, "TAGGED_WITH", None, None), (20, 31, "TAGGED_WITH", None, None),
+    (18, 32, "DEFINED_BY", None, None), (17, 32, "DEFINED_BY", None, None),
+]
+LINEAGE_TYPES = ["AGGREGATED", "FLOWS_TO", "PRODUCES", "TRANSFORMS"]
+METADATA_TYPES = ["DEFINED_BY", "TAGGED_WITH"]
 
 
 def U(i: int) -> str:
@@ -137,6 +152,9 @@ OWNER = {"kind": "hasProperty", "key": "owner"}
 DESCRIBED = {"kind": "property", "key": "description", "op": "isNotEmpty"}
 UNFED = {"kind": "degree", "direction": "in", "op": "eq", "value": 0, "edgeClass": "lineage"}
 TOP = {"kind": "isRoot", "edgeClass": "containment"}
+# One property against another: an order as numbers ("12" is 12), equality as text.
+STALE = {"kind": "property", "key": "freshnessHours", "op": "gt", "valueKey": "slaHours"}
+ON_TIME = {"kind": "property", "key": "freshnessHours", "op": "eq", "valueKey": "slaHours"}
 CONFIDENT = {"kind": "edgeProperty", "key": "confidence", "op": "gte", "value": 0.8,
              "valueType": "number"}
 
@@ -159,12 +177,18 @@ AXES = [
     ("upstream", {"edge": CONFIDENT}),
     ("downstream", {"edgeTypes": ["AGGREGATED"]}),
     ("downstream", {"maxHops": 2, "edge": NOT_BATCH}),
+    # Every link, and edge types named in any case.
+    ("neighbor", {"edgeClass": "links"}), ("downstream", {"edgeClass": "links", "maxHops": 2}),
+    ("upstream", {"edgeTypes": ["produces"]}),
+    ("downstream", {"edgeTypes": ["Tagged_With", "defined_by"]}),
 ]
 CONDITIONS = [
     None, TYPE("dataset"), TYPE("domain", "workspace"), NAMED("orders"), OWNER, DESCRIBED,
     UNFED, TOP, rel("parent", TYPE("domain")), rel("root", NAMED("Sales")),
     rel("upstream"), AND(TYPE("dataset"), rel("child", DESCRIBED)),
     OR(NAMED("Finance"), rel("child", TYPE("column"))),
+    {"kind": "isOrphan", "edgeClass": "links"}, {"kind": "hasOutgoing", "edgeTypes": ["tagged_with"]},
+    {"kind": "degree", "direction": "both", "op": "gte", "value": 3, "edgeClass": "any"},
 ]
 QUANTIFIERS = [
     {}, {"quantifier": "none"}, {"quantifier": "all"},
@@ -234,6 +258,30 @@ def _matrix():
         rel("upstream", edge=EDGE("job", "isNotSet"), quantifier="none"),
         rel("downstream", IS(29), maxHops=2, edge=EDGE("mode", "neq", "batch")),
         rel("upstream", IS(23), maxHops=3, edge=NOT_BATCH),
+        # Edge shapes over every link and every edge, and named in any case.
+        {"kind": "isOrphan", "edgeClass": "links"}, {"kind": "isOrphan", "edgeClass": "any"},
+        {"kind": "isRoot", "edgeClass": "links"}, {"kind": "isLeaf", "edgeClass": "any"},
+        {"kind": "hasIncoming", "edgeTypes": ["DEFINED_BY"]},
+        {"kind": "hasOutgoing", "edgeTypes": ["PRODUCES"]},
+        {"kind": "degree", "direction": "out", "op": "gt", "value": 2, "edgeClass": "containment"},
+        {"kind": "degree", "direction": "both", "op": "eq", "value": 2, "edgeClass": "links"},
+        AND(TYPE("dataset"), rel("neighbor", TYPE("tag"), edgeClass="links")),
+        AND(TYPE("dataset"), NOT({"kind": "isOrphan", "edgeClass": "any"})),
+        rel("downstream", rel("downstream", TYPE("glossaryTerm"), edgeClass="links"),
+            edgeTypes=["PRODUCES"]),
+        rel("descendant", rel("neighbor", TYPE("tag"), edgeClass="links")),
+        rel("upstream", IS(30), edgeTypes=["produces"]),
+        rel("neighbor", IS(31), edgeClass="links", maxHops=2),
+        rel("upstream", OR(IS(13), rel("ancestor", IS(13))), maxHops=2, edgeClass="links"),
+        # One property against another of the same entity — at the top, under
+        # NOT, and on relatives.
+        STALE, ON_TIME, AND(TYPE("dataset"), NOT(STALE)),
+        {"kind": "property", "key": "freshnessHours", "op": "lte", "valueKey": "slaHours",
+         "valueType": "string"},
+        {"kind": "property", "key": "freshnessHours", "op": "neq", "valueKey": "slaHours"},
+        rel("child", STALE), rel("child", ON_TIME, quantifier="none"),
+        rel("child", STALE, count={"op": "gte", "value": 1}),
+        rel("downstream", STALE, maxHops=2), rel("parent", rel("child", STALE)),
     ]
     return cases
 
@@ -264,7 +312,9 @@ async def provider():
         auth_enabled=False,
     )
     p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
-    p.set_resolved_edge_metadata({t: {"isLineage": True} for t in LINEAGE_TYPES}, LINEAGE_TYPES)
+    p.set_resolved_edge_metadata({**{t: {"isLineage": True} for t in LINEAGE_TYPES},
+                                  **{t: {} for t in METADATA_TYPES}}, LINEAGE_TYPES)
+    p.set_source_type_aliases({"PRODUCES": ["produces"]})
     await p._ensure_connected()
     for label in sorted({label for _, label, _, _ in NODES}):
         await p._graph.query(f"CREATE INDEX FOR (n:`{label}`) ON (n.urn)")
@@ -275,7 +325,7 @@ async def provider():
     for s, t in CONTAINMENT:
         await p._graph.query("MATCH (a {urn: $s}), (b {urn: $t}) CREATE (a)-[:CONTAINS]->(b)",
                              {"s": U(s), "t": U(t)})
-    for s, t, kind, conf, props in LINEAGE:
+    for s, t, kind, conf, props in LINEAGE + LINKS:
         await p._graph.query(
             f"MATCH (a {{urn: $s}}), (b {{urn: $t}}) CREATE (a)-[r:{kind}]->(b) "
             "SET r.confidence = $c, r.properties = $p",
@@ -296,7 +346,7 @@ def _stub() -> StubDeepSearchProvider:
                + [{"source": U(a), "target": U(b), "type": t,
                    **({"confidence": c} if c is not None else {}),
                    **({"properties": props} if props is not None else {})}
-                  for a, b, t, c, props in LINEAGE]),
+                  for a, b, t, c, props in LINEAGE + LINKS]),
         lineage_edge_types=LINEAGE_TYPES)
 
 
@@ -497,6 +547,10 @@ PATHS = [
     {"sourceUrns": [U(13)], "targetWhere": {"kind": "all"}, "edgeTypes": ["AGGREGATED"]},
     {"sourceUrns": [U(1)], "targetWhere": TYPE("city"), "edgeClass": "containment"},
     {"sourceWhere": TYPE("dataset"), "targetWhere": {"kind": "all"}, "maxPaths": 3},
+    {"sourceUrns": [U(30)], "targetWhere": TYPE("tag", "glossaryTerm"), "edgeClass": "links"},
+    {"sourceUrns": [U(31)], "direction": "incoming", "targetWhere": TYPE("dataJob"),
+     "edgeClass": "any"},
+    {"sourceUrns": [U(30)], "targetUrns": [U(11)], "edgeTypes": ["PRODUCES", "flows_to"]},
 ]
 
 
@@ -561,6 +615,72 @@ async def test_the_deepest_nesting_parses_in_linear_time(provider, scope_name):
     assert max(parse_cost(q) for q in sent) < 200_000
 
 
+# --- traces -----------------------------------------------------------------
+
+#: Followed past the hops a candidate tests itself, asking for at least one
+#: relative at the top of the query: traced from the far end — what it matches
+#: found across the data source, and one walk out from it (``plan.trace_plan``).
+#: Through a filter, named types or every link; from a range of hops; to a far
+#: end that is itself a relationship or a count; beside a condition, another
+#: relationship and a walk from named entities; and one that reaches nothing.
+TRACES = [
+    rel("downstream", TYPE("dashboard"), maxHops=6),
+    rel("upstream", TYPE("dataJob"), maxHops=5),
+    rel("upstream", TYPE("topic"), minHops=2, maxHops=6),
+    rel("downstream", TYPE("dashboard"), maxHops=5, edge=CONFIDENT),
+    rel("downstream", TYPE("dashboard"), maxHops=4, edgeTypes=["flows_to"]),
+    rel("neighbor", TYPE("glossaryTerm"), maxHops=4, edgeClass="links"),
+    rel("downstream", rel("parent", TYPE("folder")), maxHops=5),
+    rel("upstream", AND(TYPE("dataset"), UNFED), maxHops=4),
+    rel("upstream", minHops=4, maxHops=6),
+    AND(TYPE("dataset"), rel("downstream", TYPE("dashboard"), maxHops=6),
+        rel("parent", TYPE("domain"))),
+    AND(rel("downstream", OR(TYPE("dashboard"), NAMED("PII")), maxHops=7),
+        rel("upstream", IS(22), maxHops=10)),
+]
+
+
+@pytest.mark.parametrize("scope_name", list(SCOPES))
+async def test_a_trace_answers_as_the_reference_does(provider, scope_name):
+    """The uncapped engine — a search and its count — finds what the reference
+    semantics do; the capped engine, which can't plan by the walk, refuses."""
+    from backend.app.services.deep_search import CompileError
+
+    scope = SCOPES[scope_name]
+    context = SearchRunContext(data_version="relations-v1", scope_hash=f"h-trace-{scope_name}")
+    expected = await _expected(scope, TRACES)
+    wrong = []
+    for i, predicate in enumerate(TRACES):
+        query = _query(predicate, scope)
+        _validate_predicate(query.predicate)        # within the service's caps
+        page = await provider.deep_search_session(query, context=context)
+        count = await provider.deep_search_count(query, context=context)
+        got = sorted(h.node.urn for h in page.hits)
+        if got != expected[i] or count["count"] != len(expected[i]):
+            wrong.append((i, predicate, (got, count["count"]), expected[i]))
+        with pytest.raises(CompileError, match="works for a search that lists its matches"):
+            await provider.deep_search(query)
+    assert not wrong, _report(wrong)
+    assert any(expected) and not all(expected)
+
+
+async def test_a_trace_past_its_bounds_is_refused(provider, monkeypatch):
+    from backend.app.providers.falkordb_search import plan as plan_mod
+    from backend.app.services.deep_search import CompileError
+
+    scope = SCOPES["data_source"]
+    context = SearchRunContext(data_version="relations-v1", scope_hash="h-trace-bounds")
+    monkeypatch.setattr(plan_mod, "REACH_ANCHORS_MAX", 3)
+    with pytest.raises(CompileError, match="More than 3 entities match the far end"):
+        await provider.deep_search_session(
+            _query(rel("upstream", TYPE("dataset"), maxHops=5), scope), context=context)
+    monkeypatch.setattr(plan_mod, "REACH_ANCHORS_MAX", 200_000)
+    monkeypatch.setattr(plan_mod, "REACH_MAX", 1)
+    with pytest.raises(CompileError, match="reaches more than 1 entities"):
+        await provider.deep_search_session(
+            _query(rel("downstream", TYPE("dashboard"), maxHops=5), scope), context=context)
+
+
 @pytest.mark.parametrize("scope_name", list(SCOPES))
 async def test_paths(provider, scope_name):
     """Every route, its edges' properties included — or, cut at maxPaths,
@@ -593,3 +713,119 @@ def test_the_paths_are_telling():
                                                  SCOPES["data_source"], results="paths")))
              for raw in PATHS]
     assert sum(1 for page in found if page.paths) >= len(PATHS) - 1
+
+
+async def test_a_type_the_data_source_lacks_is_refused(provider):
+    """A misspelt edge type is refused by every engine, naming the nearest
+    type — not a condition that silently matches nothing."""
+    from backend.app.services.deep_search import CompileError
+
+    scope = SCOPES["data_source"]
+    for predicate in (rel("downstream", edgeTypes=["PRODUCE"]),
+                      {"kind": "hasIncoming", "edgeTypes": ["PRODUCE"]}):
+        query = _query(predicate, scope)
+        with pytest.raises(CompileError, match="did you mean PRODUCES"):
+            await provider.deep_search(query)
+        with pytest.raises(CompileError, match="did you mean PRODUCES"):
+            await provider.deep_search_session(query, context=SearchRunContext(
+                data_version="relations-v1", scope_hash="h-refused"))
+        answer = await provider.deep_search_membership(
+            scope, [("q", query.predicate)], ALL_URNS, context=SearchRunContext())
+        assert "did you mean PRODUCES" in answer["errors"]["q"]
+    with pytest.raises(CompileError, match="CONTAINS is a containment edge"):
+        await provider.deep_search(_query(rel("upstream", edgeTypes=["CONTAINS"]), scope))
+
+
+# --- layers, as the view's canvas places entities -------------------------------
+
+#: Types by layer (domains cascade to what they hold, regions don't), a rule on a
+#: property that outranks the type rule, a URN glob, a hand-placed workspace that
+#: cascades — "shared" (21) is held by it and by a domain — and a fallback layer.
+LAYER_VIEW = {"content": {"entityScope": "all"}, "layout": {"referenceLayout": {"layers": [
+    {"id": "dom", "name": "Domains", "order": 0, "entityTypes": ["domain"]},
+    {"id": "geo", "name": "Places", "order": 1, "rules": [
+        {"id": "g", "entityTypes": ["region"], "inheritsFromParent": False}]},
+    {"id": "own", "name": "Owned by Alice", "order": 2, "rules": [
+        {"id": "o", "priority": 5, "conditions": [
+            {"field": "owner", "operator": "equals", "value": "alice"}]}]},
+    {"id": "data", "name": "Data", "order": 3, "entityTypes": ["dataset"]},
+    {"id": "stream", "name": "Streams", "order": 4, "rules": [{"id": "s", "urnPattern": "urn:2?"}]},
+    {"id": "bi", "name": "Reporting", "order": 5, "entityTypes": ["dashboard"]},
+    {"id": "rest", "name": "Everything else", "order": 6, "showUnassigned": True},
+], "assignments": {U(9): {"layerId": "bi", "inheritsChildren": True}}}}}
+
+
+def LAYER(value):
+    return {"kind": "layer", "layerAssignment": value}
+
+
+LAYER_CASES = [
+    *(LAYER(name) for name in ("Domains", "places", "Owned by Alice", "Data", "Streams",
+                               "Reporting", "Everything else", "rest", "no-such-layer")),
+    AND(TYPE("dataset"), LAYER("Reporting")),
+    NOT(LAYER("Data")),
+    OR(LAYER("Streams"), LAYER("Places")),
+    rel("downstream", LAYER("Reporting")),
+    rel("downstream", AND(TYPE("dashboard"), LAYER("Reporting")), maxHops=3),
+    rel("parent", LAYER("Domains")),
+    rel("child", LAYER("Owned by Alice"), quantifier="none"),
+    rel("child", LAYER("Everything else"), quantifier="all"),
+    rel("descendant", LAYER("Reporting")),
+    rel("ancestor", LAYER("Reporting")),
+    rel("child", LAYER("Data"), count={"op": "gte", "value": 2}),
+    AND(LAYER("Data"), rel("upstream", LAYER("Streams"))),
+]
+
+
+def _layered(predicate, scope):
+    """The query as the service hands it to an engine: its layer filters read
+    against the view (``_with_resolved_layers``)."""
+    from backend.app.services.advanced_search_service import _with_resolved_layers
+    from backend.app.services.view_scope import EffectiveViewScope, _placement_inputs
+
+    placement, layers, digest = _placement_inputs(LAYER_VIEW)
+    eff = EffectiveViewScope(
+        view_id="v", workspace_id="ws", data_source_id=None, canvas_kind="reference",
+        root_urns=(), entity_type_allow_list=frozenset(), layer_allow_list=frozenset(),
+        max_depth=12, scope_hash="h", placement=placement, layers=layers,
+        placement_digest=digest)
+    query = _query(predicate, scope)
+    return query.model_copy(update={"predicate": _with_resolved_layers(query.predicate, eff, [])})
+
+
+async def test_layers_are_telling():
+    """The view places entities in every layer, and the cases split them."""
+    stub = _stub()
+    scope = SCOPES["data_source"]
+    counts = []
+    for predicate in LAYER_CASES:
+        answer = await stub.deep_search_membership(
+            scope, [("q", _layered(predicate, scope).predicate)], ALL_URNS)
+        counts.append(len(answer["matches"]["q"]))
+    assert all(counts[:7]) and counts[8] == 0
+    assert sum(1 for c in counts if 0 < c < len(ALL_URNS)) >= len(LAYER_CASES) - 3
+
+
+@pytest.mark.parametrize("scope_name", list(SCOPES))
+async def test_layers_in_every_engine(provider, scope_name):
+    """The uncapped engine (search and count), the capped one and a rule's
+    membership place entities in layers exactly as the canvas does — the stub
+    answers with ``place_all`` itself."""
+    scope = SCOPES[scope_name]
+    stub = _stub()
+    context = SearchRunContext(data_version="relations-v1", scope_hash=f"h-layers-{scope_name}")
+    wrong = []
+    for i, predicate in enumerate(LAYER_CASES):
+        query = _layered(predicate, scope)
+        want = sorted((await stub.deep_search_membership(
+            scope, [("q", query.predicate)], ALL_URNS))["matches"]["q"])
+        page = await provider.deep_search_session(query, context=context)
+        count = await provider.deep_search_count(query, context=context)
+        capped = await provider.deep_search(query)
+        member = await provider.deep_search_membership(
+            scope, [("q", query.predicate)], ALL_URNS, context=SearchRunContext())
+        got = (sorted(h.node.urn for h in page.hits), count["count"],
+               sorted(h.node.urn for h in capped.hits), sorted(member["matches"].get("q", [])))
+        if got != (want, len(want), want, want) or member["errors"]:
+            wrong.append((i, predicate, (got, member["errors"]), want))
+    assert not wrong, _report(wrong)

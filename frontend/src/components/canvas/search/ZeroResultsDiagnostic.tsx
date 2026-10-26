@@ -59,7 +59,7 @@ import type {
 
 import { CypherDisclosure } from './panel/CypherDisclosure'
 import { findScopeCondition } from './panel/predicateComposition'
-import { refLabel } from './panel/relations'
+import { axisMeta, refLabel, throughOf } from './panel/relations'
 import { ZeroResultRescue } from './panel/rescue/ZeroResultRescue'
 import type { QuickMatch } from './session/quickPredicate'
 
@@ -722,11 +722,14 @@ function DiscoverTable({ result }: { result: SearchDiscoverResult }) {
 
 function predicateUsesLineage(p: Predicate): boolean {
     if (p.kind === 'isOrphan' || p.kind === 'isLeaf' || p.kind === 'isRoot'
-        || p.kind === 'hasIncoming' || p.kind === 'hasOutgoing') {
-        return p.edgeClass === 'lineage' || p.edgeClass === 'any'
+        || p.kind === 'hasIncoming' || p.kind === 'hasOutgoing' || p.kind === 'degree') {
+        // Every link and every edge are whatever the graph holds, flagged
+        // lineage or not; named edge types are their own.
+        return !p.edgeTypes && (p.edgeClass ?? 'lineage') === 'lineage'
     }
-    if (p.kind === 'degree') {
-        return p.edgeClass === 'lineage' || p.edgeClass === 'any'
+    if (p.kind === 'related') {
+        return (axisMeta(p.axis).lineage && throughOf(p) === 'lineage')
+            || (!!p.where && predicateUsesLineage(p.where))
     }
     if (p.kind === 'withinHops') {
         // withinHops doesn't have explicit edgeClass; it uses edgeTypes
@@ -746,7 +749,10 @@ function predicateUsesContainment(p: Predicate): boolean {
     if (p.kind === 'isOrphan' || p.kind === 'isLeaf' || p.kind === 'isRoot'
         || p.kind === 'hasIncoming' || p.kind === 'hasOutgoing'
         || p.kind === 'degree') {
-        return p.edgeClass === 'containment' || p.edgeClass === 'any'
+        return !p.edgeTypes && p.edgeClass === 'containment'
+    }
+    if (p.kind === 'related') {
+        return !axisMeta(p.axis).lineage || (!!p.where && predicateUsesContainment(p.where))
     }
     if (p.kind === 'group') {
         return p.children.some(predicateUsesContainment)

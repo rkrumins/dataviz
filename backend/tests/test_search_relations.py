@@ -22,8 +22,11 @@ from pydantic import TypeAdapter, ValidationError as PydanticValidationError
 from backend.app.providers.falkordb_deep_search import (
     CompileError,
     _build_candidate_cypher,
+    _build_compiler_for_provider,
     _build_within_hops_continuation,
     _Compiler,
+    explain_deep_search,
+    refuse_trace,
     tail_clauses,
 )
 from backend.app.providers.falkordb_search import membership
@@ -98,8 +101,11 @@ class TestModel:
         (rel("child", minHops=2, maxHops=2), "child is one step"),
         (rel("root", maxHops=3), "root takes no hops"),
         (rel("ancestor", edge={"kind": "edgeHasProperty", "key": "k"}),
-         "edge filters apply to lineage"),
-        (rel("descendant", edgeTypes=["X"]), "edge filters apply to lineage"),
+         "edge conditions apply to links"),
+        (rel("descendant", edgeTypes=["X"]), "edge types and edge conditions apply to links"),
+        (rel("child", edgeClass="links"), "not to the hierarchy"),
+        (rel("upstream", edgeClass="links", edgeTypes=["X"]),
+         "name edge types or an edge class, not both"),
         (rel("upstream", minHops=3, maxHops=2), "maxHops is less than minHops"),
         (rel("downstream", maxHops=11), "at most 10 hops"),
         (rel("child", quantifier="none", count={"op": "gt", "value": 1}),
@@ -153,10 +159,32 @@ class TestValidation:
             _validate_predicate(P(rel("upstream", rel("parent", rel("root",
                                                                      rel("child"))))))
 
-    def test_lineage_tested_from_every_candidate_goes_three_hops(self):
+    def test_lineage_past_three_hops_is_traced_at_the_top(self):
+        """Past the hops a candidate tests itself, a relationship is traced
+        from its far end: at least one relative, at the top of the query.
+        Anywhere else it is refused, pointing at Cypher."""
         _validate_predicate(P(rel("downstream", TYPE("dashboard"), maxHops=3)))
-        with pytest.raises(ValidationError, match="4 hops.*at most 3.*Name the far end"):
-            _validate_predicate(P(rel("downstream", TYPE("dashboard"), maxHops=4)))
+        _validate_predicate(P(rel("downstream", TYPE("dashboard"), maxHops=4)))
+        _validate_predicate(P(AND(TYPE("dataset"), rel("upstream", TYPE("topic"), maxHops=10))))
+        too_far = rel("downstream", TYPE("dashboard"), maxHops=4)
+        for raw in (OR(TYPE("dataset"), too_far),
+                    {"kind": "group", "op": "not", "children": [too_far]},
+                    {**too_far, "quantifier": "none"}, {**too_far, "quantifier": "all"},
+                    {**too_far, "count": {"op": "gte", "value": 2}},
+                    rel("parent", too_far)):
+            with pytest.raises(ValidationError, match=r"4 hops\. Following more than 3 works for "
+                                                       r"'at least one' at the top.*Cypher"):
+                _validate_predicate(P(raw))
+
+    def test_a_query_traces_one_relationship_at_most(self):
+        traced = rel("upstream", TYPE("topic"), maxHops=5)
+        _count_and_validate(_query(AND(traced, rel("downstream", TYPE("dashboard")))))
+        # Walked from the entities it names: not a trace.
+        _count_and_validate(_query(AND(traced, rel("downstream", IS("u"), maxHops=10))))
+        with pytest.raises(ValidationError, match="2 relationships in this query follow "
+                                                  "lineage more than 3 hops, and one may"):
+            _count_and_validate(_query(AND(traced, rel("downstream", TYPE("dashboard"),
+                                                       maxHops=6))))
 
     def test_lineage_walked_from_named_entities_goes_ten(self):
         _validate_predicate(P(AND(TYPE("dataset"), rel("upstream", IS("u"), maxHops=10))))
@@ -164,14 +192,17 @@ class TestValidation:
         for raw in (OR(TYPE("dataset"), rel("upstream", IS("u"), maxHops=10)),
                     rel("upstream", IS("u"), maxHops=10, quantifier="none"),
                     rel("parent", rel("upstream", IS("u"), maxHops=10))):
-            with pytest.raises(ValidationError, match="at most 3"):
+            with pytest.raises(ValidationError, match="Following more than 3 works"):
                 _validate_predicate(P(raw))
 
     def test_lineage_from_inside_named_entities_goes_ten_too(self):
         """What a container's lineage question asks: is it, or is inside it."""
         _validate_predicate(P(rel("upstream", OR(IS("ds"), rel("ancestor", IS("ds"))), maxHops=10)))
-        with pytest.raises(ValidationError, match="at most 3"):
-            _validate_predicate(P(rel("upstream", OR(IS("ds"), TYPE("t")), maxHops=4)))
+        # More than named entities: traced from what it matches instead.
+        _validate_predicate(P(rel("upstream", OR(IS("ds"), TYPE("t")), maxHops=4)))
+        with pytest.raises(ValidationError, match="Following more than 3 works"):
+            _validate_predicate(P(rel("upstream", OR(IS("ds"), TYPE("t")), maxHops=4,
+                                      quantifier="none")))
 
     def test_a_rule_follows_lineage_one_hop(self):
         _validate_predicate(P(rel("upstream", TYPE("topic"))), rule=True)
@@ -656,6 +687,155 @@ class TestReachPlan:
         assert plan.units == [] and "not in the graph" in notes[0]
 
 
+def _tracing() -> _Compiler:
+    c = _compiler()
+    c.trace_beyond = 3
+    return c
+
+
+class TestTrace:
+    """A relationship followed past the hops a candidate tests itself, asking
+    for at least one relative at the top of the query, is traced from its far
+    end: the head keeps every candidate and the walk is the whole test."""
+
+    def test_it_is_hoisted_with_its_far_end_and_its_walk(self):
+        c = _tracing()
+        far = AND(TYPE("topic"), rel("parent", TYPE("domain")))
+        head = c.compile(P(AND(TYPE("dataset"), rel("upstream", far, minHops=2, maxHops=6))))
+        assert head.startswith("toLower(labels(n)[0]) IN $p")
+        assert c.tail == [] and c.hoisted_within_hops == []
+        t = c.hoisted_trace
+        # From the far end to the candidate: what feeds it, followed forwards.
+        assert (t["hops"], t["min_hops"], t["direction"], t["edge_types"], t["types"]) == (
+            6, 2, "out", ["FLOWS_TO"], ["topic"])
+        # The far end's plain conditions in one stage, its relationship in the next.
+        assert len(t["far_end"]) == 2 and "labels(n)[0]" in t["far_end"][0]
+
+    def test_only_one_at_the_top_asking_for_a_relative_is_traced(self):
+        for raw in (rel("upstream", TYPE("topic"), maxHops=3),
+                    rel("upstream", IS("u"), maxHops=6),
+                    rel("upstream", TYPE("topic"), maxHops=6, quantifier="none"),
+                    OR(TYPE("dataset"), rel("upstream", TYPE("topic"), maxHops=6))):
+            c = _tracing()
+            c.compile(P(raw))
+            assert c.hoisted_trace is None, raw
+        # Not where a trace can't run (membership), nor without the limit.
+        c = _tracing()
+        c.anchor_lineage = False
+        c.compile(P(rel("upstream", TYPE("topic"), maxHops=6)))
+        assert c.hoisted_trace is None and c.tail
+        c = _compiler()
+        c.compile(P(rel("upstream", TYPE("topic"), maxHops=6)))
+        assert c.hoisted_trace is None and c.tail
+
+    def test_one_over_no_edges_relates_nothing(self):
+        c = _Compiler(lineage_edge_types=set(), containment_edge_types={"CONTAINS"})
+        c.trace_beyond = 3
+        assert c.compile(P(rel("upstream", TYPE("topic"), maxHops=6))) == "false"
+        assert c.hoisted_trace is None
+
+    def test_the_capped_engine_refuses_it(self):
+        c = _tracing()
+        c.compile(P(rel("upstream", TYPE("topic"), maxHops=6)))
+        with pytest.raises(CompileError, match="more than 3 hops works for a search that "
+                                               "lists its matches.*Cypher"):
+            refuse_trace(c)
+        refuse_trace(_compiler())
+
+    def test_explain_shows_each_candidate_testing_it_and_says_how_it_runs(self):
+        class _Provider:
+            _entity_type_levels = {"dataset": 0}
+
+            def _get_lineage_edge_types(self):
+                return {"FLOWS_TO"}
+
+            def _get_containment_edge_types(self):
+                return {"CONTAINS"}
+
+        result = explain_deep_search(_Provider(), _query(rel("upstream", TYPE("topic"),
+                                                             maxHops=6)))
+        assert "[:FLOWS_TO*1..6]" in result["hits_cypher"]
+        assert any("walks out from there" in n for n in result["notes"])
+
+
+class TestTracePlan:
+    """What the far end matches is found across the data source, a band of a
+    label at a time; one walk runs out from it; only what it reaches, in
+    scope, is read — and past a bound or out of time, it is refused."""
+
+    @staticmethod
+    def _run(seen, *, matched=(10, 11), reached=(20, 21, 22)):
+        async def run(cypher, params):
+            seen.append((cypher, params))
+            if cypher.startswith("CALL db.meta.stats()"):
+                return SimpleNamespace(result_set=[[{"Column": 4, "Dataset": 3, "Topic": 2}]])
+            if "AS first" in cypher:
+                return SimpleNamespace(result_set=[["Topic", 10]])
+            if "MATCH _whP0" in cypher:                             # the walk
+                return SimpleNamespace(result_set=[[list(reached)]])
+            if cypher.startswith("MATCH (n:"):                      # the far end's scan
+                return SimpleNamespace(result_set=[[list(matched)]])
+            if "labels(n)" in cypher:                               # the scope's check
+                return SimpleNamespace(result_set=[
+                    [20, "u20", ["Column"], []], [21, None, ["Column"], []],
+                    [22, "u22", ["_AggMeta"], []]])
+            raise AssertionError(cypher)
+        return run
+
+    @staticmethod
+    async def _plan(run, *, labels=("Column", "Dataset", "Topic"), notes=None):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+        c = _tracing()
+        c.compile(P(rel("upstream", TYPE("topic"), maxHops=6)))
+        return await plan_mod.reach_plan(run, SimpleNamespace(_entity_type_levels={"column": 1}),
+                                         _query({"kind": "all"}), c, list(labels),
+                                         ("CONTAINS",), width=2,
+                                         notes=[] if notes is None else notes)
+
+    async def test_it_reads_only_what_the_walk_from_the_far_end_reaches(self):
+        seen = []
+        plan = await self._plan(self._run(seen))
+        # 21 has no URN, 22 is bookkeeping: what the scope's own units skip.
+        # Every unit is the trace's answer, and the rest of the query applies.
+        assert [(u.kind, u.roots, u.satisfies) for u in plan.units] == [("ids", [20], None)]
+        scans = [cy for cy, _ in seen if cy.startswith("MATCH (n:") and "AS first" not in cy]
+        # Only the label the far end's type can hold; its condition on each.
+        assert scans and all(cy.startswith("MATCH (n:`Topic`)") for cy in scans)
+        assert all("toLower(labels(n)[0]) IN $p" in cy and cy.endswith("RETURN collect(ID(n))")
+                   for cy in scans)
+        walk, params = next((cy, p) for cy, p in seen if "MATCH _whP0" in cy)
+        assert params["_anchors"] == [10, 11]
+        assert "(anchor)-[:FLOWS_TO*1..6]->(n)" in walk and "ID(anchor) <> ID(n)" in walk
+
+    async def test_it_refuses_past_its_bounds(self, monkeypatch):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+        monkeypatch.setattr(plan_mod, "REACH_ANCHORS_MAX", 1)
+        with pytest.raises(CompileError, match="More than 1 entities match the far end this "
+                                               "search follows more than 3 hops to"):
+            await self._plan(self._run([]))
+        monkeypatch.setattr(plan_mod, "REACH_ANCHORS_MAX", 200_000)
+        monkeypatch.setattr(plan_mod, "REACH_MAX", 2)
+        with pytest.raises(CompileError, match="reaches more than 2 entities"):
+            await self._plan(self._run([]))
+
+    async def test_it_refuses_when_it_runs_out_of_time(self):
+        async def run(cypher, params):
+            if cypher.startswith("CALL db.meta.stats()"):
+                return SimpleNamespace(result_set=[[{"Topic": 2}]])
+            if "AS first" in cypher:
+                return SimpleNamespace(result_set=[["Topic", 10]])
+            raise Exception("Query timed out")
+
+        with pytest.raises(CompileError, match="took too long"):
+            await self._plan(run)
+
+    async def test_a_far_end_matching_nothing_reaches_nothing(self):
+        seen, notes = [], []
+        plan = await self._plan(self._run(seen, matched=()), notes=notes)
+        assert plan.units == [] and "nothing in the data source matches" in notes[0]
+        assert not any("MATCH _whP0" in cy for cy, _ in seen)
+
+
 class TestService:
     async def test_a_search_by_relationship_end_to_end(self):
         page, _ = await _service(_graph()).search(_query(AND(
@@ -670,6 +850,153 @@ class TestService:
         assert resolved.at == "$.children[0].where.refs[0]" and resolved.count == 1
 
     async def test_a_relationship_past_its_caps_is_a_400(self):
-        with pytest.raises(ValidationError, match="at most 3"):
+        with pytest.raises(ValidationError, match="Following more than 3 works"):
             await _service(_graph()).search(_query(AND(
-                rel("downstream", TYPE("dashboard"), maxHops=5))))
+                rel("downstream", TYPE("dashboard"), maxHops=5, quantifier="none"))))
+
+    async def test_a_relationship_past_three_hops_is_traced(self):
+        """events → orders → revenue, a → b → c → a, d1 → {d2, d3} → d4: fed by
+        a topic within five hops; fed, two to five hops back, by what is
+        itself fed — in the cycle only (events and d1 are fed by nothing)."""
+        page, _ = await _service(_graph()).search(_query(AND(
+            rel("upstream", TYPE("topic"), maxHops=5))))
+        assert sorted(h.node.urn for h in page.hits) == ["orders", "revenue"]
+        page, _ = await _service(_graph()).search(_query(AND(
+            rel("upstream", rel("upstream"), minHops=2, maxHops=5))))
+        assert sorted(h.node.urn for h in page.hits) == ["a", "b", "c"]
+
+
+# ---------------------------------------------------------------------------
+# Edge types: named in any case, every link, every edge
+# ---------------------------------------------------------------------------
+
+#: A data source's edge types, each one's upper case → its spellings there:
+#: the graph keeps ``produces`` in lower case beside the declared PRODUCES.
+SPELLINGS = {"AGGREGATED": ["AGGREGATED"], "CONTAINS": ["CONTAINS"], "FLOWS_TO": ["FLOWS_TO"],
+             "PRODUCES": ["PRODUCES", "produces"], "TAGGED_WITH": ["TAGGED_WITH"]}
+
+
+def _spelled() -> _Compiler:
+    return _compiler(edge_type_spellings=SPELLINGS)
+
+
+def _tagged() -> StubDeepSearchProvider:
+    """job → orders → revenue (lineage); orders and revenue tagged PII;
+    job contains a step; ``lonely`` has no edges at all."""
+    nodes = [("job", "dataJob"), ("step", "task"), ("orders", "dataset"),
+             ("revenue", "dashboard"), ("pii", "tag"), ("lonely", "dataset")]
+    edges = [("job", "orders", "produces"), ("orders", "revenue", "FLOWS_TO"),
+             ("orders", "pii", "TAGGED_WITH"), ("revenue", "pii", "TAGGED_WITH"),
+             ("job", "step", "CONTAINS")]
+    return StubDeepSearchProvider(
+        nodes=[{"urn": u, "entityType": t, "displayName": u} for u, t in nodes],
+        edges=[{"source": s, "target": t, "type": k} for s, t, k in edges],
+        lineage_edge_types=["produces", "FLOWS_TO"])
+
+
+async def _tagged_matching(raw) -> list:
+    stub = _tagged()
+    answer = await stub.deep_search_membership(
+        SimpleNamespace(root_urns=None, entity_types=None), [("q", P(raw))],
+        [n["urn"] for n in stub._nodes])
+    return sorted(answer["matches"]["q"])
+
+
+class TestEdgeTypes:
+    def test_a_named_type_is_read_whatever_its_case(self):
+        c = _spelled()
+        c.compile(P(rel("downstream", TYPE("dataset"), edgeTypes=["Produces"])))
+        assert "(n)-[:PRODUCES|produces]->(_xr0)" in c.tail[0]
+        assert _spelled().compile(P({"kind": "isLeaf", "edgeTypes": ["tagged_with"]})) == (
+            "NOT (n)-[:TAGGED_WITH]->()")
+
+    def test_a_type_the_data_source_lacks_is_refused_naming_the_nearest(self):
+        with pytest.raises(CompileError, match="Edge type 'PRODUCE' isn't in this data source "
+                                               "— did you mean PRODUCES"):
+            _spelled().compile(P(rel("downstream", edgeTypes=["PRODUCE"])))
+        with pytest.raises(CompileError, match="Edge type 'qqq' isn't in this data source$"):
+            _spelled().compile(P({"kind": "hasIncoming", "edgeTypes": ["qqq"]}))
+
+    def test_a_relationship_never_walks_containment_as_a_link(self):
+        with pytest.raises(CompileError, match="contains is a containment edge — follow it "
+                                               "with Contains or Is inside"):
+            _spelled().compile(P(rel("upstream", edgeTypes=["contains"])))
+        # Counting its edges is another matter: more than five children.
+        c = _spelled()
+        c.compile(P({"kind": "degree", "direction": "out", "op": "gt", "value": 5,
+                     "edgeTypes": ["contains"]}))
+        assert c.tail == ["size([(n)-[:CONTAINS]->(_xo0) | 1]) > $p1"]
+
+    def test_links_are_every_type_but_containment(self):
+        assert _spelled().compile(P({"kind": "isOrphan", "edgeClass": "links"})) == (
+            "(NOT (n)<-[:AGGREGATED|FLOWS_TO|PRODUCES|TAGGED_WITH|produces]-() AND "
+            "NOT (n)-[:AGGREGATED|FLOWS_TO|PRODUCES|TAGGED_WITH|produces]->())")
+
+    def test_a_relationship_through_every_link_leaves_out_the_rollups(self):
+        c = _spelled()
+        c.compile(P(rel("neighbor", TYPE("tag"), edgeClass="links")))
+        assert "(n)-[:FLOWS_TO|PRODUCES|TAGGED_WITH|produces]-(_xr0)" in c.tail[0]
+
+    def test_any_is_every_edge_type(self):
+        assert _spelled().compile(P({"kind": "hasIncoming", "edgeClass": "any"})) == (
+            "(n)<-[:AGGREGATED|CONTAINS|FLOWS_TO|PRODUCES|TAGGED_WITH|produces]-()")
+        c = _spelled()
+        c.compile(P({"kind": "withinHops", "urns": ["u"], "hops": 2, "edgeClass": "any"}))
+        assert "TAGGED_WITH" in c.hoisted_within_hops[0]["edge_types"]
+
+    def test_every_link_counts_in_a_projection_too(self):
+        c = _spelled()
+        c.compile(P(rel("upstream", {"kind": "isRoot", "edgeClass": "links"})))
+        assert ("size([(_xr0)<-[:AGGREGATED|FLOWS_TO|PRODUCES|TAGGED_WITH|produces]-(_xd1) "
+                "| 1]) = $p2") in c.tail[0]
+
+    def test_every_link_needs_the_resolved_ontology(self):
+        for raw in ({"kind": "isRoot", "edgeClass": "links"}, rel("upstream", edgeClass="links")):
+            c = _Compiler()
+            with pytest.raises(CompileError, match="ontology resolution must complete"):
+                c.compile(P(raw))
+
+    def test_without_the_data_sources_types_names_are_taken_as_given(self):
+        c = _compiler()
+        c.compile(P(rel("downstream", edgeTypes=["Whatever"])))
+        assert "[:Whatever]" in c.tail[0]
+        # And any edge is what the ontology classifies.
+        assert _compiler().compile(P({"kind": "hasIncoming", "edgeClass": "any"})) == (
+            "(n)<-[:AGGREGATED|CONTAINS|FLOWS_TO]-()")
+
+    def test_the_provider_spells_every_type_it_has(self):
+        """What the ontology declares, what the graph holds, each in every
+        spelling the graph has it in."""
+        from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+        provider = FalkorDBProvider(host="localhost", port=1, graph_name="x", auth_enabled=False)
+        provider.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+        provider.set_resolved_edge_metadata({"PRODUCES": {}, "TAGGED_WITH": {}, "FLOWS_TO": {}},
+                                            ["FLOWS_TO", "PRODUCES"])
+        provider._observed_rel_types = {"produces", "FLOWS_TO", "Custom", "CONTAINS"}
+        c = _build_compiler_for_provider(provider)
+        assert c._edge_type_spellings == {
+            "CONTAINS": ["CONTAINS"], "CUSTOM": ["CUSTOM", "Custom"], "FLOWS_TO": ["FLOWS_TO"],
+            "PRODUCES": ["PRODUCES", "produces"], "TAGGED_WITH": ["TAGGED_WITH"]}
+        # Before the ontology is resolved, nothing is known to refuse a name by.
+        bare = FalkorDBProvider(host="localhost", port=1, graph_name="y", auth_enabled=False)
+        assert _build_compiler_for_provider(bare)._edge_type_spellings is None
+
+    def test_a_walk_over_every_link_runs_after_a_lineage_one(self):
+        c = _spelled()
+        c.compile(P(AND(rel("neighbor", TYPE("tag"), edgeClass="links"),
+                        rel("neighbor", TYPE("dataset")))))
+        assert "[:FLOWS_TO]-(" in c.tail[0] and "TAGGED_WITH" in c.tail[1]
+
+    async def test_the_reference_reads_names_and_classes_alike(self):
+        assert await _tagged_matching(rel("downstream", TYPE("dataset"),
+                                          edgeTypes=["PRODUCES"])) == ["job"]
+        assert await _tagged_matching(rel("neighbor", TYPE("tag"))) == []
+        assert await _tagged_matching(rel("neighbor", TYPE("tag"), edgeClass="links")) == [
+            "orders", "revenue"]
+        assert await _tagged_matching({"kind": "isOrphan"}) == ["lonely", "pii", "step"]
+        assert await _tagged_matching({"kind": "isOrphan", "edgeClass": "links"}) == [
+            "lonely", "step"]
+        assert await _tagged_matching({"kind": "isOrphan", "edgeClass": "any"}) == ["lonely"]
+        assert await _tagged_matching({"kind": "degree", "direction": "out", "op": "gte",
+                                       "value": 2, "edgeClass": "any"}) == ["job", "orders"]
