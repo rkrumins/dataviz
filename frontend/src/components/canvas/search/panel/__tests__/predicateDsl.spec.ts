@@ -924,6 +924,17 @@ describe('predicateDsl — what an editor reads off a parse', () => {
             predicate: null, error: 'Close the name with ": @"…"', errorAt: { from: 9, to: 20 } })
     })
 
+    it('notes where each condition and group sits, nested ones included', () => {
+        const text = 'NOT tag:PII OR (type:x feeds(owner IS SET))'
+        const spans = parsePredicate(text).spans.map((s) => text.slice(s.from, s.to))
+        expect(new Set(spans)).toEqual(new Set([
+            'tag:PII', 'NOT tag:PII', 'type:x', 'owner IS SET', 'feeds(owner IS SET)',
+            'type:x feeds(owner IS SET)', '(type:x feeds(owner IS SET))', text,
+        ]))
+        // Those read before an error are kept.
+        expect(parsePredicate('tag:PII AND (').spans).toEqual([{ from: 0, to: 7 }])
+    })
+
     it('reads a comma list inside prefix:value as one condition', () => {
         expect(parsePredicate('tag:PII,GDPR type:dataset,schemaField').predicate).toEqual({
             kind: 'group', op: 'and', children: [

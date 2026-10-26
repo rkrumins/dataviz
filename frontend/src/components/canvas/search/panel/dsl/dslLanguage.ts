@@ -10,6 +10,8 @@
  *                  edge types inside ``outgoing[``, and words and
  *                  relationships to start a condition with
  *   warnings       an edge type this data source doesn't have
+ *   selecting      a whole condition: from the word that starts it, or
+ *                  out from the cursor, a group at a time
  *
  * Every list the completion offers is the view's own (discovery, or a
  * server search for names and values), so nothing is guessed or loaded whole.
@@ -28,7 +30,7 @@ import type { NodeRef } from '@/types/search'
 
 import type { RoleRange } from '../../editor/codeMirrorBase'
 import type { NamedEntity } from '../entityNames'
-import { type DslToken, parsePredicate } from '../predicateDsl'
+import { type DslRole, type DslSpan, type DslToken, parsePredicate } from '../predicateDsl'
 import { formatNamePath } from '../relations'
 import { EDGE_SET_OPTIONS } from '../vocabulary/edgeWords'
 
@@ -119,6 +121,47 @@ function unknownEdgeTypes(tokens: readonly DslToken[], edgeTypes: readonly { id:
 /** The underline and the warnings, ``vocabulary()`` read at each pass. */
 export function dslLint(vocabulary: () => DslVocabulary) {
     return linter((view) => dslDiagnostics(view.state.doc.toString(), vocabulary().edgeTypes), { delay: 200 })
+}
+
+
+// ---------------------------------------------------------------------------
+// Selecting a condition
+// ---------------------------------------------------------------------------
+
+/** The parts a condition starts with (or, for AND/OR, joins with). */
+const HEAD_ROLES: ReadonlySet<DslRole> = new Set(['keyword', 'function', 'field'])
+
+/** The smallest of ``spans`` holding ``from``–``to`` and wider than it,
+ *  or as wide when ``orEqual``. */
+function smallestAround(spans: readonly DslSpan[], from: number, to: number, orEqual = false): DslSpan | null {
+    let best: DslSpan | null = null
+    for (const s of spans) {
+        const wider = s.to - s.from > to - from
+        if (s.from > from || s.to < to || !(wider || orEqual)) continue
+        if (!best || s.to - s.from < best.to - best.from) best = s
+    }
+    return best
+}
+
+/** The whole condition a double-click at ``pos`` selects: when ``pos`` is
+ *  on the word that starts it — ``tag`` in ``tag:PII``, ``outgoing[…](``,
+ *  ``NOT``, a property's name — or on an AND/OR, which takes in its group.
+ *  ``null`` on any other word, which selects as a word does. */
+export function conditionAtHead(text: string, pos: number): DslSpan | null {
+    const { tokens, spans } = parsePredicate(text)
+    const t = tokens.find((x) => x.from <= pos && pos < x.to)
+        ?? tokens.find((x) => x.to === pos)
+    if (!t) return null
+    const colon = t.role === 'prefixed' ? t.text.indexOf(':') : -1
+    const onPrefix = colon > 0 && pos <= t.from + colon
+    if (!HEAD_ROLES.has(t.role) && !onPrefix) return null
+    return smallestAround(spans, t.from, t.to, true)
+}
+
+/** The next condition or group out from ``from``–``to``; ``null`` when
+ *  none is wider. */
+export function widerCondition(text: string, from: number, to: number): DslSpan | null {
+    return smallestAround(parsePredicate(text).spans, from, to)
 }
 
 

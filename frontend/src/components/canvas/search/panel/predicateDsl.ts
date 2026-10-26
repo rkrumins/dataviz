@@ -168,6 +168,10 @@ export interface ParseResult {
     /** Every token, in order, with the part it played — what an editor
      *  highlights, so its colours always agree with what is parsed. */
     tokens: DslToken[]
+    /** Where each condition and group sits, nested ones included — what an
+     *  editor selects when asked for a whole condition. Those read before
+     *  an error are kept. */
+    spans: DslSpan[]
 }
 
 /** The part a token plays: ``prefixed`` is ``key:value`` in one token. */
@@ -183,13 +187,20 @@ export interface DslToken {
     text: string
 }
 
+/** A condition or a group of them, as character offsets. */
+export interface DslSpan {
+    from: number
+    to: number
+}
+
 
 export function parsePredicate(input: string): ParseResult {
     const tokens = lex(input)
     const recognized: string[] = []
     const fallbackText: string[] = []
+    let spans: DslSpan[] = []
     const result = (rest: Pick<ParseResult, 'predicate' | 'error' | 'errorAt'>): ParseResult => ({
-        ...rest, recognized, fallbackText, tokens: tokens.map(publicToken),
+        ...rest, recognized, fallbackText, tokens: tokens.map(publicToken), spans,
     })
     if (tokens.length === 0) return result({ predicate: null })
     const unclosed = tokens.find((t) => t.unclosed)
@@ -205,6 +216,7 @@ export function parsePredicate(input: string): ParseResult {
         })
     }
     const p = new Parser(tokens, recognized, fallbackText, input.length)
+    spans = p.spans
     try {
         const pred = p.parseExpr()
         if (p.pos < tokens.length) {
@@ -850,6 +862,8 @@ function jsonEnd(input: string, start: number): number {
 
 class Parser {
     pos = 0
+    /** Where each condition and group read so far sits. */
+    readonly spans: DslSpan[] = []
     constructor(
         readonly tokens: Token[],
         readonly recognized: string[],
@@ -887,11 +901,17 @@ class Parser {
         }
     }
 
+    /** Note the source range of the tokens read since ``start``. */
+    noteSpan(start: number): void {
+        if (this.pos > start) this.spans.push({ from: this.tokens[start].from, to: this.tokens[this.pos - 1].to })
+    }
+
     parseExpr(): Predicate {
         return this.parseOr()
     }
 
     parseOr(): Predicate {
+        const start = this.pos
         const left = this.parseAnd()
         const parts: Predicate[] = [left]
         while (this.peek()?.kind === TokenKind.OrKw) {
@@ -899,10 +919,12 @@ class Parser {
             parts.push(this.parseAnd())
         }
         if (parts.length === 1) return parts[0]
+        this.noteSpan(start)
         return { kind: 'group', op: 'or', children: parts }
     }
 
     parseAnd(): Predicate {
+        const start = this.pos
         const left = this.parseNot()
         const parts: Predicate[] = [left]
         while (true) {
@@ -927,14 +949,17 @@ class Parser {
             parts.push(next)
         }
         if (parts.length === 1) return parts[0]
+        this.noteSpan(start)
         return { kind: 'group', op: 'and', children: parts }
     }
 
     parseNot(): Predicate {
         const t = this.peek()
         if (t?.kind === TokenKind.NotKw) {
+            const start = this.pos
             this.consume()
             const inner = this.parseNot()
+            this.noteSpan(start)
             return { kind: 'group', op: 'not', children: [inner] }
         }
         return this.parseAtom()
@@ -957,6 +982,7 @@ class Parser {
     parseAtom(): Predicate {
         const t = this.peek()
         if (!t) this.fail('The query ends too soon: a condition should follow', null)
+        const start = this.pos
         if (t.kind === TokenKind.LParen) {
             this.consume()
             const inner = this.parseExpr()
@@ -965,10 +991,13 @@ class Parser {
                 this.fail('Missing ")" to close this "("', t)
             }
             this.consume()
+            this.noteSpan(start)
             return inner
         }
         // Predicate token — may consume up to 3 tokens (e.g. `name CONTAINS x`).
-        return this.parsePredicateToken()
+        const atom = this.parsePredicateToken()
+        this.noteSpan(start)
+        return atom
     }
 
     parsePredicateToken(): Predicate {

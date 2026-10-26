@@ -57,6 +57,10 @@ const press = (key: string, mod = false) => act(() => {
     fireEvent.keyDown(content(), { key, ...(mod ? { ctrlKey: true } : {}) })
 })
 const askFromTheCanvas = () => fireEvent.click(screen.getByRole('button', { name: 'Ask from the canvas' }))
+const selected = () => {
+    const { from, to } = editor().state.selection.main
+    return text().slice(from, to)
+}
 
 
 describe('Code mode', () => {
@@ -150,6 +154,22 @@ describe('Code mode', () => {
         expect(text()).toBe('noIncoming[DEFINED_BY]')
         expect(screen.getByRole('status')).toHaveTextContent('Reads as:')
         expect(screen.getByRole('status')).toHaveTextContent(/no incoming Defined by edges/i)
+    })
+
+    it('selects the filter around the cursor with ⌘I, then its group, then everything', () => {
+        render(<Panel initial={null} onCommit={vi.fn()} />)
+        type('type:dataset AND (tag:PII OR owner IS SET)')
+        act(() => { editor().dispatch({ selection: { anchor: text().indexOf('PII') + 1 } }) })
+        press('i', true)
+        expect(selected()).toBe('tag:PII')
+        press('i', true)
+        expect(selected()).toBe('tag:PII OR owner IS SET')
+        press('i', true)
+        press('i', true)
+        expect(selected()).toBe(text())
+        // Nothing wider: the whole query stays selected.
+        press('i', true)
+        expect(selected()).toBe(text())
     })
 
     it('points at Cypher for what the words can’t say', () => {
