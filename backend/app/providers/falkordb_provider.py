@@ -52,6 +52,7 @@ from ..models.graph import (
 from backend.common.models.graph import TraceClosureResult, TraceFrontierNode
 from .base import GraphDataProvider
 from .index_policy import edge_index_ddl
+from backend.app.services.native_query.parse_cost import MAX_PARSE_COST, parse_cost
 from backend.common.interfaces.provider import ProviderConfigurationError
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
 from backend.common.property_patch import apply_properties_patch
@@ -2183,6 +2184,19 @@ _IDENTITY_STAMP_PAUSE_MAX_S = 2.0
 """Ceiling on one such gap, so a single slow chunk cannot stall the pass."""
 
 _INDEX_MARKER_TTL_S = int(os.getenv("FALKORDB_INDEX_MARKER_TTL_S", str(24 * 3600)))
+
+
+def _refuse_slow_parse(cypher: str) -> None:
+    """Refuse a statement FalkorDB would take too long just to parse
+    (``native_query.parse_cost``): no timeout bounds that time, and the thread
+    parsing serves no one else meanwhile. What the provider writes itself never
+    comes near; a search nested past what its compiler keeps linear could."""
+    if parse_cost(cypher) > MAX_PARSE_COST:
+        from backend.app.services.deep_search import CompileError
+
+        raise CompileError(
+            "This search nests too deeply for the graph database to read it quickly. Take out "
+            "a level of nesting — a group or a NOT inside another — and try again.")
 
 #: How long ONE node-level refusal silences the whole index set — for every
 #: reader, on every pod, because it is written where they all look.
@@ -4799,6 +4813,7 @@ class FalkorDBProvider(GraphDataProvider):
         # where the lock makes the window binding.
         """One read: on a replica when the router allows it, otherwise on the
         master — and on the master once more if the replica let us down."""
+        _refuse_slow_parse(cypher)
         replica = None
         try:
             # The master is a candidate here, not only a fallback: on one
