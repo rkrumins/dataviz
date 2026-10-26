@@ -95,7 +95,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/services/INSIGHTS.md"
   },
   "services-search": {
-    "updated": "2026-10-24",
+    "updated": "2026-10-25",
     "path": "docs/services/SEARCH.md"
   },
   "services-context-engine": {
@@ -103,7 +103,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/services/CONTEXT_ENGINE.md"
   },
   "services-assignments": {
-    "updated": "2026-10-04",
+    "updated": "2026-10-25",
     "path": "docs/services/ASSIGNMENTS.md"
   },
   "feature-aggregation-reconciliation": {
@@ -194,6 +194,10 @@ export const docMeta: Record<string, DocMeta> = {
     "updated": "2026-10-26",
     "path": "docs/RBAC.md"
   },
+  "native-queries": {
+    "updated": "2026-10-25",
+    "path": "docs/NATIVE_QUERIES.md"
+  },
   "sso": {
     "updated": "2026-10-14",
     "path": "docs/SSO.md"
@@ -273,10 +277,6 @@ export const docMeta: Record<string, DocMeta> = {
   "read-path-performance": {
     "updated": "2026-10-10",
     "path": "docs/read-path-performance/README.md"
-  },
-  "native-queries": {
-    "updated": "2026-10-24",
-    "path": "docs/NATIVE_QUERIES.md"
   }
 }
 export const guideMeta: Record<string, DocMeta> = {
@@ -329,7 +329,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/MANAGING_VIEWS.md"
   },
   "display-rules": {
-    "updated": "2026-10-10",
+    "updated": "2026-10-23",
     "path": "docs/guide/DISPLAY_RULES.md"
   },
   "semantic-layer": {
