@@ -22,3 +22,28 @@ export function anchorInView(anchor: Element): boolean {
     }
     return true
 }
+
+
+/**
+ * followAnchor — keeps an open menu on its anchor. `place` runs now, on
+ * every scroll and resize, and on every frame: an anchor inside a popover
+ * (a filter's editor, a sentence token's) moves when that popover is
+ * placed, grows or follows a scroll, with no event of its own. Measured on
+ * scroll alone, a menu stayed where the popover had been — once, in the
+ * window's corner, before the popover was placed. `place` keeps its state
+ * when nothing moved. Returns the cleanup.
+ */
+export function followAnchor(place: () => void): () => void {
+    place()
+    let frame = requestAnimationFrame(function tick() {
+        place()
+        frame = requestAnimationFrame(tick)
+    })
+    window.addEventListener('resize', place)
+    window.addEventListener('scroll', place, true)
+    return () => {
+        cancelAnimationFrame(frame)
+        window.removeEventListener('resize', place)
+        window.removeEventListener('scroll', place, true)
+    }
+}

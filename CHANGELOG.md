@@ -56,6 +56,9 @@ every engine and checks them against the reference semantics; the guide has the 
 - An edge type named `LINEAGE`, `LINKS`, `ANY` or `CONTAINMENT` couldn't be named in Code mode: the
   word was read as the class. Quote it — `outgoing["LINEAGE"](…)` — as completion and the printer now
   do.
+- A list in a filter's editor — the types, tags or values to pick — opened in the window's top-left
+  corner, over the app's header, and after a scroll stayed where the editor had been. It opens on its
+  field now, below it while five rows fit there (not over the editor's own controls), and follows it.
 - Code mode's selection was invisible: its colour wasn't a valid CSS value.
 - The Property Manager's coachmark showed through Search Studio.
 - The **Group as AND / OR** bar sat off-centre.

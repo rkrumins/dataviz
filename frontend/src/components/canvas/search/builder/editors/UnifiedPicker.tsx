@@ -46,7 +46,7 @@ import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
 
-import { anchorInView } from '../../panel/anchorInView'
+import { anchorInView, followAnchor } from '../../panel/anchorInView'
 
 import { fieldClass } from './shared'
 
@@ -136,6 +136,11 @@ export type UnifiedPickerProps = SingleProps | MultiProps
 // Component
 // ---------------------------------------------------------------------------
 
+/** The open list at its tallest (``max-h-72``), and the least room — five
+ *  rows — it opens below its field with before it goes above instead. */
+const LIST_MAX_H = 288
+const LIST_MIN_H = 180
+
 export function UnifiedPicker(props: UnifiedPickerProps) {
     const {
         options,
@@ -168,7 +173,7 @@ export function UnifiedPicker(props: UnifiedPickerProps) {
     const portalRef = useRef<HTMLDivElement>(null)
     const listboxId = useId()
     const [portalCoords, setPortalCoords] = useState<{
-        top: number; left: number; width: number; flipped: boolean
+        top: number; left: number; width: number; flipped: boolean; maxHeight: number
     } | null>(null)
 
     // Measure + reposition the portal dropdown so it stays anchored to
@@ -183,20 +188,20 @@ export function UnifiedPicker(props: UnifiedPickerProps) {
             const viewportW = window.innerWidth
             const viewportH = window.innerHeight
             const width = Math.max(r.width, 240)
-            const desiredH = 320
-            const spaceBelow = viewportH - r.bottom
-            const flipped = spaceBelow < desiredH && r.top > spaceBelow
+            // Below the field while five rows fit there, as short as the
+            // room it has: above, it covers what sits over the field — in
+            // a filter's editor, the editor's own controls.
+            const below = viewportH - r.bottom - 8
+            const above = r.top - 8
+            const flipped = below < LIST_MIN_H && above > below
+            const maxHeight = Math.min(LIST_MAX_H, flipped ? above : below)
             const top = flipped ? r.top - 4 : r.bottom + 4
             const left = Math.min(r.left, viewportW - width - 8)
-            setPortalCoords({ top, left, width, flipped })
+            setPortalCoords((prev) => prev && prev.top === top && prev.left === left && prev.width === width
+                && prev.flipped === flipped && prev.maxHeight === maxHeight
+                ? prev : { top, left, width, flipped, maxHeight })
         }
-        update()
-        window.addEventListener('resize', update)
-        window.addEventListener('scroll', update, true)
-        return () => {
-            window.removeEventListener('resize', update)
-            window.removeEventListener('scroll', update, true)
-        }
+        return followAnchor(update)
     }, [portal, open])
 
     const isMultiple = props.multiple === true
@@ -517,7 +522,7 @@ interface DropdownProps {
     open: boolean
     portal: boolean
     portalCoords: {
-        top: number; left: number; width: number; flipped: boolean
+        top: number; left: number; width: number; flipped: boolean; maxHeight: number
     } | null
     portalRef: React.RefObject<HTMLDivElement | null>
     listboxId: string
@@ -559,6 +564,7 @@ function UnifiedPickerDropdown({
                     : undefined,
                 left: portalCoords.left,
                 width: portalCoords.width,
+                maxHeight: portalCoords.maxHeight,
                 zIndex: 9999,
             } as CSSProperties : undefined}
             className={cn(
