@@ -9,13 +9,17 @@
  * drops straight into the editor — fully editable — and the user just
  * adds a name / colour / icon and hits Create.
  *
+ * ``CreateRuleFromQuery`` does the same for a query from the library —
+ * this view's, another view's or the user's own — with the view's types
+ * and layers looked up as the query card has them.
+ *
  * Rendered via ``createPortal`` (mirrors SaveQueryDialog) so the
  * ``fixed inset-0`` overlay escapes the search panel's framer-motion
  * transform and resolves to the viewport.
  */
 import { motion } from 'framer-motion'
 import { Tags, X } from 'lucide-react'
-import { type FC, useCallback } from 'react'
+import { type FC, useCallback, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 
 import { useAppNotifications } from '@/components/ui/notifications'
@@ -23,15 +27,22 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { DisplayRuleEditor } from '@/components/canvas/property-manager/DisplayRuleEditor'
 import { cn } from '@/lib/utils'
 import { useDisplayRules } from '@/store/referenceModelStore'
+import { useSchemaStore } from '@/store/schema'
 import { useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { DisplayRuleConfig } from '@/types/schema'
 import type { Predicate } from '@/types/search'
+
+import { useDiscovery } from '../builder/useDiscovery'
+
+import { useViewLayerOptions } from './layerOptions'
 
 
 export interface CreateRuleModalProps {
     viewId: string
     /** The query to seed the rule's criteria with. */
     seedPredicate: Predicate
+    /** A name to start from — the saved query's. */
+    seedName?: string
     knownEntityTypes: string[]
     knownLayers: string[]
     onClose: () => void
@@ -39,7 +50,7 @@ export interface CreateRuleModalProps {
 
 
 export const CreateRuleModal: FC<CreateRuleModalProps> = ({
-    viewId, seedPredicate, knownEntityTypes, knownLayers, onClose,
+    viewId, seedPredicate, seedName = '', knownEntityTypes, knownLayers, onClose,
 }) => {
     const rules = useDisplayRules()
     const saveRule = useViewLibraryStore((s) => s.saveRule)
@@ -60,7 +71,7 @@ export const CreateRuleModal: FC<CreateRuleModalProps> = ({
     // rule. The editor mints a real id on save via its own logic.
     const seed: DisplayRuleConfig = {
         id: '',
-        name: '',
+        name: seedName,
         color: '#6366f1',
         predicate: seedPredicate,
         enabled: true,
@@ -143,5 +154,24 @@ export const CreateRuleModal: FC<CreateRuleModalProps> = ({
         </div>
         </>,
         document.body,
+    )
+}
+
+
+/** The rule modal for a query from the library: the view's own types and
+ *  layers, as the query card hands it its own. */
+export const CreateRuleFromQuery: FC<{
+    viewId: string
+    predicate: Predicate
+    name: string
+    onClose: () => void
+}> = ({ viewId, predicate, name, onClose }) => {
+    const discovery = useDiscovery(viewId)
+    const layers = useViewLayerOptions(discovery.getValueSamples)
+    const schema = useSchemaStore((s) => s.schema)
+    const types = useMemo(() => schema?.entityTypes?.map((t) => t.id) ?? [], [schema])
+    return (
+        <CreateRuleModal viewId={viewId} seedPredicate={predicate} seedName={name}
+                         knownEntityTypes={types} knownLayers={layers.map((o) => o.label)} onClose={onClose} />
     )
 }

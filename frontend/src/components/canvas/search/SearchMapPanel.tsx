@@ -46,6 +46,7 @@ import {
 } from 'react'
 
 import { IconButton } from '@/components/ui/Button'
+import { useAppNotifications } from '@/components/ui/notifications'
 import { Segmented } from '@/components/ui/Segmented'
 import { cn } from '@/lib/utils'
 import { rememberUrnLabels } from '@/lib/urnLabels'
@@ -72,6 +73,7 @@ import type { SavedViewQuery } from '@/services/viewLibraryService'
 import type { AncestorRef, Predicate } from '@/types/search'
 
 import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
+import { CreateRuleFromQuery } from './panel/CreateRuleModal'
 import { ExportMatchesDialog } from './panel/ExportMatchesDialog'
 import { LibraryPopover } from './panel/LibraryPopover'
 import { MatchBar } from './panel/MatchBar'
@@ -406,15 +408,31 @@ function PanelInner({
         }
     }, [handleRefine, commitDraft, viewSession, editorMode, setEditorMode])
 
+    // A query from the library runs as it loads, as a recipe does — the
+    // builder may be folded away, with nothing on screen to run it.
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
-        commitDraft(entry.predicate)
+        handleRefine(entry.predicate)
         setLibraryOpen(false)
-    }, [commitDraft])
+    }, [handleRefine])
 
     const handleLoadSaved = useCallback((query: SavedViewQuery) => {
-        commitDraft(query.predicate)
+        handleRefine(query.predicate)
         setLibraryOpen(false)
-    }, [commitDraft])
+    }, [handleRefine])
+
+    // A display rule made of a saved query: its finished conditions, under
+    // its name, in the rule editor — which says before saving if the
+    // query is one a rule can't be (a path, a long lineage walk…).
+    const { notify } = useAppNotifications()
+    const [ruleSeed, setRuleSeed] = useState<{ predicate: Predicate; name: string } | null>(null)
+    const handleMakeRule = useCallback((predicate: Predicate, name: string) => {
+        const runnable = buildRunnablePredicate(predicate)
+        if (!runnable) {
+            notify('warning', `“${name}” has no finished filter to tag entities by yet.`)
+            return
+        }
+        setRuleSeed({ predicate: runnable.predicate, name })
+    }, [notify])
 
     /**
      * "Search inside this group" — the result-pane action that used to
@@ -667,6 +685,7 @@ function PanelInner({
                 onRemoveRecent={removeRecent}
                 onSaveAs={setSaveTarget}
                 onLoadSaved={handleLoadSaved}
+                onMakeRule={handleMakeRule}
                 activeDraft={Boolean(draftPredicate)}
             >
                 <div>
@@ -709,6 +728,11 @@ function PanelInner({
                         setSaveTarget(null)
                     }}
                 />
+            )}
+
+            {ruleSeed && (
+                <CreateRuleFromQuery viewId={viewId} predicate={ruleSeed.predicate} name={ruleSeed.name}
+                                     onClose={() => setRuleSeed(null)} />
             )}
 
             {advancedOpen ? (
