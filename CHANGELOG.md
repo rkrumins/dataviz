@@ -9,7 +9,7 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
-## [Unreleased] — Service accounts: self-service, from workspace access to creation
+## [Unreleased] — Service accounts: self-service, from workspace access to reading every workspace
 
 ### Added
 
@@ -51,6 +51,13 @@ limitations** — a changelog that only lists good news is not worth reading.
   **Account → API keys → Service accounts you manage**, managed by them or a team they're in; it
   reaches nothing until a workspace gives it a role. Changing the policy is recorded in the
   activity log. See ADR-029.
+- **A service account can read every workspace**, for an integration that reads across the whole
+  organization: an org admin or a super admin chooses **Let it read every workspace…** on its
+  page. Its keys then read every workspace's views, data sources, semantic layers, catalog and
+  providers — those created later too — as far as each key reaches, and change nothing. Its
+  managers can take that away. It is the new platform role **Org reader** (`org_reader`), which
+  carries `system:org-viewer` alone; of any platform role, a service account keeps only that.
+  Appointing a manager counts it, as it counts the account's roles. See ADR-030.
 
 ### Changed
 
@@ -69,6 +76,8 @@ limitations** — a changelog that only lists good news is not worth reading.
   - `platform_settings.sa_who_may_create`, `sa_per_person_limit` and `sa_require_team_manager`
     (`20261026_1000_sa_policy`): who may create a service account. Unset, only the administrators
     of service accounts may, as before.
+- It also seeds the **Org reader** role (`20261026_1200_sa_org_read`), with its one grant,
+  `system:org-viewer`. Nobody holds it until an administrator gives it to a service account.
 
 ---
 

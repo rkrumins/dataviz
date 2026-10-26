@@ -907,6 +907,36 @@ Details: [Service Accounts](/guide/service-accounts#who-else-may-create-one).
 
 ---
 
+## ADR-030: A service account may read every workspace, and do nothing else across them
+
+**Status:** Accepted — extends [ADR-028](#adr-028-service-accounts-answer-to-their-managers).
+**Date:** 2026-10-26
+**Context:** A service account held only the roles each workspace gave it, and any platform role attached to one was dropped. An integration that reads across the whole tenancy — a catalogue export, a lineage crawler — needed a role in every workspace, and another each time a workspace was created. People have Org Auditor for this, but it also reads the audit log, every role binding and the analytics, which no integration needs.
+
+**Decision:**
+- **One platform role, `org_reader`.** It carries `system:org-viewer` alone: every workspace's views, data sources, semantic layers, catalog and providers, read only, in workspaces created later too. Fresh installs seed it; migration `20261026_1200_sa_org_read` adds it to an existing database.
+- **An allow-list, where there was a ban.** An account's claims keep, of whatever platform roles are attached to it, only the permissions in `SERVICE_ACCOUNT_GLOBAL_PERMISSIONS` (`backend/common/service_accounts.py`) — today `system:org-viewer` — as they keep no workspace permission that administers a workspace or lets people in.
+- **Who gives it, and who takes it away.** An administrator of service accounts who reads every workspace themselves — an org admin or a super admin — with `PUT /api/v1/admin/service-accounts/{id}/org-read`. Its managers can take it away, as can the administrators (`DELETE`). The activity log records both (`identity.service_account.org_read_granted` and `…org_read_revoked`).
+- **Appointing a manager counts it.** Whoever manages an account can act as it, so an appointment that would give someone read access to every workspace is refused unless they read every workspace already, or the appointer could give the account that access. The same applies to handing accounts over and to joining a team that manages them.
+- **Keys narrow it.** A key reaches other workspaces through it only as far as its own selection and profile allow, and only to read.
+
+**Reasoning:** Reading across the tenancy is the one cross-workspace need integrations commonly have. Administering across workspaces is not, and each workspace should go on deciding who changes its data. One permission on an allow-list keeps the fence explicit: widening it takes one entry, and an ADR saying why.
+
+**Trade-offs:**
+- (+) A tenancy-wide reader needs one grant rather than one per workspace, and it reaches new workspaces as they are created.
+- (+) No workspace's admins can grant it, so it stays the decision of the people who look after service accounts.
+- (-) Workspaces don't consent to it one by one — as they don't to an Org Auditor.
+- (-) A workspace's removal preview lists only the roles held in that workspace. Read access to every workspace is for the administrators of service accounts, or the account's managers, to take away.
+
+**Alternatives considered:**
+- Reusing `org_auditor` — rejected: it also reads the audit log, every binding and the analytics.
+- A role in each workspace — what was possible before. It misses every workspace created later.
+- Letting a workspace's admins grant it — rejected: it reaches workspaces they don't run.
+
+Details: [Service Accounts](/guide/service-accounts#reading-every-workspace).
+
+---
+
 ## Decision Summary
 
 | # | Decision | Status | Risk Level |
@@ -938,8 +968,9 @@ Details: [Service Accounts](/guide/service-accounts#who-else-may-create-one).
 | 025 | PostgreSQL-only management DB, schema owned by an upgrade job | Accepted | Low |
 | 026 | Property storage in a PostgreSQL side index | Accepted, partly built (slice A only) | Medium (not wired in) |
 | 027 | Personal API keys scoped per resource | Accepted (extended by ADR-028) | Medium (surface registry upkeep) |
-| 028 | Service accounts answer to their managers | Accepted (extended by ADR-029) | Medium (team membership is part of an account's security) |
+| 028 | Service accounts answer to their managers | Accepted (extended by ADR-029 and ADR-030) | Medium (team membership is part of an account's security) |
 | 029 | Who may create a service account is a policy, shipped closed | Accepted | Low |
+| 030 | A service account may read every workspace, and do nothing else across them | Accepted | Medium (reach across every workspace) |
 
 ---
 

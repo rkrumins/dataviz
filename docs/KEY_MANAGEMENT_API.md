@@ -270,6 +270,8 @@ are under `/api/v1/admin/service-accounts`:
 | `PUT`, `DELETE /{id}/managers/{users\|groups}/{subject_id}` | Managers, administrators | Appoint or remove a manager. Its managers can't remove the last one: `409` |
 | `POST /{id}/roles` | Administrators | Give it a workspace role: `{workspaceId, role}`, and `expiresAt` to end it then |
 | `DELETE /{id}/roles/{binding_id}` | Managers, administrators | Take a role away |
+| `PUT /{id}/org-read` | Administrators who read every workspace | Let it read every workspace, those created later too, as far as each key reaches (the `org_reader` role). Its detail then says `orgRead: {grantedAt}`; giving it again changes nothing |
+| `DELETE /{id}/org-read` | Managers, administrators | Stop it reading every workspace. Its roles in workspaces stay |
 | `POST /hand-over` | Administrators | Move a person's manager seats to a successor: `{fromUserId, to: {type, id}}`, and `accountIds` to move only some |
 
 To anyone else the account doesn't exist: `404`, and so is a purged one. Someone who can see it but
@@ -278,7 +280,8 @@ is restoring one that isn't deleted.
 They answer `409` for a manager who isn't an active person or is a break-glass account, `422` for a
 role that administers a workspace or lets people in, and `403` when you couldn't grant that role
 yourself — or, appointing a manager or adding someone to a team that manages the account, when they
-would gain one of its roles that you couldn't grant them: a manager can do whatever the account can.
+would gain one of its roles that you couldn't grant them, or its reading every workspace that you
+couldn't give it: a manager can do whatever the account can.
 The rules behind them: [Service Accounts](/guide/service-accounts).
 
 **A workspace's access** is given as a person's is, by its admins and stewards — on its members

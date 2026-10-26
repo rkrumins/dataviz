@@ -57,7 +57,8 @@ allow it — otherwise ask a super admin or an org admin (**Administration → S
 3. **Ask each workspace it works in for a role**, from its page: Workspace viewer to read,
    Workspace member or Data engineer to change data. Each workspace's admins and stewards answer,
    or add it themselves. A service account never holds a role that administers a workspace or
-   lets people in.
+   lets people in. One that reads across the whole organization can instead be let read every
+   workspace, by an org admin or a super admin.
 
 It then appears under **Account → API keys → Service accounts you manage**. What it is and who
 answers for it: [Service Accounts](/guide/service-accounts).

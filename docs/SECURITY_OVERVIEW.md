@@ -393,8 +393,10 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
 - **Service accounts.** A key can belong to a service account: a principal nobody signs in
   as, which every sign-in path refuses and no identity provider can link to. It holds only the
   workspace roles a workspace gives it — its admins and stewards, as they give a person, or an
-  administrator of service accounts — never a platform role, a team's roles, or one that
-  administers a workspace or lets people in. Its managers, people or members of managing teams,
+  administrator of service accounts — never a team's roles, or one that administers a workspace
+  or lets people in. Of a platform role it keeps only `system:org-viewer`: reading every
+  workspace, which only an administrator of service accounts who reads every workspace gives it
+  (`org_reader`, ADR-030). Its managers, people or members of managing teams,
   make its keys after the same step-up and are recorded as having made them. So can a holder of
   `system:users:manage` (a super admin) while their session is known to be alive, and the
   account's managers are told; `system:service-accounts:manage` alone makes no keys. Its

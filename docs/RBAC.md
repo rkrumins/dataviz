@@ -19,8 +19,8 @@ security picture, see the [Security Overview](/docs/security-overview).
 
 ## TL;DR
 
-* Eight built-in roles: three platform roles (`super_admin`, `org_admin`, `org_auditor`)
-  and five workspace roles. Any account without a platform role is in the default `user`
+* Nine built-in roles: four platform roles (`super_admin`, `org_admin`, `org_auditor`,
+  `org_reader`) and five workspace roles. Any account without a platform role is in the default `user`
   tier, which stores nothing and grants nothing.
 * Permissions are namespaced by category — `system:*` or `workspace:*`. The resolver only
   emits permissions whose category matches the binding's scope; cross-category ones are
@@ -38,6 +38,7 @@ security picture, see the [Security Overview](/docs/security-overview).
 | Super Admin | `super_admin` | Platform | Platform owner or SRE break-glass. Bind sparingly. |
 | Org Admin | `org_admin` | Platform | Org-wide operator who curates workspaces, but doesn't manage users or SSO. |
 | Org Auditor | `org_auditor` | Platform | Compliance or audit reviewer: sees every workspace, every binding and the activity log, and changes nothing. |
+| Org Reader | `org_reader` | Platform | A service account that reads across the whole tenancy: every workspace, read only, and nothing else. Only an administrator of service accounts who reads every workspace gives it. |
 | Workspace Admin | `workspace_admin` | A workspace | Workspace owner who manages its members and settings. |
 | Data Engineer | `workspace_data_engineer` | A workspace | Owns the data products in a workspace — data sources, views, semantic layers, catalog — without managing members or settings, or publishing views to everyone. |
 | Member | `workspace_member` | A workspace | Standard contributor: edits views and manages data sources. |
@@ -48,7 +49,7 @@ security picture, see the [Security Overview](/docs/security-overview).
 platform role: no platform permissions, and no workspace access until a workspace binding
 grants it.
 
-All eight roles are stored once, at `scope_type='global'` with `scope_id=NULL`. The three
+All nine roles are stored once, at `scope_type='global'` with `scope_id=NULL`. The four
 platform roles are bound at global scope. The five workspace roles are templates you bind to a
 specific workspace (`scope_type='workspace'`, `scope_id=<workspace id>`); bound at global
 scope they grant nothing, because the resolver's category filter drops every `workspace:*`
@@ -63,6 +64,7 @@ Exactly what `ROLE_GRANTS` in `backend/app/config/rbac_seed.py` stores for each 
 | `super_admin` | 26 | `system:admin`, `system:analytics:read`, `system:sso:hosts:manage`, `system:audit:read`, `system:bindings:read`, `system:groups:manage`, `system:org-admin`, `system:org-viewer`, `system:service-accounts:manage`, `system:templates:manage`, `system:users:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
 | `org_admin` | 20 | `system:analytics:read`, `system:groups:manage`, `system:org-admin`, `system:service-accounts:manage`, `system:templates:manage`, `system:workspaces:create`, `workspace:admin`, `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:members:add`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:publish`, `workspace:view:read` |
 | `org_auditor` | 4 | `system:analytics:read`, `system:audit:read`, `system:bindings:read`, `system:org-viewer` |
+| `org_reader` | 1 | `system:org-viewer` |
 | `workspace_admin` | 1 | `workspace:admin` |
 | `workspace_data_engineer` | 11 | `workspace:catalog:manage`, `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:manage`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
 | `workspace_member` | 9 | `workspace:catalog:read`, `workspace:datasource:manage`, `workspace:datasource:read`, `workspace:ontology:read`, `workspace:provider:read`, `workspace:view:create`, `workspace:view:delete`, `workspace:view:edit`, `workspace:view:read` |
@@ -76,7 +78,7 @@ What a role can actually do differs from its stored grants in four places, all c
   reach a session. Their workspace powers come from the shortcuts: `system:admin` passes every
   check, and `system:org-admin` passes every workspace-scoped check in every workspace.
 * `org_auditor` reads every workspace through `system:org-viewer`, which passes any
-  workspace-scoped `:read` check.
+  workspace-scoped `:read` check. `org_reader` carries that alone, for a service account.
 * `workspace_admin` stores only `workspace:admin`, which the resolver expands to every
   `workspace:*` permission in that workspace.
 * `workspace_data_engineer` has neither `workspace:admin` nor `workspace:view:publish`, so it
@@ -97,7 +99,7 @@ shortcuts and `workspace:admin` reach further, as described above.
 | `system:bindings:read` | system | List role bindings and per-user effective access cross-workspace. | `super_admin`, `org_auditor` |
 | `system:groups:manage` | system | Create, edit, delete groups and manage their members. | `super_admin`, `org_admin` |
 | `system:org-admin` | system | Cross-workspace operator; implies every workspace permission. | `super_admin`, `org_admin` |
-| `system:org-viewer` | system | Read-only operator across every workspace in the tenancy. | `super_admin`, `org_auditor` |
+| `system:org-viewer` | system | Read-only operator across every workspace in the tenancy. | `super_admin`, `org_auditor`, `org_reader` |
 | `system:service-accounts:manage` | system | Create service accounts, choose who manages them, grant them workspace roles, and say who else may create one. | `super_admin`, `org_admin` |
 | `system:templates:manage` | system | Curate the organization's layout templates and the built-in ones. | `super_admin`, `org_admin` |
 | `system:users:manage` | system | Create, approve, suspend, and change roles for users. | `super_admin` |
@@ -519,8 +521,12 @@ one of its data sources is.
   registered it as one, which kept the owner's session index growing for as long as a key
   was busy.
 - **A service account's keys.** A service account (an id starting `svc_`) is resolved like a
-  person, but keeps only its direct workspace bindings: no groups and no global roles, so no
-  shortcut reaches its keys whatever a row says. It may hold any workspace role that neither
+  person, but keeps only its direct bindings, and no groups. Of a global role it keeps only
+  the permissions in `SERVICE_ACCOUNT_GLOBAL_PERMISSIONS` (`backend/common/service_accounts.py`)
+  — today `system:org-viewer`, which the `org_reader` role carries — so no shortcut but
+  reading every workspace reaches its keys, whatever a row says. An administrator of service
+  accounts who reads every workspace gives it that (`PUT
+  /api/v1/admin/service-accounts/{id}/org-read`), and its managers can take it away. It may hold any workspace role that neither
   administers the workspace nor lets people in, and what is requestable is applied again at
   resolution, so a role later widened to administer brings it none of that. Its managers make
   keys that act as it, whatever they can reach themselves, run the account itself, and ask
@@ -530,7 +536,8 @@ one of its data sources is.
   the account's access, so it may give the appointee only what they hold already or what the
   appointer could grant them: for each of the account's roles, the appointee holds every
   permission it gives the account there (a team, through its own roles), or the appointer could
-  grant it there. Whoever controls a managing team's membership controls that delegation too, so
+  grant it there; and if the account reads every workspace, the appointee does too, or the
+  appointer could give it that. Whoever controls a managing team's membership controls that delegation too, so
   adding someone to a team that manages a service account is held to the same rule on top of
   `system:groups:manage`, and an access-request approval never adds anyone to one. A holder of
   `system:users:manage` can make an account's keys without managing it, and its managers are
@@ -654,6 +661,7 @@ user's display role and resolved claims always agree. `PUT
 set — `user`, `org_auditor`, `org_admin` and `super_admin`
 (`GLOBAL_ASSIGNABLE_ROLES` in `backend/common/roles.py`). Assigning `user`
 clears the account's platform role and leaves its workspace bindings alone.
+`org_reader` isn't among them: it is given to a service account, on its own page.
 Workspace roles (`workspace_admin`, `workspace_data_engineer`,
 `workspace_member`, `workspace_viewer`) are bound through the workspace-members
 endpoint, which supplies the workspace context they need; binding them globally

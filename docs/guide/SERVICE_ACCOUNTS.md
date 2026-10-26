@@ -70,8 +70,10 @@ works in, [as a person's does](#for-workspaces); you can also give it a role
 yourself: open it, and pick a workspace and a role. A service account can hold
 any workspace role that neither administers the workspace nor lets people in —
 Workspace viewer to read, Workspace member or Data engineer to change data,
-but never Workspace admin or Workspace steward — and never a platform role or
-a place in a team. Its keys pick a new role up within half a minute.
+but never Workspace admin or Workspace steward — and never a place in a team.
+Of the platform roles it holds only one, which lets it
+[read every workspace](#reading-every-workspace). Its keys pick a new role up
+within half a minute.
 
 Those roles are all it has. Nothing else can be shared with it — a view, a
 template or a draft — and should someone later widen a role it holds to
@@ -82,6 +84,26 @@ away and the view is out of its reach too.
 Wherever access is listed — a workspace's members, everyone with access,
 access reviews, the activity log — it is marked as a service account, and
 links here. It is never counted among people.
+
+### Reading every workspace
+
+An integration that reads across the whole organization — a catalogue export,
+a lineage crawler — can be let **read every workspace**, rather than given a
+role in each: open the account and choose **Let it read every workspace…**,
+which says first what that means. Its keys can then read the views, data
+sources, semantic layers, catalog and providers of every workspace, including
+those created later, as far as each key reaches. It changes nothing anywhere,
+and the audit log, role bindings and analytics stay out of its reach.
+
+Only an administrator of service accounts who reads every workspace
+themselves — an org admin or a super admin — can give it this. Its managers,
+and the administrators, can take it away, and the activity log records both.
+Whoever manages it reads every workspace through it, so appointing a manager
+counts it too, [below](#teams-as-managers).
+
+It is the platform role **Org reader** (`org_reader`), which carries
+`system:org-viewer` alone. Whatever platform role is attached to a service
+account, that permission is all it keeps of it.
 
 ### Who else may create one
 
@@ -119,7 +141,9 @@ A manager can do whatever the account can. So nobody — an administrator, or
 one of its managers — can make someone able to act as it who would gain access
 the appointer couldn't give them directly: for each of the account's roles,
 either they hold as much there already, or whoever appoints them could grant
-it there. A team holds what its own roles give every member. If someone would
+it there — and if it reads every workspace, either they do too, or whoever
+appoints them could give it that. A team holds what its own roles give every
+member. If someone would
 gain more, the refusal names the roles in the way. The same goes for handing
 an account over.
 
@@ -164,7 +188,8 @@ administrator of service accounts — say so.
   adding it to a team or pointing it to the identity provider, and nobody
   answers one for an account they manage, or asked for.
 - **See whose it is.** Its name opens its page: what it is for, who manages
-  it, and its roles in the workspaces you can open.
+  it, its roles in the workspaces you can open, and whether it reads every
+  workspace.
 - **Remove it** as you would a person. Its managers hear about it.
 - **Removing someone who manages one** names it, when its role here gives
   more than they would keep — through its keys they could still act here —
@@ -207,7 +232,8 @@ You run the account there, as any of its managers:
   requests says so: ask its admins to add the account.
 - **Keep access that's ending**: a role given for a while says when it ends,
   and **Keep** asks the workspace to extend it.
-- **Take away** a role it no longer needs, so it reaches no more than it uses.
+- **Take away** a role it no longer needs, or its reading every workspace, so
+  it reaches no more than it uses.
 - **Delete** it once nothing runs as it any more: its keys stop at once. It
   stays on your list, marked **Deleted**, and you can restore it, as it was,
   for 30 days — unless an administrator holds it.
