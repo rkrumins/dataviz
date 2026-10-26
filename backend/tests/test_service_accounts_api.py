@@ -1239,7 +1239,8 @@ async def test_an_administrator_who_reads_every_workspace_lets_an_account_read_t
         dropped = await test_client.delete(f"{BASE}/{svc}/org-read")
         assert (dropped.status_code, dropped.json()["orgRead"]) == (200, None)
         assert [r["role"] for r in dropped.json()["roles"]] == ["workspace_viewer"]
-        assert (await test_client.delete(f"{BASE}/{svc}/org-read")).status_code == 200
+        again = await test_client.delete(f"{BASE}/{svc}/org-read")
+        assert again.status_code == 200
     assert not await _reads_every_workspace(db_session, svc)
     assert [(p["name"], p["changed_by"]) for _e, p in await _events(
         db_session, "identity.service_account.org_read_revoked",
@@ -1252,7 +1253,8 @@ async def test_a_deleted_account_neither_gains_nor_loses_reading_every_workspace
     await seed_org_reader_catalogue(db_session)
     svc = (await _create(test_client))["id"]
     assert (await test_client.put(f"{BASE}/{svc}/org-read")).status_code == 200
-    assert (await test_client.delete(f"{BASE}/{svc}")).status_code == 200
+    deleted = await test_client.delete(f"{BASE}/{svc}")
+    assert deleted.status_code == 200
     for method in (test_client.put, test_client.delete):
         refused = await method(f"{BASE}/{svc}/org-read")
         assert (refused.status_code, refused.json()["detail"]) == (
