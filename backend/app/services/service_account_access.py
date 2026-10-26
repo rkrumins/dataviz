@@ -13,6 +13,11 @@ them anything the person doing it couldn't have given them directly: for each
 of the account's roles, either they hold it already or the appointer could
 grant it there (:func:`appointment_refusal`).
 
+Besides its workspace roles, an account can read every workspace
+(:func:`org_read_bindings`): the one platform permission its claims keep. An
+administrator of service accounts who reads every workspace themselves gives
+it that; its managers can take it away, and appointing a manager counts it.
+
 Who may create one for themselves is a policy the administrators set
 (:func:`creation_policy`): nobody but them, as it ships; anyone who lets
 people into a workspace; or anyone. Creating one gives it no access.
@@ -32,11 +37,16 @@ from backend.app.db.repositories import role_repo, service_account_repo, user_re
 from backend.app.db.repositories.binding_repo import _is_expired
 from backend.app.services import permission_service, workspace_access
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.common.roles import role_label
+from backend.common.roles import RoleName, role_label
 
 MANAGE = "system:service-accounts:manage"
 #: Who may make an account's keys without managing it.
 MINT_ANY = "system:users:manage"
+#: Reading every workspace: the one platform permission a service account's
+#: claims keep (``SERVICE_ACCOUNT_GLOBAL_PERMISSIONS``), given through
+#: :data:`ORG_READER`.
+ORG_READ = "system:org-viewer"
+ORG_READER = RoleName.ORG_READER.value
 #: Who may create a service account for themselves: the administrators of
 #: service accounts alone, anyone who lets people into a workspace, or anyone.
 WHO_MAY_CREATE = ("central", "granters", "everyone")
@@ -60,8 +70,11 @@ class Can:
     keys: bool = False
     #: Give it workspace roles from its own page.
     grant: bool = False
-    #: Take its roles away.
+    #: Take its roles away, and its reading every workspace.
     revoke: bool = False
+    #: Let it read every workspace: an administrator of service accounts who
+    #: reads every workspace themselves.
+    org_read: bool = False
     #: Ask a workspace for access for it, or to keep access that is ending.
     request: bool = False
     #: Its keys stop at once; it can be restored for 30 days.
@@ -72,7 +85,7 @@ class Can:
 
 def _can(
     *, central: bool, manager: bool, mint_any: bool, held: bool, deleted: bool = False,
-    in_my_workspace: bool = False,
+    in_my_workspace: bool = False, org_reach: bool = False,
 ) -> Can:
     if not (central or manager or mint_any):
         # The admins and stewards of a workspace it holds a role in see it,
@@ -85,8 +98,13 @@ def _can(
     return Can(
         view=True, edit=runs, disable=runs, enable=central or (manager and not held),
         managers=runs, keys=manager or mint_any, grant=central, revoke=runs, request=runs,
-        delete=runs,
+        delete=runs, org_read=central and org_reach,
     )
+
+
+def reads_every_workspace(claims: PermissionClaims) -> bool:
+    """Every workspace is readable to them, through a platform role."""
+    return any(p in claims.global_perms for p in workspace_access.ORG_WIDE_PERMISSIONS)
 
 
 async def _in_my_workspace(session: AsyncSession, claims: PermissionClaims, account_id: str) -> bool:
@@ -109,7 +127,7 @@ async def decide(
         central=has_permission(claims, MANAGE),
         manager=await service_account_repo.is_manager(session, user.id, user_id),
         mint_any=has_permission(claims, MINT_ANY), held=row.admin_hold,
-        deleted=user.deleted_at is not None,
+        deleted=user.deleted_at is not None, org_reach=reads_every_workspace(claims),
     )
     if not any((facts["central"], facts["manager"], facts["mint_any"])):
         facts["in_my_workspace"] = await _in_my_workspace(session, claims, user.id)
@@ -122,6 +140,10 @@ _REFUSED = {
         "accounts can enable it"
     ),
     "grant": "Only an administrator of service accounts can give it a role here",
+    "org_read": (
+        "Only an administrator of service accounts who reads every workspace can let it read "
+        "every workspace"
+    ),
     "restore": (
         "An administrator holds this service account, so only an administrator of service "
         "accounts can restore it"
@@ -142,7 +164,7 @@ async def require(
     facts = dict(
         manager=await service_account_repo.is_manager(session, account_id, user_id),
         mint_any=has_permission(claims, MINT_ANY), held=found[1].admin_hold,
-        deleted=found[0].deleted_at is not None,
+        deleted=found[0].deleted_at is not None, org_reach=reads_every_workspace(claims),
     )
     central = has_permission(claims, MANAGE)
     if not (central or facts["manager"] or facts["mint_any"]):
@@ -236,6 +258,24 @@ async def _roles_of(session: AsyncSession, account_ids: Iterable[str]) -> list[R
     return [b for b in rows if not _is_expired(b.expires_at, now=now)]
 
 
+async def org_read_bindings(session: AsyncSession, account_ids: Iterable[str]) -> list[RoleBindingORM]:
+    """The accounts' live platform roles that let them read every workspace:
+    ``org_reader``, or any other carrying that, which is all an account keeps
+    of one (``permission_service.resolve``)."""
+    wanted = sorted(set(account_ids))
+    if not wanted:
+        return []
+    now = datetime.now(timezone.utc)
+    rows = [b for b in (await session.execute(
+        select(RoleBindingORM).where(
+            RoleBindingORM.subject_type == "user", RoleBindingORM.subject_id.in_(wanted),
+            RoleBindingORM.scope_type == "global",
+        ).order_by(RoleBindingORM.granted_at, RoleBindingORM.id)
+    )).scalars().all() if not _is_expired(b.expires_at, now=now)]
+    perms = await role_repo.role_names_with_permissions(session, sorted({b.role_name for b in rows}))
+    return [b for b in rows if ORG_READ in perms.get(b.role_name, ())]
+
+
 async def reach_gaps(
     session: AsyncSession, account_ids: Iterable[str], holders: list[PermissionClaims],
 ) -> list[tuple[RoleBindingORM, list[str]]]:
@@ -260,17 +300,25 @@ async def appointment_refusal(
 ) -> Optional[str]:
     """Why the caller can't make ``who`` — with ``holders``' claims — able to
     act as these accounts, or ``None`` when they can: each role ``who`` would
-    gain is one the caller could grant there."""
+    gain is one the caller could grant there, and reading every workspace
+    one the caller could give them."""
     blocked = [
         b for b, gets in await reach_gaps(session, account_ids, holders)
         if not workspace_access.can_grant(claims, b.scope_id, b.role_name, gets)
     ]
-    if not blocked:
+    reads_all = (
+        not (has_permission(claims, MANAGE) and reads_every_workspace(claims))
+        and not any(reads_every_workspace(h) for h in holders)
+        and bool(await org_read_bindings(session, account_ids))
+    )
+    if not blocked and not reads_all:
         return None
     names = await user_repo.get_workspace_names_by_ids(session, sorted({b.scope_id for b in blocked}))
     gained = list(dict.fromkeys(
         f"{role_label(b.role_name)} in {names.get(b.scope_id) or b.scope_id}" for b in blocked
     ))
+    if reads_all:
+        gained.insert(0, "read access to every workspace")
     return (
         f"Whoever manages a service account can do whatever it can, and {who} would gain "
         f"{_listed(gained)}, which you can't grant"

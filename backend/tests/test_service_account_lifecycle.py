@@ -44,6 +44,7 @@ from tests.common.api_key_world import (
     prime,
     user_row,
 )
+from tests.common.workspace_access_world import seed_org_reader_catalogue
 
 NOW = datetime.now(timezone.utc)
 
@@ -560,9 +561,10 @@ async def test_a_service_accounts_keys_stop_when_its_record_is_gone(client, db_s
     assert (refused.status_code, error(refused)) == (401, "api_key_owner_inactive")
 
 
-async def test_a_service_account_acts_only_through_its_own_workspace_roles(db_session):
-    """A platform role or a team's role attached to a service account never
-    reaches its keys."""
+async def test_a_service_account_acts_only_through_its_own_roles(db_session):
+    """A team's role attached to a service account never reaches its keys,
+    and of a platform role only reading every workspace does."""
+    await seed_org_reader_catalogue(db_session)
     db_session.add_all(_account("svc_claims"))
     db_session.add(_person("usr_twin"))
     db_session.add(GroupORM(id="grp_x", name="X"))
@@ -585,9 +587,39 @@ async def test_a_service_account_acts_only_through_its_own_workspace_roles(db_se
 
     account = await permission_service.resolve(db_session, "svc_claims")
     person = await permission_service.resolve(db_session, "usr_twin")
-    assert account.global_perms == ()
+    assert account.global_perms == ("system:org-viewer",)
+    assert permission_service.has_permission(account, "workspace:view:read", workspace_id="ws_b")
+    assert not permission_service.has_permission(account, "workspace:view:edit", workspace_id="ws_b")
     assert set(account.ws_perms) == {"ws_a"}
     assert person.global_perms and set(person.ws_perms) == {"ws_a", "ws_b"}
+
+
+async def test_reading_every_workspace_reaches_its_keys_only_to_read(db_session):
+    """``org_reader`` lets an account's keys read every workspace — one made
+    later too — and change nothing there. Org Auditor gives it no more: not
+    the audit log, the bindings or the analytics."""
+    await seed_org_reader_catalogue(db_session)
+    for account_id, role in (("svc_reader", "org_reader"), ("svc_auditor", "org_auditor")):
+        db_session.add_all(_account(account_id))
+        await db_session.flush()
+        db_session.add(RoleBindingORM(
+            subject_type="user", subject_id=account_id, role_name=role,
+            scope_type="global", scope_id=None,
+        ))
+    await db_session.commit()
+    for account_id in ("svc_reader", "svc_auditor"):
+        resolved = await permission_service.resolve(db_session, account_id)
+        assert resolved.global_perms == ("system:org-viewer",), account_id
+
+    scope = permission_service.KeyScope(
+        key_id="apk_reader", kind="service", views="write", data="write", all_resources=True,
+    )
+    keyed = await permission_service.resolve_for_api_key(db_session, "svc_reader", scope)
+    assert keyed.global_perms == ()
+    for permission in ("workspace:view:read", "workspace:datasource:read"):
+        assert permission_service.has_permission(keyed, permission, workspace_id="ws_later"), permission
+    for permission in ("workspace:view:edit", "workspace:datasource:manage"):
+        assert not permission_service.has_permission(keyed, permission, workspace_id="ws_later"), permission
 
 
 async def test_a_view_it_made_is_no_way_back_into_a_workspace(db_session):

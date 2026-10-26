@@ -497,6 +497,10 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "identity.service_account.manager_removed": (
         "warning", _summary_service_account_manager(added=False),
     ),
+    # Its reach across the whole tenancy widens: worth a reviewer's eye.
+    "identity.service_account.org_read_granted": (
+        "warning", _summary_service_account("can now read every workspace"),
+    ),
     "user.login_failed": ("warning", _summary_login_failed),
     "user.logged_out": ("warning", lambda p: f"User {p.get('user_id') or '?'} signed out"),
     "identity.api_key.revoked": ("warning", _summary_api_key_revoked),
@@ -572,6 +576,9 @@ _EVENT_META: dict[str, tuple[str, callable]] = {
     "identity.service_account.restored": ("info", _summary_service_account("restored")),
     "identity.service_account.manager_added": (
         "info", _summary_service_account_manager(added=True),
+    ),
+    "identity.service_account.org_read_revoked": (
+        "info", _summary_service_account("no longer reads every workspace"),
     ),
     "identity.api_key.expiring": (
         "info", lambda p: f"API key {_api_key_label(p)} expires {p.get('expires_at') or 'soon'}",
@@ -899,6 +906,8 @@ LABELS: dict[str, str] = {
     "identity.service_account.purged": "Purged a deleted service account",
     "identity.service_account.manager_added": "Appointed a service account's manager",
     "identity.service_account.manager_removed": "Removed a service account's manager",
+    "identity.service_account.org_read_granted": "Let a service account read every workspace",
+    "identity.service_account.org_read_revoked": "Stopped a service account reading every workspace",
     "visualization.view.created": "Created a view",
     "visualization.view.deleted": "Deleted a view",
     "visualization.view.admin_viewed": "Opened a private view as an admin",

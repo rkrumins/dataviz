@@ -21,7 +21,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
 from backend.app.api.v1.endpoints import versioning
 from backend.app.auth.dependencies import get_permission_claims
@@ -33,6 +33,7 @@ from backend.app.db.models import (
     OutboxEventORM,
     PlatformSettingsORM,
     RoleBindingORM,
+    RolePermissionORM,
     ServiceAccountORM,
     UserORM,
     ViewActivityLogORM,
@@ -44,7 +45,7 @@ from backend.app.services import api_key_housekeeping, workspace_access
 from backend.app.services.permission_service import PermissionClaims
 from backend.app.services.versioning.service import AccessDenied, GraphVersioningService
 from backend.auth_service.core import api_keys
-from tests.common.workspace_access_world import seed_steward_catalogue
+from tests.common.workspace_access_world import seed_org_reader_catalogue, seed_steward_catalogue
 
 BASE = "/api/v1/admin/service-accounts"
 ADMIN = "usr_test000000"  # the test client's own user
@@ -351,7 +352,7 @@ async def test_its_managers_run_it_without_administering_service_accounts(
         assert detail.json()["can"] == {
             "view": True, "edit": True, "disable": True, "enable": True, "managers": True,
             "keys": True, "grant": False, "revoke": True, "request": True, "delete": True,
-            "restore": False,
+            "restore": False, "orgRead": False,
         }
         assert (await test_client.get(f"/api/v1/me/service-accounts/{svc}")).json()["can"] == detail.json()["can"]
         renamed = await test_client.patch(f"{BASE}/{svc}", json={"name": "Nightly sync"})
@@ -610,12 +611,14 @@ async def test_a_deleted_account_is_purged_after_30_days_and_its_rows_stay(test_
     """The hourly pass revokes its keys and removes its roles and managers;
     the account's own rows stay, so the activity log still names it. Until
     then nothing is lost."""
+    await seed_org_reader_catalogue(db_session)
     svc = (await _create(test_client, managers=(
         {"type": "user", "id": "usr_ada"}, {"type": "group", "id": "grp_ops"},
     )))["id"]
     assert (await test_client.post(f"{BASE}/{svc}/roles", json={
         "workspaceId": "ws_x", "role": "workspace_viewer",
     })).status_code == 201
+    assert (await test_client.put(f"{BASE}/{svc}/org-read")).status_code == 200
     generated = api_keys.generate(api_keys.KIND_SERVICE)
     key = await api_key_repo.create(
         db_session, user_id=svc, kind="service", created_by="usr_ada", name="sync",
@@ -646,7 +649,7 @@ async def test_a_deleted_account_is_purged_after_30_days_and_its_rows_stay(test_
     assert (await db_session.get(UserORM, svc)).first_name == "Metadata sync"
     [(_, purged)] = await _events(db_session, "identity.service_account.purged")
     assert (purged["name"], purged["keys_revoked"], purged["roles_removed"], purged["managers_removed"]) == (
-        "Metadata sync", 1, 1, 2,
+        "Metadata sync", 1, 2, 2,
     )
     assert [
         (p["key_id"], p["reason"]) for _e, p in await _events(db_session, "identity.api_key.revoked")
@@ -1178,6 +1181,124 @@ async def test_an_account_holds_workspace_roles_that_neither_administer_nor_let_
     assert (await test_client.get(f"{BASE}/{account['id']}")).json()["roles"] == []
     kinds = [e for e, _ in await _events(db_session, "rbac.workspace.member_")]
     assert kinds == ["rbac.workspace.member_bound", "rbac.workspace.member_revoked"]
+
+
+# ── Reading every workspace ─────────────────────────────────────────
+
+
+async def _reads_every_workspace(db_session, account_id: str) -> bool:
+    from backend.app.services import permission_service
+
+    resolved = await permission_service.resolve(db_session, account_id)
+    return permission_service.has_permission(resolved, "workspace:view:read", workspace_id="ws_any")
+
+
+async def test_an_administrator_who_reads_every_workspace_lets_an_account_read_them_all(
+    test_client, db_session, people,
+):
+    """Only an administrator of service accounts who reads every workspace
+    themselves lets an account read every workspace. Its managers see that,
+    and take it away."""
+    await seed_org_reader_catalogue(db_session)
+    svc = await _managed_by_me(test_client, "usr_ada")
+    with claims():
+        refused = await test_client.put(f"{BASE}/{svc}/org-read")
+    assert (refused.status_code, refused.json()["detail"]) == (403, (
+        "Only an administrator of service accounts who reads every workspace can let it read "
+        "every workspace"
+    ))
+    with claims("system:service-accounts:manage"):
+        assert (await test_client.get(f"{BASE}/{svc}")).json()["can"]["orgRead"] is False
+        assert (await test_client.put(f"{BASE}/{svc}/org-read")).status_code == 403
+    assert not await _reads_every_workspace(db_session, svc)
+
+    with claims("system:org-admin", "system:service-accounts:manage"):
+        given = await test_client.put(f"{BASE}/{svc}/org-read")
+        assert given.status_code == 200, given.text
+        assert given.json()["can"]["orgRead"] is True
+        assert given.json()["orgRead"]["grantedAt"]
+        # Given again, nothing changes.
+        assert (await test_client.put(f"{BASE}/{svc}/org-read")).json()["orgRead"] == given.json()["orgRead"]
+    assert await _reads_every_workspace(db_session, svc)
+    bindings = (await db_session.execute(
+        select(RoleBindingORM).where(RoleBindingORM.subject_id == svc)
+    )).scalars().all()
+    assert [(b.role_name, b.scope_type, b.scope_id, b.granted_by) for b in bindings] == [
+        ("org_reader", "global", None, ADMIN),
+    ]
+    assert [(p["name"], p["changed_by"]) for _e, p in await _events(
+        db_session, "identity.service_account.org_read_granted",
+    )] == [("Metadata sync", ADMIN)]
+
+    # Its managers see it and take it away; its role in a workspace stays.
+    assert (await test_client.post(f"{BASE}/{svc}/roles", json={
+        "workspaceId": "ws_x", "role": "workspace_viewer",
+    })).status_code == 201
+    with claims():
+        assert (await test_client.get(f"{BASE}/{svc}")).json()["orgRead"] == given.json()["orgRead"]
+        dropped = await test_client.delete(f"{BASE}/{svc}/org-read")
+        assert (dropped.status_code, dropped.json()["orgRead"]) == (200, None)
+        assert [r["role"] for r in dropped.json()["roles"]] == ["workspace_viewer"]
+        assert (await test_client.delete(f"{BASE}/{svc}/org-read")).status_code == 200
+    assert not await _reads_every_workspace(db_session, svc)
+    assert [(p["name"], p["changed_by"]) for _e, p in await _events(
+        db_session, "identity.service_account.org_read_revoked",
+    )] == [("Metadata sync", ADMIN)]
+
+
+async def test_a_deleted_account_neither_gains_nor_loses_reading_every_workspace(
+    test_client, db_session, people,
+):
+    await seed_org_reader_catalogue(db_session)
+    svc = (await _create(test_client))["id"]
+    assert (await test_client.put(f"{BASE}/{svc}/org-read")).status_code == 200
+    assert (await test_client.delete(f"{BASE}/{svc}")).status_code == 200
+    for method in (test_client.put, test_client.delete):
+        refused = await method(f"{BASE}/{svc}/org-read")
+        assert (refused.status_code, refused.json()["detail"]) == (
+            409, "This service account is deleted: restore it first",
+        )
+    assert (await test_client.post(f"{BASE}/{svc}/restore")).json()["orgRead"] is not None
+
+
+async def test_its_page_says_it_reads_every_workspace_only_while_it_does(test_client, db_session, people):
+    """Org reader is a role like any other: should an operator take reading
+    every workspace out of it, no account reads them all through it any
+    more, and its page says so."""
+    await seed_org_reader_catalogue(db_session)
+    svc = (await _create(test_client))["id"]
+    assert (await test_client.put(f"{BASE}/{svc}/org-read")).json()["orgRead"] is not None
+    await db_session.execute(delete(RolePermissionORM).where(RolePermissionORM.role_name == "org_reader"))
+    await db_session.commit()
+    assert (await test_client.get(f"{BASE}/{svc}")).json()["orgRead"] is None
+    assert not await _reads_every_workspace(db_session, svc)
+
+
+async def test_nobody_comes_to_read_every_workspace_by_being_appointed(
+    test_client, db_session, people,
+):
+    """Whoever manages an account that reads every workspace reads them all
+    through it. So its managers may appoint only someone who reads every
+    workspace already, and an administrator who could give it that, anyone."""
+    await seed_org_reader_catalogue(db_session)
+    svc = await _managed_by_me(test_client)
+    assert (await test_client.put(f"{BASE}/{svc}/org-read")).status_code == 200
+    with claims():
+        refused = await test_client.put(f"{BASE}/{svc}/managers/users/usr_bea")
+        assert (refused.status_code, refused.json()["detail"]) == (403, (
+            "Whoever manages a service account can do whatever it can, and Bea P would gain read "
+            "access to every workspace, which you can't grant"
+        ))
+        assert (await test_client.put(f"{BASE}/{svc}/managers/groups/grp_ops")).status_code == 403
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id="usr_bea", role_name="org_auditor",
+        scope_type="global", scope_id=None,
+    ))
+    await db_session.commit()
+    with claims():
+        assert (await test_client.put(f"{BASE}/{svc}/managers/users/usr_bea")).status_code == 200
+    with claims("system:org-admin", "system:service-accounts:manage"):
+        assert (await test_client.put(f"{BASE}/{svc}/managers/users/usr_ada")).status_code == 200
 
 
 # ── Handing over ────────────────────────────────────────────────────

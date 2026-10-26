@@ -18,8 +18,9 @@ Within that:
   creates two empty tables and seeds a permission; ``20261025_1200_sa_admin_hold``
   adds a column with a constant default and holds the few disabled accounts;
   ``20261025_1400_sa_requests`` and ``20261025_1600_sa_purge`` each add a
-  nullable column, and ``20261026_1000_sa_policy`` three to the one-row
-  ``platform_settings``), since on a database
+  nullable column, ``20261026_1000_sa_policy`` adds three to the one-row
+  ``platform_settings``, and ``20261026_1200_sa_org_read`` seeds a role), since
+  on a database
   upgrading through them the lock is also held while they run;
 * a revision that locks a table other requests use bounds how long it waits
   for that lock (``lock_timeout``), so a long-running reader makes the
@@ -52,7 +53,8 @@ _NEWER = "20261023_1200_service_accounts"
 _HOLD = "20261025_1200_sa_admin_hold"
 _ASKED = "20261025_1400_sa_requests"
 _PURGE = "20261025_1600_sa_purge"
-_HEAD = "20261026_1000_sa_policy"
+_POLICY = "20261026_1000_sa_policy"
+_HEAD = "20261026_1200_sa_org_read"
 #: Every revision that locks a table other requests use, and in which
 #: direction: ``users`` for the key's foreign key, ``user_identities``, and
 #: the ledger.
@@ -70,6 +72,7 @@ _ON_LIVE_TABLES = {
     f"{_HOLD}.py": ("upgrade", "downgrade"),
     f"{_ASKED}.py": ("upgrade", "downgrade"),
     f"{_PURGE}.py": ("upgrade", "downgrade"),
+    f"{_POLICY}.py": ("upgrade", "downgrade"),
     f"{_HEAD}.py": ("upgrade", "downgrade"),
 }
 
@@ -151,7 +154,8 @@ def test_the_chain_ends_five_cheap_revisions_after_the_ledger_revision():
     config.set_main_option("script_location", str(_VERSIONS.parent))
     script = ScriptDirectory.from_config(config)
     assert script.get_heads() == [_HEAD]
-    assert script.get_revision(_HEAD).down_revision == _PURGE
+    assert script.get_revision(_HEAD).down_revision == _POLICY
+    assert script.get_revision(_POLICY).down_revision == _PURGE
     assert script.get_revision(_PURGE).down_revision == _ASKED
     assert script.get_revision(_ASKED).down_revision == _HOLD
     assert script.get_revision(_HOLD).down_revision == _NEWER

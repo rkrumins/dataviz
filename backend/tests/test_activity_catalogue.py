@@ -345,6 +345,21 @@ def test_a_service_accounts_retirement_reads_plainly():
     })[1] == "API key “sync” (nxsat_ab12…) revoked as its deleted service account was purged"
 
 
+def test_reading_every_workspace_reads_plainly():
+    account = {"user_id": "svc_0123456789ab", "name": "Metadata sync", "changed_by": "usr_admin"}
+    assert catalogue.summarize("identity.service_account.org_read_granted", account) == (
+        "warning", "Service account “Metadata sync” can now read every workspace",
+    )
+    assert catalogue.summarize("identity.service_account.org_read_revoked", account) == (
+        "info", "Service account “Metadata sync” no longer reads every workspace",
+    )
+    assert catalogue.label_of("identity.service_account.org_read_granted") == (
+        "Let a service account read every workspace"
+    )
+    out = catalogue.project(event_type="identity.service_account.org_read_revoked", payload=account)
+    assert (out["actor_id"], out["subject_id"]) == ("usr_admin", "svc_0123456789ab")
+
+
 def test_who_may_create_service_accounts_reads_plainly():
     def said(**to) -> str:
         return catalogue.summarize("platform.service_account_policy.updated", {"details": {"to": to}})[1]

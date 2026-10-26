@@ -2,13 +2,15 @@
 
 ``/admin/service-accounts`` is where super and org admins
 (``system:service-accounts:manage``) create them, list them all, give them
-workspace roles, hand a leaver's accounts over to a successor, and say who
-else may create one for themselves (``/policy``) — at
+workspace roles — or, reading every workspace themselves, read access to every
+workspace (``/{id}/org-read``) — hand a leaver's accounts over to a successor,
+and say who else may create one for themselves (``/policy``) — at
 ``POST /me/service-accounts``, managing it themselves or through a team. Each
 account's own routes, ``/admin/service-accounts/{id}``, are its managers' as
 well: they rename it, disable and enable it, delete and restore it — unless an
-administrator holds it — appoint and remove its managers, and take its roles
-away (``service_account_access`` says who may do what). ``/me/service-accounts``
+administrator holds it — appoint and remove its managers, and take its roles,
+and its reading every workspace, away (``service_account_access`` says who may
+do what). ``/me/service-accounts``
 is where a manager finds the accounts they answer for; their keys are made
 under ``/me/service-accounts/{id}/api-keys``.
 
@@ -69,6 +71,7 @@ _GATES = {
     "enable": "manages it unless an administrator holds it, or system:service-accounts:manage (in handler)",
     "restore": "manages it unless an administrator holds it, or system:service-accounts:manage (in handler)",
     "grant": "system:service-accounts:manage (in handler)",
+    "org_read": "system:service-accounts:manage, reading every workspace (in handler)",
 }
 _RUNS_IT = "manages it, or system:service-accounts:manage (in handler)"
 
@@ -148,6 +151,12 @@ class RoleOut(_Model):
     expires_at: Optional[str] = Field(None, alias="expiresAt")
 
 
+class OrgReadOut(_Model):
+    """It reads every workspace — those created later too — as far as each of
+    its keys reaches, and changes nothing there."""
+    granted_at: Optional[str] = Field(None, alias="grantedAt")
+
+
 class RequestOut(_Model):
     """An open request for the account's access, waiting on a workspace."""
     id: str
@@ -199,10 +208,13 @@ class AccountCan(_Model):
     request: bool
     delete: bool
     restore: bool
+    org_read: bool = Field(alias="orgRead")
 
 
 class ServiceAccountDetail(ServiceAccountOut):
     roles: List[RoleOut]
+    #: It reads every workspace; ``None`` while it doesn't.
+    org_read: Optional[OrgReadOut] = Field(None, alias="orgRead")
     #: Requests for its access still waiting on a workspace.
     requests: List[RequestOut]
     live_keys: int = Field(alias="liveKeys")
@@ -390,8 +402,11 @@ async def _detail(
         session, sorted({b.scope_id for b in bindings} | {r.target_id for r in asked}),
     )
     askers = await user_repo.get_identities_by_ids(session, sorted({r.requested_by for r in asked if r.requested_by}))
+    # Reading every workspace reaches theirs too, so whoever sees it sees that.
+    reads_all = await service_account_access.org_read_bindings(session, [account_id])
     return ServiceAccountDetail(
         **base.model_dump(),
+        org_read=OrgReadOut(granted_at=reads_all[0].granted_at) if reads_all else None,
         roles=[
             RoleOut(
                 binding_id=b.id, workspace_id=b.scope_id, workspace_name=names.get(b.scope_id),
@@ -1027,6 +1042,53 @@ async def revoke_role(
             "sessions_revoked": 0,
         },
     )
+
+
+@admin_router.put("/{account_id}/org-read", response_model=ServiceAccountDetail)
+async def grant_org_read(
+    account_id: str = Path(..., max_length=64),
+    _found=Depends(_account("org_read")),
+    actor: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Let the account read every workspace — those created later too — as
+    far as each of its keys reaches: views, data sources, semantic layers,
+    catalog and providers, and nothing it could change. Only an
+    administrator of service accounts who reads every workspace can. Its
+    keys pick it up within half a minute."""
+    found = await service_account_repo.get(session, account_id, for_update=True)
+    if found is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This service account is deleted: restore it first")
+    if not await service_account_access.org_read_bindings(session, [account_id]):
+        await binding_repo.create_binding(
+            session, subject_type="user", subject_id=account_id,
+            role_name=service_account_access.ORG_READER, scope_type="global", granted_by=actor.id,
+        )
+        await _record(session, "org_read_granted", account_id, found[0].first_name, changed_by=actor.id)
+    return await _detail(session, account_id, actor.id, claims)
+
+
+@admin_router.delete("/{account_id}/org-read", response_model=ServiceAccountDetail)
+async def revoke_org_read(
+    account_id: str = Path(..., max_length=64),
+    _found=Depends(_account("revoke")),
+    actor: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Stop the account reading every workspace — its managers too: an
+    integration should reach no more than it uses. Its roles in workspaces
+    stay."""
+    found = await service_account_repo.get(session, account_id, for_update=True)
+    if found is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This service account is deleted: restore it first")
+    bindings = await service_account_access.org_read_bindings(session, [account_id])
+    for binding in bindings:
+        await binding_repo.delete_binding(session, binding.id)
+    if bindings:
+        await _record(session, "org_read_revoked", account_id, found[0].first_name, changed_by=actor.id)
+    return await _detail(session, account_id, actor.id, claims)
 
 
 # ── Managers ────────────────────────────────────────────────────────

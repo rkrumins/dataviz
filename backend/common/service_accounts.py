@@ -29,6 +29,11 @@ DEFAULT_GRACE_DAYS = 14
 #: managers removed.
 RESTORE_DAYS = 30
 
+#: The platform permissions a service account may hold: reading every
+#: workspace, which the ``org_reader`` role carries. Of any platform role
+#: attached to one, its claims keep these and nothing else (ADR-030).
+SERVICE_ACCOUNT_GLOBAL_PERMISSIONS = frozenset({"system:org-viewer"})
+
 
 def grace_days(value: object) -> int:
     """The grace switch as days: 0 or more, or the default for anything that
@@ -59,6 +64,7 @@ def is_person(user_id_column):
 
 
 __all__ = [
-    "ID_PREFIX", "EMAIL_DOMAIN", "DEFAULT_GRACE_DAYS", "RESTORE_DAYS", "grace_days",
+    "ID_PREFIX", "EMAIL_DOMAIN", "DEFAULT_GRACE_DAYS", "RESTORE_DAYS",
+    "SERVICE_ACCOUNT_GLOBAL_PERMISSIONS", "grace_days",
     "is_service_account", "new_id", "email_for", "is_person",
 ]
