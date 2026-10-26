@@ -300,7 +300,7 @@ async def key_audience(
     and while nobody can act for it, the administrators who appoint them."""
     if not is_service_account(owner_id):
         return KeyAudience({owner_id}, "/me/api-keys")
-    found = await service_account_repo.get(session, owner_id)
+    found = await service_account_repo.get(session, owner_id, deleted=True)
     name = found[0].first_name if found else owner_id
     rules = await policy(session)
     people = await service_account_repo.who_answers(

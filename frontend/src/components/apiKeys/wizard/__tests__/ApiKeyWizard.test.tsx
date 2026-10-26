@@ -35,7 +35,10 @@ vi.mock('@/services/apiKeyService', async (importOriginal) => ({
     apiKeyService: svc,
 }))
 vi.mock('@/services/serviceAccountService', () => ({
-    serviceAccountService: { mine: () => Promise.resolve({ items: [], total: 0, graceDays: 14 }) },
+    serviceAccountService: {
+        mine: () => Promise.resolve({ items: [], total: 0, graceDays: 14 }),
+        myCreation: () => Promise.resolve({ mayCreate: false }),
+    },
 }))
 vi.mock('@/components/account/AccountShell', async (importOriginal) => ({
     ...(await importOriginal<typeof import('@/components/account/AccountShell')>()),

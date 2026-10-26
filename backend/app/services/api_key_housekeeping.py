@@ -13,7 +13,10 @@ announce.
 Each pass first checks that every service account still has a manager in
 good standing (``service_account_standing.sweep``): a manager's sign-in window
 lapses with time alone, with no request to notice it, and that check is what
-pauses the account's keys.
+pauses the account's keys. It also purges the service accounts deleted 30 days
+before, which can no longer be restored: their keys are revoked and their
+roles and managers removed, and their rows kept, so the activity log still
+names them.
 
 Runs on the CONTROLPLANE/DEV role only, like the other sweepers, and claims
 an advisory lock for each step of a pass so two processes never send the same
@@ -34,10 +37,13 @@ from backend.app.jobs.metrics import increment as metrics_increment
 from backend.app.db.repositories import (
     api_key_repo,
     api_key_usage_repo,
+    binding_repo,
     notification_repo,
     outbox_event_repo,
+    service_account_repo,
 )
 from backend.app.services import service_account_standing
+from backend.common.service_accounts import RESTORE_DAYS
 
 logger = logging.getLogger(__name__)
 
@@ -128,11 +134,55 @@ async def _expiry_reminders(session: AsyncSession) -> None:
         logger.info("Sent %d API key expiry reminder(s)", reminded)
 
 
+async def purge_deleted(session: AsyncSession, *, now: Optional[datetime] = None) -> int:
+    """Purge the service accounts deleted more than 30 days ago, a batch a
+    pass: revoke their keys, and remove their roles and managers. Their
+    rows stay. Returns how many."""
+    now = now or datetime.now(timezone.utc)
+    due = await service_account_repo.due_for_purge(
+        session, before=now - timedelta(days=RESTORE_DAYS), limit=_BATCH,
+    )
+    for account_id, name in due:
+        keys = await api_key_repo.revoke_all_for_user(session, account_id, by=None, reason="purged")
+        for key in keys:
+            await outbox_event_repo.emit(
+                session,
+                event_type="identity.api_key.revoked",
+                aggregate_type="user",
+                aggregate_id=account_id,
+                payload={
+                    "user_id": account_id, "key_id": key.id, "key_name": key.name,
+                    "token_prefix": key.token_prefix, "revoked_by": None, "reason": "purged",
+                },
+            )
+        roles = await binding_repo.delete_subject_bindings(session, subject_type="user", subject_id=account_id)
+        managers = await service_account_repo.purge(session, account_id, now=now)
+        await outbox_event_repo.emit(
+            session,
+            event_type="identity.service_account.purged",
+            aggregate_type="user",
+            aggregate_id=account_id,
+            payload={
+                "user_id": account_id, "name": name, "keys_revoked": len(keys),
+                "roles_removed": roles, "managers_removed": managers,
+            },
+        )
+    return len(due)
+
+
+async def _purge(session: AsyncSession) -> None:
+    purged = await purge_deleted(session)
+    if purged:
+        logger.info("Purged %d service account(s) deleted %d days ago", purged, RESTORE_DAYS)
+
+
 #: A pass, most important first: whether a service account still has a
-#: manager decides whether its keys work.
+#: manager decides whether its keys work. A deleted account's keys already
+#: don't, so purging it can wait for the reminders.
 _STEPS = (
     ("service_accounts", _service_accounts),
     ("expiry_reminders", _expiry_reminders),
+    ("service_account_purge", _purge),
     ("usage_prune", lambda session: api_key_usage_repo.prune(session)),
 )
 
@@ -163,9 +213,9 @@ async def run_sweeper(
     interval: float = _DEFAULT_INTERVAL_SECONDS,
 ) -> None:
     """Background loop until ``shutdown`` is set: check that service accounts
-    still have managers, remind owners of keys about to expire, and drop
-    usage counts past their retention. A failed step is logged and retried on
-    the next tick."""
+    still have managers, remind owners of keys about to expire, purge the
+    service accounts deleted 30 days ago, and drop usage counts past their
+    retention. A failed step is logged and retried on the next tick."""
     logger.info("API key housekeeping started (interval=%.0fs)", interval)
     while not shutdown.is_set():
         for step, run in _STEPS:

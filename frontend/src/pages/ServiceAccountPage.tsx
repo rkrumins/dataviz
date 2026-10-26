@@ -5,20 +5,24 @@
  * Its managers run it here: they rename it, disable and enable it, appoint and
  * remove its managers, take away roles it no longer needs, and make its keys.
  * The administrators of service accounts can do all of that and give it
- * roles; someone who may make any account's keys sees it for those. What each
- * may do is the server's `can`, and the page offers nothing more.
+ * roles — and, reading every workspace themselves, let it read every
+ * workspace; someone who may make any account's keys sees it for those. What
+ * each may do is the server's `can`, and the page offers nothing more.
  *
  * The keys act as the account, never as you: they reach what the account's
  * own roles give it, count against its own limit, and keep working when you
  * leave, as long as someone still manages it. While nobody manages it, its
  * keys work until the grace period ends and then pause — the page says which,
  * and until when.
+ *
+ * Deleting it stops its keys at once. For 30 days the page shows it deleted,
+ * as it was, for whoever may to restore it; then it is purged.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router-dom'
 import {
-    AlertCircle, ArrowLeft, Bot, Code2, ExternalLink, History, KeySquare, Plus, Power, RefreshCw, ShieldAlert,
-    Trash2, Users, X,
+    AlertCircle, ArrowLeft, Bot, Clock, Code2, ExternalLink, Globe, History, KeySquare, Plus, Power, RefreshCw,
+    RotateCcw, Send, ShieldAlert, Trash2, Users, X,
 } from 'lucide-react'
 
 import { AccountCard, AccountShell } from '@/components/account/AccountShell'
@@ -29,9 +33,11 @@ import { KeyCard, PastKeyRow } from '@/components/apiKeys/KeyCard'
 import { KeyDetailDrawer } from '@/components/apiKeys/KeyDetailDrawer'
 import { RotateKeyDialog } from '@/components/apiKeys/RotateKeyDialog'
 import { clearDraft, peekDraft, type ApiKeyDraft } from '@/components/apiKeys/apiKeyDraft'
-import { isLive, isRenewable, stepUpUnavailable } from '@/components/apiKeys/apiKeyFormat'
+import { formatDay, isLive, isRenewable, stepUpUnavailable } from '@/components/apiKeys/apiKeyFormat'
+import { KeyDialog } from '@/components/apiKeys/KeyDialog'
 import { KeyClientProvider, useKeyClient } from '@/components/apiKeys/keyClient'
 import { ApiKeyWizard } from '@/components/apiKeys/wizard/ApiKeyWizard'
+import { RequestForAccount } from '@/components/serviceAccounts/RequestForAccount'
 import { RoleGrant } from '@/components/serviceAccounts/RoleGrant'
 import { SubjectPicker, subjectKey } from '@/components/serviceAccounts/SubjectPicker'
 import { ManagerRow, StandingChip, TeamNote, standingOf } from '@/components/serviceAccounts/parts'
@@ -40,6 +46,7 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { roleVisualFor } from '@/lib/roleVisual'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
+import { accessRequestsService } from '@/services/accessRequestsService'
 import { serviceAccountKeys, type ApiKey, type ApiKeyOptions, type KeyRef } from '@/services/apiKeyService'
 import {
     serviceAccountService, type ServiceAccountDetail, type ServiceAccountManager,
@@ -114,7 +121,8 @@ export function ServiceAccountPage() {
             )}
             {account && keyAccount && (
                 <>
-                    <AboutAccount account={account} central={central} busy={busy} change={change} />
+                    {account.deletedAt && <Deleted account={account} busy={busy} change={change} />}
+                    <AboutAccount account={account} central={central} busy={busy} change={change} reload={() => void load().then(setAccount)} />
                     {account.can.keys ? (
                         <KeyClientProvider client={client} account={keyAccount}>
                             <AccountKeys account={account} />
@@ -137,21 +145,128 @@ export function ServiceAccountPage() {
 
 type Change = (fn: () => Promise<unknown>, done: string) => Promise<boolean>
 
+/** A deleted account, as it was, until it is purged — and the way back. */
+function Deleted({ account, busy, change }: { account: ServiceAccountDetail; busy: boolean; change: Change }) {
+    return (
+        <Banner
+            tone="warn"
+            icon={Trash2}
+            title={`Deleted ${account.deletedAt ? formatDay(account.deletedAt) : ''} — its keys don’t work`}
+            action={account.can.restore && (
+                <Button
+                    variant="secondary"
+                    size="sm"
+                    leftIcon={RotateCcw}
+                    disabled={busy}
+                    onClick={() => void change(() => serviceAccountService.restore(account.id), `“${account.name}” restored`)}
+                >
+                    Restore
+                </Button>
+            )}
+        >
+            {account.adminHold ? 'An administrator' : 'Its managers'} can restore it
+            {account.purgesAt && <> until {formatDay(account.purgesAt)}</>}, with its keys, roles and managers as
+            they were. After that its keys are revoked, and its roles and managers removed.
+        </Banner>
+    )
+}
+
+/** Deleting an account, said before it is done: what stops, and the way back. */
+function DeleteDialog({ account, held, busy, onClose, onDelete }: {
+    account: ServiceAccountDetail
+    /** Only an administrator will be able to restore it. */
+    held: boolean
+    busy: boolean
+    onClose: () => void
+    onDelete: () => void
+}) {
+    const keys = account.liveKeys
+    // When it would be purged, deleted now: worked out once, as the dialog opens.
+    const [purges] = useState(() => formatDay(new Date(Date.now() + 30 * 24 * 3600 * 1000).toISOString()))
+    return (
+        <KeyDialog
+            icon={Trash2}
+            tone="danger"
+            title={`Delete “${account.name}”?`}
+            subtitle="For an integration nothing runs any more."
+            onClose={onClose}
+            footer={(
+                <>
+                    <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+                    <Button variant="danger" size="sm" leftIcon={Trash2} loading={busy} onClick={onDelete}>Delete</Button>
+                </>
+            )}
+        >
+            <ul className="space-y-2 text-sm text-ink-secondary list-disc pl-5">
+                <li>
+                    {keys === 0 ? 'It has no live keys.' : `Its ${keys} live key${keys === 1 ? '' : 's'} stop${keys === 1 ? 's' : ''} working at once.`}
+                </li>
+                {account.requests.length > 0 && <li>Its requests waiting on a workspace are withdrawn.</li>}
+                <li>
+                    {held ? 'Only an administrator can restore it' : 'Its managers can restore it'} until {purges},
+                    with its keys, roles and managers as they were.
+                </li>
+                <li>After that its keys are revoked, and its roles and managers removed.</li>
+            </ul>
+        </KeyDialog>
+    )
+}
+
+/** Letting it read every workspace, said before it is done: what it reaches,
+ *  and what it doesn't. */
+function OrgReadDialog({ account, busy, onClose, onGive }: {
+    account: ServiceAccountDetail
+    busy: boolean
+    onClose: () => void
+    onGive: () => void
+}) {
+    return (
+        <KeyDialog
+            icon={Globe}
+            title="Let it read every workspace?"
+            subtitle={`“${account.name}”, for an integration that reads across the whole organization.`}
+            onClose={onClose}
+            footer={(
+                <>
+                    <Button variant="ghost" size="sm" onClick={onClose}>Cancel</Button>
+                    <Button variant="primary" size="sm" leftIcon={Globe} loading={busy} onClick={onGive}>Let it read them all</Button>
+                </>
+            )}
+        >
+            <ul className="space-y-2 text-sm text-ink-secondary list-disc pl-5">
+                <li>
+                    Its keys can read the views, data sources, semantic layers, catalog and providers of every
+                    workspace, those created later too, as far as each key reaches.
+                </li>
+                <li>It can change nothing more than before, and the audit log, role bindings and analytics stay out of its reach.</li>
+                <li>Whoever manages it can read every workspace through it, so its managers can appoint only someone who already reads every workspace.</li>
+                <li>Its managers can take it away.</li>
+            </ul>
+        </KeyDialog>
+    )
+}
+
 /** What keeps its keys working — its standing, who manages it, where it has a
  *  role — and, for whoever may, the means to change each. */
-function AboutAccount({ account, central, busy, change }: {
+function AboutAccount({ account, central, busy, change, reload }: {
     account: ServiceAccountDetail
     /** An administrator of service accounts: may leave it with no manager. */
     central: boolean
     busy: boolean
     change: Change
+    /** Read the account again — after asking a workspace for its access. */
+    reload: () => void
 }) {
+    const [asking, setAsking] = useState(false)
+    const keeping = new Set(account.requests.map((r) => r.bindingId).filter(Boolean))
     const { can } = account
     const standing = standingOf(account)
     const [editing, setEditing] = useState(false)
     const [name, setName] = useState('')
     const [description, setDescription] = useState('')
     const [removingLast, setRemovingLast] = useState(false)
+    const [deleting, setDeleting] = useState(false)
+    const [givingOrgRead, setGivingOrgRead] = useState(false)
     const last = account.managers.length === 1
     const teams = account.managers.filter((m) => m.type === 'group').map((m) => m.name)
 
@@ -169,7 +284,7 @@ function AboutAccount({ account, central, busy, change }: {
         >
             <div className="flex flex-wrap items-center gap-2">
                 <StandingChip account={account} />
-                <span className="text-xs text-ink-muted">{standing.detail}</span>
+                {!account.deletedAt && <span className="text-xs text-ink-muted">{standing.detail}</span>}
             </div>
             {editing ? (
                 <div className="mt-3 space-y-2">
@@ -203,7 +318,7 @@ function AboutAccount({ account, central, busy, change }: {
                         </Button>
                     </div>
                 </div>
-            ) : (can.edit || can.disable || can.enable) && (
+            ) : (can.edit || can.disable || can.enable || can.delete) && (
                 <div className="mt-2 -ml-2 flex flex-wrap items-center gap-1">
                     {can.edit && (
                         <Button
@@ -239,7 +354,31 @@ function AboutAccount({ account, central, busy, change }: {
                             Enable
                         </Button>
                     )}
+                    {can.delete && (
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            leftIcon={Trash2}
+                            disabled={busy}
+                            className="hover:text-rose-600 dark:hover:text-rose-400"
+                            onClick={() => setDeleting(true)}
+                        >
+                            Delete…
+                        </Button>
+                    )}
                 </div>
+            )}
+            {deleting && (
+                <DeleteDialog
+                    account={account}
+                    held={central || account.adminHold}
+                    busy={busy}
+                    onClose={() => setDeleting(false)}
+                    onDelete={() => void change(
+                        () => serviceAccountService.delete(account.id),
+                        `“${account.name}” deleted — its keys stopped working`,
+                    ).then(() => setDeleting(false))}
+                />
             )}
 
             <h3 className="mt-5 mb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Managed by</h3>
@@ -292,15 +431,58 @@ function AboutAccount({ account, central, busy, change }: {
             )}
 
             <h3 className="mt-5 mb-2 text-[11px] font-semibold uppercase tracking-wider text-ink-muted">Where it has a role</h3>
+            {account.orgRead && (
+                <div className="flex flex-wrap items-center gap-2 mb-3 px-3 py-2 rounded-xl border border-cyan-500/20 bg-cyan-500/[0.06] text-xs text-ink-secondary">
+                    <Globe className="w-3.5 h-3.5 text-cyan-600 dark:text-cyan-400 shrink-0" aria-hidden />
+                    <span className="min-w-0 flex-1">
+                        <span className="font-semibold text-ink">Reads every workspace</span>, those created later too, as
+                        far as each key reaches. It changes nothing there.
+                    </span>
+                    {can.revoke && (
+                        <Button
+                            variant="ghost"
+                            size="sm"
+                            disabled={busy}
+                            aria-label="Take away read access to every workspace"
+                            onClick={() => void change(
+                                () => serviceAccountService.revokeOrgRead(account.id),
+                                'It no longer reads every workspace',
+                            )}
+                        >
+                            Take away
+                        </Button>
+                    )}
+                </div>
+            )}
             {account.roles.length === 0 ? (
-                <p className="text-xs text-ink-muted mb-3">
-                    No roles yet: its keys reach nothing until an administrator gives it one.
-                </p>
+                !account.orgRead && (
+                    <p className="text-xs text-ink-muted mb-3">
+                        No roles yet: its keys reach nothing until a workspace gives it one.
+                    </p>
+                )
             ) : (
                 <ul className="flex flex-wrap gap-2 mb-3" aria-label="Roles">
                     {account.roles.map((r) => (
                         <li key={r.bindingId} className="inline-flex items-center gap-1 pl-2.5 pr-1 py-1 rounded-lg bg-black/[0.04] dark:bg-white/[0.06] text-xs text-ink-secondary">
-                            <span><span className="font-semibold text-ink">{r.workspaceName ?? r.workspaceId}</span> · {roleVisualFor(r.role).label}</span>
+                            <span>
+                                <span className="font-semibold text-ink">{r.workspaceName ?? r.workspaceId}</span> · {roleVisualFor(r.role).label}
+                                {r.expiresAt && <> · until {new Date(r.expiresAt).toLocaleDateString()}</>}
+                            </span>
+                            {r.expiresAt && can.request && (keeping.has(r.bindingId) ? (
+                                <span className="px-1.5 text-ink-muted">Asked to keep</span>
+                            ) : (
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={busy}
+                                    onClick={() => void change(
+                                        () => accessRequestsService.extend({ bindingId: r.bindingId }),
+                                        `Asked ${r.workspaceName ?? 'the workspace'} to keep its access`,
+                                    )}
+                                >
+                                    Keep
+                                </Button>
+                            ))}
                             {can.revoke && (
                                 <IconButton
                                     icon={X}
@@ -313,8 +495,60 @@ function AboutAccount({ account, central, busy, change }: {
                     ))}
                 </ul>
             )}
+            {account.requests.length > 0 && (
+                <ul className="space-y-1.5 mb-3" aria-label="Waiting on a workspace">
+                    {account.requests.map((r) => (
+                        <li key={r.id} className="flex flex-wrap items-center gap-2 text-xs text-ink-secondary">
+                            <Clock className="w-3.5 h-3.5 text-amber-500 shrink-0" aria-hidden />
+                            <span className="min-w-0 flex-1">
+                                {r.bindingId ? 'Asked to keep' : 'Asked for'} <span className="font-semibold text-ink">{roleVisualFor(r.role).label}</span>
+                                {' in '}<span className="font-semibold text-ink">{r.workspaceName ?? r.workspaceId}</span>
+                                {r.requestedBy && <> by {r.requestedBy}</>} — waiting on the workspace
+                            </span>
+                            {can.request && (
+                                <Button
+                                    variant="ghost"
+                                    size="sm"
+                                    disabled={busy}
+                                    onClick={() => void change(() => accessRequestsService.withdraw(r.id), 'Request withdrawn')}
+                                >
+                                    Withdraw
+                                </Button>
+                            )}
+                        </li>
+                    ))}
+                </ul>
+            )}
             {can.grant && (
                 <RoleGrant busy={busy} onGrant={(workspaceId, role) => change(() => serviceAccountService.grantRole(account.id, { workspaceId, role }), 'Role given')} />
+            )}
+            {can.orgRead && !account.orgRead && (
+                <Button variant="ghost" size="sm" leftIcon={Globe} className="mt-3" onClick={() => setGivingOrgRead(true)}>
+                    Let it read every workspace…
+                </Button>
+            )}
+            {givingOrgRead && (
+                <OrgReadDialog
+                    account={account}
+                    busy={busy}
+                    onClose={() => setGivingOrgRead(false)}
+                    onGive={() => void change(
+                        () => serviceAccountService.grantOrgRead(account.id),
+                        `“${account.name}” now reads every workspace`,
+                    ).then(() => setGivingOrgRead(false))}
+                />
+            )}
+            {can.request && (
+                <Button variant="secondary" size="sm" leftIcon={Send} className="mt-3" onClick={() => setAsking(true)}>
+                    Ask a workspace for access
+                </Button>
+            )}
+            {asking && (
+                <RequestForAccount
+                    account={account}
+                    onClose={() => setAsking(false)}
+                    onSent={() => { setAsking(false); reload() }}
+                />
             )}
         </AccountCard>
     )
@@ -327,7 +561,8 @@ function KeysSummary({ account }: { account: ServiceAccountDetail }) {
         <AccountCard icon={KeySquare} title="Its keys" blurb="Made by its managers. They act as the account, never as whoever made them.">
             <div className="flex flex-wrap items-center gap-3">
                 <span className="min-w-0 flex-1 text-sm text-ink">
-                    {account.liveKeys} live key{account.liveKeys === 1 ? '' : 's'}.
+                    {account.liveKeys} live key{account.liveKeys === 1 ? '' : 's'}
+                    {account.deletedAt && account.liveKeys > 0 ? ', stopped while it is deleted.' : '.'}
                 </span>
                 {canSeeKeys && (
                     <a href={`/admin/api-keys?ownerId=${encodeURIComponent(account.id)}`} className="inline-flex items-center gap-1 text-xs font-semibold text-indigo-600 dark:text-indigo-400 hover:underline">

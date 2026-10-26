@@ -227,6 +227,11 @@ SYSTEM_ROLES: tuple[dict[str, str | None], ...] = (
         "description": "Read-only operator across the whole tenancy. Sees every workspace + every binding + the audit log; cannot mutate.",
     },
     {
+        "name": "org_reader",
+        "scope_type": "global",
+        "description": "Reads every workspace — views, data sources, semantic layers, catalog and providers — and nothing else: not the audit log, role bindings or analytics. For a service account that reads across the whole tenancy.",
+    },
+    {
         "name": "super_admin",
         "scope_type": "global",
         "description": "Platform owner. Carries system:admin; implies every permission, every scope.",
@@ -285,6 +290,9 @@ ROLE_GRANTS: tuple[tuple[str, str], ...] = (
     ("org_auditor", "system:audit:read"),
     ("org_auditor", "system:bindings:read"),
     ("org_auditor", "system:org-viewer"),
+    # Reading every workspace, and nothing else: what a service account that
+    # reads across the tenancy is given (ADR-030).
+    ("org_reader", "system:org-viewer"),
     ("super_admin", "system:admin"),
     ("super_admin", "system:analytics:read"),
     ("super_admin", "system:audit:read"),
