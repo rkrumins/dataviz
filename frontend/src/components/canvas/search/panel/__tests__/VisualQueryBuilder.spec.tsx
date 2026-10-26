@@ -124,10 +124,11 @@ describe('VisualQueryBuilder', () => {
         expect(screen.getByRole('button', { name: 'Through which edges' })).toHaveTextContent('Any link')
     })
 
-    it('compares a property with another of the same entity', () => {
+    it('compares a property with another of the same entity', async () => {
         render(<VisualQueryBuilder {...baseProps({ predicate: {
             kind: 'property', key: 'freshnessHours', op: 'gt', valueKey: 'slaHours',
         } as Predicate })} />)
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Show all options' }))
         expect(screen.getByRole('radio', { name: 'Another property' })).toBeChecked()
         expect(screen.getByText('Other property')).toBeInTheDocument()
         expect(screen.getByText('slaHours')).toBeInTheDocument()
@@ -139,17 +140,22 @@ describe('VisualQueryBuilder', () => {
         render(<VisualQueryBuilder {...baseProps({ onSeed, predicate: {
             kind: 'property', key: 'rows', op: 'gt', value: 5, valueType: 'number',
         } as Predicate })} />)
-        await userEvent.setup().click(screen.getByRole('radio', { name: 'Another property' }))
+        const user = userEvent.setup()
+        await user.click(screen.getByRole('button', { name: 'Show all options' }))
+        await user.click(screen.getByRole('radio', { name: 'Another property' }))
         expect(onSeed).toHaveBeenLastCalledWith(expect.objectContaining({
             kind: 'property', key: 'rows', op: 'gt', valueKey: '' }))
         expect(onSeed.mock.lastCall?.[0]).not.toHaveProperty('value')
     })
 
-    it('names a graph shape for the edges it counts', () => {
+    it('names a graph shape for the edges it counts', async () => {
         render(<VisualQueryBuilder {...baseProps({ predicate: {
             kind: 'isRoot', edgeClass: 'links',
         } as Predicate })} />)
 
+        // Folded, the row says it; opened, its card names it and the edges it counts.
+        expect(screen.getByRole('button', { name: 'Nothing links into it' })).toHaveAttribute('aria-haspopup', 'dialog')
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Show all options' }))
         expect(screen.getByText('Nothing links into it')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'Through which edges' })).toHaveTextContent('Any link')
     })

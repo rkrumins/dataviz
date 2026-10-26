@@ -152,6 +152,12 @@ match any row (**OR**) instead. Select several rows to **Group as AND / OR** on 
 add a **NOT group** to exclude what it matches.
 **Undo** and **Redo** step through your edits; **New** starts again.
 
+**A finished filter reads as one line** — *Type is Dataset*, *Is tagged
+#Certified* — and each part you picked opens that filter's editor where it is.
+The chevron, **Show all options**, opens the full card. A new or unfinished
+filter opens as its card, and folds once it's complete and you move on.
+Relationships, paths and edge counts keep their cards.
+
 **Text filters** match **Contains**, **Starts with**, **Ends with**, **Is
 exactly**, or a **Wildcard pattern** (`*sales*`, `sales*`, `*_raw`).
 Matching ignores case.
@@ -329,8 +335,8 @@ lineage, so every relationship above works the same there:
 | Exactly five levels below a category | `ancestor*5(type:Category)` |
 | Everything under *Finance*, at any depth (up to 20 levels) | `ancestor(@"Finance")` |
 | Leaves with a direct `LINEAGE` edge into the *Sales* layer | `no child() outgoing["LINEAGE"](layer:"Sales")` |
-| *Finance* leaves feeding any other layer, one step | `layer:"Finance" no child() feeds*1(NOT layer:"Finance")` |
-| Categories one of whose leaves feeds the *Sales* layer | `type:Category descendant(no child() feeds*1(layer:"Sales"))` |
+| *Finance* leaves feeding any other layer, one step | `layer:"Finance" no child() feeds(NOT layer:"Finance")` |
+| Categories one of whose leaves feeds the *Sales* layer | `type:Category descendant(no child() feeds(layer:"Sales"))` |
 
 A condition can't point back at an entity's own layer, so "into another layer"
 names it, as above; to ask it of every layer at once, join one such condition

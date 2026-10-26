@@ -119,7 +119,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/features/view-portability.md"
   },
   "feature-search-and-rules-reference": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/features/search-and-rules-reference.md"
   },
   "top-level-nodes-performance": {
@@ -305,7 +305,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "advanced-search": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/guide/ADVANCED_SEARCH.md"
   },
   "lineage-lens": {
@@ -329,7 +329,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/MANAGING_VIEWS.md"
   },
   "display-rules": {
-    "updated": "2026-10-23",
+    "updated": "2026-10-26",
     "path": "docs/guide/DISPLAY_RULES.md"
   },
   "semantic-layer": {

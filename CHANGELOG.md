@@ -69,6 +69,20 @@ every engine and checks them against the reference semantics; the guide has the 
 
 ---
 
+## [Unreleased] — Search in Views with layers and hand placements
+
+### Fixed
+
+- A View crashed ("This view encountered an error") as soon as search results arrived if one of its
+  layers had been saved without its entity types, as a View written through the API can be. Such a
+  layer now claims no type, and the rest place as before.
+- In a View set to hold every entity of its types, search looked only inside the entities placed by
+  hand, and with *One placement rule for every view surface* off the panel filed every other match
+  under **Not on this canvas**. Hand placements now bound search only in a curated View: one set to
+  hold every entity searches all of them, and places a match by its type.
+
+---
+
 ## [Unreleased] — Connections: any edge, either way, and layers as the View places them
 
 ### Added
@@ -89,6 +103,11 @@ source's own, each with the entity types it joins), the direction and the condit
 walked must meet. Edge counts have a Form row. The palette adds *Contains, at any depth*, *Is linked
 to*, *Connected through an edge type* and *Something inside it feeds*, and the canvas menu **What’s
 linked to this**.
+
+**Finished filters read as one line.** In the Form, a complete filter folds to its words — *Type is
+Dataset*, *Is tagged #Certified* — and each part you picked opens its editor where it is; **Show
+all options** opens the full card. A new or unfinished filter opens as its card and folds once it is
+complete and you move on. Relationships, paths and edge counts keep their cards.
 
 **Connections in Code mode.** `feeds(…)`, `fedBy(…)`, `linkedTo(…)`, `outgoing[PRODUCES](…)`,
 `incoming(…)`; `noIncoming`, `noLinks`, `noEdges`, `noIncoming[DEFINED_BY]`;
