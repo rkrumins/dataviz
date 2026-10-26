@@ -45,6 +45,8 @@ export function toRuns(segments: Segment[]): Run[] {
         flushSep()
         open = null
         if (seg.t === 'text') runs.push({ text: seg.text })
+        // A value no token edits is said all the same: "is greater than its “slaHours”".
+        else if (seg.t === 'value') runs.push({ text: seg.quoted ? `“${seg.text}”` : seg.text })
         else if (seg.t === 'em') runs.push({ text: seg.text, tone: 'em' })
         else if (seg.t === 'note') runs.push({ text: seg.text, tone: 'note' })
         else if (seg.t === 'cond') runs.push({ text: 'anything that…', tone: 'cond', predicate: seg.predicate })

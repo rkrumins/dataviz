@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest'
 
 import type { Predicate, RelatedPredicate } from '@/types/search'
 
+import { toRuns } from '../../sentence/lineWords'
 import {
     connector, isOrInside, leafSegments, reachSegments, relationVerb, type Segment,
 } from '../sentenceGrammar'
@@ -57,6 +58,10 @@ describe('sentenceGrammar — the parts a token edits', () => {
         expect(words(segs)).toBe('"freshnessHours" is greater than its "slaHours"')
         // The other property is said, not a token of its own.
         expect(slots(segs)).toEqual([['key', 'freshnessHours'], ['phrase', 'is greater than']])
+        // Said on the Sentence's line too, not dropped from it.
+        const runs = toRuns(segs)
+        expect(runs.map((r) => r.text).join('')).toBe('“freshnessHours” is greater than its “slaHours”')
+        expect(runs.filter((r) => r.slot).map((r) => r.text)).toEqual(['“freshnessHours”', 'is greater than'])
     })
 
     it('leaves a gap where a value is still to be picked', () => {
