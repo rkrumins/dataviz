@@ -95,6 +95,14 @@ class Unit:
     # ids: the hoisted lineage walk (its index) every one of them is known
     # to meet, so its continuation is left out.
     satisfies: Optional[int] = None
+    # A Connections search's unit (``edges``) reads its nodes' edges, in a
+    # band of edge IDs: from ``elo`` (None: the first) to ``ehi`` (None:
+    # open-ended, likely ``espan`` IDs past ``elo``). ``reverse``: the
+    # second pass of ``either`` — edges stored the other way round.
+    reverse: bool = False
+    elo: Optional[int] = None
+    ehi: Optional[int] = None
+    espan: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -107,7 +115,23 @@ class Unit:
 
     def split(self) -> Optional[List["Unit"]]:
         """Two halves of this unit, or None when it can't be cut further.
-        A chunk that runs out of time is retried as its halves."""
+        A chunk that runs out of time is retried as its halves.
+
+        A Connections unit is cut in its edges too, into quarters: a unit
+        far past its usual time likely holds a hub, whose edges halving the
+        nodes leaves whole in one half (a single node can't be halved)."""
+        halves = self._split_nodes()
+        if not self.banded:
+            return halves
+        quarters = [part for half in halves or [self] for part in half._split_band() or [half]]
+        return quarters if len(quarters) > 1 else None
+
+    @property
+    def banded(self) -> bool:
+        """A Connections unit, read in a band of edge IDs."""
+        return self.espan > 0 or self.elo is not None or self.ehi is not None
+
+    def _split_nodes(self) -> Optional[List["Unit"]]:
         if self.kind == "range":
             lo = self.lo or 0
             # An open-ended range is cut where its nodes likely end; its
@@ -117,20 +141,31 @@ class Unit:
                 return None
             mid = lo + (hi - lo) // 2
             half = max(1, self.size // 2)
-            return [Unit("range", self.label, self.lo, mid, None, self.exclude, half),
-                    Unit("range", self.label, mid, self.hi, None, self.exclude, half,
-                         0 if self.hi is not None else hi - mid)]
+            return [replace(self, hi=mid, size=half, span=0),
+                    replace(self, lo=mid, size=half,
+                            span=0 if self.hi is not None else hi - mid)]
         if self.kind == "walk" and self.roots and len(self.roots) > 1:
             mid = len(self.roots) // 2
             half = max(1, self.size // 2)
-            return [Unit("walk", roots=self.roots[:mid], size=half, depth=self.depth),
-                    Unit("walk", roots=self.roots[mid:], size=half, depth=self.depth)]
+            return [replace(self, roots=self.roots[:mid], size=half),
+                    replace(self, roots=self.roots[mid:], size=half)]
         if self.kind == "ids" and self.roots and len(self.roots) > 1:
             mid = len(self.roots) // 2
-            return [Unit("ids", roots=self.roots[:mid], size=mid, satisfies=self.satisfies),
-                    Unit("ids", roots=self.roots[mid:], size=len(self.roots) - mid,
-                         satisfies=self.satisfies)]
+            return [replace(self, roots=self.roots[:mid], size=mid),
+                    replace(self, roots=self.roots[mid:], size=len(self.roots) - mid)]
         return None
+
+    def _split_band(self) -> Optional[List["Unit"]]:
+        """Two halves of the edge-ID band, cut like an open-ended range."""
+        lo = self.elo or 0
+        hi = self.ehi if self.ehi is not None else lo + self.espan
+        if hi - lo < 2:
+            return None
+        mid = lo + (hi - lo) // 2
+        half = max(1, self.size // 2)
+        return [replace(self, ehi=mid, espan=0, size=half),
+                replace(self, elo=mid, size=half,
+                        espan=0 if self.ehi is not None else hi - mid)]
 
 
 @dataclass
