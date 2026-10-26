@@ -333,9 +333,9 @@ lineage, so every relationship above works the same there:
 | --- | --- |
 | Every leaf — an entity that holds nothing | `no child()` (or `noOutgoing[containment]`) |
 | Exactly five levels below a category | `ancestor*5(type:Category)` |
-| Everything under *Finance*, at any depth (up to 20 levels) | `ancestor(@"Finance")` |
+| Everything under the category *Finance*, at any depth (up to 20 levels) | `ancestor(@"Finance")` |
 | Leaves with a direct `LINEAGE` edge into the *Sales* layer | `no child() outgoing["LINEAGE"](layer:"Sales")` |
-| *Finance* leaves feeding any other layer, one step | `layer:"Finance" no child() feeds(NOT layer:"Finance")` |
+| Leaves in the *Finance* layer feeding any other layer, one step | `layer:"Finance" no child() feeds(NOT layer:"Finance")` |
 | Categories one of whose leaves feeds the *Sales* layer | `type:Category descendant(no child() feeds(layer:"Sales"))` |
 
 A condition can't point back at an entity's own layer, so "into another layer"
