@@ -147,6 +147,12 @@ export function refLabel(ref: NodeRef): string {
     return ref.urn ? formatUrnLabel(ref.urn, 48) : '…'
 }
 
+/** A reference as a token or the map shows it: by name, without the
+ *  "anywhere" (``**``) its path may start with. */
+export function refName(ref: NodeRef): string {
+    return refLabel(ref.path && ref.path.length > 1 && ref.path[0] === '**' ? { ...ref, path: ref.path.slice(1) } : ref)
+}
+
 /** A name path typed as text: segments split on "/", "\/" a slash in a
  *  name and "\\" a backslash, each trimmed; empty segments dropped. */
 export function parseNamePath(text: string): string[] {

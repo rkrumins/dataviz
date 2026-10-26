@@ -35,6 +35,7 @@ import { createPortal } from 'react-dom'
 
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { cn } from '@/lib/utils'
+import { usePersonaMode } from '@/store/persona'
 import {
     useCanvasFilterMode,
     useFocusedMatchIndex,
@@ -1108,6 +1109,37 @@ function WarningBanner({
     deadlineExceeded: boolean
     candidateCount: number | null
 }) {
+    // Business reads what it means for the answer; how the engine got
+    // there is a click away. Technical reads the engine's account.
+    const technical = usePersonaMode() === 'technical'
+    const [why, setWhy] = useState(false)
+    const whyToggle = !technical && (
+        <>
+            {' '}
+            <button type="button" onClick={() => setWhy(!why)} aria-expanded={why}
+                    className="font-medium underline underline-offset-2">
+                {why ? 'Less' : 'Why?'}
+            </button>
+        </>
+    )
+    const capText = (
+        <>
+            {candidateCount !== null
+                ? `${candidateCount.toLocaleString()} candidates scanned before the cap fired. `
+                : 'The candidate-scan cap fired before the full result set was returned. '}
+            Some matches aren't shown. Narrow your filters,
+            tighten the scope, or raise the candidate cap in
+            Options.
+        </>
+    )
+    const deadlineText = (
+        <>
+            The provider returned what it had when the
+            timeout fired. Some matches are missing.
+            Tighten the predicate, lower the candidate cap,
+            or raise the deadline in Options.
+        </>
+    )
     return (
         <div className="flex flex-col gap-2">
             {truncated && (
@@ -1125,16 +1157,16 @@ function WarningBanner({
                     </div>
                     <div className="flex-1 min-w-0 text-[12px] leading-snug">
                         <div className="font-display font-semibold text-amber-900 dark:text-amber-100">
-                            Results truncated — candidate cap reached
+                            {technical ? 'Results truncated — candidate cap reached' : 'Some matches aren’t shown'}
                         </div>
                         <div className="mt-0.5 text-amber-900/85 dark:text-amber-100/90">
-                            {candidateCount !== null
-                                ? `${candidateCount.toLocaleString()} candidates scanned before the cap fired. `
-                                : 'The candidate-scan cap fired before the full result set was returned. '}
-                            Some matches aren't shown. Narrow your filters,
-                            tighten the scope, or raise the candidate cap in
-                            Options.
+                            {technical ? capText : 'The search stopped at its limit before it reached them. '
+                                + 'Narrow it, or search a smaller part of the view, to see them all.'}
+                            {whyToggle}
                         </div>
+                        {!technical && why && (
+                            <div className="mt-1 text-amber-900/70 dark:text-amber-100/75">{capText}</div>
+                        )}
                     </div>
                 </div>
             )}
@@ -1153,14 +1185,16 @@ function WarningBanner({
                     </div>
                     <div className="flex-1 min-w-0 text-[12px] leading-snug">
                         <div className="font-display font-semibold text-rose-900 dark:text-rose-100">
-                            Soft deadline exceeded — partial results
+                            {technical ? 'Soft deadline exceeded — partial results' : 'Some matches may be missing'}
                         </div>
                         <div className="mt-0.5 text-rose-900/85 dark:text-rose-100/90">
-                            The provider returned what it had when the
-                            timeout fired. Some matches are missing.
-                            Tighten the predicate, lower the candidate cap,
-                            or raise the deadline in Options.
+                            {technical ? deadlineText : 'The search ran out of time and shows what it found by then. '
+                                + 'Narrow it to be sure of the whole answer.'}
+                            {whyToggle}
                         </div>
+                        {!technical && why && (
+                            <div className="mt-1 text-rose-900/70 dark:text-rose-100/75">{deadlineText}</div>
+                        )}
                     </div>
                 </div>
             )}

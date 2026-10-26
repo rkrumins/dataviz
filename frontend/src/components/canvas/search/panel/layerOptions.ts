@@ -9,6 +9,11 @@
  *               config (by ``id`` or ``name``), the layer's
  *               ``name`` is used. Otherwise the value itself.
  */
+import { useMemo } from 'react'
+
+import { useActiveView } from '@/store/schema'
+
+
 export interface LayerOption {
     value: string
     label: string
@@ -62,4 +67,30 @@ export function entityTypesInView(
         .sort(([a, x], [b, y]) => (y.sampled ?? 0) - (x.sampled ?? 0) || a.localeCompare(b))
         .map(([type]) => type)
     return present.length > 0 ? present : fallback
+}
+
+
+/**
+ * Resolve layer options for the active view.
+ *
+ * Strategy:
+ *   1. Sample DB-stored ``layerAssignment`` values (exactly what the BE
+ *      compares against). For each, enrich the label from the view
+ *      config when possible.
+ *   2. If discovery returns nothing, fall back to the view's reference-
+ *      layout config — using ``layer.id`` as value (typical assignment
+ *      writer) and ``layer.name`` as label.
+ *
+ * This handles both common conventions:
+ *   - DB stores layer IDs → label is enriched from view config
+ *   - DB stores layer names → label IS the value (visibly the same)
+ */
+export function useViewLayerOptions(
+    getValueSamples: (key: string) => unknown[],
+): LayerOption[] {
+    const activeView = useActiveView()
+    return useMemo<LayerOption[]>(
+        () => layerOptions(activeView?.layout?.referenceLayout?.layers ?? [], getValueSamples),
+        [activeView, getValueSamples],
+    )
 }

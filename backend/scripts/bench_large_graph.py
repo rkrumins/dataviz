@@ -12,6 +12,10 @@ fire:
 * compiling one, and its Cypher with the values written in;
 * name suggestions as the picker asks for them (a part of a name, eight
   shown, waiting at most 0.8 s), and a name path;
+* counts as the panel asks for them, through the service's own counts:
+  a five-line sentence's (each line alone, and how the lines narrow), the
+  type chips over a name search, and six recipes — the first answer, every
+  count complete, and the slowest request;
 * native queries: a sample, a 3-hop walk, a count, the row cap, the server's
   time limit and the reply byte cap — with this process's peak memory.
 
@@ -29,6 +33,7 @@ import asyncio
 import resource
 import statistics
 import time
+from types import SimpleNamespace
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 FIELDS = 9               # per dataset
@@ -149,12 +154,13 @@ async def main() -> None:
         execute_count_session,
         execute_session_search,
     )
+    from backend.app.services.advanced_search_service import AdvancedSearchService
     from backend.app.services.deep_search import SearchRunContext
     from backend.app.services.native_query.cypher_text import inline_params
     from backend.app.services.native_query.guard import FALKORDB, check
     from backend.app.services.native_query.limit import cap_rows
     from backend.common.interfaces.native_query import NativeQueryError
-    from backend.common.models.search import NodeRef, SearchQuery, SearchScope
+    from backend.common.models.search import NodeRef, SearchCountsRequest, SearchQuery, SearchScope
 
     p = FalkorDBProvider(host=opts.host, port=opts.port, graph_name=opts.graph, auth_enabled=False)
     p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
@@ -270,6 +276,82 @@ async def main() -> None:
     say("Name paths (full, and ** / name)",
         "/".join(str(len(r["urns"])) for r in resolved["result"]),
         f"median {resolved['median'] * 1000:,.0f} ms")
+
+    class Counts(AdvancedSearchService):
+        """The service's counts as the route runs them, in this scope rather
+        than one resolved from a view."""
+        async def _rule_scope(self, requested):
+            return requested, SimpleNamespace(scope_hash="bench")
+
+    service = Counts(SimpleNamespace(provider=p), session=None, workspace_id=None)
+
+    async def counted(items: Dict[str, Dict[str, Any]], requests: int) -> Dict[str, Any]:
+        """As the panel counts: the same items again with their sessions, a
+        second's wait each, until every count is complete or ``requests``
+        have been made."""
+        version, sessions = str(time.monotonic_ns()), {}  # cold, as after an edit
+        started, slowest, first = time.perf_counter(), 0.0, 0.0
+        for n in range(1, requests + 1):
+            sent = time.perf_counter()
+            answer = await service.counts(SearchCountsRequest.model_validate({
+                "scope": scope.model_dump(by_alias=True), "purpose": "search", "waitMs": 1000,
+                "items": [{"id": k, "predicate": v} for k, v in items.items()],
+                "sessions": sessions}), run_context=SearchRunContext(data_version=version))
+            slowest = max(slowest, time.perf_counter() - sent)
+            first = first or time.perf_counter() - started
+            sessions = {k: c.session_id for k, c in answer.counts.items() if c.session_id}
+            exact = sum(c.status == "complete" for c in answer.counts.values())
+            if exact == len(items):
+                break
+        errors = [c.error for c in answer.counts.values() if c.error]
+        if errors:
+            raise RuntimeError(errors[0])
+        return {"first": first, "done": time.perf_counter() - started, "slowest": slowest,
+                "requests": n, "exact": exact}
+
+    def all_of(*children: Dict[str, Any]) -> Dict[str, Any]:
+        return {"kind": "group", "op": "and", "children": list(children)}
+
+    def type_is(label: str) -> Dict[str, Any]:
+        return {"kind": "entityType", "op": "in", "values": [label]}
+
+    lineage = {"edgeClass": "lineage"}
+    undescribed = {"kind": "hasProperty", "key": "description", "negate": True}
+    named_7 = {"kind": "text", "target": "name", "match": "substring", "value": "7"}
+    lines = [
+        type_is("dataset"),
+        {"kind": "related", "axis": "downstream", "maxHops": 3, "where": type_is("dataset")},
+        {"kind": "related", "axis": "ancestor",
+         "where": {"kind": "is", "refs": [{"urn": urn("db", database)}]}},
+        named_7,
+        undescribed,
+    ]
+    # As the Sentence view plans them: each line alone, the lines up to each
+    # one (the last is the whole query), and what the "inside" line names.
+    sentence = {f"alone:{i}": line for i, line in enumerate(lines)}
+    sentence.update({f"prefix:{i}": all_of(*lines[:i + 1]) for i in range(1, len(lines))})
+    sentence["where:2"] = lines[2]["where"]
+    chips = {f"type:{label}": all_of(named_7, type_is(label)) for label in LABELS}
+    recipes = {
+        "widely-read": all_of(type_is("dataset"), {"kind": "related", "axis": "downstream",
+                                                   "count": {"op": "gte", "value": 3}}),
+        "lineage-starts": all_of({"kind": "isRoot", **lineage}, {"kind": "hasOutgoing", **lineage}),
+        "undocumented": all_of(type_is("dataset"), undescribed),
+        "undocumented-fields": all_of(type_is("schemaField"), undescribed),
+        "no-lineage": all_of(type_is("dataset"), {"kind": "isOrphan", **lineage}),
+        "dead-ends": all_of(type_is("dataset"), {"kind": "hasIncoming", **lineage},
+                            {"kind": "isLeaf", **lineage}),
+    }
+    for what, items, requests in [
+        (f"Counts: a {len(lines)}-line sentence ({len(sentence)} counts)", sentence, 600),
+        (f"Counts: type chips over a name search ({len(chips)} types)", chips, 600),
+        (f"Counts: {len(recipes)} recipes", recipes, 600),
+        (f"Counts: {len(recipes)} recipes, as the gallery asks (2 requests)", recipes, 2),
+    ]:
+        t = await counted(items, requests)
+        say(what, f"first answer {t['first'] * 1000:,.0f} ms",
+            f"{t['exact']}/{len(items)} complete in {t['done'] * 1000:,.0f} ms",
+            f"slowest request {t['slowest'] * 1000:,.0f} ms of {t['requests']}")
 
     async def native(cypher: str, *, limit: int = 200, timeout_ms: int = 10_000,
                      max_reply_bytes: int = 16 * MIB):

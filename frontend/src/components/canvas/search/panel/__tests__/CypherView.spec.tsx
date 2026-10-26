@@ -9,6 +9,7 @@ import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { useBranchStore } from '@/store/branchStore'
 import { DEFAULT_FEATURES, useFeaturesStore } from '@/store/features'
+import { usePersonaStore } from '@/store/persona'
 import { useSearchStore } from '@/store/searchStore'
 import type { Predicate, SearchExplainResult } from '@/types/search'
 
@@ -87,12 +88,24 @@ describe('CypherView', () => {
         const editor = screen.getByRole('textbox', { name: 'Compiled Cypher' })
         expect(editor.textContent).toContain('n.entityType IN $p0')
         expect(editor.getAttribute('aria-readonly')).toBe('true')
-        // Coloured as a parameter, and listed with its value.
+        // Coloured as a parameter, and listed with its value among the
+        // engine's details — folded for Business, a click away.
         expect(screen.getAllByText('$p0').map((el) => el.className)).toContain('text-rose-700 dark:text-rose-300')
+        expect(screen.queryByText('["dataset"]')).toBeNull()
+        fireEvent.click(screen.getByRole('button', { name: /Engine details/ }))
         expect(screen.getByText('["dataset"]')).toBeTruthy()
 
         await act(async () => { fireEvent.click(screen.getByRole('button', { name: /Copy with values/ })) })
         expect(writeText).toHaveBeenCalledWith(INLINED)
+    })
+
+    it('opens the engine\'s details for Technical', () => {
+        usePersonaStore.getState().setMode('technical')
+        compiled = COMPILED
+        render(<CypherView viewId="view-1" />)
+        expect(screen.getByRole('button', { name: /Engine details/ })).toHaveAttribute('aria-expanded', 'true')
+        expect(screen.getByText('["dataset"]')).toBeTruthy()
+        usePersonaStore.getState().setMode('business')
     })
 
     it.each([

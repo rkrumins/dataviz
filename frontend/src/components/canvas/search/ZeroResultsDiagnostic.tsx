@@ -60,6 +60,7 @@ import type {
 import { CypherDisclosure } from './panel/CypherDisclosure'
 import { findScopeCondition } from './panel/predicateComposition'
 import { refLabel } from './panel/relations'
+import { ZeroResultRescue } from './panel/rescue/ZeroResultRescue'
 import type { QuickMatch } from './session/quickPredicate'
 
 
@@ -74,6 +75,11 @@ export interface ZeroResultsDiagnosticProps {
      *  no quick query to switch — the lead then states the miss without
      *  offering the one-click fixes. */
     onSwitchMatch?: (match: QuickMatch) => void
+    /** The query as the builder holds it, and how to change it: with
+     *  both, the lead names the line where the matches run out and
+     *  offers the fixes that find something. */
+    draft?: Predicate | null
+    onApplyFix?: (next: Predicate) => void
 }
 
 
@@ -86,7 +92,7 @@ interface Cause {
 
 
 export const ZeroResultsDiagnostic: FC<ZeroResultsDiagnosticProps> = ({
-    result, query, viewId, onSwitchMatch,
+    result, query, viewId, onSwitchMatch, draft, onApplyFix,
 }) => {
     const causes = useMemo(() => diagnose(result, query), [result, query])
     const text = useMemo(() => firstTextLeaf(query.predicate), [query.predicate])
@@ -100,7 +106,10 @@ export const ZeroResultsDiagnostic: FC<ZeroResultsDiagnosticProps> = ({
                 how a slow property search looked like a broken one. */}
             {result.deadlineExceeded
                 ? <TimedOutLead />
-                : <MissLead text={text} onSwitchMatch={onSwitchMatch} unnamed={unnamed} />}
+                : draft && onApplyFix
+                    ? <ZeroResultRescue viewId={viewId} draft={draft} onApply={onApplyFix}
+                                        fallback={<MissLead text={text} onSwitchMatch={onSwitchMatch} unnamed={unnamed} />} />
+                    : <MissLead text={text} onSwitchMatch={onSwitchMatch} unnamed={unnamed} />}
 
             <TechnicalDetails>
                 {causes.map((c, i) => (

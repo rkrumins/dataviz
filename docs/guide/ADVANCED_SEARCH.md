@@ -2,10 +2,11 @@
 
 *For Viewers and Builders.* Advanced Search finds every entity in a View that
 matches what you describe — a name, a tag, a property value, a place in the
-lineage — however large the View is. It lights the matches up on the canvas,
-counts them in every container, and keeps the searches you use again, for you
-or for everyone who opens the View. This page shows you how to search a View,
-narrow the results, act on the matches, and save the searches you reuse.
+lineage — however large the View is. Ask in plain words, start from a recipe,
+or build the query as a sentence, counted as you go. It lights the matches up
+on the canvas, counts them in every container, and keeps the searches you use
+again, for you or for everyone who opens the View. This page shows you how to
+ask, narrow the results, act on the matches, and save the searches you reuse.
 
 > **Note:** *The one-sentence model* — A search is a set of **filters** (joined
 > with AND, OR and NOT) run over **one View**. The same filters power the quick
@@ -16,24 +17,27 @@ narrow the results, act on the matches, and save the searches you reuse.
 
 ## Get started in 5 minutes
 
-1. **Open a View** and press `/`. The **Search this view…** box in the header
-   takes the keystroke.
-2. **Type a word** — say `customer`. After two characters {brand} searches the
-   *whole* View on the server, not just what's on screen, and lists the **Top
-   matches** with the path to each one.
-3. **Press Enter** (or click a match) to fly the canvas to it, expanding
-   whatever it sits inside.
-4. **Press `⌘↵` / `Ctrl+Enter`** to open the **Advanced Search panel** with the
-   same query. Every match is listed, grouped by layer, and highlighted on the
-   canvas; collapsed containers show how many matches they hold.
-5. **Choose Refine** and add a filter: **Add filter → Tags & properties →
-   Tag is…** and pick `PII`. The results update as you edit.
-6. **Try Isolate** in the match bar to show only the matches and their
-   containers, then **Highlight** to go back.
-7. **Choose Save**, name it "Customer PII", and pick **Everyone on this view**
+1. **Open a View** and press `⌘⇧F` / `Ctrl+Shift+F`. The **Advanced Search**
+   panel opens beside the canvas, ready for filters.
+2. **Add a filter** — type `dataset` into **Search by name, tag, type,
+   property…** and pick **Everything of type dataset**, or choose **Add filter
+   → Tags & properties → Tag is…** and pick `PII`. Each filter is a card, and
+   the matches light up on the canvas as you edit.
+3. **Add another** the same way. Filters join with **AND**; click it between
+   two cards to match any of them instead.
+4. **Narrow from the answer** — a type chip keeps one type, a breadcrumb looks
+   inside a container. **Isolate** in the match bar shows only the matches and
+   their containers; **Highlight** goes back.
+5. **Choose Save**, name it "Customer PII", and pick **Everyone on this view**
    (or **Just me**). It's now one click away in the **Library**.
 
-That's the whole loop: type, refine, act on the canvas, keep.
+That's the whole loop: filter, refine, act on the canvas, keep. Two more ways
+in sit beside the filters: **Or ask in plain words…** — `datasets that feed
+dashboards` reads back what it understood, and how many it finds, before
+anything runs — and the **Sentence** view, which reads the query the way you'd
+say it. Not sure where to start? The empty panel offers **recipes**, each with
+how many it finds in this View. For one word, the header's **Search this
+view…** box (press `/`) is quicker: see [The search box](#the-search-box).
 
 ---
 
@@ -44,6 +48,8 @@ That's the whole loop: type, refine, act on the canvas, keep.
 | **Search box** | The header of a View (**Search this view…**) | Click it, or press `/` anywhere on the canvas |
 | **Advanced Search panel** | The left side of the canvas | `⌘⇧F` / `Ctrl+Shift+F`, the ✨ **Refine** button in the search box, `⌘↵` in the search box, or **See all … results** in its list |
 | **Search button** | The Graph and Hierarchy canvases (no header box) | Click **Search ⌘⇧F**, or press the shortcut |
+| **Search Studio** | Over the canvas, opened out from the panel | **Open Search Studio** (⤢) in the panel's header, or `E` in the panel |
+| **Command palette** | `⌘⇧P` / `Ctrl+Shift+P` on a Context View | **Ask about this view** or **Open Search Studio** |
 | **Property Manager** | **Properties** in the View's header | **Find all using this** / **Find missing this** on a property opens the panel with that search |
 
 ---
@@ -72,7 +78,8 @@ the same query, ready to extend.
 ## The Advanced Search panel
 
 The panel has a header — **Search**, where it searches, **Refine**, **Library**,
-**Options** — a query card, and the results. It can be resized from its edge.
+**Options**, **Open Search Studio** — a query card, and the results. Resize it
+from its edge: drag it, or focus it and use the arrow keys.
 
 ### Where the search runs
 
@@ -87,12 +94,45 @@ Pick the scope from the header's scope menu:
 A search never shows you anything the View's own permissions don't allow: the
 server works out the View's boundary itself, whatever the browser sends.
 
+### Ask in plain words
+
+Ask on the query card — **Or ask in plain words…** under the filters in
+**Form**, at the top in **Sentence**. Type a question the way you'd say it:
+
+| You ask | It reads as |
+| --- | --- |
+| `datasets tagged PII` · `#PII` · `PII columns` | Datasets with the tag · anything tagged · columns tagged |
+| `unused datasets` · `dead ends` · `sources` · `orphaned columns` | The lineage shape: nothing downstream · nothing upstream · no lineage at all |
+| `undocumented datasets` · `unowned datasets` | No `description` · no `owner` |
+| `datasets that feed dashboards` · `dashboards fed by datasets` | A relationship, up to 3 hops — `directly` for one hop, `within 2 hops` for two |
+| `datasets that feed no dashboards` · `only feed dashboards` · `feed at least 2 dashboards` | None of them · every one · a count |
+| `datasets in Snowflake` · `datasets inside "Sales Ops"` · `datasets in the gold layer` | Inside a container you name · in a layer |
+| `datasets owned by alice@corp` · `with more than 1M rows` · `updated in the last 7 days` | Property comparisons |
+| `datasets that feed "CFO Revenue"` | A named entity, in quotes |
+
+As you type it **reads the question back** — **Reads as**, and how many it
+matches — before anything changes. A word with more than one reading, such as
+a tag that is also a container's name, shows its readings as chips: pick the
+one you mean. A name several entities share says so and lets you pick one.
+Words it can't place are **searched for by name**, and it lists them.
+
+**Enter** applies the question and runs it; **Esc** clears it; **↑** and **↓**
+bring back earlier questions. Start with **and** — `and tagged PII` — to add to
+the query rather than replace it (**The query becomes** says the result). Over
+an answer, with the builder folded away, the same bar sits above the results.
+
+> **Note:** Ask is rule-based. It reads your View's own types, tags, properties
+> and layers; nothing you type is sent to an AI service.
+
 ### Building a query
 
-An empty query card shows a search field ("add a filter"), example queries
-drawn from this View's own data, and every filter, grouped as below. Pick a
-suggestion — an entity type, a tag, a property or one of its values — or a
-filter, and it becomes a filter row. Later, use **Add filter**:
+An empty query card opens on filters: **Search by name, tag, type,
+property…** suggests filters from this View's own data — its types, tags,
+properties and their values — and **Add filter** lists every filter, grouped as
+below. Pick one and it becomes a filter card. Beneath them, **Or ask in plain
+words…** and the **recipes** (see [Recipes gallery](#recipes-gallery)) are two
+more ways to start. Add more later with the same field under the cards, or
+**+ and…** in **Sentence**:
 
 | Category | Filters |
 | --- | --- |
@@ -103,8 +143,8 @@ filter, and it becomes a filter row. Later, use **Add filter**:
 | **Relationships** | Parent is… · Top-level container is… · Any container above it… · Contains… · Fed by… · Feeds… · Is a named entity… · Inside a container named… |
 | **Advanced** | Paths from A to B · Within N hops of… · Number of edges… · Every entity · AND group · OR group · NOT group |
 
-Rows are joined with **AND**; click an **AND** between them to match any row
-(**OR**) instead. Select several rows to **Group as AND / OR** on their own, or
+In **Form**, rows are joined with **AND**; click an **AND** between them to
+match any row (**OR**) instead. Select several rows to **Group as AND / OR** on their own, or
 add a **NOT group** to exclude what it matches.
 **Undo** and **Redo** step through your edits; **New** starts again.
 
@@ -133,6 +173,62 @@ ignoring case unless you tick **Match case**.
 > group** around "owner **is** alice" includes them. **is empty** finds a
 > missing value, blank text or an empty list; **is not set** finds only a
 > missing one.
+
+### Build it as a sentence
+
+The query card shows the same query four ways — **Form**, **Sentence**,
+**Code** and **Cypher** — and you can switch at any time; the card remembers
+your choice. It opens in **Form**, the filter cards; **Sentence** is the guided
+alternative.
+
+**Sentence** reads the query the way you'd say it: *Find* **datasets** *that
+are tagged* **#PII** *and* **feed** **a dashboard**. Every highlighted word is
+a token: click one to change it — a type, a tag, a value, a relationship's
+verb, how far it reaches. A dashed **pick…** is something still to fill in.
+
+- **+ and…** adds a line (any filter), **+ or…** an alternative, and **+
+  that…** a condition on a relationship's relative.
+- A line's **⋯** menu offers **Duplicate**, **Match any of…**, **Exclude
+  these** and **Remove**.
+- **all** or **any** after *Find* chooses whether every line must match or any
+  one.
+- What a sentence can't show — within N hops, a number of edges, groups nested
+  very deep — says **Edit in Code**.
+
+When the query has a relationship or a route, a **map** above the sentence
+draws its shape — *Datasets* → *feed* → *Dashboard* — with each part's count.
+Click a box or an arrow to change that part; **Map** folds it away.
+
+**Form** shows the same query as cards, one per filter, with every option in
+view.
+
+### Counts as you build
+
+Numbers arrive as you build, before anything runs:
+
+- each **Sentence line** shows how many still match once it is added, read top
+  to bottom like a funnel (hover for the line's own count);
+- each box on the **map**, the **Ask** preview, every **recipe** and every
+  **type chip** over the results shows its count.
+
+A count reads **N+** while the View is still being counted. Counts need a
+FalkorDB data source; elsewhere the numbers simply don't appear. On a very
+large View, where a heavy line can take a while to finish counting, you can
+turn them off under **Options → Live counts**: nothing is counted as you
+build, and **Counts off · Turn on** above the sentence brings them back. A
+line that can't be counted says why: **Counted once it is filled in**,
+**Routes are found when the search runs**, or **Too many hops to count —
+name the far end to go further**.
+
+### When nothing matches
+
+When a query would find nothing, the Sentence view marks the line where the
+matches run out — **Nothing matches from here** — before anything runs, and
+offers up to three fixes, each counted, one click to apply: **Without** the
+line, **Match any condition, not all**, **Look up to *N* hops away**, **Any of
+them, not every one**, **Contains *…*, not exactly**, or **Search the whole
+view**. An empty answer over the results leads with the same line and fixes,
+whichever builder you use.
 
 ### Relationships
 
@@ -179,9 +275,9 @@ end a condition, routes go up to 4 hops; with both, 3.
 
 ### Code mode
 
-Switch the query card from **Visual** to **Code** to type the query instead.
-Both modes edit the same query, so you can move between them freely, and the
-card reopens in the mode you used last. Press `⌘↵` / `Ctrl+Enter` (or click
+Switch the query card to **Code** to type the query instead. Every mode edits
+the same query, so you can move between them freely, and the card reopens in
+the mode you used last. Press `⌘↵` / `Ctrl+Enter` (or click
 away) to apply, and `Esc` to undo your edit.
 
 The editor helps as you type:
@@ -239,7 +335,8 @@ you can paste JSON there yourself. A quoted value always stays text:
 ### The Cypher tab
 
 **Cypher** shows the query in words and the Cypher it runs as — exactly what a
-search sends — with its bound parameters and any notes from the compiler.
+search sends — with its bound parameters and any notes from the compiler under
+**Engine details** (folded for Business, open for Technical).
 **Copy with values** gives the statement with its values written in, so it runs
 as it is anywhere Cypher runs. A data source that isn't searched as Cypher says
 so instead.
@@ -289,14 +386,20 @@ in [Native read-only queries: security](/docs/native-queries).
 **Manual** waits for **Run** — handy while you build a large query. Rows you
 haven't finished are left out of the run, never guessed at.
 
-### Templates
+### Recipes gallery
 
-**Library → Templates** starts you from a ready-made query. The **Featured**
-ones — *Overview*, *All datasets*, *PII tagged*, *No lineage*, *No
-downstream*, *No upstream*, *PII spread*, *No owner*, *Lineage gaps*,
-*Orphans by layer* — cover the common questions; the full list adds
-paths, hops, top-N by a property and more. Picking one replaces your current
-filters.
+**Recipes** are ready-made questions, grouped by what you set out to do:
+**Impact**, **Root cause**, **Governance & PII**, **Documentation gaps**,
+**Ownership**, **Cleanup** and **Discovery**. Each is put in your View's own
+words — *Datasets without an owner*, *Everything tagged PII or GDPR* — and
+says how many it finds; one naming a type, tag or property the View doesn't
+have isn't offered.
+
+The empty query card starts with one per intent (**All *N*** shows the rest);
+**Library → Recipes** and an idle **Search Studio** show them all. A recipe
+ready to run runs at once. One with something to fill in — *Everything one
+entity feeds*, *Find something by name* — says **fill in** and opens the query
+at that blank. Picking a recipe replaces your current query.
 
 ---
 
@@ -327,6 +430,17 @@ the other canvases). A group's **Search inside this group** adds an *Inside
 Subtree* filter for it. **Load more** fetches the next thousand; **Load all**
 keeps going until every match is listed.
 
+The answer refines the query, not just the list:
+
+- **Narrow to** chips, when the matches are of several types, keep one type —
+  each with its count — and **×** on a chip leaves that type out.
+- The **breadcrumb** on a match — the containers it sits in — narrows to
+  **inside** the one you click.
+- A match says **why it matched**: the words it contains, or, when the query
+  asks for any of several things, which of them it **meets**.
+
+Each of these changes the query itself, so **Undo** takes it back.
+
 On a very large View the first answer arrives quickly and keeps filling in —
 **scanning N%** shows how far it has got, and the count reads **N+** until it's
 exact. Nothing needs clicking.
@@ -354,6 +468,28 @@ save or turn into a rule.
 
 ---
 
+## Search Studio
+
+**Search Studio** opens the panel out over the canvas, with room to work:
+**Open Search Studio** (⤢) in the panel's header, `E` in the panel, or
+**Open Search Studio** in the command palette. It shows, side by side:
+
+- **The query** — the same card: Ask, Sentence and map, Form, Code or Cypher.
+- **The results** — the match bar, and the matches as a **Table** (name, type,
+  where, matched because) or as **Cards**. Tick rows to act on them together:
+  **Frame on canvas**, **Keep only these** (up to 64), **Leave these out**, or
+  **Copy names**. A row's **Reveal** shows it on the canvas.
+- **What the view holds** — its **Types**, **Tags** and **Properties** (with
+  their commonest values), each counted exactly. Click one to add it to the
+  query; in Cypher it is copied instead, ready to paste.
+
+Narrower than 1,280 px the third pane becomes a drawer (**Show what the view
+holds**); narrower than 1,024 px the three become tabs. **Esc** or **Back to
+the panel** returns you, and **Reveal** and **Frame** step out of the way to
+show the canvas. Before anything runs, the results pane offers every recipe.
+
+---
+
 ## Saving and sharing searches
 
 Every search you run is kept in **Library → Mine** automatically (the last ten
@@ -374,7 +510,8 @@ them:
 - **This view** — the searches saved for everyone. Click one to load it.
   People who can edit the View see **Remove**, which asks once more — it
   removes the search **for everyone**.
-- **Templates** — the built-in starting points.
+- **Recipes** — ready-made questions in the View's own words (see
+  [Recipes gallery](#recipes-gallery)).
 
 A saved search keeps its **filters**. It doesn't keep the scope or options you
 ran it with: loading it runs it the way the panel runs every search.
@@ -418,7 +555,13 @@ a lineage relationship of more than one hop.
 | `⌘↵` / `Ctrl+Enter` | Search box | Open the panel with this query |
 | `Esc` | Search box | Close the list; press again to clear the search |
 | `J` / `↓` · `K` / `↑` | Panel (outside a text field) | Next / previous match |
-| `Enter` | Panel (outside a text field) | Reveal the current match on the canvas |
+| `Enter` | Panel (outside a text field or button) | Reveal the current match on the canvas |
+| `E` | Panel (outside a text field) | Open Search Studio |
+| `Esc` | Search Studio | Back to the panel (closes an open picker first) |
+| `Enter` · `Esc` | Ask bar | Apply the question and run it · clear it |
+| `↑` `↓` | Ask bar | Bring back earlier questions |
+| `←` `→` (`Shift` for more) · `Home` `End` | The panel's edge | Narrow or widen the panel · narrowest or widest |
+| `⌘⇧P` / `Ctrl+Shift+P` | A Context View | **Ask about this view** · **Open Search Studio** |
 | `⌘↵` / `Ctrl+Enter` | Code mode | Apply what you typed |
 | `Esc` | Code mode | Undo your edit (closes the suggestions first) |
 | `Ctrl+Space` | Code mode | Show suggestions |
@@ -448,7 +591,8 @@ tag:PII OR tag:GDPR
 ```
 
 **Datasets without an owner.** Entity type is `dataset`, then **Property
-compares to…** `owner` **is empty**. Or run the *No owner* template.
+compares to…** `owner` **is empty**. Or start from the *Datasets without an
+owner* recipe.
 
 ```text
 type:dataset owner IS EMPTY
@@ -549,6 +693,9 @@ upstream*..2(ancestor(@"Country/United Kingdom"))
 | Your own Cypher: time | 10 s by default, 30 s at most |
 | Your own Cypher: runs | 20 a minute per person; 2 at once per data source |
 | Your own Cypher: query and answer | 20,000 characters; an answer of up to 8 MiB, each text value up to 2,000 characters and each list or map up to 100 entries |
+| Counts as you build | FalkorDB data sources; not for a *Path*, or a filter not yet filled in |
+| **Narrow to** chips | The 12 commonest types, counted when not every match is loaded |
+| **Keep only these** (Search Studio) | 64 rows |
 
 ---
 
@@ -573,6 +720,9 @@ upstream*..2(ancestor(@"Country/United Kingdom"))
 | "*More rows matched — these are the first …*" | The answer had more rows than **Rows** allows | Raise **Rows**, or narrow the query |
 | "*The answer was too large to show whole*", "*… needs more memory than one query may use*" | Whole nodes or long lists made the answer too big | Return properties (`n.name`) instead of whole nodes, or fewer rows |
 | "*You've run a lot of queries in a short time*" | 20 runs a minute is the limit | Wait a moment |
+| No counts beside the Sentence lines, recipes or Ask | **Live counts** is off, the data source isn't FalkorDB, or you opened the View through a share link | Turn on **Options → Live counts**, or run the query to see its count |
+| **Searched for by name: …** under the Ask bar | Those words aren't a type, tag, property, layer or container the View holds | Rephrase with the View's own words, pick a reading, or keep the name search |
+| **Nothing matches from here** on a Sentence line | That line leaves nothing of what the lines above it found | Apply one of the fixes beside it, or change the line |
 
 ---
 

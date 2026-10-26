@@ -34,16 +34,19 @@
  * the lineage canvas spotlights matches and shows enriched badges.
  */
 import { motion, AnimatePresence } from 'framer-motion'
-import { BookOpen, SlidersHorizontal, Sparkles, X } from 'lucide-react'
+import { BookOpen, Maximize2, SlidersHorizontal, Sparkles, X } from 'lucide-react'
 import {
     type FC,
     useCallback,
     useEffect,
+    useLayoutEffect,
     useMemo,
     useRef,
     useState,
 } from 'react'
 
+import { IconButton } from '@/components/ui/Button'
+import { Segmented } from '@/components/ui/Segmented'
 import { cn } from '@/lib/utils'
 import { rememberUrnLabels } from '@/lib/urnLabels'
 import {
@@ -53,6 +56,7 @@ import {
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useFeature } from '@/store/features'
+import { usePersonaMode } from '@/store/persona'
 import {
     DEFAULT_DRAFT_OPTIONS,
     readPersistedCanvasFilterMode,
@@ -65,7 +69,7 @@ import {
 } from '@/store/searchStore'
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { SavedViewQuery } from '@/services/viewLibraryService'
-import type { AncestorRef } from '@/types/search'
+import type { AncestorRef, Predicate } from '@/types/search'
 
 import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
 import { ExportMatchesDialog } from './panel/ExportMatchesDialog'
@@ -74,20 +78,32 @@ import { MatchBar } from './panel/MatchBar'
 import { NoViewState } from './panel/NoViewState'
 import { QueryCard } from './panel/QueryCard'
 import { QuerySentence } from './panel/QuerySentence'
+import { useEditorMode } from './panel/builderMode'
+import { ResultsAskBar } from './panel/ask/ResultsAskBar'
 import { ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
 import { ResultsPane } from './panel/ResultsPane'
 import { SaveQueryDialog } from './panel/SaveQueryDialog'
 import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
 import { ScopeModePicker } from './panel/ScopeModePicker'
 import { setScopeCondition } from './panel/predicateComposition'
+import { buildRunnablePredicate } from './panel/runnablePredicate'
 import { useLoadAll } from './panel/useLoadAll'
 import { useViewSearchSessionOptional } from './session/ViewSearchSessionContext'
 import { hasReportableView } from './session/useViewSearchSessionController'
+import { SEARCH_OPTIONS } from './searchOptions'
 import { usePendingSearchRun } from './usePendingSearchRun'
-import {
-    defaultInputs,
-    type SearchTemplate,
-} from './searchTemplates'
+import type { Recipe } from './panel/recipes/recipes'
+import { SearchCoachmark } from './panel/guidance/SearchCoachmark'
+import { ViewRecipes } from './panel/recipes/ViewRecipes'
+import { ResultsTable } from './studio/ResultsTable'
+import { SchemaInspector } from './studio/SchemaInspector'
+import { SearchStudio } from './studio/SearchStudio'
+import { useHostRect } from './studio/useHostRect'
+
+
+/** The header width its toolbar needs with every chip labelled — with the
+ *  Refine chip, and without it. */
+const LABELLED_WIDTH = { withRefine: 570, without: 480 }
 
 
 export interface SearchMapPanelProps {
@@ -217,6 +233,10 @@ function PanelInner({
     // only search IS this panel have nowhere else to compose a query, so
     // for them the builder is always the top of the panel.
     const refineOpen = viewSession ? viewSession.refineOpen : true
+    // The Sentence builder already reads as the query, so the one-line
+    // statement above the results would repeat it.
+    const [editorMode, setEditorMode] = useEditorMode()
+    const sentenceShowing = refineOpen && editorMode === 'sentence'
     const { loadAll, isLoadingAll, cancelLoadAll } = useLoadAll(session)
 
     const draftPredicate = useDraftPredicate()
@@ -260,6 +280,14 @@ function PanelInner({
     ) => {
         void runPredicate(p, options)
     }, [runPredicate])
+    // A change made from the results — a fix for an empty answer, a type
+    // to narrow to: the query changes and runs at once, whether or not
+    // the builder is open to run it.
+    const handleRefine = useCallback((next: Predicate) => {
+        useSearchStore.getState().commitDraft(next)
+        const runnable = buildRunnablePredicate(next)
+        if (runnable) handleRun(runnable.predicate, SEARCH_OPTIONS)
+    }, [handleRun])
 
     // Hydrate per-view canvas-filter-mode preference on mount /
     // viewId change. The store keeps a single ``canvasFilterMode``
@@ -327,20 +355,24 @@ function PanelInner({
     }, [onClear, cancel, resetTemplate, clearStore])
 
     /**
-     * Seed-from-template: rather than calling runTemplate (which would
-     * REPLACE the canonical state with the template's full SearchQuery
-     * including its aggregations), we just compile the template's
-     * predicate and seed the draft. The QueryCard's debounced auto-run
-     * then fires with the user's hits-only options — so the result is
-     * an editable set of filter rows the user can refine.
+     * Start from a recipe. One ready to run runs now, as a change made
+     * from the results does. One with something to fill in opens the
+     * builder on it: in the Sentence view at its first blank — unless
+     * this person builds in Form, where the blank is an empty field.
      */
-    const handleSeedTemplate = useCallback((template: SearchTemplate) => {
-        const built = template.build(defaultInputs(template))
-        if (built.predicate) {
-            commitDraft(built.predicate)
-        }
+    const handlePickRecipe = useCallback((recipe: Recipe) => {
         setLibraryOpen(false)
-    }, [commitDraft])
+        if (!recipe.blank) {
+            handleRefine(recipe.predicate)
+            return
+        }
+        commitDraft(recipe.predicate)
+        viewSession?.refine()
+        if (editorMode !== 'form') {
+            setEditorMode('sentence')
+            useSearchStore.getState().requestOpenBlank()
+        }
+    }, [handleRefine, commitDraft, viewSession, editorMode, setEditorMode])
 
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
         commitDraft(entry.predicate)
@@ -431,6 +463,16 @@ function PanelInner({
     // canvas reveal is reserved for this explicit handler so the user
     // controls when the canvas pans/expands. No-op when there's no
     // focused match or no matching hit in the current page.
+    // Reveal and Frame go to the canvas, so Search Studio steps aside first.
+    const revealNode = useMemo(() => onRevealNode && ((urn: string, path: AncestorRef[]) => {
+        useSearchStore.getState().setStudioOpen(false)
+        onRevealNode(urn, path)
+    }), [onRevealNode])
+    const frameMatches = useMemo(() => onFrameMatches && ((urns: string[]) => {
+        useSearchStore.getState().setStudioOpen(false)
+        onFrameMatches(urns)
+    }), [onFrameMatches])
+
     const revealFocusedOnCanvas = useCallback(() => {
         if (!onRevealNode) return
         const { orderedMatchUrns, focusedMatchIndex } = useSearchStore.getState()
@@ -439,8 +481,8 @@ function PanelInner({
         if (!urn) return
         const hits = view.kind === 'results' ? (view.result.hits ?? []) : []
         const hit = hits.find((h) => h.node.urn === urn)
-        onRevealNode(urn, hit?.ancestorPath ?? [])
-    }, [onRevealNode, view])
+        revealNode?.(urn, hit?.ancestorPath ?? [])
+    }, [onRevealNode, revealNode, view])
 
     // Panel-level keyboard handler. J/↓ → next match, K/↑ → prev,
     // Enter → reveal the focused match on the canvas (the deliberate
@@ -449,6 +491,29 @@ function PanelInner({
     // text input so the user can still type in the query card / row
     // filter without triggering these shortcuts.
     const panelRef = useRef<HTMLDivElement>(null)
+
+    // Search Studio: the same panel opened out over its canvas.
+    const studioOpen = useSearchStore((s) => s.studioOpen)
+    const setStudioOpen = useSearchStore((s) => s.setStudioOpen)
+    const persona = usePersonaMode()
+    const expandRef = useRef<HTMLButtonElement | null>(null)
+    // The first-run tip points at it, so it is state as well as a ref.
+    const [expandEl, setExpandEl] = useState<HTMLButtonElement | null>(null)
+    const expandRefs = useCallback((el: HTMLButtonElement | null) => {
+        expandRef.current = el
+        setExpandEl(el)
+    }, [])
+    const [studioHost, setStudioHost] = useState<Element | null>(null)
+    const [studioView, setStudioView] = useState<'table' | 'cards'>('table')
+    useLayoutEffect(() => {
+        if (studioOpen) setStudioHost(panelRef.current?.closest('[data-panel="search-map-panel"]')?.parentElement ?? null)
+    }, [studioOpen])
+    const closeStudio = useCallback(() => {
+        setStudioOpen(false)
+        requestAnimationFrame(() => expandRef.current?.focus())
+    }, [setStudioOpen])
+    // The Studio is this panel's: it doesn't outlive it.
+    useEffect(() => () => setStudioOpen(false), [setStudioOpen])
     const handlePanelKeyDown = useCallback((e: React.KeyboardEvent) => {
         const target = e.target as HTMLElement | null
         if (target && (
@@ -456,6 +521,8 @@ function PanelInner({
             || target.tagName === 'TEXTAREA'
             || target.isContentEditable
         )) return
+        // Search Studio and the popovers are portaled: their keys are theirs.
+        if (!panelRef.current?.contains(target)) return
         switch (e.key) {
             case 'j':
             case 'J':
@@ -470,14 +537,85 @@ function PanelInner({
                 stepFocus('prev')
                 return
             case 'Enter': {
+                // Enter on a button presses it.
+                if (target?.closest('button, a[href]')) return
                 e.preventDefault()
                 revealFocusedOnCanvas()
                 return
             }
+            case 'e':
+            case 'E':
+                if (e.metaKey || e.ctrlKey || e.altKey) return
+                e.preventDefault()
+                setStudioOpen(true)
+                return
             default:
                 return
         }
-    }, [stepFocus, revealFocusedOnCanvas])
+    }, [stepFocus, revealFocusedOnCanvas, setStudioOpen])
+
+    // The panel's parts, laid out in its column — or, opened out, in
+    // Search Studio. Never both: there is one query card.
+    const queryCard = (
+        <QueryCard
+            viewId={viewId}
+            isRunning={view.kind === 'running'}
+            runState={runState}
+            onRun={handleRun}
+            onOpenAdvanced={() => {
+                setStudioOpen(false)
+                openAdvanced('options')
+            }}
+            onPickRecipe={handlePickRecipe}
+        />
+    )
+    const matchBar = (
+        <MatchBar
+            count={resultsCount}
+            elapsedMs={elapsedMs}
+            isRunning={view.kind === 'running'}
+            errorMessage={view.kind === 'error' ? view.message : null}
+            truncated={truncated}
+            countIsExact={countIsExact}
+            deadlineExceeded={deadlineExceeded}
+            candidateCount={candidateCount}
+            scanning={view.kind === 'results'
+                && view.result.status === 'running'}
+            progress={view.kind === 'results'
+                ? view.result.progress ?? null
+                : null}
+            onFrame={canFrame
+                ? () => frameMatches?.(frameTargetUrns)
+                : undefined}
+            onShowFocusedOnCanvas={onRevealNode
+                ? revealFocusedOnCanvas
+                : undefined}
+            onClear={view.kind === 'results' || view.kind === 'error'
+                ? handleClear
+                : undefined}
+            onExport={canExport ? () => setExportOpen(true) : undefined}
+            unit={view.kind === 'results' && view.result.paths ? 'path' : 'match'}
+            viewId={viewId}
+        />
+    )
+    const resultsPane = (
+        <ResultsPane
+            view={view}
+            viewId={viewId}
+            onScopeToGroup={handleScopeToGroup}
+            onReveal={revealNode}
+            onOpen={onOpenNode}
+            onLoadMore={loadMore}
+            isLoadingMore={isLoadingMore}
+            onLoadAll={loadAll}
+            isLoadingAll={isLoadingAll}
+            onCancelLoadAll={cancelLoadAll}
+            draft={draftPredicate}
+            onRefine={handleRefine}
+        />
+    )
+    // A table only for rows: not routes, not nothing.
+    const tableHits = view.kind === 'results' && !view.result.paths ? view.result.hits ?? [] : []
 
     return (
         <div
@@ -490,7 +628,8 @@ function PanelInner({
                 open={libraryOpen}
                 onOpenChange={setLibraryOpen}
                 recentQueries={recentQueries}
-                onSeedTemplate={handleSeedTemplate}
+                viewId={viewId}
+                onPickRecipe={handlePickRecipe}
                 onLoadRecent={handleLoadRecent}
                 onTogglePinRecent={togglePinRecent}
                 onRemoveRecent={removeRecent}
@@ -517,9 +656,12 @@ function PanelInner({
                                 else viewSession.refine()
                             }
                             : undefined}
+                        onExpand={() => setStudioOpen(true)}
+                        expandRef={expandRefs}
                     />
                 </div>
             </LibraryPopover>
+            <SearchCoachmark anchor={expandEl} />
 
             {saveTarget && (
                 <SaveQueryDialog
@@ -543,78 +685,92 @@ function PanelInner({
                     initialTab={advancedTab}
                     onClose={() => setAdvancedOpen(false)}
                 />
+            ) : studioOpen ? (
+                <div className="flex flex-1 flex-col items-center justify-center gap-3 p-6 text-center">
+                    <p className="text-sm text-ink-muted">Search Studio is open over the canvas.</p>
+                    <button type="button" onClick={closeStudio}
+                            className="rounded-lg border border-glass-border px-3 py-1.5 text-sm text-ink hover:border-accent-lineage/40">
+                        Back to the panel
+                    </button>
+                </div>
             ) : (
                 <>
                     <div className={cn(
                         'flex-1 min-h-0 overflow-y-auto custom-scrollbar',
                         'px-3 py-3 flex flex-col gap-3',
                     )}>
-                        {refineOpen && (
-                            <QueryCard
-                                viewId={viewId}
-                                isRunning={view.kind === 'running'}
-                                runState={runState}
-                                onRun={handleRun}
-                                onOpenAdvanced={() => openAdvanced('options')}
-                            />
-                        )}
+                        {refineOpen && queryCard}
 
                         {showResultsSection && (
                             <div className="flex flex-col gap-2">
                                 {/* With the builder folded away this is the
-                                    only statement of what was asked. */}
-                                <QuerySentence draftPredicate={draftPredicate} />
-                                <MatchBar
-                                    count={resultsCount}
-                                    elapsedMs={elapsedMs}
-                                    isRunning={view.kind === 'running'}
-                                    errorMessage={view.kind === 'error' ? view.message : null}
-                                    truncated={truncated}
-                                    countIsExact={countIsExact}
-                                    deadlineExceeded={deadlineExceeded}
-                                    candidateCount={candidateCount}
-                                    scanning={view.kind === 'results'
-                                        && view.result.status === 'running'}
-                                    progress={view.kind === 'results'
-                                        ? view.result.progress ?? null
-                                        : null}
-                                    onFrame={canFrame
-                                        ? () => onFrameMatches?.(frameTargetUrns)
-                                        : undefined}
-                                    onShowFocusedOnCanvas={onRevealNode
-                                        ? revealFocusedOnCanvas
-                                        : undefined}
-                                    onClear={view.kind === 'results' || view.kind === 'error'
-                                        ? handleClear
-                                        : undefined}
-                                    onExport={canExport ? () => setExportOpen(true) : undefined}
-                                    unit={view.kind === 'results' && view.result.paths ? 'path' : 'match'}
-                                    viewId={viewId}
-                                />
-                                <ResultsPane
-                                    view={view}
-                                    viewId={viewId}
-                                    onScopeToGroup={handleScopeToGroup}
-                                    onReveal={onRevealNode}
-                                    onOpen={onOpenNode}
-                                    onLoadMore={loadMore}
-                                    isLoadingMore={isLoadingMore}
-                                    onLoadAll={loadAll}
-                                    isLoadingAll={isLoadingAll}
-                                    onCancelLoadAll={cancelLoadAll}
-                                />
-                                {exportOpen && view.kind === 'results' && (
-                                    <ExportMatchesDialog
-                                        viewId={viewId}
-                                        query={view.query}
-                                        matchCount={countIsExact ? resultsCount : null}
-                                        onClose={() => setExportOpen(false)}
-                                    />
-                                )}
+                                    only statement of what was asked — and
+                                    a new question is still one line away. */}
+                                {!refineOpen && <ResultsAskBar viewId={viewId} onRun={handleRun} />}
+                                {!sentenceShowing && <QuerySentence draftPredicate={draftPredicate} />}
+                                {matchBar}
+                                {resultsPane}
                             </div>
                         )}
                     </div>
                 </>
+            )}
+            {exportOpen && view.kind === 'results' && (
+                <ExportMatchesDialog
+                    viewId={viewId}
+                    query={view.query}
+                    matchCount={countIsExact ? resultsCount : null}
+                    onClose={() => setExportOpen(false)}
+                />
+            )}
+            {studioOpen && !advancedOpen && (
+                <SearchStudio
+                    host={studioHost}
+                    onClose={closeStudio}
+                    builder={queryCard}
+                    results={(
+                        <>
+                            {showResultsSection && matchBar}
+                            {tableHits.length > 0 && (
+                                <Segmented size="sm" className="self-start" label="How to show the results"
+                                           value={studioView} onChange={setStudioView}
+                                           options={[{ value: 'table', label: 'Table' }, { value: 'cards', label: 'Cards' }]} />
+                            )}
+                            {view.kind === 'idle' ? (
+                                <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto custom-scrollbar">
+                                    <p className="px-1 text-sm text-ink-muted">
+                                        Ask a question, build one, or start from a recipe — what it finds shows here.
+                                    </p>
+                                    <ViewRecipes viewId={viewId} onPick={handlePickRecipe} />
+                                </div>
+                            ) : tableHits.length > 0 && studioView === 'table' && view.kind === 'results' ? (
+                                <ResultsTable
+                                    hits={tableHits}
+                                    query={view.query.predicate}
+                                    draft={draftPredicate}
+                                    onRefine={handleRefine}
+                                    onReveal={revealNode}
+                                    onOpen={onOpenNode}
+                                    onLookInside={(a) => handleScopeToGroup({ ancestorUrn: a.urn,
+                                        ancestorDisplayName: a.displayName, ancestorEntityType: a.entityType })}
+                                    onFrame={frameMatches}
+                                    canLoadMore={!!view.result.cursor}
+                                    isLoadingMore={isLoadingMore}
+                                    onLoadMore={loadMore}
+                                    viewId={viewId}
+                                    total={view.result.totalCount ?? view.result.candidateCount ?? null}
+                                />
+                            ) : (
+                                <div className="min-h-0 flex-1 overflow-y-auto custom-scrollbar">{resultsPane}</div>
+                            )}
+                        </>
+                    )}
+                    inspector={(
+                        <SchemaInspector viewId={viewId} draft={draftPredicate} onRefine={handleRefine}
+                                         mode={editorMode}
+                                         initialTab={persona === 'technical' ? 'properties' : 'types'} />
+                    )}
+                />
             )}
         </div>
     )
@@ -639,9 +795,12 @@ function PanelInner({
  */
 function CompactHeader({
     onClose, onOpenLibrary, libraryOpen, onOpenOptions, optionsDeltaCount,
-    refineOpen, onToggleRefine,
+    refineOpen, onToggleRefine, onExpand, expandRef,
 }: {
     onClose: () => void
+    /** Open the panel out into Search Studio. */
+    onExpand: () => void
+    expandRef: React.Ref<HTMLButtonElement>
     onOpenLibrary: () => void
     libraryOpen: boolean
     onOpenOptions: () => void
@@ -651,9 +810,16 @@ function CompactHeader({
      *  nothing to toggle it to. */
     onToggleRefine?: () => void
 }) {
+    // Narrower than the whole toolbar needs, its chips keep only their
+    // icons — and at the narrowest the toolbar takes a second row — so
+    // Close and the Studio's button stay in reach.
+    const [headerEl, setHeaderEl] = useState<HTMLDivElement | null>(null)
+    const headerWidth = useHostRect(headerEl)?.width ?? 0
+    const iconOnly = headerWidth > 0
+        && headerWidth < (onToggleRefine ? LABELLED_WIDTH.withRefine : LABELLED_WIDTH.without)
     return (
-        <div className={cn(
-            'flex items-center gap-2 px-4 py-3',
+        <div ref={setHeaderEl} className={cn(
+            'flex flex-wrap items-center gap-x-1.5 gap-y-2 px-3.5 py-3',
             'border-b border-glass-border/60 bg-canvas-elevated/60',
         )}>
             <div className="flex items-center gap-2 min-w-0 shrink-0">
@@ -674,7 +840,7 @@ function CompactHeader({
                     <ScopeModePicker />
                 </div>
             </div>
-            <div className="ml-auto flex items-center gap-1">
+            <div className="ml-auto flex items-center gap-0.5">
                 {onToggleRefine && (
                     <ToolbarChip
                         label="Refine"
@@ -684,14 +850,16 @@ function CompactHeader({
                         Icon={Sparkles}
                         active={refineOpen}
                         onClick={onToggleRefine}
+                        iconOnly={iconOnly}
                     />
                 )}
                 <ToolbarChip
                     label="Library"
-                    title="Saved queries, recent runs, and templates"
+                    title="Saved queries, recent runs and recipes"
                     Icon={BookOpen}
                     active={libraryOpen}
                     onClick={onOpenLibrary}
+                    iconOnly={iconOnly}
                 />
                 <ToolbarChip
                     label="Options"
@@ -702,13 +870,17 @@ function CompactHeader({
                     active={false}
                     onClick={onOpenOptions}
                     badge={optionsDeltaCount > 0 ? optionsDeltaCount : undefined}
+                    iconOnly={iconOnly}
                 />
+                <IconButton ref={expandRef} icon={Maximize2} label="Open Search Studio" shortcut="E"
+                            detail="The query, its results as a table, and what the view holds — side by side"
+                            onClick={onExpand} className="hidden sm:inline-flex" />
                 <button
                     type="button"
                     onClick={onClose}
                     title="Close"
                     className={cn(
-                        'inline-flex items-center justify-center w-7 h-7 rounded-md ml-1',
+                        'inline-flex items-center justify-center w-7 h-7 rounded-md ml-0.5',
                         'text-ink-muted hover:text-ink hover:bg-glass/40 transition-colors',
                     )}
                 >
@@ -728,7 +900,7 @@ function CompactHeader({
  * non-default-count indicator.
  */
 function ToolbarChip({
-    label, title, Icon, active, onClick, badge,
+    label, title, Icon, active, onClick, badge, iconOnly = false,
 }: {
     label: string
     title: string
@@ -736,6 +908,9 @@ function ToolbarChip({
     active: boolean
     onClick: () => void
     badge?: number
+    /** Only the icon, where the toolbar is short of room; the label stays
+     *  its name. */
+    iconOnly?: boolean
 }) {
     return (
         <button
@@ -743,8 +918,10 @@ function ToolbarChip({
             onClick={onClick}
             title={title}
             aria-pressed={active}
+            aria-label={iconOnly ? label : undefined}
             className={cn(
-                'inline-flex items-center gap-1.5 h-7 px-2 rounded-md',
+                'inline-flex items-center gap-1.5 h-7 rounded-md',
+                iconOnly ? 'px-1.5' : 'px-2',
                 'text-[11.5px] font-medium transition-colors relative',
                 active
                     ? 'bg-accent-lineage/20 text-accent-lineage'
@@ -752,7 +929,7 @@ function ToolbarChip({
             )}
         >
             <Icon className="w-3.5 h-3.5" />
-            <span>{label}</span>
+            {!iconOnly && <span>{label}</span>}
             {badge !== undefined && (
                 <span className={cn(
                     'inline-flex items-center justify-center min-w-[14px] h-[14px] px-1',

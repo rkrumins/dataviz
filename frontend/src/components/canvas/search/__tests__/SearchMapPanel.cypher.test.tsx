@@ -1,10 +1,11 @@
 /**
- * The Query card's Cypher tab sits beside Visual and Code, and the card
+ * The Query card's Cypher tab sits beside Sentence, Form and Code, and the card
  * reopens on it — the card remounts each time the Advanced drawer closes.
  * A native query's highlight is no draft's, so emptying the draft leaves
  * it lit.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
+import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ViewSearchSessionContext } from '@/components/canvas/search/session/ViewSearchSessionContext'
@@ -39,6 +40,7 @@ function renderPanel(session: ViewSearchSession) {
                 />
             </ViewSearchSessionContext.Provider>
         </ProviderOverride>,
+        { wrapper: MemoryRouter },
     )
 }
 
@@ -52,7 +54,7 @@ describe('SearchMapPanel — the Cypher tab', () => {
 
     it('shows what the query compiles to, and reopens on it', () => {
         const first = renderPanel(stubSession({ refineOpen: true }))
-        fireEvent.click(screen.getByRole('button', { name: 'Cypher' }))
+        fireEvent.click(screen.getByRole('radio', { name: 'Cypher' }))
         expect(screen.getByText('Compiling the query…')).toBeInTheDocument()
         first.unmount()
 

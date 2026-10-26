@@ -9,7 +9,7 @@
  * exact number.
  */
 import type { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
-import type { Predicate } from '@/types/search'
+import type { Predicate, SearchScope } from '@/types/search'
 
 
 export interface RuleCount {
@@ -38,6 +38,21 @@ const WAIT_MS = 1000
 const MAX_REQUESTS = 600
 
 
+export interface CountRulesOptions {
+    signal?: AbortSignal
+    onUpdate?: (counts: ReadonlyMap<string, RuleCount>) => void
+    /** Where to count: the whole view unless said otherwise — a search
+     *  being built counts in the scope it runs in. */
+    scope?: SearchScope
+    /** ``search``: the conditions of a search being built, held to a
+     *  search's limits rather than a display rule's. */
+    purpose?: 'rule' | 'search'
+    /** Stop after this many requests and answer with the counts so far —
+     *  floors, not exact — instead of following every count to the end. */
+    maxRequests?: number
+}
+
+
 /**
  * Count ``rules`` in ``viewId``, calling ``onUpdate`` with every rule's
  * count after each answer. Resolves with the final counts; rejects when
@@ -50,10 +65,7 @@ export async function countRules(
     provider: RemoteGraphProvider,
     viewId: string,
     rules: ReadonlyArray<RuleToCount>,
-    opts: {
-        signal?: AbortSignal
-        onUpdate?: (counts: ReadonlyMap<string, RuleCount>) => void
-    } = {},
+    opts: CountRulesOptions = {},
 ): Promise<ReadonlyMap<string, RuleCount>> {
     const counts = new Map<string, RuleCount>()
     try {
@@ -82,13 +94,15 @@ async function countGroup(
     viewId: string,
     rules: ReadonlyArray<RuleToCount>,
     counts: Map<string, RuleCount>,
-    opts: { signal?: AbortSignal; onUpdate?: (counts: ReadonlyMap<string, RuleCount>) => void },
+    opts: CountRulesOptions,
 ): Promise<void> {
     const sessions: Record<string, string> = {}
     const items = rules.map((r) => ({ id: r.id, predicate: asGroup(r.predicate) }))
-    for (let request = 0; request < MAX_REQUESTS; request++) {
+    const scope = opts.scope ?? { viewId, scopeMode: 'view' }
+    for (let request = 0; request < (opts.maxRequests ?? MAX_REQUESTS); request++) {
         const answer = await provider.searchCounts(
-            { scope: { viewId, scopeMode: 'view' }, items, waitMs: WAIT_MS, sessions: { ...sessions } },
+            { scope, items, waitMs: WAIT_MS, sessions: { ...sessions },
+              ...(opts.purpose ? { purpose: opts.purpose } : {}) },
             { signal: opts.signal },
         )
         let complete = true
@@ -108,6 +122,8 @@ async function countGroup(
         opts.onUpdate?.(new Map(counts))
         if (complete) return
     }
+    // A cap the caller asked for: what has been counted so far is the answer.
+    if (opts.maxRequests !== undefined) return
     throw new Error(`still counting after ${MAX_REQUESTS} requests`)
 }
 

@@ -51,6 +51,14 @@ const SCOPE = [
   'components/canvas/context-view/ContextViewHeader.tsx',
   'components/canvas/context-view/header',
   'components/canvas/property-manager/PropertyManagerButton.tsx',
+  'components/canvas/search/panel/sentence',
+  'components/canvas/search/panel/map',
+  'components/canvas/search/panel/ask',
+  'components/canvas/search/panel/rescue',
+  'components/canvas/search/panel/results',
+  'components/canvas/search/panel/guidance',
+  'components/canvas/search/panel/recipes',
+  'components/canvas/search/studio',
   'features/versioning/components',
 ]
 

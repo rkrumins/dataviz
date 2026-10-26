@@ -87,11 +87,14 @@ export interface RelationshipEditorProps {
     discoveredLayers: LayerOption[]
     isRunning: boolean
     onSubmit?: () => void
+    /** Leave out the relative's own condition — the Sentence builder shows
+     *  it as the lines under the relationship. */
+    hideWhere?: boolean
 }
 
 
 export const RelationshipEditor: FC<RelationshipEditorProps> = ({
-    value, onChange, discovery, knownEntityTypes, discoveredLayers, isRunning, onSubmit,
+    value, onChange, discovery, knownEntityTypes, discoveredLayers, isRunning, onSubmit, hideWhere = false,
 }) => {
     const ctx = useContext(RelationContext)
     const meta = axisMeta(value.axis)
@@ -181,7 +184,7 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
                 </div>
             )}
 
-            <div className="flex flex-col gap-1.5">
+            {!hideWhere && <div className="flex flex-col gap-1.5">
                 <span className="text-[10px] font-mono uppercase tracking-[0.14em] text-ink-muted">
                     {lead === 'all' ? `Every ${meta.noun}…` : `Where the ${meta.noun}…`}
                 </span>
@@ -210,7 +213,7 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
                         No condition: any {meta.noun} will do.
                     </p>
                 )}
-            </div>
+            </div>}
         </div>
     )
 }

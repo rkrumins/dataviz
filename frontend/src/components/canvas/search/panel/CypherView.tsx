@@ -15,11 +15,12 @@
  * Below it, for whoever may query the view's data source: Edit and run,
  * starting from that same statement (``NativeConsole``).
  */
-import { AlertCircle, AlertTriangle, CheckCircle2, Copy, Info, Loader2 } from 'lucide-react'
+import { AlertCircle, AlertTriangle, CheckCircle2, ChevronRight, Copy, Info, Loader2 } from 'lucide-react'
 import { type FC, type ReactNode, useCallback, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import { useIsDraftMode } from '@/store/branchStore'
+import { usePersonaMode } from '@/store/persona'
 import { useDraftPredicate } from '@/store/searchStore'
 
 import { CypherEditor } from '../editor/CypherEditor'
@@ -97,9 +98,15 @@ export const CypherView: FC<CypherViewProps> = ({ viewId }) => {
                         className="max-h-72 overflow-y-auto custom-scrollbar -mx-3 -my-2.5"
                     />
                 </Block>
-                {typeof result.candidate_cap === 'number' && <CandidateCapHint cap={result.candidate_cap} />}
-                {Object.keys(params).length > 0 && <ParamsBlock params={params} />}
-                {notes.length > 0 && <NotesBlock notes={notes} />}
+                <EngineDetails parts={[
+                    typeof result.candidate_cap === 'number' ? 'candidate cap' : null,
+                    Object.keys(params).length > 0 ? `${Object.keys(params).length} parameters` : null,
+                    notes.length > 0 ? `${notes.length} ${notes.length === 1 ? 'note' : 'notes'}` : null,
+                ]}>
+                    {typeof result.candidate_cap === 'number' && <CandidateCapHint cap={result.candidate_cap} />}
+                    {Object.keys(params).length > 0 && <ParamsBlock params={params} />}
+                    {notes.length > 0 && <NotesBlock notes={notes} />}
+                </EngineDetails>
             </>
         )
     }
@@ -118,6 +125,26 @@ export const CypherView: FC<CypherViewProps> = ({ viewId }) => {
                         : null}
                 />
             )}
+        </div>
+    )
+}
+
+
+/** How the engine will run it — its cap, parameters and notes. Open for
+ *  Technical; folded for Business, one click away. */
+function EngineDetails({ parts, children }: { parts: Array<string | null>; children: ReactNode }) {
+    const technical = usePersonaMode() === 'technical'
+    const [open, setOpen] = useState(technical)
+    const summary = parts.filter(Boolean).join(' · ')
+    if (!summary) return null
+    return (
+        <div className="flex flex-col gap-3">
+            <button type="button" onClick={() => setOpen(!open)} aria-expanded={open}
+                    className="inline-flex items-center gap-1.5 self-start text-[11px] font-medium text-ink-muted hover:text-ink">
+                <ChevronRight className={cn('w-3 h-3 transition-transform', open && 'rotate-90')} />
+                Engine details <span className="text-ink-muted/70">· {summary}</span>
+            </button>
+            {open && children}
         </div>
     )
 }

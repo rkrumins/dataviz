@@ -200,6 +200,9 @@ export function OperatorMenu<T extends string>({
                     {open && renderCoords && (
                         <motion.div
                             ref={menuRef}
+                            // A floating layer: a popover holding this menu
+                            // doesn't treat a pick in it as a click outside.
+                            data-floating-layer=""
                             initial={{ opacity: 0, y: renderCoords.flipped ? 4 : -4, scale: 0.97 }}
                             animate={{ opacity: 1, y: 0, scale: 1 }}
                             transition={{ duration: 0.12 }}

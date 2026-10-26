@@ -313,6 +313,18 @@ interface SearchStoreState {
      * the original Advanced Search.
      */
     canvasFilterMode: CanvasFilterMode
+
+    /** Search Studio — the panel's full-width workspace over the canvas —
+     *  is open. The panel's one query card lives there while it is. */
+    studioOpen: boolean
+
+    /** A recipe with something to fill in was just picked: the Sentence
+     *  builder opens there once it shows it. */
+    pendingOpenBlank: boolean
+
+    /** "Ask about this view" was chosen from outside the panel: the Ask bar
+     *  takes focus once it shows. */
+    pendingAskFocus: boolean
 }
 
 
@@ -407,6 +419,13 @@ interface SearchStoreActions {
      *  the "open in Advanced Search + run" bridge used by the Property
      *  Manager. The caller also opens the panel. */
     requestSearchRun: (predicate: Predicate) => void
+    setStudioOpen: (open: boolean) => void
+    requestOpenBlank: () => void
+    /** Atomic read-and-clear of the request to open what to fill in. */
+    consumeOpenBlank: () => boolean
+    requestAskFocus: () => void
+    /** Atomic read-and-clear of the request to focus the Ask bar. */
+    consumeAskFocus: () => boolean
     /** Atomic read-and-clear of the pending run predicate (panel-side). */
     consumePendingRun: () => Predicate | null
     /** Persist the scope mode chosen by the user in the panel header.
@@ -659,6 +678,9 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     // is active at store-create time — callers (SearchMapPanel mount)
     // hydrate the right value via setCanvasFilterMode.
     canvasFilterMode: 'highlight',
+    studioOpen: false,
+    pendingOpenBlank: false,
+    pendingAskFocus: false,
 
     setResult: ({ viewId, matchUrns, ancestorPaths, ancestorCounts, queryHash }) => {
         const next = new Set<string>()
@@ -882,6 +904,30 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         // edit/undo it), then flag the panel to run it.
         get().commitDraft(predicate)
         set({ pendingRunPredicate: predicate })
+    },
+
+    setStudioOpen: (open) => {
+        set({ studioOpen: open })
+    },
+
+    requestOpenBlank: () => {
+        set({ pendingOpenBlank: true })
+    },
+
+    consumeOpenBlank: () => {
+        const pending = get().pendingOpenBlank
+        if (pending) set({ pendingOpenBlank: false })
+        return pending
+    },
+
+    requestAskFocus: () => {
+        set({ pendingAskFocus: true })
+    },
+
+    consumeAskFocus: () => {
+        const pending = get().pendingAskFocus
+        if (pending) set({ pendingAskFocus: false })
+        return pending
     },
 
     consumePendingRun: () => {

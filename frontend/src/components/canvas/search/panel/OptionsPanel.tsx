@@ -10,6 +10,10 @@
  * since that's the option that most directly shapes the result
  * narrative. Page-size / candidate-cap / include-ancestor-path sit
  * underneath as advanced affordances.
+ *
+ * Below the card, this browser's **Live counts** — whether conditions are
+ * counted as they are built. Not a request option: Reset defaults and the
+ * header's badge leave it alone.
  */
 import { type FC, useState } from 'react'
 
@@ -21,6 +25,7 @@ import {
 } from '@/store/searchStore'
 
 import { AggregationEditor } from './AggregationEditor'
+import { useLiveCounts } from './counts/liveCounts'
 
 
 export interface OptionsPanelProps {
@@ -37,6 +42,7 @@ export const OptionsPanel: FC<OptionsPanelProps> = ({
     const effective = draftOptions ?? DEFAULT_DRAFT_OPTIONS
     const isCustom = draftOptions !== null
     const [showAdvanced, setShowAdvanced] = useState(false)
+    const [liveCounts, setLiveCounts] = useLiveCounts()
 
     const primarySpec = effective.aggregations[0] ?? { by: 'entityType', maxBuckets: 50 }
 
@@ -137,6 +143,22 @@ export const OptionsPanel: FC<OptionsPanelProps> = ({
                     </div>
                 )}
             </div>
+
+            <label className="flex items-start gap-2 px-1 text-[11px] text-ink-muted">
+                <input
+                    type="checkbox"
+                    checked={liveCounts}
+                    onChange={(e) => setLiveCounts(e.target.checked)}
+                    className="mt-0.5 rounded border-glass-border"
+                />
+                <span>
+                    <span className="text-ink">Live counts</span>
+                    <span className="block text-[10px] text-ink-muted/70 leading-snug">
+                        Count each condition as you build — sentence lines, the map, the Ask
+                        preview, recipes and type chips. Turn off on very large views.
+                    </span>
+                </span>
+            </label>
         </div>
     )
 }
