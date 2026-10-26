@@ -10,6 +10,7 @@ a time as Viewer or Member (``workspace_access`` holds the ceilings).
 
   GET    /admin/workspaces/{ws_id}/members                list bindings + roles
   GET    /admin/workspaces/{ws_id}/members/grant-options  what the caller may grant
+  GET    /admin/workspaces/{ws_id}/members/service-accounts  service accounts to add
   POST   /admin/workspaces/{ws_id}/members                create binding
   PUT    /admin/workspaces/{ws_id}/members/{binding}/expiry  move its end date
   DELETE /admin/workspaces/{ws_id}/members/{binding}      revoke binding
@@ -22,7 +23,9 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -36,15 +39,19 @@ from backend.app.db.repositories import (
     group_repo,
     notification_repo,
     role_repo,
+    service_account_repo,
     user_repo,
 )
-from backend.app.services import workspace_access
-from backend.app.services.permission_service import PermissionClaims, simulate_for_user
+from backend.app.services import service_account_access, workspace_access
+from backend.app.services.permission_service import PermissionClaims, resolve, simulate_for_user
 from backend.app.services.revocation_service import revoke_subject_sessions
 from backend.auth_service.interface import User
 from backend.common.models.rbac import (
     AccessProvenance,
+    AccessRequestManager,
+    ImpactPreviewAccountBinding,
     ImpactPreviewResponse,
+    ImpactPreviewServiceAccount,
     ImpactPreviewUser,
     RequestableRole,
     WorkspaceAccessGrant,
@@ -58,6 +65,7 @@ from backend.common.models.rbac import (
     WorkspaceMemberExpiryUpdateRequest,
     WorkspaceMemberResponse,
     WorkspaceMemberSubject,
+    WorkspaceServiceAccountCandidate,
 )
 
 
@@ -340,7 +348,10 @@ async def get_grant_options(
         .order_by(WorkspaceDataSourceORM.label)
     )).scalars().all()
     roles = [
-        RequestableRole(name=r.name, description=r.description, is_system=r.is_system)
+        RequestableRole(
+            name=r.name, description=r.description, is_system=r.is_system,
+            requestable=workspace_access.is_requestable(perms),
+        )
         for r, perms in await workspace_access.workspace_roles(session, ws_id)
         if workspace_access.can_grant(claims, ws_id, r.name, perms)
     ]
@@ -364,6 +375,35 @@ async def get_grant_options(
             WorkspaceGrantSource(id=d.id, label=d.label, restricted=bool(d.is_restricted)) for d in sources
         ],
     )
+
+
+@router.get(
+    "/service-accounts",
+    response_model=list[WorkspaceServiceAccountCandidate],
+    response_model_by_alias=True,
+)
+async def list_service_account_candidates(
+    ws_id: str,
+    q: Optional[str] = Query(None, max_length=200),
+    _user: User = Depends(requires(workspace_access.MEMBERS_ADD, workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+) -> list[WorkspaceServiceAccountCandidate]:
+    """Enabled service accounts matching ``q`` (name or what it is for), to
+    add here like a person: what each is for, and who manages it — a team the
+    identity provider keeps, marked."""
+    await _ensure_workspace_exists(session, ws_id)
+    rows, _total = await service_account_repo.list_page(session, q=q, status="active", limit=20)
+    managed_by = await service_account_repo.manager_names(session, [user.id for user, _account in rows])
+    return [
+        WorkspaceServiceAccountCandidate(
+            id=user.id, name=user.first_name, description=account.description,
+            managers=[
+                AccessRequestManager(type=kind, name=name, from_idp=from_idp)
+                for kind, name, from_idp in managed_by[user.id]
+            ],
+        )
+        for user, account in rows
+    ]
 
 
 @router.post(
@@ -394,14 +434,12 @@ async def create_member_binding(
         )
 
     # Subject must exist before we bind it.
+    account = body.subject_type == "user" and is_service_account(body.subject_id)
     if body.subject_type == "user":
         if await user_repo.get_user_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="User not found")
-        if is_service_account(body.subject_id):
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="A service account's roles are given on its own page, under Service accounts",
-            )
+        if account and await service_account_repo.get(session, body.subject_id) is None:
+            raise HTTPException(status_code=404, detail="Service account not found")
     elif body.subject_type == "group":
         if await group_repo.get_group_by_id(session, body.subject_id) is None:
             raise HTTPException(status_code=404, detail="Group not found")
@@ -435,12 +473,34 @@ async def create_member_binding(
         )
 
     perms = (await role_repo.role_names_with_permissions(session, [body.role])).get(body.role, [])
+    if account:
+        # Only a workspace role that neither administers it nor lets people
+        # in — as anywhere a service account is given one.
+        defined = {r.name for r, _p in await workspace_access.workspace_roles(session, ws_id)}
+        if body.role not in defined or not workspace_access.is_requestable(perms):
+            raise HTTPException(
+                status_code=422,
+                detail=(
+                    "A service account can hold a workspace role that neither administers the "
+                    "workspace nor lets people in"
+                ),
+            )
+        if (ws.access_mode or "app") == "idp" and workspace_access.tier(claims, ws_id) != "admin":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Its identity provider decides who is in this workspace, so only its admins give "
+                    "a service account access here"
+                ),
+            )
     if not workspace_access.can_grant(claims, ws_id, body.role, perms):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=workspace_access.ceiling_refusal(claims, ws_id, body.role),
         )
-    exception = (ws.access_mode or "app") == "idp" and body.subject_type == "user"
+    # The identity provider doesn't know a service account: its role here is
+    # the admins' decision, never an exception.
+    exception = (ws.access_mode or "app") == "idp" and body.subject_type == "user" and not account
     if exception and not body.exception:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -703,7 +763,9 @@ async def preview_revoke_binding(
 
     Computes which users would lose what permissions if the named
     binding were revoked. For a user binding, only one user is
-    affected; for a group binding, every group member is.
+    affected; for a group binding, every group member is. Those losing
+    access who manage a service account with a role here could still act
+    here through its keys: each such account is named, with those roles.
     """
     binding = await binding_repo.get_binding(session, binding_id)
     if binding is None or binding.scope_type != "workspace" or binding.scope_id != ws_id:
@@ -724,6 +786,8 @@ async def preview_revoke_binding(
     aggregate_lost: set[str] = set()
     affected_ws: set[str] = set()
     user_impact: list[ImpactPreviewUser] = []
+    # Who loses something, by name, and what they keep.
+    losing: dict[str, tuple[str, PermissionClaims]] = {}
 
     for uid in user_ids:
         before_g, before_w = await simulate_for_user(session, uid)
@@ -761,6 +825,8 @@ async def preview_revoke_binding(
         )
         aggregate_gained.update(gained)
         aggregate_lost.update(lost)
+        if lost:
+            losing[uid] = (display_name or uid, await resolve(session, uid, excluded_binding_id=binding_id))
 
     return ImpactPreviewResponse(
         affected_users=len(user_impact),
@@ -768,4 +834,36 @@ async def preview_revoke_binding(
         gained_perms=sorted(aggregate_gained),
         lost_perms=sorted(aggregate_lost),
         user_impact=user_impact,
+        service_accounts=await _accounts_still_reaching(session, ws_id, losing),
     )
+
+
+async def _accounts_still_reaching(
+    session: AsyncSession, ws_id: str, losing: dict[str, tuple[str, PermissionClaims]],
+) -> list[ImpactPreviewServiceAccount]:
+    """The service accounts those losing access manage, with their roles here
+    that give more than the person keeps: through its keys, they could still
+    act here."""
+    found: dict[str, tuple[list[str], dict[str, str]]] = {}
+    for uid, (name, keeps) in losing.items():
+        managed = await service_account_repo.managed_accounts(session, uid)
+        for binding, _gets in await service_account_access.reach_gaps(session, managed, [keeps]):
+            if binding.scope_id != ws_id:
+                continue
+            managed_by, roles = found.setdefault(binding.subject_id, ([], {}))
+            if name not in managed_by:
+                managed_by.append(name)
+            roles[binding.id] = binding.role_name
+    if not found:
+        return []
+    names = await user_repo.get_identities_by_ids(session, sorted(found))
+    return sorted((
+        ImpactPreviewServiceAccount(
+            id=account_id, name=(names.get(account_id) or {}).get("name") or account_id,
+            managed_by=managed_by,
+            bindings=[
+                ImpactPreviewAccountBinding(binding_id=b, role=r) for b, r in sorted(roles.items())
+            ],
+        )
+        for account_id, (managed_by, roles) in found.items()
+    ), key=lambda a: a.name.lower())

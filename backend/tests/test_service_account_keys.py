@@ -509,6 +509,22 @@ async def test_expiry_reminders_go_to_the_managers_or_with_none_left_to_the_admi
     assert [(n.user_id, n.link) for n in told] == [(ROOT, f"/service-accounts/{account}")]
 
 
+async def test_a_deleted_accounts_keys_get_no_expiry_reminder_until_it_is_restored(
+    client, db_session, account,
+):
+    """Its keys can't be rotated while it is deleted, so nobody is asked to."""
+    key = await _minted(db_session, account, name="first", expires_at=_in(3))
+    (await db_session.get(ApiKeyORM, key.id)).created_at = days_ago(60)
+    deleted = await db_session.get(UserORM, account)
+    deleted.deleted_at = days_ago(1)
+    await db_session.commit()
+    assert await api_key_housekeeping.remind_once(db_session) == 0
+    assert await _notes(db_session, "api_key_expiring") == []
+    deleted.deleted_at = None
+    await db_session.commit()
+    assert await api_key_housekeeping.remind_once(db_session) == 1
+
+
 async def test_a_persons_own_key_notices_read_as_before(client, db_session):
     audience = await service_account_standing.key_audience(db_session, OWNER)
     assert (audience.user_ids, audience.link, audience.whose) == ({OWNER}, "/me/api-keys", "your")

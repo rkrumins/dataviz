@@ -2,13 +2,21 @@
 
 ``/admin/service-accounts`` is where super and org admins
 (``system:service-accounts:manage``) create them, list them all, give them
-workspace roles, and hand a leaver's accounts over to a successor. Each
+workspace roles — or, reading every workspace themselves, read access to every
+workspace (``/{id}/org-read``) — hand a leaver's accounts over to a successor,
+and say who else may create one for themselves (``/policy``) — at
+``POST /me/service-accounts``, managing it themselves or through a team. Each
 account's own routes, ``/admin/service-accounts/{id}``, are its managers' as
-well: they rename it, disable and enable it — unless an administrator holds it
-disabled — appoint and remove its managers, and take its roles away
-(``service_account_access`` says who may do what). ``/me/service-accounts`` is
-where a manager finds the accounts they answer for; their keys are made under
-``/me/service-accounts/{id}/api-keys``.
+well: they rename it, disable and enable it, delete and restore it — unless an
+administrator holds it — appoint and remove its managers, and take its roles,
+and its reading every workspace, away (``service_account_access`` says who may
+do what). ``/me/service-accounts``
+is where a manager finds the accounts they answer for; their keys are made
+under ``/me/service-accounts/{id}/api-keys``.
+
+A deleted account's keys stop at once. For 30 days it can be restored with
+everything as it was; then the hourly pass purges it
+(``api_key_housekeeping``).
 
 An account's keys work while it has a manager in good standing, and for a
 grace period after its last one goes (``service_account_standing``): every
@@ -26,9 +34,11 @@ from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
+from backend.app.db.advisory import hold_for_transaction
 from backend.app.db.engine import get_db_session
-from backend.app.db.models import RoleBindingORM, WorkspaceORM
+from backend.app.db.models import PlatformSettingsORM, RoleBindingORM, WorkspaceORM
 from backend.app.db.repositories import (
+    access_request_repo,
     api_key_repo,
     binding_repo,
     group_repo,
@@ -38,11 +48,12 @@ from backend.app.db.repositories import (
     user_repo,
 )
 from backend.app.services import service_account_access, service_account_standing, workspace_access
+from backend.app.services.activity import recorder
 from backend.app.services.permission_service import PermissionClaims, has_permission
-from backend.app.services.service_account_access import MANAGE
+from backend.app.services.service_account_access import MANAGE, MINT_ANY
 from backend.auth_service.interface import User
 from backend.common.display_name import resolve_display_name
-from backend.common.service_accounts import is_service_account
+from backend.common.service_accounts import RESTORE_DAYS, is_service_account
 
 logger = logging.getLogger(__name__)
 
@@ -53,9 +64,14 @@ me_router = APIRouter()
 #: surface (``scripts/export_pentest_surface.py``); the rule is
 #: ``service_account_access``.
 _GATES = {
-    "view": "manages it, or system:service-accounts:manage or system:users:manage (in handler)",
+    "view": (
+        "manages it, an admin or steward of a workspace it is in, or "
+        "system:service-accounts:manage or system:users:manage (in handler)"
+    ),
     "enable": "manages it unless an administrator holds it, or system:service-accounts:manage (in handler)",
+    "restore": "manages it unless an administrator holds it, or system:service-accounts:manage (in handler)",
     "grant": "system:service-accounts:manage (in handler)",
+    "org_read": "system:service-accounts:manage, reading every workspace (in handler)",
 }
 _RUNS_IT = "manages it, or system:service-accounts:manage (in handler)"
 
@@ -131,6 +147,27 @@ class RoleOut(_Model):
     workspace_name: Optional[str] = Field(None, alias="workspaceName")
     role: str
     granted_at: Optional[str] = Field(None, alias="grantedAt")
+    #: When it ends; ``None`` while it lasts until taken away.
+    expires_at: Optional[str] = Field(None, alias="expiresAt")
+
+
+class OrgReadOut(_Model):
+    """It reads every workspace — those created later too — as far as each of
+    its keys reaches, and changes nothing there."""
+    granted_at: Optional[str] = Field(None, alias="grantedAt")
+
+
+class RequestOut(_Model):
+    """An open request for the account's access, waiting on a workspace."""
+    id: str
+    workspace_id: str = Field(alias="workspaceId")
+    workspace_name: Optional[str] = Field(None, alias="workspaceName")
+    role: str
+    created_at: str = Field(alias="createdAt")
+    #: Who asked for it, by name.
+    requested_by: Optional[str] = Field(None, alias="requestedBy")
+    #: A request to keep this role, which ends soon.
+    binding_id: Optional[str] = Field(None, alias="bindingId")
 
 
 class ServiceAccountOut(_Model):
@@ -148,8 +185,12 @@ class ServiceAccountOut(_Model):
     #: When it was found with no manager; its keys pause at ``pausesAt``.
     unmanaged_since: Optional[str] = Field(None, alias="unmanagedSince")
     pauses_at: Optional[str] = Field(None, alias="pausesAt")
-    #: An administrator disabled it: only one of them enables it again.
+    #: An administrator disabled or deleted it: only one of them enables or
+    #: restores it again.
     admin_hold: bool = Field(alias="adminHold")
+    #: When it was deleted; it is purged at ``purgesAt`` unless restored.
+    deleted_at: Optional[str] = Field(None, alias="deletedAt")
+    purges_at: Optional[str] = Field(None, alias="purgesAt")
     #: With ``managedBy``: what that person's leaving involves.
     hand_over: Optional[HandOverFacts] = Field(None, alias="handOver")
 
@@ -164,10 +205,18 @@ class AccountCan(_Model):
     keys: bool
     grant: bool
     revoke: bool
+    request: bool
+    delete: bool
+    restore: bool
+    org_read: bool = Field(alias="orgRead")
 
 
 class ServiceAccountDetail(ServiceAccountOut):
     roles: List[RoleOut]
+    #: It reads every workspace; ``None`` while it doesn't.
+    org_read: Optional[OrgReadOut] = Field(None, alias="orgRead")
+    #: Requests for its access still waiting on a workspace.
+    requests: List[RequestOut]
     live_keys: int = Field(alias="liveKeys")
     #: What the caller may do with it.
     can: AccountCan
@@ -187,6 +236,54 @@ class CreateServiceAccountRequest(_Model):
     managers: List[ManagerRef] = Field(..., min_length=1, max_length=20)
 
 
+class CreateMyServiceAccountRequest(_Model):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    name: str = Field(..., min_length=1, max_length=80)
+    description: Optional[str] = Field(None, max_length=500)
+    #: A team you are in, to manage it instead of you.
+    team: Optional[str] = Field(None, min_length=1, max_length=64)
+
+
+WhoMayCreate = Literal["central", "granters", "everyone"]
+
+
+class CreationPolicyOut(_Model):
+    """Who may create a service account for themselves: the administrators
+    of service accounts alone (``central``), anyone who lets people into a
+    workspace (``granters``), or anyone (``everyone``)."""
+    who_may_create: WhoMayCreate = Field(alias="whoMayCreate")
+    #: How many live accounts each person may have created.
+    per_person_limit: int = Field(alias="perPersonLimit")
+    #: An account someone creates is managed by a team they are in.
+    require_team_manager: bool = Field(alias="requireTeamManager")
+
+
+class CreationPolicyUpdate(_Model):
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+    who_may_create: Optional[WhoMayCreate] = Field(None, alias="whoMayCreate")
+    per_person_limit: Optional[int] = Field(None, alias="perPersonLimit", ge=1, le=1000)
+    require_team_manager: Optional[bool] = Field(None, alias="requireTeamManager")
+
+
+class TeamRef(_Model):
+    id: str
+    name: str
+
+
+class MyCreation(CreationPolicyOut):
+    """The policy as it applies to you."""
+    may_create: bool = Field(alias="mayCreate")
+    #: Why not, when you may not.
+    reason: Optional[str] = None
+    #: The live accounts you have created, against ``perPersonLimit`` —
+    #: which binds everyone but the administrators of service accounts.
+    created: int
+    #: ``perPersonLimit`` binds you.
+    limited: bool
+    #: The teams you are in: any of them may manage an account you create.
+    teams: List[TeamRef]
+
+
 class UpdateServiceAccountRequest(_Model):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
     name: Optional[str] = Field(None, min_length=1, max_length=80)
@@ -197,6 +294,8 @@ class RoleRequest(_Model):
     model_config = ConfigDict(populate_by_name=True, extra="forbid")
     workspace_id: str = Field(..., alias="workspaceId", min_length=1, max_length=64)
     role: str = Field(..., min_length=1, max_length=64)
+    #: When the role ends; left out, it lasts until taken away.
+    expires_at: Optional[str] = Field(None, alias="expiresAt", max_length=40)
 
 
 class HandOverRequest(_Model):
@@ -214,13 +313,13 @@ class HandOverResult(_Model):
 # ── Building answers ────────────────────────────────────────────────
 
 
-def _pauses_at(unmanaged_since: Optional[str], grace_days: int) -> Optional[str]:
-    if not unmanaged_since:
+def _days_after(instant: Optional[str], days: int) -> Optional[str]:
+    if not instant:
         return None
-    since = datetime.fromisoformat(unmanaged_since)
+    since = datetime.fromisoformat(instant)
     if since.tzinfo is None:
         since = since.replace(tzinfo=timezone.utc)
-    return (since + timedelta(days=grace_days)).isoformat()
+    return (since + timedelta(days=days)).isoformat()
 
 
 async def _accounts_out(
@@ -261,14 +360,15 @@ async def _accounts_out(
             managers=[ManagerOut(**m.__dict__) for m in managers[user.id]],
             managed=bool(people), single_manager=len(people) == 1,
             unmanaged_since=account.unmanaged_since,
-            pauses_at=_pauses_at(account.unmanaged_since, rules.grace_days),
-            admin_hold=account.admin_hold, hand_over=hand_over,
+            pauses_at=_days_after(account.unmanaged_since, rules.grace_days),
+            admin_hold=account.admin_hold, deleted_at=user.deleted_at,
+            purges_at=_days_after(user.deleted_at, RESTORE_DAYS), hand_over=hand_over,
         ))
     return out, rules.grace_days
 
 
 async def _account_or_404(session: AsyncSession, account_id: str):
-    found = await service_account_repo.get(session, account_id)
+    found = await service_account_repo.get(session, account_id, deleted=True)
     if found is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Service account not found")
     return found
@@ -289,17 +389,38 @@ async def _detail(
     [base], _ = await _accounts_out(session, [found])
     can = await service_account_access.decide(session, user_id, claims, found)
     bindings = await _roles(session, account_id)
+    asked = await access_request_repo.list_for_requester(session, requester_id=account_id, status="open")
+    if not (
+        has_permission(claims, MANAGE) or has_permission(claims, MINT_ANY)
+        or await service_account_repo.is_manager(session, account_id, user_id)
+    ):
+        # Seen from a workspace it is in: only the workspaces the caller can
+        # open, and nothing it has asked for.
+        bindings = [b for b in bindings if workspace_access.can_open(claims, b.scope_id)]
+        asked = []
     names = await user_repo.get_workspace_names_by_ids(
-        session, sorted({b.scope_id for b in bindings if b.scope_id}),
+        session, sorted({b.scope_id for b in bindings} | {r.target_id for r in asked}),
     )
+    askers = await user_repo.get_identities_by_ids(session, sorted({r.requested_by for r in asked if r.requested_by}))
+    # Reading every workspace reaches theirs too, so whoever sees it sees that.
+    reads_all = await service_account_access.org_read_bindings(session, [account_id])
     return ServiceAccountDetail(
         **base.model_dump(),
+        org_read=OrgReadOut(granted_at=reads_all[0].granted_at) if reads_all else None,
         roles=[
             RoleOut(
                 binding_id=b.id, workspace_id=b.scope_id, workspace_name=names.get(b.scope_id),
-                role=b.role_name, granted_at=b.granted_at,
+                role=b.role_name, granted_at=b.granted_at, expires_at=b.expires_at,
             )
             for b in sorted(bindings, key=lambda b: ((names.get(b.scope_id) or "").lower(), b.role_name))
+        ],
+        requests=[
+            RequestOut(
+                id=r.id, workspace_id=r.target_id, workspace_name=names.get(r.target_id),
+                role=r.requested_role, created_at=r.created_at, binding_id=r.binding_id,
+                requested_by=(askers.get(r.requested_by) or {}).get("name") if r.requested_by else None,
+            )
+            for r in asked
         ],
         live_keys=await api_key_repo.count_active_for_user(session, account_id),
         can=AccountCan(**asdict(can)),
@@ -317,6 +438,37 @@ async def _may_appoint(
     refusal = await service_account_access.appointment_refusal(session, claims, account_ids, [holder], name)
     if refusal:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
+
+
+async def _create(
+    session: AsyncSession, *, name: str, description: Optional[str],
+    subjects: list[tuple[Optional[str], Optional[str], str]], actor_id: str, via: Optional[str] = None,
+) -> str:
+    """A new, enabled account managed by ``subjects`` (``_manager_subject``),
+    recorded as made by ``actor_id``. Returns its id."""
+    description = (description or "").strip() or None
+    account_id = await service_account_repo.create(
+        session, name=name, description=description, created_by=actor_id,
+    )
+    await _record(
+        session, "created", account_id, name, created_by=actor_id, description=description,
+        **({"via": via} if via else {}),
+    )
+    for user_id, group_id, manager_name in subjects:
+        await _appoint(
+            session, account_id, name, user_id=user_id, group_id=group_id,
+            manager_name=manager_name, actor_id=actor_id,
+        )
+    await service_account_standing.refresh(session, [account_id])
+    logger.info("Service account %s created by %s", account_id, actor_id)
+    return account_id
+
+
+def _policy_out(policy: service_account_access.CreationPolicy) -> CreationPolicyOut:
+    return CreationPolicyOut(
+        who_may_create=policy.who, per_person_limit=policy.per_person_limit,
+        require_team_manager=policy.require_team,
+    )
 
 
 async def _record(session: AsyncSession, verb: str, account_id: str, name: str, **payload) -> None:
@@ -391,6 +543,13 @@ async def _dismiss(
             manager_type="user" if user_id else "group", manager_id=user_id or group_id,
             manager_name=manager_name, via=via,
         )
+        if user_id and not await service_account_repo.is_manager(session, account_id, user_id):
+            await notification_repo.notify(
+                session, user_ids=[user_id], kind="service_account_manager_removed",
+                title=f"You no longer manage {account_name}",
+                body="You don't answer for this service account any more, and can't make, rotate or revoke its keys.",
+                actor_id=actor_id, resource_type="service_account", resource_id=account_id,
+            )
         await service_account_standing.tell_keys_outlive(
             session, [account_id], person=user_id, team=group_id, actor_id=actor_id,
         )
@@ -403,18 +562,27 @@ async def _dismiss(
 @admin_router.get("", response_model=ServiceAccountList, dependencies=[Depends(requires(MANAGE))])
 async def list_service_accounts(
     q: Optional[str] = Query(None, max_length=200),
-    status_filter: Optional[Literal["active", "disabled"]] = Query(None, alias="status"),
+    status_filter: Optional[Literal["active", "disabled", "deleted"]] = Query(None, alias="status"),
+    standing: Optional[Literal["unmanaged", "held"]] = Query(None),
+    manager: Optional[str] = Query(None, max_length=64),
+    workspace: Optional[str] = Query(None, max_length=64),
     managed_by: Optional[str] = Query(None, alias="managedBy", max_length=64),
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0, le=100_000),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Every service account, with who answers for each and whether its keys
-    are about to pause. ``managedBy`` lists the accounts a person's leaving
-    touches — those they manage, themselves or through a team, and those they
-    made a key for that still works — with what it involves."""
+    are about to pause — or, ``status=deleted``, those deleted and not yet
+    purged. Narrowed to those with no manager in good standing
+    (``standing=unmanaged``) or held by an administrator (``held``); those a
+    person manages, themselves or through a team, or a team manages
+    (``manager``); and those holding a role in a workspace (``workspace``).
+    ``managedBy`` lists the accounts a person's leaving touches — those they
+    manage, themselves or through a team, and those they made a key for that
+    still works — with what it involves."""
     rows, total = await service_account_repo.list_page(
-        session, q=q, status=status_filter, leaving=managed_by, limit=limit, offset=offset,
+        session, q=q, status=status_filter, standing=standing, managed_by=manager,
+        workspace_id=workspace, leaving=managed_by, limit=limit, offset=offset,
     )
     items, grace = await _accounts_out(session, rows, managed_by=managed_by)
     return ServiceAccountList(items=items, total=total, grace_days=grace)
@@ -435,22 +603,49 @@ async def create_service_account(
     if not name:
         raise HTTPException(status_code=422, detail="A service account needs a name")
     subjects = [await _manager_subject(session, ref) for ref in body.managers]
-    account_id = await service_account_repo.create(
-        session, name=name, description=(body.description or "").strip() or None,
-        created_by=admin.id,
+    account_id = await _create(
+        session, name=name, description=body.description, subjects=subjects, actor_id=admin.id,
     )
-    await _record(
-        session, "created", account_id, name, created_by=admin.id,
-        description=(body.description or "").strip() or None,
-    )
-    for user_id, group_id, manager_name in subjects:
-        await _appoint(
-            session, account_id, name, user_id=user_id, group_id=group_id,
-            manager_name=manager_name, actor_id=admin.id,
-        )
-    await service_account_standing.refresh(session, [account_id])
-    logger.info("Service account %s created by %s", account_id, admin.id)
     return await _detail(session, account_id, admin.id, claims)
+
+
+@admin_router.get("/policy", response_model=CreationPolicyOut, dependencies=[Depends(requires(MANAGE))])
+async def get_creation_policy(session: AsyncSession = Depends(get_db_session)):
+    """Who may create a service account for themselves, how many each, and
+    whether a team they are in must manage it."""
+    return _policy_out(await service_account_access.creation_policy(session))
+
+
+@admin_router.put("/policy", response_model=CreationPolicyOut)
+async def set_creation_policy(
+    body: CreationPolicyUpdate,
+    admin: User = Depends(requires(MANAGE)),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Change who may create a service account for themselves, how many
+    each, or whether a team must manage it. What is left out stays."""
+    before = await service_account_access.creation_policy(session)
+    row = await session.get(PlatformSettingsORM, 1)
+    if row is None:
+        row = PlatformSettingsORM(id=1)
+        session.add(row)
+    if body.who_may_create is not None:
+        row.sa_who_may_create = body.who_may_create
+    if body.per_person_limit is not None:
+        row.sa_per_person_limit = body.per_person_limit
+    if body.require_team_manager is not None:
+        row.sa_require_team_manager = body.require_team_manager
+    row.updated_at = datetime.now(timezone.utc).isoformat()
+    row.updated_by = admin.id
+    await session.flush()
+    after = await service_account_access.creation_policy(session)
+    if after != before:
+        await recorder.record_for_request(
+            session, "platform.service_account_policy.updated",
+            details={"from": _policy_out(before).model_dump(by_alias=True),
+                     "to": _policy_out(after).model_dump(by_alias=True)},
+        )
+    return _policy_out(after)
 
 
 @admin_router.post("/hand-over", response_model=HandOverResult)
@@ -591,6 +786,104 @@ async def enable_service_account(
     return await _detail(session, account_id, actor.id, claims)
 
 
+@admin_router.delete("/{account_id}", response_model=ServiceAccountDetail)
+async def delete_service_account(
+    account_id: str = Path(..., max_length=64),
+    _found=Depends(_account("delete")),
+    actor: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Retire an account: every key it holds stops at once, and its requests
+    still waiting on a workspace are withdrawn. Nothing else changes, and for
+    30 days restoring it brings it back as it was; then it is purged — its
+    keys revoked, its roles and managers removed. Deleted by an
+    administrator of service accounts, it is held: its managers can't
+    restore it."""
+    found = await service_account_repo.get(session, account_id, for_update=True)
+    if found is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Already deleted")
+    user, account = found
+    central = has_permission(claims, MANAGE)
+    now = datetime.now(timezone.utc)
+    user.deleted_at = now.isoformat()
+    account.admin_hold = account.admin_hold or central
+    await session.flush()
+    for request in await access_request_repo.list_for_requester(
+        session, requester_id=account_id, status="open",
+    ):
+        try:
+            await access_request_repo.resolve(
+                session, request_id=request.id, new_status="withdrawn", resolver_id=actor.id,
+                note="Its service account was deleted",
+            )
+        except ValueError:
+            continue  # answered meanwhile
+        await user_repo.create_outbox_event(
+            session,
+            event_type="rbac.access_request.withdrawn",
+            payload={
+                "request_id": request.id,
+                "requester_id": account_id,
+                "target_type": request.target_type,
+                "target_id": request.target_id,
+                "workspace_id": request.target_id,
+                "requested_role": request.requested_role,
+                "actor_id": actor.id,
+            },
+        )
+    await _record(session, "deleted", account_id, user.first_name, changed_by=actor.id, held=account.admin_hold)
+    purges = (now + timedelta(days=RESTORE_DAYS)).date().isoformat()
+    await notification_repo.notify(
+        session, user_ids=[account_id], kind="service_account_deleted",
+        title=f"{'An administrator' if central else actor.display_name} deleted it, and its keys have stopped",
+        body=(
+            f"{'An administrator' if account.admin_hold else 'Its managers'} can restore it until "
+            f"{purges}, with everything as it was. After that its keys are revoked, and its roles "
+            "and managers removed."
+        ),
+        actor_id=actor.id, resource_type="service_account", resource_id=account_id,
+    )
+    return await _detail(session, account_id, actor.id, claims)
+
+
+@admin_router.post("/{account_id}/restore", response_model=ServiceAccountDetail)
+async def restore_service_account(
+    account_id: str = Path(..., max_length=64),
+    _found=Depends(_account("restore")),
+    actor: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Bring a deleted account back as it was — its keys, roles and
+    managers — until it is purged. An administrator's restoring it lets go
+    of its hold, unless it comes back disabled."""
+    found = await service_account_repo.get(session, account_id, deleted=True, for_update=True)
+    if found is None or found[0].deleted_at is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="It was restored or purged meanwhile")
+    user, account = found
+    user.deleted_at = None
+    if user.status == "active":
+        # Only a disabled account stays held.
+        account.admin_hold = False
+    await session.flush()
+    await _record(session, "restored", account_id, user.first_name, changed_by=actor.id)
+    await service_account_standing.refresh(session, [account_id])
+    who = "An administrator" if has_permission(claims, MANAGE) else actor.display_name
+    await notification_repo.notify(
+        session, user_ids=[account_id], kind="service_account_restored",
+        title=f"{who} restored it",
+        body=(
+            "Its keys, roles and managers are as they were before it was deleted."
+            if user.status == "active" else
+            "Its roles and managers are as they were before it was deleted. It is still disabled, "
+            "so its keys don't work until it is enabled."
+        ),
+        actor_id=actor.id, resource_type="service_account", resource_id=account_id,
+    )
+    return await _detail(session, account_id, actor.id, claims)
+
+
 @admin_router.put("/{account_id}/managers/{kind}/{subject_id}", response_model=ServiceAccountDetail)
 async def appoint_manager(
     account_id: str = Path(..., max_length=64),
@@ -667,8 +960,9 @@ async def grant_role(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Give the account a role in a workspace: one that neither administers
-    the workspace nor lets people in, and that you could grant there. Its
-    keys pick it up within half a minute."""
+    the workspace nor lets people in, and that you could grant there — until
+    ``expiresAt``, or until taken away. Its keys pick it up within half a
+    minute."""
     workspace = await session.get(WorkspaceORM, body.workspace_id)
     if workspace is None or workspace.deleted_at is not None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
@@ -689,7 +983,7 @@ async def grant_role(
         )
     binding, outcome = await workspace_access.grant_role(
         session, subject_type="user", subject_id=account_id, role=body.role,
-        ws_id=workspace.id, granted_by=actor.id,
+        ws_id=workspace.id, granted_by=actor.id, expires_at=body.expires_at,
     )
     if outcome == "existing":
         raise HTTPException(
@@ -706,7 +1000,7 @@ async def grant_role(
             "subject_id": account_id,
             "role": body.role,
             "actor_id": actor.id,
-            "expires_at": None,
+            "expires_at": binding.expires_at,
             "sessions_revoked": 0,
             "idp_exception": False,
             "reactivated": outcome == "reactivated",
@@ -714,7 +1008,7 @@ async def grant_role(
     )
     return RoleOut(
         binding_id=binding.id, workspace_id=workspace.id, workspace_name=workspace.name,
-        role=binding.role_name, granted_at=binding.granted_at,
+        role=binding.role_name, granted_at=binding.granted_at, expires_at=binding.expires_at,
     )
 
 
@@ -750,7 +1044,144 @@ async def revoke_role(
     )
 
 
+@admin_router.put("/{account_id}/org-read", response_model=ServiceAccountDetail)
+async def grant_org_read(
+    account_id: str = Path(..., max_length=64),
+    _found=Depends(_account("org_read")),
+    actor: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Let the account read every workspace — those created later too — as
+    far as each of its keys reaches: views, data sources, semantic layers,
+    catalog and providers, and nothing it could change. Only an
+    administrator of service accounts who reads every workspace can. Its
+    keys pick it up within half a minute."""
+    found = await service_account_repo.get(session, account_id, for_update=True)
+    if found is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This service account is deleted: restore it first")
+    if not await service_account_access.org_read_bindings(session, [account_id]):
+        await binding_repo.create_binding(
+            session, subject_type="user", subject_id=account_id,
+            role_name=service_account_access.ORG_READER, scope_type="global", granted_by=actor.id,
+        )
+        await _record(session, "org_read_granted", account_id, found[0].first_name, changed_by=actor.id)
+    return await _detail(session, account_id, actor.id, claims)
+
+
+@admin_router.delete("/{account_id}/org-read", response_model=ServiceAccountDetail)
+async def revoke_org_read(
+    account_id: str = Path(..., max_length=64),
+    _found=Depends(_account("revoke")),
+    actor: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Stop the account reading every workspace — its managers too: an
+    integration should reach no more than it uses. Its roles in workspaces
+    stay."""
+    found = await service_account_repo.get(session, account_id, for_update=True)
+    if found is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="This service account is deleted: restore it first")
+    bindings = await service_account_access.org_read_bindings(session, [account_id])
+    for binding in bindings:
+        await binding_repo.delete_binding(session, binding.id)
+    if bindings:
+        await _record(session, "org_read_revoked", account_id, found[0].first_name, changed_by=actor.id)
+    return await _detail(session, account_id, actor.id, claims)
+
+
 # ── Managers ────────────────────────────────────────────────────────
+
+
+@me_router.get("/policy", response_model=MyCreation)
+async def my_creation_policy(
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Whether you may create a service account for yourself, how many you
+    have, and the teams you may name to manage one."""
+    policy = await service_account_access.creation_policy(session)
+    created = await service_account_repo.count_created_by(session, user.id)
+    reason = service_account_access.creation_refusal(policy, claims) or _over_limit(policy, claims, created)
+    return MyCreation(
+        **_policy_out(policy).model_dump(), may_create=reason is None, reason=reason, created=created,
+        limited=not has_permission(claims, MANAGE),
+        teams=[TeamRef(id=i, name=n) for i, n in await service_account_repo.teams_of(session, user.id)],
+    )
+
+
+def _over_limit(
+    policy: service_account_access.CreationPolicy, claims: PermissionClaims, created: int,
+) -> Optional[str]:
+    """Why someone who has created ``created`` accounts may create no more —
+    never an administrator of service accounts."""
+    if created < policy.per_person_limit or has_permission(claims, MANAGE):
+        return None
+    return (
+        f"You have created {created} service accounts, the most each person may. Delete one "
+        "nothing uses any more, or ask an administrator of service accounts"
+    )
+
+
+async def _creation_policy(
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+) -> service_account_access.CreationPolicy:
+    """A route dependency: the creation policy, when it lets the caller
+    create a service account for themselves."""
+    policy = await service_account_access.creation_policy(session)
+    refusal = service_account_access.creation_refusal(policy, claims)
+    if refusal:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=refusal)
+    return policy
+
+
+_creation_policy.service_account_gate = (  # type: ignore[attr-defined]
+    "system:service-accounts:manage, or whoever the creation policy admits, up to its limit (in handler)"
+)
+
+
+@me_router.post("", response_model=ServiceAccountDetail, status_code=status.HTTP_201_CREATED)
+async def create_my_service_account(
+    body: CreateMyServiceAccountRequest,
+    policy: service_account_access.CreationPolicy = Depends(_creation_policy),
+    user: User = Depends(get_current_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A service account for one of your integrations, when the policy lets
+    you create one: you manage it, or a team you are in does. It holds no
+    roles until a workspace gives it some."""
+    name = body.name.strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="A service account needs a name")
+    if body.team is None and policy.require_team:
+        raise HTTPException(
+            status_code=422,
+            detail="Name a team you're in to manage it, so it outlives any one person",
+        )
+    # You must be someone who may manage one, whoever is named.
+    creator = await _manager_subject(session, ManagerRef(type="user", id=user.id))
+    if body.team is None:
+        subject = creator
+    elif body.team in {team for team, _name in await service_account_repo.teams_of(session, user.id)}:
+        subject = await _manager_subject(session, ManagerRef(type="group", id=body.team))
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Only a team you're in can manage an account you create",
+        )
+    # Two at once must not both pass the limit.
+    await hold_for_transaction(session, f"service-accounts-created:{user.id}")
+    over = _over_limit(policy, claims, await service_account_repo.count_created_by(session, user.id))
+    if over:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=over)
+    account_id = await _create(
+        session, name=name, description=body.description, subjects=[subject], actor_id=user.id,
+        via="self_service",
+    )
+    return await _detail(session, account_id, user.id, claims)
 
 
 @me_router.get("", response_model=ServiceAccountList)
@@ -761,9 +1192,10 @@ async def list_my_service_accounts(
     session: AsyncSession = Depends(get_db_session),
 ):
     """The service accounts you answer for, yourself or through a team, a
-    page at a time."""
+    page at a time — and after them those deleted and not yet purged, which
+    you may restore."""
     rows, total = await service_account_repo.list_page(
-        session, managed_by=user.id, limit=limit, offset=offset,
+        session, managed_by=user.id, with_deleted=True, limit=limit, offset=offset,
     )
     items, grace = await _accounts_out(session, rows)
     return ServiceAccountList(items=items, total=total, grace_days=grace)

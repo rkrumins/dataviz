@@ -17,6 +17,7 @@
  *
  * Someone who manages service accounts finds them here too: their keys act
  * as the account rather than as you, and live on each account's own page.
+ * Where the administrators' policy lets them, they create one here.
  */
 import { useCallback, useEffect, useState } from 'react'
 import {
@@ -34,6 +35,7 @@ import { RotateKeyDialog } from '@/components/apiKeys/RotateKeyDialog'
 import { clearDraft, peekDraft, type ApiKeyDraft } from '@/components/apiKeys/apiKeyDraft'
 import { expiryCountdown, isLive, isRenewable, siteUrl, stepUpUnavailable, stillCalled } from '@/components/apiKeys/apiKeyFormat'
 import { ApiKeyWizard } from '@/components/apiKeys/wizard/ApiKeyWizard'
+import { CreateServiceAccountDialog } from '@/components/serviceAccounts/CreateServiceAccountDialog'
 import { standingOf } from '@/components/serviceAccounts/parts'
 import { Badge } from '@/components/ui/Badge'
 import { Button, IconButton } from '@/components/ui/Button'
@@ -44,7 +46,7 @@ import { serviceAccountHref } from '@/lib/serviceAccounts'
 import { useDocumentTitle } from '@/lib/useDocumentTitle'
 import { cn } from '@/lib/utils'
 import { apiKeyService, type ApiKey, type ApiKeyOptions, type KeyRef } from '@/services/apiKeyService'
-import { serviceAccountService, type ServiceAccount } from '@/services/serviceAccountService'
+import { serviceAccountService, type MyCreation, type ServiceAccount } from '@/services/serviceAccountService'
 import { useFeature } from '@/store/features'
 
 export function MyApiKeysPage() {
@@ -88,13 +90,19 @@ function ApiKeysContent() {
     const [editing, setEditing] = useState<ApiKey | null>(null)
     const [drawerKey, setDrawerKey] = useState<ApiKey | null>(null)
     const closeDrawer = useCallback(() => setDrawerKey(null), [])
-    // The service accounts you answer for. Most people have none, and the
-    // card only appears for those who do — so a failure just leaves it out.
+    // The service accounts you answer for, and whether you may create one.
+    // Most people have none and may not, and the card only appears for those
+    // who do or may — so a failure just leaves it out.
     const [managed, setManaged] = useState<{ items: ServiceAccount[]; total: number }>({ items: [], total: 0 })
+    const [allowance, setAllowance] = useState<MyCreation | null>(null)
+    const [creatingAccount, setCreatingAccount] = useState(false)
     useEffect(() => {
         let live = true
         serviceAccountService.mine({ limit: MANAGED_PAGE })
             .then((res) => { if (live) setManaged({ items: res.items, total: res.total }) })
+            .catch(() => {})
+        serviceAccountService.myCreation()
+            .then((res) => { if (live) setAllowance(res) })
             .catch(() => {})
         return () => { live = false }
     }, [])
@@ -356,7 +364,22 @@ function ApiKeysContent() {
                 </>
             )}
 
-            {managed.items.length > 0 && <ManagedAccounts accounts={managed.items} total={managed.total} onMore={moreManaged} />}
+            {(managed.items.length > 0 || allowance?.mayCreate) && (
+                <ManagedAccounts
+                    accounts={managed.items}
+                    total={managed.total}
+                    onMore={moreManaged}
+                    allowance={allowance}
+                    onCreate={() => setCreatingAccount(true)}
+                />
+            )}
+            {creatingAccount && allowance && (
+                <CreateServiceAccountDialog
+                    allowance={allowance}
+                    onClose={() => setCreatingAccount(false)}
+                    onCreated={(created) => window.location.assign(serviceAccountHref(created.id))}
+                />
+            )}
 
             <div className="flex flex-col items-start gap-2 px-1">
                 <p className="flex items-start gap-2 text-xs text-ink-muted max-w-2xl">
@@ -452,11 +475,14 @@ function Stat({ label, value, suffix, tone, children }: {
 /** How many of the service accounts you manage the card shows at a time. */
 const MANAGED_PAGE = 50
 
-/** The service accounts you manage: their keys are made on each one's page. */
-function ManagedAccounts({ accounts, total, onMore }: {
+/** The service accounts you manage: their keys are made on each one's page.
+ *  Where the policy lets you, you create one here too. */
+function ManagedAccounts({ accounts, total, onMore, allowance, onCreate }: {
     accounts: ServiceAccount[]
     total: number
     onMore: () => Promise<void>
+    allowance: MyCreation | null
+    onCreate: () => void
 }) {
     const [loading, setLoading] = useState(false)
     const left = total - accounts.length
@@ -466,6 +492,11 @@ function ManagedAccounts({ accounts, total, onMore }: {
             title="Service accounts you manage"
             blurb="Their keys act as the account, not as you, and keep working when you leave — as long as someone still manages it."
         >
+            {accounts.length === 0 && (
+                <p className="text-sm text-ink-muted">
+                    You manage none yet. Create one for an integration that should keep running whoever set it up.
+                </p>
+            )}
             <ul className="divide-y divide-black/[0.06] dark:divide-white/[0.07]" aria-label="Service accounts you manage">
                 {accounts.map((a) => {
                     const standing = standingOf(a)
@@ -497,6 +528,16 @@ function ManagedAccounts({ accounts, total, onMore }: {
                         Show {Math.min(left, MANAGED_PAGE)} more of {total}
                     </Button>
                 </div>
+            )}
+            {allowance?.mayCreate ? (
+                <div className="pt-3 flex flex-wrap items-center gap-3">
+                    <Button variant="secondary" size="sm" leftIcon={Plus} onClick={onCreate}>Create service account</Button>
+                    {allowance.limited && (
+                        <span className="text-xs text-ink-muted">{allowance.created} of {allowance.perPersonLimit} created</span>
+                    )}
+                </div>
+            ) : allowance?.reason && allowance.limited && allowance.created >= allowance.perPersonLimit && (
+                <p className="pt-3 text-xs text-ink-muted">{allowance.reason}.</p>
             )}
         </AccountCard>
     )
