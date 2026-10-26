@@ -8,6 +8,18 @@
  * `graceDays` after the last one goes, so an integration keeps running while
  * a successor is appointed. Its keys themselves are `serviceAccountKeys(id)`
  * in apiKeyService.
+ *
+ * A deleted account's keys stop at once. Until `purgesAt`, 30 days on, it can
+ * be restored as it was; then its keys are revoked and its roles and managers
+ * removed.
+ *
+ * Who else may create one for themselves is the administrators' policy:
+ * nobody, as it ships; anyone who lets people into a workspace; or anyone —
+ * each up to a limit, and perhaps only with a team they're in managing it.
+ *
+ * Besides its roles in workspaces, an account can read every workspace
+ * (`orgRead`): an administrator who reads every workspace gives it that, and
+ * its managers can take it away.
  */
 import { authFetch } from './apiClient'
 
@@ -67,8 +79,12 @@ export interface ServiceAccount {
     /** Since when nobody has; its keys pause at `pausesAt`. */
     unmanagedSince: string | null
     pausesAt: string | null
-    /** An administrator disabled it: only one of them enables it again. */
+    /** An administrator disabled or deleted it: only one of them enables or
+     *  restores it again. */
     adminHold: boolean
+    /** When it was deleted; it is purged at `purgesAt` unless restored. */
+    deletedAt: string | null
+    purgesAt: string | null
     /** Only when listed by `managedBy`. */
     handOver: HandOverFacts | null
 }
@@ -79,6 +95,21 @@ export interface ServiceAccountRole {
     workspaceName: string | null
     role: string
     grantedAt: string | null
+    /** When it ends; null while it lasts until taken away. */
+    expiresAt: string | null
+}
+
+/** A request for its access still waiting on a workspace. */
+export interface ServiceAccountRequest {
+    id: string
+    workspaceId: string
+    workspaceName: string | null
+    role: string
+    createdAt: string
+    /** Who asked for it, by name. */
+    requestedBy: string | null
+    /** A request to keep this role, which ends soon. */
+    bindingId: string | null
 }
 
 /** What you may do with one account, as the server decides it. */
@@ -95,12 +126,26 @@ export interface ServiceAccountCan {
     keys: boolean
     /** Give it workspace roles from its page. */
     grant: boolean
-    /** Take its roles away. */
+    /** Take its roles away, and its reading every workspace. */
     revoke: boolean
+    /** Let it read every workspace: an administrator of service accounts who
+     *  reads every workspace themselves. */
+    orgRead: boolean
+    /** Ask a workspace for access for it, or to keep access that ends. */
+    request: boolean
+    /** Its keys stop at once; it can be restored for 30 days. */
+    delete: boolean
+    /** Its managers can't while an administrator holds it. */
+    restore: boolean
 }
 
 export interface ServiceAccountDetail extends ServiceAccount {
     roles: ServiceAccountRole[]
+    /** It reads every workspace — those created later too — as far as each
+     *  key reaches, and changes nothing there; `null` while it doesn't. */
+    orgRead: { grantedAt: string | null } | null
+    /** Requests for its access still waiting on a workspace. */
+    requests: ServiceAccountRequest[]
     liveKeys: number
     can: ServiceAccountCan
 }
@@ -112,9 +157,41 @@ export interface ServiceAccountList {
     graceDays: number
 }
 
+/** Who may create a service account for themselves: the administrators of
+ *  service accounts alone, anyone who lets people into a workspace, or anyone. */
+export type WhoMayCreate = 'central' | 'granters' | 'everyone'
+
+export interface CreationPolicy {
+    whoMayCreate: WhoMayCreate
+    /** How many live accounts each person may have created. */
+    perPersonLimit: number
+    /** An account someone creates is managed by a team they're in. */
+    requireTeamManager: boolean
+}
+
+/** The policy as it applies to you. */
+export interface MyCreation extends CreationPolicy {
+    mayCreate: boolean
+    /** Why not, when you may not. */
+    reason: string | null
+    /** The live accounts you have created, against `perPersonLimit`. */
+    created: number
+    /** `perPersonLimit` binds you: it doesn't an administrator of service accounts. */
+    limited: boolean
+    /** The teams you're in: any of them may manage an account you create. */
+    teams: { id: string; name: string }[]
+}
+
 export interface ServiceAccountFilters {
     q?: string
-    status?: 'active' | 'disabled'
+    /** `deleted`: those deleted and not yet purged. */
+    status?: 'active' | 'disabled' | 'deleted'
+    /** No manager in good standing, or held by an administrator. */
+    standing?: 'unmanaged' | 'held'
+    /** A person, themselves or through a team, or a team. */
+    manager?: string
+    /** Holding a role in this workspace. */
+    workspace?: string
     /** The accounts a person's leaving touches — those they manage, themselves or
      *  through a team, and those they made a key for that still works — with what
      *  it involves. */
@@ -165,6 +242,15 @@ export const serviceAccountService = {
         return authFetch(`${one(id)}/enable`, { method: 'POST' })
     },
 
+    /** Every key it holds stops at once; for 30 days restoring it brings it all back. */
+    delete(id: string): Promise<ServiceAccountDetail> {
+        return authFetch(one(id), { method: 'DELETE' })
+    },
+
+    restore(id: string): Promise<ServiceAccountDetail> {
+        return authFetch(`${one(id)}/restore`, { method: 'POST' })
+    },
+
     addManager(id: string, ref: ManagerRef): Promise<ServiceAccountDetail> {
         return authFetch(manager(id, ref), { method: 'PUT' })
     },
@@ -173,8 +259,9 @@ export const serviceAccountService = {
         return authFetch(manager(id, ref), { method: 'DELETE' })
     },
 
-    /** A workspace role that neither administers the workspace nor lets people in. */
-    grantRole(id: string, body: { workspaceId: string; role: string }): Promise<ServiceAccountRole> {
+    /** A workspace role that neither administers the workspace nor lets people in,
+     *  until `expiresAt` or until taken away. */
+    grantRole(id: string, body: { workspaceId: string; role: string; expiresAt?: string }): Promise<ServiceAccountRole> {
         return authFetch(`${one(id)}/roles`, { method: 'POST', body: JSON.stringify(body) })
     },
 
@@ -182,12 +269,43 @@ export const serviceAccountService = {
         return authFetch(`${one(id)}/roles/${encodeURIComponent(bindingId)}`, { method: 'DELETE' })
     },
 
+    /** Let it read every workspace. */
+    grantOrgRead(id: string): Promise<ServiceAccountDetail> {
+        return authFetch(`${one(id)}/org-read`, { method: 'PUT' })
+    },
+
+    /** Stop it reading every workspace; its roles in workspaces stay. */
+    revokeOrgRead(id: string): Promise<ServiceAccountDetail> {
+        return authFetch(`${one(id)}/org-read`, { method: 'DELETE' })
+    },
+
     /** Move a person's manager seats to a successor — all of them, or `accountIds`. */
     handOver(body: { fromUserId: string; to: ManagerRef; accountIds?: string[] }): Promise<{ handedOver: string[] }> {
         return authFetch(`${ADMIN}/hand-over`, { method: 'POST', body: JSON.stringify(body) })
     },
 
-    /** The accounts you manage, yourself or through a team, a page at a time. */
+    /** Who may create a service account for themselves. */
+    policy(): Promise<CreationPolicy> {
+        return authFetch(`${ADMIN}/policy`)
+    },
+
+    /** Change it; what is left out stays. */
+    setPolicy(body: Partial<CreationPolicy>): Promise<CreationPolicy> {
+        return authFetch(`${ADMIN}/policy`, { method: 'PUT', body: JSON.stringify(body) })
+    },
+
+    /** Whether you may create one, and the teams you may name to manage it. */
+    myCreation(): Promise<MyCreation> {
+        return authFetch(`${MINE}/policy`)
+    },
+
+    /** One you manage — or, named, a team you're in. */
+    createMine(body: { name: string; description?: string; team?: string }): Promise<ServiceAccountDetail> {
+        return authFetch(MINE, { method: 'POST', body: JSON.stringify(body) })
+    },
+
+    /** The accounts you manage, yourself or through a team, a page at a time —
+     *  then those deleted and not yet purged. */
     mine(params: { limit?: number; offset?: number } = {}): Promise<ServiceAccountList> {
         return authFetch(`${MINE}${query(params)}`)
     },

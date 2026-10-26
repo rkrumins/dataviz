@@ -67,6 +67,29 @@ async def seed_steward_catalogue(session: AsyncSession) -> None:
     await session.commit()
 
 
+async def seed_org_reader_catalogue(session: AsyncSession) -> None:
+    """The shared test catalogue predates reading every workspace: add Org
+    Auditor and what ``20261026_1200_sa_org_read`` adds — Org reader — with
+    their platform permissions and grants as ``rbac_seed`` has them, and
+    Super Admin's ``system:org-viewer``."""
+    from backend.app.config import rbac_seed
+
+    now = datetime.now(timezone.utc).isoformat()
+    roles = ("org_auditor", "org_reader")
+    grants = [(r, p) for r, p in rbac_seed.ROLE_GRANTS if r in roles] + [("super_admin", "system:org-viewer")]
+    session.add_all(
+        PermissionORM(id=p, description=p, category="system") for p in sorted({p for _r, p in grants})
+    )
+    for name in roles:
+        session.add(RoleORM(
+            name=name, description=name.replace("_", " ").capitalize(), scope_type="global",
+            scope_id=None, is_system=True, created_at=now, updated_at=now,
+        ))
+    await session.flush()
+    session.add_all(RolePermissionORM(role_name=r, permission_id=p) for r, p in grants)
+    await session.commit()
+
+
 async def build_world(session: AsyncSession) -> None:
     session.add_all([WorkspaceORM(id=WS, name="Finance"), WorkspaceORM(id=WS_OTHER, name="Operations")])
     for name, uid in PEOPLE.items():

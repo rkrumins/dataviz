@@ -122,6 +122,18 @@ SYSTEM_ROLE_DEFAULTS: dict[str, SystemRoleDefault] = {
             "system:org-viewer",
         }),
     ),
+    RoleName.ORG_READER.value: SystemRoleDefault(
+        description=(
+            "Reads every workspace — views, data sources, semantic layers, "
+            "catalog and providers — and nothing else: not the audit log, "
+            "role bindings or analytics. For a service account that reads "
+            "across the whole tenancy."
+        ),
+        scope_type="global",
+        permissions=frozenset({
+            "system:org-viewer",
+        }),
+    ),
     RoleName.WORKSPACE_ADMIN.value: SystemRoleDefault(
         description=(
             "Workspace administrator — settings, members, deletion, and "

@@ -15,6 +15,7 @@
  * Visual language matches the rest of the admin shell — gradient
  * icon, framer-motion entrance, layered border.
  */
+import type { ReactNode } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import {
     AlertTriangle, Loader2, Check, X, Plus, Minus, Users, Briefcase,
@@ -47,12 +48,14 @@ export interface ImpactPreviewModalProps {
     /** Ask why, optionally: the caller takes the draft in `onConfirm`. */
     reason?: ReasonDraft
     reasonAudience?: ReasonAudience
+    /** Shown below the preview once it has loaded. */
+    children?: ReactNode
 }
 
 
 export function ImpactPreviewModal({
     open, title, intent, confirmLabel, preview, loading, error,
-    onCancel, onConfirm, confirming = false, reason, reasonAudience = 'workspace',
+    onCancel, onConfirm, confirming = false, reason, reasonAudience = 'workspace', children,
 }: ImpactPreviewModalProps) {
     const intentColors = intent === 'destructive'
         ? {
@@ -118,7 +121,10 @@ export function ImpactPreviewModal({
                                         {error}
                                     </div>
                                 ) : preview ? (
-                                    <PreviewBody preview={preview} />
+                                    <>
+                                        <PreviewBody preview={preview} />
+                                        {children}
+                                    </>
                                 ) : null}
                             </div>
 

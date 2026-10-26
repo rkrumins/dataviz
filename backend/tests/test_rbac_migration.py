@@ -41,6 +41,8 @@ _WS_ACCESS_MIGRATION_PATH = _VERSIONS_DIR / "20261019_1000_ws_access.py"
 # Service accounts added system:service-accounts:manage — creating them,
 # choosing their managers and granting their workspace roles.
 _SERVICE_ACCOUNTS_MIGRATION_PATH = _VERSIONS_DIR / "20261023_1200_service_accounts.py"
+# Org-wide read for service accounts added the org_reader role.
+_ORG_READ_MIGRATION_PATH = _VERSIONS_DIR / "20261026_1200_sa_org_read.py"
 
 
 def _load_migration(path: Path, name: str):
@@ -335,6 +337,27 @@ def test_service_accounts_permission_reaches_an_existing_database():
     assert {(r, p) for r, p in rbac_seed.ROLE_GRANTS if p == perm} == migration_grants
     for role, _ in migration_grants:
         assert perm in SYSTEM_ROLE_DEFAULTS[role].permissions, role
+
+
+def test_the_org_reader_role_reaches_an_existing_database():
+    """``org_reader`` is seeded by the migration AND ``rbac_seed``, with the
+    same text and its one grant, and "Reset to default" restores it: fresh
+    installs and migrated databases must agree on what reading every
+    workspace gives a service account — ``system:org-viewer``, the one
+    platform permission an account's claims keep, and nothing else."""
+    from backend.app.config import rbac_seed
+    from backend.common.role_defaults import SYSTEM_ROLE_DEFAULTS
+    from backend.common.service_accounts import SERVICE_ACCOUNT_GLOBAL_PERMISSIONS
+
+    role = "org_reader"
+    assert _ORG_READ_MIGRATION_PATH.exists(), f"missing migration: {_ORG_READ_MIGRATION_PATH}"
+    mod = _load_migration(_ORG_READ_MIGRATION_PATH, "_org_read_migration")
+    assert mod._ROLE == role
+    seed_role = next(r for r in rbac_seed.SYSTEM_ROLES if r["name"] == role)
+    assert (seed_role["scope_type"], seed_role["description"]) == ("global", mod._ROLE_DESCRIPTION)
+    assert set(mod._ROLE_PERMISSIONS) == {(role, "system:org-viewer")}
+    assert {(r, p) for r, p in rbac_seed.ROLE_GRANTS if r == role} == set(mod._ROLE_PERMISSIONS)
+    assert SYSTEM_ROLE_DEFAULTS[role].permissions == SERVICE_ACCOUNT_GLOBAL_PERMISSIONS
 
 
 def test_the_analytics_permission_is_offered_to_the_client():
