@@ -19,11 +19,11 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DATA_ARCHITECTURE.md"
   },
   "decisions": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -59,7 +59,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/local-integration-testing.md"
   },
   "integration-quickstart": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/INTEGRATION_QUICKSTART.md"
   },
   "api-guide": {
@@ -67,7 +67,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/API_GUIDE.md"
   },
   "key-management-api": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/KEY_MANAGEMENT_API.md"
   },
   "graph-metadata-api": {
@@ -187,11 +187,11 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md"
   },
   "security-overview": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/SECURITY_OVERVIEW.md"
   },
   "rbac": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/RBAC.md"
   },
   "sso": {
@@ -231,7 +231,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/CONFIGURATION.md"
   },
   "observability": {
-    "updated": "2026-10-24",
+    "updated": "2026-10-26",
     "path": "docs/OBSERVABILITY.md"
   },
   "runbooks": {
@@ -313,7 +313,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/NAVIGATING_LAYERS.md"
   },
   "requesting-access": {
-    "updated": "2026-10-19",
+    "updated": "2026-10-25",
     "path": "docs/guide/REQUESTING_ACCESS.md"
   },
   "creating-views": {
@@ -357,7 +357,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/ADMIN_SETUP.md"
   },
   "workspace-admin": {
-    "updated": "2026-10-24",
+    "updated": "2026-10-25",
     "path": "docs/guide/WORKSPACE_ADMIN.md"
   },
   "users-access": {
@@ -365,7 +365,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/USERS_ACCESS.md"
   },
   "service-accounts": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-26",
     "path": "docs/guide/SERVICE_ACCOUNTS.md"
   },
   "sso-setup": {

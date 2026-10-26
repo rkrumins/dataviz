@@ -27,6 +27,7 @@ import {
 } from 'lucide-react'
 import {
     workspaceMembersService,
+    type ServiceAccountCandidate,
     type WorkspaceMemberResponse,
 } from '@/services/workspaceMembersService'
 import { WorkspaceAccessList } from './WorkspaceAccessList'
@@ -45,6 +46,7 @@ import { AccessReviewPanel } from './AccessReviewPanel'
 import { useGrantOptions } from '@/hooks/useWorkspaceAccess'
 import { useAuthStore } from '@/store/auth'
 import { ImpactPreviewModal } from '@/components/admin/ImpactPreviewModal'
+import { AccountsStillReaching } from './AccountsStillReaching'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useDebouncedValue } from '@/hooks/useDebouncedValue'
 import { Backdrop } from '@/components/ui/Backdrop'
@@ -369,6 +371,8 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
         preview: ImpactPreviewResponse | null
         error: string | null
     } | null>(null)
+    // Service accounts the person manages whose roles here to remove as well.
+    const [alsoRemove, setAlsoRemove] = useState<Set<string>>(new Set())
     const revokeReason = useReasonDraft('member-remove')
     // Bindings (the raw grants) vs People (the flattened, inheritance-
     // aware list of everyone who can actually get in).
@@ -530,19 +534,28 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
         }
     }
 
-    const handleRevoke = async (member: WorkspaceMemberResponse, reason?: string) => {
+    const handleRevoke = async (member: WorkspaceMemberResponse, reason?: string, accountRoles: string[] = []) => {
         setActionLoading(`revoke-${member.bindingId}`)
         setError(null)
         try {
             await workspaceMembersService.revoke(workspaceId, member.bindingId, { reason })
+            // Roles of the service accounts they manage, as chosen: through
+            // those accounts they could still act here.
+            for (const bindingId of accountRoles) {
+                await workspaceMembersService.revoke(workspaceId, bindingId, { reason })
+            }
             await fetchMembers()
-            notify('success', `Revoked ${member.subject.displayName ?? member.subject.id}`)
+            const also = accountRoles.length === 0 ? ''
+                : accountRoles.length === 1 ? ' and a service account’s role here'
+                    : ` and ${accountRoles.length} service account roles here`
+            notify('success', `Revoked ${member.subject.displayName ?? member.subject.id}${also}`)
             setModal(null)
             setRevokePreview(null)
         } catch (err) {
             const msg = err instanceof Error ? err.message : 'Failed to revoke binding'
             notify('error', msg)
             setError(msg)
+            void fetchMembers()
         } finally {
             setActionLoading(null)
         }
@@ -555,6 +568,7 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
      */
     const handleRequestRevoke = async (member: WorkspaceMemberResponse) => {
         revokeReason.reset()
+        setAlsoRemove(new Set())
         setRevokePreview({ member, loading: true, preview: null, error: null })
         try {
             const preview = await workspaceMembersService.previewRevoke(
@@ -982,10 +996,16 @@ export function WorkspaceMembers({ workspaceId, canManage = true }: {
                 }
                 onCancel={() => setRevokePreview(null)}
                 onConfirm={() => {
-                    if (revokePreview) void handleRevoke(revokePreview.member, revokeReason.take())
+                    if (revokePreview) void handleRevoke(revokePreview.member, revokeReason.take(), [...alsoRemove])
                 }}
                 reason={revokeReason}
-            />
+            >
+                <AccountsStillReaching
+                    accounts={revokePreview?.preview?.serviceAccounts ?? []}
+                    chosen={alsoRemove}
+                    onChange={setAlsoRemove}
+                />
+            </ImpactPreviewModal>
         </div>
     )
 }
@@ -1014,12 +1034,21 @@ function AddMemberModal({
     submitting: boolean
 }) {
     const reason = useReasonDraft('member-add')
-    const [subjectType, setSubjectType] = useState<SubjectType>('user')
+    // A service account is added as the user it is, within its fences.
+    const [kind, setKind] = useState<SubjectType | 'service'>('user')
+    const subjectType: SubjectType = kind === 'group' ? 'group' : 'user'
     // What the caller may grant here: a steward adds people as Viewer or
     // Member; an admin any role whose permissions they hold, groups too.
     const { options } = useGrantOptions(workspaceId)
     const canBindGroups = options?.tier === 'admin'
     const idpRun = options?.accessMode === 'idp'
+    // Where the identity provider decides who is in, only admins add an
+    // account: the provider doesn't know it.
+    const canAddAccounts = !!options && (canBindGroups || !idpRun)
+    const kinds: (SubjectType | 'service')[] = [
+        'user', ...(canBindGroups ? ['group' as const] : []), ...(canAddAccounts ? ['service' as const] : []),
+    ]
+    const [accounts, setAccounts] = useState<ServiceAccountCandidate[] | null>(null)
     const [exception, setException] = useState(false)
     // Only a Super Admin may list every account; everyone else picks from
     // the people directory any signed-in user can search.
@@ -1030,7 +1059,11 @@ function AddMemberModal({
     const [userTotal, setUserTotal] = useState(0)
     const [userPage, setUserPage] = useState(0)
     const [groups, setGroups] = useState<GroupResponse[] | null>(null)
-    const availableRoles = options?.roles ?? null
+    // A service account holds only roles that neither administer the
+    // workspace nor let people in.
+    const availableRoles = options
+        ? options.roles.filter(r => kind !== 'service' || r.requestable !== false)
+        : null
     const [search, setSearch] = useState('')
     const [selected, setSelected] = useState<{ id: string; label: string } | null>(null)
     const [role, setRole] = useState<RoleName>('workspace_member')
@@ -1057,7 +1090,7 @@ function AddMemberModal({
     // returned (fifty people). Groups are still one local list.
     const debouncedSearch = useDebouncedValue(search.trim(), 300)
     useEffect(() => {
-        if (subjectType !== 'user') return
+        if (kind !== 'user') return
         let cancelled = false
         const page = listsAccounts
             ? adminUserService.listUsers({
@@ -1080,7 +1113,18 @@ function AddMemberModal({
                 if (!cancelled) notify('error', err instanceof Error ? err.message : 'Failed to load')
             })
         return () => { cancelled = true }
-    }, [subjectType, debouncedSearch, userPage, listsAccounts, notify])
+    }, [kind, debouncedSearch, userPage, listsAccounts, notify])
+
+    useEffect(() => {
+        if (kind !== 'service') return
+        let cancelled = false
+        workspaceMembersService.serviceAccountCandidates(workspaceId, debouncedSearch)
+            .then((found) => { if (!cancelled) setAccounts(found) })
+            .catch(err => {
+                if (!cancelled) notify('error', err instanceof Error ? err.message : 'Failed to load')
+            })
+        return () => { cancelled = true }
+    }, [kind, debouncedSearch, workspaceId, notify])
 
     useEffect(() => {
         ;(async () => {
@@ -1096,18 +1140,20 @@ function AddMemberModal({
     }, [subjectType, groups, notify])
 
     // Reset selection when toggling subject type
-    useEffect(() => { setSelected(null) }, [subjectType])
+    useEffect(() => { setSelected(null) }, [kind])
 
     const candidates = useMemo(() => {
         // Already active-only, searched and name-sorted by the server.
+        if (kind === 'service') return accounts ?? []
         if (subjectType === 'user') return users ?? []
         const q = search.trim().toLowerCase()
         return (groups ?? [])
             .filter(g => !q || g.name.toLowerCase().includes(q) || (g.description ?? '').toLowerCase().includes(q))
             .sort((a, b) => a.name.localeCompare(b.name))
-    }, [subjectType, users, groups, search])
+    }, [kind, subjectType, accounts, users, groups, search])
 
-    const needsException = idpRun && subjectType === 'user'
+    // A service account is never an exception: the provider doesn't know it.
+    const needsException = idpRun && kind === 'user'
     // Exceptions are the admins' alone, and always end.
     const exceptionAllowed = needsException && canBindGroups
     const duration = exceptionAllowed && !expiresIn ? '30d' : expiresIn
@@ -1125,7 +1171,7 @@ function AddMemberModal({
                     <div>
                         <h3 className="text-lg font-bold text-ink">Add member</h3>
                         <p className="text-xs text-ink-muted">
-                            Bind a user or group to this workspace at a chosen role
+                            Give a person, a group or a service account a role in this workspace
                         </p>
                     </div>
                 </div>
@@ -1135,19 +1181,19 @@ function AddMemberModal({
             </div>
 
             {/* Subject-type toggle — groups are bound by admins only */}
-            {canBindGroups && (
+            {kinds.length > 1 && (
             <div className="flex gap-1 bg-black/5 dark:bg-white/5 rounded-xl p-1 mb-4 w-fit">
-                {(['user', 'group'] as const).map(t => (
+                {kinds.map(t => (
                     <button
                         key={t}
-                        onClick={() => setSubjectType(t)}
+                        onClick={() => setKind(t)}
                         className={cn(
                             'flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-semibold transition-colors duration-150',
-                            subjectType === t ? 'bg-white dark:bg-white/10 text-ink shadow-sm' : 'text-ink-muted hover:text-ink',
+                            kind === t ? 'bg-white dark:bg-white/10 text-ink shadow-sm' : 'text-ink-muted hover:text-ink',
                         )}
                     >
-                        {t === 'user' ? <UserCog className="w-3.5 h-3.5" /> : <Users2 className="w-3.5 h-3.5" />}
-                        {t === 'user' ? 'User' : 'Group'}
+                        {t === 'user' ? <UserCog className="w-3.5 h-3.5" /> : t === 'group' ? <Users2 className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
+                        {t === 'user' ? 'User' : t === 'group' ? 'Group' : 'Service account'}
                     </button>
                 ))}
             </div>
@@ -1158,13 +1204,13 @@ function AddMemberModal({
                 {/* Subject picker */}
                 <div className="space-y-2">
                     <label className="text-xs font-semibold uppercase tracking-wider text-ink-muted block">
-                        {subjectType === 'user' ? 'Choose a user' : 'Choose a group'}
+                        {kind === 'service' ? 'Choose a service account' : subjectType === 'user' ? 'Choose a user' : 'Choose a group'}
                     </label>
                     <div className="relative">
                         <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted" />
                         <input
                             type="text"
-                            placeholder={subjectType === 'user' ? 'Search users...' : 'Search groups...'}
+                            placeholder={kind === 'service' ? 'Search service accounts...' : subjectType === 'user' ? 'Search users...' : 'Search groups...'}
                             value={search}
                             onChange={(e) => { setSearch(e.target.value); setUserPage(0) }}
                             className="input pl-9 h-9 w-full text-sm"
@@ -1172,23 +1218,33 @@ function AddMemberModal({
                         />
                     </div>
                     <div className="rounded-xl border border-glass-border bg-glass-base/30 max-h-60 overflow-y-auto">
-                        {(subjectType === 'user' ? users : groups) === null ? (
+                        {(kind === 'service' ? accounts : subjectType === 'user' ? users : groups) === null ? (
                             <div className="p-6 text-center text-ink-muted text-sm">
                                 <Loader2 className="w-4 h-4 animate-spin inline-block mr-2" />
                                 Loading…
                             </div>
                         ) : candidates.length === 0 ? (
                             <div className="p-6 text-center text-ink-muted text-sm">
-                                {search ? 'No matches.' : `No ${subjectType}s available.`}
+                                {search ? 'No matches.' : kind === 'service' ? 'No service accounts available.' : `No ${subjectType}s available.`}
                             </div>
                         ) : (
                             candidates.map(c => {
-                                const isUser = subjectType === 'user'
+                                const a = kind === 'service' ? (c as ServiceAccountCandidate) : null
+                                const isUser = subjectType === 'user' && !a
                                 const u = isUser ? (c as Pick<AdminUserResponse, 'id' | 'displayName' | 'email'>) : null
-                                const g = !isUser ? (c as GroupResponse) : null
-                                const id = isUser ? u!.id : g!.id
-                                const label = isUser ? u!.displayName : g!.name
-                                const sub = isUser ? u!.email : (g!.description ?? `${g!.memberCount} member${g!.memberCount === 1 ? '' : 's'}`)
+                                const g = !isUser && !a ? (c as GroupResponse) : null
+                                const id = a ? a.id : isUser ? u!.id : g!.id
+                                const label = a ? a.name : isUser ? u!.displayName : g!.name
+                                // Whose integration it is: its managers, and
+                                // which of their teams the provider keeps.
+                                const sub = a
+                                    ? [
+                                        a.description,
+                                        a.managers.length
+                                            ? `Managed by ${a.managers.map(m => m.fromIdp ? `${m.name} (from your identity provider)` : m.name).join(', ')}`
+                                            : 'Nobody manages it',
+                                    ].filter(Boolean).join(' · ')
+                                    : isUser ? u!.email : (g!.description ?? `${g!.memberCount} member${g!.memberCount === 1 ? '' : 's'}`)
                                 const isSelected = selected?.id === id
                                 return (
                                     <button

@@ -95,6 +95,7 @@ export const SYSTEM_ROLE_LABELS: Record<SystemRole, string> = {
     [ROLE_NAMES.SUPER_ADMIN]: 'Super Admin',
     [ROLE_NAMES.ORG_ADMIN]: 'Org Admin',
     [ROLE_NAMES.ORG_AUDITOR]: 'Org Auditor',
+    [ROLE_NAMES.ORG_READER]: 'Org Reader',
     [ROLE_NAMES.USER]: 'User',
     [ROLE_NAMES.WORKSPACE_ADMIN]: 'Workspace Admin',
     [ROLE_NAMES.WORKSPACE_DATA_ENGINEER]: 'Data Engineer',

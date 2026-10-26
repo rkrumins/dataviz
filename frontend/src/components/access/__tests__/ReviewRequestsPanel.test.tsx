@@ -2,7 +2,8 @@
  * The requests someone answers, in one list: open ones with Review and Deny
  * (with a reason the requester sees), All for how each was answered, and —
  * on a workspace's Members tab — nothing at all while nothing waits. A
- * request says how long it has waited, and one to keep access says so.
+ * request says how long it has waited, one to keep access says so, and one
+ * for a service account says what it is for and who manages it.
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -90,6 +91,28 @@ describe('ReviewRequestsPanel', () => {
         const bo = screen.getByText('Bo').closest('li') as HTMLElement
         expect(within(bo).getByText(/asks to keep/)).toHaveTextContent(/ends/)
         expect(within(bo).queryByText(/Waiting \d+ day/)).not.toBeInTheDocument()
+    })
+
+    it('says a request is for a service account, what it is for and whose it is', async () => {
+        requests.listToAnswer.mockResolvedValue([request({
+            id: 'ar_1', requester: { id: 'svc_sync', email: 'svc_sync@service.local', displayName: 'Metadata sync' },
+            serviceAccount: {
+                description: 'Syncs the catalogue nightly',
+                managers: [
+                    { type: 'user', name: 'Ana', fromIdp: false },
+                    { type: 'group', name: 'Data platform', fromIdp: true },
+                ],
+            },
+            requestedBy: { id: 'usr_ana', email: 'ana@x.io', displayName: 'Ana' },
+        })])
+        renderPanel()
+
+        const row = (await screen.findByText('Metadata sync')).closest('li') as HTMLElement
+        expect(within(row).getByText('Service account')).toBeInTheDocument()
+        expect(within(row).queryByText('svc_sync@service.local')).not.toBeInTheDocument()
+        expect(within(row).getByText('Service account: Syncs the catalogue nightly')).toBeInTheDocument()
+        expect(within(row).getByText(/Managed by Ana, Data platform \(from your identity provider\)/)).toBeInTheDocument()
+        expect(within(row).getByText('Asked by Ana')).toBeInTheDocument()
     })
 
     it('declines with a reason the requester sees', async () => {

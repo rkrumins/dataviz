@@ -54,7 +54,7 @@ function account(over: Partial<ServiceAccount>): ServiceAccount {
     return {
         id: 'svc_sync', name: 'Metadata sync', description: null, status: 'active',
         createdAt: '2026-10-01T00:00:00+00:00', createdBy: null, managers: [], managed: true,
-        singleManager: true, unmanagedSince: null, pausesAt: null, adminHold: false,
+        singleManager: true, unmanagedSince: null, pausesAt: null, adminHold: false, deletedAt: null, purgesAt: null,
         handOver: {
             seat: true, teams: [], lastManager: true,
             keysCreatedBy: [{ id: 'apk_1', name: 'nightly', prefix: 'nxsat_Ab', lastUsedAt: null }],
