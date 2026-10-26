@@ -842,6 +842,38 @@ describe('predicateDsl — connections, edge types and edge counts', () => {
 })
 
 
+describe('predicateDsl — an edge type named like a class', () => {
+    // A generic ontology may call its lineage edge LINEAGE. Bare in brackets
+    // the word is the class (every lineage type); in quotes, the edge type.
+    it('reads a quoted name as the edge type, a bare one as the class', () => {
+        expect(parsePredicate('outgoing["LINEAGE"](type:x)').predicate).toEqual({
+            kind: 'related', axis: 'downstream', edgeTypes: ['LINEAGE'],
+            where: { kind: 'entityType', op: 'in', values: ['x'] } })
+        expect(parsePredicate('outgoing[LINEAGE](type:x)').predicate).toEqual({
+            kind: 'related', axis: 'downstream', where: { kind: 'entityType', op: 'in', values: ['x'] } })
+        expect(parsePredicate('noIncoming["Links", FLOWS_TO]').predicate).toMatchObject({
+            edgeTypes: ['Links', 'FLOWS_TO'] })
+        expect(parsePredicate('edges["ANY"](out) > 2').predicate).toMatchObject({ edgeTypes: ['ANY'] })
+        expect(parsePredicate('outgoing[""](type:x)').error).toMatch(/between the quotes/)
+    })
+
+    it('writes such a name in quotes, so it reads back as the same edge type', () => {
+        for (const p of [
+            { kind: 'related', axis: 'downstream', edgeTypes: ['LINEAGE'], maxHops: 2 },
+            { kind: 'related', axis: 'neighbor', edgeTypes: ['links', 'PRODUCES'] },
+            { kind: 'isRoot', edgeTypes: ['CONTAINMENT'] },
+            { kind: 'degree', direction: 'out', op: 'gt', value: 2, edgeTypes: ['Any'] },
+        ] as Predicate[]) {
+            const text = stringifyPredicate(p)
+            expect(text).toMatch(/"(LINEAGE|links|CONTAINMENT|Any)"/)
+            expect(parsePredicate(text).predicate).toEqual(p)
+        }
+        expect(stringifyPredicate({ kind: 'related', axis: 'downstream', edgeTypes: ['FLOWS_TO'] }))
+            .toBe('outgoing[FLOWS_TO]()')
+    })
+})
+
+
 describe('predicateDsl — one property against another', () => {
     const parse = (text: string) => parsePredicate(text).predicate
     const keyed = (over: Partial<PropertyPredicate>): Predicate =>

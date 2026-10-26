@@ -106,9 +106,12 @@ function unknownEdgeTypes(tokens: readonly DslToken[], edgeTypes: readonly { id:
         if (open < 0 || close < 0) continue
         let at = t.from + open + 1
         for (const part of t.text.slice(open + 1, close).split(',')) {
-            const name = part.trim()
-            if (name && !EDGE_CLASS_WORDS.has(name.toLowerCase()) && !known.has(name.toUpperCase())) {
-                const from = at + part.indexOf(name)
+            const raw = part.trim()
+            // In quotes, a name is an edge type even when it reads as a class.
+            const isQuoted = raw.length > 1 && raw.startsWith('"') && raw.endsWith('"')
+            const name = isQuoted ? raw.slice(1, -1) : raw
+            if (name && (isQuoted || !EDGE_CLASS_WORDS.has(name.toLowerCase())) && !known.has(name.toUpperCase())) {
+                const from = at + part.indexOf(raw) + (isQuoted ? 1 : 0)
                 out.push({ from, to: from + name.length, severity: 'warning',
                            message: `Edge type ${name} isn't in this data source` })
             }
@@ -208,7 +211,8 @@ export function completionContextAt(doc: string, pos: number): DslCompletionCont
     if (bracket && (CONNECTION_WORDS.has(edgeWord) || COUNTING_WORDS.has(edgeWord))) {
         const names = bracket[2].split(',')
         const text = (names.pop() ?? '').trimStart()
-        return { kind: 'edgeType', from: pos - text.length, text, taken: names.map((n) => n.trim()),
+        return { kind: 'edgeType', from: pos - text.length, text,
+                 taken: names.map((n) => n.trim().replace(/^"(.*)"$/, '$1')),
                  connection: CONNECTION_WORDS.has(edgeWord) }
     }
 
@@ -362,7 +366,9 @@ export function dslCompletionSource(vocabulary: () => DslVocabulary): Completion
                         ...(vocab.edgeTypes ?? [])
                             .filter((t) => !taken.has(t.id.toUpperCase()) && !(at.connection && t.containment))
                             .slice(0, MAX_OPTIONS)
-                            .map((t) => ({ label: t.id, detail: t.detail, type: 'constant' })),
+                            // One named like a class goes in quotes, or it would read as the class.
+                            .map((t) => ({ label: t.id, detail: t.detail, type: 'constant',
+                                           ...(EDGE_CLASS_WORDS.has(t.id.toLowerCase()) ? { apply: `"${t.id}"` } : {}) })),
                     ],
                     validFor: /^[\w.-]*$/,
                 }

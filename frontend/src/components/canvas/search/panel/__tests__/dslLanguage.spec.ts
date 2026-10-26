@@ -195,3 +195,21 @@ describe('dslLanguage — selecting a whole condition', () => {
         expect(steps).toEqual(['tag:PII', 'tag:PII OR owner IS SET', '(tag:PII OR owner IS SET)', text])
     })
 })
+
+
+describe('dslLanguage — an edge type named like a class', () => {
+    const generic: DslVocabulary = { ...VOCAB, edgeTypes: [{ id: 'LINEAGE' }, { id: 'HAS', containment: true }] }
+
+    it('completes it in quotes, so it is not read as the class', async () => {
+        const r = await complete('outgoing[|', generic)
+        expect(r?.options.find((o) => o.label === 'LINEAGE' && o.type === 'constant')?.apply).toBe('"LINEAGE"')
+        // The class itself is still offered, bare.
+        expect(r?.options.find((o) => o.label === 'lineage')?.apply).toBeUndefined()
+    })
+
+    it('warns only about a quoted name the data source lacks', () => {
+        expect(dslDiagnostics('outgoing["LINEAGE"](type:x)', generic.edgeTypes)).toEqual([])
+        expect(dslDiagnostics('outgoing["NOPE"](type:x)', generic.edgeTypes)).toEqual([
+            expect.objectContaining({ severity: 'warning', from: 10, to: 14 })])
+    })
+})

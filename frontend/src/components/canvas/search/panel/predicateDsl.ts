@@ -424,7 +424,7 @@ function relationSpelling(p: RelatedPredicate): string {
 function relationWord(p: RelatedPredicate): string {
     if (!axisMeta(p.axis).lineage) return p.axis
     const link = LINK_WORDS[p.axis as keyof typeof LINK_WORDS]
-    if (p.edgeTypes) return `${link}[${p.edgeTypes.join(', ')}]`
+    if (p.edgeTypes) return `${link}[${edgeTypeList(p.edgeTypes)}]`
     if (p.edgeClass === 'links') return link
     return p.axis === 'upstream' ? 'fedBy' : p.axis === 'downstream' ? 'feeds' : 'linkedTo[lineage]'
 }
@@ -445,7 +445,7 @@ const SHAPE_SPELLINGS: Record<ShapeKind, { lineage: string; links: string }> = {
 function shapeSpelling(kind: ShapeKind, c: { edgeClass?: EdgeClass | null; edgeTypes?: string[] | null }): string {
     const words = SHAPE_SPELLINGS[kind]
     const neutral = kind === 'isOrphan' ? 'noEdges' : words.links
-    if (c.edgeTypes) return `${neutral}[${c.edgeTypes.join(', ')}]`
+    if (c.edgeTypes) return `${neutral}[${edgeTypeList(c.edgeTypes)}]`
     const set = c.edgeClass ?? DEFAULT_EDGE_CLASS
     if (set === 'lineage' || set === 'links') return words[set]
     return kind === 'isOrphan' && set === 'any' ? 'noEdges' : `${neutral}[${set}]`
@@ -453,7 +453,7 @@ function shapeSpelling(kind: ShapeKind, c: { edgeClass?: EdgeClass | null; edgeT
 
 /** ``edges(out) > 10`` — any link unless the brackets say otherwise. */
 function degreeSpelling(c: DegreePredicate): string {
-    const set = c.edgeTypes ? `[${c.edgeTypes.join(', ')}]`
+    const set = c.edgeTypes ? `[${edgeTypeList(c.edgeTypes)}]`
         : c.edgeClass === 'links' ? '' : `[${c.edgeClass ?? DEFAULT_EDGE_CLASS}]`
     return `edges${set}(${c.direction ?? 'both'}) ${COUNT_SYMBOLS[c.op ?? 'eq']} ${c.value}`
 }
@@ -807,14 +807,28 @@ const SHAPE_CLASSES: readonly EdgeClass[] = ['lineage', 'links', 'any', 'contain
 function readEdgeSet(content: string, classes: readonly EdgeClass[]): { edgeClass?: EdgeClass; edgeTypes?: string[] } {
     const names = content.split(',').map((n) => n.trim()).filter(Boolean)
     if (!names.length) throw new Error('Name edge types between the brackets: outgoing[PRODUCES](…)')
-    const named = names.map((n) => n.toLowerCase()).filter((n) => SHAPE_CLASSES.includes(n as EdgeClass))
-    if (!named.length) return { edgeTypes: names }
+    // A name in quotes is an edge type, never a class: how one called
+    // LINEAGE, LINKS, ANY or CONTAINMENT is named.
+    const quoted = (n: string) => n.length > 1 && n.startsWith('"') && n.endsWith('"')
+    const named = names.filter((n) => !quoted(n)).map((n) => n.toLowerCase())
+        .filter((n) => SHAPE_CLASSES.includes(n as EdgeClass))
+    if (!named.length) {
+        const types = names.map((n) => (quoted(n) ? n.slice(1, -1).trim() : n))
+        if (types.some((t) => !t)) throw new Error('Name an edge type between the quotes: outgoing["LINEAGE"](…)')
+        return { edgeTypes: types }
+    }
     const list = classes.map((c) => `[${c}]`).join(', ')
     if (names.length > 1) throw new Error(`Name edge types, or one of ${list} — not both`)
     if (!classes.includes(named[0] as EdgeClass)) {
         throw new Error(`A connection follows ${list} or edge types, not [${named[0]}]`)
     }
     return { edgeClass: named[0] as EdgeClass }
+}
+
+/** Edge types as the brackets spell them: one named like a class
+ *  (LINEAGE, LINKS…) in quotes, or it would read as the class. */
+function edgeTypeList(types: readonly string[]): string {
+    return types.map((t) => (SHAPE_CLASSES.includes(t.toLowerCase() as EdgeClass) ? `"${t}"` : t)).join(', ')
 }
 
 /** A call that opens a relationship — not count(, .via( or edges(. */
