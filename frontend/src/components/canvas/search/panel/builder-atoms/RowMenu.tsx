@@ -110,6 +110,8 @@ export const RowMenu: FC<RowMenuProps> = ({
                 <>
                     <motion.div
                         ref={popoverRef}
+                        // Its picks are the row's own: not a click away from it.
+                        data-floating-layer=""
                         initial={{ opacity: 0, y: -4, scale: 0.98 }}
                         animate={{ opacity: 1, y: 0, scale: 1 }}
                         transition={{ duration: 0.12 }}

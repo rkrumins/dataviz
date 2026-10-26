@@ -30,6 +30,11 @@ walked must meet. Edge counts have a Form row. The palette adds *Contains, at an
 to*, *Connected through an edge type* and *Something inside it feeds*, and the canvas menu **What’s
 linked to this**.
 
+**Finished filters read as one line.** In the Form, a complete filter folds to its words — *Type is
+Dataset*, *Is tagged #Certified* — and each part you picked opens its editor where it is; **Show
+all options** opens the full card. A new or unfinished filter opens as its card and folds once it is
+complete and you move on. Relationships, paths and edge counts keep their cards.
+
 **Connections in Code mode.** `feeds(…)`, `fedBy(…)`, `linkedTo(…)`, `outgoing[PRODUCES](…)`,
 `incoming(…)`; `noIncoming`, `noLinks`, `noEdges`, `noIncoming[DEFINED_BY]`;
 `edges[PRODUCES](in) >= 2`. Completion offers the data source's edge types inside `[…]`, and an

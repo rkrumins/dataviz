@@ -22,8 +22,8 @@
  * UnifiedPicker (used for multi-value editors — tags, types, property
  * values) is invoked with ``portal={true}`` for the same reason.
  */
-import { ExternalLink, KeyRound, Type, X } from 'lucide-react'
-import { type FC, type ReactNode, memo, useEffect, useMemo, useState } from 'react'
+import { ChevronDown, ExternalLink, KeyRound, Type, X } from 'lucide-react'
+import { type FC, type ReactNode, memo, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
 import { formatUrnLabel } from '@/lib/urnLabels'
@@ -67,6 +67,7 @@ import { useValueSuggestions } from '../typed/useValueSuggestions'
 import { parseDuration, recode, valueProblem } from '../typed/valueCodec'
 import { TYPE_META, VALUE_TYPES, type ValueType, observeType } from '../typed/valueTypes'
 
+import { CompactLine } from './CompactLine'
 import { EdgeCountEditor, EdgeSetField } from './EdgeShapeEditors'
 import { NodeRefList } from './NodeRefPicker'
 import { OperatorMenu } from './OperatorMenu'
@@ -134,6 +135,15 @@ export interface ConditionRowProps {
 }
 
 
+/** Kinds whose finished row folds to one line of words. Relationships,
+ *  paths, edge counts and groups keep their cards: their options are the
+ *  point of them. */
+const FOLDABLE = new Set<string>([
+    'text', 'entityType', 'tag', 'layer', 'hasProperty', 'property', 'descendantOf', 'is',
+    'isRoot', 'isLeaf', 'isOrphan', 'hasIncoming', 'hasOutgoing',
+])
+
+
 const ConditionRowImpl: FC<ConditionRowProps> = ({
     value, discovery, knownEntityTypes, activeEntityTypes, discoveredLayers,
     isRunning, autoFocus, onChange, onRemove, onOpenAdvanced, onSubmit,
@@ -141,12 +151,39 @@ const ConditionRowImpl: FC<ConditionRowProps> = ({
 }) => {
     const meta = getKindMeta(value)
     const incomplete = isIncomplete(value)
-    const editor = renderEditor({
+    const ctx: EditorCtx = {
         value, onChange, discovery, knownEntityTypes,
         activeEntityTypes, discoveredLayers, isRunning,
         autoFocus: autoFocus ?? false, onSubmit,
         onOpenAdvanced,
-    })
+    }
+    const editor = renderEditor(ctx)
+
+    // A finished simple condition reads as one line; a new or unfinished
+    // one opens as its card, and folds once finished when the person moves
+    // on — a click or focus anywhere outside it. A pick in a portaled menu
+    // (a picker's, the row's ⋯) is not moving on.
+    const foldable = FOLDABLE.has(value.kind ?? '')
+    const [expanded, setExpanded] = useState(() => !!autoFocus || incomplete)
+    const [foldOnLeave, setFoldOnLeave] = useState(expanded)
+    const compact = foldable && !expanded
+    const rowRef = useRef<HTMLDivElement>(null)
+    useEffect(() => {
+        if (!foldable || !expanded || !foldOnLeave || incomplete) return
+        const leave = (e: Event) => {
+            const target = e.target
+            if (!(target instanceof Element) || rowRef.current?.contains(target)) return
+            if (target.closest('[data-floating-layer]')) return
+            setExpanded(false)
+            setFoldOnLeave(false)
+        }
+        document.addEventListener('pointerdown', leave, true)
+        document.addEventListener('focusin', leave)
+        return () => {
+            document.removeEventListener('pointerdown', leave, true)
+            document.removeEventListener('focusin', leave)
+        }
+    }, [foldable, expanded, foldOnLeave, incomplete])
 
     // Multi-select state — only active when the row caller supplied
     // both ``parentPath`` and ``index``. Off otherwise (e.g. when the
@@ -160,12 +197,13 @@ const ConditionRowImpl: FC<ConditionRowProps> = ({
     const toggleRowSelection = useSearchStore((s) => s.toggleRowSelection)
 
     return (
-        <RowCard tone="neutral" incomplete={incomplete}>
+        <RowCard ref={rowRef} tone="neutral" incomplete={incomplete} className={compact ? 'py-1.5' : undefined}>
             <div className="group/row flex flex-col gap-3">
-                {/* Header — checkbox + icon + descriptive label + actions */}
-                <div className="flex items-start gap-2.5">
+                {/* Header — checkbox + icon + descriptive label (or, folded,
+                    the condition as words) + actions */}
+                <div className={cn('flex gap-2.5', compact ? 'items-center' : 'items-start')}>
                     {selectable && (
-                        <div className="pt-1">
+                        <div className={compact ? undefined : 'pt-1'}>
                             <RowSelectionCheckbox
                                 selected={selected}
                                 onToggle={() => toggleRowSelection(parentPath!, index!)}
@@ -173,7 +211,7 @@ const ConditionRowImpl: FC<ConditionRowProps> = ({
                             />
                         </div>
                     )}
-                    <span className={cn(
+                    <span title={compact ? meta.label : undefined} className={cn(
                         'inline-flex items-center justify-center shrink-0',
                         'w-6 h-6 rounded-md text-[14px]',
                         'bg-accent-lineage/12 text-accent-lineage',
@@ -181,16 +219,39 @@ const ConditionRowImpl: FC<ConditionRowProps> = ({
                         {meta.icon}
                     </span>
                     <div className="flex-1 min-w-0 flex flex-col leading-tight">
-                        <span className="text-[12.5px] font-medium text-ink">
-                            {meta.label}
-                        </span>
-                        {meta.description && (
-                            <span className="text-[10.5px] text-ink-muted/80 leading-snug">
-                                {meta.description}
-                            </span>
+                        {compact ? (
+                            <CompactLine value={value} title={meta.label} layers={discoveredLayers}
+                                         editor={renderEditor({ ...ctx, autoFocus: true })} />
+                        ) : (
+                            <>
+                                <span className="text-[12.5px] font-medium text-ink">
+                                    {meta.label}
+                                </span>
+                                {meta.description && (
+                                    <span className="text-[10.5px] text-ink-muted/80 leading-snug">
+                                        {meta.description}
+                                    </span>
+                                )}
+                            </>
                         )}
                     </div>
                     <div className="flex items-center gap-0.5 shrink-0">
+                        {foldable && (
+                            <button
+                                type="button"
+                                onClick={() => { setExpanded(!expanded); setFoldOnLeave(false) }}
+                                aria-expanded={!compact}
+                                aria-label={compact ? 'Show all options' : 'Fold to one line'}
+                                title={compact ? 'Show all options' : 'Fold to one line'}
+                                className={cn(
+                                    'inline-flex items-center justify-center w-6 h-6 rounded-md',
+                                    'text-ink-muted/70 hover:text-ink hover:bg-glass/40',
+                                    'transition-colors',
+                                )}
+                            >
+                                <ChevronDown className={cn('w-3.5 h-3.5 transition-transform', !compact && 'rotate-180')} />
+                            </button>
+                        )}
                         {(onWrap || onDuplicate) && (
                             <RowMenu
                                 onWrap={(w) => onWrap?.(w)}
@@ -216,7 +277,7 @@ const ConditionRowImpl: FC<ConditionRowProps> = ({
                 </div>
 
                 {/* Editor body (per-kind) */}
-                {editor && <div className="flex flex-col gap-3 pl-8">{editor}</div>}
+                {!compact && editor && <div className="flex flex-col gap-3 pl-8">{editor}</div>}
             </div>
         </RowCard>
     )

@@ -98,8 +98,9 @@ describe('DisplayRuleEditor', () => {
                 }}
             />,
         )
-        // The shared ConditionRow renders the tag filter's description.
-        expect(screen.getByText(/Match nodes by their assigned tags/i)).toBeInTheDocument()
+        // The shared ConditionRow reads the finished tag filter as one line,
+        // its tag a token that opens the filter's editor.
+        expect(screen.getByRole('button', { name: 'Tag: #PII' })).toHaveAttribute('aria-haspopup', 'dialog')
     })
 
     it('blocks Save until a name is entered, then emits a well-formed rule', async () => {
