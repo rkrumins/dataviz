@@ -40,6 +40,8 @@ import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
 
+import { anchorInView } from './anchorInView'
+
 
 export interface OperatorOption<T extends string> {
     value: T
@@ -94,6 +96,8 @@ export function OperatorMenu<T extends string>({
     useLayoutEffect(() => {
         if (!open) { setCoords(null); return }
         const update = () => {
+            // Scrolled out of sight: close rather than float, unattached.
+            if (buttonRef.current && !anchorInView(buttonRef.current)) { setOpen(false); return }
             const r = buttonRef.current?.getBoundingClientRect()
             if (!r) return
             const menuW = Math.max(r.width, 200)

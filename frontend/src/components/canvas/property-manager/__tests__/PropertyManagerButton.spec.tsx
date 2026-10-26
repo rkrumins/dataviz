@@ -7,7 +7,7 @@
  * strip peeking under the button and could never read or close it. The
  * coachmark now portals to the body, and it can be dismissed on its own.
  */
-import { render, screen, cleanup } from '@testing-library/react'
+import { act, render, screen, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
@@ -42,6 +42,15 @@ describe('PropertyManagerButton first-run coachmark', () => {
         localStorage.setItem(PROPERTY_MANAGER_SEEN_KEY, '1')
         mount()
         expect(screen.queryByText(HINT)).toBeNull()
+    })
+
+    it('is silent while a surface covers its button (the canvas made inert under Search Studio)', async () => {
+        const { header } = mount()
+        expect(screen.getByText(HINT)).toBeInTheDocument()
+        await act(async () => { header.setAttribute('inert', '') })
+        expect(screen.queryByText(HINT)).toBeNull()
+        await act(async () => { header.removeAttribute('inert') })
+        expect(screen.getByText(HINT)).toBeInTheDocument()
     })
 
     it('is silent while the manager is already open', () => {

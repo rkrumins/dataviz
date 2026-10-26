@@ -53,6 +53,7 @@ import { cn } from '@/lib/utils'
 import type { Predicate } from '@/types/search'
 
 import { parsePredicate, stringifyPredicate } from './predicateDsl'
+import { anchorInView } from './anchorInView'
 import { topLevelConditions } from './predicateComposition'
 import { RelationContext } from './relationContext'
 import {
@@ -134,7 +135,9 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
     const buttonRef = useRef<HTMLButtonElement>(null)
     const popoverRef = useRef<HTMLDivElement>(null)
     const inputRef = useRef<HTMLInputElement>(null)
-    const [coords, setCoords] = useState<{ top: number; left: number; width: number } | null>(null)
+    const [coords, setCoords] = useState<{
+        top?: number; bottom?: number; maxHeight: number; left: number; width: number
+    } | null>(null)
 
     // Measure the trigger button on open / scroll / resize so the portal
     // popover stays anchored. Using a portal escapes the panel's
@@ -145,6 +148,8 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
     useLayoutEffect(() => {
         if (!open) { setCoords(null); return }
         const update = () => {
+            // Scrolled out of sight: close rather than float, unattached.
+            if (buttonRef.current && !anchorInView(buttonRef.current)) { setOpen(false); return }
             const r = buttonRef.current?.getBoundingClientRect()
             if (!r) return
             // Anchor under the QueryCard content area so the popover
@@ -172,7 +177,17 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
                 containerRect?.left ?? r.left,
                 viewportW - popoverW - 8,
             )
-            setCoords({ top: r.bottom + 4, left, width: popoverW })
+            // Below the button, unless it is near the bottom of the window
+            // and there is more room above — and never taller than the room
+            // it has, so the end of the list stays on screen.
+            const below = window.innerHeight - r.bottom - 12
+            const above = r.top - 12
+            const up = below < 320 && above > below
+            setCoords({
+                ...(up ? { bottom: window.innerHeight - r.top + 4 } : { top: r.bottom + 4 }),
+                maxHeight: Math.max(200, up ? above : below),
+                left, width: popoverW,
+            })
         }
         update()
         window.addEventListener('resize', update)
@@ -300,6 +315,8 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
                 style={{
                     position: 'fixed',
                     top: coords.top,
+                    bottom: coords.bottom,
+                    maxHeight: coords.maxHeight,
                     left: coords.left,
                     width: coords.width,
                     zIndex: 9999,
@@ -393,7 +410,7 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
                     user flagged. With the popover now 380-640px
                     wide (W2 UX uplift) there's room for legible
                     text + a more generous row rhythm. */}
-                <div className="max-h-[32rem] overflow-y-auto custom-scrollbar py-1.5">
+                <div className="min-h-0 max-h-[32rem] overflow-y-auto custom-scrollbar py-1.5">
                     {filteredCategories.length === 0 ? (
                         <div className="px-4 py-5 text-[12.5px] text-ink-muted/80 italic">
                             No filters match &ldquo;{query}&rdquo;.

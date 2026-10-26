@@ -80,7 +80,7 @@ import { QueryCard } from './panel/QueryCard'
 import { QuerySentence } from './panel/QuerySentence'
 import { useEditorMode } from './panel/builderMode'
 import { ResultsAskBar } from './panel/ask/ResultsAskBar'
-import { ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
+import { PANEL_MAX_WIDTH, PANEL_MIN_WIDTH, ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
 import { ResultsPane } from './panel/ResultsPane'
 import { SaveQueryDialog } from './panel/SaveQueryDialog'
 import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
@@ -104,6 +104,24 @@ import { useHostRect } from './studio/useHostRect'
 /** The header width its toolbar needs with every chip labelled — with the
  *  Refine chip, and without it. */
 const LABELLED_WIDTH = { withRefine: 570, without: 480 }
+
+/** The least the canvas beside the panel keeps: the panel stops widening
+ *  there, however wide it was asked to be, so the canvas and its toolbar
+ *  stay usable. */
+const CANVAS_MIN_WIDTH = 480
+
+/** How wide ``el`` is, kept current as it resizes (0 until first measured
+ *  — an observer reports the size it starts with). */
+function useWidth(el: HTMLElement | null): number {
+    const [width, setWidth] = useState(0)
+    useLayoutEffect(() => {
+        if (!el || typeof ResizeObserver !== 'function') return
+        const ro = new ResizeObserver(() => setWidth(el.clientWidth))
+        ro.observe(el)
+        return () => ro.disconnect()
+    }, [el])
+    return width
+}
 
 
 export interface SearchMapPanelProps {
@@ -132,26 +150,40 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
     open, onClose, viewId, onRevealNode, onOpenNode, onFrameMatches, session, onClear,
 }) => {
     const [width, setWidth] = useState<number>(() => readPersistedWidth())
+    const [dragging, setDragging] = useState(false)
+    // The row the panel shares with its canvas: the panel shows narrower
+    // than asked when the canvas would otherwise drop below its minimum.
+    const [host, setHost] = useState<HTMLElement | null>(null)
+    const hostWidth = useWidth(host)
+    const maxWidth = hostWidth
+        ? Math.max(PANEL_MIN_WIDTH, Math.min(PANEL_MAX_WIDTH, hostWidth - CANVAS_MIN_WIDTH))
+        : PANEL_MAX_WIDTH
+    const shown = Math.min(width, maxWidth)
 
     return (
         <AnimatePresence>
             {open && (
                 <motion.aside
+                    ref={(el: HTMLElement | null) => setHost(el?.parentElement ?? null)}
                     data-panel="search-map-panel"
                     data-testid="search-map-panel"
                     initial={{ width: 0, opacity: 0 }}
-                    animate={{ width, opacity: 1 }}
+                    animate={{ width: shown, opacity: 1 }}
                     exit={{ width: 0, opacity: 0 }}
-                    transition={{ type: 'spring', stiffness: 400, damping: 35 }}
+                    // While dragged it follows the pointer; a spring here
+                    // left the edge trailing the handle.
+                    transition={dragging ? { duration: 0 } : { type: 'spring', stiffness: 400, damping: 35 }}
                     className={cn(
                         'relative h-full flex-shrink-0 overflow-hidden',
                         'bg-canvas-elevated/98 backdrop-blur-2xl',
                         'border-r border-glass-border shadow-2xl shadow-black/25',
                     )}
                 >
+                    {/* The right padding keeps the scrollbars inside out
+                        from under the resize handle on the edge. */}
                     <div
-                        className="h-full flex flex-col overflow-hidden"
-                        style={{ width }}
+                        className="h-full flex flex-col overflow-hidden pr-1.5"
+                        style={{ width: shown }}
                     >
                         {viewId ? (
                             session ? (
@@ -180,7 +212,7 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
                     {/* Multi-select "Group as AND / OR" floating bar.
                         Self-hides when fewer than 2 rows selected. */}
                     {viewId && <BulkGroupActionBar />}
-                    <ResizeHandle width={width} onResize={setWidth} />
+                    <ResizeHandle width={shown} max={maxWidth} onResize={setWidth} onDragChange={setDragging} />
                 </motion.aside>
             )}
         </AnimatePresence>

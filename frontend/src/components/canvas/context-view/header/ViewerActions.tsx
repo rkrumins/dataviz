@@ -29,6 +29,7 @@ import { PropertyManagerButton } from '../../property-manager/PropertyManagerBut
 import { DisplayMenu } from './DisplayMenu'
 import { ImportExportMenu, type ViewFileActions } from './ImportExportMenu'
 import { TraceHistoryPanel, type TraceHistoryPanelEntry } from './TraceHistoryPanel'
+import { useFolded } from './toolbarFold'
 import { HoverTip } from '@/components/ui/HoverTip'
 
 export interface ComprehensionToolsProps {
@@ -160,6 +161,12 @@ export function ComprehensionTools({
   // The Lens focuses ONE entity by construction; Trace can take a whole
   // selection. Defaults to canTrace so a caller that never sets it is unchanged.
   const lensAllowed = canOpenLens ?? canTrace
+  // Short of room, these show their icon alone (see toolbarFold.ts).
+  const lineageFolded = useFolded('lineage')
+  const selectFolded = useFolded('select')
+  const lensFolded = useFolded('lens')
+  const traceFolded = useFolded('trace')
+  const propertiesFolded = useFolded('properties')
 
   // The server now REFUSES POST /graph/trace* when this is off (feature_gate.py), so leaving
   // the button here would hand the user an action that 403s. HIDDEN, not disabled: a greyed-out
@@ -191,18 +198,20 @@ export function ComprehensionTools({
       >
       <button
         data-tour="canvas-lineage-toggle"
+        data-toolbar-item="lineage"
         onClick={onToggleLineageFlow}
         className={cn(
-          "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
+          "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition duration-300",
           showLineageFlow
             ? "bg-gradient-to-r from-accent-lineage/15 to-accent-lineage/[0.08] text-accent-lineage shadow-sm shadow-accent-lineage/10 border border-accent-lineage/35 dark:from-accent-lineage/20 dark:to-accent-lineage/10 dark:shadow-lg dark:shadow-accent-lineage/20 dark:border-accent-lineage/30"
-            : "bg-black/[0.04] border border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08] dark:hover:bg-white/[0.08]"
+            : "bg-black/[0.04] border border-black/[0.10] text-ink-muted hover:bg-black/[0.08] hover:text-ink dark:bg-white/[0.04] dark:border-white/[0.08] dark:hover:bg-white/[0.08]",
+          lineageFolded && "px-2.5",
         )}
       >
         <motion.div animate={{ rotate: showLineageFlow ? 0 : -180 }} transition={{ duration: 0.18 }}>
           <LucideIcons.GitBranch className="w-4 h-4" />
         </motion.div>
-        <span>Lineage</span>
+        <span data-toolbar-label className={lineageFolded ? 'sr-only' : undefined}>Lineage</span>
         <div className={cn(
           "w-2 h-2 rounded-full transition-colors duration-300",
           showLineageFlow ? "bg-green-500 dark:bg-green-400 dark:shadow-lg dark:shadow-green-400/50" : "bg-ink-muted/30"
@@ -260,17 +269,21 @@ export function ComprehensionTools({
         >
           <button
             type="button"
+            data-toolbar-item="select"
             onClick={onToggleMultiSelect}
             aria-pressed={multiSelectArmed}
             className={cn(
-              'flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300',
+              'flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition duration-300',
               multiSelectArmed
                 ? 'bg-accent-lineage/20 text-accent-lineage border border-accent-lineage/50 hover:bg-accent-lineage/30'
                 : 'bg-black/[0.03] border border-black/[0.06] text-ink-muted hover:text-ink hover:bg-black/[0.06] dark:bg-white/[0.03] dark:border-white/[0.06] dark:hover:bg-white/[0.08]',
+              selectFolded && 'px-2.5',
             )}
           >
             <LucideIcons.SquareCheckBig className="w-4 h-4" strokeWidth={2.2} />
-            {multiSelectArmed ? 'Selecting' : 'Select'}
+            <span data-toolbar-label className={selectFolded ? 'sr-only' : undefined}>
+              {multiSelectArmed ? 'Selecting' : 'Select'}
+            </span>
           </button>
         </HoverTip>
       )}
@@ -284,17 +297,19 @@ export function ComprehensionTools({
           detail={lensAllowed ? (isDraft ? DRAFT_WALK_NOTE : 'Opens the Lineage Lens over the canvas') : undefined}
         >
         <button
+          data-toolbar-item="lens"
           onClick={lensAllowed ? onOpenLens : undefined}
           disabled={!lensAllowed}
           className={cn(
-            "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
+            "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition duration-300",
             lensAllowed
               ? "bg-gradient-to-r from-teal-500/15 to-accent-lineage/10 text-teal-700 dark:text-teal-300 border border-teal-500/40 hover:from-teal-500/25 hover:to-accent-lineage/20 hover:border-teal-400/60 dark:hover:shadow-lg dark:hover:shadow-teal-500/20"
-              : "bg-black/[0.03] border border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/40 cursor-not-allowed"
+              : "bg-black/[0.03] border border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/40 cursor-not-allowed",
+            lensFolded && "px-2.5",
           )}
         >
           <LucideIcons.Focus className="w-4 h-4" strokeWidth={2.2} />
-          <span>Focus Lens</span>
+          <span data-toolbar-label className={lensFolded ? 'sr-only' : undefined}>Focus Lens</span>
         </button>
         </HoverTip>
       )}
@@ -305,11 +320,15 @@ export function ComprehensionTools({
         // not worth hovering.
         <button
           data-tour="canvas-trace"
+          data-toolbar-item="trace"
           onClick={onExitTrace}
-          className="flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-gradient-to-r from-rose-500/20 to-rose-500/10 text-rose-700 border border-rose-400/50 hover:from-rose-500/30 hover:to-rose-500/20 hover:border-rose-400/70 dark:text-rose-200 dark:border-rose-400/40 dark:hover:border-rose-300/60 dark:hover:shadow-lg dark:hover:shadow-rose-500/20 transition-all duration-300"
+          className={cn(
+            "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium bg-gradient-to-r from-rose-500/20 to-rose-500/10 text-rose-700 border border-rose-400/50 hover:from-rose-500/30 hover:to-rose-500/20 hover:border-rose-400/70 dark:text-rose-200 dark:border-rose-400/40 dark:hover:border-rose-300/60 dark:hover:shadow-lg dark:hover:shadow-rose-500/20 transition duration-300",
+            traceFolded && "px-2.5",
+          )}
         >
           <LucideIcons.X className="w-4 h-4" strokeWidth={2.4} />
-          <span>Exit Trace</span>
+          <span data-toolbar-label className={traceFolded ? 'sr-only' : undefined}>Exit Trace</span>
           <span className="w-2 h-2 rounded-full bg-rose-500 dark:bg-rose-300 dark:shadow-lg dark:shadow-rose-300/60 animate-pulse" />
         </button>
       ) : !lineageReady ? (
@@ -320,17 +339,19 @@ export function ComprehensionTools({
         >
         <button
           data-tour="canvas-trace"
+          data-toolbar-item="trace"
           onClick={warnLineageNotReady}
           aria-busy="true"
           className={cn(
-            "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300 cursor-wait",
+            "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition duration-300 cursor-wait",
             "bg-gradient-to-r from-accent-lineage/12 to-purple-500/[0.06] text-accent-lineage/85 border border-accent-lineage/30",
             "dark:from-accent-lineage/18 dark:to-purple-500/10 dark:text-accent-lineage dark:border-accent-lineage/25",
             "shadow-sm shadow-accent-lineage/10",
+            traceFolded && "px-2.5",
           )}
         >
           <LucideIcons.Loader2 className="w-4 h-4 animate-spin" strokeWidth={2.4} />
-          <span>Loading lineage…</span>
+          <span data-toolbar-label className={traceFolded ? 'sr-only' : undefined}>Loading lineage…</span>
           <span
             className="w-2 h-2 rounded-full bg-accent-lineage dark:shadow-lg dark:shadow-accent-lineage/60 animate-pulse"
             aria-hidden
@@ -359,6 +380,7 @@ export function ComprehensionTools({
           >
           <button
             data-tour="canvas-trace"
+            data-toolbar-item="trace"
             onClick={
               canTrace
                 ? onStartTrace
@@ -368,15 +390,18 @@ export function ComprehensionTools({
             }
             disabled={!canTrace && !hasTraceHistory}
             className={cn(
-              "flex items-center gap-2 px-4 py-2 text-sm font-medium transition-all duration-300",
+              "flex items-center gap-2 px-4 py-2 text-sm font-medium transition duration-300",
               hasTraceHistory ? "rounded-l-xl border-r-0" : "rounded-xl",
               (canTrace || hasTraceHistory)
                 ? "bg-gradient-to-r from-accent-lineage/20 to-purple-500/10 text-accent-lineage border border-accent-lineage/40 hover:from-accent-lineage/30 hover:to-purple-500/20 hover:border-accent-lineage/60 dark:hover:shadow-lg dark:hover:shadow-accent-lineage/20"
-                : "rounded-xl bg-black/[0.03] border border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/40 cursor-not-allowed"
+                : "rounded-xl bg-black/[0.03] border border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/40 cursor-not-allowed",
+              traceFolded && "px-2.5",
             )}
           >
             <LucideIcons.Workflow className="w-4 h-4" strokeWidth={2.2} />
-            <span>{traceSeedCount > 1 ? `Trace ${traceSeedCount} Entities` : 'Trace Lineage'}</span>
+            <span data-toolbar-label className={traceFolded ? 'sr-only' : undefined}>
+              {traceSeedCount > 1 ? `Trace ${traceSeedCount} Entities` : 'Trace Lineage'}
+            </span>
           </button>
           </HoverTip>
           {hasTraceHistory && (
@@ -429,6 +454,7 @@ export function ComprehensionTools({
         <PropertyManagerButton
           open={propertyManagerOpen}
           onToggle={onTogglePropertyManager}
+          folded={propertiesFolded}
         />
       )}
 
@@ -451,6 +477,7 @@ export function ViewerActions({ canManage, canEnterEdit, onEnterEdit, ...tools }
   // Editing IS versioning (edit mode = an open draft): when the admin turns
   // versioning off, the Edit entry disappears entirely — not disabled-with-hint.
   const versioningEnabled = useFeature('versioningEnabled')
+  const editFolded = useFolded('edit')
   return (
     <>
       <ComprehensionTools {...tools} />
@@ -470,17 +497,19 @@ export function ViewerActions({ canManage, canEnterEdit, onEnterEdit, ...tools }
             detail={canEnterEdit ? 'The published version stays untouched until you publish' : undefined}
           >
           <button
+            data-toolbar-item="edit"
             onClick={canEnterEdit ? onEnterEdit : undefined}
             disabled={!canEnterEdit}
             className={cn(
-              "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-all duration-300",
+              "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition duration-300",
               canEnterEdit
                 ? "bg-accent-lineage/[0.08] text-accent-lineage border border-accent-lineage/45 shadow-sm shadow-accent-lineage/10 hover:bg-accent-lineage/[0.14] hover:border-accent-lineage/65 dark:bg-accent-lineage/[0.12] dark:border-accent-lineage/40 dark:hover:shadow-lg dark:hover:shadow-accent-lineage/15"
-                : "bg-black/[0.03] border border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/40 cursor-not-allowed"
+                : "bg-black/[0.03] border border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/40 cursor-not-allowed",
+              editFolded && "px-2.5",
             )}
           >
             <LucideIcons.PenLine className="w-4 h-4" strokeWidth={2.2} />
-            <span>Edit</span>
+            <span data-toolbar-label className={editFolded ? 'sr-only' : undefined}>Edit</span>
           </button>
           </HoverTip>
         </>

@@ -46,6 +46,8 @@ import { createPortal } from 'react-dom'
 
 import { cn } from '@/lib/utils'
 
+import { anchorInView } from '../../panel/anchorInView'
+
 import { fieldClass } from './shared'
 
 
@@ -174,6 +176,8 @@ export function UnifiedPicker(props: UnifiedPickerProps) {
     useLayoutEffect(() => {
         if (!portal || !open) { setPortalCoords(null); return }
         const update = () => {
+            // Scrolled out of sight: close rather than float, unattached.
+            if (containerRef.current && !anchorInView(containerRef.current)) { setOpen(false); return }
             const r = containerRef.current?.getBoundingClientRect()
             if (!r) return
             const viewportW = window.innerWidth

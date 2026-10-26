@@ -18,6 +18,7 @@ import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { BRANCH_VOCAB } from '@/features/versioning/model/branchVocab'
 import { ComprehensionTools, type ComprehensionToolsProps } from './ViewerActions'
+import { useFolded } from './toolbarFold'
 
 export interface EditorActionsProps extends ComprehensionToolsProps {
   canUndo?: boolean
@@ -43,6 +44,10 @@ export function EditorActions({
   onExitEdit,
   ...tools
 }: EditorActionsProps) {
+  // Short of room, these show their icon alone (see toolbarFold.ts).
+  const undoFolded = useFolded('undo')
+  const redoFolded = useFolded('redo')
+  const reviewFolded = useFolded('review')
   return (
     <>
       <ComprehensionTools {...tools} />
@@ -57,15 +62,17 @@ export function EditorActions({
           onClick={onUndo}
           disabled={!canUndo}
           aria-label="Undo"
+          data-toolbar-item="undo"
           className={cn(
-            "flex items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold tracking-tight transition-all",
+            "flex items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold tracking-tight transition",
             canUndo
               ? "text-ink/85 hover:bg-black/[0.06] hover:text-ink active:bg-black/[0.10] dark:hover:bg-white/[0.06] dark:active:bg-white/[0.10]"
-              : "text-ink-muted/40 dark:text-ink-muted/25 cursor-not-allowed"
+              : "text-ink-muted/40 dark:text-ink-muted/25 cursor-not-allowed",
+            undoFolded && "px-2.5",
           )}
         >
           <LucideIcons.Undo2 className="w-3.5 h-3.5" strokeWidth={2.4} />
-          <span>Undo</span>
+          <span data-toolbar-label className={undoFolded ? 'sr-only' : undefined}>Undo</span>
         </button>
         </HoverTip>
         <div className="w-px bg-black/[0.10] dark:bg-white/[0.08]" />
@@ -74,14 +81,16 @@ export function EditorActions({
           onClick={onRedo}
           disabled={!canRedo}
           aria-label="Redo"
+          data-toolbar-item="redo"
           className={cn(
-            "flex items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold tracking-tight transition-all",
+            "flex items-center gap-1.5 px-3 py-2 text-[11.5px] font-semibold tracking-tight transition",
             canRedo
               ? "text-ink/85 hover:bg-black/[0.06] hover:text-ink active:bg-black/[0.10] dark:hover:bg-white/[0.06] dark:active:bg-white/[0.10]"
-              : "text-ink-muted/40 dark:text-ink-muted/25 cursor-not-allowed"
+              : "text-ink-muted/40 dark:text-ink-muted/25 cursor-not-allowed",
+            redoFolded && "px-2.5",
           )}
         >
-          <span>Redo</span>
+          <span data-toolbar-label className={redoFolded ? 'sr-only' : undefined}>Redo</span>
           <LucideIcons.Redo2 className="w-3.5 h-3.5" strokeWidth={2.4} />
         </button>
         </HoverTip>
@@ -103,15 +112,17 @@ export function EditorActions({
       <button
         onClick={onOpenStagedChanges}
         disabled={pendingChangeCount === 0}
+        data-toolbar-item="review"
         className={cn(
-          "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all duration-300 border",
+          "flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition duration-300 border",
           pendingChangeCount > 0
             ? "bg-accent-lineage border-transparent text-white shadow-lg shadow-accent-lineage/30 hover:bg-accent-lineage/90 hover:shadow-accent-lineage/40 active:scale-[0.98]"
-            : "bg-black/[0.03] border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/50 cursor-not-allowed"
+            : "bg-black/[0.03] border-black/[0.06] text-ink-muted/50 dark:bg-white/[0.03] dark:border-white/[0.06] dark:text-ink-muted/50 cursor-not-allowed",
+          reviewFolded && "px-2.5",
         )}
       >
         <LucideIcons.ListChecks className="w-4 h-4" strokeWidth={2.4} />
-        <span>Review &amp; Save</span>
+        <span data-toolbar-label className={reviewFolded ? 'sr-only' : undefined}>Review &amp; Save</span>
         {pendingChangeCount > 0 && (
           <span className="flex items-center justify-center min-w-[20px] h-5 px-1 rounded-md bg-white/25 text-[11px] font-bold tabular-nums leading-none">
             {pendingChangeCount}

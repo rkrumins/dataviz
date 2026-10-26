@@ -33,16 +33,20 @@ function markSeen(): void {
     try { localStorage.setItem(PROPERTY_MANAGER_SEEN_KEY, '1') } catch { /* non-fatal */ }
 }
 
-// A tick that advances on every resize and on any scroll (capture), so the
-// coachmark's placement is re-derived from the trigger's live rect.
+// A tick that advances on every resize, on any scroll (capture) and when a
+// surface makes part of the page inert, so the coachmark's placement — and
+// whether its trigger is covered — is re-derived from the live page.
 let viewportTick = 0
 function subscribeViewport(onChange: () => void): () => void {
     const bump = () => { viewportTick += 1; onChange() }
     window.addEventListener('resize', bump)
     window.addEventListener('scroll', bump, true)
+    const inert = typeof MutationObserver === 'function' ? new MutationObserver(bump) : null
+    inert?.observe(document.body, { attributes: true, attributeFilter: ['inert'], subtree: true })
     return () => {
         window.removeEventListener('resize', bump)
         window.removeEventListener('scroll', bump, true)
+        inert?.disconnect()
     }
 }
 const getViewportTick = () => viewportTick
@@ -55,10 +59,12 @@ export interface PropertyManagerButtonProps {
     open: boolean
     onToggle: () => void
     className?: string
+    /** Its icon alone — a toolbar short of room (the Context View header's). */
+    folded?: boolean
 }
 
 
-export function PropertyManagerButton({ open, onToggle, className }: PropertyManagerButtonProps) {
+export function PropertyManagerButton({ open, onToggle, className, folded = false }: PropertyManagerButtonProps) {
     // The hint is armed once per browser; it shows whenever the manager is
     // closed until the user opens the manager or dismisses it.
     const [hintArmed, setHintArmed] = useState(() => !readSeen())
@@ -69,7 +75,11 @@ export function PropertyManagerButton({ open, onToggle, className }: PropertyMan
     // re-derived when the viewport ticks. No state is written in effects.
     const [triggerEl, setTriggerEl] = useState<HTMLButtonElement | null>(null)
     useSyncExternalStore(hintArmed ? subscribeViewport : subscribeNothing, getViewportTick, getViewportTick) // re-render on resize/scroll while the hint can show
-    const rect = hintVisible && triggerEl ? triggerEl.getBoundingClientRect() : null
+    // Under an inert surface (the canvas, while Search Studio covers it) the
+    // trigger can't be reached, and a coachmark fixed over the page would
+    // float on top of that surface.
+    const covered = !!triggerEl?.closest('[inert]')
+    const rect = hintVisible && triggerEl && !covered ? triggerEl.getBoundingClientRect() : null
     const anchor = rect ? { top: rect.bottom + 8, left: rect.left } : null
 
     const dismissHint = () => { setHintArmed(false); markSeen() }
@@ -89,8 +99,9 @@ export function PropertyManagerButton({ open, onToggle, className }: PropertyMan
             <button
                 ref={setTriggerEl}
                 onClick={handleClick}
+                data-toolbar-item="properties"
                 className={cn(
-                    'relative flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition-all duration-300',
+                    'relative flex items-center gap-2 px-3.5 py-2 rounded-xl text-sm font-medium transition duration-300',
                     open
                         ? 'bg-gradient-to-r from-accent-lineage/30 to-purple-500/20 text-accent-lineage border border-accent-lineage/60 shadow-md shadow-accent-lineage/20'
                         /* A PLAIN token, not `bg-canvas-elevated/95`: the
@@ -99,6 +110,7 @@ export function PropertyManagerButton({ open, onToggle, className }: PropertyMan
                            was the only transparent button on a row where every
                            sibling paints a real fill. */
                         : 'bg-canvas-elevated/95 backdrop-blur border border-glass-border text-ink-muted hover:text-ink hover:border-accent-lineage/40',
+                    folded && 'px-2.5',
                     className,
                 )}
             >
@@ -107,7 +119,7 @@ export function PropertyManagerButton({ open, onToggle, className }: PropertyMan
                     <span className="absolute -inset-0.5 rounded-xl ring-2 ring-accent-lineage/50 animate-pulse pointer-events-none" />
                 )}
                 <SlidersHorizontal className="w-4 h-4" strokeWidth={2.2} />
-                <span>Properties</span>
+                <span data-toolbar-label className={folded ? 'sr-only' : undefined}>Properties</span>
             </button>
             </HoverTip>
 
