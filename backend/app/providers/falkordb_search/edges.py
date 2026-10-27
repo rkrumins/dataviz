@@ -591,7 +591,8 @@ def explain_edges(provider, query: SearchQuery) -> Dict[str, Any]:
     if edges.direction == "either":
         notes.append("Either way: the second part reads the edges stored the other way "
                      "round, leaving out those the first part returns.")
-    cypher = " UNION ALL ".join(statements)
+    # No edge type to read: nothing to run, the note says why.
+    cypher = " UNION ALL ".join(statements) if ectx.types else ""
     return {"cypher": cypher, "hits_cypher": cypher, "params": params, "notes": notes,
             "anchor": side, "edge_types": list(ectx.types)}
 

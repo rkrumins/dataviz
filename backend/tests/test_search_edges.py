@@ -562,7 +562,7 @@ class TestEdgeSessions:
     async def test_pages_follow_the_order_to_the_end(self, edge_scan, monkeypatch):
         """Past the rows a session keeps, a later page is a session of the
         rows after the last one — the totals still the first page's."""
-        edge_scan({"A": A_ROWS * 1, "B": B_ROWS})
+        edge_scan({"A": A_ROWS, "B": B_ROWS})
         monkeypatch.setattr(edges_mod, "SESSION_EDGES", 1)
         monkeypatch.setenv("DEEP_SEARCH_SESSION_ROWS", "50")
         get_deep_search_settings.cache_clear()
@@ -761,6 +761,12 @@ class TestExplain:
         assert (params["_roots0"], params["_roots1"]) == (["r1"], ["x"])
         assert re.search(r"\| _xq\d+\.urn\] WHERE _xs\d+ IN \$_farRoots\)", cypher)
         assert params["_farRoots"] == ["r1"]
+
+    def test_no_edge_type_to_read_is_no_statement(self):
+        provider = _fake_provider()
+        provider._get_lineage_edge_types = lambda: []
+        out = edges_mod.explain_edges(provider, _edge_query({"edgeClass": "lineage"}))
+        assert out["cypher"] == "" and "No edges of these types" in " ".join(out["notes"])
 
     def test_the_views_types_bound_both_ends_without_roots(self):
         out = self._explain({"sourceWhere": STRING}, scope={
