@@ -3384,7 +3384,7 @@
       "description": "``POST /search/exports``: every entity in the view that matches\n``predicate``, written to a file \u2014 exactly, however many. A large export\ntakes more than one request: send the same request again with the\nreturned ``sessionId`` until ``status`` is ``complete``, then download\nit from ``GET /search/exports/{sessionId}/download``.",
       "properties": {
         "columns": {
-          "description": "Properties to add to each row, after its urn, name, type and qualified name \u2014 ``description`` and ``tags`` included.",
+          "description": "Properties to add to each row, after its urn, name, type and qualified name \u2014 ``description`` and ``tags`` included. A Connections search's: the edge's own, after its fixed columns.",
           "items": {
             "type": "string"
           },

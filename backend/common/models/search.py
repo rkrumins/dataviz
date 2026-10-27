@@ -795,6 +795,17 @@ PathPredicate.model_rebuild()
 EdgesPredicate.model_rebuild()
 
 
+def unwrap_edges(predicate):
+    """A Connections search sent as the one condition of an AND group — the
+    way a root is usually sent — is that search itself; any other predicate
+    is returned as it is."""
+    if (isinstance(predicate, GroupPredicate) and predicate.op == "and"
+            and len(predicate.children) == 1
+            and isinstance(predicate.children[0], EdgesPredicate)):
+        return predicate.children[0]
+    return predicate
+
+
 class AnchorGroup(NamedTuple):
     """Entities a lineage walk can start from: those ``refs`` name, taken
     ``lo`` to ``hi`` containment levels below them — ``0..0`` the entities
@@ -1828,13 +1839,23 @@ class SearchCatalogResult(_Base):
 
 #: The columns every export row starts with, before the chosen properties.
 SEARCH_EXPORT_BASE_COLUMNS = ("urn", "displayName", "entityType", "qualifiedName")
+#: A Connections search's: the edge, each end — its urn, name, type and
+#: parent — then the edge's own properties, as JSON.
+SEARCH_EXPORT_EDGE_COLUMNS = (
+    "edgeKey", "edgeId", "edgeType",
+    "sourceUrn", "sourceName", "sourceType", "sourceParentUrn", "sourceParentName",
+    "targetUrn", "targetName", "targetType", "targetParentUrn", "targetParentName",
+    "properties",
+)
 SEARCH_EXPORT_COLUMNS_MAX = 200
 
 
-def export_columns(columns: List[str]) -> List[str]:
-    """Every column of an export: the base ones, then the properties asked
-    for, each once."""
-    return list(dict.fromkeys([*SEARCH_EXPORT_BASE_COLUMNS, *(c for c in columns if c)]))
+def export_columns(columns: List[str], *, edges: bool = False) -> List[str]:
+    """Every column of an export: the base ones — an entity's, or ``edges``,
+    a Connections search's — then the properties asked for (an entity's, or
+    the edge's own), each once."""
+    base = SEARCH_EXPORT_EDGE_COLUMNS if edges else SEARCH_EXPORT_BASE_COLUMNS
+    return list(dict.fromkeys([*base, *(c for c in columns if c)]))
 
 
 class SearchExportRequest(_Base):
@@ -1849,7 +1870,8 @@ class SearchExportRequest(_Base):
     columns: List[str] = Field(
         default_factory=list, max_length=SEARCH_EXPORT_COLUMNS_MAX,
         description="Properties to add to each row, after its urn, name, type and "
-                    "qualified name — ``description`` and ``tags`` included.")
+                    "qualified name — ``description`` and ``tags`` included. A "
+                    "Connections search's: the edge's own, after its fixed columns.")
     wait_ms: int = Field(2000, alias="waitMs", ge=0, le=60000)
     session_id: Optional[str] = Field(None, alias="sessionId", max_length=64)
 

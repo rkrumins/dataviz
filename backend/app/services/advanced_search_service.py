@@ -90,6 +90,7 @@ from backend.common.models.search import (
     WithinHopsPredicate,
     export_columns,
     traced_from_far_end,
+    unwrap_edges,
 )
 from backend.common.search_semantics import SemanticsError, resolve_predicate
 
@@ -206,8 +207,8 @@ def _validate_edges(p: EdgesPredicate, *, depth: int, path: str, rule: bool) -> 
         )
     if depth > 1:
         raise ValidationError(
-            f"The Connections search at {path} must be the whole query, not part of a "
-            "group or another condition — send it as the predicate itself"
+            f"The Connections search at {path} must be the whole query — not beside other "
+            "conditions, under a NOT, or inside another condition"
         )
     if p.edge_predicate is not None:
         _validate_edge_filter(p.edge_predicate, f"{path}.edgePredicate")
@@ -691,7 +692,10 @@ def _validate_items(items, *, rule: bool = True) -> None:
 def _with_result_shape(query: SearchQuery) -> SearchQuery:
     """A Connections search answers edges: ``options.results`` left out is
     filled in, and what a page of edges can't carry — another result
-    shape, facets, a sort — is a 400, never a page quietly without it."""
+    shape, facets, a sort — is a 400, never a page quietly without it. One
+    sent inside an AND group of its own is the search itself
+    (``unwrap_edges``)."""
+    query = query.model_copy(update={"predicate": unwrap_edges(query.predicate)})
     options = query.options
     if not isinstance(query.predicate, EdgesPredicate):
         if options.results == "edges":
@@ -1024,6 +1028,9 @@ class AdvancedSearchService:
         work), then moves on the least advanced counts until its wait is
         spent — so many rules all progress, none starve."""
         started = time.monotonic()
+        request = request.model_copy(update={"items": [
+            item.model_copy(update={"predicate": unwrap_edges(item.predicate)})
+            for item in request.items]})
         _validate_items(request.items, rule=request.purpose == "rule")
         scope, eff = await self._rule_scope(request.scope)
         if scope is None:
@@ -1124,6 +1131,7 @@ class AdvancedSearchService:
         to a file — exactly, however many, in the view's scope resolved here
         as a search's is. A large export takes more than one request; the
         answer that completes it carries a download token for ``principal``."""
+        request = request.model_copy(update={"predicate": unwrap_edges(request.predicate)})
         leaves = _validate_predicate(request.predicate, path="$.predicate")
         max_leaves = get_deep_search_settings().max_leaf_count
         if leaves > max_leaves:
@@ -1131,8 +1139,10 @@ class AdvancedSearchService:
         scope, eff = await self._rule_scope(request.scope)
         if scope is None:
             # Every root the client named lies outside the view: nothing.
-            return SearchExportResult(session_id="", status="complete", format=request.format,
-                                      columns=export_columns(request.columns))
+            return SearchExportResult(
+                session_id="", status="complete", format=request.format,
+                columns=export_columns(request.columns,
+                                       edges=isinstance(request.predicate, EdgesPredicate)))
         op = self._provider_op("deep_search_export")
         context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
         predicate, _resolved = await self._resolve_predicate_refs(

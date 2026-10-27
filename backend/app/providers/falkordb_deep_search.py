@@ -2284,6 +2284,9 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     continuation isn't materialised here (would be ~one extra line
     per AggregationSpec — left to caller's understanding).
     """
+    if query.predicate.kind == "edges":
+        from backend.app.providers.falkordb_search.edges import explain_edges
+        return explain_edges(provider, query)
     _s = get_deep_search_settings()
     effective_candidate_cap = _resolve_candidate_cap(query, _s)
     notes: List[str] = []

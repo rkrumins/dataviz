@@ -55,6 +55,7 @@ from backend.app.providers.falkordb_deep_search import (
     _ref_urns,
     _required_types,
     _sanitize_label,
+    _scope_urn_sets_with_depths,
     _searchable_labels,
     encode_cursor,
     tail_clauses,
@@ -137,6 +138,10 @@ class EdgeContext:
     near: str = "true"                # either: the far end's condition on ``n``
     far: str = "true"                 # either: the anchor end's condition on ``m``
     name_key: Optional[str] = None
+    # The anchor end's containers by URN, each with its depth: the view's
+    # roots and its own "inside" — what a unit's clamps hold by ID.
+    anchor_sets: Tuple[Tuple[Tuple[str, ...], int], ...] = ()
+    types: Tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -439,32 +444,42 @@ def edge_context(provider, query: SearchQuery, state: Dict[str, Any]) -> EdgeCon
         within_hops=hops, hop_parts=hop_parts, tail=tuple(compiler.tail),
     )
     head = [c for c in [*checks, far_head] if c != "true"]
+    sets, depths = _scope_urn_sets_with_depths(
+        query.model_copy(update={"predicate": near or MatchAllPredicate()}), compiler)
     return EdgeContext(
         anchor=anchor, anchor_side=side, rel="|".join(_sanitize_label(t) for t in types),
         edge_where=edge_where, far_head=" AND ".join(grouped(c) for c in head) or "true",
         far_stages=tuple(scope_stages + far_stages), near=far_on_near, far=near_on_far,
         name_key=getattr(provider, "_name_property", None),
+        anchor_sets=tuple((tuple(s), int(d)) for s, d in zip(sets, depths)),
+        types=tuple(types),
     )
 
 
 def _far_scope_checks(compiler, query: SearchQuery, state: Dict[str, Any], depth: int,
                       containment) -> Tuple[List[str], List[str], Dict[str, Any]]:
     """The far end's scope, as ``plan._in_scope`` tests an entity: a label in
-    scope and, when the scope is the canvas, on it — plain tests for the
-    edge MATCH's WHERE — and below the view's roots, a stage."""
-    k = compiler._name()
-    checks = [f"ANY(_xl{k} IN labels(m) WHERE _xl{k} IN $_farLabels)"]
-    params: Dict[str, Any] = {"_farLabels": list(state.get("far_labels") or [])}
+    scope (any case, as ``_labels_in_scope`` matches them; none named, none
+    tested) and, when the scope is the canvas, on it — plain tests for the
+    edge MATCH's WHERE — and below the view's roots (by ID, or by URN for a
+    statement that reads no graph first), a stage."""
+    checks: List[str] = []
+    params: Dict[str, Any] = {}
+    if state.get("far_labels") is not None:
+        k = compiler._name()
+        checks.append(f"ANY(_xl{k} IN labels(m) WHERE toLower(_xl{k}) IN $_farLabels)")
+        params["_farLabels"] = sorted({str(lbl).lower() for lbl in state["far_labels"]})
     scope = query.scope
     if scope.scope_mode == "visible" and scope.visible_urns:
         checks.append("m.urn IN $_farUrns")
         params["_farUrns"] = list(scope.visible_urns)
     stages: List[str] = []
-    if state.get("far_roots") is not None:
-        k = compiler._name()
-        stages.append(f"ANY(_xs{k} IN [(m)<-[:{_rel(containment)}*0..{depth}]-(_xq{k}) "
-                      f"| ID(_xq{k})] WHERE _xs{k} IN $_farRoots)")
-        params["_farRoots"] = list(state["far_roots"])
+    for key, read in (("far_roots", "ID({})"), ("far_root_urns", "{}.urn")):
+        if state.get(key) is not None:
+            k = compiler._name()
+            stages.append(f"ANY(_xs{k} IN [(m)<-[:{_rel(containment)}*0..{depth}]-(_xq{k}) "
+                          f"| {read.format(f'_xq{k}')}] WHERE _xs{k} IN $_farRoots)")
+            params["_farRoots"] = list(state[key])
     return checks, stages, params
 
 
@@ -481,6 +496,15 @@ def edge_match(unit: Unit, ectx: EdgeContext, clamps: List[List[int]]
     (the anchor end) to ``m`` — and the variables of each one's source and
     target."""
     head, params = match_statement(unit, ectx.anchor, clamps)
+    cypher, src, tgt = _edge_part(head, params, unit, ectx)
+    return cypher, params, src, tgt
+
+
+def _edge_part(head: str, params: Dict[str, Any], unit: Unit, ectx: EdgeContext
+               ) -> Tuple[str, str, str]:
+    """``head`` — the anchor end's statement, up to ``n`` — and the rest:
+    each of its edges in the unit's band and pass, and the far end. Binds
+    the band's parameters into ``params``."""
     out, src, tgt = _ends(unit, ectx)
     carry = "n, e, m"
     parts = [head]
@@ -509,7 +533,67 @@ def edge_match(unit: Unit, ectx: EdgeContext, clamps: List[List[int]]
         stages.append(f"NOT (coalesce({ectx.far}, false) AND _xa)")
     if stages:
         parts.append(tail_clauses(stages, carry=carry, alias="_xf"))
-    return " ".join(parts), params, src, tgt
+    return " ".join(parts), src, tgt
+
+
+def explain_edges(provider, query: SearchQuery) -> Dict[str, Any]:
+    """A Connections search as one statement to read, copy or edit and run:
+    the whole scope at once, where the engine reads its anchor end unit by
+    unit — the same tests, the scope by URN. It touches no database, so the
+    end that anchors is chosen by the conditions alone (``_anchor_side``)."""
+    edges = query.predicate
+    scope = query.scope
+    containment = _containment(provider)
+    rooted = scope.scope_mode == "view" and bool(scope.root_urns) and bool(containment)
+    visible = scope.scope_mode == "visible" and bool(scope.visible_urns)
+    types = ([t.lower() for t in scope.entity_types or []]
+             if not (rooted or visible) else [])
+    side = _anchor_side(provider, query, [], {})
+    ectx = edge_context(provider, query, {
+        "anchor": side, "far_labels": types or None,
+        "far_root_urns": list(scope.root_urns) if rooted else None})
+    anchor = ectx.anchor
+    params = dict(anchor.params)
+    conds = ["n.urn IS NOT NULL"]
+    if anchor.where not in ("", "true"):
+        conds.append(grouped(anchor.where))
+    if visible:
+        conds.append("n.urn IN $_visible")
+        params["_visible"] = list(scope.visible_urns)
+    if types:
+        conds.append("ANY(_l IN labels(n) WHERE toLower(_l) IN $_types)")
+        params["_types"] = types
+    parts = ["MATCH (n) WHERE " + " AND ".join(conds)]
+    for i, (urns, depth) in enumerate(ectx.anchor_sets):
+        parts.append(f"WITH n MATCH (n)<-[:{_rel(containment)}*0..{depth}]-(_r{i}) "
+                     f"WHERE _r{i}.urn IN $_roots{i} WITH DISTINCT n")
+        params[f"_roots{i}"] = list(urns)
+    if anchor.within_hops:
+        parts.append(anchor.within_hops)
+    if anchor.tail:
+        parts.append(tail_clauses(list(anchor.tail)))
+    head = " ".join(parts)
+    passes = [False, True] if edges.direction == "either" else [False]
+    statements = []
+    for reverse in passes:
+        cypher, src, tgt = _edge_part(head, params, Unit("ids", reverse=reverse), ectx)
+        statements.append(f"{cypher} RETURN {src}.urn AS source, type(e) AS edgeType, "
+                          f"{tgt}.urn AS target, ID(e) AS edgeId")
+    end = "From (the source)" if side == "source" else "To (the target)"
+    notes = [
+        f"Reads {end} as entities and tests the other end on each of their edges. The "
+        "engine reads that end in units (bands of node IDs, walks down the view's roots, "
+        "the canvas's entities), each counting and ranking its own edges.",
+        (f"Edge types: {', '.join(ectx.types)}." if ectx.types
+         else "No edges of these types are in this data source."),
+        "Rollups (AGGREGATED) are never returned: they summarise other edges.",
+    ]
+    if edges.direction == "either":
+        notes.append("Either way: the second part reads the edges stored the other way "
+                     "round, leaving out those the first part returns.")
+    cypher = " UNION ALL ".join(statements)
+    return {"cypher": cypher, "hits_cypher": cypher, "params": params, "notes": notes,
+            "anchor": side, "edge_types": list(ectx.types)}
 
 
 def edge_sort(src: str, tgt: str, name_key: Optional[str]) -> SortSpec:

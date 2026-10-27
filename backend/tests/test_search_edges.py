@@ -167,10 +167,14 @@ class TestResultShape:
         page = _empty_page(_with_result_shape(query(edges())))
         assert (page.edges, page.edge_type_counts, page.hits, page.aggregates) == ([], {}, None, None)
 
-    def test_a_wrapped_one_is_refused_before_it_runs(self):
-        with pytest.raises(ValidationError, match="send it as the predicate itself"):
+    def test_one_sent_in_a_group_of_its_own_is_the_search_itself(self):
+        q = _with_result_shape(query({"kind": "group", "op": "and", "children": [edges()]}))
+        assert q.predicate.kind == "edges" and q.options.results == "edges"
+        assert _count_and_validate(q) == 1
+        # Beside another condition, it is not the whole query.
+        with pytest.raises(ValidationError, match="must be the whole query"):
             _count_and_validate(_with_result_shape(query(
-                {"kind": "group", "op": "and", "children": [edges()]})))
+                {"kind": "group", "op": "and", "children": [edges(), DATASET]})))
 
 
 class TestWalkers:
@@ -206,8 +210,11 @@ class TestLibrary:
     def test_saved_as_a_search_not_as_a_rule(self):
         raw = edges(sourceWhere=STRING, targetWhere=SMITH_PARENT)
         assert _check_predicate(raw, rule=False).kind == "edges"
-        with pytest.raises(LibraryError, match="A display rule tags entities"):
-            _check_predicate(raw, rule=True)
+        wrapped = {"kind": "group", "op": "and", "children": [raw]}
+        assert _check_predicate(wrapped, rule=False).kind == "group"     # stored as sent
+        for given in (raw, wrapped):
+            with pytest.raises(LibraryError, match="A display rule tags entities"):
+                _check_predicate(given, rule=True)
 
 
 # ---------------------------------------------------------------------------
@@ -687,3 +694,76 @@ class TestReference:
         page, _ = await svc.search(query(edges(sourceWhere=STRING, targetWhere=SMITH_PARENT)))
         assert [e.key for e in page.edges] and page.total_count == 2
         assert page.edge_type_counts == {"DERIVES": 1, "FEEDS": 1}
+
+
+# ---------------------------------------------------------------------------
+# Export and explain
+# ---------------------------------------------------------------------------
+
+class TestExport:
+    def test_the_columns(self):
+        from backend.common.models.search import SEARCH_EXPORT_EDGE_COLUMNS, export_columns
+        assert export_columns([], edges=True) == list(SEARCH_EXPORT_EDGE_COLUMNS)
+        assert export_columns(["mode", "edgeType", "mode"], edges=True) == [
+            *SEARCH_EXPORT_EDGE_COLUMNS, "mode"]
+        assert export_columns(["owner"])[:4] == ["urn", "displayName", "entityType", "qualifiedName"]
+
+    def test_an_edge_as_a_record(self):
+        from backend.app.providers.falkordb_search.export import _edge_record
+        row = [7, "FEEDS", {"properties": '{"mode": "batch"}', "id": "e-7"},
+               "urn:a", "A", "column", ["urn:pa", "PA"], "urn:b", "B", "dataset", None]
+        record = _edge_record(row, ["edgeKey", "mode", "absent"])
+        assert record["edgeKey"] == "7" and record["edgeId"] == "e-7"
+        assert (record["sourceParentUrn"], record["sourceParentName"]) == ("urn:pa", "PA")
+        assert record["targetParentUrn"] is None
+        assert record["properties"] == {"mode": "batch", "id": "e-7"}
+        assert (record["mode"], record["absent"]) == ("batch", None)
+        # No id of its own: the canvas's.
+        assert _edge_record([1, "T", {}, "a", "", "x", None, "b", "", "y", None], [])["edgeId"] == "a|T|b"
+
+    def test_the_manifest_keeps_the_plan(self):
+        from backend.app.providers.falkordb_search.export import Manifest
+        manifest = Manifest("csv", ["edgeKey"], "f", state={"anchor": "target", "far_roots": [1]})
+        assert Manifest.from_json(manifest.to_json()).state == {"anchor": "target", "far_roots": [1]}
+        assert "state" not in json.loads(Manifest("csv", [], "f").to_json())
+
+
+class TestExplain:
+    def _explain(self, raw, scope=None):
+        # No ``_ro_query``: explaining reads nothing.
+        return edges_mod.explain_edges(_fake_provider(), _edge_query(raw, scope))
+
+    def test_one_statement_with_its_notes(self):
+        out = self._explain({"sourceWhere": STRING, "targetWhere": SMITH_PARENT})
+        assert " UNION ALL " not in out["cypher"] and out["hits_cypher"] == out["cypher"]
+        assert out["cypher"].startswith("MATCH (n) WHERE n.urn IS NOT NULL AND ")
+        assert out["cypher"].endswith(
+            "RETURN n.urn AS source, type(e) AS edgeType, m.urn AS target, ID(e) AS edgeId")
+        assert out["anchor"] == "source" and out["edge_types"] == ["DERIVES", "FEEDS"]
+        assert any(n.startswith("Reads From (the source)") for n in out["notes"])
+        assert "Edge types: DERIVES, FEEDS." in out["notes"]
+
+    def test_either_way_is_two_parts(self):
+        out = self._explain({"sourceWhere": STRING, "targetWhere": DATASET, "direction": "either"})
+        first, second = out["cypher"].split(" UNION ALL ")
+        assert "MATCH (n)-[e:DERIVES|FEEDS]->(m)" in first
+        assert "AS _xa MATCH (n)<-[e:DERIVES|FEEDS]-(m)" in second
+        assert second.endswith("RETURN m.urn AS source, type(e) AS edgeType, n.urn AS target, "
+                               "ID(e) AS edgeId")
+
+    def test_the_scope_by_urn_at_both_ends(self):
+        out = self._explain({"sourceWhere": {"kind": "descendantOf", "urns": ["x"]}}, scope={
+            "viewId": "v", "scopeMode": "view", "rootUrns": ["r1"], "maxDepth": 5})
+        cypher, params = out["cypher"], out["params"]
+        # The view's roots, then the end's own container, each by URN.
+        assert "MATCH (n)<-[:CONTAINS*0..5]-(_r0) WHERE _r0.urn IN $_roots0" in cypher
+        assert "MATCH (n)<-[:CONTAINS*0..5]-(_r1) WHERE _r1.urn IN $_roots1" in cypher
+        assert (params["_roots0"], params["_roots1"]) == (["r1"], ["x"])
+        assert re.search(r"\| _xq\d+\.urn\] WHERE _xs\d+ IN \$_farRoots\)", cypher)
+        assert params["_farRoots"] == ["r1"]
+
+    def test_the_views_types_bound_both_ends_without_roots(self):
+        out = self._explain({"sourceWhere": STRING}, scope={
+            "viewId": "v", "scopeMode": "data_source", "entityTypes": ["Column"]})
+        assert "ANY(_l IN labels(n) WHERE toLower(_l) IN $_types)" in out["cypher"]
+        assert out["params"]["_types"] == out["params"]["_farLabels"] == ["column"]

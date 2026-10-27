@@ -727,3 +727,85 @@ plain one stays at 1–4 ms. Inside a relationship it sits in several. So:
 A relationship's first run of a shape still costs 130–550 ms per statement
 with a number comparison in its edge filter (under 50 ms without); nested
 three deep, 60–140 ms. Strings, types, URNs and key names stay cheap.
+
+## 16. Connections: edges as results
+
+A Connections search (`kind: edges`, `falkordb_search/edges.py`) returns
+edges: every direct edge from an entity meeting one condition to an entity
+meeting another. One end, the anchor, is read as a search for its entities
+would read it (§12's plan and units); each match expands its edges; the far
+end is tested on each edge. Measured on FalkorDB 4.18.11 with
+`backend/scripts/bench_search_edges.py` — a 2M-node graph from
+`seed_search_bench.py` (§1) given two `DERIVES` per field, a 100,000-edge hub
+and the examples' properties: 6.85M edges.
+
+**The statement shapes.** Each was checked against a direct count first.
+
+- **Far end.** Its plain tests sit in the edge `MATCH`'s `WHERE`. Its
+  relationships are projected after it, carrying `n, e, m`, as §15's stages
+  do.
+- **Anchored on the target.** The arrow points the other way. Every row still
+  reads source → target.
+- **Either way: two passes over each unit.**
+  - The second pass reads the edges stored the other way round, and leaves out
+    those the first counts.
+  - It tests the other end's condition on the anchor once per entity, before
+    the expansion, then on the far end per edge.
+  - Both are coalesced, so an unknown never drops an edge.
+- **One statement per unit.** Per edge type, it returns the exact count and the
+  first k rows in order. An `ORDER BY` before a grouped `collect` keeps its
+  order in every group, checked on groups of 6,000 to 100,000 rows.
+- **A page read back.** Each edge is found by its ends' IDs, checked by their
+  URNs, then its own ID between them. That is `NodeByIdSeek` twice, then
+  `Expand Into`: 500 edges of a 100,000-edge hub in 8–10 ms, whatever its
+  degree.
+- **One compiler for both ends** (§15). Two comprehensions sharing a pattern
+  alias leave the second empty, so the anchor end, the far end, the
+  either-way conditions and the scope check take their names from one counter.
+- **Bands of edge IDs.** A band re-expands its nodes' edges, but divides the
+  far end's tests, the sort and the collect. A unit far past its time is cut
+  in both its nodes and its edges, so a hub can be cut too.
+
+**The far end's scope.** It is `plan._in_scope`'s test, made per edge:
+- a label in scope;
+- on the canvas, in `visible` mode;
+- below the view's roots: an upward check against their IDs, the first stage.
+
+A view has at most 5,000 roots (`DEEP_SEARCH_SCOPE_ROOT_URNS_CAP`). On 30,666
+edge rows, the check cost +3 µs a row with 64 roots and +24 µs with 5,000,
+paid only by rows that passed everything else. So no view is refused for its
+roots.
+
+**Which end anchors.** Both ends read native values only, so either end gives
+the same answer; `test_search_edges_live.py` holds every case to it. The
+choice is cost.
+
+- A **named end** comes first: it is read by ID, or down from its entities.
+- Then an end with a **plain test beyond its types**. On 180,000 columns,
+  "string, called bob → whose parent's family is smith" took 0.2 s anchored on
+  the plain end and 1.1 s on the relationship end. A relationship is the
+  costliest test, better paid by the edges a cheaper end reaches than by every
+  entity.
+- Then **types alone**, then **relationships alone**, the end of fewer entities
+  breaking ties.
+
+**At scale** (first answers waiting 1 s, units two at a time):
+
+| Search | Edges | Complete | First answer | Direct Cypher |
+|---|---:|---:|---:|---:|
+| string field called bob → anything | 1,270 | 2.43 s | 1.10 s | 0.31 s |
+| the hub (named) → a string field | 33,334 | 0.45 s | 0.45 s | 0.06 s |
+| any dataset (the hub at the far end) → a string field | 33,334 | 3.47 s | 1.17 s | 0.51 s |
+| inside a domain → a string field | 17,806 | 0.80 s | 0.80 s | 0.15 s |
+| a string field → one whose parent's family is smith | 127,021 | 12.75 s | 1.29 s | 3.65 s |
+| a view of 100 roots: a string field → anything | 13,005 | 2.95 s | 2.95 s | 0.72 s |
+| a view of 1,000 roots: a string field → anything | 1,265,934 | 23.46 s | 1.92 s | 13.48 s |
+| 5,000 entities on the canvas, between them | 9,962 | 0.59 s | 0.59 s | 37.94 s |
+| the smith search, a unit's budget cut to 1 s | 127,021 | 13.10 s | 1.43 s | 3.62 s |
+
+- Every total is exact, the same as the direct count.
+- The direct statements are single-threaded and answer one count. The engine
+  pages, ranks, holds 2,000 ordered edges and stays exact under any budget:
+  cut to 1 s a unit, the smith search still finished.
+- The selective searches spend their time scanning the anchor's label in
+  units.

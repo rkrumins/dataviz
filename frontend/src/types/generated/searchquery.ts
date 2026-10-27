@@ -717,7 +717,7 @@ export type Resolvedscope = {
     [k: string]: unknown
 } | null
 /**
- * Properties to add to each row, after its urn, name, type and qualified name — ``description`` and ``tags`` included.
+ * Properties to add to each row, after its urn, name, type and qualified name — ``description`` and ``tags`` included. A Connections search's: the edge's own, after its fixed columns.
  */
 export type Columns1 = string[]
 export type Format = 'csv' | 'ndjson'
