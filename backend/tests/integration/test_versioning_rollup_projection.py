@@ -183,9 +183,82 @@ async def _run() -> None:
                 ps.falkor_graph_name = None              # unpin → worker never re-projects it
 
 
+async def _run_dedicated() -> None:
+    """A dedicated source's rollups live in ``{graph_name}_proj``, written only by the aggregation
+    job: the projector writes none into the graph, and hands the job every window that changes
+    them — a lineage edge, a containment move — and no other."""
+    from backend.app.services.projection_target import AggregationEdgeTypes
+
+    svc = GraphVersioningService()
+    sfx = os.urandom(3).hex()
+    name = f"gvt_aggd_{sfx}"
+    gid = (await svc.create_graph(data_source_id="ds_aggd_" + sfx, workspace_id="ws_agg",
+                                  actor="bot", falkor_graph_name=name))["graph_id"]
+    handed: list = []
+
+    async def _types(_svc, _graph_id):
+        return AggregationEdgeTypes(CONT, LIN, {}, in_graph=False)
+
+    async def _stale(g):
+        handed.append(g)
+
+    proj = FalkorProjector(make_falkor_graph_factory(), edge_types_resolver=_types,
+                           on_rollups_stale=_stale)
+    client = make_falkor_graph_factory()(name)
+    if asyncio.iscoroutine(client):
+        client = await client
+
+    A, B, C = "urn:t:dedA_" + sfx, "urn:t:dedB_" + sfx, "urn:t:dedC_" + sfx
+    Ac, Bc = A + ".c", B + ".c"
+
+    async def _publish(*ops):
+        handed.clear()
+        await svc.apply_ops(graph_id=gid, actor="bot", containment_edge_types=CONT, ops=list(ops))
+        await proj.project_graph(gid)
+
+    try:
+        await _publish(_node(A, "Table"), _node(B, "Table"), _node(Ac, "Column"),
+                       _node(Bc, "Column"), _edge("cA_" + sfx, A, Ac, "CONTAINS"),
+                       _edge("cB_" + sfx, B, Bc, "CONTAINS"))
+        assert handed == [gid], "a first seed writes the raw edges the job builds from"
+
+        await _publish(_edge("lin_" + sfx, Ac, Bc, "FLOWS_TO"))
+        assert handed == [gid], "a lineage edge changes the rollups"
+        assert await _rollups(client) == {}, "none written into the source graph"
+
+        await _publish({"op": "update", "entity_kind": "node", "entity_id": A,
+                        "payload": {"displayName": "renamed"}})
+        assert handed == [], "a rename changes no rollup"
+        await _publish(_edge("own_" + sfx, A, B, "OWNS"))
+        assert handed == [], "nor does an edge that is neither lineage nor containment"
+
+        await _publish(_node(C, "Table"), _del("cB_" + sfx), _edge("cC_" + sfx, C, Bc, "CONTAINS"))
+        assert handed == [gid], "a containment move re-points the rollups"
+        assert await _rollups(client) == {}
+
+        handed.clear()
+        assert await svc.request_projection_rebuild(gid)
+        await proj.project_graph(gid)
+        assert handed == [], "a rebuild that finds nothing to write hands nothing over"
+    finally:
+        try:
+            await client.delete()
+        except Exception:
+            pass
+        async with gvdb.graphver_session() as s:
+            ps = await s.get(ProjectionStateORM, gid)
+            if ps is not None:
+                ps.falkor_graph_name = None
+
+
 @pytest.mark.skipif(os.getenv("GRAPHVER_E2E") != "1", reason="needs Postgres+FalkorDB (set GRAPHVER_E2E=1)")
 def test_rollup_projection():
     asyncio.run(_run())
+
+
+@pytest.mark.skipif(os.getenv("GRAPHVER_E2E") != "1", reason="needs Postgres+FalkorDB (set GRAPHVER_E2E=1)")
+def test_a_dedicated_source_hands_every_rollup_change_to_the_job():
+    asyncio.run(_run_dedicated())
 
 
 if __name__ == "__main__":

@@ -19,7 +19,8 @@ they are.
 ``workspace_data_sources.source_mode`` cannot answer it: ``'managed'`` is
 written only by the blank-model wizard and a one-off script, never by the
 bootstrap path that versions an existing source, so most versioned sources have
-it NULL. A live ``graphver.graphs`` row is the definitive signal.
+it NULL. A live ``graphver.graphs`` row whose "enable version control" job
+finished is the definitive signal (see :func:`_enabled`).
 
 The read follows the shape ``insights_service.discovery`` already established
 for this store — lazy imports, its own engine, never joined into a
@@ -45,9 +46,9 @@ from typing import Dict, FrozenSet, Optional
 
 logger = logging.getLogger(__name__)
 
-# A source becomes versioned at bootstrap and stays versioned. Ten minutes of
-# staleness costs at most one sweep evaluating a brand-new versioned source as
-# if it were externally mastered.
+# A source becomes versioned when its bootstrap finishes and stays versioned.
+# Ten minutes of staleness costs at most one sweep evaluating a brand-new
+# versioned source as if it were externally mastered.
 CACHE_TTL_SECS = 600
 
 # After a refresh fails, the previous answer is served for this long before the
@@ -59,6 +60,25 @@ FAILURE_BACKOFF_SECS = 30
 _cache: Optional[FrozenSet[str]] = None
 _cache_at: float = 0.0
 _refresh_failed_at: Optional[float] = None
+
+
+def _enabled():
+    """A live versioned graph whose "enable version control" job, if it had one,
+    finished — the rule ``GraphVersioningService.main_heads`` applies. Until then
+    the data source still reads its own graph as it always did, nothing is
+    published into it, and a cancelled enable deletes the graph: it is external
+    to the sweep, the freshness rows and the Explorer alike. One anti-join on
+    ``ix_jobs_graph_status``."""
+    from sqlalchemy import exists
+
+    from backend.app.services.versioning.models import GraphORM, JobORM
+    from backend.app.services.versioning.service import _UNFINISHED_ENABLEMENT
+
+    return GraphORM.deleted_at.is_(None) & ~exists().where(
+        JobORM.graph_id == GraphORM.id,
+        JobORM.job_type == "bootstrap",
+        JobORM.status.in_(_UNFINISHED_ENABLEMENT),
+    )
 
 
 class VersionedLookupUnavailable(RuntimeError):
@@ -74,7 +94,8 @@ class VersionedLookupUnavailable(RuntimeError):
 async def versioned_data_source_ids(
     *, ttl_secs: int = CACHE_TTL_SECS,
 ) -> FrozenSet[str]:
-    """Every data source with a live versioned graph.
+    """Every data source with a live versioned graph that finished being
+    enabled (:func:`_enabled`).
 
     Serves the cache while it is fresh, and keeps serving it if a refresh
     fails — a blip must not flip the fleet's classification. Raises
@@ -100,9 +121,7 @@ async def versioned_data_source_ids(
 
         async with get_session_factory()() as session:
             rows = await session.execute(
-                select(GraphORM.data_source_id).where(
-                    GraphORM.deleted_at.is_(None)
-                )
+                select(GraphORM.data_source_id).where(_enabled())
             )
         found = frozenset(r[0] for r in rows.all() if r[0])
     except asyncio.CancelledError:
@@ -322,7 +341,8 @@ class ProjectorHealth:
 async def projector_health(
     *, ttl_secs: int = HEALTH_CACHE_TTL_SECS,
 ) -> "Dict[str, ProjectorHealth]":
-    """Projection health for every live versioned graph, keyed by data source.
+    """Projection health for every live versioned graph that finished being
+    enabled (:func:`_enabled`), keyed by data source.
 
     One indexed scan over ``graphver.graphs`` LEFT JOINed to
     ``graphver.projection_state`` — both low-cardinality control-plane tables,
@@ -366,7 +386,9 @@ async def projector_health(
                     ProjectionStateORM,
                     ProjectionStateORM.graph_id == GraphORM.id,
                 )
-                .where(GraphORM.deleted_at.is_(None))
+                # While it is being enabled its watermark is parked on purpose:
+                # read as health, that is a projection stalled behind its head.
+                .where(_enabled())
             )).all()
         checked_at = datetime.now(timezone.utc).isoformat()
         found = {

@@ -76,6 +76,29 @@ async def _main_heads() -> None:
     assert await svc.main_heads(workspace_id="ws_a", data_source_ids=[ds_a]) == {}
 
 
+async def _versioned_for_the_sweep_once_enabled() -> None:
+    """The set the aggregation sweep, the freshness rows and the Explorer read follows the same
+    rule — and so does projector health, which would read an enabling graph's parked watermark as
+    a projection stalled behind its head."""
+    from backend.app.services import versioned_sources
+
+    svc = GraphVersioningService()
+    ds = _ds()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws_a", actor="alice"))["graph_id"]
+    async with db.graphver_session() as s:
+        job = models.JobORM(job_type="bootstrap", graph_id=gid, workspace_id="ws_a",
+                            data_source_id=ds, status="pending")
+        s.add(job)
+    for status, versioned in (("pending", False), ("running", False), ("failed", False),
+                              ("completed", True)):
+        async with db.graphver_session() as s:
+            (await s.get(models.JobORM, job.id)).status = status
+        versioned_sources.reset_cache()
+        versioned_sources.reset_health_cache()
+        assert (ds in await versioned_sources.versioned_data_source_ids()) is versioned, status
+        assert (ds in await versioned_sources.projector_health()) is versioned, status
+
+
 def _app():
     """The versioning router alone, as a reader of every workspace a request names."""
     from types import SimpleNamespace
@@ -242,6 +265,11 @@ def test_main_heads_answer_the_same_one_source_per_read(monkeypatch):
 
     monkeypatch.setattr(service, "_HEADS_PER_READ", 1)
     asyncio.run(_run(_main_heads))
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_the_sweep_sees_a_source_as_versioned_once_turning_it_on_finished():
+    asyncio.run(_run(_versioned_for_the_sweep_once_enabled))
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")

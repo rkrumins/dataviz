@@ -1909,7 +1909,14 @@ async def reconcile_projection(
                 status_code=503, detail="fast read layer is unreachable — try again shortly")
     finally:
         _reconcile_inflight.discard(graph_id)
-    return DriftReportModel.model_validate(dataclasses.asdict(report))
+    out = dataclasses.asdict(report)
+    if out.get("rollups") is not None and _meta.get("data_source_id"):
+        from backend.app.services.projection_target import _projection_mode
+        if await _projection_mode(str(_meta["data_source_id"])) == "dedicated":
+            # Its rollups live in {graph_name}_proj, which the scan never reads: a count of the
+            # ones in this graph says nothing about them (the summaries' own status does).
+            out["rollups"] = None
+    return DriftReportModel.model_validate(out)
 
 
 @router.post("/graphs/{graph_id}/commits/{commit_id}/revert", response_model=CommitResponse)

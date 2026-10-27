@@ -72,7 +72,8 @@ export interface AggregationTuning {
 
 export interface AggregationTriggerRequest {
   ontologyId?: string;
-  projectionMode: string;
+  /** Where the run writes its rollups; leave it out for the data source's own placement. */
+  projectionMode?: string;
   batchSize: number;
   maxRetries?: number;
   timeoutSecs?: number;

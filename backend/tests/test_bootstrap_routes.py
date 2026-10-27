@@ -320,3 +320,28 @@ async def test_a_decision_is_202_with_the_job_and_200_when_already_recorded(
     assert (await test_client.post(path, json=_DECISION)).status_code == 200
     bad = await test_client.post(path, json={"action": "keep_all", "fingerprint": "f" * 32})
     assert bad.status_code == 422 and len(calls) == 2
+
+
+async def test_the_sync_chip_reads_external_until_turning_version_control_on_finished(
+    test_client: AsyncClient, _data_source, monkeypatch,
+):
+    from backend.app.services.versioning.service import GraphVersioningService
+
+    heads = {}
+
+    async def _heads(self, *, workspace_id, data_source_ids):
+        assert (workspace_id, list(data_source_ids)) == (WS, [DS])
+        return heads
+
+    async def _watermark(self, graph_id):
+        return {"committed": 3, "projected": 3, "fresh": True, "status": "idle"}
+
+    monkeypatch.setattr(GraphVersioningService, "main_heads", _heads)
+    monkeypatch.setattr(GraphVersioningService, "projection_watermark", _watermark)
+    url = f"/api/v1/{WS}/graph/sync-status?dataSourceId={DS}"
+    resp = await test_client.get(url)
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["kind"] == "external", "the view still reads the source's own graph"
+    heads[DS] = {"graph_id": "g1", "kind": "manual", "main_head_commit_seq": 3}
+    resp = await test_client.get(url)
+    assert (resp.json()["kind"], resp.json()["versioned"]["graphId"]) == ("versioned", "g1")

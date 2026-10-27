@@ -964,7 +964,15 @@ class AggregationService:
                 data_source_label=ontology_data.get("data_source_label"),
                 ontology_id=ontology_data.get("ontology_id"),
                 ontology_fingerprint=ontology_data.get("ontology_fingerprint"),
-                projection_mode=request.projection_mode,
+                # The data source's own placement unless the request chose one. Automatic
+                # callers (a source-changed signal, a refresh, the sweep, the projector's
+                # hand-off) ask without one, and an in-source run for a dedicated source
+                # writes its rollups into the source graph, where nothing reads them.
+                projection_mode=(
+                    request.projection_mode
+                    if "projection_mode" in request.model_fields_set
+                    else ontology_data.get("projection_mode") or "in_source"
+                ),
                 containment_edge_types=json.dumps(containment_types),
                 lineage_edge_types=json.dumps(lineage_types),
                 entity_type_levels=json.dumps(
@@ -3739,6 +3747,7 @@ class AggregationService:
             "workspace_id": ds.workspace_id,
             "provider_id": ds.provider_id,
             "graph_name": ds.graph_name,
+            "projection_mode": getattr(ds, "projection_mode", None) or "in_source",
             "data_source_label": getattr(ds, "label", None),
             "containment_edge_types": containment_types,
             "lineage_edge_types": lineage_types,

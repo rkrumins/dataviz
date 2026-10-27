@@ -3045,8 +3045,10 @@ async def get_sync_status(
         )
 
     svc = GraphVersioningService()
-    graph = await svc.get_graph_by_data_source(dataSourceId)
-    if graph and str(graph.get("workspace_id")) == str(ws_id):
+    # Versioned once turning version control on has finished: until then the view reads the
+    # source's own graph as it always did, so its sync is the external one.
+    graph = (await svc.main_heads(workspace_id=ws_id, data_source_ids=[dataSourceId])).get(dataSourceId)
+    if graph:
         wm = await svc.projection_watermark(str(graph["graph_id"]))
         revs = [r for r in (wm.get("committed_revision"), wm.get("projected_revision")) if r]
         actors = {r["actor"] for r in revs if r.get("actor")}

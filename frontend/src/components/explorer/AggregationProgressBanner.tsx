@@ -152,7 +152,7 @@ export function AggregationProgressBanner({
                 // No ``tuning``: the control plane resolves the admin's
                 // configured defaults. ``timeoutSecs`` is sent because a
                 // null column falls back to the 15-minute stall window.
-                aggregationService.triggerAggregation(dataSourceId, { projectionMode: 'in_source', batchSize: 500, timeoutSecs: DEFAULT_TIMEOUT_SECS }, 'manual', { reason: answer.reason });
+                aggregationService.triggerAggregation(dataSourceId, { batchSize: 500, timeoutSecs: DEFAULT_TIMEOUT_SECS }, 'manual', { reason: answer.reason });
                 setReadiness(prev => prev ? { ...prev, driftDetected: false, aggregationStatus: 'pending' } : null);
                 setPollEpoch(e => e + 1);
               }
@@ -244,7 +244,7 @@ export function AggregationProgressBanner({
                 if (!answer) return;
                 const gentle = gentlePreset();
                 aggregationService.triggerAggregation(dataSourceId, {
-                  projectionMode: 'in_source', batchSize: 500,
+                  batchSize: 500,
                   maxRetries: gentle.maxRetries, timeoutSecs: gentle.timeoutMinutes * 60, tuning: gentle.tuning,
                 }, 'manual', { reason: answer.reason });
                 setReadiness(prev => prev ? { ...prev, aggregationStatus: 'pending' } : null);

@@ -1131,7 +1131,8 @@ class FalkorProjector:
         under containers that were MOVED in the window. O(window delta × chain depth²).
 
         Returns ``{(src_urn, tgt_urn): {"dw": int, "types": set}}``, ``None`` when nothing
-        rollup-affecting changed, or the sentinel ``"stale"`` when a move exceeded the cap."""
+        rollup-affecting changed, or the sentinel ``"stale"`` when a move exceeded the cap or the
+        rollups live in another graph (the resolver's ``in_graph`` false: dedicated mode)."""
         try:
             sets = await self._edge_types_resolver(self._svc, graph.id)
         except Exception:                                # pragma: no cover - app-layer resolution
@@ -1205,6 +1206,10 @@ class FalkorProjector:
             return "stale"
         if not lineage_creates and not lineage_deletes and not moved:
             return None
+        if not getattr(sets, "in_graph", True):
+            # The rollups live in another graph, which only the aggregation job writes (dedicated
+            # mode): hand it the window rather than compute deltas for this graph.
+            return "stale"
 
         anc_cache: Dict[Tuple[str, Optional[int]], Tuple[List[str], Dict[str, List[str]]]] = {}
         lvl_cache: Dict[Tuple[str, Optional[int]], Optional[int]] = {}
@@ -1749,7 +1754,8 @@ class FalkorProjector:
         base, this pass already moved them from Postgres's window (``rollups_moved_this_pass``
         — a heal after a publish window; its deltas assumed raw writes that did not land, so a
         second delta would double-count), rollup cells went with a node that had to be deleted
-        outright, or the graph is a fork (its chains span the parent's rows)."""
+        outright, the graph is a fork (its chains span the parent's rows), or the rollups live in
+        another graph (dedicated mode)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             nodes, edges, types_by_urn = await self._expected_projection(
@@ -1795,7 +1801,11 @@ class FalkorProjector:
         if sets:
             cont_types = {t.upper() for t in (sets[0] or [])}
             lineage_types = {t.upper() for t in (sets[1] or [])}
-            if lineage_types:
+            if not getattr(sets, "in_graph", True):
+                # The rollups live in another graph, which only the aggregation job writes
+                # (dedicated mode): hand it any raw change, as a fork does.
+                rollups = "stale" if (raw_edges_change or diff.relabels) else "none"
+            elif lineage_types:
                 expected_triples = urn_triples(edges.keys())
                 actual_triples = urn_triples(actual_edges.keys())
                 if not owned:

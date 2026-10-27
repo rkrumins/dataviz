@@ -191,3 +191,54 @@ def test_idempotency_unique_violation_replays_instead_of_500(monkeypatch):
         "a unique-index race on the idempotency key must replay the "
         "existing job, not surface a 500"
     )
+
+
+# ── where a run writes its rollups ──────────────────────────────────────
+
+
+class _InsertSession(_IntegritySession):
+    """The insert transaction commits; what it adds is kept."""
+
+    def __init__(self):
+        super().__init__(None, None)
+        self._results = [None]                       # the graph-level guard: no other job
+        self.added = []
+
+    def add(self, obj):
+        self.added.append(obj)
+
+
+@pytest.mark.parametrize("asked, placement, written", [
+    ({}, "dedicated", "dedicated"),          # every automatic caller asks without one
+    ({"projectionMode": "in_source"}, "dedicated", "in_source"),   # a chosen one stands
+    ({}, None, "in_source"),
+])
+def test_a_run_writes_where_its_data_source_keeps_rollups_unless_told(
+    monkeypatch, asked, placement, written,
+):
+    from backend.app.services.aggregation import service as svc_mod
+
+    async def _claim(session, ds_id):
+        return True
+
+    async def _resolve(ds_id, session):
+        return {"graph_name": "g1", "containment_edge_types": ["HAS"],
+                "lineage_edge_types": ["FLOWS"], "projection_mode": placement}
+
+    async def _tuning(session, t, ds_id=None):
+        return {}
+
+    async def _upsert(session, ds_id, **kw):
+        return None
+
+    monkeypatch.setattr(svc_mod, "claim_exclusive", _claim)
+    svc = _make_service()
+    monkeypatch.setattr(svc, "_resolve_ontology", _resolve)
+    monkeypatch.setattr(svc, "_effective_tuning", _tuning)
+    monkeypatch.setattr(svc, "_upsert_ds_state", _upsert)
+
+    session = _InsertSession()
+    job, _lineage = _run(svc._trigger_insert(
+        "ds-1", AggregationTriggerRequest(**asked), "api", session, None, "",
+    ))
+    assert job.projection_mode == written

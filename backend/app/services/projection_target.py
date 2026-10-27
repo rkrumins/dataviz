@@ -10,13 +10,23 @@ async projection path self-heals exactly the way the interactive ``project_now``
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import NamedTuple, Optional
 
 from backend.app.db.engine import get_async_session
 from backend.app.db.repositories import data_source_repo
 from backend.app.services.versioning.service import GraphVersioningService
 
 logger = logging.getLogger(__name__)
+
+
+class AggregationEdgeTypes(NamedTuple):
+    """What :func:`resolve_aggregation_edge_types` answers — to the projector, a tuple of
+    (containment, lineage, level_map). ``in_graph`` false: the rollups live in another graph,
+    which only the aggregation job writes (dedicated mode's ``{graph_name}_proj``)."""
+    containment: list
+    lineage: list
+    levels: dict
+    in_graph: bool = True
 
 
 async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: str):
@@ -27,17 +37,17 @@ async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: 
     ancestor cross-product writes leaf/mixed cells the canonical boundary excludes,
     which the on-demand reader then double-counts. ``None`` on any failure or when
     the ontology defines no lineage types (the projector then skips rollup
-    maintenance for that window)."""
+    maintenance for that window).
+
+    In dedicated mode the aggregation job writes the rollups to ``{graph_name}_proj``,
+    a graph the projector never touches, so it maintains nothing there: the edge types
+    (``in_graph`` false, no level map) only tell it which windows change the rollups, to
+    hand each of those to the job (``make_rollup_rebuild_hook``)."""
     try:
         meta = await svc.get_graph(graph_id)
         if not meta or not meta.get("data_source_id"):
             return None
-        if await _projection_mode(str(meta["data_source_id"])) == "dedicated":
-            # In dedicated mode the aggregation worker writes rollups to {graph_name}_proj —
-            # a different graph than the projector's target — and the projector's full-seed
-            # wipe doesn't touch them. Incremental maintenance would write where nothing
-            # reads; leave dedicated-mode rollups entirely to the aggregation job.
-            return None
+        dedicated = await _projection_mode(str(meta["data_source_id"])) == "dedicated"
         from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
         from backend.app.ontology.service import LocalOntologyService
         async with get_async_session() as s:
@@ -49,12 +59,14 @@ async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: 
         lin = list(getattr(resolved, "lineage_edge_types", None) or [])
         if not lin:
             return None
+        if dedicated:
+            return AggregationEdgeTypes(cont, lin, {}, in_graph=False)
         try:
             from backend.app.services.ontology_levels import derive_level_map
             levels = derive_level_map(resolved)
         except Exception:
             levels = {}
-        return (cont, lin, levels)
+        return AggregationEdgeTypes(cont, lin, levels)
     except Exception as exc:
         logger.warning("aggregation edge-type resolution for %s skipped: %s", graph_id, exc)
         return None
@@ -73,7 +85,8 @@ async def _projection_mode(data_source_id: str) -> str:
 def make_rollup_rebuild_hook(get_aggregation_service):
     """Build the projector's ``on_rollups_stale`` hook: queue a scoped aggregation rebuild
     for the graph's data source when rollups can't be maintained incrementally (a full-seed
-    wipe destroyed them, or a containment move exceeded the bounded-recount cap). Dedup and
+    wipe destroyed them, or a containment move exceeded the bounded-recount cap) — or, for a
+    dedicated source, whose rollups the projector never maintains, signal each change. Dedup and
     concurrency are the AggregationService's own guards (active-job conflict → benign no-op).
     ``get_aggregation_service`` is a lazy getter (app.state in direct mode). With no service
     in this process — proxy mode, the deployed web tier — the job is queued on the control
@@ -88,9 +101,20 @@ def make_rollup_rebuild_hook(get_aggregation_service):
         agg = get_aggregation_service()
         mode = await _projection_mode(str(ds_id))
         if mode == "dedicated":
-            # The projector never touches a dedicated-mode {graph_name}_proj graph, so
-            # there is nothing to heal — and a wrong-mode rebuild would write rollups
-            # into the source graph, where nothing reads them for this data source.
+            # The job is the only writer of a dedicated {graph_name}_proj graph, and every
+            # window that changes its rollups ends here. Signal the change as a load into the
+            # source is signalled — change-gated, marked stale until rebuilt, at most one rebuild
+            # per cooldown with the rest left to the scheduler — rather than queue a whole run
+            # for every publish.
+            if agg is None:
+                await _queue_on_control_plane(str(ds_id), None, mode)
+                return
+            try:
+                async with get_async_session() as s:
+                    await agg.signal_source_changed(str(ds_id), s, reason="versioned_publish")
+                logger.info("signalled the rollup change for ds=%s (dedicated)", ds_id)
+            except Exception as exc:                     # pragma: no cover - infra
+                logger.warning("rollup change for ds=%s not signalled: %s", ds_id, exc)
             return
         # One job per projected commit: evict/restore churn at the same commit collapses
         # into it (the service's idempotent-replay window), while a later change is never
@@ -117,11 +141,11 @@ def make_rollup_rebuild_hook(get_aggregation_service):
     return _hook
 
 
-async def _queue_on_control_plane(ds_id: str, idempotency_key: str, mode: str) -> None:
+async def _queue_on_control_plane(ds_id: str, idempotency_key: Optional[str], mode: str) -> None:
     """Queue the rollup rebuild on the aggregation control plane — the same route and
-    internal auth the insights purge uses for its post-purge rebuild. Never raises: a
-    409 (a job already active) is the benign outcome, and anything else is logged loudly
-    enough to act on."""
+    internal auth the insights purge uses for its post-purge rebuild; for a dedicated source,
+    signal the change instead (see the hook). Never raises: a 409 (a job already active) is
+    the benign outcome, and anything else is logged loudly enough to act on."""
     import os
     import httpx
     from backend.app.services.aggregation.internal_auth import internal_auth_headers
@@ -132,14 +156,21 @@ async def _queue_on_control_plane(ds_id: str, idempotency_key: str, mode: str) -
             base_url=base, timeout=httpx.Timeout(10.0, connect=3.0),
             headers=internal_auth_headers(),
         ) as client:
-            resp = await client.post(
-                f"/aggregation/data-sources/{ds_id}/jobs",
-                params={"triggerSource": "api"},
-                json={"projectionMode": mode, "idempotencyKey": idempotency_key},
-            )
+            if mode == "dedicated":
+                resp = await client.post(
+                    f"/aggregation/data-sources/{ds_id}/source-changed",
+                    json={"reason": "versioned_publish"},
+                )
+            else:
+                resp = await client.post(
+                    f"/aggregation/data-sources/{ds_id}/jobs",
+                    params={"triggerSource": "api"},
+                    json={"projectionMode": mode, "idempotencyKey": idempotency_key},
+                )
         if resp.status_code in (200, 201, 202):
-            logger.info("queued aggregation rebuild for ds=%s on the control plane "
-                        "(rollups stale after projection)", ds_id)
+            logger.info("%s for ds=%s on the control plane (rollups stale after projection)",
+                        "signalled the change" if mode == "dedicated"
+                        else "queued aggregation rebuild", ds_id)
         elif resp.status_code == 409:
             logger.info("rollup rebuild for ds=%s not queued: a job is already active", ds_id)
         else:
