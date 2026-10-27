@@ -9,6 +9,9 @@ Cypher count::
     python -m backend.scripts.bench_search_edges --graph edges_bench --prepare
     python -m backend.scripts.bench_search_edges --graph edges_bench
 
+To see a unit that runs out of time split, measure again with a one-second
+budget per unit: ``DEEP_SEARCH_CHUNK_TIMEOUT_MS=1000`` in the environment.
+
 ``--prepare`` adds, to every ``SchemaField``, a ``dataType`` (string, int,
 date by turns) and a ``first_name`` (``bob`` on one in 997), and two
 ``DERIVES`` edges to the fields 7 and 31 places on (JSON mode batch, stream);
@@ -22,7 +25,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import time
 
 from falkordb import FalkorDB
@@ -60,7 +62,7 @@ def prepare(host: str, port: int, graph: str) -> None:
 
 async def measure(host: str, port: int, graph: str) -> None:
     from backend.app.providers.falkordb_provider import FalkorDBProvider
-    from backend.app.services.deep_search import SearchRunContext, get_deep_search_settings
+    from backend.app.services.deep_search import SearchRunContext
     from backend.common.models.search import SearchQuery
 
     p = FalkorDBProvider(host=host, port=port, graph_name=graph, auth_enabled=False)
@@ -147,11 +149,6 @@ async def measure(host: str, port: int, graph: str) -> None:
               "MATCH (a)-[e:DERIVES]->(b) WHERE a.urn IN $v AND b.urn IN $v RETURN count(e)",
               scope={"viewId": "v", "scopeMode": "visible", "visibleUrns": shown},
               params={"v": shown})
-    os.environ["DEEP_SEARCH_CHUNK_TIMEOUT_MS"] = "1000"
-    get_deep_search_settings.cache_clear()
-    await run("the same, a unit's budget cut to 1 s",
-              {"sourceWhere": string, "targetWhere": smith_parent, "edgeTypes": ["DERIVES"]},
-              example)
 
 
 def main() -> None:

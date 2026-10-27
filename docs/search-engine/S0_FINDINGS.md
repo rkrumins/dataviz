@@ -806,6 +806,7 @@ choice is cost.
 - Every total is exact, the same as the direct count.
 - The direct statements are single-threaded and answer one count. The engine
   pages, ranks, holds 2,000 ordered edges and stays exact under any budget:
-  cut to 1 s a unit, the smith search still finished.
+  cut to 1 s a unit (the last row, run with `DEEP_SEARCH_CHUNK_TIMEOUT_MS=1000`),
+  the smith search still finished.
 - The selective searches spend their time scanning the anchor's label in
   units.
