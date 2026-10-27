@@ -252,6 +252,7 @@ export type Predicate =
     | HasIncomingPredicate
     | HasOutgoingPredicate
     | PathPredicate
+    | EdgesPredicate
     | MatchAllPredicate
     | IsPredicate
     | RelatedPredicate
@@ -436,23 +437,69 @@ export type Sourcewhere =
           | HasIncomingPredicate
           | HasOutgoingPredicate
           | PathPredicate
+          | EdgesPredicate
           | MatchAllPredicate
           | IsPredicate
           | RelatedPredicate
           | GroupPredicate
       )
     | null
-export type Kind19 = 'all'
-export type Kind20 = 'is'
+/**
+ * ``outgoing``: edges stored From → To. ``either``: stored either way, each edge once.
+ */
+export type Direction3 = 'outgoing' | 'either'
+/**
+ * Which edges: lineage, containment, links (every edge but the hierarchy's) or any. Left out: links.
+ */
+export type Edgeclass8 = ('lineage' | 'containment' | 'links' | 'any') | null
+/**
+ * What every returned edge must meet.
+ */
+export type Edgepredicate2 =
+    (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
+/**
+ * These edge types instead of a class.
+ */
+export type Edgetypes8 = string[] | null
+export type Kind19 = 'edges'
+/**
+ * What each edge's source must meet (From). Left out: any entity.
+ */
+export type Sourcewhere1 =
+    | (
+          | TextPredicate
+          | PropertyPredicate
+          | TagPredicate
+          | HasPropertyPredicate
+          | DescendantOfPredicate
+          | WithinHopsPredicate
+          | EntityTypePredicate
+          | LayerPredicate
+          | DegreePredicate
+          | IsOrphanPredicate
+          | IsLeafPredicate
+          | IsRootPredicate
+          | HasIncomingPredicate
+          | HasOutgoingPredicate
+          | PathPredicate
+          | EdgesPredicate
+          | MatchAllPredicate
+          | IsPredicate
+          | RelatedPredicate
+          | GroupPredicate
+      )
+    | null
+export type Kind20 = 'all'
+export type Kind21 = 'is'
 export type Refs2 = NodeRef[]
 export type Axis =
     'parent' | 'child' | 'ancestor' | 'descendant' | 'root' | 'upstream' | 'downstream' | 'neighbor'
 export type Op6 = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte'
 export type Value2 = number
 export type Edge = (EdgePropertyPredicate | EdgeHasPropertyPredicate | EdgeGroupPredicate) | null
-export type Edgeclass8 = ('lineage' | 'links') | null
-export type Edgetypes8 = string[] | null
-export type Kind21 = 'related'
+export type Edgeclass9 = ('lineage' | 'links') | null
+export type Edgetypes9 = string[] | null
+export type Kind22 = 'related'
 export type Maxhops1 = number | null
 export type Minhops = number
 export type Quantifier = 'any' | 'none' | 'all'
@@ -473,6 +520,7 @@ export type Where =
           | HasIncomingPredicate
           | HasOutgoingPredicate
           | PathPredicate
+          | EdgesPredicate
           | MatchAllPredicate
           | IsPredicate
           | RelatedPredicate
@@ -495,23 +543,16 @@ export type Children1 = (
     | HasIncomingPredicate
     | HasOutgoingPredicate
     | PathPredicate
+    | EdgesPredicate
     | MatchAllPredicate
     | IsPredicate
     | RelatedPredicate
     | GroupPredicate
 )[]
-export type Kind22 = 'group'
+export type Kind23 = 'group'
 export type Op7 = 'and' | 'or' | 'not'
 /**
- * Endpoint nodes by name path (or URN).
- */
-export type Targetrefs = NodeRef[] | null
-/**
- * Endpoint nodes. Paths terminate here.
- */
-export type Targeturns = string[]
-/**
- * The endpoint nodes as a condition instead of named.
+ * What each edge's target must meet (To). Left out: any entity.
  */
 export type Targetwhere =
     | (
@@ -530,6 +571,42 @@ export type Targetwhere =
           | HasIncomingPredicate
           | HasOutgoingPredicate
           | PathPredicate
+          | EdgesPredicate
+          | MatchAllPredicate
+          | IsPredicate
+          | RelatedPredicate
+          | GroupPredicate
+      )
+    | null
+/**
+ * Endpoint nodes by name path (or URN).
+ */
+export type Targetrefs = NodeRef[] | null
+/**
+ * Endpoint nodes. Paths terminate here.
+ */
+export type Targeturns = string[]
+/**
+ * The endpoint nodes as a condition instead of named.
+ */
+export type Targetwhere1 =
+    | (
+          | TextPredicate
+          | PropertyPredicate
+          | TagPredicate
+          | HasPropertyPredicate
+          | DescendantOfPredicate
+          | WithinHopsPredicate
+          | EntityTypePredicate
+          | LayerPredicate
+          | DegreePredicate
+          | IsOrphanPredicate
+          | IsLeafPredicate
+          | IsRootPredicate
+          | HasIncomingPredicate
+          | HasOutgoingPredicate
+          | PathPredicate
+          | EdgesPredicate
           | MatchAllPredicate
           | IsPredicate
           | RelatedPredicate
@@ -640,7 +717,7 @@ export type Resolvedscope = {
     [k: string]: unknown
 } | null
 /**
- * Properties to add to each row, after its urn, name, type and qualified name — ``description`` and ``tags`` included.
+ * Properties to add to each row, after its urn, name, type and qualified name — ``description`` and ``tags`` included. A Connections search's: the edge's own, after its fixed columns.
  */
 export type Columns1 = string[]
 export type Format = 'csv' | 'ndjson'
@@ -660,6 +737,7 @@ export type Predicate1 =
     | HasIncomingPredicate
     | HasOutgoingPredicate
     | PathPredicate
+    | EdgesPredicate
     | MatchAllPredicate
     | IsPredicate
     | RelatedPredicate
@@ -731,7 +809,7 @@ export type Includeancestorpath = boolean
  * Number of hits returned per page. Default 50 (sane for browsing); the panel sets it to the candidate cap (5000) when it wants the full match set in one round-trip so canvas highlighting can cover every match without paginating. Bounded at 5000 (matches CANDIDATE_CAP) — larger pages require cursor pagination.
  */
 export type Pagesize = number
-export type Results = 'aggregates' | 'hits' | 'both' | 'paths'
+export type Results = 'aggregates' | 'hits' | 'both' | 'paths' | 'edges'
 /**
  * Continue this search session (from a ``running`` response) rather than start a new one. It finishes on the data it started on even if the graph changes meanwhile, and says so (``stale``). Ignored when it doesn't belong to this query.
  */
@@ -766,6 +844,7 @@ export type Predicate2 =
     | HasIncomingPredicate
     | HasOutgoingPredicate
     | PathPredicate
+    | EdgesPredicate
     | MatchAllPredicate
     | IsPredicate
     | RelatedPredicate
@@ -853,6 +932,32 @@ export type Cursor1 = string | null
  */
 export type Dataversion5 = string | null
 export type Deadlineexceeded = boolean
+/**
+ * A Connections search's matches per edge type, over every match — exact once the search is complete.
+ */
+export type Edgetypecounts = {
+    [k: string]: number
+} | null
+/**
+ * A Connections search's page of edges, in order: source name, target name, edge type.
+ */
+export type Edges1 = EdgeHit[] | null
+export type Edgetype = string
+/**
+ * The edge's id as the canvas knows it: its own id when it has one, else source|TYPE|target.
+ */
+export type Id1 = string
+/**
+ * Unique within the answer: list rows, selection and stepping key on it.
+ */
+export type Key5 = string
+/**
+ * Its containers, nearest first — what the canvas files an end it doesn't draw under.
+ */
+export type Ancestorpath2 = AncestorRef[]
+export type Displayname4 = string
+export type Entitytype5 = string
+export type Urn4 = string
 export type Elapsedms5 = number
 /**
  * Ordered by server relevance; do not re-sort by `score`. Ranking runs over the whole candidate set before this page is sliced from it, so `score` is a per-hit annotation, not the key the list is in.
@@ -862,10 +967,10 @@ export type Hits = SearchHit[] | null
  * Populated when the request's predicate contains a PathPredicate and options.results='paths'. Ordered node→edge→node sequences from source to target.
  */
 export type Paths = PathHit[] | null
-export type Edgetype = string
+export type Edgetype1 = string
 export type Sourceurn = string
 export type Targeturn = string
-export type Edges1 = EdgeRef[]
+export type Edges2 = EdgeRef[]
 export type Hopcount = number
 /**
  * Ordered list — first is source endpoint, last is target endpoint.
@@ -903,7 +1008,7 @@ export type Truncated1 = boolean
  */
 export type Complete = boolean
 export type Elapsedms6 = number
-export type Key5 = string
+export type Key6 = string
 /**
  * A type had more distinct values than listed.
  */
@@ -1467,6 +1572,28 @@ export interface PathPredicate {
     sourceWhere?: Sourcewhere
     targetRefs?: Targetrefs
     targetUrns?: Targeturns
+    targetWhere?: Targetwhere1
+}
+/**
+ * A Connections search: edges, not entities. Every direct edge whose
+ * source meets ``sourceWhere`` and whose target meets ``targetWhere`` —
+ * either left out, any entity in the search's scope — through
+ * ``edgeTypes`` or ``edgeClass`` (left out: every link, any edge but the
+ * hierarchy's), each edge meeting ``edgePredicate``.
+ *
+ * ``direction`` ``outgoing`` takes edges as they are stored, source →
+ * target; ``either`` takes those stored the other way too, each edge
+ * once. It is the whole query, never part of a group, and it answers
+ * ``edges``. Rollups (``AGGREGATED``) summarise other edges and are never
+ * returned.
+ */
+export interface EdgesPredicate {
+    direction?: Direction3
+    edgeClass?: Edgeclass8
+    edgePredicate?: Edgepredicate2
+    edgeTypes?: Edgetypes8
+    kind?: Kind19
+    sourceWhere?: Sourcewhere1
     targetWhere?: Targetwhere
 }
 /**
@@ -1477,14 +1604,14 @@ export interface PathPredicate {
  * not quietly match the whole view. Asking for everything is spelled out.
  */
 export interface MatchAllPredicate {
-    kind?: Kind19
+    kind?: Kind20
 }
 /**
  * The entities themselves: matches an entity a reference names —
  * ``Country / United Kingdom``, or a URN.
  */
 export interface IsPredicate {
-    kind?: Kind20
+    kind?: Kind21
     refs: Refs2
 }
 /**
@@ -1511,9 +1638,9 @@ export interface RelatedPredicate {
     axis: Axis
     count?: CountSpec | null
     edge?: Edge
-    edgeClass?: Edgeclass8
-    edgeTypes?: Edgetypes8
-    kind?: Kind21
+    edgeClass?: Edgeclass9
+    edgeTypes?: Edgetypes9
+    kind?: Kind22
     maxHops?: Maxhops1
     minHops?: Minhops
     quantifier?: Quantifier
@@ -1535,7 +1662,7 @@ export interface CountSpec {
  */
 export interface GroupPredicate {
     children: Children1
-    kind?: Kind22
+    kind?: Kind23
     op?: Op7
 }
 /**
@@ -1789,6 +1916,8 @@ export interface SearchResultPage {
     cursor?: Cursor1
     dataVersion?: Dataversion5
     deadlineExceeded?: Deadlineexceeded
+    edgeTypeCounts?: Edgetypecounts
+    edges?: Edges1
     elapsedMs: Elapsedms5
     hits?: Hits
     paths?: Paths
@@ -1858,6 +1987,31 @@ export interface Properties1 {
     [k: string]: unknown
 }
 /**
+ * One edge a Connections search matched, source → target as stored.
+ */
+export interface EdgeHit {
+    edgeType: Edgetype
+    id: Id1
+    key: Key5
+    properties?: Properties2
+    source: EdgeEnd
+    target: EdgeEnd
+}
+export interface Properties2 {
+    [k: string]: unknown
+}
+/**
+ * One end of an edge a Connections search returned: enough to name
+ * it, show it under its parent, and find where the canvas draws it.
+ */
+export interface EdgeEnd {
+    ancestorPath?: Ancestorpath2
+    displayName: Displayname4
+    entityType: Entitytype5
+    parent?: AncestorRef | null
+    urn: Urn4
+}
+/**
  * One returned path: an ordered alternating sequence of nodes and
  * edges, with the hop count for sorting / display.
  *
@@ -1866,7 +2020,7 @@ export interface Properties1 {
  * ``target_urns`` (after direction normalisation).
  */
 export interface PathHit {
-    edges: Edges1
+    edges: Edges2
     hopCount: Hopcount
     nodes: Nodes
 }
@@ -1878,12 +2032,12 @@ export interface PathHit {
  * endpoints, which is what callers actually render.
  */
 export interface EdgeRef {
-    edgeType: Edgetype
-    properties?: Properties2
+    edgeType: Edgetype1
+    properties?: Properties3
     sourceUrn: Sourceurn
     targetUrn: Targeturn
 }
-export interface Properties2 {
+export interface Properties3 {
     [k: string]: unknown
 }
 /**
@@ -1909,7 +2063,7 @@ export interface QueryExplain {
 export interface SearchValuesResult {
     complete?: Complete
     elapsedMs?: Elapsedms6
-    key: Key5
+    key: Key6
     truncated?: Truncated2
     values?: Values3
 }

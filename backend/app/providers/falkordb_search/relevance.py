@@ -53,15 +53,16 @@ from backend.common.models.search import GroupPredicate, PropertyPredicate, Sear
 from backend.common.search_semantics import fold_case
 
 
-def display_name_expr(name_key: Optional[str]) -> str:
+def display_name_expr(name_key: Optional[str], var: str = "n") -> str:
     """The row's display name: the first non-empty text of displayName, the
     source's name property, name, title, label — ``_rows_to_candidates``'s
-    fallbacks, as ``or`` chains them. Null when there is none."""
+    fallbacks, as ``or`` chains them. Null when there is none. ``var``: the
+    entity it names (a Connections search names both ends of an edge)."""
     columns = ["displayName"]
     for key in (name_key, "name", "title", "label"):
         if key and key not in columns:
             columns.append(key)
-    parts = ", ".join(_text_if_any(f"n.{_safe_property_name(c)}") for c in columns)
+    parts = ", ".join(_text_if_any(f"{var}.{_safe_property_name(c)}") for c in columns)
     return f"coalesce({parts})"
 
 

@@ -9,6 +9,44 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Connections: edges as search results (API)
+
+### Added
+
+**Connections: a search that returns edges.** A new predicate, `edges`, asks for edges instead of
+entities: every direct edge whose source meets one condition (`sourceWhere`, "From") and whose
+target meets another (`targetWhere`, "To"). It can go through named edge types or a class, and
+each edge can meet an edge filter. Edges are taken as stored, or `either` way, each edge once.
+"Every edge from a string column called bob to anything whose parent's family is smith" is one
+query. So is "from a table or any of its columns into the Sales layer". Each end takes any entity
+condition: properties, types, tags, names, "inside a container", layers, and relationships such as
+"its parent is…".
+- **Every match, counted exactly.** It runs on the uncapped engine and pages through every match
+  in a fixed order (source name, target name, type), with exact totals per edge type.
+- **What each edge carries:** its id, type and properties, and both ends, each with its parent and
+  containers.
+- **The other search endpoints:**
+  - **Counts** take a Connections search as an item.
+  - **Exports** write each edge with its ends and their parents.
+  - **Explain** shows the whole search as one statement, ready to edit and run in the Cypher tab.
+- **Scale:** on 2 million entities and 6.85 million edges, a selective search answers in about a
+  second, and one matching 127,000 edges finishes in 13 s, exactly.
+
+See [the developer reference](docs/features/search-and-rules-reference.md#connections-edges-as-results).
+The search panel, highlighting on the canvas and Code mode follow.
+
+### Known limitations
+
+- **Connections are direct edges only.** Multi-hop connections are future scope: the edges of every
+  route of up to N hops between a From and a To match, with conditions on the entities between.
+  Until then, a path pattern lists routes, and a relationship tests reach.
+- **Both ends read native property values only**: a value kept as raw JSON doesn't match at either
+  end, as in a relationship's condition.
+- **A Connections search needs the uncapped engine.** It isn't a display rule, can't be used through
+  a share link, and has no facets or sort.
+
+---
+
 ## [Unreleased] — Search at any width, saved searches across Views, and Code mode that edits like an editor
 
 ### Added

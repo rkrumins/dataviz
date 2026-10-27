@@ -275,6 +275,49 @@
       "title": "DescendantOfPredicate",
       "type": "object"
     },
+    "EdgeEnd": {
+      "description": "One end of an edge a Connections search returned: enough to name\nit, show it under its parent, and find where the canvas draws it.",
+      "properties": {
+        "ancestorPath": {
+          "description": "Its containers, nearest first \u2014 what the canvas files an end it doesn't draw under.",
+          "items": {
+            "$ref": "#/$defs/AncestorRef"
+          },
+          "title": "Ancestorpath",
+          "type": "array"
+        },
+        "displayName": {
+          "title": "Displayname",
+          "type": "string"
+        },
+        "entityType": {
+          "title": "Entitytype",
+          "type": "string"
+        },
+        "parent": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AncestorRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "urn": {
+          "title": "Urn",
+          "type": "string"
+        }
+      },
+      "required": [
+        "urn",
+        "displayName",
+        "entityType"
+      ],
+      "title": "EdgeEnd",
+      "type": "object"
+    },
     "EdgeGroupPredicate": {
       "description": "Boolean composition of edge predicates.\n\nSame shape as ``GroupPredicate`` but scoped to a traversed edge.\nService-layer validator enforces depth / leaf caps mirroring the\nnode-predicate tree.",
       "properties": {
@@ -353,6 +396,45 @@
         "key"
       ],
       "title": "EdgeHasPropertyPredicate",
+      "type": "object"
+    },
+    "EdgeHit": {
+      "description": "One edge a Connections search matched, source \u2192 target as stored.",
+      "properties": {
+        "edgeType": {
+          "title": "Edgetype",
+          "type": "string"
+        },
+        "id": {
+          "description": "The edge's id as the canvas knows it: its own id when it has one, else source|TYPE|target.",
+          "title": "Id",
+          "type": "string"
+        },
+        "key": {
+          "description": "Unique within the answer: list rows, selection and stepping key on it.",
+          "title": "Key",
+          "type": "string"
+        },
+        "properties": {
+          "additionalProperties": true,
+          "title": "Properties",
+          "type": "object"
+        },
+        "source": {
+          "$ref": "#/$defs/EdgeEnd"
+        },
+        "target": {
+          "$ref": "#/$defs/EdgeEnd"
+        }
+      },
+      "required": [
+        "key",
+        "id",
+        "edgeType",
+        "source",
+        "target"
+      ],
+      "title": "EdgeHit",
       "type": "object"
     },
     "EdgePropertyPredicate": {
@@ -456,6 +538,295 @@
         "edgeType"
       ],
       "title": "EdgeRef",
+      "type": "object"
+    },
+    "EdgesPredicate": {
+      "description": "A Connections search: edges, not entities. Every direct edge whose\nsource meets ``sourceWhere`` and whose target meets ``targetWhere`` \u2014\neither left out, any entity in the search's scope \u2014 through\n``edgeTypes`` or ``edgeClass`` (left out: every link, any edge but the\nhierarchy's), each edge meeting ``edgePredicate``.\n\n``direction`` ``outgoing`` takes edges as they are stored, source \u2192\ntarget; ``either`` takes those stored the other way too, each edge\nonce. It is the whole query, never part of a group, and it answers\n``edges``. Rollups (``AGGREGATED``) summarise other edges and are never\nreturned.",
+      "properties": {
+        "direction": {
+          "default": "outgoing",
+          "description": "``outgoing``: edges stored From \u2192 To. ``either``: stored either way, each edge once.",
+          "enum": [
+            "outgoing",
+            "either"
+          ],
+          "title": "Direction",
+          "type": "string"
+        },
+        "edgeClass": {
+          "anyOf": [
+            {
+              "enum": [
+                "lineage",
+                "containment",
+                "links",
+                "any"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Which edges: lineage, containment, links (every edge but the hierarchy's) or any. Left out: links.",
+          "title": "Edgeclass"
+        },
+        "edgePredicate": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "edgeGroup": "#/$defs/EdgeGroupPredicate",
+                  "edgeHasProperty": "#/$defs/EdgeHasPropertyPredicate",
+                  "edgeProperty": "#/$defs/EdgePropertyPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/EdgePropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgeHasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgeGroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What every returned edge must meet.",
+          "title": "Edgepredicate"
+        },
+        "edgeTypes": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 32,
+              "minItems": 1,
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "These edge types instead of a class.",
+          "title": "Edgetypes"
+        },
+        "kind": {
+          "const": "edges",
+          "default": "edges",
+          "title": "Kind",
+          "type": "string"
+        },
+        "sourceWhere": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "all": "#/$defs/MatchAllPredicate",
+                  "degree": "#/$defs/DegreePredicate",
+                  "descendantOf": "#/$defs/DescendantOfPredicate",
+                  "edges": "#/$defs/EdgesPredicate",
+                  "entityType": "#/$defs/EntityTypePredicate",
+                  "group": "#/$defs/GroupPredicate",
+                  "hasIncoming": "#/$defs/HasIncomingPredicate",
+                  "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+                  "hasProperty": "#/$defs/HasPropertyPredicate",
+                  "is": "#/$defs/IsPredicate",
+                  "isLeaf": "#/$defs/IsLeafPredicate",
+                  "isOrphan": "#/$defs/IsOrphanPredicate",
+                  "isRoot": "#/$defs/IsRootPredicate",
+                  "layer": "#/$defs/LayerPredicate",
+                  "path": "#/$defs/PathPredicate",
+                  "property": "#/$defs/PropertyPredicate",
+                  "related": "#/$defs/RelatedPredicate",
+                  "tag": "#/$defs/TagPredicate",
+                  "text": "#/$defs/TextPredicate",
+                  "withinHops": "#/$defs/WithinHopsPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/TextPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/TagPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DescendantOfPredicate"
+                },
+                {
+                  "$ref": "#/$defs/WithinHopsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EntityTypePredicate"
+                },
+                {
+                  "$ref": "#/$defs/LayerPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DegreePredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsOrphanPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsLeafPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsRootPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasIncomingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasOutgoingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PathPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgesPredicate"
+                },
+                {
+                  "$ref": "#/$defs/MatchAllPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/RelatedPredicate"
+                },
+                {
+                  "$ref": "#/$defs/GroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What each edge's source must meet (From). Left out: any entity.",
+          "title": "Sourcewhere"
+        },
+        "targetWhere": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "all": "#/$defs/MatchAllPredicate",
+                  "degree": "#/$defs/DegreePredicate",
+                  "descendantOf": "#/$defs/DescendantOfPredicate",
+                  "edges": "#/$defs/EdgesPredicate",
+                  "entityType": "#/$defs/EntityTypePredicate",
+                  "group": "#/$defs/GroupPredicate",
+                  "hasIncoming": "#/$defs/HasIncomingPredicate",
+                  "hasOutgoing": "#/$defs/HasOutgoingPredicate",
+                  "hasProperty": "#/$defs/HasPropertyPredicate",
+                  "is": "#/$defs/IsPredicate",
+                  "isLeaf": "#/$defs/IsLeafPredicate",
+                  "isOrphan": "#/$defs/IsOrphanPredicate",
+                  "isRoot": "#/$defs/IsRootPredicate",
+                  "layer": "#/$defs/LayerPredicate",
+                  "path": "#/$defs/PathPredicate",
+                  "property": "#/$defs/PropertyPredicate",
+                  "related": "#/$defs/RelatedPredicate",
+                  "tag": "#/$defs/TagPredicate",
+                  "text": "#/$defs/TextPredicate",
+                  "withinHops": "#/$defs/WithinHopsPredicate"
+                },
+                "propertyName": "kind"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/TextPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/TagPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasPropertyPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DescendantOfPredicate"
+                },
+                {
+                  "$ref": "#/$defs/WithinHopsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EntityTypePredicate"
+                },
+                {
+                  "$ref": "#/$defs/LayerPredicate"
+                },
+                {
+                  "$ref": "#/$defs/DegreePredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsOrphanPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsLeafPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsRootPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasIncomingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/HasOutgoingPredicate"
+                },
+                {
+                  "$ref": "#/$defs/PathPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgesPredicate"
+                },
+                {
+                  "$ref": "#/$defs/MatchAllPredicate"
+                },
+                {
+                  "$ref": "#/$defs/IsPredicate"
+                },
+                {
+                  "$ref": "#/$defs/RelatedPredicate"
+                },
+                {
+                  "$ref": "#/$defs/GroupPredicate"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "What each edge's target must meet (To). Left out: any entity.",
+          "title": "Targetwhere"
+        }
+      },
+      "title": "EdgesPredicate",
       "type": "object"
     },
     "EntityTypePredicate": {
@@ -621,6 +992,7 @@
                 "all": "#/$defs/MatchAllPredicate",
                 "degree": "#/$defs/DegreePredicate",
                 "descendantOf": "#/$defs/DescendantOfPredicate",
+                "edges": "#/$defs/EdgesPredicate",
                 "entityType": "#/$defs/EntityTypePredicate",
                 "group": "#/$defs/GroupPredicate",
                 "hasIncoming": "#/$defs/HasIncomingPredicate",
@@ -685,6 +1057,9 @@
               },
               {
                 "$ref": "#/$defs/PathPredicate"
+              },
+              {
+                "$ref": "#/$defs/EdgesPredicate"
               },
               {
                 "$ref": "#/$defs/MatchAllPredicate"
@@ -1471,6 +1846,7 @@
                   "all": "#/$defs/MatchAllPredicate",
                   "degree": "#/$defs/DegreePredicate",
                   "descendantOf": "#/$defs/DescendantOfPredicate",
+                  "edges": "#/$defs/EdgesPredicate",
                   "entityType": "#/$defs/EntityTypePredicate",
                   "group": "#/$defs/GroupPredicate",
                   "hasIncoming": "#/$defs/HasIncomingPredicate",
@@ -1535,6 +1911,9 @@
                 },
                 {
                   "$ref": "#/$defs/PathPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgesPredicate"
                 },
                 {
                   "$ref": "#/$defs/MatchAllPredicate"
@@ -1593,6 +1972,7 @@
                   "all": "#/$defs/MatchAllPredicate",
                   "degree": "#/$defs/DegreePredicate",
                   "descendantOf": "#/$defs/DescendantOfPredicate",
+                  "edges": "#/$defs/EdgesPredicate",
                   "entityType": "#/$defs/EntityTypePredicate",
                   "group": "#/$defs/GroupPredicate",
                   "hasIncoming": "#/$defs/HasIncomingPredicate",
@@ -1657,6 +2037,9 @@
                 },
                 {
                   "$ref": "#/$defs/PathPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgesPredicate"
                 },
                 {
                   "$ref": "#/$defs/MatchAllPredicate"
@@ -1949,6 +2332,7 @@
                   "all": "#/$defs/MatchAllPredicate",
                   "degree": "#/$defs/DegreePredicate",
                   "descendantOf": "#/$defs/DescendantOfPredicate",
+                  "edges": "#/$defs/EdgesPredicate",
                   "entityType": "#/$defs/EntityTypePredicate",
                   "group": "#/$defs/GroupPredicate",
                   "hasIncoming": "#/$defs/HasIncomingPredicate",
@@ -2013,6 +2397,9 @@
                 },
                 {
                   "$ref": "#/$defs/PathPredicate"
+                },
+                {
+                  "$ref": "#/$defs/EdgesPredicate"
                 },
                 {
                   "$ref": "#/$defs/MatchAllPredicate"
@@ -2997,7 +3384,7 @@
       "description": "``POST /search/exports``: every entity in the view that matches\n``predicate``, written to a file \u2014 exactly, however many. A large export\ntakes more than one request: send the same request again with the\nreturned ``sessionId`` until ``status`` is ``complete``, then download\nit from ``GET /search/exports/{sessionId}/download``.",
       "properties": {
         "columns": {
-          "description": "Properties to add to each row, after its urn, name, type and qualified name \u2014 ``description`` and ``tags`` included.",
+          "description": "Properties to add to each row, after its urn, name, type and qualified name \u2014 ``description`` and ``tags`` included. A Connections search's: the edge's own, after its fixed columns.",
           "items": {
             "type": "string"
           },
@@ -3020,6 +3407,7 @@
               "all": "#/$defs/MatchAllPredicate",
               "degree": "#/$defs/DegreePredicate",
               "descendantOf": "#/$defs/DescendantOfPredicate",
+              "edges": "#/$defs/EdgesPredicate",
               "entityType": "#/$defs/EntityTypePredicate",
               "group": "#/$defs/GroupPredicate",
               "hasIncoming": "#/$defs/HasIncomingPredicate",
@@ -3084,6 +3472,9 @@
             },
             {
               "$ref": "#/$defs/PathPredicate"
+            },
+            {
+              "$ref": "#/$defs/EdgesPredicate"
             },
             {
               "$ref": "#/$defs/MatchAllPredicate"
@@ -3453,7 +3844,8 @@
             "aggregates",
             "hits",
             "both",
-            "paths"
+            "paths",
+            "edges"
           ],
           "title": "Results",
           "type": "string"
@@ -3580,6 +3972,7 @@
               "all": "#/$defs/MatchAllPredicate",
               "degree": "#/$defs/DegreePredicate",
               "descendantOf": "#/$defs/DescendantOfPredicate",
+              "edges": "#/$defs/EdgesPredicate",
               "entityType": "#/$defs/EntityTypePredicate",
               "group": "#/$defs/GroupPredicate",
               "hasIncoming": "#/$defs/HasIncomingPredicate",
@@ -3644,6 +4037,9 @@
             },
             {
               "$ref": "#/$defs/PathPredicate"
+            },
+            {
+              "$ref": "#/$defs/EdgesPredicate"
             },
             {
               "$ref": "#/$defs/MatchAllPredicate"
@@ -3841,6 +4237,38 @@
           "default": false,
           "title": "Deadlineexceeded",
           "type": "boolean"
+        },
+        "edgeTypeCounts": {
+          "anyOf": [
+            {
+              "additionalProperties": {
+                "type": "integer"
+              },
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A Connections search's matches per edge type, over every match \u2014 exact once the search is complete.",
+          "title": "Edgetypecounts"
+        },
+        "edges": {
+          "anyOf": [
+            {
+              "items": {
+                "$ref": "#/$defs/EdgeHit"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "A Connections search's page of edges, in order: source name, target name, edge type.",
+          "title": "Edges"
         },
         "elapsedMs": {
           "title": "Elapsedms",
@@ -4047,6 +4475,7 @@
               "all": "#/$defs/MatchAllPredicate",
               "degree": "#/$defs/DegreePredicate",
               "descendantOf": "#/$defs/DescendantOfPredicate",
+              "edges": "#/$defs/EdgesPredicate",
               "entityType": "#/$defs/EntityTypePredicate",
               "group": "#/$defs/GroupPredicate",
               "hasIncoming": "#/$defs/HasIncomingPredicate",
@@ -4111,6 +4540,9 @@
             },
             {
               "$ref": "#/$defs/PathPredicate"
+            },
+            {
+              "$ref": "#/$defs/EdgesPredicate"
             },
             {
               "$ref": "#/$defs/MatchAllPredicate"

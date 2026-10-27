@@ -35,6 +35,7 @@ from typing import Annotated, Any, Dict, List, Literal, NamedTuple, Optional, Tu
 
 from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
+from ..derived_artifacts import is_derived_edge_type
 from ..search_semantics import KEY_OPERATORS
 from .graph import GraphNode
 
@@ -590,6 +591,65 @@ class PathPredicate(_Base):
         return self
 
 
+EDGES_PAGE_MAX = 500
+"""The most edges one page of a Connections search answers: each carries
+both its ends, their parents and their ancestor chains."""
+
+EdgesDirection = Literal["outgoing", "either"]
+
+
+class EdgesPredicate(_Base):
+    """A Connections search: edges, not entities. Every direct edge whose
+    source meets ``sourceWhere`` and whose target meets ``targetWhere`` —
+    either left out, any entity in the search's scope — through
+    ``edgeTypes`` or ``edgeClass`` (left out: every link, any edge but the
+    hierarchy's), each edge meeting ``edgePredicate``.
+
+    ``direction`` ``outgoing`` takes edges as they are stored, source →
+    target; ``either`` takes those stored the other way too, each edge
+    once. It is the whole query, never part of a group, and it answers
+    ``edges``. Rollups (``AGGREGATED``) summarise other edges and are never
+    returned.
+    """
+    kind: Literal["edges"] = "edges"
+    source_where: Optional["Predicate"] = Field(
+        None, alias="sourceWhere",
+        description="What each edge's source must meet (From). Left out: any entity.",
+    )
+    target_where: Optional["Predicate"] = Field(
+        None, alias="targetWhere",
+        description="What each edge's target must meet (To). Left out: any entity.",
+    )
+    direction: EdgesDirection = Field(
+        "outgoing",
+        description="``outgoing``: edges stored From → To. ``either``: stored "
+                    "either way, each edge once.",
+    )
+    edge_class: Optional[EdgeClass] = Field(
+        None, alias="edgeClass",
+        description="Which edges: lineage, containment, links (every edge but the "
+                    "hierarchy's) or any. Left out: links.",
+    )
+    edge_types: Optional[List[str]] = Field(
+        None, alias="edgeTypes", min_length=1, max_length=32,
+        description="These edge types instead of a class.",
+    )
+    edge_predicate: Optional[EdgePredicateType] = Field(
+        None, alias="edgePredicate",
+        description="What every returned edge must meet.",
+    )
+
+    @model_validator(mode="after")
+    def _shape(self) -> "EdgesPredicate":
+        if self.edge_types and self.edge_class:
+            raise ValueError("name edge types or an edge class, not both")
+        rollups = [t for t in self.edge_types or () if is_derived_edge_type(t)]
+        if rollups:
+            raise ValueError(f"{rollups[0]} edges are rollups of other edges — "
+                             "ask for the edges themselves")
+        return self
+
+
 # ---------------------------------------------------------------------------
 # Relationships — conditions on the entities related to each one
 # ---------------------------------------------------------------------------
@@ -720,6 +780,7 @@ Predicate = Annotated[
         HasIncomingPredicate,
         HasOutgoingPredicate,
         PathPredicate,
+        EdgesPredicate,
         MatchAllPredicate,
         IsPredicate,
         RelatedPredicate,
@@ -731,6 +792,18 @@ Predicate = Annotated[
 GroupPredicate.model_rebuild()
 RelatedPredicate.model_rebuild()
 PathPredicate.model_rebuild()
+EdgesPredicate.model_rebuild()
+
+
+def unwrap_edges(predicate):
+    """A Connections search sent as the one condition of an AND group — the
+    way a root is usually sent — is that search itself; any other predicate
+    is returned as it is."""
+    if (isinstance(predicate, GroupPredicate) and predicate.op == "and"
+            and len(predicate.children) == 1
+            and isinstance(predicate.children[0], EdgesPredicate)):
+        return predicate.children[0]
+    return predicate
 
 
 class AnchorGroup(NamedTuple):
@@ -849,7 +922,7 @@ AggregationSpec.model_rebuild()
 # Scope + options + the full request
 # ---------------------------------------------------------------------------
 
-ResultShape = Literal["aggregates", "hits", "both", "paths"]
+ResultShape = Literal["aggregates", "hits", "both", "paths", "edges"]
 
 
 ScopeMode = Literal["visible", "view", "data_source"]
@@ -1163,6 +1236,32 @@ class PathHit(_Base):
     hop_count: int = Field(alias="hopCount")
 
 
+class EdgeEnd(_Base):
+    """One end of an edge a Connections search returned: enough to name
+    it, show it under its parent, and find where the canvas draws it."""
+    urn: str
+    display_name: str = Field(alias="displayName")
+    entity_type: str = Field(alias="entityType")
+    parent: Optional[AncestorRef] = None
+    ancestor_path: List[AncestorRef] = Field(
+        default_factory=list, alias="ancestorPath",
+        description="Its containers, nearest first — what the canvas files an "
+                    "end it doesn't draw under.",
+    )
+
+
+class EdgeHit(_Base):
+    """One edge a Connections search matched, source → target as stored."""
+    key: str = Field(description="Unique within the answer: list rows, selection "
+                                 "and stepping key on it.")
+    id: str = Field(description="The edge's id as the canvas knows it: its own id "
+                                "when it has one, else source|TYPE|target.")
+    edge_type: str = Field(alias="edgeType")
+    properties: Dict[str, Any] = Field(default_factory=dict)
+    source: EdgeEnd
+    target: EdgeEnd
+
+
 class SearchAggregateBucket(_Base):
     """One ancestor (or facet) with N matches inside it."""
     ancestor_urn: str = Field(alias="ancestorUrn")
@@ -1303,6 +1402,16 @@ class SearchResultPage(_Base):
         description="Populated when the request's predicate contains a "
                     "PathPredicate and options.results='paths'. Ordered "
                     "node→edge→node sequences from source to target.",
+    )
+    edges: Optional[List[EdgeHit]] = Field(
+        None,
+        description="A Connections search's page of edges, in order: source "
+                    "name, target name, edge type.",
+    )
+    edge_type_counts: Optional[Dict[str, int]] = Field(
+        None, alias="edgeTypeCounts",
+        description="A Connections search's matches per edge type, over every "
+                    "match — exact once the search is complete.",
     )
     cursor: Optional[str] = None
     truncated: bool = Field(
@@ -1730,13 +1839,23 @@ class SearchCatalogResult(_Base):
 
 #: The columns every export row starts with, before the chosen properties.
 SEARCH_EXPORT_BASE_COLUMNS = ("urn", "displayName", "entityType", "qualifiedName")
+#: A Connections search's: the edge, each end — its urn, name, type and
+#: parent — then the edge's own properties, as JSON.
+SEARCH_EXPORT_EDGE_COLUMNS = (
+    "edgeKey", "edgeId", "edgeType",
+    "sourceUrn", "sourceName", "sourceType", "sourceParentUrn", "sourceParentName",
+    "targetUrn", "targetName", "targetType", "targetParentUrn", "targetParentName",
+    "properties",
+)
 SEARCH_EXPORT_COLUMNS_MAX = 200
 
 
-def export_columns(columns: List[str]) -> List[str]:
-    """Every column of an export: the base ones, then the properties asked
-    for, each once."""
-    return list(dict.fromkeys([*SEARCH_EXPORT_BASE_COLUMNS, *(c for c in columns if c)]))
+def export_columns(columns: List[str], *, edges: bool = False) -> List[str]:
+    """Every column of an export: the base ones — an entity's, or ``edges``,
+    a Connections search's — then the properties asked for (an entity's, or
+    the edge's own), each once."""
+    base = SEARCH_EXPORT_EDGE_COLUMNS if edges else SEARCH_EXPORT_BASE_COLUMNS
+    return list(dict.fromkeys([*base, *(c for c in columns if c)]))
 
 
 class SearchExportRequest(_Base):
@@ -1751,7 +1870,8 @@ class SearchExportRequest(_Base):
     columns: List[str] = Field(
         default_factory=list, max_length=SEARCH_EXPORT_COLUMNS_MAX,
         description="Properties to add to each row, after its urn, name, type and "
-                    "qualified name — ``description`` and ``tags`` included.")
+                    "qualified name — ``description`` and ``tags`` included. A "
+                    "Connections search's: the edge's own, after its fixed columns.")
     wait_ms: int = Field(2000, alias="waitMs", ge=0, le=60000)
     session_id: Optional[str] = Field(None, alias="sessionId", max_length=64)
 

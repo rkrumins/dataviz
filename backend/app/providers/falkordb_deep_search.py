@@ -405,6 +405,12 @@ class _Compiler:
                     "Only one Path predicate is allowed per query."
                 )
             return self._visit_path(p)
+        if kind == "edges":
+            # Its ends are compiled one at a time (``falkordb_search.edges``),
+            # never the whole of it: what compiles it whole can't answer it.
+            raise CompileError(
+                "A Connections search returns edges, which only the uncapped search "
+                "engine answers — as a search of its own.")
         raise CompileError(f"unknown predicate kind: {kind!r}")
 
     def _visit_group(self, g, *, in_or: bool, at_top_and: bool) -> str:
@@ -1129,6 +1135,79 @@ class _Compiler:
         # fail it. Not wrapped to short-circuit: what is costly in it, a
         # nested relationship's list, is built whatever comes before.
         return filters, operand(f"coalesce({' AND '.join(tests)}, false)")
+
+    # ---- Connections: a search whose results are edges ----
+
+    def connection_edge_types(self, p) -> List[str]:
+        """A Connections search's edges, as the graph spells them: the types
+        it names, else its class's — every link when it names none — never
+        a rollup, which summarises other edges."""
+        if p.edge_types:
+            types = self._named_edge_types(p.edge_types)
+        else:
+            types = self._resolve_degree_edge_types(
+                p.model_copy(update={"edge_class": p.edge_class or "links"}))
+        return sorted(t for t in types if not is_derived_edge_type(t))
+
+    def compile_far_end(self, where, var: str, depth: int, *,
+                        projected: bool = False) -> Tuple[str, List[str]]:
+        """A Connections search's far end, tested on ``var`` for each edge a
+        unit's nodes have: its plain conditions as the edge MATCH's WHERE
+        (``"true"`` for none), the rest as stages projected after it —
+        "inside a container" (``_far_descendant``), then each relationship,
+        cheapest first. Native values only, as a relative's: the raw-property
+        probe answers for a unit's own nodes. ``projected``: the plain
+        conditions are for a projection too (``condition``)."""
+        if where is None:
+            return "true", []
+        members = _conjuncts(where)
+        for m in members:
+            # Hoisted, they would be the anchor's walk — not this end's test.
+            if m.kind in ("withinHops", "path"):
+                raise CompileError(f"{m.kind} can't sit in a Connections search's From or To")
+        saved = (self._var, self.raw_leaves, self.projected)
+        self._var, self.raw_leaves, self.projected = var, None, projected
+        try:
+            head = [self._visit(m, in_or=False, at_top_and=True) for m in members
+                    if m.kind != "descendantOf" and not _has_relation(m)]
+            stages = [self._far_descendant(m, depth) for m in members
+                      if m.kind == "descendantOf"]
+            stages += [self._projected_stage(m) for m in sorted(
+                (m for m in members if _has_relation(m)), key=_relation_cost)]
+        finally:
+            self._var, self.raw_leaves, self.projected = saved
+        head = [h for h in head if h != "true"]
+        if not head:
+            return "true", stages
+        return (head[0] if len(head) == 1 else "(" + " AND ".join(head) + ")"), stages
+
+    def condition(self, where, var: str, depth: int) -> str:
+        """``where`` on ``var`` as one boolean to project: the second pass of
+        a search either way tests each edge's ends against the other end's
+        condition too, as ``compile_far_end`` reads it."""
+        head, stages = self.compile_far_end(where, var, depth, projected=True)
+        parts = [head] if head != "true" else []
+        parts += stages
+        if not parts:
+            return "true"
+        return parts[0] if len(parts) == 1 else "(" + " AND ".join(operand(p) for p in parts) + ")"
+
+    def _far_descendant(self, p, depth: int) -> str:
+        """"Inside a container" at the far end: the container itself, or an
+        entity below it at most its ``maxDepth`` (else ``depth``, the
+        scope's) — what the anchor's walk down from it reads."""
+        urns = list(p.urns) + _ref_urns(p.refs, "descendantOf")
+        if not urns:
+            return "false"      # its references named nothing
+        if self._containment_edge_types is None:
+            raise CompileError(
+                "inside a container requires the provider's containment edge types — "
+                "ontology resolution must complete before search.")
+        k, v = self._name(), self._var
+        rel = "|".join(_sanitize_label(t) for t in sorted(self._containment_edge_types))
+        bound = self._bind(urns)
+        return (f"({v}.urn IN {bound} OR ANY(_xb{k} IN [({v})<-[:{rel}*1..{int(p.max_depth or depth)}]"
+                f"-(_xr{k}) WHERE _xr{k}.urn IN {bound} | true] WHERE _xb{k}))")
 
     # ---- Edge-predicate compilation (inside PathPredicate / WithinHops) ----
 
@@ -2205,6 +2284,9 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     continuation isn't materialised here (would be ~one extra line
     per AggregationSpec — left to caller's understanding).
     """
+    if query.predicate.kind == "edges":
+        from backend.app.providers.falkordb_search.edges import explain_edges
+        return explain_edges(provider, query)
     _s = get_deep_search_settings()
     effective_candidate_cap = _resolve_candidate_cap(query, _s)
     notes: List[str] = []
@@ -4527,13 +4609,23 @@ async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:
     """
     if not hits:
         return
+    paths = await _ancestor_refs(provider, [h.node.urn for h in hits])
+    for h in hits:
+        h.ancestor_path = paths.get(h.node.urn, [])
 
-    async def _safe_chain(h: SearchHit) -> Tuple[str, List[str]]:
+
+async def _ancestor_refs(provider, urns: List[str]) -> Dict[str, List[AncestorRef]]:
+    """Each of ``urns``' containers, root first — ``_hydrate_ancestors``'
+    reading, for any entities (a Connections search's edge ends too)."""
+    if not urns:
+        return {}
+
+    async def _safe_chain(urn: str) -> Tuple[str, List[str]]:
         try:
-            chain = await provider._get_ancestor_chain(h.node.urn)
+            chain = await provider._get_ancestor_chain(urn)
         except Exception:
             chain = []
-        return h.node.urn, chain
+        return urn, chain
 
     # 1. Every hit's ancestor chain: in one pass where the provider reads
     # them in bulk (one pipelined cache read, one Cypher for the misses) —
@@ -4543,18 +4635,18 @@ async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:
     chains: Dict[str, List[str]] = {}
     if bulk is not None:
         try:
-            chains = await bulk([h.node.urn for h in hits])
+            chains = await bulk(list(urns))
         except Exception:
             logger.warning("deep_search: bulk ancestor chains failed; "
                            "ancestor_path will be empty on this page")
     else:
         chain_results = await asyncio.gather(
-            *(_safe_chain(h) for h in hits), return_exceptions=False,
+            *(_safe_chain(u) for u in urns), return_exceptions=False,
         )
         chains = dict(chain_results)
     needed_urns: set = set()
-    for urns in chains.values():
-        needed_urns.update(urns)
+    for chain in chains.values():
+        needed_urns.update(chain)
 
     # 2. Single batched node fetch for every unique ancestor URN —
     # collapses what was N round-trips into one.
@@ -4574,14 +4666,16 @@ async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:
                 "ancestor_path will be empty on this page",
             )
 
-    for h in hits:
-        chain = chains.get(h.node.urn, [])
+    paths: Dict[str, List[AncestorRef]] = {}
+    for urn in urns:
+        chain = chains.get(urn, [])
         # chain is parent → ... → root; reverse to root → parent
         refs = []
-        for urn in reversed(chain):
-            if urn in summaries:
-                name, etype = summaries[urn]
+        for anc in reversed(chain):
+            if anc in summaries:
+                name, etype = summaries[anc]
                 refs.append(AncestorRef(
-                    urn=urn, display_name=name, entity_type=etype,
+                    urn=anc, display_name=name, entity_type=etype,
                 ))
-        h.ancestor_path = refs
+        paths[urn] = refs
+    return paths
