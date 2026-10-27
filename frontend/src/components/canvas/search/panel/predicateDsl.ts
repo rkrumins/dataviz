@@ -203,8 +203,20 @@ export interface DslSpan {
     to: number
 }
 
+/** What the text is read against. */
+export interface ParseOptions {
+    /** The View's layer names: one of several words reads whole unquoted —
+     *  ``layer:My Cool Layer`` — the longest that the words spell. */
+    layers?: readonly string[]
+}
 
-export function parsePredicate(input: string): ParseResult {
+/** A layer's name as layer names are compared: case and spacing aside. */
+export function layerKey(name: string): string {
+    return name.trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+
+export function parsePredicate(input: string, options: ParseOptions = {}): ParseResult {
     const tokens = lex(input)
     const recognized: string[] = []
     const fallbackText: string[] = []
@@ -225,7 +237,7 @@ export function parsePredicate(input: string): ParseResult {
             errorAt: { from: unclosed.from, to: unclosed.to },
         })
     }
-    const p = new Parser(tokens, recognized, fallbackText, input.length)
+    const p = new Parser(tokens, recognized, fallbackText, input.length, options.layers ?? [])
     spans = p.spans
     try {
         const pred = p.parseExpr()
@@ -540,8 +552,8 @@ function stable(v: unknown): string {
  *  several with one of those, ``tag IN ("PII data", GDPR)``. */
 function listedValues(field: 'type' | 'tag', values: string[]): string {
     if (!values.some(needsQuotes)) return `${field}:${values.join(',')}`
-    if (values.length === 1) return `${field}:"${values[0]}"`
-    return `${field} IN (${values.map((v) => (needsQuotes(v) ? `"${v}"` : v)).join(', ')})`
+    if (values.length === 1) return `${field}:${quote(values[0])}`
+    return `${field} IN (${values.map((v) => (needsQuotes(v) ? quote(v) : v)).join(', ')})`
 }
 
 
@@ -559,14 +571,14 @@ function spelling(c: Predicate): string | null {
             return listedValues('tag', c.values)
         }
         case 'layer':
-            return `layer:${needsQuotes(c.layerAssignment) ? `"${c.layerAssignment}"` : c.layerAssignment}`
+            return `layer:${needsQuotes(c.layerAssignment) ? quote(c.layerAssignment) : c.layerAssignment}`
         case 'hasProperty': {
             const name = c.keyMatch === 'prefix' ? `${c.key}*`
                 : c.keyMatch === 'contains' ? `*${c.key}*` : c.key
             return c.negate ? `not has:${name}` : `hasProperty:${name}`
         }
         case 'property': {
-            const key = needsQuotes(c.key) ? `"${c.key}"` : c.key
+            const key = needsQuotes(c.key) ? quote(c.key) : c.key
             if (c.valueKey != null) return `${key} ${PROP_OP_STR[c.op ?? 'eq']} {${c.valueKey}}${formatSuffixes(c)}`
             return `${key} ${formatComparison(c)}${formatSuffixes(c)}`
         }
@@ -955,7 +967,29 @@ class Parser {
         readonly fallbackText: string[],
         /** The input's length: where "it ended too soon" points. */
         readonly length: number,
+        /** The View's layer names (``ParseOptions``). */
+        readonly layers: readonly string[] = [],
     ) {}
+
+    /** The layer ``value`` names: the longest of the View's layer names that
+     *  it and the plain words after it spell, ignoring case and spacing —
+     *  those words read as part of it — else ``value`` as written. */
+    layerName(value: string): string {
+        if (!this.layers.length) return value
+        const named = new Map(this.layers.map((n) => [layerKey(n), n]))
+        let words = layerKey(value)
+        let found: { name: string; end: number } | null = null
+        for (let i = this.pos; i < this.tokens.length; i += 1) {
+            const t = this.tokens[i]
+            if (t.kind !== TokenKind.Word || t.text.includes(':')) break
+            words = `${words} ${layerKey(t.text)}`
+            if (named.has(words)) found = { name: named.get(words)!, end: i + 1 }
+            if (![...named.keys()].some((n) => n.startsWith(`${words} `))) break
+        }
+        if (!found) return value
+        for (; this.pos < found.end; this.pos += 1) this.tokens[this.pos].role = 'value'
+        return found.name
+    }
 
     peek(): Token | null {
         return this.tokens[this.pos] ?? null
@@ -1230,7 +1264,8 @@ class Parser {
                     this.recognized.push(`${t.text} ${opT.text} ${valT.raw}`)
                     // `layer = "X"` is a layer predicate
                     if (t.kind === TokenKind.Word && t.text.toLowerCase() === 'layer' && propOp === 'eq') {
-                        return { kind: 'layer', layerAssignment: rawValue }
+                        return { kind: 'layer', layerAssignment: valT.kind === TokenKind.Quoted
+                            ? rawValue : this.layerName(rawValue) }
                     }
                     return this.consumeSuffixes({
                         kind: 'property',
@@ -1254,6 +1289,8 @@ class Parser {
                 if (quoted) {
                     this.consume()
                     quoted.role = 'prefixed'
+                } else if (prefixed.kind === 'layer') {
+                    prefixed.layerAssignment = this.layerName(prefixed.layerAssignment)
                 }
                 this.recognized.push(quoted ? `${t.text}${quoted.raw}` : t.text)
                 return prefixed
@@ -1785,7 +1822,15 @@ function splitCsv(s: string): string[] {
 
 
 function needsQuotes(s: string): boolean {
-    return /\s|[",()!=<>]/.test(s) || s === ''
+    return /\s|["',()!=<>]/.test(s) || s === ''
+}
+
+
+/** ``s`` in quotes the language reads back as ``s``: double, or single when
+ *  it holds a double one. (One holding both can't be — its condition is
+ *  written as JSON, ``formatAtom``.) */
+function quote(s: string): string {
+    return s.includes('"') ? `'${s}'` : `"${s}"`
 }
 
 
@@ -1814,7 +1859,7 @@ function coerceScalar(value: string, wasQuoted: boolean): unknown {
 
 function formatScalar(v: unknown): string {
     if (v === null || v === undefined) return 'null'
-    if (typeof v === 'string') return needsQuotes(v) || readsAsNonText(v) ? `"${v}"` : v
+    if (typeof v === 'string') return needsQuotes(v) || readsAsNonText(v) ? quote(v) : v
     if (typeof v === 'boolean' || typeof v === 'number') return String(v)
     if (Array.isArray(v)) return `(${v.map(formatScalar).join(', ')})`
     return JSON.stringify(v)

@@ -452,7 +452,7 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
     if session is None or session.status == FAILED:
         query = SearchQuery(predicate=MatchAllPredicate(), scope=scope)
         compiler = _build_compiler_for_provider(provider)
-        compiler.compile(query.predicate)
+        compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
         plan = await make_plan(
             provider, query, compiler,
             run=lambda c, p: run(c, p, max(1.0, settings.chunk_timeout_ms / 1000.0)),

@@ -184,6 +184,23 @@ describe('Code mode', () => {
         expect(selected()).toBe(text())
     })
 
+    it('reads a layer name of several words, unquoted, against the View’s layers', () => {
+        const onCommit = vi.fn()
+        render(<CodeMode draft={null} isRunning={false} onCommit={onCommit}
+                         vocabulary={{ ...VOCABULARY, layers: ['My Cool Layer'] }} />)
+        type('layer:My Cool Layer AND type:dataset')
+        expect(screen.getByRole('status')).toHaveTextContent('Reads as:')
+        expect(screen.getByRole('status')).not.toHaveTextContent('searched as text')
+        // ⌘I takes the whole name with it.
+        act(() => { editor().dispatch({ selection: { anchor: text().indexOf('Cool') } }) })
+        press('i', true)
+        expect(selected()).toBe('layer:My Cool Layer')
+        press('Enter', true)
+        expect(onCommit).toHaveBeenCalledWith({
+            kind: 'group', op: 'and', children: [{ kind: 'layer', layerAssignment: 'My Cool Layer' }, DATASETS],
+        })
+    })
+
     it('points at Cypher for what the words can’t say', () => {
         const onOpenCypher = vi.fn()
         render(<CodeMode draft={null} isRunning={false} onCommit={vi.fn()} vocabulary={VOCABULARY}

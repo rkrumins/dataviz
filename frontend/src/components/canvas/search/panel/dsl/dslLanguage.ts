@@ -37,7 +37,9 @@ import type { RoleRange } from '../../editor/codeMirrorBase'
 import { arityOf, isNegative, operatorLabel, predicateType } from '../../typed/operators'
 import type { ValueType } from '../../typed/valueTypes'
 import type { NamedEntity } from '../entityNames'
-import { type DslRole, type DslSpan, type DslToken, parsePredicate, PROP_OP_STR } from '../predicateDsl'
+import {
+    type DslRole, type DslSpan, type DslToken, layerKey, type ParseOptions, parsePredicate, PROP_OP_STR,
+} from '../predicateDsl'
 import { formatNamePath } from '../relations'
 import { EDGE_SET_OPTIONS } from '../vocabulary/edgeWords'
 
@@ -67,10 +69,11 @@ export interface DslVocabulary {
 // Highlighting and the underline
 // ---------------------------------------------------------------------------
 
-/** The parser's tokens as ranges to colour; ``key:value`` in two parts. */
-export function dslRanges(text: string): RoleRange[] {
+/** The parser's tokens as ranges to colour; ``key:value`` in two parts.
+ *  ``options``: what the text is read against — the View's layers. */
+export function dslRanges(text: string, options: ParseOptions = {}): RoleRange[] {
     const out: RoleRange[] = []
-    for (const t of parsePredicate(text).tokens) {
+    for (const t of parsePredicate(text, options).tokens) {
         const colon = t.role === 'prefixed' ? t.text.indexOf(':') : -1
         if (colon > 0) {
             out.push({ from: t.from, to: t.from + colon + 1, role: 'prefix' })
@@ -87,8 +90,9 @@ export function dslRanges(text: string): RoleRange[] {
  *  character when it points past the end ("it ends too soon"). A query
  *  that reads gets a warning on each edge type not among ``edgeTypes``,
  *  once they are known. */
-export function dslDiagnostics(text: string, edgeTypes?: readonly { id: string }[]): Diagnostic[] {
-    const result = parsePredicate(text)
+export function dslDiagnostics(text: string, edgeTypes?: readonly { id: string }[],
+                               options: ParseOptions = {}): Diagnostic[] {
+    const result = parsePredicate(text, options)
     if (!result.error) return edgeTypes?.length ? unknownEdgeTypes(result.tokens, edgeTypes) : []
     let from = Math.min(result.errorAt?.from ?? 0, text.length)
     let to = Math.min(result.errorAt?.to ?? text.length, text.length)
@@ -130,7 +134,10 @@ function unknownEdgeTypes(tokens: readonly DslToken[], edgeTypes: readonly { id:
 
 /** The underline and the warnings, ``vocabulary()`` read at each pass. */
 export function dslLint(vocabulary: () => DslVocabulary) {
-    return linter((view) => dslDiagnostics(view.state.doc.toString(), vocabulary().edgeTypes), { delay: 200 })
+    return linter((view) => {
+        const v = vocabulary()
+        return dslDiagnostics(view.state.doc.toString(), v.edgeTypes, { layers: v.layers })
+    }, { delay: 200 })
 }
 
 
@@ -157,8 +164,8 @@ function smallestAround(spans: readonly DslSpan[], from: number, to: number, orE
  *  on the word that starts it — ``tag`` in ``tag:PII``, ``outgoing[…](``,
  *  ``NOT``, a property's name — or on an AND/OR, which takes in its group.
  *  ``null`` on any other word, which selects as a word does. */
-export function conditionAtHead(text: string, pos: number): DslSpan | null {
-    const { tokens, spans } = parsePredicate(text)
+export function conditionAtHead(text: string, pos: number, options: ParseOptions = {}): DslSpan | null {
+    const { tokens, spans } = parsePredicate(text, options)
     const t = tokens.find((x) => x.from <= pos && pos < x.to)
         ?? tokens.find((x) => x.to === pos)
     if (!t) return null
@@ -170,8 +177,9 @@ export function conditionAtHead(text: string, pos: number): DslSpan | null {
 
 /** The next condition or group out from ``from``–``to``; ``null`` when
  *  none is wider. */
-export function widerCondition(text: string, from: number, to: number): DslSpan | null {
-    return smallestAround(parsePredicate(text).spans, from, to)
+export function widerCondition(text: string, from: number, to: number,
+                               options: ParseOptions = {}): DslSpan | null {
+    return smallestAround(parsePredicate(text, options).spans, from, to)
 }
 
 
@@ -185,6 +193,9 @@ export type DslCompletionContext =
     | { kind: 'name'; from: number; text: string }
     | { kind: 'prefixValue'; prefix: 'type' | 'tag' | 'layer' | 'has'; from: number; text: string;
         taken: string[] }
+    /** A layer's name after ``layer:`` or ``layer =``, begun in ``quote`` —
+     *  or, with none, in plain words that start one of the View's layers. */
+    | { kind: 'layerName'; from: number; text: string; quote: string }
     /** ``taken``: inside ``IN (…)``, the values already listed. */
     | { kind: 'value'; key: string; from: number; text: string; quoted: boolean; taken?: string[] }
     | { kind: 'operator'; key: string; quoted: boolean; field: ComparedField; from: number; text: string }
@@ -219,15 +230,30 @@ const DURATION = /(?:^|[\s(!])(?:"[^"]+"|[A-Za-z_][\w.-]*)\s+WITHIN\s+LAST\s+(\w
 
 
 /** ``keyField``: what a name before the cursor is, if it can start a
- *  comparison — the vocabulary knows; without it, names are words. */
+ *  comparison — the vocabulary knows; without it, names are words.
+ *  ``layers``: the View's layer names, which may run to several words. */
 export function completionContextAt(
     doc: string, pos: number,
     keyField?: (key: string, quoted: boolean) => ComparedField | null,
+    layers: readonly string[] = [],
 ): DslCompletionContext {
     const before = doc.slice(0, pos)
     // Inside @"… not yet closed: an entity, by name.
     const ref = /@(["'])([^"']*)$/.exec(before)
     if (ref) return { kind: 'name', from: pos - ref[2].length, text: ref[2] }
+
+    // A layer's name begun after layer: or layer =, in quotes or in words.
+    const layer = /(?:^|[\s(!])layer(?::|\s*=\s*)(["']?)([^"'()]*)$/i.exec(before)
+    if (layer) {
+        const [, quote, text] = layer
+        // In plain words: more than one, the last begun, starting a layer's
+        // name — the parser reads those as one. A word alone is the
+        // prefix's own value.
+        if (quote || (/^[^\s"'(),!=<>]+(?:\s+[^\s"'(),!=<>:]+)+$/.test(text)
+                      && layersStartingWith(layers, text).length)) {
+            return { kind: 'layerName', from: pos - text.length, text, quote }
+        }
+    }
 
     // After a comparison, inside {… not yet closed: another property.
     const keyRef = /(?:=|<|>)\s*\{([^{}":]*)$/.exec(before)
@@ -301,6 +327,12 @@ export function completionContextAt(
 
 function unquoteKey(raw: string): string {
     return raw.startsWith('"') ? raw.slice(1, -1) : raw
+}
+
+/** The layers whose names start with ``text``, case and spacing aside. */
+function layersStartingWith(layers: readonly string[], text: string): string[] {
+    const typed = layerKey(text)
+    return layers.filter((name) => layerKey(name).startsWith(typed))
 }
 
 /** The names the parser reads as text fields (a name search's targets),
@@ -636,7 +668,7 @@ export function dslCompletionSource(vocabulary: () => DslVocabulary): Completion
         // A name the view doesn't list may be a property all the same; the
         // language's own words never are.
         const at = completionContextAt(doc, context.pos, (key, isQuoted) =>
-            listed(key, isQuoted) ?? (RESERVED.test(key) ? null : 'property'))
+            listed(key, isQuoted) ?? (RESERVED.test(key) ? null : 'property'), vocab.layers)
         switch (at.kind) {
             case 'name':
                 return nameCompletions(context, at, vocab)
@@ -645,13 +677,38 @@ export function dslCompletionSource(vocabulary: () => DslVocabulary): Completion
                     : at.prefix === 'tag' ? vocab.tags
                         : at.prefix === 'layer' ? vocab.layers : vocab.propertyKeys
                 const taken = new Set(at.taken)
+                // One that needs quotes is written in them — the first value
+                // only: a list after a comma takes none.
                 return {
                     from: at.from,
-                    options: list.filter((v) => bare(v) && !taken.has(v)).slice(0, MAX_OPTIONS)
-                        .map((v) => ({ label: v, type: 'constant' })),
+                    options: list.filter((v) => (bare(v) || !at.taken.length) && !taken.has(v))
+                        .slice(0, MAX_OPTIONS)
+                        .map((v) => ({ label: v, type: 'constant', ...(bare(v) ? {} : { apply: quoted(v) }) })),
                     validFor: /^[^\s(),"'!=<>]*$/,
                 }
             }
+            case 'layerName':
+                if (at.quote) {
+                    return {
+                        from: at.from,
+                        // One holding the quote it was begun in can't be written in it.
+                        options: vocab.layers.filter((name) => !name.includes(at.quote)).slice(0, MAX_OPTIONS)
+                            .map((name) => ({
+                                label: name, type: 'constant',
+                                apply: (view: EditorView, _c: Completion, from: number, to: number) =>
+                                    writeQuoted(view, name, from, to),
+                            })),
+                        validFor: /^[^"']*$/,
+                    }
+                }
+                // Asked again at each key: once the words start no layer's
+                // name, they are whatever they read as.
+                return {
+                    from: at.from,
+                    options: layersStartingWith(vocab.layers, at.text).slice(0, MAX_OPTIONS)
+                        .map((name) => ({ label: name, type: 'constant', apply: quoted(name) })),
+                    filter: false,
+                }
             case 'value': {
                 const taken = new Set(at.taken ?? [])
                 // The entity type and a layer take the view's own lists.
@@ -798,7 +855,13 @@ async function applyName(view: EditorView, pathFor: (e: NamedEntity) => Promise<
     const typed = view.state.sliceDoc(from, to)
     const ref = await pathFor(entity).catch(() => ({ urn: entity.urn }) as NodeRef)
     if (view.state.sliceDoc(from, to) !== typed) return
-    const text = ref.path ? formatNamePath(ref.path) : (ref.urn ?? entity.urn)
+    writeQuoted(view, ref.path ? formatNamePath(ref.path) : (ref.urn ?? entity.urn), from, to)
+}
+
+
+/** Write ``text`` between ``from`` and ``to``, just inside an open quote,
+ *  and close the quote unless it already is; the cursor goes after it. */
+function writeQuoted(view: EditorView, text: string, from: number, to: number): void {
     const quote = view.state.sliceDoc(from - 1, from)
     const closed = view.state.sliceDoc(to, to + 1) === quote
     view.dispatch({

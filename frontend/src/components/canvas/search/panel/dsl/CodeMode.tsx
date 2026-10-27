@@ -47,7 +47,9 @@ export function CodeMode({
         if (shown !== applied && !typed) setText(shown)
     }
 
-    const parsed = useMemo(() => parsePredicate(text), [text])
+    // Read against the View's layers: ``layer:My Cool Layer`` is one name.
+    const layers = vocabulary.layers
+    const parsed = useMemo(() => parsePredicate(text, { layers }), [text, layers])
     const commit = useCallback(() => {
         // A query that doesn't parse is never applied: the one you had stays.
         if (!typed || parsed.error) return

@@ -61,7 +61,10 @@ class TestValidation:
             "kind": "group", "op": "and", "children": [DATASET, DATASET]}))) == 4
         with pytest.raises(ValidationError, match=r"\$.targetWhere.*can't sit inside"):
             _validate_predicate(P(path(sourceUrns=["a"], targetWhere={
-                "kind": "descendantOf", "urns": ["u"]})))
+                "kind": "withinHops", "urns": ["u"], "hops": 2})))
+        # Inside a container is a condition on the end itself.
+        assert _validate_predicate(P(path(sourceUrns=["a"], targetWhere={
+            "kind": "descendantOf", "urns": ["u"]}))) == 2
         deep = {"kind": "related", "axis": "parent", "where": {
             "kind": "related", "axis": "parent", "where": {
                 "kind": "related", "axis": "parent"}}}

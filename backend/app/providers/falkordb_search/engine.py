@@ -142,7 +142,7 @@ async def execute_session_search(
             return await provider._ro_query(cypher, params=params, timeout=timeout_s)
 
     compiler, raw_labels = await _compiler_for(provider, run, context, settings)
-    where = compiler.compile(query.predicate)
+    where = compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
     if compiler.hoisted_path is not None:
         raise CompileError("path search is not run by the uncapped engine")
     hops, hop_params, hop_parts = within_hops(compiler)
@@ -240,7 +240,7 @@ async def execute_count_session(
             return await provider._ro_query(cypher, params=params, timeout=timeout_s)
 
     compiler, raw_labels = await _compiler_for(provider, run, context, settings)
-    where = compiler.compile(query.predicate)
+    where = compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
     if compiler.hoisted_path is not None:
         raise CompileError("a path search has no count")
     hops, hop_params, hop_parts = within_hops(compiler)
@@ -629,7 +629,7 @@ async def _compute_facets(provider, query: SearchQuery, specs, sid: str, store: 
     """Each of ``specs``, by the capped engine's statement for it."""
     started = time.monotonic()
     compiler = _build_compiler_for_provider(provider)
-    where = compiler.compile(query.predicate)
+    where = compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
     params: Dict[str, Any] = dict(compiler.params)
     try:
         refuse_trace(compiler)

@@ -417,7 +417,7 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
     cols = export_columns(list(columns), edges=edges)
     if not edges:
         compiler, raw_labels = await _compiler_for(provider, run, context, settings)
-        where = compiler.compile(query.predicate)
+        where = compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
         if compiler.hoisted_path is not None:
             raise CompileError("A path search finds routes, not entities to export.")
         hops, hop_params, hop_parts = within_hops(compiler)
