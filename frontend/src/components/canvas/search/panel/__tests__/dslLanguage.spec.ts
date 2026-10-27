@@ -213,3 +213,53 @@ describe('dslLanguage — an edge type named like a class', () => {
             expect.objectContaining({ severity: 'warning', from: 10, to: 14 })])
     })
 })
+
+
+describe('dslLanguage — connections', () => {
+    it.each<[string, ReturnType<typeof completionContextAt>]>([
+        // A connection's edges are any edges — a count's rules, not a relationship's.
+        ['from(type:x) to[|', { kind: 'edgeType', from: 16, text: '', taken: [], connection: false }],
+        ['from(type:x) linkedTo[PRODUCES, D|', { kind: 'edgeType', from: 32, text: 'D', taken: ['PRODUCES'],
+            connection: false }],
+        // linkedTo anywhere else is a relationship.
+        ['linkedTo[|', { kind: 'edgeType', from: 9, text: '', taken: [], connection: true }],
+        ['from(linkedTo[|', { kind: 'edgeType', from: 14, text: '', taken: [], connection: true }],
+        // Right after from(…): where the edges go; inside an end, a condition.
+        ['from(type:x) |', { kind: 'connectionEnd', from: 13, text: '' }],
+        ['from(type:x) li|', { kind: 'connectionEnd', from: 13, text: 'li' }],
+        ['from(type:x) to(ty|', { kind: 'term', from: 16, text: 'ty' }],
+        ['from(|', { kind: 'term', from: 5, text: '' }],
+        ['from(type:x) to(type:y).via(con|', { kind: 'edgeKey', from: 28, text: 'con' }],
+    ])('reads %s', (doc, expected) => {
+        const [text, pos] = cursor(doc)
+        expect(completionContextAt(text, pos)).toEqual(expected)
+    })
+
+    it('offers where the edges go after from(…), unasked', async () => {
+        expect(labels(await complete('from(type:x) |'))).toEqual(['to(…)', 'to[…](…)', 'linkedTo(…)'])
+    })
+
+    it('offers every class and edge type inside to[', async () => {
+        expect(labels(await complete('from() to[|'))).toEqual(['lineage', 'links', 'any', 'containment',
+            'PRODUCES', 'DEFINED_BY', 'CONTAINS'])
+    })
+
+    it('offers a whole connection to start a query with', async () => {
+        expect(labels(await complete('fr|'))).toEqual(expect.arrayContaining(['from(…) to(…)', 'from(…) linkedTo(…)']))
+    })
+
+    it('warns about an edge type in to[…] that the data source lacks', () => {
+        expect(dslDiagnostics('from() to[PRODUCE]()', VOCAB.edgeTypes).map((d) => d.message)).toEqual([
+            "Edge type PRODUCE isn't in this data source"])
+    })
+
+    it('selects an end, then the whole connection', () => {
+        const text = 'from(type:x) to[PRODUCES](tag:PII).via(rows > 5)'
+        const fromWord = conditionAtHead(text, 1)
+        expect(fromWord && text.slice(fromWord.from, fromWord.to)).toBe('from(type:x)')
+        const toWord = conditionAtHead(text, text.indexOf('to[') + 1)
+        expect(toWord && text.slice(toWord.from, toWord.to)).toBe('to[PRODUCES](tag:PII)')
+        const wider = widerCondition(text, 0, 'from(type:x)'.length)
+        expect(wider && text.slice(wider.from, wider.to)).toBe(text)
+    })
+})

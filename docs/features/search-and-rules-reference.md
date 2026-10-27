@@ -5,7 +5,8 @@ keep searches and display rules in a View's library, and move that library
 between Views: the query model, every endpoint with its permissions and errors,
 the library pack format, and ready-to-run recipes.
 
-The user guides are [Advanced Search](/guide/advanced-search) and
+The user guides are [Advanced Search](/guide/advanced-search),
+[Finding Connections](/guide/finding-connections) and
 [Display Rules](/guide/display-rules). How the search service is built — the
 validate → scope → execute pipeline and its configuration — is in
 [Search: Deep & Advanced](/docs/services-search).
@@ -333,6 +334,18 @@ More examples:
 ```
 — every `FEEDS` edge, either way, touching the parent of a column.
 
+**In Code mode.** The panel's Code mode writes a Connections search as words,
+and a library pack or saved search may hold either form:
+
+| Code | JSON |
+| --- | --- |
+| `from(type:dataJob) to(type:dataset)` | `{"kind": "edges", "sourceWhere": {"kind": "entityType", "op": "in", "values": ["dataJob"]}, "targetWhere": {"kind": "entityType", "op": "in", "values": ["dataset"]}}` |
+| `from(…) to[PRODUCES, CONSUMES](…)` | Adds `"edgeTypes": ["PRODUCES", "CONSUMES"]` |
+| `from(…) to[lineage](…)` | Adds `"edgeClass": "lineage"`; `[containment]` and `[any]` likewise. `[links]` is the default, left out |
+| `from(…) linkedTo(…)` | Adds `"direction": "either"` |
+| `from(…) to(…).via(confidence >= 0.8)` | Adds `"edgePredicate": {"kind": "edgeProperty", "key": "confidence", "op": "gte", "value": 0.8}` |
+| `from() to(layer:Gold)` | No `sourceWhere`: any entity. `{"kind": "edges", "targetWhere": {"kind": "layer", "layerAssignment": "Gold"}}` |
+
 **What it returns.** `options.results` is `edges` (left out, it is filled in;
 another value is a `400`). The page lists `edges` in order: the source's name,
 the target's name, the edge type, then the URNs. Each edge has:
@@ -346,6 +359,42 @@ the target's name, the edge type, then the URNs. Each edge has:
 `edgeTypeCounts` gives the matches per edge type, exact once the search is
 complete; `totalCount` gives all of them. Pages hold at most 500 edges, and
 `cursor` and `waitMs` work as for entities.
+
+The answer to "every edge from `fact_orders`, or anything inside it, to the
+Reporting layer" on the demo platform graph, cut to its first edge:
+
+```json
+{"status": "complete", "totalCount": 8, "edgeTypeCounts": {"TRANSFORMS": 8},
+ "edges": [
+  {"key": "704", "id": "e-00000647", "edgeType": "TRANSFORMS",
+   "properties": {"logic": "COUNT(DISTINCT)", "id": "e-00000647", "confidence": 1},
+   "source": {"urn": "urn:li:schemaField:customer_key_000005db", "displayName": "customer_key",
+              "entityType": "schemaField",
+              "parent": {"urn": "urn:li:dataset:fact_orders_000005d4", "displayName": "fact_orders",
+                         "entityType": "dataset"},
+              "ancestorPath": [
+                {"urn": "urn:li:domain:enterprise_data_platform_00000001",
+                 "displayName": "Enterprise Data Platform", "entityType": "domain"},
+                {"urn": "urn:li:dataPlatform:snowflake_0000000f", "displayName": "Snowflake",
+                 "entityType": "dataPlatform"},
+                {"urn": "urn:li:container:analytics_gold_0000057b", "displayName": "ANALYTICS.GOLD",
+                 "entityType": "container"},
+                {"urn": "urn:li:dataset:fact_orders_000005d4", "displayName": "fact_orders",
+                 "entityType": "dataset"}]},
+   "target": {"urn": "urn:li:schemaField:unique_customers_00000645", "displayName": "unique_customers",
+              "entityType": "schemaField",
+              "parent": {"urn": "urn:li:dataset:rpt_daily_revenue_00000631",
+                         "displayName": "rpt_daily_revenue", "entityType": "dataset"},
+              "ancestorPath": [
+                {"urn": "urn:li:domain:enterprise_data_platform_00000001",
+                 "displayName": "Enterprise Data Platform", "entityType": "domain"},
+                {"urn": "urn:li:dataPlatform:snowflake_0000000f", "displayName": "Snowflake",
+                 "entityType": "dataPlatform"},
+                {"urn": "urn:li:container:analytics_reporting_00000628",
+                 "displayName": "ANALYTICS.REPORTING", "entityType": "container"},
+                {"urn": "urn:li:dataset:rpt_daily_revenue_00000631",
+                 "displayName": "rpt_daily_revenue", "entityType": "dataset"}]}}]}
+```
 
 **The rules:**
 - It is the whole query. It can't sit beside other conditions, under a `not`,

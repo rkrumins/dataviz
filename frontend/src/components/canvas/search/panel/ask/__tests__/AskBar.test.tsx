@@ -68,6 +68,16 @@ describe('AskBar', () => {
         expect(screen.getByText('12 matches', { selector: '[aria-live]' })).toBeInTheDocument()
     })
 
+    it('reads a connection question back as a connection, and applies it as the whole query', () => {
+        const { ask, input, onAsk } = setup()
+        ask('connections from datasets to dashboards either way')
+        expect(screen.getByText(/^Connections/)).toHaveTextContent(
+            /Connections from anything .*dataset.* to anything .*dashboard.*, through any link, either way/)
+        expect(screen.queryByText(/anything that…/)).not.toBeInTheDocument()
+        fireEvent.keyDown(input, { key: 'Enter' })
+        expect(onAsk).toHaveBeenCalledWith(expect.objectContaining({ kind: 'edges', direction: 'either' }))
+    })
+
     it('applies the question once on Enter, remembers it and clears', () => {
         const { ask, input, onAsk } = setup()
         ask('datasets tagged PII')
