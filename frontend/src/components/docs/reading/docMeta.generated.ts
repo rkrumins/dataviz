@@ -281,11 +281,11 @@ export const docMeta: Record<string, DocMeta> = {
 }
 export const guideMeta: Record<string, DocMeta> = {
   "welcome": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-27",
     "path": "docs/guide/WELCOME.md"
   },
   "key-concepts": {
-    "updated": "2026-10-19",
+    "updated": "2026-10-27",
     "path": "docs/guide/KEY_CONCEPTS.md"
   },
   "quick-start": {
@@ -307,6 +307,10 @@ export const guideMeta: Record<string, DocMeta> = {
   "advanced-search": {
     "updated": "2026-10-27",
     "path": "docs/guide/ADVANCED_SEARCH.md"
+  },
+  "finding-connections": {
+    "updated": "2026-10-27",
+    "path": "docs/guide/FINDING_CONNECTIONS.md"
   },
   "lineage-lens": {
     "updated": "2026-10-10",
@@ -409,7 +413,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/WAYS_OF_WORKING.md"
   },
   "glossary": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-27",
     "path": "docs/guide/GLOSSARY.md"
   },
   "troubleshooting": {

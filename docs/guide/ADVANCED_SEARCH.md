@@ -10,7 +10,7 @@ ask, narrow the results, act on the matches, and save the searches you reuse.
 
 It can find the **edges themselves** too: every relationship from the entities
 you describe to the ones you describe next, with both ends and their parents —
-see [Connections](#connections-the-edges-themselves).
+see [Finding Connections](/guide/finding-connections).
 
 > **Note:** *The one-sentence model* — A search is a set of **filters** (joined
 > with AND, OR and NOT) run over **one View**. The same filters power the quick
@@ -357,60 +357,21 @@ it, into the Reporting layer". Each answer is one edge, with both of its ends
 and the containers each sits in.
 
 Switch **Find** in the query card's first row from **Entities** to
-**Connections**. Your conditions become **From**; switching back brings them
-back. The card then reads as three parts:
+**Connections**: your conditions become **From**, and switching back brings
+them back. Then say where the edges end (**To**) and which edges count
+(**Through**: **Any link**, **Lineage**, **Containment**, **Any edge** or
+**These edge types…**; **From → To** or **Either way**; and **Only edges
+where…**). Each end is an ordinary query of its own and shows its live count.
+The results list each edge; the canvas lights the lines that carry them, each
+badged with how many it carries; Search Studio, **Export** and the **Library**
+take them too. A Connections search finds direct edges, one edge from a From
+match to a To match (see [Limits](#limits)), and it can't be made into a
+display rule.
 
-- **From** and **To** — each an ordinary query of its own: types, tags,
-  properties, names, **In layer…**, **Inside a container named…** (which counts
-  the container itself), and relationships such as **Is directly inside** — "to
-  anything whose parent's family is smith". Each shows its live count. An empty
-  end reads **any entity**.
-- **Through**, on the line between them:
-  - which edges — **Any link** (every edge but the hierarchy's, the default),
-    **Lineage**, **Containment**, **Any edge**, or **These edge types…**;
-  - which way — **From → To**, as each edge is stored, or **Either way**;
-  - **Only edges where…** — conditions on the edge itself, such as
-    `confidence` at least 0.8.
-
-A Connections search finds **direct edges** — one edge from a From match to a
-To match, not routes through others (see [Limits](#limits)). With both ends
-empty it waits for edge types, so it never scans every edge by accident.
-
-**The results.** The match bar counts connections, and `J` / `K` step through
-them. Each row is one edge: the source, the edge type (its properties on
-hover) and the target, each end with the container it sits in. Type chips
-count each edge type exactly; click one to narrow **Through** to it. A row
-shows both ends on the canvas, opens either end, or copies the edge's id.
-When nothing matches, the panel says how many entities meet From and To —
-nothing at one end needs a different fix from ends that never link — and
-offers **Either way**, **Any link** or dropping the edge condition.
-
-**On the canvas** both ends and their containers light up, as matches do, and
-so do the **lines that draw the matched edges**, each with a badge saying how
-many matches it draws (**N+** while more pages remain), while the other lines
-dim. Matches folded inside collapsed containers light the line between the
-containers on screen — even where no summary of their connections was built —
-and opening a container moves the light to the rows inside, down to the exact
-edges. **On Hover** and **Adaptive** draw the lit lines too; past 1,000, a chip
-says how many more weren't drawn. Matches of a kind of flow you've hidden in
-the **Flows** panel stay hidden, and the match bar says so, with **Show
-them**. On the Graph canvas the matched lines light up the same way.
-
-**Studio, export and the library.** Search Studio shows the edges as a table —
-Source, Source parent, Type, Target, Target parent, and any edge property as
-a column — to frame on the canvas or copy as CSV. **Export** writes every edge
-with its ends and their parents, its properties as JSON, and the edge
-properties you pick. Saved, a search shows a **Connections** badge in the
-Library; a display rule can't be made of one, since a rule tags entities.
-
-Your examples, in **Code**:
-
-| Question | Code |
-| --- | --- |
-| Every edge from a string field called bob to anything whose parent's family is smith | `from(dataType = string AND first_name = bob) to(parent(family = smith))` |
-| From `fact_orders` or anything inside it, to the Reporting layer | `from(inside @"**/fact_orders") to(layer:"Reporting layer")` |
-| From a job to the datasets it produces, tagged PII | `from(type:dataJob) to[PRODUCES](type:dataset tag:PII)` |
-| Column to column, either way, through confident lineage | `from(type:schemaField) linkedTo[lineage](type:schemaField).via(confidence >= 0.8)` |
+**[Finding Connections](/guide/finding-connections)** walks through a first
+search step by step, with pictures; gives worked examples in the Form, Ask and
+Code; explains what the canvas shows; and says what to do when nothing
+matches.
 
 > **Note:** Both ends read the values each entity keeps as its own. A value kept
 > only inside an entity's raw properties JSON doesn't match at either end — the
@@ -1073,12 +1034,15 @@ steps tests reach.
 | "*A connection is the whole query…*" in **Code** | `from(…) to(…)` sits in an AND, OR or NOT, or inside a relationship | Put the other conditions in its ends: `from(type:dataset tag:PII) to(…)` |
 | "*Say where the edges go…*" in **Code** | `from(…)` isn't followed by `to(…)` or `linkedTo(…)` | Add the far end — `to()` for any entity |
 | "*A connection is one edge…*" in **Code** | Steps such as `to*..3(` ask for routes | Find direct edges, or follow reach with a relationship (**Feeds** within *N* steps) or a *Path* |
-| **0 connections**, and both ends have matches | No direct edge joins them the way the search asks | Try **Either way**, **Any link**, or drop the edge condition — the empty answer offers each |
+| **0 connections**, and both ends have matches | No direct edge joins them the way the search asks | Try **Either way**, **Any link**, or drop the edge condition — the empty answer offers each. See [When nothing matches](/guide/finding-connections#when-nothing-matches) |
 
 ---
 
 ## Where to next
 
+- [Finding Connections](/guide/finding-connections) — when you want the lines
+  between things rather than the things: every connection from one set of
+  entities to another.
 - [Display Rules](/guide/display-rules) — when you want to colour the canvas by
   a rule you write.
 - [Tracing Lineage on the Canvas](/guide/exploring-graph) — when you've found an

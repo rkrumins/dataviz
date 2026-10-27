@@ -50,8 +50,11 @@ panel says how many entities meet each end and offers the fixes that fit. Connec
 **Ask** reads "connections from columns tagged PII to dashboards through produces, either way".
 Each end is read as a question of its own.
 
-See the guide's [Connections](/guide/advanced-search#connections-the-edges-themselves)
-section.
+**A guide page for everyone.** [Finding Connections](/guide/finding-connections) explains what a
+connection is and walks through a first search step by step, with pictures. It gives worked
+examples in the Form, Ask and Code, explains what the canvas shows, and says what to do when
+nothing matches. The glossary gains *Connection*, *Edge type*, *Either way*, *From / To* and
+*Through*, and the guide's home page gains a card and a question for it.
 
 ### Changed
 
