@@ -224,7 +224,7 @@
       "type": "object"
     },
     "DescendantOfPredicate": {
-      "description": "Clamp matches to the subtree(s) rooted at ``urns`` and ``refs``.\n\nLives as a predicate (not on ``SearchScope``) so it can sit inside\nOR groups \u2014 e.g. ``(under Customers OR under Orders) AND tag=PII``.\nThe single-subtree case is also expressible via ``scope.root_urns``,\nwhich the provider may push down as a tighter Cypher anchor.",
+      "description": "Clamp matches to the subtree(s) rooted at ``urns`` and ``refs``.\n\nLives as a predicate (not on ``SearchScope``) so it can sit inside\nOR groups \u2014 e.g. ``(under Customers OR under Orders) AND tag=PII`` \u2014\nand NOT groups and relationships' conditions: there each entity is\ntested itself, as the container or below it within ``max_depth`` (else\nthe scope's). In the top-level AND it bounds the search instead. The\nsingle-subtree case is also expressible via ``scope.root_urns``,\nwhich the provider may push down as a tighter Cypher anchor.",
       "properties": {
         "kind": {
           "const": "descendantOf",

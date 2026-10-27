@@ -118,6 +118,11 @@ def rel(axis, where=None, **kw):
     return {"kind": "related", "axis": axis, **({"where": where} if where is not None else {}), **kw}
 
 
+def FAMILY(name):
+    """It, what it holds and what holds it."""
+    return {"kind": "group", "op": "or", "children": [INSIDE(name), rel("descendant", IS(name))]}
+
+
 STRING_BOB = AND(PROP("dataType", "string"), PROP("first_name", "bob"))
 SMITH_PARENT = rel("parent", PROP("family", "smith"))
 STREAM = {"kind": "edgeProperty", "key": "mode", "op": "eq", "value": "stream"}
@@ -150,6 +155,17 @@ CASES = [
                                                      targetWhere=TYPE("Entity"))),
     ("into the parent of a column", C(targetWhere=rel("child", IS("S.leads.name")))),
     ("into a table's columns", C(targetWhere=rel("parent", IS("S.leads")))),
+    ("into anything holding a column", C(targetWhere=rel("descendant", IS("S.leads.name")))),
+    ("a table, what it holds and what holds it, to the same of another",
+     C(sourceWhere=FAMILY("F.orders"), targetWhere=FAMILY("S.leads"))),
+    ("the same, either way", C(sourceWhere=FAMILY("F.orders"), targetWhere=FAMILY("S.leads"),
+                               direction="either")),
+    ("from inside either of two tables", C(sourceWhere={"kind": "group", "op": "or", "children": [
+        INSIDE("F.orders"), INSIDE("S.deals")]})),
+    ("into Finance from anything not inside it", C(sourceWhere=NOT(INSIDE("F")),
+                                                   targetWhere=INSIDE("F"))),
+    ("from the Finance layer into a table's family", C(sourceWhere=LAYER("Finance"),
+                                                       targetWhere=FAMILY("S.leads"))),
     ("named at both ends", C(sourceWhere=IS("F.orders.name"), targetWhere=IS("S.leads.name"))),
     ("in stream mode, from a string column", C(sourceWhere=PROP("dataType", "string"),
                                                edgePredicate=STREAM)),

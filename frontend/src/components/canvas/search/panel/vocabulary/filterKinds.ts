@@ -537,9 +537,9 @@ export function filterKindById(id: string): FilterKind | undefined {
 }
 
 
-/** Entries that scope the whole search, which a relationship's condition
- *  can't hold. */
-const SCOPE_ENTRIES = new Set(['root-in-view', 'inside-subtree', 'inside-named', 'path', 'within-hops'])
+/** Routes through the graph, which a relationship's condition can't hold —
+ *  "inside a container" it can: there it is the relative's own test. */
+const ROUTE_ENTRIES = new Set(['path', 'within-hops'])
 
 export interface KindContext {
     /** How many relationships the conditions being added sit inside. */
@@ -556,15 +556,15 @@ export interface KindContext {
 }
 
 /** The categories, holding only what can be added where the conditions
- *  stand: a relationship's condition is about the relative (the scope of
- *  the search is the query's alone), and relationships nest only so deep.
- *  Categories left empty are dropped. */
+ *  stand: a relationship's condition is about the relative (it follows no
+ *  route), and relationships nest only so deep. Categories left empty are
+ *  dropped. */
 export function availableCategories({ relationDepth, rule, end, canCode, canAdvanced }: KindContext): FilterCategory[] {
     return FILTER_CATEGORIES
         .map((cat) => ({
             ...cat,
             entries: cat.entries.filter((e) => {
-                if (relationDepth > 0 && SCOPE_ENTRIES.has(e.id)) return false
+                if (relationDepth > 0 && ROUTE_ENTRIES.has(e.id)) return false
                 if (rule && e.id === 'path') return false
                 if (end && (e.id === 'path' || e.id === 'within-hops')) return false
                 if (relationDepth >= RELATION_DEPTH_MAX && e.id.startsWith('rel-')) return false

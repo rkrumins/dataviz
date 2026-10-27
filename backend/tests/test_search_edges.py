@@ -259,10 +259,17 @@ class TestCompiler:
                                                   "m", 7)
         assert "*1..7]" in inside
 
-    def test_inside_a_container_sits_in_an_ends_top_level_and(self):
-        with pytest.raises(CompileError, match="top-level AND"):
-            _compiler().compile_far_end(P({"kind": "group", "op": "or", "children": [
-                {"kind": "descendantOf", "urns": ["u"]}, DATASET]}), "m", 12)
+    def test_inside_a_container_under_an_or_is_tested_on_each_edge(self):
+        c = _compiler()
+        head, [stage] = c.compile_far_end(P({"kind": "group", "op": "or", "children": [
+            {"kind": "descendantOf", "urns": ["u"]}, DATASET]}), "m", 7)
+        # Projected — it reads m's ancestors — as far as the scope reaches.
+        assert head == "true"
+        inside = re.match(r"\(\(m\.urn IN \$(p\d+) OR ANY\(_xb\d+ IN \[\(m\)<-\[:CONTAINS\*1\.\.7\]"
+                          r"-\(_xr\d+\) WHERE _xr\d+\.urn IN \$\1 \| true\] WHERE _xb\d+\)\) OR ",
+                          stage)
+        assert inside and c.params[inside.group(1)] == ["u"], stage
+        assert ["dataset"] in c.params.values()
 
     def test_a_far_end_hoists_nothing(self):
         with pytest.raises(CompileError, match="withinHops can't sit"):

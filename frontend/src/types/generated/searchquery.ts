@@ -1366,8 +1366,11 @@ export interface HasPropertyPredicate {
  * Clamp matches to the subtree(s) rooted at ``urns`` and ``refs``.
  *
  * Lives as a predicate (not on ``SearchScope``) so it can sit inside
- * OR groups — e.g. ``(under Customers OR under Orders) AND tag=PII``.
- * The single-subtree case is also expressible via ``scope.root_urns``,
+ * OR groups — e.g. ``(under Customers OR under Orders) AND tag=PII`` —
+ * and NOT groups and relationships' conditions: there each entity is
+ * tested itself, as the container or below it within ``max_depth`` (else
+ * the scope's). In the top-level AND it bounds the search instead. The
+ * single-subtree case is also expressible via ``scope.root_urns``,
  * which the provider may push down as a tighter Cypher anchor.
  */
 export interface DescendantOfPredicate {

@@ -9,6 +9,55 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — "Inside" anywhere in a query, searches that start from a thing's ancestors, and layer names with spaces
+
+### Added
+
+- **"Inside a container" anywhere in a query.** Under an **OR** or a **NOT** group, or as a
+  relationship's condition, **Inside a container named…** (`inside @"…"` in Code mode) tests each
+  entity: the container itself, or anything up to 12 levels below it (fewer in a shallower View).
+  At the top of a query it still limits the whole search. So a thing's *family* — it, everything
+  inside it and every container above it — is one query: `inside @"X" OR descendant(@"X")`. It
+  works at either end of a Connections search, and in display rules. Inside a relationship's
+  condition, the Form's palette now offers **Inside a container named…**, **Inside Subtree** and
+  **Root in view is…**.
+- **Layer names with spaces in Code mode.** `layer:Reporting layer` and `layer = Reporting layer`
+  read as one name when the View has a layer called that, ignoring case and spacing; the
+  longest name the words spell wins, and the words after it are the rest of the query. Quoted,
+  `layer:"Reporting layer"` always reads whole. Suggestions offer the View's layers while a name
+  of several words is typed, with or without a quote, and write the picked name in quotes,
+  closing an open quote once. A type, tag or property name that needs quotes is written in them
+  when picked, as the first value after `type:`, `tag:`, `layer:` or `has:`.
+
+### Changed
+
+- **A search starts from the things it names.** A condition in the query's top-level AND that
+  names entities — `@"X"`, its parent (`child(@"X")`), its ancestors (`descendant(@"X")`), or an
+  OR of those with `inside @"X"` — is now where the search starts: those entities are found from
+  *X*, up or down the hierarchy, and only they are tested by the rest of the query. A
+  Connections end that names its entities this way is the end it starts from. On 2 million
+  entities and 6.85 million edges, against the previous version on the same machine, with every
+  count exact: the 100,000 connections out of a column's containers in 1.6 s rather than 15 s;
+  those from one container's family to another's in 0.55 s rather than 28 s; and those from a
+  layer into a container's family in 1 s rather than 110 s.
+- **An ANY query holding an "inside" row runs as written.** Before, the panel lifted an **Inside
+  a container named…** row out of an **ANY** (OR) query and used it to limit the whole search,
+  because the server couldn't read it there. It is now one of the alternatives, as the builder
+  shows it, and the **inside *X*** chip is shown only when it limits the whole search.
+- **Code mode writes a value with a quote in it in the other kind of quote** — `owner = 'say "hi"'`,
+  `tag:"O'Brien"` — and a value holding both kinds as JSON. Each reads back as it was.
+
+### Known limitations
+
+- **With both ends named, a Connections search starts from From.** A From whose things have
+  very many edges then costs more than starting from To would: 1.9 s rather than 0.5 s, measured
+  from a column's containers, one of them a dataset with 100,000 edges, into a container.
+- **Unquoted layer names need the View's layers.** Code mode reads `layer:Reporting layer` as
+  one name only where it knows the View's layers. The filter palette's typed-in query, which
+  doesn't, reads it as `layer:Reporting` and a name search for `layer`: quote the name there.
+
+---
+
 ## [Unreleased] — Connections in the search panel, on the canvas, in Code mode and Ask
 
 ### Added

@@ -376,6 +376,7 @@ point at one thing's **children**, or at its **parent**. Each row below is a
 | Tables with **at least 6** columns | **Entity type is…** **dataset**, then **Directly contains…**: change **at least one** to **a number of** → **at least** `6`, and pick type **schemaField** | `from() to(type:dataset count(child(type:schemaField)) >= 6)` |
 | One thing's **children**: `rpt_daily_revenue`'s columns | **Is directly inside…**, then **Add a condition on them** → **Is a named entity…** `rpt_daily_revenue` | `from() to(parent(@"**/rpt_daily_revenue"))` |
 | One thing **and everything inside it** | **Inside a container named…** `rpt_daily_revenue` | `from() to(inside @"**/rpt_daily_revenue")` |
+| One thing's **family**: it, everything inside it and every container above it | **Inside a container named…** `rpt_daily_revenue`, and **Contains, at any depth…** with **Is a named entity…** `rpt_daily_revenue` as its condition; click the **AND** between them to make it **OR** | `from() to(inside @"**/rpt_daily_revenue" OR descendant(@"**/rpt_daily_revenue"))` |
 | One thing's **parent**: the table holding the column `unique_customers` | **Directly contains…**, then **Add a condition on them** → **Is a named entity…** `rpt_daily_revenue / unique_customers` | `from() to(child(@"**/rpt_daily_revenue/unique_customers"))` |
 
 The same filters work in **From**. *"Column lineage from the table
@@ -390,6 +391,11 @@ The same filters work in **From**. *"Column lineage from the table
 
 The demo data answers 6 connections, column to column, such as
 `customer_key` → `unique_customers` and `gross_profit` → `total_profit`.
+
+To catch lineage drawn at any level — between the tables, their columns or the
+containers above them — give each end the table's family instead:
+`from(inside @"**/fact_orders" OR descendant(@"**/fact_orders")) to(inside @"**/rpt_daily_revenue" OR descendant(@"**/rpt_daily_revenue"))`.
+The demo data draws its lineage between columns, so this finds the same 6.
 
 Ask understands some of the hierarchy, too:
 
@@ -555,6 +561,13 @@ without losing anything:
 
 > **Tip:** Start with **Any link**, then use the **Narrow to** chips to see
 > which kinds of connection you have before you pick one under **Through**.
+
+> **Tip:** On a large graph, name the things at one end. An end that names
+> them — **Is a named entity…**, **Inside a container named…**, or one
+> thing's parent, children or the containers above it — is where the search
+> starts, so it answers in about a second even across millions of things. With
+> neither end named, such as from one layer to another, the search checks the
+> connections of everything the ends describe, and takes longer.
 
 ## When nothing matches
 

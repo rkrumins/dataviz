@@ -175,7 +175,7 @@ describe('AddFilterPalette', () => {
             where: { kind: 'entityType', op: 'in', values: [] } })
     })
 
-    it('inside a relationship, offers no scope of the search, and no relationship past the deepest', async () => {
+    it('inside a relationship, offers no route, and no relationship past the deepest', async () => {
         const user = userEvent.setup()
         const at = (depth: number) => render(
             <RelationContext.Provider value={{ depth, rule: false }}>
@@ -184,8 +184,9 @@ describe('AddFilterPalette', () => {
         )
         const { unmount } = at(1)
         await user.click(screen.getByRole('button', { name: /add filter/i }))
-        expect(screen.queryByText(/Inside Subtree/i)).not.toBeInTheDocument()
-        expect(screen.queryByText(/Inside a container named/i)).not.toBeInTheDocument()
+        // "Inside a container" is the relative's own test there.
+        expect(screen.getByText(/Inside Subtree/i)).toBeInTheDocument()
+        expect(screen.getByText(/Inside a container named/i)).toBeInTheDocument()
         expect(screen.queryByText(/Paths from A to B/i)).not.toBeInTheDocument()
         expect(screen.getByText('Is directly inside…')).toBeInTheDocument()
         expect(screen.getByText('Something inside it feeds…')).toBeInTheDocument()

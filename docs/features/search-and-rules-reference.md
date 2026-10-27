@@ -128,7 +128,7 @@ returns edges instead ([Connections](#connections-edges-as-results)):
 | `hasProperty` | `key`, `negate` (false), `keyMatch`: `exact` · `prefix` · `contains` (`exact`) | key 1–128 | The property is present — by its exact name, or (`prefix`, `contains`) by part of its name, ignoring case |
 | `all` | — | — | Every entity in scope (an empty group is refused; ask for everything with this) |
 | `entityType` | `op`: `in` · `notIn` (`in`), `values` | 1–32 values | The entity's type |
-| `descendantOf` | `urns`, `refs`, `maxDepth` | 1–64 urns or [references](#names-instead-of-urns); depth 1–20 | Inside those containers |
+| `descendantOf` | `urns`, `refs`, `maxDepth` | 1–64 urns or [references](#names-instead-of-urns); depth 1–20 | Inside those containers, or one of them. In the top-level AND it bounds the search; under `or` or `not`, or in a relationship's or a Connections end's condition, it tests each entity, `maxDepth` (else the scope's `maxDepth`) deep |
 | `withinHops` | `urns`, `refs`, `hops`, `direction`: `out` · `in` · `both` (`both`), `edgeClass` (`lineage`), `edgeTypes`, `edgePredicate` | 1–64 urns or references; hops 1–10 | Within N hops of those entities |
 | `path` | each end named (`sourceUrns` / `sourceRefs`, `targetUrns` / `targetRefs`) or a condition (`sourceWhere`, `targetWhere`); `direction`: `outgoing` · `incoming` · `any` (`outgoing`), `edgeClass` (`lineage`), `edgeTypes`, `maxHops` (4), `maxPaths` (32), `edgePredicate` | 1–8 urns or references an end; hops 1–6 — 4 with an end a condition, 3 with both; paths 1–128 | Routes between them (`results: "paths"`): [path patterns](#path-patterns) |
 | `is` | `refs` | 1–64 references | The entities those [references](#names-instead-of-urns) name |
@@ -252,8 +252,12 @@ What they mean, for an entity *n* whose relatives along the axis are *R(n)*:
 **Fast when the far end is named.** A relationship in the top-level AND whose
 `where` is just an `is` — "under *Country / United Kingdom*", "fed by
 *Sales / orders*" — is walked **from** those entities, so it costs about what
-`descendantOf` or `withinHops` does, and lineage may go up to 10 hops. Any
-other relationship is tested from each candidate — after the rest of the query
+`descendantOf` or `withinHops` does, and lineage may go up to 10 hops. A
+lineage relationship's `where` may also name them as what's inside one
+(`descendantOf`), one's parent or children, its ancestors or descendants (a
+`parent`, `child`, `ancestor` or `descendant` relationship whose `where` is an
+`is`), or an `or` of those: the walk starts from all of them. Any other
+relationship is tested from each candidate — after the rest of the query
 has narrowed them — and lineage goes at most 3 hops
 (`DEEP_SEARCH_RELATION_MAX_HOPS`), with one exception: one relationship a query,
 in the top-level AND and asking for at least one relative, may follow lineage
@@ -264,6 +268,13 @@ is refused past 200,000 such matches or 500,000 entities reached, and it runs
 for a search that lists its matches, not for group counts. The related
 entities may sit anywhere in the data source; the matches are always inside
 the View.
+
+**Fast when the query names its matches.** The same in the top-level AND —
+`descendant(@"X")` (X's ancestors), `child(@"X")` (its parent),
+`inside @"X" OR descendant(@"X")` — is where the search starts: those entities
+are found from *X*, up or down the hierarchy, and only they are tested by the
+rest of the query, rather than every entity in the scope. A Connections end
+that names its entities so is the end the search starts from.
 
 Code mode writes them as words — `parent(type:domain)`, `every
 child(description IS NOT EMPTY)`, `count(child(type:column)) > 100`,
@@ -313,7 +324,7 @@ a string column called bob to anything whose parent's family is smith":
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `sourceWhere` · `targetWhere` | any entity | Each end's condition: any node predicate but `withinHops` and `path`. "Inside a container" (`descendantOf`) is allowed, in the end's top-level AND |
+| `sourceWhere` · `targetWhere` | any entity | Each end's condition: any node predicate but `withinHops` and `path`. "Inside a container" (`descendantOf`) is allowed anywhere in it |
 | `direction` | `outgoing` | `outgoing`: edges stored From → To. `either`: stored either way, each edge once |
 | `edgeClass` | links | `lineage`, `containment`, `links` (every edge but the hierarchy's) or `any` |
 | `edgeTypes` | — | Named edge types instead of a class (1–32); a containment type may be named |
@@ -372,6 +383,7 @@ Inside an end, Code mode writes the hierarchy as words:
 | --- | --- |
 | `@"**/rpt_daily_revenue"` | `{"kind": "is", "refs": [{"path": ["**", "rpt_daily_revenue"]}]}` |
 | `inside @"**/rpt_daily_revenue"` | `{"kind": "descendantOf", "refs": [{"path": ["**", "rpt_daily_revenue"]}]}`: the entity and everything below it |
+| `inside @"**/fact_orders" OR descendant(@"**/fact_orders")` | `{"kind": "group", "op": "or", "children": [{"kind": "descendantOf", "refs": […]}, {"kind": "related", "axis": "descendant", "where": {"kind": "is", "refs": […]}}]}`: its family — the entity, everything below it and every container above it |
 | `parent(…)` · `child(…)` | `{"kind": "related", "axis": "parent", "where": …}`; `"axis": "child"` likewise |
 | `ancestor*2(…)` · `ancestor(…)` · `descendant(…)` | `"axis": "ancestor", "minHops": 2, "maxHops": 2`; no hops for any depth, 1–20; `"axis": "descendant"` likewise |
 | `every child(…)` · `no child(…)` | Adds `"quantifier": "all"` · `"quantifier": "none"` |
@@ -502,7 +514,7 @@ P30D").
 | Leaves in the whole tree | 64 | `DEEP_SEARCH_MAX_LEAF_COUNT` |
 | Children of one `or` group | 24 | `DEEP_SEARCH_MAX_OR_BRANCH` |
 | A `not` group | exactly one child | — |
-| `descendantOf`, `withinHops`, `path` | only in the top-level AND (never under `or` / `not`, nor in a relationship's or path end's condition); one `path` per query | — |
+| `withinHops`, `path` | only in the top-level AND (never under `or` / `not`, nor in a relationship's or path end's condition); one `path` per query | — |
 | Relationships inside relationships (and path ends) | 3 deep | `DEEP_SEARCH_MAX_RELATION_DEPTH` |
 | Lineage hops a relationship tests from each candidate | 3 (at most 6) | `DEEP_SEARCH_RELATION_MAX_HOPS` |
 | Lineage hops when the far end is named (an `is`, in the top-level AND) | 10 | — |
@@ -664,7 +676,6 @@ A rule's predicate is checked as a search's is, and additionally may not use:
 - a lineage relationship of more than one hop — a rule is asked of every
   entity on the canvas
 - `text` with `match` `regex` or `fulltext`
-- `descendantOf` under an `or` or `not` group
 
 Relationships are otherwise allowed — "has a child tagged PII", "its parent is a
 domain", "fed by a topic" — and name references too, which keep a rule working
@@ -1045,7 +1056,7 @@ curl -s -b "$JAR" -o pii.csv \
 - **Rules only add chips.** No node colour, hiding, priority, first-match,
   description, owner or per-rule scope.
 - **A rule can't use** `withinHops`, `path`, lineage relationships past one
-  hop, `regex` or `fulltext` text, or `descendantOf` under `or` / `not`.
+  hop, or `regex` or `fulltext` text.
 - **Share links can't follow lineage or relationships**: `related`, `path`,
   `withinHops` and `edges` answer `403` for them, as do rules that use them.
 - **Relationships tested from each candidate follow lineage 3 hops**. Up to 10

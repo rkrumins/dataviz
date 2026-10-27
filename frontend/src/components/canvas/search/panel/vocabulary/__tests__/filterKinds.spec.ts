@@ -47,11 +47,11 @@ describe('filterKinds — what can be added where', () => {
             FILTER_CATEGORIES.flatMap((c) => c.entries.map((e) => e.id)))
     })
 
-    it('keeps the search scope out of a relationship\'s condition', () => {
+    it('keeps routes out of a relationship\'s condition, and lets "inside a container" in', () => {
         const inside = ids(availableCategories({ ...everywhere, relationDepth: 1 }))
-        for (const scope of ['root-in-view', 'inside-subtree', 'inside-named', 'path', 'within-hops']) {
-            expect(inside).not.toContain(scope)
-        }
+        for (const route of ['path', 'within-hops']) expect(inside).not.toContain(route)
+        // The relative's own test: in that container, or below it.
+        for (const scope of ['root-in-view', 'inside-subtree', 'inside-named']) expect(inside).toContain(scope)
         expect(inside).toContain('rel-parent')
     })
 

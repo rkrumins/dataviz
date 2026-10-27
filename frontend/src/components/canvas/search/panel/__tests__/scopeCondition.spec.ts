@@ -66,8 +66,8 @@ describe('setScopeCondition', () => {
     })
 
     it('nests an OR draft under a new AND root', () => {
-        // DescendantOf is only legal in the top-level AND group; as a
-        // sibling inside OR it is a hard CompileError.
+        // A scope bounds the whole query: as a sibling inside OR it would
+        // be one more alternative instead.
         const draft: Predicate = {
             kind: 'group', op: 'or',
             children: [nameContains('a'), nameContains('b')],
@@ -76,6 +76,16 @@ describe('setScopeCondition', () => {
         expect(next).toMatchObject({ kind: 'group', op: 'and' })
         expect(children(next).map((c) => c.kind)).toEqual(['group', 'descendantOf'])
         expect(children(next)[0]).toMatchObject({ op: 'or' })
+    })
+
+    it('scopes an ANY draft without dropping its "inside" alternatives', () => {
+        const draft: Predicate = {
+            kind: 'group', op: 'or', children: [nameContains('a'), scopeTo('urn:gold')],
+        }
+        const next = setScopeCondition(draft, scopeTo('urn:silver'))
+        expect(next).toMatchObject({ kind: 'group', op: 'and' })
+        expect(children(children(next)[0]).map((c) => c.kind)).toEqual(['text', 'descendantOf'])
+        expect(findScopeCondition(next)).toMatchObject({ urns: ['urn:silver'] })
     })
 
     it('removes the scope and leaves the rest of the query intact', () => {
@@ -104,23 +114,27 @@ describe('findScopeCondition', () => {
     it('reports none for an unscoped draft', () => {
         expect(findScopeCondition(nameContains('a'))).toBeNull()
     })
+
+    it('reports none under ANY, where an "inside" row is an alternative', () => {
+        expect(findScopeCondition({
+            kind: 'group', op: 'or', children: [nameContains('a'), scopeTo('urn:gold')],
+        })).toBeNull()
+    })
 })
 
 
 describe('buildRunnablePredicate with a scope row', () => {
-    it('hoists the scope out when the user flips the root to ANY', () => {
-        // The row menu / root-op toggle can move a scope row into an OR
-        // root after the fact, which the compiler rejects outright.
-        // Reading it as "A or B, inside X" keeps the query runnable.
+    it('runs an ANY query holding a scope row as written', () => {
+        // Flipping the root to ANY makes "inside X" one of the
+        // alternatives, as the builder shows it — the server reads it there.
         const draft: Predicate = {
             kind: 'group', op: 'or',
             children: [nameContains('a'), nameContains('b'), scopeTo('urn:gold')],
         }
         const runnable = buildRunnablePredicate(draft)!
-        expect(runnable.predicate).toMatchObject({ kind: 'group', op: 'and' })
-        const top = children(runnable.predicate)
-        expect(top.map((c) => c.kind)).toEqual(['group', 'descendantOf'])
-        expect(top[0]).toMatchObject({ op: 'or' })
+        expect(runnable.predicate).toMatchObject({ kind: 'group', op: 'or' })
+        expect(children(runnable.predicate).map((c) => c.kind))
+            .toEqual(['text', 'text', 'descendantOf'])
     })
 
     it('leaves an OR query with no scope row alone', () => {

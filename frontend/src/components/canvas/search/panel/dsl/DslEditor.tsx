@@ -55,6 +55,9 @@ export interface DslEditorHandle {
 /** Marks a change that came from ``value``, not from typing. */
 const FromOutside = Annotation.define<boolean>()
 
+/** What the text is read against: the View's layers, as Code mode reads it. */
+const readAgainst = (props: DslEditorProps) => ({ layers: props.vocabulary.layers })
+
 
 export const DslEditor = forwardRef<DslEditorHandle, DslEditorProps>(function DslEditor(props, ref) {
     const host = useRef<HTMLDivElement>(null)
@@ -88,7 +91,7 @@ export const DslEditor = forwardRef<DslEditorHandle, DslEditorProps>(function Ds
                             preventDefault: true,
                             run: (v) => {
                                 const { from, to } = v.state.selection.main
-                                const span = widerCondition(v.state.doc.toString(), from, to)
+                                const span = widerCondition(v.state.doc.toString(), from, to, readAgainst(latest.current))
                                     ?? { from: 0, to: v.state.doc.length }
                                 v.dispatch({ selection: EditorSelection.single(span.from, span.to), userEvent: 'select' })
                                 return true
@@ -101,7 +104,7 @@ export const DslEditor = forwardRef<DslEditorHandle, DslEditorProps>(function Ds
                         if (event.detail !== 2 || event.button !== 0
                             || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return null
                         const pos = v.posAtCoords({ x: event.clientX, y: event.clientY })
-                        const span = pos == null ? null : conditionAtHead(v.state.doc.toString(), pos)
+                        const span = pos == null ? null : conditionAtHead(v.state.doc.toString(), pos, readAgainst(latest.current))
                         if (!span) return null
                         const selection = EditorSelection.single(span.from, span.to)
                         return { get: () => selection, update: () => false }
@@ -111,7 +114,7 @@ export const DslEditor = forwardRef<DslEditorHandle, DslEditorProps>(function Ds
                         placeholder: current.placeholder,
                         complete: [dslCompletionSource(() => latest.current.vocabulary)],
                     }),
-                    roleHighlighting(dslRanges),
+                    roleHighlighting((text) => dslRanges(text, readAgainst(latest.current))),
                     dslLint(() => latest.current.vocabulary),
                     editable.of(EditorView.editable.of(!current.disabled)),
                     described.of(current.ariaDescribedBy

@@ -168,10 +168,10 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$", rule: boo
                                   relations=relations, top=top, end=end)
     if isinstance(predicate, EdgesPredicate):
         return _validate_edges(predicate, depth=depth, path=path, rule=rule)
-    if relations and predicate.kind in ("descendantOf", "withinHops", "path"):
+    if relations and predicate.kind in ("withinHops", "path"):
         raise ValidationError(
             f"{predicate.kind} at {path} can't sit inside a relationship's or a path "
-            "end's condition — use an ancestor or lineage relationship there instead"
+            "end's condition — use a lineage relationship there instead"
         )
     if end and predicate.kind in ("withinHops", "path"):
         raise ValidationError(
@@ -223,7 +223,7 @@ def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool
     goes — tested from every candidate, a few hops; in the top-level AND,
     asking for at least one relative, walked from its far end as far as
     withinHops: from the entities it names (``anchor_groups`` — an ``is``,
-    inside one, or an OR of those) or what its condition matches
+    inside one, above one, or an OR of those) or what its condition matches
     (``traced_from_far_end``, once a query: ``_check_traces``); in a display
     rule, one — and its edge filter's."""
     s = get_deep_search_settings()

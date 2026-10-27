@@ -1,5 +1,6 @@
-import { CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
+import { type Completion, CompletionContext, type CompletionResult } from '@codemirror/autocomplete'
 import { EditorState } from '@codemirror/state'
+import { EditorView } from '@codemirror/view'
 import { describe, expect, it, vi } from 'vitest'
 
 import { OPERATOR_TABLE, type PropertyOperator } from '@/types/generated/searchOperators'
@@ -101,9 +102,13 @@ describe('dslLanguage — what the cursor is in the middle of', () => {
 
 
 describe('dslLanguage — completion', () => {
-    it('offers the values a prefix takes, leaving out those written and those that need quotes', async () => {
-        expect(labels(await complete('type:dataset,|'))).toEqual(['dashboard'])
+    it('offers the values a prefix takes, leaving out those written', async () => {
         expect(labels(await complete('tag:|'))).toEqual(['PII', 'GDPR'])
+        // One that needs quotes is written in them — as the first value: a
+        // list after a comma takes none, so there it is left out.
+        expect((await complete('type:|'))?.options.map((o) => [o.label, o.apply])).toEqual([
+            ['dataset', undefined], ['dashboard', undefined], ['data product', '"data product"']])
+        expect(labels(await complete('type:dataset,|'))).toEqual(['dashboard'])
     })
 
     it("offers a property's values from the server, quoted when they must be", async () => {
@@ -156,6 +161,73 @@ describe('dslLanguage — completion', () => {
         expect(r?.options.map((o) => [o.label, o.detail])).toEqual([
             ['Sales', 'domain'], ['Sales', 'dataset · Finance']])
         expect(await complete('@"|', { ...VOCAB, names: { search, pathFor: vi.fn() } })).toBeNull()
+    })
+})
+
+
+describe('dslLanguage — a layer name of several words', () => {
+    const LAYERS: DslVocabulary = { ...VOCAB, layers: ['Source', 'My Cool Layer', "Bob's layer", 'The "best" layer'] }
+
+    it.each<[string, ReturnType<typeof completionContextAt>]>([
+        ['layer:"My C|', { kind: 'layerName', from: 7, text: 'My C', quote: '"' }],
+        ["layer = 'My|", { kind: 'layerName', from: 9, text: 'My', quote: "'" }],
+        ['feeds(layer:My Co|', { kind: 'layerName', from: 12, text: 'My Co', quote: '' }],
+        ['NOT layer = my  cool L|', { kind: 'layerName', from: 12, text: 'my  cool L', quote: '' }],
+        // A word alone is the prefix's value; a space, nothing begun yet.
+        ['layer:My|', { kind: 'prefixValue', prefix: 'layer', from: 6, text: 'My', taken: [] }],
+        ['layer:My |', { kind: 'term', from: 9, text: '' }],
+        // Words that start no layer's name are what they read as.
+        ['layer:Source AND fe|', { kind: 'term', from: 17, text: 'fe' }],
+        ['layer: My Co|', { kind: 'term', from: 10, text: 'Co' }],
+    ])("reads %s against the View's layers", (doc, expected) => {
+        const [text, pos] = cursor(doc)
+        expect(completionContextAt(text, pos, undefined, LAYERS.layers)).toEqual(expected)
+    })
+
+    it('offers a name that needs quotes after layer:, written in them', async () => {
+        expect((await complete('layer:|', LAYERS))?.options.map((o) => [o.label, o.apply])).toEqual([
+            ['Source', undefined], ['My Cool Layer', '"My Cool Layer"'], ["Bob's layer", `"Bob's layer"`],
+            ['The "best" layer', `'The "best" layer'`]])
+        expect((await complete('layer = |', LAYERS))?.options.map((o) => o.apply)).toEqual([
+            'Source', '"My Cool Layer"', `"Bob's layer"`, `'The "best" layer'`])
+    })
+
+    it('offers the layers a name of several words starts, while it is typed, in quotes when picked', async () => {
+        const r = await complete('layer:My Co|', LAYERS)
+        expect(r?.from).toBe(6)
+        expect(r?.options.map((o) => [o.label, o.apply])).toEqual([['My Cool Layer', '"My Cool Layer"']])
+        expect(labels(await complete('NOT layer = my  cool l|', LAYERS))).toEqual(['My Cool Layer'])
+        // Nothing unasked at a space; once no layer's name starts so, the
+        // words are suggested as what they read as.
+        expect(await complete('layer:My |', LAYERS)).toBeNull()
+        expect(labels(await complete('layer:Source AND fe|', LAYERS))).toContain('feeds(…)')
+    })
+
+    it('offers the layers inside quotes, and closes the quote once', async () => {
+        // One holding the quote begun can't be written in it.
+        expect(labels(await complete('layer:"|', LAYERS))).toEqual(['Source', 'My Cool Layer', "Bob's layer"])
+        expect(labels(await complete("layer = '|", LAYERS))).toEqual(['Source', 'My Cool Layer', 'The "best" layer'])
+        // As typed, and with the quote closed for you.
+        for (const doc of ['layer:"My|', 'layer:"My|"']) {
+            const [text, pos] = cursor(doc)
+            const view = new EditorView({ state: EditorState.create({ doc: text }) })
+            const r = (await complete(doc, LAYERS))!
+            const picked = r.options.find((o) => o.label === 'My Cool Layer')!
+            ;(picked.apply as (v: EditorView, c: Completion, from: number, to: number) => void)(view, picked, r.from, pos)
+            expect(view.state.doc.toString()).toBe('layer:"My Cool Layer"')
+            expect(view.state.selection.main.head).toBe('layer:"My Cool Layer"'.length)
+            view.destroy()
+        }
+    })
+
+    it('colours and selects a name of several words as one', () => {
+        const options = { layers: LAYERS.layers }
+        const text = 'layer:My Cool Layer x'
+        expect(dslRanges(text, options).map((r) => [text.slice(r.from, r.to), r.role])).toEqual([
+            ['layer:', 'prefix'], ['My', 'value'], ['Cool', 'value'], ['Layer', 'value'], ['x', 'text']])
+        const at = text.indexOf('Cool')
+        expect(widerCondition(text, at, at, options)).toEqual({ from: 0, to: 'layer:My Cool Layer'.length })
+        expect(conditionAtHead(text, 2, options)).toEqual({ from: 0, to: 'layer:My Cool Layer'.length })
     })
 })
 

@@ -52,7 +52,6 @@ from backend.app.providers.falkordb_deep_search import (
     _conjuncts,
     _edge_properties,
     _has_relation,
-    _ref_urns,
     _required_types,
     _sanitize_label,
     _scope_urn_sets_with_depths,
@@ -78,13 +77,10 @@ from backend.app.providers.falkordb_search.plan import (
     Context,
     Plan,
     Unit,
-    _anchor_ids,
     _ids_of,
-    _in_scope,
     _label_stats,
     _labels_in_scope,
     _rel,
-    _timed_out,
     make_plan,
     match_statement,
     within_hops,
@@ -278,15 +274,14 @@ async def _plan(provider, query: SearchQuery, run, settings, deadline: float
     if not types:
         return Plan([], notes=["No edges of these types are in this data source."]), state
     near = (edges.source_where if side == "source" else edges.target_where) or MatchAllPredicate()
-    compiler.compile(near)
+    compiler.compile(near, scope_depth=query.scope.max_depth)
     anchor_query = query.model_copy(update={"predicate": near})
     counts, total = await _edge_stats(plan_run)
     width = _width(settings.chunk_width, counts, types, stats, near)
-    plan = (await _named_plan(plan_run, provider, anchor_query, compiler, labels, containment,
-                              width)
-            or await make_plan(provider, anchor_query, compiler, run=plan_run, width=width,
-                               walk_max=settings.walk_max,
-                               timeout_s=max(0.5, deadline - time.monotonic())))
+    # An end naming entities is read from them (``plan.named_plan``).
+    plan = await make_plan(provider, anchor_query, compiler, run=plan_run, width=width,
+                           walk_max=settings.walk_max,
+                           timeout_s=max(0.5, deadline - time.monotonic()))
     units = [dataclasses.replace(u, espan=max(2, total)) for u in plan.units]
     if edges.direction == "either":
         units += [dataclasses.replace(u, reverse=True) for u in units]
@@ -330,8 +325,9 @@ def _anchor_side(provider, query: SearchQuery, labels, stats) -> str:
 
 
 def _names_entities(m) -> bool:
-    """A condition that is named entities, or what is inside them — read
-    from them, never by a scan (``_named_plan``, the clamps of ``make_plan``)."""
+    """A condition that is named entities, what is inside them, or above
+    them — read from them, never by a scan (``plan.named_plan``, the clamps
+    of ``make_plan``)."""
     if m.kind in ("is", "descendantOf") or anchor_groups(m) is not None:
         return True
     return (m.kind == "related" and m.axis in ("parent", "ancestor", "root")
@@ -378,32 +374,6 @@ def _width(width: int, counts: Dict[str, int], types, stats, near) -> int:
     return max(1_000, int(width / max(1.0, degree)))
 
 
-async def _named_plan(run, provider, query: SearchQuery, compiler, labels, containment,
-                      width: int) -> Optional[Plan]:
-    """The entities an anchor end names (an ``is``, or inside one —
-    ``anchor_groups``) as ``ids`` units: read by ID, not found in every
-    label's bands. Each is still tested by the whole end. None for an end
-    that names none, too many, or more than a statement's time can find."""
-    groups = next((g for m in _conjuncts(query.predicate)
-                   for g in [anchor_groups(m)] if g is not None), None)
-    if groups is None or (not containment and any(g.hi for g in groups)):
-        return None
-    entry = {"groups": [{"urns": _ref_urns(g.refs, "a Connections search's end"),
-                         "lo": g.lo, "hi": g.hi} for g in groups],
-             "containment": list(containment)}
-    try:
-        ids = await _anchor_ids(run, labels, entry)
-        if ids is None:
-            return None
-        ids = await _in_scope(run, provider, query, compiler, labels, containment, ids)
-    except Exception as exc:                                  # noqa: BLE001
-        if not _timed_out(exc):
-            raise
-        return None
-    return Plan([Unit("ids", roots=ids[i:i + width], size=len(ids[i:i + width]))
-                 for i in range(0, len(ids), max(1, width))])
-
-
 # ---------------------------------------------------------------------------
 # The statements
 # ---------------------------------------------------------------------------
@@ -420,7 +390,7 @@ def edge_context(provider, query: SearchQuery, state: Dict[str, Any]) -> EdgeCon
     depth = int(query.scope.max_depth or 12)
     containment = _containment(provider)
     compiler = _compiler(provider)
-    where = compiler.compile(near or MatchAllPredicate())
+    where = compiler.compile(near or MatchAllPredicate(), scope_depth=query.scope.max_depth)
     types = compiler.connection_edge_types(edges)
     far_head, far_stages = compiler.compile_far_end(far, "m", depth)
     saved, compiler._edge_var = compiler._edge_var, "e"

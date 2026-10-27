@@ -279,8 +279,11 @@ class DescendantOfPredicate(_Base):
     """Clamp matches to the subtree(s) rooted at ``urns`` and ``refs``.
 
     Lives as a predicate (not on ``SearchScope``) so it can sit inside
-    OR groups — e.g. ``(under Customers OR under Orders) AND tag=PII``.
-    The single-subtree case is also expressible via ``scope.root_urns``,
+    OR groups — e.g. ``(under Customers OR under Orders) AND tag=PII`` —
+    and NOT groups and relationships' conditions: there each entity is
+    tested itself, as the container or below it within ``max_depth`` (else
+    the scope's). In the top-level AND it bounds the search instead. The
+    single-subtree case is also expressible via ``scope.root_urns``,
     which the provider may push down as a tighter Cypher anchor.
     """
     kind: Literal["descendantOf"] = "descendantOf"
@@ -807,32 +810,46 @@ def unwrap_edges(predicate):
 
 
 class AnchorGroup(NamedTuple):
-    """Entities a lineage walk can start from: those ``refs`` name, taken
-    ``lo`` to ``hi`` containment levels below them — ``0..0`` the entities
-    themselves, ``1..20`` everything inside them, ``0..20`` both."""
+    """Entities a walk can start from: those ``refs`` name, taken ``lo`` to
+    ``hi`` containment levels below them — ``0..0`` the entities themselves,
+    ``1..20`` everything inside them, ``0..20`` both — or, ``up``, that many
+    levels above them: ``1..1`` their parents, ``1..20`` all their
+    ancestors. ``hi`` None: as deep as the search's scope reaches (an
+    ``inside`` naming no depth)."""
     refs: Tuple[NodeRef, ...]
     lo: int
-    hi: int
+    hi: Optional[int]
+    up: bool = False
+
+
+#: The tree relationships that name entities when their condition is an
+#: ``is``: below them (``ancestor``, ``parent``) or above them.
+_NAMED_AXES = {"ancestor": False, "parent": False, "descendant": True, "child": True}
 
 
 def anchor_groups(where: Optional["Predicate"]) -> Optional[List[AnchorGroup]]:
     """The named entities ``where`` amounts to, when it amounts to named
-    entities and nothing else: ``is``; inside one (``related(ancestor,
-    is)``, any relative, no count); an OR of those. None for any other
-    condition.
+    entities and nothing else: ``is``; inside one (``descendantOf``, or
+    ``related(ancestor | parent, is)``); above one, its ancestors or its
+    parent (``related(descendant | child, is)``) — any relative, no count;
+    an OR of those. None for any other condition.
 
-    A lineage relationship whose condition is one of these is walked from
-    the entities, as far as ``withinHops``, instead of tested from every
-    candidate — the service's hop limit and the compiler both read it here,
-    so they can't disagree."""
+    A walk starts from them instead of every candidate testing the
+    condition itself: a search's own (``plan.named_plan``), a Connections
+    search's end, and a lineage relationship's far end, walked from as far
+    as ``withinHops``. The service's hop limit and the compiler both read it
+    here, so they can't disagree."""
     if where is None:
         return None
     if where.kind == "is":
         return [AnchorGroup(tuple(where.refs), 0, 0)]
-    if (where.kind == "related" and where.axis == "ancestor" and where.quantifier == "any"
+    if where.kind == "descendantOf":
+        refs = tuple(NodeRef(urn=u) for u in where.urns) + tuple(where.refs or ())
+        return [AnchorGroup(refs, 0, where.max_depth)]
+    if (where.kind == "related" and where.axis in _NAMED_AXES and where.quantifier == "any"
             and where.count is None and where.where is not None and where.where.kind == "is"):
         lo, hi = where.hop_range()
-        return [AnchorGroup(tuple(where.where.refs), lo, hi)]
+        return [AnchorGroup(tuple(where.where.refs), lo, hi, _NAMED_AXES[where.axis])]
     if where.kind == "group" and (where.op == "or" or len(where.children) == 1) \
             and where.op != "not":
         groups: List[AnchorGroup] = []

@@ -45,7 +45,9 @@ from typing import Any, Awaitable, Callable, Dict, FrozenSet, List, Optional, Se
 from backend.app.providers.falkordb_deep_search import (
     KEY_COMPARISON_NOTE,
     _build_within_hops_continuation,
+    _conjuncts,
     _placements_of,
+    _ref_urns,
     _scope_urn_sets_with_depths,
     _sanitize_label,
     _searchable_labels,
@@ -57,6 +59,7 @@ from backend.app.providers.falkordb_search.keys import SortSpec
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf, probe_condition
 from backend.app.services.deep_search import CompileError
 from backend.app.services.native_query.parse_cost import grouped
+from backend.common.models.search import anchor_groups
 
 #: Root sets up to this size clamp range units with an ``IN`` list. The
 #: check costs (ancestor rows) × (roots): 50 roots cost 2× an unclamped
@@ -248,6 +251,12 @@ async def make_plan(provider, query, compiler, *, run: Run, width: int,
     # Values kept raw (``raw_leaves`` collects them) aren't compared key to key.
     if compiler.compares_keys and compiler.raw_leaves is not None:
         notes.append(KEY_COMPARISON_NOTE)
+    # A traced relationship's walk is its whole test: only its plan reads it.
+    if compiler.hoisted_trace is None:
+        named = await named_plan(run, provider, query, compiler, labels, containment,
+                                 width=width, notes=notes)
+        if named is not None:
+            return named
     reach = await reach_plan(run, provider, query, compiler, labels, containment,
                              width=width, notes=notes)
     if reach is not None:
@@ -550,7 +559,8 @@ def _timed_out(exc: BaseException) -> bool:
 async def _anchor_ids(run: Run, labels: Sequence[str], entry: Dict[str, Any]
                       ) -> Optional[List[int]]:
     """The node IDs the walk starts from: the named entities, or what lies
-    their groups' levels below them. None past ``REACH_ANCHORS_MAX``."""
+    their groups' levels below them — above them, for a group ``up`` (their
+    parents, their ancestors). None past ``REACH_ANCHORS_MAX``."""
     groups = entry.get("groups") or [{"urns": entry["urns"], "lo": 0, "hi": 0}]
     rel = _rel(entry.get("containment") or ())
     ids: set = set()
@@ -559,9 +569,11 @@ async def _anchor_ids(run: Run, labels: Sequence[str], entry: Dict[str, Any]
         if roots and int(group["hi"]) == 0:
             ids.update(roots)
         elif roots:
+            levels = f"[:{rel}*{int(group['lo'])}..{int(group['hi'])}]"
+            step = f"(_a)-{levels}->(_w)" if group.get("up") else f"(_w)-{levels}->(_a)"
             res = await run(
                 "UNWIND $_ids AS _wi MATCH (_w) WHERE ID(_w) = _wi "
-                f"MATCH (_w)-[:{rel}*{int(group['lo'])}..{int(group['hi'])}]->(_a) "
+                f"MATCH {step} "
                 "WITH DISTINCT _a LIMIT $_lim RETURN collect(ID(_a))",
                 {"_ids": roots, "_lim": REACH_ANCHORS_MAX + 1},
             )
@@ -569,6 +581,49 @@ async def _anchor_ids(run: Run, labels: Sequence[str], entry: Dict[str, Any]
         if len(ids) > REACH_ANCHORS_MAX:
             return None
     return sorted(ids)
+
+
+def _walked(m) -> bool:
+    """A condition the scope's own walk already bounds: an "inside" in the
+    top-level AND, or a relative up the tree that is a named entity — what
+    the compiler hoists as roots (``_Compiler._anchorable``)."""
+    return m.kind == "descendantOf" or (
+        m.kind == "related" and m.axis in ("parent", "ancestor", "root")
+        and m.quantifier == "any" and m.count is None
+        and m.where is not None and m.where.kind == "is")
+
+
+async def named_plan(run: Run, provider, query, compiler, labels: Sequence[str],
+                     containment: Tuple[str, ...], *, width: int,
+                     notes: List[str]) -> Optional[Plan]:
+    """The entities a condition in the query's top-level AND names — an
+    ``is``, above one (its parent, its ancestors), or an OR of those and
+    "inside one" (``anchor_groups``) — as ``ids`` units: found from them,
+    by ID and up or down the tree, not in every label's bands. Each is still
+    tested by the whole query. None — read the scope as usual — when none
+    names entities the scope's own walk doesn't already bound (``_walked``),
+    or they're more than ``REACH_ANCHORS_MAX`` or a statement's time can
+    find."""
+    groups = next((g for m in _conjuncts(query.predicate) if not _walked(m)
+                   for g in [anchor_groups(m)] if g is not None), None)
+    if groups is None or (not containment and any(g.hi != 0 for g in groups)):
+        return None
+    depth = int(query.scope.max_depth or 12)
+    entry = {"groups": [{"urns": _ref_urns(g.refs, "a search's condition"), "lo": g.lo,
+                         "hi": depth if g.hi is None else g.hi,
+                         **({"up": True} if g.up else {})} for g in groups],
+             "containment": list(containment)}
+    try:
+        ids = await _anchor_ids(run, labels, entry)
+        if ids is None:
+            return None
+        ids = await _in_scope(run, provider, query, compiler, labels, containment, ids)
+    except Exception as exc:                                  # noqa: BLE001
+        if not _timed_out(exc):
+            raise
+        return None
+    return Plan([Unit("ids", roots=ids[i:i + width], size=len(ids[i:i + width]))
+                 for i in range(0, len(ids), max(1, width))], notes=notes)
 
 
 async def _reached_ids(run: Run, anchors: List[int], entry: Dict[str, Any],

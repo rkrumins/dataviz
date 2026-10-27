@@ -288,6 +288,80 @@ describe('predicateDsl — a quoted value after a prefix', () => {
 })
 
 
+describe('predicateDsl — a layer name of several words, or odd characters', () => {
+    const layers = ['My Cool Layer', 'My Cool', 'Source']
+    const read = (text: string) => parsePredicate(text, { layers }).predicate
+    const layer = (name: string): Predicate => ({ kind: 'layer', layerAssignment: name })
+    const name = (value: string): Predicate => ({
+        kind: 'text', value, target: 'name', match: 'substring', caseSensitive: false, boost: 1,
+    })
+
+    it.each<[string, string]>([
+        ['layer:My Cool Layer', 'My Cool Layer'],
+        ['layer = My Cool Layer', 'My Cool Layer'],
+        // The longest name the words spell; case and spacing aside, the View's own.
+        ['layer:My Cool', 'My Cool'],
+        ['layer:my  cool   LAYER', 'My Cool Layer'],
+        ['layer = my cool', 'My Cool'],
+        // One word reads as it always has, a layer of the View or not.
+        ['layer:Source', 'Source'],
+        ['layer:Other', 'Other'],
+    ])("reads %s unquoted, against the View's layers", (text, expected) => {
+        expect(read(text)).toEqual(layer(expected))
+    })
+
+    it('leaves the words after the name to the rest of the query', () => {
+        expect(read('layer:My Cool Layer customer')).toEqual({
+            kind: 'group', op: 'and', children: [layer('My Cool Layer'), name('customer')],
+        })
+        expect(read('layer:Source tag:PII')).toEqual({
+            kind: 'group', op: 'and', children: [layer('Source'), { kind: 'tag', op: 'hasAny', values: ['PII'] }],
+        })
+        expect(read('layer:My Cool Layer OR feeds(layer:My Cool)')).toEqual({
+            kind: 'group', op: 'or', children: [
+                layer('My Cool Layer'), { kind: 'related', axis: 'downstream', where: layer('My Cool') }],
+        })
+    })
+
+    it("reads the first word alone when the View's layers aren't known", () => {
+        expect(parsePredicate('layer:My Cool Layer').predicate).toEqual({
+            kind: 'group', op: 'and', children: [layer('My'), name('Cool'), name('Layer')],
+        })
+    })
+
+    it.each<[string, string]>([
+        ["Bob's layer", `layer:"Bob's layer"`],
+        ['The "best" layer', `layer:'The "best" layer'`],
+        ['Sales (EU)', 'layer:"Sales (EU)"'],
+        ['a,b', 'layer:"a,b"'],
+        ['x=y', 'layer:"x=y"'],
+        ['Gold!', 'layer:"Gold!"'],
+    ])('writes the layer %s as %s, which reads back the same', (layerName, written) => {
+        expect(stringifyPredicate(layer(layerName))).toBe(written)
+        expect(parsePredicate(written).predicate).toEqual(layer(layerName))
+        expect(parsePredicate(written, { layers: [layerName] }).predicate).toEqual(layer(layerName))
+    })
+
+    it('writes a name holding both quotes as JSON, which reads back the same', () => {
+        const p = layer(`It's "x"`)
+        expect(stringifyPredicate(p)).toBe(JSON.stringify(p))
+        expect(parsePredicate(stringifyPredicate(p)).predicate).toEqual(p)
+    })
+
+    it.each<[Predicate, string]>([
+        [{ kind: 'tag', op: 'hasAny', values: ["O'Brien"] }, `tag:"O'Brien"`],
+        [{ kind: 'tag', op: 'hasAny', values: ["O'Brien", 'say "hi"'] }, `tag IN ("O'Brien", 'say "hi"')`],
+        [{ kind: 'entityType', op: 'in', values: ["bob's type"] }, `type:"bob's type"`],
+        [{ kind: 'property', key: 'owner', op: 'eq', value: 'say "hi"' } as Predicate, `owner = 'say "hi"'`],
+        [{ kind: 'property', key: "Bob's key", op: 'eq', value: 'x' } as Predicate, `"Bob's key" = x`],
+        [{ kind: 'property', key: 'say "hi"', op: 'eq', value: 'x' } as Predicate, `'say "hi"' = x`],
+    ])('quotes any value or key holding a quote in the other kind: %j', (p, written) => {
+        expect(stringifyPredicate(p)).toBe(written)
+        expect(parsePredicate(written).predicate).toEqual(p)
+    })
+})
+
+
 describe('predicateDsl — property operators round-trip', () => {
     const prop = (op: string, value: unknown, key = 'owner'): Predicate =>
         ({ kind: 'property', key, op, value } as Predicate)

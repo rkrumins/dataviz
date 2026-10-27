@@ -299,12 +299,13 @@ entity's own conditions under it.
 **Following lineage far.** A relationship is tested from each candidate up to
 3 steps. Past that, one asking for **at least one**, at the top of the search —
 not under an OR group or a NOT group, and not inside another relationship — is
-walked from its far end instead, up to 10 steps: from the entities it names,
-or — one such relationship a search — from everything its far end matches
-across the data source. A far end matching more than 200,000 entities, or a
-walk reaching more than 500,000, is refused in plain words: narrow the far end,
-or follow fewer steps. For **no**, **only** or a count that deep, write it in
-[Cypher](#your-own-cypher).
+walked from its far end instead, up to 10 steps: from the entities it names
+(with what's inside them, their parent or children, or every container above
+them), or — one such relationship a search — from everything its far end
+matches across the data source. A far end matching more than 200,000
+entities, or a walk reaching more than 500,000, is refused in plain words:
+narrow the far end, or follow fewer steps. For **no**, **only** or a count
+that deep, write it in [Cypher](#your-own-cypher).
 
 **Edges and their counts.** Under **Graph shape**, **No upstream lineage**,
 **No links at all**, **No edges at all** and the rest find entities by the
@@ -322,6 +323,17 @@ in the View (`** / orders`). Because names mean the same everywhere, a saved
 search or rule that uses them keeps working when it moves to another View or
 environment. A path that names several entities uses all of them; one that
 names nothing matches nothing.
+
+**Inside a container, anywhere in the query.** At the top of the query,
+**Inside a container named…** (or **Inside Subtree**) limits the whole search
+to that container. Under an **OR** or a **NOT** group, or as a relationship's
+condition, it tests each entity instead: the container itself, or anything
+below it, up to 12 levels down (fewer if the View is shallower). So
+*fact_orders' family* — `fact_orders`, everything inside it and every
+container above it — is an **OR** group of **Inside a container named…**
+`** / fact_orders` and **Contains, at any depth…** with **Is a named
+entity…** `** / fact_orders`; in Code,
+`inside @"**/fact_orders" OR descendant(@"**/fact_orders")`.
 
 **Paths from A to B** lists the routes between two ends, each end entities you
 name or **Any entity where…** a condition: "every route from a topic to a
@@ -412,9 +424,12 @@ The editor helps as you type:
     where the edges go.
 
   They come from this View's own data, and an edge type the data source
-  doesn't know is underlined as you type. For *status is one of Active,
-  Demised or Suspended*, type `status `, pick **IN (…)**, then pick each value
-  as it's offered: `status IN (Active, Demised, Suspended)`.
+  doesn't know is underlined as you type. A value with spaces or quotes in it
+  is written in quotes when you pick it (`type:"data product"`), and a layer
+  whose name is several words is offered while you type it, quoted or not.
+  For *status is one of Active, Demised or Suspended*, type `status `, pick
+  **IN (…)**, then pick each value as it's offered:
+  `status IN (Active, Demised, Suspended)`.
 - **Reads as** says the query in words, and lists any words that will be
   searched as plain text in names.
 - **Examples** insert a ready-made condition at the cursor; a connection
@@ -448,7 +463,7 @@ it.
 | `edges(out) > 10` · `edges[PRODUCES](in) >= 2` | How many edges, which way (`in`, `out`, `both`): links unless brackets say otherwise |
 | `"Asset Owner" = Bob` | A property name with spaces, quoted |
 | `freshnessHours > {slaHours}` | Compared with another property of the same entity (`=`, `!=`, `<`, `<=`, `>`, `>=`) |
-| `layer:Raw` · `layer:"Reporting layer"` | In that layer, as the View places it |
+| `layer:Raw` · `layer:Reporting layer` · `layer:"Reporting layer"` | In that layer, as the View places it. A name of several words needs no quotes when the View has a layer called that; quoted, it always reads whole |
 | `… AS NUMBER` · `… MATCH CASE` · `… INCLUDING MISSING` | After a property comparison: its type, case-sensitivity, and whether entities without the property match |
 | `a AND (b OR c)` · `NOT tag:PII` · `!tag:PII` | Grouping; words side by side mean AND |
 | `parent(type:domain)` · `root(@"Country")` · `ancestor(region = EMEA)` | Its parent is a domain · its top-level container is *Country* · any container above it has region EMEA |
@@ -988,7 +1003,7 @@ LIMIT 200
 | Filters in one query | 64 |
 | Nesting depth of groups | 6 levels |
 | Filters directly inside one OR group | 24 |
-| *Inside Subtree*, *Within N hops*, *Path* | Only at the top level (not inside OR or NOT, nor in a relationship's condition); one *Path* per query |
+| *Within N hops*, *Path* | Only at the top level (not inside OR or NOT, nor in a relationship's condition); one *Path* per query |
 | Relationships inside relationships | 3 deep |
 | Lineage hops in a relationship | 3; 10 for **at least one** at the top level — walked from the entities it names, or, one a search, traced from what its far end matches (at most 200,000 entities, reaching at most 500,000) |
 | **In layer…** | A View that places at most 1,000 entities by hand, and no more layer rules than FalkorDB can follow quickly |
@@ -1024,7 +1039,7 @@ steps tests reach.
 | **No matches**, but you know it's there | The property name or value differs from what you typed, or the entity is outside the View | Pick the property and value from the suggestions; check the scope menu; try **Entire data source** |
 | A **draft**'s new entity isn't found | Search reads the published graph; changes on a draft aren't searchable until they're published | Publish, or look in the draft's canvas directly |
 | "*This view has no boundaries yet, so searching for a word on its own…*" | A plain word over **Everything**, in a View that doesn't limit itself to any entities or types, would read the whole data source | Add a type, tag or property filter, or set **Look in** to **Name** |
-| "*…only allowed in the top-level AND group*" | *Inside Subtree*, *Within N hops* or *Path* sits inside an OR or NOT group | Move it to the top level of the query |
+| "*…only allowed in the top-level AND group*" | *Within N hops* or *Path* sits inside an OR or NOT group | Move it to the top level of the query |
 | "*between needs a lower and an upper value*", "*give a duration like P30D*" | A value can't be compared the way the filter asks | Fix the value the message names |
 | "*… names no entity*" under **No matches**, or **not found** on a name | A name path is spelled differently, or starts below the top | Start at a top-level entity and name each container on the way down, or start with `**` |
 | "*… follows lineage 4 hops. Following more than 3 works for 'at least one' at the top of the query…*" | The relationship asks for none, every one or a count, sits under an OR or NOT group, or is inside another condition | Ask for **at least one** at the top of the query, follow at most 3 steps, or write it in Cypher |
