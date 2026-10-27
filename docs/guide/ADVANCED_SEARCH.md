@@ -370,8 +370,11 @@ display rule.
 
 **[Finding Connections](/guide/finding-connections)** walks through a first
 search step by step, with pictures; gives worked examples in the Form, Ask and
-Code; explains what the canvas shows; and says what to do when nothing
-matches.
+Code, among them
+[everything coming into one thing](/guide/finding-connections#everything-coming-into-one-thing)
+and [the hierarchy at either end](/guide/finding-connections#up-and-down-the-hierarchy);
+explains what the canvas shows, actual connections and rolled-up lines alike;
+and says what to do when nothing matches.
 
 > **Note:** Both ends read the values each entity keeps as its own. A value kept
 > only inside an entity's raw properties JSON doesn't match at either end — the
@@ -389,14 +392,29 @@ The editor helps as you type:
 - **Colours** show how each word is read — a keyword, a property, a value, a
   relationship — and a red underline marks where a query stops making sense,
   with the reason below it.
-- **Suggestions** (or `Ctrl+Space`) offer what fits where the cursor is: entity
-  types after `type:`, tags after `tag:`, layers after `layer:`, a property's
-  values after `owner =`, other properties inside `{`, edge types inside
-  `outgoing[` and `to[` (each with the entity types it joins), edge properties
-  inside `.via(`, entities by name after `@"`, and after `from(…)` where the
-  edges go. They come from this View's own
-  data, and an edge type the data source doesn't know is underlined as you
-  type.
+- **Suggestions** (or `Ctrl+Space`) offer what fits where the cursor is:
+  - after a property's name, every operator, in the Form's words: `IN (…)`
+    *is one of*, `NOT IN (…)` *is none of*, `BETWEEN … AND …` *is between*,
+    `WITHIN LAST …`, `IS SET` and the rest. They open by themselves after a
+    property this View lists; after any other name, start typing the operator
+    (`IN`, `IS`, `NOT`…) or press `Ctrl+Space`. After `name` or `description`
+    they're the text operators, and after `type`, `IN (…)`;
+  - a property's values after `owner =` and inside `tier IN (`, each list
+    leaving out the values already in it, and entity types inside
+    `type IN (`;
+  - how long after `WITHIN LAST`, and the endings a comparison takes
+    (`AS TEXT`, `MATCH CASE`, `INCLUDING MISSING`), only where they change
+    what it means;
+  - entity types after `type:`, tags after `tag:`, layers after `layer:`,
+    other properties inside `{`, edge types inside `outgoing[` and `to[` (each
+    with the entity types it joins), `.via(…)` after a relationship and edge
+    properties inside it, entities by name after `@"`, and after `from(…)`
+    where the edges go.
+
+  They come from this View's own data, and an edge type the data source
+  doesn't know is underlined as you type. For *status is one of Active,
+  Demised or Suspended*, type `status `, pick **IN (…)**, then pick each value
+  as it's offered: `status IN (Active, Demised, Suspended)`.
 - **Reads as** says the query in words, and lists any words that will be
   searched as plain text in names.
 - **Examples** insert a ready-made condition at the cursor; a connection
