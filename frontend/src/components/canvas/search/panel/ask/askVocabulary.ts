@@ -24,6 +24,8 @@ export interface AskVocabulary {
     longest: number
     tags: readonly string[]
     keys: readonly string[]
+    /** Edge types, for a connection's "through …". */
+    edgeTypes?: readonly string[]
 }
 
 export interface AskVocabularyInput {
@@ -32,6 +34,7 @@ export interface AskVocabularyInput {
     propertyKeys: readonly string[]
     valueSamples: ReadonlyArray<{ key: string; value: string }>
     layers: ReadonlyArray<{ value: string; label: string }>
+    edgeTypes?: readonly string[]
 }
 
 
@@ -103,5 +106,5 @@ export function buildAskVocabulary(input: AskVocabularyInput): AskVocabulary {
         file([...label.trim().split(/\s+/), 'layer'], meaning)
     }
 
-    return { phrases, longest, tags: input.tagValues, keys: input.propertyKeys }
+    return { phrases, longest, tags: input.tagValues, keys: input.propertyKeys, edgeTypes: input.edgeTypes ?? [] }
 }

@@ -7,7 +7,8 @@
  *   completion     what fits where the cursor is — entity types after
  *                  ``type:``, a property's values after ``owner =``, edge
  *                  fields inside ``.via(``, entities by name after ``@"``,
- *                  edge types inside ``outgoing[``, and words and
+ *                  edge types inside ``outgoing[`` and ``to[``, a
+ *                  connection's far end after ``from(…)``, and words and
  *                  relationships to start a condition with
  *   warnings       an edge type this data source doesn't have
  *   selecting      a whole condition: from the word that starts it, or
@@ -182,6 +183,7 @@ export type DslCompletionContext =
     | { kind: 'edgeKey'; from: number; text: string }
     | { kind: 'edgeType'; from: number; text: string; taken: string[]; connection: boolean }
     | { kind: 'keyRef'; from: number; text: string }
+    | { kind: 'connectionEnd'; from: number; text: string }
     | { kind: 'term'; from: number; text: string }
 
 const PREFIXES: Record<string, 'type' | 'tag' | 'layer' | 'has'> = {
@@ -204,16 +206,18 @@ export function completionContextAt(doc: string, pos: number): DslCompletionCont
     const keyRef = /(?:=|<|>)\s*\{([^{}":]*)$/.exec(before)
     if (keyRef) return { kind: 'keyRef', from: pos - keyRef[1].length, text: keyRef[1] }
 
-    // Inside outgoing[… not yet closed: edge types — a connection's never
-    // the hierarchy's.
+    // Inside outgoing[… not yet closed: edge types — a relationship's never
+    // the hierarchy's. A connection's end (to[, or linkedTo[ right after
+    // from(…)) takes any edges, as a count does.
     const bracket = /(?:^|[\s(!])([A-Za-z_-]+)(?:\*[\d.]*)?\[([^\]]*)$/.exec(before)
     const edgeWord = bracket?.[1].toLowerCase().replace(/[_-]/g, '') ?? ''
-    if (bracket && (CONNECTION_WORDS.has(edgeWord) || COUNTING_WORDS.has(edgeWord))) {
+    if (bracket && (CONNECTION_WORDS.has(edgeWord) || COUNTING_WORDS.has(edgeWord) || edgeWord === 'to')) {
         const names = bracket[2].split(',')
         const text = (names.pop() ?? '').trimStart()
+        const head = before.slice(0, bracket.index + bracket[0].indexOf(bracket[1]))
         return { kind: 'edgeType', from: pos - text.length, text,
                  taken: names.map((n) => n.trim().replace(/^"(.*)"$/, '$1')),
-                 connection: CONNECTION_WORDS.has(edgeWord) }
+                 connection: CONNECTION_WORDS.has(edgeWord) && !(edgeWord === 'linkedto' && endsWithSource(head)) }
     }
 
     const comparison = COMPARISON.exec(before)
@@ -240,7 +244,27 @@ export function completionContextAt(doc: string, pos: number): DslCompletionCont
     if (via >= 0 && !closes(before.slice(via + 5))) {
         return { kind: 'edgeKey', from: pos - term.length, text: term }
     }
+    // Right after from(…): where the edges go.
+    if (endsWithSource(before.slice(0, pos - term.length))) {
+        return { kind: 'connectionEnd', from: pos - term.length, text: term }
+    }
     return { kind: 'term', from: pos - term.length, text: term }
+}
+
+/** Whether ``text`` ends with a whole ``from(…)`` — what a connection's
+ *  ``to(`` or ``linkedTo(`` follows. */
+function endsWithSource(text: string): boolean {
+    const t = text.trimEnd()
+    if (!t.endsWith(')')) return false
+    let depth = 0
+    for (let i = t.length - 1; i >= 0; i -= 1) {
+        if (t[i] === ')') depth += 1
+        else if (t[i] === '(') {
+            depth -= 1
+            if (depth === 0) return /(?:^|[\s(!])from$/i.test(t.slice(0, i))
+        }
+    }
+    return false
 }
 
 /** Words whose brackets name edges, read with ``_`` and ``-`` left out: a
@@ -289,6 +313,8 @@ const TERMS: Completion[] = [
     snippetCompletion('no fedBy(${})', { label: 'no fedBy(…)', detail: 'nothing feeding it is…', type: 'function' }),
     snippetCompletion('count(child(${})) > 0', { label: 'count(…)', detail: 'how many relatives are…', type: 'function' }),
     snippetCompletion('edges(${1:both}) > ${2:10}', { label: 'edges(…) >', detail: 'how many edges, in, out or both', type: 'function' }),
+    snippetCompletion('from(${1}) to(${2})', { label: 'from(…) to(…)', detail: 'connections: the edges from … to …', type: 'function' }),
+    snippetCompletion('from(${1}) linkedTo(${2})', { label: 'from(…) linkedTo(…)', detail: 'connections, either way', type: 'function' }),
     snippetCompletion('upstream(${})', { label: 'upstream(…)', detail: 'older spelling of fedBy(…)', type: 'function', boost: -1 }),
     snippetCompletion('downstream(${})', { label: 'downstream(…)', detail: 'older spelling of feeds(…)', type: 'function', boost: -1 }),
     snippetCompletion('neighbor(${})', { label: 'neighbor(…)', detail: 'older spelling of linkedTo[lineage](…)', type: 'function', boost: -1 }),
@@ -302,6 +328,13 @@ const TERMS: Completion[] = [
     { label: 'AND', type: 'keyword' },
     { label: 'OR', type: 'keyword' },
     { label: 'NOT', type: 'keyword' },
+]
+
+/** Where a connection's edges go, after ``from(…)``. */
+const CONNECTION_ENDS: Completion[] = [
+    snippetCompletion('to(${})', { label: 'to(…)', detail: 'to something that…, any link', type: 'function', boost: 2 }),
+    snippetCompletion('to[${1}](${2})', { label: 'to[…](…)', detail: 'through these edges, to…', type: 'function', boost: 1 }),
+    snippetCompletion('linkedTo(${})', { label: 'linkedTo(…)', detail: 'either way', type: 'function' }),
 ]
 
 /** A word the language reads as one token, as typed; anything else quoted. */
@@ -390,6 +423,8 @@ export function dslCompletionSource(vocabulary: () => DslVocabulary): Completion
                     })),
                     validFor: /^[\w.-]*$/,
                 }
+            case 'connectionEnd':
+                return { from: at.from, options: CONNECTION_ENDS, validFor: /^[\w.*-]*$/ }
             case 'term':
                 if (!at.text && !context.explicit) return null
                 return {
