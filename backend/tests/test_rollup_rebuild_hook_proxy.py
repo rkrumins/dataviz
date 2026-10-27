@@ -68,7 +68,12 @@ def test_proxy_mode_queues_the_job_on_the_control_plane(monkeypatch):
     assert "headers" in init                              # internal service auth
 
 
-def test_dedicated_mode_still_queues_nothing(monkeypatch):
+def test_dedicated_mode_signals_the_change_and_queues_no_run(monkeypatch):
+    """A dedicated source's rollups live in its ``_proj`` graph, which only the job writes: the
+    change is signalled (change-gated, one rebuild per cooldown), never a run queued directly."""
     _patch(monkeypatch, mode="dedicated")
     asyncio.run(pt.make_rollup_rebuild_hook(lambda: None)("graph_1"))
-    assert [c for c in _Client.calls if c[0] == "post"] == []
+    assert [c for c in _Client.calls if c[0] == "post"] == [(
+        "post", "/aggregation/data-sources/ds_1/source-changed", None,
+        {"reason": "versioned_publish"},
+    )]

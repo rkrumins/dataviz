@@ -22,13 +22,22 @@ branch_labels = None
 depends_on = None
 
 
+def _bound_lock_wait() -> None:
+    """Wait at most five seconds for a lock: ``projection_state`` is read on every versioned
+    read, and giving up (to be run again) beats queueing them."""
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("SET LOCAL lock_timeout = '5s'")
+
+
 def upgrade() -> None:
+    _bound_lock_wait()
     bind = op.get_bind()
     tbl = f'"{gv_config.graphver_schema()}"."projection_state"'
     bind.execute(sa.text(f"ALTER TABLE {tbl} ADD COLUMN IF NOT EXISTS drift jsonb"))
 
 
 def downgrade() -> None:
+    _bound_lock_wait()
     bind = op.get_bind()
     tbl = f'"{gv_config.graphver_schema()}"."projection_state"'
     bind.execute(sa.text(f"ALTER TABLE {tbl} DROP COLUMN IF EXISTS drift"))

@@ -5,13 +5,11 @@ hands the job only what it can't, as a run queued per projected commit. A dedica
 them in ``{graph_name}_proj``, which only the aggregation job writes, so the projector maintains
 nothing there and hands over every window that changes them — signalled as a load into the source
 is (change-gated, marked stale until rebuilt, one rebuild per cooldown), never a run per publish,
-and never a rebuild in the wrong graph.
+and never a rebuild in the wrong graph. (The proxy runtime: ``test_rollup_rebuild_hook_proxy.py``.)
 """
 import asyncio
 import contextlib
 from types import SimpleNamespace
-
-import httpx
 
 from backend.app.services import projection_target as pt
 
@@ -62,24 +60,6 @@ def test_an_in_source_source_still_queues_a_run_per_projected_commit(monkeypatch
     [(ds_id, request, source)] = agg.triggers
     assert (ds_id, request.idempotency_key, source) == ("ds1", "gv-rollup-rebuild:g1:7", "api")
     assert agg.signals == []
-
-
-def test_without_a_service_here_the_control_plane_is_signalled(monkeypatch):
-    _wire(monkeypatch, "dedicated")
-    posted = []
-
-    def _handler(request: httpx.Request):
-        posted.append((request.url.path, request.content))
-        return httpx.Response(200, json={})
-
-    real = httpx.AsyncClient
-    monkeypatch.setattr(httpx, "AsyncClient",
-                        lambda **kw: real(transport=httpx.MockTransport(_handler), **kw))
-    monkeypatch.setattr("backend.app.services.aggregation.internal_auth.internal_auth_headers",
-                        lambda: {})
-    asyncio.run(pt.make_rollup_rebuild_hook(lambda: None)("g1"))
-    assert posted == [("/aggregation/data-sources/ds1/source-changed",
-                       b'{"reason":"versioned_publish"}')]
 
 
 def test_a_dedicated_source_gets_the_edge_types_to_hand_over_and_no_level_map(monkeypatch):

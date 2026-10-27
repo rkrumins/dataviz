@@ -19,11 +19,12 @@ Within that:
   adds a column with a constant default and holds the few disabled accounts;
   ``20261025_1400_sa_requests`` and ``20261025_1600_sa_purge`` each add a
   nullable column, ``20261026_1000_sa_policy`` adds three to the one-row
-  ``platform_settings``, ``20261026_1200_sa_org_read`` seeds a role, and
+  ``platform_settings``, ``20261026_1200_sa_org_read`` seeds a role,
   ``20261024_1000_native_query`` adds a column with a constant default to the
   small ``resource_grants``, swaps a CHECK and seeds a permission and its
-  grants), since on a database upgrading through them the lock is also held
-  while they run;
+  grants, and ``20261027_1200_projection_drift`` adds a nullable column to
+  ``projection_state``), since on a database upgrading through them the lock
+  is also held while they run;
 * a revision that locks a table other requests use bounds how long it waits
   for that lock (``lock_timeout``), so a long-running reader makes the
   upgrade give up, to be run again, instead of queueing every later query
@@ -57,7 +58,8 @@ _ASKED = "20261025_1400_sa_requests"
 _PURGE = "20261025_1600_sa_purge"
 _POLICY = "20261026_1000_sa_policy"
 _ORG_READ = "20261026_1200_sa_org_read"
-_HEAD = "20261024_1000_native_query"
+_NATIVE = "20261024_1000_native_query"
+_HEAD = "20261027_1200_projection_drift"
 #: Every revision that locks a table other requests use, and in which
 #: direction: ``users`` for the key's foreign key, ``user_identities``, and
 #: the ledger.
@@ -77,6 +79,7 @@ _ON_LIVE_TABLES = {
     f"{_PURGE}.py": ("upgrade", "downgrade"),
     f"{_POLICY}.py": ("upgrade", "downgrade"),
     f"{_ORG_READ}.py": ("upgrade", "downgrade"),
+    f"{_NATIVE}.py": ("upgrade", "downgrade"),
     f"{_HEAD}.py": ("upgrade", "downgrade"),
 }
 
@@ -153,12 +156,13 @@ def test_a_database_left_between_the_two_still_comes_back_down():
         assert _shape(conn) == ({"id", "occurred_at"}, set())
 
 
-def test_the_chain_ends_twelve_cheap_revisions_after_the_ledger_revision():
+def test_the_chain_ends_thirteen_cheap_revisions_after_the_ledger_revision():
     config = Config()
     config.set_main_option("script_location", str(_VERSIONS.parent))
     script = ScriptDirectory.from_config(config)
     assert script.get_heads() == [_HEAD]
-    assert script.get_revision(_HEAD).down_revision == _ORG_READ
+    assert script.get_revision(_HEAD).down_revision == _NATIVE
+    assert script.get_revision(_NATIVE).down_revision == _ORG_READ
     assert script.get_revision(_ORG_READ).down_revision == _POLICY
     assert script.get_revision(_POLICY).down_revision == _PURGE
     assert script.get_revision(_PURGE).down_revision == _ASKED
