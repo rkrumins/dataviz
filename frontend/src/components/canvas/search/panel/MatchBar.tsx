@@ -35,6 +35,7 @@ import { createPortal } from 'react-dom'
 
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { cn } from '@/lib/utils'
+import { useConnectionVisibility, useConnectionVisibilityStore } from '@/store/connectionVisibility'
 import { usePersonaMode } from '@/store/persona'
 import {
     useCanvasFilterMode,
@@ -161,6 +162,7 @@ export const MatchBar: FC<MatchBarProps> = ({
                     onFrame={onFrame}
                 />
             )}
+            {unit === 'connection' && hasMatches && !isRunning && !isError && <HiddenTypesNote viewId={viewId} />}
             {((showTruncation && unit === 'match') || showDeadlineExceeded) && (
                 <WarningBanner
                     truncated={showTruncation && unit === 'match'}
@@ -168,6 +170,45 @@ export const MatchBar: FC<MatchBarProps> = ({
                     candidateCount={candidateCount ?? null}
                 />
             )}
+        </div>
+    )
+}
+
+
+/** A Connections search's matches the canvas keeps hidden, their edge types
+ *  hidden there by the reader: how many, and a way to show them. */
+function HiddenTypesNote({ viewId }: { viewId: string }) {
+    const matched = useSearchStore((s) => s.matchedEdges)
+    const { hiddenTypes } = useConnectionVisibility(viewId)
+    const hidden = useMemo(() => {
+        if (hiddenTypes.size === 0) return null
+        const types = new Set<string>()
+        let count = 0
+        for (const m of matched) {
+            const type = m.edgeType.toUpperCase()
+            if (hiddenTypes.has(type)) { count++; types.add(type) }
+        }
+        return count > 0 ? { count, types } : null
+    }, [matched, hiddenTypes])
+    if (!hidden) return null
+    return (
+        <div className={cn(
+            'flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-ink-secondary',
+            'border-t border-slate-200/70 dark:border-glass-border/40',
+        )}>
+            <EyeOff className="w-3 h-3 shrink-0 text-ink-muted" aria-hidden />
+            <span className="min-w-0 flex-1">
+                {hidden.count.toLocaleString()} of these {hidden.count === 1 ? 'connection is' : 'connections are'} of{' '}
+                {hidden.types.size === 1 ? 'a type' : 'types'} hidden on the canvas.
+            </span>
+            <button
+                type="button"
+                onClick={() => useConnectionVisibilityStore.getState().setHidden(
+                    viewId, [...hiddenTypes].filter((t) => !hidden.types.has(t)))}
+                className="shrink-0 rounded-md px-1.5 py-0.5 font-medium text-accent-lineage hover:bg-accent-lineage/10"
+            >
+                Show them
+            </button>
         </div>
     )
 }

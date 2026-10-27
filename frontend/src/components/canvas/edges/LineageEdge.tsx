@@ -18,6 +18,8 @@ interface LineageEdgeData {
   // Trace flags for consistent highlighting
   isTraced?: boolean
   isDimmed?: boolean
+  /** A Connections search matched an edge this line draws. */
+  isSearchMatch?: boolean
   [key: string]: unknown
 }
 
@@ -52,7 +54,7 @@ export const LineageEdge = memo(function LineageEdge({
   // Get highlighting state from store
   const highlightedEdgeIds = useEdgeFiltersStore((s) => s.highlightedEdgeIds)
   const highlightMode = useEdgeFiltersStore((s) => s.highlightMode)
-  const isHighlighted = highlightedEdgeIds.has(id) || isTraced
+  const isHighlighted = highlightedEdgeIds.has(id) || isTraced || (data?.isSearchMatch ?? false)
 
   // Schema-driven edge visual
   const edgeVisual = useEdgeVisual(edgeType)

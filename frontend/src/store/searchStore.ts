@@ -298,6 +298,15 @@ interface SearchStoreState {
     orderedEdgeKeys: ReadonlyArray<string>
 
     /**
+     * A Connections search's matched edges, for the canvas to light the
+     * lines that draw them: the first ``MATCHED_EDGES_CAP`` loaded, in list
+     * order. Empty for any other search.
+     */
+    matchedEdges: ReadonlyArray<MatchedEdge>
+    /** Every matched edge is loaded: no page of them remains. */
+    matchedEdgesComplete: boolean
+
+    /**
      * Index into ``orderedMatchUrns`` (``orderedEdgeKeys`` for a
      * Connections search) of the match the user is currently
      * focused on via the MatchBar stepper or keyboard (J/K/↑/↓). Drives:
@@ -339,6 +348,25 @@ interface SearchStoreState {
 
 
 /**
+ * One edge a Connections search matched, as the canvas lights it: its ends,
+ * its type, and the containers each end sits in, parent first — where to
+ * file an end the canvas has not loaded.
+ */
+export interface MatchedEdge {
+    key: string
+    /** The edge's id, by the canvas's own rule for a raw edge's. */
+    id: string
+    source: string
+    target: string
+    edgeType: string
+    sourceChain: readonly string[]
+    targetChain: readonly string[]
+}
+
+/** The most matched edges the canvas lights: the first loaded. */
+export const MATCHED_EDGES_CAP = 2000
+
+/**
  * Per-hit input to the ancestor rollup derivation. The leaf entity type
  * is needed alongside the path so the breakdown map can tally matches
  * by what kind of node sits at the end of each path.
@@ -367,6 +395,10 @@ interface SearchStoreActions {
         /** A Connections search's edge keys, in list order — what the
          *  stepper walks. Left out for any other search. */
         edgeKeys?: Iterable<string>
+        /** A Connections search's edges, in list order, for the canvas — and
+         *  whether they are all loaded. Left out for any other search. */
+        matchedEdges?: readonly MatchedEdge[]
+        matchedEdgesComplete?: boolean
         /** Per-hit ancestor info (path + the entityType of the hit at the
          *  end of that path). Used to derive both ``ancestorMatchCounts``
          *  and ``ancestorMatchTypeBreakdowns`` so the canvas can surface
@@ -583,6 +615,7 @@ const CANVAS_FILTER_STORAGE_KEY = 'synodic.advancedSearch.canvasFilterMode.v1'
 const EMPTY_HISTORY: ReadonlyArray<Predicate | null> = Object.freeze([])
 const EMPTY_RECENT: ReadonlyArray<RecentQueryEntry> = Object.freeze([])
 const EMPTY_ORDERED_URNS: ReadonlyArray<string> = Object.freeze([])
+const EMPTY_MATCHED_EDGES: ReadonlyArray<MatchedEdge> = Object.freeze([])
 
 
 /**
@@ -691,6 +724,8 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     selectedIndices: [],
     orderedMatchUrns: EMPTY_ORDERED_URNS,
     orderedEdgeKeys: EMPTY_ORDERED_URNS,
+    matchedEdges: EMPTY_MATCHED_EDGES,
+    matchedEdgesComplete: true,
     focusedMatchIndex: null,
     // Initial mode is 'highlight'; per-view persisted overrides are
     // applied via the setCanvasFilterMode action on first read. We
@@ -702,7 +737,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     pendingOpenBlank: false,
     pendingAskFocus: false,
 
-    setResult: ({ viewId, matchUrns, edgeKeys, ancestorPaths, ancestorCounts, queryHash }) => {
+    setResult: ({ viewId, matchUrns, edgeKeys, matchedEdges, matchedEdgesComplete, ancestorPaths, ancestorCounts, queryHash }) => {
         const next = new Set<string>()
         // Build the ordered list and the set in one pass so iteration
         // order from the caller (backend hit order) is preserved for
@@ -757,6 +792,8 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             matchUrnSet: next,
             orderedMatchUrns: ordered.length === 0 ? EMPTY_ORDERED_URNS : ordered,
             orderedEdgeKeys: edges.length === 0 ? EMPTY_ORDERED_URNS : edges,
+            matchedEdges: matchedEdges?.length ? matchedEdges.slice(0, MATCHED_EDGES_CAP) : EMPTY_MATCHED_EDGES,
+            matchedEdgesComplete: matchedEdgesComplete ?? true,
             // A new query, or a focused match this result set no longer
             // holds, still resets: landing the user on a different match
             // than they expected is worse than landing them on none.
@@ -918,6 +955,8 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             matchUrnSet: EMPTY_SET,
             orderedMatchUrns: EMPTY_ORDERED_URNS,
             orderedEdgeKeys: EMPTY_ORDERED_URNS,
+            matchedEdges: EMPTY_MATCHED_EDGES,
+            matchedEdgesComplete: true,
             focusedMatchIndex: null,
             queryHash: null,
             ancestorMatchCounts: EMPTY_MAP,
@@ -1001,6 +1040,8 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             matchUrnSet: EMPTY_SET,
             orderedMatchUrns: EMPTY_ORDERED_URNS,
             orderedEdgeKeys: EMPTY_ORDERED_URNS,
+            matchedEdges: EMPTY_MATCHED_EDGES,
+            matchedEdgesComplete: true,
             focusedMatchIndex: null,
             queryHash: null,
             draftPredicate: null,

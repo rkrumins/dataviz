@@ -35,7 +35,7 @@
  */
 import { useState } from 'react'
 import * as PopoverPrimitive from '@radix-ui/react-popover'
-import { Unlink, Layers, ListPlus, Focus, SearchX } from 'lucide-react'
+import { Unlink, Layers, ListPlus, Focus, SearchX, Waypoints } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { unitMeaning, unitNoun } from './connections/connectionUnits'
@@ -71,6 +71,8 @@ export function CanvasStatusChips({
   focusShown,
   focusTotal,
   onOpenFocusLens,
+  searchShown,
+  searchTotal,
   rootsLoaded,
   rootsHaveMore,
   onLoadMoreRoots,
@@ -100,6 +102,9 @@ export function CanvasStatusChips({
   focusShown?: number
   focusTotal?: number
   onOpenFocusLens?: () => void
+  /** A Connections search's lit lines: drawn (its own budget) / lit in all. */
+  searchShown?: number
+  searchTotal?: number
   /** Root pagination: top-level entities loaded so far; `rootsHaveMore`
    *  = the last page was full, so more likely exist beyond it. */
   rootsLoaded?: number
@@ -120,11 +125,12 @@ export function CanvasStatusChips({
   const showUnassigned = unassignedEntities.length > 0
   const showAggDetail = aggDetailTotal > aggDetailShown && aggDetailShown > 0
   const showFocus = (focusTotal ?? 0) > (focusShown ?? 0) && (focusShown ?? 0) > 0
+  const showSearch = (searchTotal ?? 0) > (searchShown ?? 0) && (searchShown ?? 0) > 0
   const showRoots = !!rootsHaveMore && (rootsLoaded ?? 0) > 0
   const showExternal = !!selectedExternal && (selectedExternal.in + selectedExternal.out) > 0
   const showNotFound = notFoundPlacements.length > 0
 
-  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showRoots && !showExternal && !showNotFound) return null
+  if (!showUnresolved && !showUnassigned && !showAggDetail && !showFocus && !showSearch && !showRoots && !showExternal && !showNotFound) return null
 
   return (
     // Bottom-RIGHT, above the reserved dock band (--edge-legend-height) but
@@ -246,6 +252,30 @@ export function CanvasStatusChips({
                 Open lens
               </button>
             )}
+          </div>
+        </InfoTooltip>
+      )}
+
+      {showSearch && (
+        <InfoTooltip
+          side="right"
+          content={
+            <div>
+              <p className="font-semibold mb-1">More matched lines than the canvas draws</p>
+              <p className="text-ink-muted">
+                The search lights {searchTotal!.toLocaleString()} {unitNoun(searchTotal!, 'lines')} — drawing the{' '}
+                {searchShown!.toLocaleString()} with the most matches. All Edges draws every one; the
+                results list every connection.
+              </p>
+            </div>
+          }
+        >
+          <div className={CHIP_CLASS}>
+            <Waypoints className="w-3 h-3 text-accent-lineage/80" />
+            <span>
+              <span className="tabular-nums">{(searchTotal! - searchShown!).toLocaleString()}</span> more matched{' '}
+              {unitNoun(searchTotal! - searchShown!, 'lines')} not drawn
+            </span>
           </div>
         </InfoTooltip>
       )}

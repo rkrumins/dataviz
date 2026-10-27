@@ -44,10 +44,12 @@ import {
     useSearchStore,
     type AncestorCountInfo,
     type AncestorPathInfo,
+    type MatchedEdge,
 } from '@/store/searchStore'
 import type {
     AggregationSpec,
     AncestorRef,
+    EdgeEnd,
     Predicate,
     SearchAggregateBucket,
     SearchQuery,
@@ -143,6 +145,16 @@ function collectMatchUrns(result: SearchResultPage): string[] {
  *  what the match stepper walks. Undefined for any other search. */
 function collectEdgeKeys(result: SearchResultPage): string[] | undefined {
     return result.edges?.map((e) => e.key) ?? undefined
+}
+
+/** A Connections search's edges as the canvas lights them: each end's
+ *  containers parent first, as the canvas files an end it has not loaded. */
+function collectMatchedEdges(result: SearchResultPage): MatchedEdge[] | undefined {
+    const chain = (end: EdgeEnd) => (end.ancestorPath ?? []).map((a) => a.urn).reverse()
+    return result.edges?.map((e) => ({
+        key: e.key, id: e.id, source: e.source.urn, target: e.target.urn, edgeType: e.edgeType,
+        sourceChain: chain(e.source), targetChain: chain(e.target),
+    }))
 }
 
 
@@ -643,6 +655,8 @@ export function useAdvancedSearch(
                 viewId,
                 matchUrns: collectMatchUrns(result),
                 edgeKeys: collectEdgeKeys(result),
+                matchedEdges: collectMatchedEdges(result),
+                matchedEdgesComplete: !result.cursor && result.status !== 'running',
                 ancestorPaths,
                 ancestorCounts: collectAncestorCounts(query, result),
                 queryHash: JSON.stringify(query),
@@ -704,6 +718,8 @@ export function useAdvancedSearch(
                 viewId,
                 matchUrns,
                 edgeKeys: collectEdgeKeys(result),
+                matchedEdges: collectMatchedEdges(result),
+                matchedEdgesComplete: !result.cursor && result.status !== 'running',
                 ancestorPaths,
                 ancestorCounts: collectAncestorCounts(query, result),
                 queryHash: JSON.stringify(query),
@@ -897,6 +913,8 @@ export function useAdvancedSearch(
                 viewId,
                 matchUrns: collectMatchUrns(merged),
                 edgeKeys: collectEdgeKeys(merged),
+                matchedEdges: collectMatchedEdges(merged),
+                matchedEdgesComplete: !merged.cursor,
                 ancestorPaths: collectAncestorPaths(merged),
                 // ``merged`` keeps page 1's aggregates (later pages ask for
                 // rows only), so the badges stay exact instead of regressing

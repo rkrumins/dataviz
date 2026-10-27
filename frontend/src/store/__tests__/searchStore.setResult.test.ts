@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 
-import { useSearchStore } from '../searchStore'
+import { MATCHED_EDGES_CAP, type MatchedEdge, useSearchStore } from '../searchStore'
 
 
 beforeEach(() => {
@@ -229,5 +229,34 @@ describe('searchStore — a Connections search steps through its edges', () => {
         useSearchStore.getState().stepFocus('next')
         useSearchStore.getState().stepFocus('next')
         expect(useSearchStore.getState().focusedMatchIndex).toBe(1)
+    })
+})
+
+
+describe("searchStore — a Connections search's edges, for the canvas", () => {
+    const matched = (i: number): MatchedEdge => ({
+        key: `k${i}`, id: `e${i}`, source: 'a', target: `b${i}`, edgeType: 'T', sourceChain: [], targetChain: [],
+    })
+
+    it('keeps the first edges loaded, as many as the canvas lights, and whether all are', () => {
+        const edges = Array.from({ length: MATCHED_EDGES_CAP + 5 }, (_, i) => matched(i))
+        useSearchStore.getState().setResult({
+            viewId: 'view-1', matchUrns: ['a'], matchedEdges: edges, matchedEdgesComplete: false, queryHash: 'q',
+        })
+        const s = useSearchStore.getState()
+        expect(s.matchedEdges).toHaveLength(MATCHED_EDGES_CAP)
+        expect(s.matchedEdges[0].key).toBe('k0')
+        expect(s.matchedEdgesComplete).toBe(false)
+    })
+
+    it('holds none for an entity search, or once cleared', () => {
+        useSearchStore.getState().setResult({ viewId: 'view-1', matchUrns: ['a'], matchedEdges: [matched(1)], queryHash: 'q' })
+        useSearchStore.getState().setResult({ viewId: 'view-1', matchUrns: ['a'], queryHash: 'q2' })
+        expect(useSearchStore.getState().matchedEdges).toEqual([])
+        expect(useSearchStore.getState().matchedEdgesComplete).toBe(true)
+
+        useSearchStore.getState().setResult({ viewId: 'view-1', matchUrns: ['a'], matchedEdges: [matched(1)], queryHash: 'q' })
+        useSearchStore.getState().clear()
+        expect(useSearchStore.getState().matchedEdges).toEqual([])
     })
 })
