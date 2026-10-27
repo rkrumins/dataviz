@@ -370,8 +370,11 @@ display rule.
 
 **[Finding Connections](/guide/finding-connections)** walks through a first
 search step by step, with pictures; gives worked examples in the Form, Ask and
-Code; explains what the canvas shows; and says what to do when nothing
-matches.
+Code, among them
+[everything coming into one thing](/guide/finding-connections#everything-coming-into-one-thing)
+and [the hierarchy at either end](/guide/finding-connections#up-and-down-the-hierarchy);
+explains what the canvas shows, actual connections and rolled-up lines alike;
+and says what to do when nothing matches.
 
 > **Note:** Both ends read the values each entity keeps as its own. A value kept
 > only inside an entity's raw properties JSON doesn't match at either end — the

@@ -334,6 +334,26 @@ More examples:
 ```
 — every `FEEDS` edge, either way, touching the parent of a column.
 
+```json
+{"kind": "edges", "targetWhere": {"kind": "is", "refs": [{"path": ["**", "rpt_daily_revenue"]}]}}
+```
+— every edge into one entity: on the demo platform graph, 5 (4 `CONSUMES`, 1
+`PRODUCES`). Leave `sourceWhere` out for any source.
+
+```json
+{"kind": "edges", "targetWhere": {"kind": "related", "axis": "ancestor", "minHops": 2, "maxHops": 2,
+   "where": {"kind": "is", "refs": [{"path": ["**", "Snowflake"]}]}}}
+```
+— every edge into anything whose grandparent is `Snowflake`: 33 on the demo
+graph, as `parent` within `parent` finds.
+
+```json
+{"kind": "edges", "edgeTypes": ["TRANSFORMS"],
+ "sourceWhere": {"kind": "related", "axis": "parent", "where": {"kind": "is", "refs": [{"path": ["**", "fact_orders"]}]}},
+ "targetWhere": {"kind": "related", "axis": "parent", "where": {"kind": "is", "refs": [{"path": ["**", "rpt_daily_revenue"]}]}}}
+```
+— column lineage between two tables: 6 on the demo graph.
+
 **In Code mode.** The panel's Code mode writes a Connections search as words,
 and a library pack or saved search may hold either form:
 
@@ -345,6 +365,17 @@ and a library pack or saved search may hold either form:
 | `from(…) linkedTo(…)` | Adds `"direction": "either"` |
 | `from(…) to(…).via(confidence >= 0.8)` | Adds `"edgePredicate": {"kind": "edgeProperty", "key": "confidence", "op": "gte", "value": 0.8}` |
 | `from() to(layer:Gold)` | No `sourceWhere`: any entity. `{"kind": "edges", "targetWhere": {"kind": "layer", "layerAssignment": "Gold"}}` |
+
+Inside an end, Code mode writes the hierarchy as words:
+
+| In an end | JSON |
+| --- | --- |
+| `@"**/rpt_daily_revenue"` | `{"kind": "is", "refs": [{"path": ["**", "rpt_daily_revenue"]}]}` |
+| `inside @"**/rpt_daily_revenue"` | `{"kind": "descendantOf", "refs": [{"path": ["**", "rpt_daily_revenue"]}]}`: the entity and everything below it |
+| `parent(…)` · `child(…)` | `{"kind": "related", "axis": "parent", "where": …}`; `"axis": "child"` likewise |
+| `ancestor*2(…)` · `ancestor(…)` · `descendant(…)` | `"axis": "ancestor", "minHops": 2, "maxHops": 2`; no hops for any depth, 1–20; `"axis": "descendant"` likewise |
+| `every child(…)` · `no child(…)` | Adds `"quantifier": "all"` · `"quantifier": "none"` |
+| `count(child(…)) >= 6` | Adds `"count": {"op": "gte", "value": 6}` |
 
 **What it returns.** `options.results` is `edges` (left out, it is filled in;
 another value is a `400`). The page lists `edges` in order: the source's name,
@@ -402,8 +433,17 @@ Reporting layer" on the demo platform graph, cut to its first edge:
 - Both ends must be in the search's scope.
 - Both ends read native property values only, as a relationship's condition
   does.
+- `outgoing` follows each edge the way it is stored. On the demo graph,
+  `CONSUMES` is stored from the reader to what it reads, so a chart's
+  `CONSUMES` edge counts as coming into the dataset it reads; name `edgeTypes`
+  to keep only the kinds that carry data in.
 - Rollups (`AGGREGATED`) are never returned, and can't be named: they summarise
-  other edges.
+  other edges. Naming one is a `422`: *AGGREGATED edges are rollups of other
+  edges — ask for the edges themselves*. To roll edges up to tables,
+  containers or layers, group them by an entry of each end's `ancestorPath`;
+  the canvas places its lit lines the same way.
+- An end's relationships nest at most 3 deep (`DEEP_SEARCH_MAX_RELATION_DEPTH`),
+  and its containment axes go 1–20 levels.
 - `aggregations` and `sort` are refused: the order is fixed.
 - An end's relationship follows lineage at most 3 hops.
 - Explain shows the search as one statement, ready to edit and run.

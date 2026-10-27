@@ -48,6 +48,7 @@ counted exactly, and lights each one up on the canvas.
 | Things that match: *"datasets tagged PII"* | An ordinary search: **Find → Entities** | The datasets |
 | Things linked to something: *"datasets that feed a dashboard"* | **Entities**, with a [relationship](/guide/advanced-search#relationships) filter such as **Feeds…** | The datasets, not the lines |
 | The lines themselves: *"every line from `fact_orders` into the Reporting layer"* | **Find → Connections** (this page) | Each line, with both of its ends and the containers they sit in |
+| Everything arriving at one thing: *"what comes into `rpt_daily_revenue`?"* | **Find → Connections**, with **From** left empty ([how](#everything-coming-into-one-thing)) | Each line into it, with where it comes from |
 | Routes through several steps: *"every way from this topic to that dataset"* | **Paths from A to B**, under **Add filter → Advanced** | Routes, each a chain of lines |
 
 ## Your first connection search
@@ -140,6 +141,33 @@ carries.
 - **Containment** connections ("this contains that") light up their two ends
   only, because the canvas draws containment as one box inside another rather
   than as a line.
+
+### Actual connections and rolled-up lines
+
+A Connections search always finds the **actual connections**: the lines the
+data source keeps, one by one. What changes is how much detail you see.
+
+- **The list, Search Studio and Export** show every actual connection, one row
+  each, counted exactly.
+- **The canvas** shows the same connections at the level of detail you've
+  opened. Between two closed containers, one **rolled-up line** stands for
+  every connection running between what's inside them, and its badge counts
+  yours. Open a container and the light moves down, step by step, to the
+  actual lines.
+
+The rolled-up line is worked out from the connections your search found, so
+it's always true to the real lineage. That's also why it appears even where
+the data source's own summaries, its [rollups](/guide/rollup-capacity),
+haven't been built yet.
+
+You can't search for the rolled-up lines themselves. They're summaries of
+connections, so ask for the connections and close the containers to see them
+rolled up. In Code, naming the summaries' kind, `to[AGGREGATED](…)`, is
+refused: *AGGREGATED edges are rollups of other edges — ask for the edges
+themselves*.
+
+> **Tip:** To total connections per table or container, **Export** them: each
+> row names the container each end sits in, ready to count in a spreadsheet.
 
 ### In Search Studio, and as a file
 
@@ -271,6 +299,115 @@ points.
 - **Ask:** `connections from the silver layer to the gold layer`
 - **Code:** `from(layer:Silver) to(layer:Gold)`
 
+## Everything coming into one thing
+
+*"What arrives at the report table `rpt_daily_revenue`, or at any of its
+columns?"* To see everything coming into something, leave **From** empty and
+describe that thing in **To**. In the demo data, `rpt_daily_revenue` is a
+table in the **ANALYTICS.REPORTING** container, inside **Snowflake**, and it
+holds six columns.
+
+1. Switch the query card to **Connections**, and leave **From** reading **any
+   entity**.
+2. Under **To**, click **Add filter**, choose **Inside a container named…**
+   and pick `rpt_daily_revenue`. To now matches the table and its six columns.
+3. Let it run. The demo data answers **20 connections**: 12 **Consumes** from
+   the charts that read the table and its columns, 7 **Transforms** from
+   columns in other tables, and 1 **Produces** from the job that builds it.
+
+- **Code:** `from() to(inside @"**/rpt_daily_revenue")`
+
+![The results of every connection into rpt_daily_revenue or anything inside it: the sentence saying what was asked, the match bar reading 20 connections, Narrow to chips for Consumes 12, Transforms 7 and Produces 1, and rows such as AOV Trend in Revenue Dashboard, Consumes, avg_order_value in rpt_daily_revenue](/docs-assets/guide/finding-connections-into.png)
+
+Change the search to suit what you're asking:
+
+| To see connections… | In the Form | In Code |
+| --- | --- | --- |
+| Into one thing only, not what's inside it | **To** → **Is a named entity…** `rpt_daily_revenue` | `from() to(@"**/rpt_daily_revenue")` |
+| Into any of several things | **To** → **Is a named entity…**, and pick each one | `from() to(@"**/rpt_daily_revenue" OR @"**/rpt_fulfillment")` |
+| Into things picked by name | **To** → **Entity type is…** **dataset** and **Name contains…** `rpt_daily` | `from() to(type:dataset rpt_daily)` |
+| Into things picked by their details | **To** → **Entity type is…** **dataset**, then **Property compares to…** `sourceSystem` **is** `snowflake`, and `freshnessHours` **is at least** `41` | `from() to(type:dataset sourceSystem = snowflake freshnessHours >= 41)` |
+| Only from certain things | **From** → **Entity type is…** **chart** | `from(type:chart) to(@"**/rpt_daily_revenue")` |
+| Only the kinds that carry data in | **Through** → **These edge types…** → **Produces** and **Transforms** | `from() to[PRODUCES, TRANSFORMS](inside @"**/rpt_daily_revenue")` |
+
+In the demo data these find 5, 8, 5, 26, 4 and 8 connections. The first row's
+5 are the table's own: 4 **Consumes** from the charts that read it, and the
+**Produces** from the job that builds it.
+
+To ask in plain words, start with `connections from anything to …`:
+
+- `connections from anything to rpt_daily_revenue`
+- `connections from anything to rpt_daily_revenue or rpt_fulfillment`
+- `connections from charts to rpt_daily_revenue`
+- `connections from anything to rpt_daily_revenue through produces and transforms`
+
+Ask reads a bare name as **Name contains…**, so `rpt_daily_revenue` would
+also match a `rpt_daily_revenue_v2`. It needs both ends, too: *connections to
+rpt_daily_revenue*, with no *from*, is read as an ordinary search.
+
+> **Note:** Lines point the way the data source keeps them. In the demo data,
+> **Consumes** points from the reader to what it reads, so the charts that read
+> `rpt_daily_revenue` count as coming into it. To see only what carries data
+> into a thing, pick those kinds under **Through**, as in the last row above.
+
+On the canvas, open **ANALYTICS.REPORTING** and `rpt_daily_revenue`: the 7
+**Transforms** lines land on the columns they feed. The charts sit in
+**Tableau Cloud**, which this View has no layer for, so their 12 **Consumes**
+connections are in the list but have nowhere to be drawn.
+
+![The canvas with ANALYTICS.REPORTING and rpt_daily_revenue opened: lit lines run from the closed ANALYTICS.GOLD container to the columns avg_order_value, order_count, report_date and total_profit, with three more columns folded into a "3 more" row](/docs-assets/guide/finding-connections-into-canvas.png)
+
+## Up and down the hierarchy
+
+Either end can describe things by **where they sit**: by their parent, by a
+container further up, or by what they hold. The same filters also let an end
+point at one thing's **children**, or at its **parent**. Each row below is a
+**To** you can use with any **From**.
+
+| To see connections into… | In the Form (under **To**) | In Code |
+| --- | --- | --- |
+| Things whose **parent** is `ANALYTICS.REPORTING` | **Is directly inside…**, then **Add a condition on them** → **Is a named entity…** `ANALYTICS.REPORTING` | `from() to(parent(@"**/ANALYTICS.REPORTING"))` |
+| Things whose **grandparent** is `Snowflake` | **Is inside…**, with **Levels** → **Custom range** `2` to `2`; as its condition, **Is a named entity…** `Snowflake` | `from() to(ancestor*2(@"**/Snowflake"))` |
+| The same, one level at a time | **Is directly inside…**, with another **Is directly inside…** as its condition | `from() to(parent(parent(@"**/Snowflake")))` |
+| Things anywhere under `Snowflake`, but not `Snowflake` itself | **Is inside…** with **Levels** → **Any depth**; as its condition, **Is a named entity…** `Snowflake` | `from() to(ancestor(@"**/Snowflake"))` |
+| Things that **hold** a column named like `unique_customers` | **Directly contains…**, pick type **schemaField**, then **Add a condition on them** → **Name contains…** `unique_customers` | `from() to(child(type:schemaField unique_customers))` |
+| Things whose columns are **all** tagged PII | **Directly contains…**: change **at least one** to **only**, pick type **schemaField**, then **Add a condition on them** → **Tag is…** **PII** | `from() to(every child(type:schemaField tag:PII))` |
+| Tables with **no** column tagged PII | **Entity type is…** **dataset**, then **Directly contains…** as in the row above, with **no** in place of **only** | `from() to(type:dataset no child(type:schemaField tag:PII))` |
+| Tables with **at least 6** columns | **Entity type is…** **dataset**, then **Directly contains…**: change **at least one** to **a number of** → **at least** `6`, and pick type **schemaField** | `from() to(type:dataset count(child(type:schemaField)) >= 6)` |
+| One thing's **children**: `rpt_daily_revenue`'s columns | **Is directly inside…**, then **Add a condition on them** → **Is a named entity…** `rpt_daily_revenue` | `from() to(parent(@"**/rpt_daily_revenue"))` |
+| One thing **and everything inside it** | **Inside a container named…** `rpt_daily_revenue` | `from() to(inside @"**/rpt_daily_revenue")` |
+| One thing's **parent**: the table holding the column `unique_customers` | **Directly contains…**, then **Add a condition on them** → **Is a named entity…** `rpt_daily_revenue / unique_customers` | `from() to(child(@"**/rpt_daily_revenue/unique_customers"))` |
+
+The same filters work in **From**. *"Column lineage from the table
+`fact_orders` into the table `rpt_daily_revenue`"*:
+
+- **Form:** **From** → **Is directly inside…**, then **Add a condition on
+  them** → **Is a named entity…** `fact_orders`. **Through** → **These edge
+  types…** → **Transforms**. **To** → **Is directly inside…**, then **Add a
+  condition on them** → **Is a named entity…** `rpt_daily_revenue`.
+- **Ask:** `connections from columns inside fact_orders to columns inside rpt_daily_revenue through transforms`
+- **Code:** `from(parent(@"**/fact_orders")) to[TRANSFORMS](parent(@"**/rpt_daily_revenue"))`
+
+The demo data answers 6 connections, column to column, such as
+`customer_key` → `unique_customers` and `gross_profit` → `total_profit`.
+
+Ask understands some of the hierarchy, too:
+
+| Say | It reads |
+| --- | --- |
+| `connections from anything to anything whose parent is ANALYTICS.REPORTING` | Things whose parent is `ANALYTICS.REPORTING` |
+| `connections from anything to anything inside rpt_daily_revenue` | What's inside `rpt_daily_revenue`, not the table itself |
+| `connections from anything to the parent of unique_customers` | The thing that holds `unique_customers` |
+| `connections from anything to datasets containing unique_customers` | Datasets holding `unique_customers` at any depth |
+
+For a grandparent, **every**, **no** or a number, use the Form or Code: Ask
+doesn't read those yet.
+
+> **Note:** A filter about what's above or below a thing can sit inside
+> another, up to **three** deep: a parent of a parent of a parent. For more
+> levels, use **Is inside…** with **Levels**, which looks up to **20** levels
+> up; **Contains, at any depth…** looks 20 down.
+
 ## The building blocks
 
 ### From and To
@@ -294,7 +431,9 @@ the View by accident.
 | One particular thing | **Is a named entity…** | `Country / United Kingdom` |
 | Its parent (one level up) | **Is directly inside…** | a parent whose `family` is `smith` |
 | Any container above it | **Is inside…** | inside a domain called Finance |
+| Its grandparent, or a set number of levels up | **Is inside…**, with **Levels** | **Custom range** `2` to `2` for the grandparent |
 | What it holds | **Directly contains…** · **Contains, at any depth…** | a table holding a PII column |
+| How many of what it holds | **Directly contains…**, changing **at least one** to **only**, **no** or **a number of** | a table with at least 6 columns |
 | What feeds it, or what it feeds | **Is fed by…** · **Feeds…** | fed by a topic, up to 3 steps |
 | Several conditions together | Join filters with **AND** (all) or **OR** (any) | named like `customer` AND tagged PII |
 | What to leave out | A **NOT group** | not tagged Deprecated |
@@ -302,7 +441,8 @@ the View by accident.
 A name path such as `** / fact_orders` finds the name anywhere in the View;
 `Country / United Kingdom` follows the containers from the top. Because names
 mean the same everywhere, a search that uses them keeps working in other
-Views.
+Views. [Up and down the hierarchy](#up-and-down-the-hierarchy) shows the
+filters about parents and children at work.
 
 An end can't hold a route (**Paths from A to B** or **Within N hops of…**) or
 lineage followed more than 3 steps: a connection is one line, so those belong
@@ -318,7 +458,7 @@ in an ordinary search.
 | **Lineage** | Only the lines data flows along |
 | **Containment** | Only "contains" lines: what holds what |
 | **Any edge** | Every line, the hierarchy's included |
-| **These edge types…** | Only the kinds you pick, such as **Produces** |
+| **These edge types…** | Only the kinds you pick, one or several, such as **Produces** and **Transforms** |
 
 | Which way | Finds |
 | --- | --- |
@@ -352,6 +492,7 @@ without losing anything:
   | Say | For example |
   | --- | --- |
   | `connections from` ‹things› `to` ‹things› | `connections from datasets to dashboards` |
+  | `connections from anything to` ‹things› | `connections from anything to rpt_daily_revenue` |
   | … `through` ‹a kind, or lineage› | `connections from columns to columns through lineage` |
   | … `either way` | `connections from datasets to data jobs either way` |
 
@@ -370,6 +511,17 @@ without losing anything:
   | `from(A) linkedTo(B)` | Either way |
   | `from(A) to(B).via(confidence >= 0.8)` | Only connections that meet the condition |
   | `from() to(B)` | From anything, to B |
+  | `from(A) to[PRODUCES, TRANSFORMS](B)` | Any of several kinds |
+
+  Inside either end:
+
+  | Write | It matches |
+  | --- | --- |
+  | `@"**/rpt_daily_revenue"` | That one thing |
+  | `inside @"**/rpt_daily_revenue"` | That thing and everything inside it |
+  | `parent(…)` · `ancestor*2(…)` · `ancestor(…)` | Things whose parent, grandparent, or any container above, matches |
+  | `child(…)` · `descendant(…)` | Things holding something that matches, directly or at any depth |
+  | `every child(…)` · `no child(…)` · `count(child(…)) >= 6` | Things where all, none, or a number of what they hold matches |
 
   A connection is the whole query: put every other condition inside its ends.
   **Examples** in Code mode has three ready-made ones.
@@ -448,8 +600,25 @@ closed containers, however many connections run between what's inside them.
 The badge counts yours. Open the containers to see each one.
 
 **Why do some rows have no lit line?** The line may be of a kind hidden in
-the **Flows** panel, its ends may sit outside the View, or there were more
-than 1,000 lit lines to draw.
+the **Flows** panel, or there were more than 1,000 lit lines to draw. Or its
+ends sit outside the View, such as charts in a tool the View has no layer
+for: the list counts those connections, but the canvas has nowhere to draw
+them, and doesn't say so yet.
+
+**Can I list the rolled-up lines, one per pair of tables or containers?** Not
+yet. The list always shows the actual connections. Close containers on the
+canvas to see them rolled up, with a count on each line, or **Export** them
+and total them by the container each end sits in.
+
+**Why does everything coming into a table include the charts that read it?**
+Lines point the way the data source keeps them, and some kinds, such as
+**Consumes** in the demo data, point from the reader to what it reads. Pick
+the kinds that carry data in under **Through** to leave the readers out.
+
+**Can I see the lit lines on a Graph view?** Not yet. On a Graph view, the
+open search panel leaves the canvas no room, and closing the panel ends the
+search. The list, Search Studio and Export work there; to see the lines lit,
+use a Context View.
 
 **Why can't I make a display rule from it?** A display rule colours things,
 and a Connections search finds lines. Make the rule from its From or To
@@ -474,6 +643,7 @@ as its own. A value kept only inside a thing's raw properties isn't searched.
 | **Through** | Which kinds of connection count, and which way they point. |
 | **Either way** | Count connections in both directions, each once. |
 | **Container** / **parent** | The thing another sits inside, such as the table a column belongs to. |
+| **Rolled-up line** | One line on the canvas standing for every connection between what's inside two closed containers. |
 | **Layer** | One of a Context View's columns, such as **Gold** or **Reporting layer**. |
 
 More words are in the [Glossary](/guide/glossary).

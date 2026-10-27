@@ -53,8 +53,11 @@ Each end is read as a question of its own.
 **A guide page for everyone.** [Finding Connections](/guide/finding-connections) explains what a
 connection is and walks through a first search step by step, with pictures. It gives worked
 examples in the Form, Ask and Code, explains what the canvas shows, and says what to do when
-nothing matches. The glossary gains *Connection*, *Edge type*, *Either way*, *From / To* and
-*Through*, and the guide's home page gains a card and a question for it.
+nothing matches. It covers everything coming into one thing, the hierarchy at either end (a
+parent, a grandparent, what a thing holds and how many), and how the canvas rolls the actual
+connections up between closed containers. The glossary gains *Connection*, *Edge type*,
+*Either way*, *From / To* and *Through*, and the guide's home page gains a card and a question
+for it.
 
 ### Changed
 
