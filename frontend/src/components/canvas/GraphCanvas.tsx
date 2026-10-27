@@ -44,6 +44,7 @@ import { GhostNode } from './nodes/GhostNode'
 import { GenericNode } from './nodes/GenericNode'
 import { LineageEdge } from './edges/LineageEdge'
 import { AggregatedEdge } from './edges/AggregatedEdge'
+import { searchLineIds } from './searchLines'
 import { CanvasControls } from './CanvasControls'
 import { EdgeLegend } from './EdgeLegend'
 import { EntityDrawer } from '../panels/entity/EntityDrawer'
@@ -121,6 +122,7 @@ const edgeTypes = { lineage: LineageEdge, aggregated: AggregatedEdge as any }
 const MAX_VISIBLE_NODES = 2000
 /** Maximum children shown per parent before "Show More" */
 const MAX_CHILDREN_PER_PARENT = 20
+const NO_SEARCH_LINES: ReadonlySet<string> = new Set()
 
 // ============================================
 // Component
@@ -514,6 +516,16 @@ export function GraphCanvas({ className }: { className?: string }) {
     return result
   }, [rawEdges, visibleNodeIds, isContainmentEdge, findVisibleAncestor, aggregatedEdges])
 
+  // A Connections search's matched edges light their lines as a channel of
+  // their own: the reader's own highlights (useEdgeFiltersStore) stay theirs.
+  // This view's matches only, and none while a trace draws.
+  const searchViewId = useSearchStore((s) => s.viewId)
+  const matchedEdges = useSearchStore((s) => s.matchedEdges)
+  const searchLines = useMemo(() => (trace.isTracing || matchedEdges.length === 0 || searchViewId !== activeView?.id
+    ? NO_SEARCH_LINES
+    : searchLineIds(matchedEdges, allVisibleEdges, findVisibleAncestor, isContainmentEdge)),
+  [trace.isTracing, matchedEdges, searchViewId, activeView?.id, allVisibleEdges, findVisibleAncestor, isContainmentEdge])
+
   // Lineage-only subset for highlight computation
   const lineageEdges = useMemo(() =>
     allVisibleEdges.filter(e => !e._isContainment),
@@ -901,6 +913,10 @@ export function GraphCanvas({ className }: { className?: string }) {
         // Lineage: solid colored animated — shows data flow
         const isProjected = (edge as any)._isProjected
         const isAggregated = (edge.data as any)?.isAggregated === true
+        // A search lights its lines after a click or hover highlight, dimming
+        // the rest as they do.
+        const isSearchMatch = searchLines.has(edge.id)
+        const searchDims = !isHighlightActive && searchLines.size > 0 && !isSearchMatch
         return {
           id: edge.id,
           source: edge.source,
@@ -908,9 +924,10 @@ export function GraphCanvas({ className }: { className?: string }) {
           // Use 'aggregated' edge component for rolled-up edges (shows edge count badge)
           type: isAggregated ? 'aggregated' as const : 'lineage' as const,
           selected: edge.id === openLine?.id,
-          animated: !isProjected && !isAggregated && (!isHighlightActive || mergedHighlightEdges.has(edge.id)),
+          animated: (!isProjected && !isAggregated && (!isHighlightActive || mergedHighlightEdges.has(edge.id)) && !searchDims)
+            || (isSearchMatch && !isHighlightActive),
           style: {
-            opacity: isHighlightActive && !mergedHighlightEdges.has(edge.id) ? 0.15 : (isProjected ? 0.7 : 1),
+            opacity: (isHighlightActive && !mergedHighlightEdges.has(edge.id)) || searchDims ? 0.15 : (isProjected ? 0.7 : 1),
             strokeDasharray: isProjected && !isAggregated ? '8,4' : undefined,
           },
           data: {
@@ -921,10 +938,11 @@ export function GraphCanvas({ className }: { className?: string }) {
             isAggregated,
             edgeCount: (edge.data as any)?.edgeCount,
             sourceEdgeCount: (edge.data as any)?.edgeCount,
+            isSearchMatch: isSearchMatch && !isHighlightActive,
           },
         }
       })
-  }, [allVisibleEdges, showLineageFlow, trace.isTracing, trace.result, isHighlightActive, mergedHighlightEdges, enabledEdgeTypes, directionEdgeIds, isolateMode, highlightedEdgeIds, openLine])
+  }, [allVisibleEdges, showLineageFlow, trace.isTracing, trace.result, isHighlightActive, mergedHighlightEdges, enabledEdgeTypes, directionEdgeIds, isolateMode, highlightedEdgeIds, openLine, searchLines])
   // (trace.isTracing/trace.result kept in deps because the map step inside reads them for isTraced flagging)
 
   // 16. Display nodes with visual state — only VISIBLE nodes (expand/collapse aware)

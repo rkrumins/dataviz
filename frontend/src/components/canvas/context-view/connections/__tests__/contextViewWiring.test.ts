@@ -80,9 +80,9 @@ describe('the Connections panel is wired into the Context View', () => {
     expect(source).toContain('hoverPool={isStubsMode && !overlay.active ? visibleLineageEdges : undefined}')
   })
 
-  it('the panel highlight reaches the overlay only — cards keep their own highlight', () => {
+  it('the panel and search highlights reach the overlay only — cards keep their own highlight', () => {
     expect(source).toContain(
-      'isHighlightActive={connectionHighlight !== null || isHighlightActive}'
+      'isHighlightActive={connectionHighlight !== null || isHighlightActive || searchLit}'
     )
     expect(source).toMatch(/isHighlightActive=\{isHighlightActive\}/)
   })

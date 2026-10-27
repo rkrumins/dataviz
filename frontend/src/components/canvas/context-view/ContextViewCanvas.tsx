@@ -87,7 +87,7 @@ import {
   useRevealSearchHit, usePrefetchSearchHitSpine, canvasDisplayName, LANDED_NOWHERE,
   type RevealSearchHit,
 } from '@/hooks/useRevealSearchHit'
-import { useMatchUrnSet, useSearchStore } from '@/store/searchStore'
+import { useMatchUrnSet, useSearchStore, type MatchedEdge } from '@/store/searchStore'
 import { useAggregatedLineage, useAggregatedEdgesCacheVersion } from '@/hooks/useAggregatedLineage'
 import { renderedAggregationTargets, unparentedRows } from './aggregationTargets'
 import { EdgeDetailPanel, generateEdgeTypeFilters } from '../../panels/EdgeDetailPanel'
@@ -245,6 +245,12 @@ function makeConnectionTypeResolver(
 const EMPTY_EDGES: unknown[] = []
 const EMPTY_AGG_EDGES: Map<string, unknown> = new Map()
 const NO_HOLDER_EDGES: ReadonlyMap<string, AggregatedEdgeInfo> = new Map()
+const NO_MATCHED_EDGES: readonly MatchedEdge[] = []
+/** The most lines a Connections search lights while the canvas draws a
+ *  budget (On Hover, Adaptive): a budget of its own, apart from the hover's
+ *  and the ambient one. The overlay's measure pass costs ~9 ms a frame at
+ *  3,490 lines (LineageFlowOverlay); 1,000 lit lines stay well inside one. */
+const SEARCH_LINE_CAP = 1000
 /** Module constant, not an inline `?? []`. `LayerColumn` is `React.memo`'d, and
  *  a fresh array literal per render defeated that memo for every EMPTY column —
  *  so the columns with nothing in them re-rendered on every canvas render. */
@@ -2998,6 +3004,11 @@ export function ContextViewCanvas({
   // URN (`lib/canvasNodeMapper`), and a Set keeps the per-row membership
   // test O(1) for a search that matched thousands of nodes.
   const advancedMatchUrns = useMatchUrnSet()
+  // A Connections search's matched edges, for the lines that draw them
+  // (useEdgeProjection, section D).
+  const searchViewId = useSearchStore((s) => s.viewId)
+  const matchedEdges = useSearchStore((s) => s.matchedEdges)
+  const matchedEdgesComplete = useSearchStore((s) => s.matchedEdgesComplete)
 
   // Action: Move entity to layer (updated for unified context menu)
   // Stages a `move_to_layer` change instead of immediately persisting via
@@ -4730,6 +4741,20 @@ export function ContextViewCanvas({
     : new Map([...containerEdges, ...holderEdges]), [holderEdges, containerEdges])
   const ancestorChains = useAncestorChains(showLineageFlow && !overlay.active, isContainmentEdge,
     renderMap, promotedAnchors, chainedCells, unparented)
+  // A Connections search's matches: this view's only, and none while the
+  // overlay draws a trace, whose wires come from its own ledger. An end the
+  // canvas has not loaded is filed by the containers the search answered
+  // with, as useAncestorChains files lineage's.
+  const searchEdges = !overlay.active && searchViewId === connectionsViewId ? matchedEdges : NO_MATCHED_EDGES
+  const projectionChains = useMemo(() => {
+    if (!ancestorChains || searchEdges.length === 0) return ancestorChains
+    const chains = new Map(ancestorChains)
+    for (const m of searchEdges) {
+      if (m.sourceChain.length > 0 && !chains.has(m.source)) chains.set(m.source, m.sourceChain)
+      if (m.targetChain.length > 0 && !chains.has(m.target)) chains.set(m.target, m.targetChain)
+    }
+    return chains
+  }, [ancestorChains, searchEdges])
   const { visibleLineageEdges: browseVisibleLineageEdges, unresolvedEdgeCount, offCanvasByNode } = useEdgeProjection({
     edges: overlay.active ? (EMPTY_EDGES as typeof edges) : edges,
     aggregatedEdges: overlay.active ? (EMPTY_AGG_EDGES as typeof aggregatedEdges) : aggregatedEdges,
@@ -4747,12 +4772,13 @@ export function ContextViewCanvas({
     // and the trace's own hidden set is ephemeral, so browse's persisted
     // set has no say there.
     hiddenEdgeTypes: overlay.active ? EMPTY_TYPE_SET : connectionVisibility.hiddenTypes,
-    ancestorChains,
+    ancestorChains: projectionChains,
     // An anchor is drawn as its column: lineage naming it is in the view.
     promotedAnchors,
     holderEdges: overlay.active ? NO_HOLDER_EDGES : extraCells,
     // A view open to its whole data source holds every partner somewhere.
     openScope: activeEntityScope === 'all',
+    searchEdges,
   })
 
   // A TRACE'S HIDDEN TYPES ARE ITS OWN. A trace is a transient investigation
@@ -4893,6 +4919,11 @@ export function ContextViewCanvas({
     () => visibleLineageEdges.filter(e => !e.isDelegated),
     [visibleLineageEdges],
   )
+  // The lines a Connections search lights: those that draw one of its matches.
+  const searchLines = useMemo(
+    () => drawableLineageEdges.filter(e => e.searchMatches > 0),
+    [drawableLineageEdges],
+  )
 
   // Render-mode resolution: `raw` shows every projected edge; `stubs`
   // suppresses ambient edges in favour of per-node indicators (hover /
@@ -4932,7 +4963,7 @@ export function ContextViewCanvas({
   // noise; the Lineage Lens enumerates the full fan properly and the chip
   // points there. A HOVERED entity's lines follow the same rule, drawn by
   // the overlay from `hoverPool` so a hover never re-renders the canvas.
-  const edgePresentation = useMemo(() => {
+  const basePresentation = useMemo(() => {
     if (!isStubsMode) {
       return { edges: visibleLineageEdges, ambientShown: 0, ambientTotal: 0, focusShown: 0, focusTotal: 0 }
     }
@@ -4962,6 +4993,23 @@ export function ContextViewCanvas({
       focusTotal: focusAll.length,
     }
   }, [isStubsMode, lineageRenderMode, rankedAmbientEdges, visibleLineageEdges, drawableLineageEdges, autoStubThreshold, selectedNodeIds, overlay.active, traceFocusIdSet])
+  // A search's lit lines, on top: in All Edges every one is drawn already; in
+  // a budget, the lines with the most matches up to SEARCH_LINE_CAP, and how
+  // many it lit in all.
+  const edgePresentation = useMemo(() => {
+    const searchTotal = searchLines.length
+    if (!isStubsMode || searchTotal === 0) return { ...basePresentation, searchShown: searchTotal, searchTotal }
+    const lit = searchTotal > SEARCH_LINE_CAP
+      ? [...searchLines].sort((a, b) => b.searchMatches - a.searchMatches || bySignificance(a, b)).slice(0, SEARCH_LINE_CAP)
+      : searchLines
+    const drawn = new Set(basePresentation.edges.map(e => e.id))
+    return {
+      ...basePresentation,
+      edges: [...basePresentation.edges, ...lit.filter(e => !drawn.has(e.id))],
+      searchShown: lit.length,
+      searchTotal,
+    }
+  }, [basePresentation, searchLines, isStubsMode])
   // The open line is drawn whatever the mode would otherwise show.
   const effectiveLineageEdges = useMemo(() => (
     openLine && !edgePresentation.edges.some(e => e.id === openLine.id)
@@ -5841,10 +5889,20 @@ export function ContextViewCanvas({
     setHighlightScope({ viewId: connectionsViewId, tracing: overlay.active })
     setConnectionHighlight(null)
   }
+  // A Connections search lights its lines third: after the Connections
+  // panel's highlight and a selection's. Its view only, and never during a
+  // trace — `searchEdges` holds none there.
+  const searchLineIds = useMemo(() => new Set<string>(searchLines.map(e => e.id)), [searchLines])
+  const searchLit = !connectionHighlight && !isHighlightActive && searchLineIds.size > 0
   const overlayHighlightEdges = useMemo(
-    () => (connectionHighlight ? new Set(connectionHighlight) : mergedHighlightEdges),
-    [connectionHighlight, mergedHighlightEdges]
+    () => (connectionHighlight ? new Set(connectionHighlight) : searchLit ? searchLineIds : mergedHighlightEdges),
+    [connectionHighlight, searchLit, searchLineIds, mergedHighlightEdges]
   )
+  // A lit line's badge: how many matches it draws, at least, while pages of
+  // them remain.
+  const searchCountLabels = useMemo(() => (searchLit
+    ? new Map(searchLines.map(e => [e.id as string, `${e.searchMatches}${matchedEdgesComplete ? '' : '+'}`]))
+    : undefined), [searchLit, searchLines, matchedEdgesComplete])
 
   const clearSelection = useCanvasStore((s) => s.clearSelection)
 
@@ -6631,6 +6689,8 @@ export function ContextViewCanvas({
           viewScope={activeEntityScope}
           focusShown={edgePresentation.focusShown}
           focusTotal={edgePresentation.focusTotal}
+          searchShown={edgePresentation.searchShown}
+          searchTotal={edgePresentation.searchTotal}
           onOpenFocusLens={() => {
             const target = selectedNodeId ?? document.documentElement.dataset.hoveredNode ?? drawerNodeId
             if (target) openLens(target)
@@ -6873,7 +6933,8 @@ export function ContextViewCanvas({
               isTracing={overlay.active}
               traceResult={overlay.active ? nativeTraceResult : trace.result}
               highlightedEdges={overlayHighlightEdges}
-              isHighlightActive={connectionHighlight !== null || isHighlightActive}
+              isHighlightActive={connectionHighlight !== null || isHighlightActive || searchLit}
+              countLabels={searchCountLabels}
               resolveEdgeColor={resolveEdgeColor}
               resolveEdgeStrokeStyle={resolveEdgeStrokeStyle}
               onEdgeDoubleClick={handleEdgeDoubleClick}
