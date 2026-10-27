@@ -9,6 +9,80 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Connections in the search panel, on the canvas, in Code mode and Ask
+
+### Added
+
+**Find: Entities · Connections.** The Advanced Search query card can find the edges themselves.
+Switch **Find** to **Connections** and the query becomes **From** → **Through** → **To**:
+- **From** and **To** are each an ordinary query, with its live count.
+- **Through** picks the edges: any link, lineage, containment, any edge or chosen edge types. It
+  sets the direction (From → To, or either way) and takes an edge filter.
+
+The results list every edge: source → type → target, each end with its parent, and type chips
+counted exactly. A row shows both ends on the canvas, opens either end, or copies the edge's id.
+The match bar counts connections, and `J` / `K` step through them. When nothing matches, the
+panel says how many entities meet each end and offers the fixes that fit. Connections also work in:
+- **Search Studio**, as a table;
+- **Export**, with fixed edge columns;
+- the **Library**, with a **Connections** badge;
+- the **Sentence** view, which reads them as "Connections from … to …".
+
+**Connections on the canvas.**
+- **Both ends light up**, with their containers, and so do the lines that draw the matched edges.
+  Each line has a badge saying how many matches it draws (**N+** while more pages remain), and the
+  other lines dim.
+- **Matches folded inside collapsed containers** light the line between the containers on screen,
+  even where no summary of their connections was built. Opening a container moves the light down
+  to the exact edges.
+- **On Hover and Adaptive** draw the lit lines too, up to 1,000, with a chip for the rest.
+- **Hidden kinds of flow:** a match of a kind hidden in the **Flows** panel stays hidden, and the
+  match bar offers **Show them**.
+- **The Graph canvas** lights its matched lines as well, alongside your own highlights.
+
+**Code mode.**
+- `from(type:dataJob) to[PRODUCES](type:dataset)` is a Connections search. `linkedTo(…)` makes it
+  either way, `.via(…)` adds an edge filter, and `from() to(layer:Gold)` starts from any entity.
+- Suggestions offer the edge types inside `to[` and where the edges go after `from(…)`.
+- `⌘I` selects an end, then the whole connection.
+- **Examples** gain three Connections lines.
+
+**Ask** reads "connections from columns tagged PII to dashboards through produces, either way".
+Each end is read as a question of its own.
+
+**A guide page for everyone.** [Finding Connections](/guide/finding-connections) explains what a
+connection is and walks through a first search step by step, with pictures. It gives worked
+examples in the Form, Ask and Code, explains what the canvas shows, and says what to do when
+nothing matches. The glossary gains *Connection*, *Edge type*, *Either way*, *From / To* and
+*Through*, and the guide's home page gains a card and a question for it.
+
+### Changed
+
+- **"Connection" means the edges search now.** Code mode's errors call a relationship a
+  relationship: "A relationship follows [lineage], [links] or edge types…", and ".via(…) follows
+  feeds, fedBy, linkedTo or a connection's to(…)".
+
+### Fixed
+
+- **Load more past an entity search's first page.** The next page dropped the facets the first
+  page asked for, so the server refused its cursor as issued for a different query.
+- **The canvas search box** counted a Connections answer as "8 matches · 0 layers". It now says
+  "8 connections".
+
+### Known limitations
+
+- **Connections are direct edges only.** Multi-hop connections are future scope: the edges of
+  every route of up to N hops between a From and a To match.
+- **The canvas lights the first 2,000 matched edges loaded.** The list, counts and export cover
+  every match.
+- **On a Graph view, the search panel squeezes the canvas to nothing.** This is an existing layout
+  fault, and closing the panel ends the search, so no search's highlight shows there yet.
+  Context Views show it in full.
+- **Unlit lines don't dim on the Graph canvas.** That holds for a search and for a click
+  highlight: its lineage lines ignore the opacity they're given. The lit lines still stand out.
+
+---
+
 ## [Unreleased] — Connections: edges as search results (API)
 
 ### Added
@@ -33,7 +107,7 @@ condition: properties, types, tags, names, "inside a container", layers, and rel
   second, and one matching 127,000 edges finishes in 13 s, exactly.
 
 See [the developer reference](docs/features/search-and-rules-reference.md#connections-edges-as-results).
-The search panel, highlighting on the canvas and Code mode follow.
+The search panel, highlighting on the canvas, Code mode and Ask are in the block above.
 
 ### Known limitations
 

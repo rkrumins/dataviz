@@ -97,7 +97,7 @@ export const guidePersonas: GuidePersona[] = [
     intro:
       'Find views in the Explorer, read their lineage, and trace it to answer your own questions — no setup required.',
     startSlug: 'browsing-views',
-    path: ['browsing-views', 'reading-lineage', 'exploring-graph', 'lineage-lens', 'advanced-search'],
+    path: ['browsing-views', 'reading-lineage', 'exploring-graph', 'lineage-lens', 'advanced-search', 'finding-connections'],
     accent: {
       gradient: 'from-sky-500 to-indigo-600',
       text: 'text-sky-600 dark:text-sky-400',
@@ -230,6 +230,14 @@ export const guideEntries: GuideEntry[] = [
     title: 'Advanced Search',
     description: 'Find every match in a View, act on it on the canvas, and save the searches you reuse',
     importFn: () => import('@docs/guide/ADVANCED_SEARCH.md?raw'),
+  },
+  {
+    slug: 'finding-connections',
+    section: 'viewer',
+    persona: 'viewer',
+    title: 'Finding Connections',
+    description: 'List every line from one set of things to another, step by step, and light them up on the canvas',
+    importFn: () => import('@docs/guide/FINDING_CONNECTIONS.md?raw'),
   },
   {
     slug: 'lineage-lens',
@@ -479,6 +487,13 @@ export const keyJourneys: KeyJourney[] = [
     icon: Eye,
   },
   {
+    title: 'Find how things connect',
+    outcome: 'List every line from one set of things to another, and light them up on the canvas',
+    slug: 'finding-connections',
+    persona: 'viewer',
+    icon: Network,
+  },
+  {
     title: 'Ask for the access you need',
     outcome: 'Request a role in a workspace and follow your request until it’s answered',
     slug: 'requesting-access',
@@ -627,6 +642,12 @@ export const guideFaqs: GuideFAQ[] = [
     question: 'Is the data I’m looking at up to date?',
     answer:
       'Check the chip next to the data source’s name in the view’s header: **In sync · v12** means current, while a chip such as **1 version behind** or **Refresh failed · 1 version behind** means it isn’t — select it to see when each step last happened. See [Data Freshness & Ingestion](/guide/data-freshness).',
+  },
+  {
+    category: 'Using {brand}',
+    question: 'How do I find the lines between two groups of things?',
+    answer:
+      'In a view, open Advanced Search (`⌘⇧F` / `Ctrl+Shift+F`), set **Find** to **Connections**, and say where the lines start (**From**) and where they end (**To**). Every matching line is listed with both of its ends and lit up on the canvas; see [Finding Connections](/guide/finding-connections).',
   },
   {
     category: 'Using {brand}',

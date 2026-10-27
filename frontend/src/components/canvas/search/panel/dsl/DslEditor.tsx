@@ -46,9 +46,10 @@ export interface DslEditorProps {
 }
 
 export interface DslEditorHandle {
-    /** Put ``text`` where the cursor is (over the selection), and focus —
-     *  the cursor ``caret`` characters into it, or after it. */
-    insert: (text: string, caret?: number) => void
+    /** Put ``text`` where the cursor is (over the selection) — over all of
+     *  it when ``whole`` — and focus, the cursor ``caret`` characters into
+     *  it, or after it. */
+    insert: (text: string, caret?: number, whole?: boolean) => void
 }
 
 /** Marks a change that came from ``value``, not from typing. */
@@ -159,10 +160,10 @@ export const DslEditor = forwardRef<DslEditorHandle, DslEditorProps>(function Ds
     }, [props.ariaDescribedBy, described])
 
     useImperativeHandle(ref, () => ({
-        insert: (text: string, caret?: number) => {
+        insert: (text: string, caret?: number, whole?: boolean) => {
             const editor = view.current
             if (!editor) return
-            const { from, to } = editor.state.selection.main
+            const { from, to } = whole ? { from: 0, to: editor.state.doc.length } : editor.state.selection.main
             editor.dispatch({
                 changes: { from, to, insert: text },
                 selection: { anchor: from + (caret ?? text.length) },

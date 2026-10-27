@@ -597,7 +597,7 @@ describe('predicateDsl — relationships and names', () => {
         ['count(child()) > 1.5', /whole number/],
         ['parent*2(type:x)', /takes no hop range/],
         ['upstream*(type:x)', /how far/],
-        ['parent(type:x).via(mode = stream)', /follows a connection/],
+        ['parent(type:x).via(mode = stream)', /follows feeds, fedBy, linkedTo/],
         ['type:x .via(mode = stream)', /follows a relationship/],
         ['upstream().via(type:x)', /edges walked/],
         ['parent(type:x', /Missing "\)"/],
@@ -981,5 +981,128 @@ describe('predicateDsl — what an editor reads off a parse', () => {
         // A list in brackets is still its own tokens.
         expect(parsePredicate('type IN (a, b)').predicate).toEqual(
             { kind: 'entityType', op: 'in', values: ['a', 'b'] })
+    })
+})
+
+
+describe('predicateDsl — Connections: from(…) to(…)', () => {
+    const parse = (text: string) => parsePredicate(text).predicate
+    const type = (value: string): Predicate => ({ kind: 'entityType', op: 'in', values: [value] })
+    const tag = (value: string): Predicate => ({ kind: 'tag', op: 'hasAny', values: [value] })
+    const prop = (key: string, value: unknown): Predicate => ({ kind: 'property', key, op: 'eq', value })
+    const both = (...children: Predicate[]): Predicate => ({ kind: 'group', op: 'and', children })
+    const edges = (over: Record<string, unknown>): Predicate => ({ kind: 'edges', ...over } as Predicate)
+
+    it.each<[string, Predicate]>([
+        ['from(type:dataJob) to(type:dataset)', edges({ sourceWhere: type('dataJob'), targetWhere: type('dataset') })],
+        ['from(type:dataJob) to[PRODUCES](type:dataset AND tag:PII)', edges({ sourceWhere: type('dataJob'),
+            targetWhere: both(type('dataset'), tag('PII')), edgeTypes: ['PRODUCES'] })],
+        ['from(type:schemaField) to[lineage](type:schemaField).via(confidence >= 0.8)', edges({
+            sourceWhere: type('schemaField'), targetWhere: type('schemaField'), edgeClass: 'lineage',
+            edgePredicate: { kind: 'edgeProperty', key: 'confidence', op: 'gte', value: 0.8 } })],
+        ['from(customer) linkedTo(parent(tag:reporting))', edges({
+            sourceWhere: { kind: 'text', value: 'customer', target: 'name', match: 'substring',
+                caseSensitive: false, boost: 1 },
+            targetWhere: { kind: 'related', axis: 'parent', where: tag('reporting') }, direction: 'either' })],
+        ['from() to(layer:Reporting)', edges({ targetWhere: { kind: 'layer', layerAssignment: 'Reporting' } })],
+        ['from(inside @"Finance") to[any]()', edges({ edgeClass: 'any',
+            sourceWhere: { kind: 'descendantOf', urns: [], refs: [{ path: ['Finance'] }], uiScope: 'name' } })],
+        ['from(type:dataset) to[containment](type:schemaField)', edges({ sourceWhere: type('dataset'),
+            targetWhere: type('schemaField'), edgeClass: 'containment' })],
+        ['from(@"Sales/orders") linkedTo[PRODUCES, CONSUMES](type:dataJob)', edges({
+            sourceWhere: { kind: 'is', refs: [{ path: ['Sales', 'orders'] }] }, targetWhere: type('dataJob'),
+            direction: 'either', edgeTypes: ['PRODUCES', 'CONSUMES'] })],
+        // Your example: string fields called bob, to whatever sits in a smith.
+        ['from(dataType = string AND first_name = bob) to(parent(family = smith))', edges({
+            sourceWhere: both(prop('dataType', 'string'), prop('first_name', 'bob')),
+            targetWhere: { kind: 'related', axis: 'parent', where: prop('family', 'smith') } })],
+        ['from() to[PRODUCES]().via(hasProperty:job_id)', edges({ edgeTypes: ['PRODUCES'],
+            edgePredicate: { kind: 'edgeHasProperty', key: 'job_id' } })],
+    ])('reads and writes %s', (text, p) => {
+        expect(parse(text)).toEqual(p)
+        expect(stringifyPredicate(p)).toBe(text)
+    })
+
+    it.each<[string, string]>([
+        ['from(type:x) to[links](type:y)', 'from(type:x) to(type:y)'],
+        ['FROM(type:x) TO(type:y)', 'from(type:x) to(type:y)'],
+        ['(from(type:x) to(type:y))', 'from(type:x) to(type:y)'],
+        ['  from( type:x )   linkedTo( type:y )  ', 'from(type:x) linkedTo(type:y)'],
+        ['from(type:x) to(type:y AND (tag:a))', 'from(type:x) to(type:y AND tag:a)'],
+    ])('reads %s as %s', (text, written) => {
+        expect(stringifyPredicate(parse(text))).toBe(written)
+    })
+
+    it('reads linkedTo as a connection right after from(…), a relationship anywhere else', () => {
+        expect(parse('from(type:x) linkedTo(type:y)')).toMatchObject({ kind: 'edges', direction: 'either' })
+        expect(parse('linkedTo(type:y)')).toEqual({ kind: 'related', axis: 'neighbor', edgeClass: 'links',
+            where: type('y') })
+        expect(parse('from(linkedTo(type:y)) to()')).toEqual(edges({ sourceWhere: { kind: 'related',
+            axis: 'neighbor', edgeClass: 'links', where: type('y') } }))
+    })
+
+    it('writes the defaults a builder spells out as the plain words', () => {
+        expect(stringifyPredicate(edges({ sourceWhere: type('x'), targetWhere: type('y'),
+            direction: 'outgoing', edgeClass: 'links' }))).toBe('from(type:x) to(type:y)')
+    })
+
+    it.each<[string, Predicate]>([
+        ['a connection through edge types still to pick', edges({ sourceWhere: type('x'), edgeTypes: [] })],
+        ['a connection whose end holds a route', edges({ sourceWhere: { kind: 'withinHops', urns: ['urn:a'],
+            hops: 2 } as Predicate })],
+    ])('keeps %s', (_, p) => {
+        expect(parse(stringifyPredicate(p))).toEqual(p)
+    })
+
+    it('still reads a connection written as JSON, and writes it back in words', () => {
+        const json = '{"kind":"edges","sourceWhere":{"kind":"entityType","op":"in","values":["x"]}}'
+        expect(parse(json)).toEqual(edges({ sourceWhere: type('x') }))
+        expect(stringifyPredicate(parse(json))).toBe('from(type:x) to()')
+    })
+
+    it.each([
+        ['NOT from(type:x) to(type:y)', /whole query/],
+        ['type:x AND from(type:a) to(type:b)', /whole query/],
+        ['from(type:a) to(type:b) OR tag:x', /whole query/],
+        ['from(type:a) to(type:b) tag:x', /whole query/],
+        ['parent(from(type:a) to(type:b))', /whole query/],
+        ['from(from(type:a) to(type:b)) to(type:c)', /whole query/],
+        ['from(type:x)', /Say where the edges go/],
+        ['from(type:x) AND linkedTo(type:y)', /Say where the edges go/],
+        ['to(type:x)', /to\( follows from/],
+        ['from (type:x) to(type:y)', /Write from\( with no space/],
+        ['from(type:x) to (type:y)', /Write to\( with no space/],
+        ['from(type:x) linkedTo[PRODUCES] (type:y)', /Write linkedTo\[PRODUCES\]\( with no space/],
+        ['from(type:x) to*..3(type:y)', /one edge/],
+        ['from(type:x) linkedTo*2(type:y)', /one edge/],
+        ['from[PRODUCES](type:x) to(type:y)', /Edge types go on to/],
+        ['from(type:x) to[](type:y)', /Name edge types/],
+        ['from(type:x) to[lineage, PRODUCES](type:y)', /not both/],
+        ['from(type:x) to(type:y).via(type:z)', /edges walked/],
+        ['from(type:x', /Missing "\)" after from/],
+        ['from(type:x) to(type:y', /Missing "\)" after to/],
+    ])('refuses %s', (text, why) => {
+        const r = parsePredicate(text)
+        expect(r.predicate).toBeNull()
+        expect(r.error).toMatch(why)
+        expect(r.fallbackText).toEqual([])
+    })
+
+    it('points a nested connection\'s refusal at its from(', () => {
+        const text = 'NOT from(type:x) to(type:y)'
+        const r = parsePredicate(text)
+        expect(text.slice(r.errorAt!.from, r.errorAt!.to)).toBe('from(')
+    })
+
+    it('says what each token was read as, and where each end sits', () => {
+        const text = 'from(type:x) to[PRODUCES](tag:PII).via(rows > 5)'
+        const r = parsePredicate(text)
+        expect(r.tokens.map((t) => `${t.text}:${t.role}`)).toEqual([
+            'from(:function', 'type:x:prefixed', '):punct', 'to[PRODUCES](:function', 'tag:PII:prefixed',
+            '):punct', '.via(:function', 'rows:field', '>:operator', '5:value', '):punct',
+        ])
+        expect(new Set(r.spans.map((s) => text.slice(s.from, s.to)))).toEqual(new Set([
+            'type:x', 'from(type:x)', 'tag:PII', 'to[PRODUCES](tag:PII)', 'rows > 5', text,
+        ]))
     })
 })

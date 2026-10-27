@@ -213,3 +213,63 @@ describe('interpretQuestion — the names a question points at', () => {
             .toBe('type:chart AND ancestor(@"Tableau/Finance")')
     })
 })
+
+
+describe('interpretQuestion — connections', () => {
+    const edgeVocab = buildAskVocabulary({
+        entityTypes: [
+            { id: 'dataset', name: 'Dataset', pluralName: 'Datasets' },
+            { id: 'schemaField', name: 'Column', pluralName: 'Columns' },
+            { id: 'dashboard', name: 'Dashboard', pluralName: 'Dashboards' },
+            { id: 'chart', name: 'Chart', pluralName: 'Charts' },
+        ],
+        tagValues: ['PII', 'Finance'],
+        propertyKeys: ['owner'],
+        valueSamples: [],
+        layers: [{ value: 'gold', label: 'Gold' }],
+        edgeTypes: ['PRODUCES', 'DEFINED_BY', 'TRANSFORMS', 'CONTAINS'],
+    })
+    const ask = (q: string) => interpretQuestion(q, edgeVocab)
+
+    it.each([
+        ['connections from columns tagged PII to dashboards', 'from(type:schemaField AND tag:PII) to(type:dashboard)'],
+        ['Show me all the edges from datasets to charts.', 'from(type:dataset) to(type:chart)'],
+        ['links from datasets to dashboards either way', 'from(type:dataset) linkedTo(type:dashboard)'],
+        ['relationships from columns to datasets through produces', 'from(type:schemaField) to[PRODUCES](type:dataset)'],
+        ['connections from datasets to anything through defined by edges', 'from(type:dataset) to[DEFINED_BY]()'],
+        ['connections from anything to the gold layer', 'from() to(layer:gold)'],
+        ['connections from anything inside Finance to dashboards', 'from(ancestor(@"**/Finance")) to(type:dashboard)'],
+        ['connections from datasets to charts through lineage', 'from(type:dataset) to[lineage](type:chart)'],
+        ['edges from columns to columns through transforms and produces, either way',
+            'from(type:schemaField) linkedTo[TRANSFORMS, PRODUCES](type:schemaField)'],
+    ])('%s → %s', (q, out) => {
+        const r = ask(q)
+        expect(stringifyPredicate(r.predicate)).toBe(out)
+        expect(r.mode).toBe('replace')
+        expect(r.unrecognized).toEqual([])
+    })
+
+    it('ends From at the "to" that leaves the fewest words unread', () => {
+        expect(stringifyPredicate(ask('connections from datasets linked to dashboards to charts').predicate))
+            .toBe('from(type:dataset AND linkedTo[lineage]*..3(type:dashboard)) to(type:chart)')
+    })
+
+    it('says back what "through …" names that is no edge type here', () => {
+        const r = ask('connections from datasets to charts through whatever')
+        expect(stringifyPredicate(r.predicate)).toBe('from(type:dataset) to(type:chart)')
+        expect(r.unrecognized).toEqual(['whatever'])
+    })
+
+    it('keeps each word\'s place in the question, so a pick sticks to it', () => {
+        const q = 'connections from finance to dashboards'
+        expect(ask(q).ambiguities.map((a) => a.id)).toEqual(['17:finance'])
+        expect(stringifyPredicate(interpretQuestion(q, edgeVocab, { choices: { '17:finance': 'name' } }).predicate))
+            .toBe('from(finance) to(type:dashboard)')
+    })
+
+    it('reads anything else as it always did', () => {
+        expect(ask('links from finance').predicate?.kind).not.toBe('edges')
+        expect(ask('and connections from datasets to charts').predicate?.kind).not.toBe('edges')
+        expect(ask('datasets that feed dashboards').predicate?.kind).not.toBe('edges')
+    })
+})
