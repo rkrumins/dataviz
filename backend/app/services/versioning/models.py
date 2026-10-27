@@ -268,6 +268,11 @@ class ProjectionStateORM(VersioningBase):
     # Data health rebuild progress bar. NULL when no full seed is running.
     progress_done = Column(BigInteger, nullable=True)
     progress_total = Column(BigInteger, nullable=True)
+    # What the last projection pass found in a graph the platform doesn't own that its history
+    # doesn't track — ``{outsideHistory: {nodes, relationships}, noIdentifier: {nodes},
+    # unexpected?: {nodes, relationships}, checkedAt}`` (``reconcile.outside_history_counts``).
+    # Reported, never acted on. NULL for a graph the platform owns, or one never verified.
+    drift = Column(JSONB, nullable=True)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     __table_args__ = _plain(
@@ -671,6 +676,10 @@ def _ensure_schema_upgrades(conn) -> None:
     indexes. Without this, such a store keeps the CHECK it was born with and rejects every job type
     added since. Each step is idempotent and a no-op once applied, so it runs on every start."""
     widen_job_type_check(conn, JOB_TYPES)
+    # 20261027_1200_projection_drift.
+    if sa_inspect(conn).has_table("projection_state", schema=_SCHEMA):
+        conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."projection_state" '
+                          "ADD COLUMN IF NOT EXISTS drift jsonb"))
     # 20261008_1200_import_rows_idx (``bootstrap_nodes`` is a new table: ``create_all`` makes it).
     if sa_inspect(conn).has_table("import_rows", schema=_SCHEMA):
         rows = f'"{_SCHEMA}"."import_rows"'

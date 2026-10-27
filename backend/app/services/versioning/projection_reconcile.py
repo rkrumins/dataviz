@@ -120,6 +120,7 @@ def diff_projection(
     expected_edges: Mapping[EdgeKey, ExpectedEdge],
     actual_nodes: Mapping[NodeKey, ActualNode],
     actual_edges: Mapping[EdgeKey, ActualEdge],
+    presence_only: bool = False,
 ) -> ProjectionDiff:
     """The writes that make FalkorDB hold exactly what Postgres says.
 
@@ -128,6 +129,10 @@ def diff_projection(
     rewritten (its fingerprint covers the label). Stored edges are compared as they will
     read AFTER those relabels, so an edge that survives a retype is left alone. An extra
     edge whose endpoint is being deleted needs no write of its own (the DETACH takes it).
+
+    ``presence_only`` upserts only what FalkorDB LACKS, never an item it holds under a different
+    (or no) fingerprint: the heal of a graph the platform doesn't own, whose every node the
+    version-control copy left unfingerprinted — a heal must not rewrite the whole graph.
     """
     d = ProjectionDiff()
     missing: Dict[str, List[str]] = {}
@@ -146,7 +151,7 @@ def diff_projection(
             relabel_to[(old, urn)] = new
     for key, e in expected_nodes.items():
         a = actual_nodes.get(key)
-        if a is None or a.fp != e.fp:
+        if a is None or (a.fp != e.fp and not presence_only):
             d.node_upserts.append(key)
     for key in actual_nodes:
         if key not in expected_nodes and key not in relabel_to:
@@ -163,7 +168,7 @@ def diff_projection(
         stored[(after_relabel(sl, su), su, rel, after_relabel(tl, tu), tu)] = a
     for key, e in expected_edges.items():
         a = stored.get(key)
-        if a is None or a.fp != e.fp:
+        if a is None or (a.fp != e.fp and not presence_only):
             d.edge_upserts.append(key)
     for key in stored:
         if key not in expected_edges:

@@ -2561,6 +2561,9 @@ class GraphVersioningService:
                 "last_projected_at": ps.last_projected_at if ps else None,
                 "progress_done": ps.progress_done if ps else None,
                 "progress_total": ps.progress_total if ps else None,
+                # A data source's own graph: what the last pass found there that the history
+                # doesn't track (see ProjectionStateORM.drift). None for a graph the platform owns.
+                "drift": ps.drift if ps else None,
             }
 
     async def ensure_projection_target(

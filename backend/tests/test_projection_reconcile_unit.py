@@ -99,6 +99,17 @@ def test_an_unstamped_projection_is_rewritten_once_in_place():
     assert d.node_upserts == [("domain", "a")] and not d.node_deletes
 
 
+def test_presence_only_writes_what_is_missing_and_nothing_merely_unstamped():
+    # The heal of a graph the platform doesn't own: every node the version-control copy made is
+    # unfingerprinted, and a heal must not rewrite the whole graph to put back one missing item.
+    d = diff_projection(
+        {("domain", "a"): _en(), ("domain", "b"): _en()},
+        {("domain", "a", "DEPENDS_ON", "domain", "b"): _ee()},
+        {("domain", "a"): _an(None)}, {}, presence_only=True)
+    assert d.node_upserts == [("domain", "b")]
+    assert d.edge_upserts == [("domain", "a", "DEPENDS_ON", "domain", "b")]
+
+
 def test_an_extra_edge_between_surviving_nodes_is_deleted():
     d = diff_projection(
         {("domain", "a"): _en(), ("domain", "b"): _en()}, {},

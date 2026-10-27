@@ -161,23 +161,26 @@ async def falkor_counts(client, *, owned: bool = True) -> Tuple[int, int]:
     ``_apply`` pinned the watermark: reads fell back to Postgres until someone rebuilt by hand.
 
     ``owned=False`` is a graph the projector did not mint (``projection_state.owns_falkor_graph``):
-    a customer's own graph, pinned by "enable version control". Postgres holds only what the reader
-    can see of it (``bootstrap_worker``), so that is what is counted: nodes with a (non-empty) ``urn``, and
-    edges between two of them as DISTINCT ``(source, type, target)`` triples — the same shape as
-    :func:`pg_live_counts_projectable`, because such a graph may hold parallel relationships of one
-    type between one pair, which the projector's own graphs never do. Counting every node and every
-    relationship there reported the urn-less nodes and the parallel copies as "extra entities" on
-    every verify. A graph the projector owns is counted as before: anything there that it did not
+    a customer's own graph, pinned by "enable version control". What is counted there is what the
+    history TRACKS: nodes carrying a (non-empty) ``urn`` and the ``entityId`` the copy and every
+    projector write stamp, and the relationships carrying an ``id`` between two of them, as DISTINCT
+    ``(source, type, target)`` triples — the same shape as :func:`pg_live_counts_projectable`,
+    because such a graph may hold parallel relationships of one type between one pair, which the
+    projector's own graphs never do. Anything else there was written outside the history (urn-less
+    nodes the copy left alone, whatever the source's own pipeline added since): counted apart by
+    :func:`outside_history_counts` and reported as drift, never as entities missing from Postgres —
+    counting it here held the watermark back on every outside write and routed every read to
+    Postgres. A graph the projector owns is counted as before: anything there that it did not
     write IS drift."""
     if not owned:
         fn = await _bounded_query(
             client,
-            f"MATCH (n) WHERE n.urn IS NOT NULL AND n.urn <> '' AND {_NOT_DERIVED} "
-            "RETURN count(n) AS c")
+            f"MATCH (n) WHERE n.urn IS NOT NULL AND n.urn <> '' AND n.entityId IS NOT NULL "
+            f"AND {_NOT_DERIVED} RETURN count(n) AS c")
         fe = await _bounded_query(
             client,
-            "MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' AND a.urn IS NOT NULL "
-            "AND a.urn <> '' AND b.urn IS NOT NULL AND b.urn <> '' "
+            "MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' AND r.id IS NOT NULL "
+            "AND a.urn IS NOT NULL AND a.urn <> '' AND b.urn IS NOT NULL AND b.urn <> '' "
             "RETURN count(DISTINCT [a.urn, type(r), b.urn]) AS c")
         return int(fn.result_set[0][0]), int(fe.result_set[0][0])
     fn = await _bounded_query(
@@ -187,6 +190,35 @@ async def falkor_counts(client, *, owned: bool = True) -> Tuple[int, int]:
         client,
         "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' RETURN count(r) AS c")
     return int(fn.result_set[0][0]), int(fe.result_set[0][0])
+
+
+async def outside_history_counts(client) -> Dict[str, Dict[str, int]]:
+    """What a customer's own graph holds that its history does not track — the drift a graph the
+    platform does not own can have, because something other than the platform can write to it.
+
+    * ``outsideHistory`` — nodes with a ``urn`` but no ``entityId``, and relationships between two
+      such urn-bearing nodes with no ``id``: neither the copy nor any projector write made them.
+    * ``noIdentifier`` — nodes with no ``urn`` at all: the application cannot show, version or copy
+      them, so they stay as they are.
+
+    Three counts, each one scan; the derived rollup layer and its bookkeeping are never counted."""
+    nodes = await _bounded_query(
+        client,
+        f"MATCH (n) WHERE n.urn IS NOT NULL AND n.urn <> '' AND n.entityId IS NULL "
+        f"AND {_NOT_DERIVED} RETURN count(n) AS c")
+    rels = await _bounded_query(
+        client,
+        "MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' AND r.id IS NULL "
+        "AND a.urn IS NOT NULL AND a.urn <> '' AND b.urn IS NOT NULL AND b.urn <> '' "
+        "RETURN count(r) AS c")
+    bare = await _bounded_query(
+        client,
+        f"MATCH (n) WHERE (n.urn IS NULL OR n.urn = '') AND {_NOT_DERIVED} RETURN count(n) AS c")
+    return {
+        "outsideHistory": {"nodes": int(nodes.result_set[0][0]),
+                           "relationships": int(rels.result_set[0][0])},
+        "noIdentifier": {"nodes": int(bare.result_set[0][0])},
+    }
 
 
 @dataclass

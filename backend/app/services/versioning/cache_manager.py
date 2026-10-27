@@ -85,15 +85,18 @@ class CacheManager:
 
     # ---- eviction --------------------------------------------------------- #
     async def evict(self, graph_id: str, *, drop_graph: Callable[..., Awaitable]) -> bool:
-        """Evict a cold ``main`` from FalkorDB. Skips a pinned graph. Marks
-        ``status=evicted`` + ``projected_commit_seq=0`` (so the worker rebuilds it)
+        """Evict a cold ``main`` from FalkorDB. Skips a pinned graph, and a graph the platform
+        does not own (``owns_falkor_graph`` false: a data source's own graph, pinned when version
+        control was turned on — dropping it deletes the customer's data, refills it with only
+        what the history holds, and empties it meanwhile for every data source that reads it).
+        Marks ``status=evicted`` + ``projected_commit_seq=0`` (so the worker rebuilds it)
         and drops the FalkorDB graph via ``drop_graph(name, provider_id)`` — routed to
         the graph's pinned provider instance. Returns whether it evicted."""
         if await self.is_pinned(graph_id):
             return False
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
-            if ps is None or ps.status == "evicted":
+            if ps is None or ps.status == "evicted" or not ps.owns_falkor_graph:
                 return False
             name = ps.falkor_graph_name
             provider_id = ps.falkor_provider
@@ -138,20 +141,24 @@ class CacheManager:
         return func.coalesce(ProjectionStateORM.falkor_provider, config.DEFAULT_FALKOR_PROVIDER)
 
     async def resident_providers(self) -> List[str]:
-        """Distinct FalkorDB providers with at least one resident graph."""
+        """Distinct FalkorDB providers with at least one evictable resident graph."""
         async with self._session() as s:
             rows = (await s.execute(
                 select(func.distinct(self._provider_col()))
-                .where(ProjectionStateORM.status == "idle")
+                .where(ProjectionStateORM.status == "idle",
+                       ProjectionStateORM.owns_falkor_graph.is_(True))
             )).scalars().all()
         return list(rows)
 
     async def resident_count(self, provider: str) -> int:
-        """Resident ``main`` caches on one FalkorDB provider — its evictable set."""
+        """Resident ``main`` caches on one FalkorDB provider — its evictable set: only graphs the
+        platform owns (see :meth:`evict`). A data source's own graph is never dropped, so it is
+        not counted against the budget the janitor enforces by dropping."""
         async with self._session() as s:
             return int((await s.execute(
                 select(func.count()).select_from(ProjectionStateORM)
-                .where(ProjectionStateORM.status == "idle")
+                .where(ProjectionStateORM.status == "idle",
+                       ProjectionStateORM.owns_falkor_graph.is_(True))
                 .where(self._provider_col() == provider)
             )).scalar_one())
 
@@ -162,11 +169,13 @@ class CacheManager:
 
         Never a graph still at genesis (head ≤ 1): that is one whose version control is being
         enabled, is paused, failed, or is being seeded — its FalkorDB key is the data source's
-        own graph or a half-built copy, and a reseed from genesis would empty it."""
+        own graph or a half-built copy, and a reseed from genesis would empty it. Never a graph
+        the platform does not own either (see :meth:`evict`)."""
         async with self._session() as s:
             q = (select(ProjectionStateORM.graph_id)
                  .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
-                 .where(ProjectionStateORM.status == "idle", GraphORM.main_head_commit_seq > 1)
+                 .where(ProjectionStateORM.status == "idle", GraphORM.main_head_commit_seq > 1,
+                        ProjectionStateORM.owns_falkor_graph.is_(True))
                  .order_by(ProjectionStateORM.last_projected_at.asc().nulls_first())
                  .limit(limit))
             if provider is not None:

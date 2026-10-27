@@ -20,9 +20,12 @@ from backend.app.services.versioning.service import GraphVersioningService
 from backend.tests.integration.test_versioning_projection import FakeFalkor
 
 
-async def _seed(svc) -> str:
+async def _seed(svc, owned: bool = True) -> str:
+    # Eviction only ever drops a graph the platform minted (a blank model, a fork, a package seed):
+    # ``owned=False`` is a data source's own graph, pinned when version control was turned on.
     gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="a",
-                                   falkor_graph_name="gvt_" + os.urandom(3).hex()))["graph_id"]
+                                   falkor_graph_name="gvt_" + os.urandom(3).hex(),
+                                   owns_falkor_graph=owned))["graph_id"]
     d = await svc.open_draft(graph_id=gid, owner="a")
     await svc.stage_changes(graph_id=gid, branch_id=d, actor="a", ops=[
         {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A", "entityType": "Dataset"}},
@@ -83,6 +86,16 @@ async def _run() -> None:
     await proj.project_graph(g2)
     lru = await cm.lru_candidates(limit=10_000)
     assert lru.index(g1) < lru.index(g2)                # g1 projected earlier → colder → first
+
+    # ── a graph the platform doesn't own is never evicted ────────────────
+    # The data source's own graph: dropping it would delete the customer's data and refill it
+    # with only what the history holds, for every data source that reads it.
+    theirs = await _seed(svc, owned=False)
+    await proj.project_graph(theirs)
+    assert await _ps(theirs) == ("idle", 2, 2)
+    assert theirs not in await cm.lru_candidates(limit=10_000)
+    assert await cm.evict(theirs, drop_graph=drop_graph) is False
+    assert await _ps(theirs) == ("idle", 2, 2) and len(dropped) == 1, "nothing more was dropped"
 
     await close_broker_redis()
     await db.dispose_engine()

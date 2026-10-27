@@ -59,6 +59,23 @@ async def test_a_nodes_identity_property_is_kept():
 
 
 @pytest.mark.asyncio
+async def test_on_a_graph_the_platform_does_not_own_only_what_history_removed_goes():
+    """A data source's own graph: ``tier`` was in the history and was removed; ``etlNote`` was
+    written there from outside the history — not the platform's to remove."""
+    client = _Client({"u1": {"urn": "u1", "owner": "ana", "tier": "gold", "etlNote": "x"}})
+    chunk = [_item("u1", owner="ana")]
+    await FalkorProjector.__new__(FalkorProjector)._mark_removed_properties(
+        client, "Dataset", chunk, _projector_owned_property_names(),
+        removable={"u1": {"owner", "tier"}})
+    assert chunk[0]["gone"] == {"tier": None}
+
+    chunk = [_item("u1", owner="ana")]                  # a node with no earlier version: nothing
+    await FalkorProjector.__new__(FalkorProjector)._mark_removed_properties(
+        client, "Dataset", chunk, _projector_owned_property_names(), removable={})
+    assert chunk[0]["gone"] == {}
+
+
+@pytest.mark.asyncio
 async def test_a_new_node_has_nothing_to_remove():
     client = _Client({})
     chunk = [_item("new", a=1)]

@@ -74,7 +74,8 @@ async def _seed_with_committed_rollups(svc, name: str) -> str:
     the state a publish of an aggregated draft leaves behind, and the state the outage
     was in."""
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name,
+                               owns_falkor_graph=True)   # the projector's own graph
     gid = G["graph_id"]
     await _edit_publish(svc, gid, "alice", [
         {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},

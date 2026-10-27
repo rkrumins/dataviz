@@ -164,6 +164,9 @@ class FakeGraph:
             slb = cypher.split("MATCH (a:", 1)[1].split(" {urn:", 1)[0]
             tlb = cypher.split("MATCH (b:", 1)[1].split(" {urn:", 1)[0]
             rel = cypher.split("MERGE (a)-[r:", 1)[1].split("]->", 1)[0]
+            # A graph the platform doesn't own MERGEs on the id as well: `[r:TYPE {id: item.eid}]`.
+            by_id = rel.endswith(" {id: item.eid}")
+            rel = rel.split(" {", 1)[0]
             for it in params["batch"]:
                 a, b = self.nodes.get(it["src"]), self.nodes.get(it["tgt"])
                 # Label-anchored MATCH: BOTH endpoints must exist WITH the anchored label, else the
@@ -172,9 +175,11 @@ class FakeGraph:
                     # id-less MERGE collapses parallel edges: FalkorDB keys a relationship on the
                     # (src, type, tgt) TRIPLE, so N edges sharing a triple become ONE (r.id = last
                     # writer). Drop any existing same-triple edge before (re-)adding — a no-op for a
-                    # graph with no parallel edges, faithful for one that has them.
+                    # graph with no parallel edges, faithful for one that has them. MERGEd on its
+                    # id, a relationship replaces only the one with that id.
                     for _k in [k for k, e in self.edges.items()
-                               if e["src"] == it["src"] and e["tgt"] == it["tgt"] and e["type"] == rel]:
+                               if e["src"] == it["src"] and e["tgt"] == it["tgt"] and e["type"] == rel
+                               and (not by_id or k == it["eid"])]:
                         self.edges.pop(_k, None)
                     self.edges[it["eid"]] = {"src": it["src"], "tgt": it["tgt"], "type": rel,
                                              "props": it.get("props"), "conf": it.get("conf"),
@@ -298,7 +303,8 @@ async def _run() -> None:
     # ── seed + first projection (pinned target: unpinned graphs are no longer projected) ──
     first_name = "gvt_" + os.urandom(3).hex()
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=first_name)
+                               actor="alice", falkor_graph_name=first_name,
+                               owns_falkor_graph=True)   # the projector's own graph
     gid = G["graph_id"]
     await _edit_publish(svc, gid, "alice", [
         {"op": "create", "entity_kind": "node", "entity_id": "A",
@@ -487,7 +493,8 @@ async def _seed_pinned_graph(svc, name: str) -> str:
     """Create + publish a two-node graph pinned to ``name`` (a real FalkorDB target), left at
     watermark 0 so the next ``project_graph`` takes the full-seed (drop-then-reseed) path."""
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name,
+                               owns_falkor_graph=True)   # the projector's own graph
     gid = G["graph_id"]
     await _edit_publish(svc, gid, "alice", [
         {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},
