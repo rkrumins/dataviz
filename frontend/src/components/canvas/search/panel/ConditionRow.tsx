@@ -1360,6 +1360,13 @@ function isIncomplete(p: Predicate): boolean {
             return !(p.sourceUrns?.length || p.sourceRefs?.length || p.sourceWhere)
                 || !(p.targetUrns?.length || p.targetRefs?.length || p.targetWhere)
                 || [p.sourceWhere, p.targetWhere].some((w) => !!w && hasIncompleteLeaf(w))
+        // A Connections search: its ends finished, and an end or the edge
+        // types to say which edges — never every edge in the view only
+        // because nothing is filled in yet.
+        case 'edges':
+            return p.edgeTypes?.length === 0
+                || (!p.sourceWhere && !p.targetWhere && !p.edgeTypes?.length)
+                || [p.sourceWhere, p.targetWhere].some((w) => !!w && hasIncompleteLeaf(w))
         case 'is':           return !p.refs.length || p.refs.some((r) => !r.urn && !r.path?.length)
         // A relationship with no condition is complete: any relative will do.
         case 'related':      return p.edgeTypes?.length === 0 || (!!p.where && hasIncompleteLeaf(p.where))

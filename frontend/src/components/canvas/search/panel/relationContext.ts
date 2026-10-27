@@ -20,6 +20,10 @@ export interface RelationContextValue {
     /** Whether a row of the query's own sits in its top-level AND (unset: it
      *  does) — "any of" and "not" take that away, as the server reads it. */
     top?: boolean
+    /** A Connections search's From or To: no routes (a path, within N
+     *  hops) — a connection is one edge — and lineage only so far, never
+     *  traced from its far end. */
+    end?: boolean
     /** A display rule's: lineage goes one hop. */
     rule: boolean
     /** The view a name path is resolved in (the name picker's badge). */

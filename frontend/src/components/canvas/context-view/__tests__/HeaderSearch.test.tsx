@@ -232,6 +232,18 @@ describe('HeaderSearch — the status line', () => {
     expect(screen.getByText(/50,000\+ matches/)).toBeInTheDocument()
   })
 
+  it('counts a Connections search in connections, which no layer holds', () => {
+    const session = stubSession({
+      resolveLayer: vi.fn(() => 'gold'),
+      advanced: stubAdvanced({
+        view: resultsView({ totalCount: 8, truncated: false, hits: [], edges: [] }),
+      }),
+    })
+    renderBox(session)
+
+    expect(screen.getByText('8 connections')).toBeInTheDocument()
+  })
+
   it('says what a scan still running has found so far, and how far it is', () => {
     const session = stubSession({
       advanced: stubAdvanced({

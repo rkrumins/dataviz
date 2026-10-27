@@ -644,8 +644,11 @@ function StatusLine({ landingNote }: { landingNote: string | null }) {
     // an exact total there is nothing more than it, and the count reads
     // singular at one like any other exact number.
     const plus = result.truncated === true && result.totalCount == null
-    const matches = count === 1 && !plus ? 'match' : 'matches'
-    const inLayers = ` · ${layers.size} ${layers.size === 1 ? 'layer' : 'layers'}`
+    // A Connections search counts edges, and has no hits to place in layers.
+    const connections = result.edges != null
+    const one = count === 1 && !plus
+    const matches = connections ? (one ? 'connection' : 'connections') : (one ? 'match' : 'matches')
+    const inLayers = connections ? '' : ` · ${layers.size} ${layers.size === 1 ? 'layer' : 'layers'}`
     if (result.status === 'running') {
       const { scanned = 0, total = 0 } = result.progress ?? {}
       const pct = total > 0 ? Math.min(99, Math.floor((scanned / total) * 100)) : 0

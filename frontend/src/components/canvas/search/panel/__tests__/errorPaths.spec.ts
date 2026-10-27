@@ -13,6 +13,10 @@ describe('errorPaths — a server message in the panel’s words', () => {
         ['$.children[0].edge.children[1]', 'filter 1 › its edge filter › condition 2'],
         ['$.children[0].children[3].edgePredicate', 'filter 1 › condition 4 › its edge filter'],
         ['$.items[1].predicate.children[0]', 'rule 2 › condition 1'],
+        // A Connections search is the whole query: its ends are at the root.
+        ['$.sourceWhere.children[1]', 'From › condition 2'],
+        ['$.targetWhere.where', 'To › its condition'],
+        ['$.edgePredicate', 'its edge filter'],
     ])('reads %s', (path, words) => {
         expect(describeQueryPath(path)).toBe(words)
     })

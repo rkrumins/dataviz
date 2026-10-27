@@ -193,3 +193,41 @@ describe('searchStore.setResult — the focused match survives pagination', () =
         expect(useSearchStore.getState().focusedMatchIndex).toBeNull()
     })
 })
+
+
+describe('searchStore — a Connections search steps through its edges', () => {
+    function publish(keys: string[], queryHash = 'q') {
+        useSearchStore.getState().setResult({
+            viewId: 'view-1', matchUrns: ['a', 'b', 'c'], edgeKeys: keys, queryHash,
+        })
+    }
+
+    it('walks the edges, not the ends', () => {
+        publish(['a→b', 'a→c'])
+        const store = useSearchStore.getState()
+        store.stepFocus('next')
+        store.stepFocus('next')
+        const s = useSearchStore.getState()
+        expect(s.focusedMatchIndex).toBe(1)
+        expect(s.orderedEdgeKeys[s.focusedMatchIndex!]).toBe('a→c')
+        // Wraps after the second edge, though three ends are highlighted.
+        s.stepFocus('next')
+        expect(useSearchStore.getState().focusedMatchIndex).toBe(0)
+    })
+
+    it('keeps the focused edge across a later page of the same search', () => {
+        publish(['a→b', 'a→c'])
+        useSearchStore.getState().setFocusedMatchIndex(1)
+        publish(['x→a', 'a→b', 'a→c'])
+        expect(useSearchStore.getState().focusedMatchIndex).toBe(2)
+    })
+
+    it('an entity search after it steps through matches again', () => {
+        publish(['a→b'])
+        useSearchStore.getState().setResult({ viewId: 'view-1', matchUrns: ['a', 'b'], queryHash: 'q2' })
+        expect(useSearchStore.getState().orderedEdgeKeys).toEqual([])
+        useSearchStore.getState().stepFocus('next')
+        useSearchStore.getState().stepFocus('next')
+        expect(useSearchStore.getState().focusedMatchIndex).toBe(1)
+    })
+})

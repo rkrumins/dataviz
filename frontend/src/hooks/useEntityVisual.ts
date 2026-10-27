@@ -115,7 +115,8 @@ function getEdgeVisualFromSchema(
   )
   if (!relType) return edgeVisualFallback(edgeTypeId)
 
-  return relType.visual
+  // A type the ontology names without a visual of its own gets the fallback too.
+  return relType.visual ?? edgeVisualFallback(edgeTypeId)
 }
 
 // -----------------------------------------------------------------------

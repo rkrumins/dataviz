@@ -6,11 +6,12 @@
 import * as Popover from '@radix-ui/react-popover'
 import { Command } from 'cmdk'
 import { Plus } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useContext, useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import type { Predicate } from '@/types/search'
 
+import { RelationContext } from '../relationContext'
 import { availableCategories, ICON_TONES, type CodeKind } from '../vocabulary/filterKinds'
 
 
@@ -24,9 +25,11 @@ export function AddClauseMenu({ joiner, relationDepth, onAdd, onOpenCode, disabl
     disabled?: boolean
 }) {
     const [open, setOpen] = useState(false)
+    // A Connections search's end holds no route.
+    const { end } = useContext(RelationContext)
     const categories = useMemo(() => availableCategories({
-        relationDepth, rule: false, canCode: !!onOpenCode, canAdvanced: false,
-    }), [relationDepth, onOpenCode])
+        relationDepth, rule: false, end, canCode: !!onOpenCode, canAdvanced: false,
+    }), [relationDepth, end, onOpenCode])
 
     return (
         <Popover.Root open={open} onOpenChange={setOpen}>

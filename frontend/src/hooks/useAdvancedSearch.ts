@@ -60,8 +60,8 @@ import {
     findTemplate,
     type SearchTemplate,
 } from '@/components/canvas/search/searchTemplates'
-import { stringifyPredicate } from '@/components/canvas/search/panel/predicateDsl'
-import { currentScope, requestPredicate } from '@/components/canvas/search/searchRequest'
+import { queryLabel } from '@/components/canvas/search/panel/findMode'
+import { currentScope, requestOptions, requestPredicate } from '@/components/canvas/search/searchRequest'
 import { recordEvent } from '@/services/telemetryService'
 
 
@@ -75,7 +75,7 @@ const RECENTABLE_KINDS = new Set([
     'group', 'text', 'property', 'tag', 'hasProperty',
     'entityType', 'layer', 'descendantOf', 'withinHops',
     'degree', 'isOrphan', 'isLeaf', 'isRoot',
-    'hasIncoming', 'hasOutgoing', 'related', 'is',
+    'hasIncoming', 'hasOutgoing', 'related', 'is', 'edges',
 ])
 
 function isRecentablePredicate(p: Predicate): boolean {
@@ -131,7 +131,18 @@ function collectMatchUrns(result: SearchResultPage): string[] {
             }
         }
     }
+    // Connections: both ends of every edge listed.
+    for (const edge of result.edges ?? []) {
+        urns.push(edge.source.urn, edge.target.urn)
+    }
     return urns
+}
+
+
+/** A Connections search's edges, by key, in the order they are listed —
+ *  what the match stepper walks. Undefined for any other search. */
+function collectEdgeKeys(result: SearchResultPage): string[] | undefined {
+    return result.edges?.map((e) => e.key) ?? undefined
 }
 
 
@@ -175,6 +186,16 @@ function collectAncestorPaths(result: SearchResultPage): AncestorPathInfo[] {
             for (const bucket of facet) {
                 for (const hit of bucket.sampleHits ?? []) push(hit)
             }
+        }
+    }
+    // Connections: each end once, however many of the edges listed it is
+    // an end of — a container counts the matched entities inside it.
+    const ends = new Set<string>()
+    for (const edge of result.edges ?? []) {
+        for (const end of [edge.source, edge.target]) {
+            if (ends.has(end.urn)) continue
+            ends.add(end.urn)
+            push({ ancestorPath: end.ancestorPath, node: { entityType: end.entityType } })
         }
     }
     return paths
@@ -621,6 +642,7 @@ export function useAdvancedSearch(
             useSearchStore.getState().setResult({
                 viewId,
                 matchUrns: collectMatchUrns(result),
+                edgeKeys: collectEdgeKeys(result),
                 ancestorPaths,
                 ancestorCounts: collectAncestorCounts(query, result),
                 queryHash: JSON.stringify(query),
@@ -670,14 +692,18 @@ export function useAdvancedSearch(
             // contain and it didn't. The predicate is deliberately NOT sent;
             // it can carry node names, and this store holds no PII beyond the
             // actor id. The shape of the query is enough to spot a pattern.
-            recordEvent(matchUrns.length > 0 ? 'graph.search' : 'graph.search_miss', {
-                matches: matchUrns.length,
+            // A Connections search counts its edges.
+            const matches = result.edges?.length ?? matchUrns.length
+            recordEvent(matches > 0 ? 'graph.search' : 'graph.search_miss', {
+                matches,
                 template: template.id,
+                ...(result.edges ? { connections: true } : {}),
                 elapsedMs: Math.round(performance.now() - startedAt),
             })
             useSearchStore.getState().setResult({
                 viewId,
                 matchUrns,
+                edgeKeys: collectEdgeKeys(result),
                 ancestorPaths,
                 ancestorCounts: collectAncestorCounts(query, result),
                 queryHash: JSON.stringify(query),
@@ -689,7 +715,7 @@ export function useAdvancedSearch(
                 useSearchStore.getState().addRecent({
                     viewId,
                     predicate: query.predicate,
-                    label: stringifyPredicate(query.predicate),
+                    label: queryLabel(query.predicate),
                 })
             }
         } catch (e) {
@@ -757,6 +783,7 @@ export function useAdvancedSearch(
                 aggregations: draftOptions.aggregations,
                 includeAncestorPath: draftOptions.includeAncestorPath,
             }
+        const options = optionsOverride ?? defaultOptions
 
         const syntheticTemplate: SearchTemplate = {
             id: '__builder__',
@@ -768,7 +795,7 @@ export function useAdvancedSearch(
             build: () => ({
                 predicate,
                 scope: undefined,
-                options: optionsOverride ?? defaultOptions,
+                options: requestOptions(predicate, options),
             }),
         }
         // The run key must match the hash ``buildRunnablePredicate``
@@ -786,11 +813,12 @@ export function useAdvancedSearch(
     // exhaust the candidate set). Re-issuing the SAME query with
     // ``options.cursor`` set returns the next page; we append those
     // hits onto the existing result so the user sees a longer list,
-    // not a replacement.
+    // not a replacement. A Connections search pages its edges the
+    // same way.
     //
-    // Aggregations are pinned to the first page (re-running the
-    // aggregation per pagination round-trip would be wasteful and
-    // wouldn't change the bucket counts).
+    // The bucket counts are page 1's: a later page asks for rows only
+    // (the counts wouldn't change), though the request still names the
+    // facets — the cursor is only honoured for the query that issued it.
     // ---------------------------------------------------------------
     const [isLoadingMore, setIsLoadingMore] = useState(false)
 
@@ -809,15 +837,17 @@ export function useAdvancedSearch(
         const controller = new AbortController()
         abortRef.current = controller
         try {
+            const connections = view.query.predicate.kind === 'edges'
             const nextQuery: SearchQuery = {
                 ...view.query,
                 options: {
                     ...(view.query.options ?? {}),
                     cursor,
-                    // Drop aggregations on subsequent pages — we
-                    // already have them from page 1.
-                    aggregations: undefined,
-                    results: 'hits',
+                    // Later pages ask for rows only. The facets stay in the
+                    // request all the same: they are part of what the
+                    // search's session answers, and a cursor is honoured
+                    // only for the very query that issued it.
+                    results: connections ? 'edges' : 'hits',
                 },
             }
             let nextPage = await provider.searchAdvanced(
@@ -846,7 +876,11 @@ export function useAdvancedSearch(
                 ...(nextPage.hits ?? []),
             ]
             const asked = containersAsked.current
-            const merged = withContainers(view.query, {
+            const merged = connections ? {
+                ...view.result,
+                edges: [...(view.result.edges ?? []), ...(nextPage.edges ?? [])],
+                cursor: nextPage.cursor ?? undefined,
+            } : withContainers(view.query, {
                 ...view.result,
                 hits: mergedHits,
                 cursor: nextPage.cursor ?? undefined,
@@ -862,9 +896,10 @@ export function useAdvancedSearch(
             useSearchStore.getState().setResult({
                 viewId,
                 matchUrns: collectMatchUrns(merged),
+                edgeKeys: collectEdgeKeys(merged),
                 ancestorPaths: collectAncestorPaths(merged),
-                // ``merged`` keeps page 1's aggregates (nextQuery drops
-                // them), so the badges stay exact instead of regressing
+                // ``merged`` keeps page 1's aggregates (later pages ask for
+                // rows only), so the badges stay exact instead of regressing
                 // to a rollup over a now-longer hit list.
                 ancestorCounts: collectAncestorCounts(view.query, merged),
                 queryHash: JSON.stringify(view.query),

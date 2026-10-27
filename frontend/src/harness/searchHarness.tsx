@@ -115,6 +115,7 @@ function Harness() {
     useEffect(() => {
         useSearchStore.getState().clear()
         if (fixture.draft) useSearchStore.getState().commitDraft(fixture.draft)
+        if (fixture.studio) useSearchStore.getState().setStudioOpen(true)
     }, [])
 
     return (

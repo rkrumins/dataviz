@@ -19,6 +19,7 @@ import { ProviderOverride } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
 import { useViewLibraryStore, type ViewLibraryState } from '@/store/viewLibraryStore'
 
+import { NO_RULE_FOR_CONNECTIONS } from '../findMode'
 import { LibraryPopover } from '../LibraryPopover'
 
 
@@ -86,6 +87,23 @@ describe('LibraryPopover — This view', () => {
         library()
         renderPopover()
         expect(screen.queryByRole('button', { name: /Remove/ })).toBeNull()
+    })
+
+    it('marks a saved Connections search, reads it by its ends, and makes no display rule of it', () => {
+        const links: SavedViewQuery = {
+            id: 'q2', name: 'Column links',
+            // As the API reference asks a root to be sent: in an AND group of its own.
+            predicate: { kind: 'group', op: 'and', children: [
+                { kind: 'edges', sourceWhere: { kind: 'entityType', op: 'in', values: ['schemaField'] } }] },
+        }
+        library({ canEdit: true, savedQueries: [tables, links] })
+        renderPopover({ onMakeRule: vi.fn() })
+        expect(screen.getAllByText('Connections')).toHaveLength(1)
+        expect(screen.getByText('type:schemaField → anything')).toBeInTheDocument()
+        const rule = screen.getByRole('button', { name: 'Make a display rule of “Column links”' })
+        expect(rule).toBeDisabled()
+        expect(rule).toHaveAttribute('title', NO_RULE_FOR_CONNECTIONS)
+        expect(screen.getByRole('button', { name: 'Make a display rule of “Tables”' })).toBeEnabled()
     })
 
     it('says who can add queries when the view has none', async () => {

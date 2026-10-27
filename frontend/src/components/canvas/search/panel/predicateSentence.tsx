@@ -61,6 +61,16 @@ export function formatPredicateAsSentence(
             </p>
         )
     }
+    // A Connections search finds edges, whatever the lead-in names: "Show
+    // me connections from…", or — beside other words — "Connections from…".
+    if (predicate.kind === 'edges') {
+        return (
+            <p>
+                {opts.leadIn === undefined ? 'Show me connections' : 'Connections'}{' '}
+                <Inline>{leafSentence(predicate)}</Inline>.
+            </p>
+        )
+    }
     return renderTop(predicate, leadIn, !opts.singular)
 }
 
