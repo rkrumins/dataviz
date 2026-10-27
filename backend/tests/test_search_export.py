@@ -324,7 +324,7 @@ class TestSessions:
     async def test_a_walk_is_written_a_page_at_a_time(self, monkeypatch):
         monkeypatch.setattr(export_mod, "make_plan",
                             _plan([Unit("walk", None, roots=[1], size=6)]))
-        monkeypatch.setattr(export_mod, "_WALK_PAGE", 2)
+        monkeypatch.setattr(export_mod, "_PAGE", 2)
         graph = _Graph(NODES)
 
         async def run(cypher, params, timeout_s):
@@ -337,6 +337,27 @@ class TestSessions:
         out, _ = await _follow(provider, objects)
         assert out["rows"] == 6
         assert sum("$_after" in c for c in graph.statements) == 4   # 2 + 2 + 2 + 0
+
+    async def test_a_range_is_written_a_page_at_a_time_too(self, monkeypatch):
+        """FalkorDB cuts a reply at 10,000 rows on its stock image, and a
+        range read in one statement lost every match past it."""
+        monkeypatch.setattr(export_mod, "make_plan",
+                            _plan([Unit("range", "Dataset", size=6)]))
+        monkeypatch.setattr(export_mod, "_PAGE", 2)
+        graph = _Graph(NODES)
+        out, _ = await _follow(_Provider(graph), _Objects())
+        assert out["rows"] == 6
+        assert sum("$_after" in c for c in graph.statements) == 4   # 2 + 2 + 2 + 0
+
+    def test_an_exports_ranges_are_cut_to_a_page(self, monkeypatch):
+        """A range read in one statement, not paged: every page would read
+        the range again. Walks and the rest stay whole."""
+        monkeypatch.setattr(export_mod, "_PAGE", 2)
+        walk = Unit("walk", None, roots=[1], size=9)
+        units = export_mod._page_sized([Unit("range", "Dataset", 0, 8, size=8), walk])
+        assert [(u.lo, u.hi, u.size) for u in units[:-1]] == [
+            (0, 2, 2), (2, 4, 2), (4, 6, 2), (6, 8, 2)]
+        assert units[-1] is walk
 
     async def test_an_export_of_another_scope_is_never_served(self, monkeypatch):
         monkeypatch.setattr(export_mod, "make_plan", _plan(UNITS))

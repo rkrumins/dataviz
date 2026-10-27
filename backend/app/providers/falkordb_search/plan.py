@@ -61,6 +61,10 @@ from backend.app.services.deep_search import CompileError
 from backend.app.services.native_query.parse_cost import grouped
 from backend.common.models.search import anchor_groups
 
+#: The most rows FalkorDB sends in one reply on its stock image
+#: (``RESULTSET_SIZE``): it cuts a reply there without saying so, so a
+#: statement that may return more is read in pages of this many.
+REPLY_ROWS_MAX = 10_000
 #: Root sets up to this size clamp range units with an ``IN`` list. The
 #: check costs (ancestor rows) × (roots): 50 roots cost 2× an unclamped
 #: chunk, 5,000 cost 30× (§7), so a larger set is walked in buckets.
@@ -389,14 +393,21 @@ async def _resolve_clamps(run: Run, labels: Sequence[str], root_sets: List[List[
 
 
 async def _ids_of(run: Run, labels: Sequence[str], urns: Sequence[str]) -> List[int]:
+    """The node IDs of ``urns``. Half a reply's rows at a time: a node read
+    under two of the labels answers twice."""
     if not labels or not urns:
         return []
     union = " UNION ALL ".join(
         f"MATCH (r:`{_sanitize_label(lbl)}`) WHERE r.urn IN $_urns RETURN ID(r) AS id"
         for lbl in labels
     )
-    res = await run(union, {"_urns": list(urns)})
-    return sorted({int(r[0]) for r in (res.result_set or []) if r and r[0] is not None})
+    urns = list(urns)
+    step = REPLY_ROWS_MAX // 2
+    ids = set()
+    for i in range(0, len(urns), step):
+        res = await run(union, {"_urns": urns[i:i + step]})
+        ids.update(int(r[0]) for r in (res.result_set or []) if r and r[0] is not None)
+    return sorted(ids)
 
 
 async def _rooted_plan(run: Run, clamps: List[List[int]], depths: List[int], stats,
@@ -810,29 +821,39 @@ def count_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
     return f"{head} RETURN count(n)", params
 
 
-def raw_probe_statement(unit: Unit, ctx: Context) -> Tuple[str, Dict[str, Any]]:
+def raw_probe_statement(unit: Unit, ctx: Context, after: int = -1
+                        ) -> Tuple[str, Dict[str, Any]]:
     """The ids and raw JSON of this unit's nodes that may keep one of the
     predicate's keys raw — the unit's nodes alone: the predicate, the scope's
-    clamps and hops belong to the statements that use the answer."""
+    clamps and hops belong to the statements that use the answer. A page of
+    ``REPLY_ROWS_MAX`` past node ``after``: a unit may hold more."""
     head, params = match_statement(
         unit, replace(ctx, where="", params={}, within_hops="", tail=()), [])
     cond, cond_params = probe_condition(ctx.raw_leaves)
-    params.update(cond_params)
-    return f"{head} WITH n WHERE {cond} RETURN ID(n), n.propertiesRaw", params
+    params.update(cond_params, _rawafter=after, _rawpage=REPLY_ROWS_MAX)
+    return (f"{head} WITH n WHERE ({cond}) AND ID(n) > $_rawafter "
+            "WITH n ORDER BY ID(n) LIMIT $_rawpage RETURN ID(n), n.propertiesRaw", params)
 
 
-def tally_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
+def tally_statement(unit: Unit, ctx: Context, clamps: List[List[int]], after: int = -1
                     ) -> Tuple[str, Dict[str, Any]]:
     """Every containment ancestor of this unit's matches, with how many of
     them it holds per entity type — the canvas's "N matches inside" badges,
     one unit at a time instead of one statement over every match.
     ``count(DISTINCT n)``: a match reached down two paths counts once; the
-    units partition the scope, so the sums across units are exact."""
+    units partition the scope, so the sums across units are exact.
+
+    A page of ``REPLY_ROWS_MAX`` ancestors past ancestor ``after``, each with
+    its ``[entity type, count]`` pairs: a large unit's matches sit in more
+    containers than one reply holds."""
     head, params = match_statement(unit, ctx, clamps)
     rel = _rel(ctx.containment)
+    params.update(_tallyafter=after, _tallypage=REPLY_ROWS_MAX)
     return (f"{head} WITH n MATCH (_c)-[:{rel}*1..{int(ctx.max_depth)}]->(n) "
+            "WHERE ID(_c) > $_tallyafter "
             "WITH _c, labels(n)[0] AS _et, count(DISTINCT n) AS _k "
-            "RETURN _c.urn, _c.displayName, labels(_c)[0], _et, _k", params)
+            "WITH _c, collect([_et, _k]) AS _per ORDER BY ID(_c) LIMIT $_tallypage "
+            "RETURN ID(_c), _c.urn, _c.displayName, labels(_c)[0], _per", params)
 
 
 def after_statement(unit: Unit, ctx: Context, clamps: List[List[int]], k: int,
