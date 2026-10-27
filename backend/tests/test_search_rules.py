@@ -26,6 +26,7 @@ from backend.app.services.advanced_search_service import (
 )
 from backend.app.services.deep_search import SearchRunContext
 from backend.app.services.view_scope import EffectiveViewScope
+from backend.common.adapters.circuit import ProviderBusy
 from backend.common.models.search import (
     Predicate,
     SearchAncestorCountsRequest,
@@ -331,6 +332,23 @@ class TestMembershipStatement:
         assert cypher.count("ANY(_mz IN [0] WHERE") == 2
         assert params["p0"] == "x" and params["p1"] == "y"
         assert "[] ," not in cypher and ", [], " in cypher      # no ancestors needed
+
+    async def test_rules_a_busy_graph_could_not_check_are_not_answered(self):
+        """No labels filtered every entity out, so a busy graph's rules
+        matched nothing — and the canvas kept that as the answer."""
+        graph = _Graph({"u1": ("A", [], {0: True})})
+        answer = graph.run
+
+        async def busy(cypher, params):
+            if cypher.startswith("CALL db.labels()"):
+                raise TimeoutError("Query timed out")
+            return await answer(cypher, params)
+
+        graph.run = busy
+        items = [("r0", P({"kind": "property", "key": "k", "op": "eq", "value": "x"}))]
+        with pytest.raises(ProviderBusy):
+            await _members(graph, SearchScope(view_id="v", scope_mode="data_source"),
+                           items, ["u1"])
 
     async def test_an_entity_outside_the_views_roots_never_matches(self):
         graph = _Graph({"in": ("A", ["in", "root"], {0: True}),
