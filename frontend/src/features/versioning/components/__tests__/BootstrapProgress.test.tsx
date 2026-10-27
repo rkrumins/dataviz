@@ -145,6 +145,26 @@ describe('when the copy lands', () => {
     render_({ ...done, collapsed: { nodes: 3, byLabel: { Dataset: 3 }, selfLoops: 0 } })
     expect(screen.getByText(/3 duplicate item\(s\) were collapsed/)).toBeInTheDocument()
   })
+
+  it('discloses the identifiers filled in for a source keyed by another property', () => {
+    render_({
+      ...done,
+      identityStamp: { identityProperty: 'id', nameProperty: 'title', identifiers: 1200, names: 900 },
+    })
+    expect(screen.getByText(/1,200 identifier\(s\) were filled in from/)).toBeInTheDocument()
+    expect(screen.getByText(/900 name\(s\) from/)).toBeInTheDocument()
+    expect(screen.getByText(/your views read the same as before/)).toBeInTheDocument()
+  })
+
+  it('discloses connections given a new id, and items left out for having none', () => {
+    render_({
+      ...done,
+      rekeyedEdges: 2,
+      report: { ...done.report!, skippedWithoutIdentifier: { nodes: 5, edges: 1 } },
+    })
+    expect(screen.getByText(/2 connection\(s\) had an id another item already uses/)).toBeInTheDocument()
+    expect(screen.getByText(/5 item\(s\) in the source have no identifier/)).toBeInTheDocument()
+  })
 })
 
 describe('when the copy fails', () => {
@@ -158,6 +178,29 @@ describe('when the copy fails', () => {
     expect(screen.getByText('We stopped before changing anything')).toBeInTheDocument()
     expect(screen.getByText(/source graph changed while we were copying/)).toBeInTheDocument()
     expect(screen.getByText(/untouched and still reads exactly as it did/)).toBeInTheDocument()
+  })
+
+  it('lists every type spelled differently from the semantic layer, and offers only a fresh start', () => {
+    render_({
+      ...failed,
+      error: 'The graph spells 2 type(s) differently from its semantic layer, by letter case only.',
+      failure: { code: 'integrity', action: 'restart', phase: 'counting' },
+      spelling: [
+        { kind: 'label', graph: 'table', declared: 'Table', count: 2 },
+        { kind: 'relationship', graph: 'has', declared: 'HAS', count: 1 },
+      ],
+    })
+    expect(screen.getByText('table')).toBeInTheDocument()
+    expect(screen.getByText('Table')).toBeInTheDocument()
+    expect(screen.getByText('has')).toBeInTheDocument()
+    expect(screen.getByText('Connection type')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Resume/ })).not.toBeInTheDocument()
+    expect(screen.getByText(/untouched and still reads exactly as it did/)).toBeInTheDocument()
+  })
+
+  it('does not call a graph untouched once identifiers were filled into it', () => {
+    render_({ ...failed, identityStamp: { identityProperty: 'id', nameProperty: null, identifiers: 3, names: 0 } })
+    expect(screen.getByText(/filled in from id stay on its items/)).toBeInTheDocument()
   })
 
   it('resumes on one click — the safe action costs nothing', () => {

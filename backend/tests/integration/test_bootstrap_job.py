@@ -123,12 +123,13 @@ class FakeGraph:
         if "n.lastSyncedAt" in cypher:                                # the pre-flight's read
             return _RS([[i, lab, pr.get("urn"), pr.get("lastSyncedAt")]
                         for i, (lab, pr) in self._present() if lo <= i < hi])
-        if "AND b.urn <> '', count(r)" in cypher:
-            seen = {True: 0, False: 0}
-            for si, ti, _ty, _pr, _k in self._resolved():
+        if "AND b.urn <> '', type(r), count(r)" in cypher:              # the pre-flight's edges
+            seen: dict = {}
+            for si, ti, ty, _pr, _k in self._resolved():
                 if lo <= si < hi:
-                    seen[bool(self._urn(si) and self._urn(ti))] += 1
-            return _RS([[flag, n] for flag, n in seen.items() if n])
+                    key = (bool(self._urn(si) and self._urn(ti)), ty)
+                    seen[key] = seen.get(key, 0) + 1
+            return _RS([[flag, ty, n] for (flag, ty), n in seen.items()])
         if "RETURN count(r)" in cypher:                               # a window's edges
             unkeyed = "r.id IS NULL" in cypher
             return _RS([[sum(1 for si, _ti, _ty, pr, _k in self._resolved()

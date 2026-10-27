@@ -21,9 +21,11 @@ from backend.app.services.versioning.bootstrap_worker import (
     _merge_scan_summary,
     _next_phase,
     _percent,
+    _spelling_mismatches,
     _tally_matches,
     _vid,
 )
+from backend.app.services.versioning.ontology import EdgeRule, EntityRule, OntologyRules
 
 
 # ── deterministic version ids (crash-replay safety) ──────────────────────────
@@ -55,8 +57,21 @@ def test_phase_order_validates_before_anything_becomes_visible():
 
 def test_a_restart_clears_the_old_copy_before_anything_is_read_again():
     # `reset` deletes what an earlier run imported (on the worker, in windows); it must come
-    # before the counts that the re-read is checked against.
-    assert PHASES[0] == "reset" and _next_phase("reset") == "counting"
+    # before the counts that the re-read is checked against — and so must `stamp`, which fills in
+    # the identifiers of a source keyed by another property, so that the counts see its nodes.
+    assert PHASES[0] == "reset" and _next_phase("reset") == "stamp"
+    assert _next_phase("stamp") == "counting"
+
+
+def test_only_a_case_variant_of_a_declared_type_is_a_spelling_mismatch():
+    rules = OntologyRules(entity_types={"Table": EntityRule(), "Column": EntityRule()},
+                          edge_types={"HAS": EdgeRule()}, edge_type_canonical={"HAS": "HAS"})
+    found = _spelling_mismatches(
+        rules, {"table": 2, "Column": 5, "Widget": 1}, {"has": 3, "FLOWS": 4})
+    # `Column` is spelled as declared; `Widget` and `FLOWS` aren't declared at all: the copy keeps
+    # their spelling, as every later write will.
+    assert found == [{"kind": "label", "graph": "table", "declared": "Table", "count": 2},
+                     {"kind": "relationship", "graph": "has", "declared": "HAS", "count": 3}]
 
 
 def test_advancing_a_phase_starts_it_from_scratch():

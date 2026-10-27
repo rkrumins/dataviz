@@ -137,7 +137,11 @@ BOOTSTRAP_JOB_TYPE = "bootstrap"
 #
 # `reset` is first and only ever entered by a restart (:func:`retry_bootstrap`): a new job
 # starts at `counting`, with nothing to throw away.
-PHASES = ("reset", "counting", "nodes", "edges", "validate", "heads", "merkle", "backfill",
+#
+# `stamp` runs only for a source keyed by another property (``summary.identity``): it fills in the
+# identifiers (and mapped display names) the reader resolves at read time, so the pre-flight, the
+# copy, the projector and every index key on ``urn`` as they do for any other source.
+PHASES = ("reset", "stamp", "counting", "nodes", "edges", "validate", "heads", "merkle", "backfill",
           "finalize")
 # A package seed (``package_seed``) writes a brand-new key instead of backfilling a source graph:
 # its urn indexes are made (and waited for) first, then the copy is projected into it — all before
@@ -148,7 +152,7 @@ _PHASES_BY_ORIGIN = {"graph": PHASES, "package": PACKAGE_PHASES}
 
 # Percent shown to the user. Scanning dominates the wall clock, so it owns the bulk
 # of the bar; the tail phases are bounded work with honest, distinct labels.
-_PHASE_FLOOR = {"reset": 0, "counting": 0, "nodes": 2, "edges": 2, "validate": 72,
+_PHASE_FLOOR = {"reset": 0, "stamp": 0, "counting": 0, "nodes": 2, "edges": 2, "validate": 72,
                 "heads": 76, "merkle": 88, "backfill": 92, "index": 89, "project": 90,
                 "finalize": 98}
 _SCAN_SPAN = 70          # nodes+edges occupy 2%..72%
@@ -176,9 +180,10 @@ _FAILURE_ACTIONS = {"integrity": "restart", "infrastructure": "resume"}
 # made on (the fingerprint), so keeping it is safe and spares a second decision on an identical
 # list — and `sourceCollapse`, the mark that copies were removed from the source graph: nothing
 # puts them back, so a restart must not forget it (the rollups still need rebuilding, and Give up
-# must not promise an untouched source).
+# must not promise an untouched source). Nor `identityStamp`: the identifiers the `stamp` phase
+# filled in stay in the graph (and `identity`, the mapping, is part of what the job is).
 _KEPT_ON_RESTART = ("actor", "origin", "package", "ontology", "target", "duplicatePolicy",
-                    "sourceCollapse")
+                    "sourceCollapse", "identity", "identityStamp")
 
 # Which copy of a duplicated urn a collapse keeps — the ranking `_rank_duplicates_sql` applies: the
 # one synced most recently (an unparseable or missing `lastSyncedAt` ranks last), then the lowest
@@ -254,10 +259,11 @@ _COUNT_EDGES_IN_WINDOW = (
 _PREFLIGHT_NODES = ("MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi "
                     "RETURN ID(n), labels(n), n.urn, n.lastSyncedAt")
 # The window's edges, split by whether the reader can see them (both ends carry a urn): the
-# denominator the copy is checked against, replacing four unwindowed full-graph counts.
+# denominator the copy is checked against, replacing four unwindowed full-graph counts. By type, so
+# the pre-flight knows every relationship type the copy will hold (the spelling check).
 _PREFLIGHT_EDGES = ("MATCH (a) WHERE ID(a) >= $lo AND ID(a) < $hi "
                     "MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' "
-                    f"RETURN {_has_urn('a')} AND {_has_urn('b')}, count(r)")
+                    f"RETURN {_has_urn('a')} AND {_has_urn('b')}, type(r), count(r)")
 
 # The internal ids ride along: the node scan skips a collapsed copy by (id, urn, label), and the
 # edge scan tells a collapse self-loop (two copies of one urn) from a genuine one (one node).
@@ -274,10 +280,13 @@ _SCANS = {"preflight": _PREFLIGHT_NODES, "nodes": _SCAN_NODES, "edges": _SCAN_ED
 _SAMPLE_NODES = "UNWIND $urns AS u MATCH (n {urn: u}) RETURN ID(n), labels(n), properties(n)"
 # Backfill: additive, idempotent, and scoped to the same entities we copied. Each says how many
 # keys it set: a window with nothing left to stamp (any graph the platform wrote) held no write
-# lock worth pausing after.
+# lock worth pausing after. ``entityId`` is the platform's own key (reserved, never shown): one the
+# source already carries that is not the node's urn — an old export's, a platform write from an
+# earlier history — is set to the urn too, the identity the copy keys the node by, or the
+# tombstone sweep and "Check sync" would never find the node under it.
 _BACKFILL_NODES = (
     f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND {_not_derived('n')} "
-    "AND n.entityId IS NULL AND n.urn IS NOT NULL "
+    "AND n.urn IS NOT NULL AND (n.entityId IS NULL OR n.entityId <> n.urn) "
     "SET n.entityId = n.urn RETURN count(n)"
 )
 _BACKFILL_EDGES = (
@@ -297,6 +306,48 @@ def _q_label(label: str) -> str:
     """A source label as a cypher identifier — the source's own spelling, backticked, because only
     that spelling seeks its urn index."""
     return "`" + str(label).replace("`", "``") + "`"
+
+
+def _stamp_cypher(ident: Optional[str], name: Optional[str]) -> str:
+    """One `stamp` window: fill in the ``urn`` from the identity property and the ``displayName``
+    from the mapped name property, on the nodes lacking them, each marked with the property it came
+    from (``urnSource`` / ``nameSource``) — the conformance stamp's own semantics
+    (``FalkorDBProvider.stamp_conformance``), fill-only: a value the node holds itself is never
+    replaced. The urn is written as text, the reader's own reading of an identity (``str(urn)``),
+    so a numeric id keys the node the way every later write names it. RETURNs how many of each it
+    filled (the identity and name are parameters ``$ident`` / ``$name``)."""
+    fills, sets = [], []
+    if ident:
+        p = _q_label(ident)
+        fills.append(f"(n.urn IS NULL OR n.urn = '') AND n.{p} IS NOT NULL "
+                     f"AND toString(n.{p}) <> '' AS fillUrn")
+        sets += [f"n.urn = CASE WHEN fillUrn THEN toString(n.{p}) ELSE n.urn END",
+                 "n.urnSource = CASE WHEN fillUrn THEN $ident ELSE n.urnSource END"]
+    else:
+        fills.append("false AS fillUrn")
+    if name:
+        p = _q_label(name)
+        fills.append(f"(n.displayName IS NULL OR n.displayName = '') AND n.{p} IS NOT NULL "
+                     "AS fillName")
+        sets += [f"n.displayName = CASE WHEN fillName THEN toString(n.{p}) ELSE n.displayName END",
+                 "n.nameSource = CASE WHEN fillName THEN $name ELSE n.nameSource END"]
+    else:
+        fills.append("false AS fillName")
+    return (f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND {_not_derived('n')} "
+            f"WITH n, {', '.join(fills)} WHERE fillUrn OR fillName "
+            f"SET {', '.join(sets)} "
+            "RETURN sum(CASE WHEN fillUrn THEN 1 ELSE 0 END), "
+            "sum(CASE WHEN fillName THEN 1 ELSE 0 END)")
+
+
+def _rekey_cypher(src_label: Optional[str], tgt_label: Optional[str]) -> str:
+    """`backfill:rekey`: give the graph's relationship the id the copy gave it — ``edge:<id>``, when
+    its own id was already an item's (see ``_rekey``) — found by its two ends' label + urn and its
+    old id, so the projector's deletes (``{id: …}``) find it afterwards."""
+    a = f"(a:{_q_label(src_label)} {{urn: row.src}})" if src_label else "(a {urn: row.src})"
+    b = f"(b:{_q_label(tgt_label)} {{urn: row.tgt}})" if tgt_label else "(b {urn: row.tgt})"
+    return (f"UNWIND $rows AS row MATCH {a}-[r]->{b} WHERE r.id = row.old "
+            "SET r.id = row.new RETURN count(r)")
 
 
 def _copy(var: str, label: Optional[str], urn: str = "row.urn") -> str:
@@ -715,6 +766,55 @@ class BootstrapRunner:
                                    last_cursor=at if deleted else f"reset:{step + 1}")
         return False
 
+    async def _phase_stamp(self, lease: Lease, graph_id: str) -> bool:
+        """Fill in the identifiers of a source keyed by another property, before the pre-flight
+        reads it (``summary.identity``: the data source's resolved ``identityProperty`` — e.g. ``id``
+        — and/or a mapped ``nameProperty``; a no-op without one).
+
+        The reader resolves that mapping at read time, so the canvas shows such nodes; but the
+        copy, the projector and every urn index key on the ``urn`` PROPERTY, so without this the
+        copy held none of them and passed every check (each count agreed: zero). Each node lacking a
+        urn gets its identity property's value, each lacking a displayName its mapped name, marked
+        with the property it came from (:func:`_stamp_cypher`) — what the lineage-summary
+        conformance stamp already writes onto an in-source graph, so the canvas reads the same
+        values it did. ID-range windows of at most ``BOOTSTRAP_BACKFILL_MAX_WRITES`` nodes, each
+        followed by the backfill's pause: these land on the customer's live graph, as backfill's do.
+        ``summary.identityStamp`` tallies what was filled."""
+        ctx = await self._ctx(lease, graph_id)
+        async with self._session() as s:
+            job = await s.get(JobORM, lease.job_id)
+            at, summary = job.last_cursor, dict(job.summary or {})
+        identity = summary.get("identity") or {}
+        ident, name = identity.get("identityProperty"), identity.get("nameProperty")
+        if not ident and not name:
+            return True
+        client = await self._client(ctx)
+        lo = int(at.split(":")[-1]) if at else 0
+        max_id = await self._count(client, _MAX_NODE_ID)
+        if max_id is None or lo > max_id:
+            return True
+        width = config.BOOTSTRAP_BACKFILL_MAX_WRITES
+        res = await _q(client, _stamp_cypher(ident, name),
+                       {"lo": lo, "hi": lo + width, "ident": ident, "name": name},
+                       timeout_ms=_WRITE_TIMEOUT_MS)
+        rs = getattr(res, "result_set", None) or []
+        urns, names = (int(v or 0) for v in (rs[0] if rs and rs[0] else (0, 0)))
+        if urns or names:
+            await _backfill_pause()
+        async with self._session() as s:
+            job = await s.get(JobORM, lease.job_id)
+            summary = dict(job.summary or {})
+            tally = dict(summary.get("identityStamp") or {"identityProperty": ident,
+                                                          "nameProperty": name,
+                                                          "identifiers": 0, "names": 0})
+            tally["identifiers"] = int(tally["identifiers"]) + urns
+            tally["names"] = int(tally["names"]) + names
+            summary["identityStamp"] = tally
+            await lease.checkpoint(s, expect_cursor=at, summary=summary,
+                                   last_cursor=f"stamp:{lo + width}",
+                                   progress=_PHASE_FLOOR["stamp"])
+        return False
+
     async def _phase_counting(self, lease: Lease, graph_id: str):
         """The PRE-FLIGHT: read the whole source, narrowly, before anything is copied.
 
@@ -753,7 +853,7 @@ class BootstrapRunner:
 
         rows, width = await self._scan(client, "preflight", lo, width)
         hi = lo + width
-        edges, hidden_edges = await self._preflight_edges(client, lo, hi)
+        edges, hidden_edges, edge_types = await self._preflight_edges(client, lo, hi)
         records, nodes, hidden_nodes = await asyncio.to_thread(_preflight_columns, rows, graph_id)
         async with self._session() as s:
             await s.execute(text(
@@ -768,6 +868,10 @@ class BootstrapRunner:
             for key, n in (("nodes", nodes), ("edges", edges), ("invisibleNodes", hidden_nodes),
                            ("invisibleEdges", hidden_edges)):
                 src[key] = int(src.get(key, 0)) + n
+            types = dict(src.get("edgeTypes") or {})
+            for rel, n in edge_types.items():
+                types[rel] = int(types.get(rel, 0)) + n
+            src["edgeTypes"] = types
             summary["source"] = src
             await lease.checkpoint(s, expect_cursor=cursor, summary=summary,
                                    total=src["nodes"] + src["edges"],
@@ -786,8 +890,15 @@ class BootstrapRunner:
         so it applies only to the list the manager was shown. With duplicates and no decision for
         THIS fingerprint, the job pauses (``awaiting_decision``, pending, no cursor) and holds no
         slot until someone decides; with a matching decision — a re-check that found the same
-        list — it carries on."""
+        list — it carries on.
+
+        First, the spelling check: a label or relationship type the graph spells differently from
+        a type its semantic layer declares, by letter case only (``table`` / ``Table``), fails the
+        job — before anything is copied — with every mismatch in ``summary.spelling``. The copy
+        and every later edit write the declared spelling while the graph keeps its own, so an edit
+        would land as a second node beside the original and a delete would miss it."""
         await self._analyze_bootstrap_nodes(lease)
+        await self._refuse_misspelled_types(lease, graph_id, cursor, end)
         async with self._session() as s:
             # A source that shrank since an earlier read of it leaves rows past its new end.
             await s.execute(text(
@@ -813,6 +924,34 @@ class BootstrapRunner:
                     if dup else "")
         return _PAUSED if pause else True
 
+    async def _refuse_misspelled_types(self, lease: Lease, graph_id: str, cursor: str,
+                                       end: int) -> None:
+        """Fail the job (:class:`BootstrapFailure`, ``restart``) when the source spells a declared
+        type differently by letter case only — see :meth:`_finish_preflight`. Labels are the copy's
+        own (``bootstrap_nodes`` below ``end``, the nodes it will copy), relationship types the
+        pre-flight's (``summary.source.edgeTypes``); without a semantic layer there is nothing to
+        compare."""
+        rules = await self._rules(lease, await self._ctx(lease, graph_id))
+        if rules is None:
+            return
+        async with self._session() as s:
+            labels = (await s.execute(text(
+                f'SELECT label, count(*) FROM {_t("bootstrap_nodes")} '
+                "WHERE graph_id = :g AND falkor_id < :end AND label IS NOT NULL GROUP BY label"
+            ).bindparams(g=graph_id, end=end))).all()
+            job = await s.get(JobORM, lease.job_id)
+            summary = dict(job.summary or {})
+        types = (summary.get("source") or {}).get("edgeTypes") or {}
+        found = _spelling_mismatches(rules, {str(lab): int(n) for lab, n in labels}, types)
+        if not found:
+            return
+        async with self._session() as s:
+            job = await s.get(JobORM, lease.job_id)
+            summary = dict(job.summary or {})
+            summary["spelling"] = found
+            await lease.checkpoint(s, expect_cursor=cursor, summary=summary)
+        raise BootstrapFailure(_explain_spelling(found), "integrity", "restart")
+
     async def _analyze_bootstrap_nodes(self, lease: Lease) -> None:
         """Refresh the planner's statistics of ``bootstrap_nodes`` once the pre-flight has filled
         it: until autovacuum gets there they describe the table without this graph's rows, and
@@ -825,17 +964,19 @@ class BootstrapRunner:
         except Exception as exc:                                 # noqa: BLE001 — best effort
             logger.warning("bootstrap %s: could not refresh statistics: %s", lease.job_id, exc)
 
-    async def _preflight_edges(self, client, lo: int, hi: int) -> Tuple[int, int]:
-        """The window's edges: (visible — both ends carry a urn, hidden)."""
+    async def _preflight_edges(self, client, lo: int, hi: int) -> Tuple[int, int, Dict[str, int]]:
+        """The window's edges: (visible — both ends carry a urn, hidden, visible by type)."""
         res = await _q(client, _PREFLIGHT_EDGES, {"lo": lo, "hi": hi},
                        timeout_ms=_READ_TIMEOUT_MS, read_only=True)
         visible = hidden = 0
-        for flag, n in getattr(res, "result_set", None) or []:
+        types: Dict[str, int] = {}
+        for flag, rel, n in getattr(res, "result_set", None) or []:
             if flag:
                 visible += int(n or 0)
+                types[str(rel)] = types.get(str(rel), 0) + int(n or 0)
             else:
                 hidden += int(n or 0)
-        return visible, hidden
+        return visible, hidden, types
 
     async def _count(self, client, cypher: str) -> Optional[int]:
         # Deliberately NOT ``read_only``, though the cypher only reads: this is the
@@ -1252,6 +1393,8 @@ class BootstrapRunner:
             width = job.batch_size or config.BOOTSTRAP_SCAN_WIDTH
         cursor = at or "backfill:nodes:0"
         _, step, arg = (cursor.split(":", 2) + ["", ""])[:3]
+        if step == "rekey":
+            return await self._backfill_rekey(lease, graph_id, at, summary)
         if step == "dupes":
             return await self._backfill_dupes(lease, graph_id, at, arg)
         if step == "tidy":
@@ -1264,14 +1407,12 @@ class BootstrapRunner:
         client = await self._client(ctx)
         max_id = await self._max_id_of(client, summary)
         if max_id is None or lo > max_id:
-            nxt = ("backfill:edges:0" if kind == "nodes"
-                   else "backfill:dupes:" if _collapse_decided(summary) else "backfill:tidy")
-            extra: Dict[str, Any] = {}
-            if nxt == "backfill:dupes:":
-                # Marked BEFORE the first write to the source graph, and kept by a restart: from
-                # the next statement on, copies may be gone from it for good.
-                extra["summary"] = {**summary, "sourceCollapse": summary.get("sourceCollapse")
-                                    or {"moved": 0, "deleted": 0}}
+            if kind == "nodes":
+                nxt, extra = "backfill:edges:0", {}
+            elif int(summary.get("rekeyedEdges") or 0):
+                nxt, extra = "backfill:rekey", {}
+            else:
+                nxt, extra = _after_rekey(summary)
             async with self._session() as s:
                 await lease.checkpoint(s, expect_cursor=at, last_cursor=nxt,
                                        batch_size=config.BOOTSTRAP_SCAN_WIDTH, **extra)
@@ -1305,6 +1446,38 @@ class BootstrapRunner:
         async with self._session() as s:
             await lease.checkpoint(s, expect_cursor=at, last_cursor=f"backfill:{kind}:{lo + width}",
                                    batch_size=remember, progress=_PHASE_FLOOR["backfill"])
+        return False
+
+    async def _backfill_rekey(self, lease: Lease, graph_id: str, at: str, summary: dict) -> bool:
+        """``backfill:rekey`` — the relationships the copy re-keyed (``_rekey``: their own id was
+        already an item's) get that id in the graph too, ``edge:<id>``, or a later delete of one —
+        typed and anchored on its ``{id: …}`` — never finds it. Rare by nature, so one step: their
+        rows from the import commit, their ends' source labels from the pre-flight (whose
+        ``bootstrap_nodes`` rows are still there: ``backfill:tidy`` comes after), one statement per
+        pair of labels."""
+        ctx = await self._ctx(lease, graph_id)
+        kept = "(n.copy_rank IS NULL OR n.copy_rank = 1)"
+        async with self._session() as s:
+            rows = (await s.execute(text(
+                f'SELECT e.entity_id, e.source_entity_id, e.target_entity_id, '
+                f'(SELECT n.label FROM {_t("bootstrap_nodes")} n WHERE n.graph_id = e.graph_id '
+                f"   AND n.urn = e.source_entity_id AND {kept} LIMIT 1), "
+                f'(SELECT n.label FROM {_t("bootstrap_nodes")} n WHERE n.graph_id = e.graph_id '
+                f"   AND n.urn = e.target_entity_id AND {kept} LIMIT 1) "
+                f'FROM {_t("edge_versions")} e '
+                "WHERE e.graph_id = :g AND e.commit_id = :c AND e.entity_id LIKE 'edge:%'"
+            ).bindparams(g=graph_id, c=ctx.commit_id))).all()
+        by_labels: Dict[Tuple[Optional[str], Optional[str]], List[dict]] = {}
+        for eid, src, tgt, src_label, tgt_label in rows:
+            by_labels.setdefault((src_label, tgt_label), []).append(
+                {"src": src, "tgt": tgt, "old": eid[len("edge:"):], "new": eid})
+        client = await self._client(ctx)
+        for (src_label, tgt_label), batch in by_labels.items():
+            await self._write(client, _rekey_cypher(src_label, tgt_label), batch)
+        nxt, extra = _after_rekey(summary)
+        async with self._session() as s:
+            await lease.checkpoint(s, expect_cursor=at, last_cursor=nxt,
+                                   progress=_PHASE_FLOOR["backfill"], **extra)
         return False
 
     async def _backfill_dupes(self, lease: Lease, graph_id: str, at: str, after: str) -> bool:
@@ -1731,6 +1904,7 @@ async def create_bootstrap_job(
     ontology_enforcement: Optional[str] = None, origin: str = "graph",
     payload_uri: Optional[str] = None, upload_id: Optional[str] = None,
     package: Optional[Dict[str, Any]] = None, coverage: Optional[Dict[str, Any]] = None,
+    identity: Optional[Dict[str, Optional[str]]] = None,
 ) -> Dict[str, object]:
     """Enqueue "enable version control" for a data source. Idempotent.
 
@@ -1758,12 +1932,20 @@ async def create_bootstrap_job(
     ``uploadId``) and ``coverage`` how much of its types the ontology declares. Asking again for
     the same upload returns its job; a data source with any other job is
     :class:`BootstrapConflict` ``ds_has_other_job``.
+
+    ``identity`` is the data source's node-identity mapping, frozen for the job as the aggregation
+    trigger freezes it: ``{identityProperty, nameProperty}``, each set only when it is not the
+    platform's own (``urn`` / ``name``) — the job then starts with the ``stamp`` phase.
+
+    A graph some other live versioned graph already projects into — the same physical graph,
+    mounted and put under version control in another workspace — is :class:`BootstrapConflict`
+    ``graph_already_versioned``: two histories cannot both be one graph's system of record.
     """
     args = dict(data_source_id=data_source_id, workspace_id=workspace_id, actor=actor,
                 falkor_graph_name=falkor_graph_name, falkor_provider=falkor_provider, kind=kind,
                 base_ontology_id=base_ontology_id, ontology_enforcement=ontology_enforcement,
                 origin=origin, payload_uri=payload_uri, upload_id=upload_id, package=package,
-                coverage=coverage)
+                coverage=coverage, identity=identity)
     try:
         return await _enqueue_bootstrap(**args)
     except IntegrityError:
@@ -1778,8 +1960,11 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
                              ontology_enforcement: Optional[str], origin: str,
                              payload_uri: Optional[str], upload_id: Optional[str],
                              package: Optional[Dict[str, Any]],
-                             coverage: Optional[Dict[str, Any]]) -> Dict[str, object]:
+                             coverage: Optional[Dict[str, Any]],
+                             identity: Optional[Dict[str, Optional[str]]] = None,
+                             ) -> Dict[str, object]:
     seed = origin == "package"
+    identity = {k: v for k, v in (identity or {}).items() if v} or None
     async with db.graphver_session() as s:
         graph = (await s.execute(select(GraphORM).where(
             GraphORM.data_source_id == data_source_id))).scalars().first()
@@ -1816,6 +2001,12 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
             main_id = await _main_branch(s, graph.id)
             gid = graph.id
         else:
+            if not seed and falkor_graph_name and await _projected_elsewhere(
+                    s, falkor_graph_name, falkor_provider):
+                raise BootstrapConflict(
+                    "graph_already_versioned",
+                    "This graph is already under version control through another data source, "
+                    "which holds its history. Use that data source to change it.")
             res = await GraphVersioningService().create_graph(
                 data_source_id=data_source_id, workspace_id=workspace_id, kind=kind,
                 actor=actor, falkor_graph_name=falkor_graph_name,
@@ -1832,6 +2023,8 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
             s, gid, main_id, actor,
             message="seed from view package" if seed else "enable version control")
         summary: Dict[str, Any] = {"actor": actor}
+        if identity and not seed:
+            summary["identity"] = identity
         if seed:
             summary.update(origin="package", package={**(package or {}), "uploadId": upload_id},
                            ontology={"id": base_ontology_id, "enforcement": ontology_enforcement,
@@ -1841,7 +2034,8 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
             data_source_id=data_source_id, branch_id=main_id, status="pending",
             # What the claim's per-provider cap counts by.
             provider_id=falkor_provider,
-            current_phase="counting", idempotency_key=f"bootstrap:{gid}",
+            current_phase="stamp" if "identity" in summary else "counting",
+            idempotency_key=f"bootstrap:{gid}",
             batch_size=config.BOOTSTRAP_SCAN_WIDTH, target_commit_id=commit.id,
             payload_uri=payload_uri, summary=summary,
         )
@@ -1916,6 +2110,10 @@ async def bootstrap_status(
             "collapsed": summary.get("collapsed"),
             "rekeyedEdges": int(summary.get("rekeyedEdges") or 0),
             "sourceCollapse": summary.get("sourceCollapse"),
+            # Types the graph spells differently from its semantic layer (the job stopped on them).
+            "spelling": summary.get("spelling"),
+            # A source keyed by another property: the identifiers / names filled in from it.
+            "identityStamp": summary.get("identityStamp"),
         }
 
 
@@ -2150,6 +2348,20 @@ async def _main_branch(s, graph_id: str) -> str:
         BranchORM.graph_id == graph_id, BranchORM.kind == "main"))).scalars().one()
 
 
+async def _projected_elsewhere(s, falkor_graph_name: str, falkor_provider: Optional[str]) -> bool:
+    """Whether a live versioned graph already projects into this physical graph — the same name on
+    the same FalkorDB instance (no provider: the env-default one)."""
+    instance = falkor_provider or config.DEFAULT_FALKOR_PROVIDER
+    return (await s.execute(
+        select(ProjectionStateORM.graph_id)
+        .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
+        .where(ProjectionStateORM.falkor_graph_name == falkor_graph_name,
+               func.coalesce(ProjectionStateORM.falkor_provider,
+                             config.DEFAULT_FALKOR_PROVIDER) == instance,
+               GraphORM.deleted_at.is_(None))
+        .limit(1))).first() is not None
+
+
 # --------------------------------------------------------------------------- #
 # Errors + helpers                                                             #
 # --------------------------------------------------------------------------- #
@@ -2193,6 +2405,30 @@ def _api_status(job: JobORM) -> str:
     if job.status == "pending" and job.current_phase == AWAITING_DECISION:
         return "needs_decision"
     return job.status
+
+
+def _spelling_mismatches(rules, labels: Dict[str, int], types: Dict[str, int]) -> List[dict]:
+    """Each label / relationship type the graph spells differently from the type the semantic layer
+    declares, by letter case only: ``{kind, graph, declared, count}``, labels first. A type the
+    layer doesn't declare at all is not one — the copy keeps its spelling, as every write will."""
+    found = []
+    for kind, spelled, canonical in (("label", labels, rules.canonical_entity_type),
+                                     ("relationship", types, rules.canonical_edge_type)):
+        for name in sorted(spelled):
+            declared = canonical(name)
+            if declared and declared != name:
+                found.append({"kind": kind, "graph": name, "declared": declared,
+                              "count": int(spelled[name])})
+    return found
+
+
+def _explain_spelling(found: List[dict]) -> str:
+    """The plain-language reason a spelling mismatch stops the job — every one named."""
+    listed = ", ".join(f"`{m['graph']}` (declared `{m['declared']}`)" for m in found)
+    return (f"The graph spells {len(found)} type(s) differently from its semantic layer, by letter "
+            f"case only: {listed}. Version control writes the semantic layer's spelling, so edits "
+            "would land beside these items instead of on them. Make the two spellings agree — in "
+            "the semantic layer or in the graph — then start again.")
 
 
 def _explain_failed_checks(failed: List[dict]) -> str:
@@ -2391,6 +2627,17 @@ def _edge_target() -> int:
 
 async def _backfill_pause() -> None:
     await asyncio.sleep(max(0, config.BOOTSTRAP_BACKFILL_PAUSE_MS) / 1000.0)
+
+
+def _after_rekey(summary: dict) -> Tuple[str, Dict[str, Any]]:
+    """The backfill step after the relationships' ids are stamped (and re-keyed): the collapse, when
+    one was decided — marked ``sourceCollapse`` BEFORE its first write to the source graph, and kept
+    by a restart, since from its first statement on copies may be gone from it for good — else the
+    tidy. Returns ``(cursor, checkpoint extras)``."""
+    if not _collapse_decided(summary):
+        return "backfill:tidy", {}
+    return "backfill:dupes:", {"summary": {**summary, "sourceCollapse": summary.get("sourceCollapse")
+                                           or {"moved": 0, "deleted": 0}}}
 
 
 def _collapse_decided(summary: dict) -> bool:

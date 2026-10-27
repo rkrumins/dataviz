@@ -244,14 +244,22 @@ async def bootstrap_versioned_graph_endpoint(
     ``alreadyEnabled``; 409 ``cleanup_in_progress`` while an abandoned attempt is still being
     removed. Nothing becomes visible until the copy has been integrity-checked against the
     source."""
+    from backend.app.services.node_identity import load_node_identity
     from backend.app.services.versioning.bootstrap_worker import (
         BootstrapConflict, create_bootstrap_job)
     actor = user.id if user else "system"
     provider_id, graph_name = await _pin_projection_target(session, dataSourceId, ws_id)
+    # A source keyed by another property: the job fills its identifiers in before copying.
+    ident = await load_node_identity(session, dataSourceId)
     try:
         res = await create_bootstrap_job(
             data_source_id=dataSourceId, workspace_id=ws_id, actor=actor,
-            falkor_graph_name=graph_name, falkor_provider=provider_id)
+            falkor_graph_name=graph_name, falkor_provider=provider_id,
+            identity={
+                "identityProperty": ident.identity_property if ident.identity_is_mapped else None,
+                "nameProperty": (ident.name_property
+                                 if ident.name_property not in ("name", "displayName") else None),
+            })
     except BootstrapConflict as exc:
         raise HTTPException(status_code=409, detail=exc.detail)
     except ValueError as exc:

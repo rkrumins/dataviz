@@ -656,7 +656,7 @@ export interface BootstrapResult {
  *  more than once (see {@link BootstrapDuplicates}); it waits for a manager to decide. */
 export type BootstrapJobStatus = 'pending' | 'running' | 'needs_decision' | 'completed' | 'failed' | 'cancelled'
 export type BootstrapPhase =
-  | 'reset' | 'counting' | 'awaiting_decision' | 'nodes' | 'edges' | 'validate' | 'heads' | 'merkle'
+  | 'reset' | 'stamp' | 'counting' | 'awaiting_decision' | 'nodes' | 'edges' | 'validate' | 'heads' | 'merkle'
   | 'finalize' | 'backfill'
 
 /** One integrity check from the job's report — rendered verbatim in the report card. */
@@ -718,6 +718,25 @@ export interface BootstrapJob {
   /** Set once duplicate copies may have been removed from the source graph — kept through a
    *  restart, since nothing puts them back. */
   sourceCollapse?: { moved: number; deleted: number } | null
+  /** Types the graph spells differently from its semantic layer, by letter case only — the job
+   *  stopped on them before copying anything. */
+  spelling?: BootstrapSpellingMismatch[] | null
+  /** A source keyed by another property: the identifiers (and mapped names) filled in from it,
+   *  each marked with where it came from. They stay in the graph. */
+  identityStamp?: {
+    identityProperty?: string | null
+    nameProperty?: string | null
+    identifiers: number
+    names: number
+  } | null
+}
+
+/** One type the graph spells differently from the one its semantic layer declares. */
+export interface BootstrapSpellingMismatch {
+  kind: 'label' | 'relationship'
+  graph: string
+  declared: string
+  count: number
 }
 
 /** Why a job failed, and what can be done: an `integrity` failure (the copy didn't match its source)

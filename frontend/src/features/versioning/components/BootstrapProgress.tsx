@@ -45,7 +45,7 @@ type Step = { id: string; label: string; phases: JobPhase[] }
 
 /** The job's eight phases, told as the four things a person actually cares about. */
 const STEPS: Step[] = [
-  { id: 'read', label: 'Reading the graph', phases: ['counting', 'nodes', 'edges'] },
+  { id: 'read', label: 'Reading the graph', phases: ['stamp', 'counting', 'nodes', 'edges'] },
   { id: 'check', label: 'Checking every item', phases: ['validate'] },
   { id: 'write', label: 'Writing history', phases: ['heads', 'merkle'] },
   { id: 'finish', label: 'Finishing up', phases: ['finalize', 'backfill'] },
@@ -174,6 +174,10 @@ export function BootstrapProgress({
   // that runs after (Give up included) puts them back, so the copy must stop promising "untouched".
   // `sourceCollapse` outlives a restart, which re-reads the list (and may find none left).
   const decided = !!dup?.decision || !!job.sourceCollapse
+  // A source keyed by another property had its identifiers filled in (they stay): it reads the same,
+  // but it is not quite "untouched".
+  const stamp = job.identityStamp ?? null
+  const stamped = (stamp?.identifiers ?? 0) + (stamp?.names ?? 0) > 0
   // Offer only the recovery that can work: resuming an integrity failure fails the same way again,
   // and an internal one is a bug no button fixes. A job from before failures carried an action
   // offers both, as it always did.
@@ -524,10 +528,28 @@ export function BootstrapProgress({
               identifier, as decided — their connections moved to it.
             </p>
           )}
+          {stamp && stamped && (
+            <p className="mt-1 text-[11px] text-ink-muted">
+              {stamp.identifiers > 0 && stamp.identityProperty && (
+                <>{num(stamp.identifiers)} identifier(s) were filled in from <code>{stamp.identityProperty}</code>{stamp.names > 0 ? ', and ' : ''}</>
+              )}
+              {stamp.names > 0 && stamp.nameProperty && (
+                <>{num(stamp.names)} name(s) from <code>{stamp.nameProperty}</code></>
+              )}
+              {' '}— this source keys its items that way. Each is marked with where it came from, and
+              your views read the same as before.
+            </p>
+          )}
+          {(job.rekeyedEdges ?? 0) > 0 && (
+            <p className="mt-1 text-[11px] text-ink-muted">
+              {num(job.rekeyedEdges)} connection(s) had an id another item already uses, so they were given
+              a new one (<code>edge:</code> followed by the old id) — in the history and in the graph.
+            </p>
+          )}
           {(job.report.skippedWithoutIdentifier?.nodes ?? 0) > 0 && (
             <p className="mt-1 text-[11px] text-ink-muted">
               {num(job.report.skippedWithoutIdentifier!.nodes)} item(s) in the source have no identifier.
-              They don't appear anywhere in this app, so they weren't copied.
+              They don't appear anywhere in this app, so they weren't copied — they stay in the graph as they are.
             </p>
           )}
           {job.report.merkle === 'deferred' && (
@@ -573,12 +595,27 @@ export function BootstrapProgress({
               <p className="text-[12px] text-ink-muted leading-snug">
                 {finalFailure ?? job.error ?? (fromPackage ? 'The copy did not match the package.' : 'The copy did not match the source graph.')}
               </p>
+              {(job.spelling?.length ?? 0) > 0 && (
+                <ul className="mt-1.5 rounded-lg border border-glass-border divide-y divide-glass-border">
+                  {job.spelling!.map((m) => (
+                    <li key={`${m.kind} ${m.graph}`} className="flex items-center gap-2 px-2.5 py-1.5 text-[11px]">
+                      <span className="shrink-0 text-ink-muted">{m.kind === 'label' ? 'Item type' : 'Connection type'}</span>
+                      <code className="min-w-0 truncate text-ink-secondary" title={m.graph}>{m.graph}</code>
+                      <span className="shrink-0 text-ink-muted">in the graph · declared as</span>
+                      <code className="min-w-0 truncate text-ink-secondary" title={m.declared}>{m.declared}</code>
+                      <span className="ml-auto shrink-0 text-ink-muted tabular-nums">{num(m.count)}</span>
+                    </li>
+                  ))}
+                </ul>
+              )}
               <p className="text-[11px] text-ink-muted/80 mt-1">
                 {fromPackage
                   ? 'Nothing outside the new data source was touched.'
                   : decided
                     ? 'This data source still reads as it did — except that duplicate copies you chose to collapse may already have been removed.'
-                    : 'This data source is untouched and still reads exactly as it did.'}
+                    : stamped
+                      ? `This data source still reads exactly as it did. The identifiers filled in from ${stamp?.identityProperty ?? stamp?.nameProperty} stay on its items.`
+                      : 'This data source is untouched and still reads exactly as it did.'}
               </p>
             </div>
           </div>
