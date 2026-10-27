@@ -63,6 +63,7 @@ import {
     type SearchTemplate,
 } from '@/components/canvas/search/searchTemplates'
 import { queryLabel } from '@/components/canvas/search/panel/findMode'
+import { readableSearchError } from '@/components/canvas/search/panel/errorPaths'
 import { currentScope, requestOptions, requestPredicate } from '@/components/canvas/search/searchRequest'
 import { recordEvent } from '@/services/telemetryService'
 
@@ -445,6 +446,9 @@ export interface UseAdvancedSearchResult {
     /** True while a ``loadMore`` request is in flight. Drives the
      *  "Load more" button's spinner. */
     isLoadingMore: boolean
+    /** Why the last ``loadMore`` failed, in words — null unless it failed
+     *  for the page the result still ends on. */
+    loadMoreError: string | null
 }
 
 
@@ -837,6 +841,9 @@ export function useAdvancedSearch(
     // facets — the cursor is only honoured for the query that issued it.
     // ---------------------------------------------------------------
     const [isLoadingMore, setIsLoadingMore] = useState(false)
+    // A failed page, by the cursor it was asked with: it reads as failed
+    // only while the result still ends there — a new search moves on.
+    const [loadMoreFailure, setLoadMoreFailure] = useState<{ cursor: string; message: string } | null>(null)
 
     const loadMore = useCallback(async () => {
         if (view.kind !== 'results') return
@@ -846,6 +853,7 @@ export function useAdvancedSearch(
         if (isLoadingMore) return
 
         setIsLoadingMore(true)
+        setLoadMoreFailure(null)
         // Page 2 is abortable on the same terms as page 1: it closes over
         // the result it is appending to, so a page that lands after a new
         // run started would splice its hits onto a result the user has
@@ -924,12 +932,12 @@ export function useAdvancedSearch(
             })
         } catch (e) {
             if (controller.signal.aborted) return
-            // On error, leave the existing result intact. We log here
-            // (console — no project logger in the FE) rather than
-            // swallowing silently; the user will see a stable page
-            // and the next Run will surface any underlying issue.
-            // eslint-disable-next-line no-console
-            console.warn('loadMore failed', e)
+            // The result stays as it was; the footer says the page failed,
+            // and why, and offers it again.
+            setLoadMoreFailure({
+                cursor,
+                message: readableSearchError(e instanceof Error ? e.message : String(e)),
+            })
         } finally {
             setIsLoadingMore(false)
         }
@@ -974,8 +982,10 @@ export function useAdvancedSearch(
         cancel,
         loadMore,
         isLoadingMore,
+        loadMoreError: view.kind === 'results' && loadMoreFailure
+            && view.result.cursor === loadMoreFailure.cursor ? loadMoreFailure.message : null,
     }), [
         view, runState, selectTemplate, setInput, resetTemplate,
-        run, runTemplate, runPredicate, cancel, loadMore, isLoadingMore,
+        run, runTemplate, runPredicate, cancel, loadMore, isLoadingMore, loadMoreFailure,
     ])
 }

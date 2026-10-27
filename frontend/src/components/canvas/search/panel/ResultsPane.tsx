@@ -96,6 +96,9 @@ export interface ResultsPaneProps {
     onLoadMore?: () => void
     /** True while a ``loadMore`` request is in flight. */
     isLoadingMore?: boolean
+    /** Why the last page failed, when it did: the footer says so and
+     *  offers it again. */
+    loadMoreError?: string | null
     /** Page through the whole match set in one gesture — the panel loops
      *  ``onLoadMore`` until the cursor runs out. */
     onLoadAll?: () => void
@@ -112,7 +115,7 @@ export interface ResultsPaneProps {
 
 
 export const ResultsPane: FC<ResultsPaneProps> = ({
-    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
+    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
     onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine,
 }) => {
     // Ref to the scroll container. Threaded through to HitsByParent →
@@ -142,6 +145,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
                     onOpen={onOpen}
                     onLoadMore={onLoadMore}
                     isLoadingMore={isLoadingMore}
+                    loadMoreError={loadMoreError}
                     onLoadAll={onLoadAll}
                     isLoadingAll={isLoadingAll}
                     onCancelLoadAll={onCancelLoadAll}
@@ -156,7 +160,7 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
 
 
 function Dispatch({
-    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
+    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
     onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine, scrollElementRef,
 }: ResultsPaneProps & { scrollElementRef: RefObject<HTMLDivElement | null> }) {
     switch (view.kind) {
@@ -175,6 +179,7 @@ function Dispatch({
                         onOpen={onOpen}
                         onLoadMore={onLoadMore}
                         isLoadingMore={isLoadingMore}
+                        loadMoreError={loadMoreError}
                         onLoadAll={onLoadAll}
                         isLoadingAll={isLoadingAll}
                         onCancelLoadAll={onCancelLoadAll}
@@ -194,6 +199,7 @@ function Dispatch({
                         onOpen={onOpen}
                         onLoadMore={onLoadMore}
                         isLoadingMore={isLoadingMore}
+                        loadMoreError={loadMoreError}
                         onLoadAll={onLoadAll}
                         isLoadingAll={isLoadingAll}
                         onCancelLoadAll={onCancelLoadAll}
@@ -210,7 +216,7 @@ function Dispatch({
 
 
 function ResultsContent({
-    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
+    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
     onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine, scrollElementRef,
 }: {
     view: Extract<PanelView, { kind: 'results' }>
@@ -220,6 +226,7 @@ function ResultsContent({
     onOpen?: ResultsPaneProps['onOpen']
     onLoadMore?: ResultsPaneProps['onLoadMore']
     isLoadingMore?: ResultsPaneProps['isLoadingMore']
+    loadMoreError?: ResultsPaneProps['loadMoreError']
     onLoadAll?: ResultsPaneProps['onLoadAll']
     isLoadingAll?: ResultsPaneProps['isLoadingAll']
     onCancelLoadAll?: ResultsPaneProps['onCancelLoadAll']
@@ -523,6 +530,7 @@ function ResultsContent({
                                 total={totalMatches}
                                 onLoadMore={onLoadMore}
                                 isLoadingMore={isLoadingMore}
+                                loadMoreError={loadMoreError}
                                 onLoadAll={onLoadAll}
                                 isLoadingAll={isLoadingAll}
                                 onCancelLoadAll={onCancelLoadAll}
@@ -539,7 +547,7 @@ function ResultsContent({
 /** A Connections search's answer: the edges, the exact count of each
  *  type, and the next page — or, when it found none, why. */
 function ConnectionsContent({
-    view, viewId, onReveal, onOpen, onLoadMore, isLoadingMore,
+    view, viewId, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
     onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine, scrollElementRef,
 }: Omit<ResultsPaneProps, 'onScopeToGroup' | 'view'> & {
     view: Extract<PanelView, { kind: 'results' }>
@@ -584,6 +592,7 @@ function ConnectionsContent({
                         total={total}
                         onLoadMore={onLoadMore}
                         isLoadingMore={isLoadingMore}
+                        loadMoreError={loadMoreError}
                         onLoadAll={onLoadAll}
                         isLoadingAll={isLoadingAll}
                         onCancelLoadAll={onCancelLoadAll}
@@ -597,12 +606,13 @@ function ConnectionsContent({
 
 /** "Load more" and "Load all" under a page of results — hits or edges. */
 function LoadMoreFooter({
-    loaded, total, onLoadMore, isLoadingMore, onLoadAll, isLoadingAll, onCancelLoadAll,
+    loaded, total, onLoadMore, isLoadingMore, loadMoreError, onLoadAll, isLoadingAll, onCancelLoadAll,
 }: {
     loaded: number
     total: number
     onLoadMore: () => void
     isLoadingMore?: boolean
+    loadMoreError?: string | null
     onLoadAll?: () => void
     isLoadingAll?: boolean
     onCancelLoadAll?: () => void
@@ -632,6 +642,12 @@ function LoadMoreFooter({
                     </button>
                 </div>
             ) : (
+                <>
+                {loadMoreError && !isLoadingMore && (
+                    <p role="alert" className="mb-1.5 text-[11.5px] leading-snug text-amber-700 dark:text-amber-300">
+                        Couldn’t load more. {loadMoreError}
+                    </p>
+                )}
                 <div className="flex items-center gap-2">
                     <button
                         type="button"
@@ -649,7 +665,7 @@ function LoadMoreFooter({
                     >
                         {isLoadingMore
                             ? 'Loading…'
-                            : `Load more (${loaded} so far)`}
+                            : loadMoreError ? 'Try again' : `Load more (${loaded} so far)`}
                     </button>
                     {onLoadAll && (
                         <button
@@ -669,6 +685,7 @@ function LoadMoreFooter({
                         </button>
                     )}
                 </div>
+                </>
             )}
         </div>
     )

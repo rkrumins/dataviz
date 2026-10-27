@@ -60,6 +60,10 @@ describe('RemoteGraphProvider display-rule reads', () => {
     expect(init?.method).toBe('POST')
     expect(JSON.parse(String(init?.body))).toEqual(body)
     expect(init?.signal).toBe(controller.signal)
+    // Past the server's 120s tier: the browser never gives up on work the
+    // server is still doing (and asks again, doubling it).
+    expect(init?.timeoutMs).toBe(TIMEOUTS.SEARCH_MEMBERSHIP_MS)
+    expect(TIMEOUTS.SEARCH_MEMBERSHIP_MS).toBe(150_000)
   })
 
   it('searchCounts POSTs to /search/counts with the search timeout', async () => {

@@ -102,3 +102,24 @@ describe('DisplayRuleList count line', () => {
         expect(reveal).toBeDisabled()
     })
 })
+
+
+describe('DisplayRuleList when the rules could not be checked', () => {
+    beforeEach(() => useDisplayRuleMatchStore.getState().clear())
+
+    it('says so, with why, instead of showing no tags as if nothing matched', async () => {
+        useDisplayRuleMatchStore.getState().setMembershipError('The graph is busy.')
+        renderList(rule())
+        expect(screen.getByRole('alert')).toHaveTextContent(
+            'Couldn’t check the display rules, so some tags or counts may be missing. The graph is busy.')
+        const before = useDisplayRuleMatchStore.getState().retryToken
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Retry' }))
+        expect(useDisplayRuleMatchStore.getState().retryToken).toBe(before + 1)
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    it('says nothing when they were checked', () => {
+        renderList(rule())
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+})

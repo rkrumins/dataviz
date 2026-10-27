@@ -101,6 +101,27 @@ describe('useDisplayRuleEngine', () => {
         ).toBe(150))
     })
 
+    it('says when the rules could not be checked, and asks again on Retry', async () => {
+        useReferenceModelStore.setState({ displayRules: [rule('pii')] })
+        useCanvasStore.setState({ nodes: nodes(5) })
+        membership().mockRejectedValueOnce(new Error(
+            'API Error 429: {"detail":{"code":"PROVIDER_BUSY","reason":"the graph is busy"}}'))
+        vi.mocked(countRules).mockRejectedValueOnce(new Error('API Error 504: {}'))
+        renderHook(() => useDisplayRuleEngine('view-1'))
+
+        await waitFor(() => expect(useDisplayRuleMatchStore.getState().membershipError)
+            .toBe('The graph is busy.'))
+        await waitFor(() => expect(useDisplayRuleMatchStore.getState().countsError).not.toBeNull())
+        expect(useDisplayRuleMatchStore.getState().matchUrnsByRule.get('pii')).toBeUndefined()
+
+        act(() => { useDisplayRuleMatchStore.getState().retryChecks() })
+        await waitFor(() => expect(membership()).toHaveBeenCalledTimes(2))
+        await waitFor(() => expect(
+            useDisplayRuleMatchStore.getState().matchUrnsByRule.get('pii')?.size).toBe(1))
+        expect(useDisplayRuleMatchStore.getState().membershipError).toBeNull()
+        await waitFor(() => expect(useDisplayRuleMatchStore.getState().countsError).toBeNull())
+    })
+
     it('asks about at most 32 rules a request', async () => {
         useReferenceModelStore.setState({
             displayRules: Array.from({ length: 40 }, (_, i) => rule(`r${i}`)),
