@@ -199,7 +199,7 @@ export function relationDepth(p: Predicate | null | undefined): number {
     if (!p) return 0
     if (p.kind === 'group') return Math.max(0, ...p.children.map(relationDepth))
     if (p.kind === 'related') return 1 + relationDepth(p.where ?? null)
-    if (p.kind === 'path') {
+    if (p.kind === 'path' || p.kind === 'edges') {
         return Math.max(relationDepth(p.sourceWhere ?? null), relationDepth(p.targetWhere ?? null))
     }
     return 0

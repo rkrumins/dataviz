@@ -33,17 +33,18 @@ import { RelationContext } from './relationContext'
  * ``draftPredicate`` so the live Advanced-Search panel keeps working
  * with zero-arg call sites untouched.
  *
- * Inside a relationship or a route's end it renders nothing: the query's
- * own disclosure already reads the whole thing, nested conditions included.
+ * Inside a relationship, a route's end or a Connections search's it renders
+ * nothing: the query's own disclosure already reads the whole thing, nested
+ * conditions included.
  */
 export const WhatThisMeansDisclosure: FC<{ predicate?: Predicate | null }> = ({
     predicate,
 }) => {
     const [open, setOpen] = useState(false)
     const storeDraft = useDraftPredicate()
-    const { depth } = useContext(RelationContext)
+    const { depth, end } = useContext(RelationContext)
     const draft = predicate !== undefined ? predicate : storeDraft
-    if (depth > 0) return null
+    if (depth > 0 || end) return null
 
     const oneLiner = collapsedSummary(draft)
 
@@ -107,6 +108,13 @@ export const WhatThisMeansDisclosure: FC<{ predicate?: Predicate | null }> = ({
  */
 function collapsedSummary(draft: Parameters<typeof formatPredicateAsSentence>[0]): string {
     if (!draft) return 'No filters yet — add a condition to start.'
+    if (draft.kind === 'edges') {
+        const end = (where: typeof draft.sourceWhere) => {
+            const n = where ? topLevelConditions(where).length : 0
+            return n ? `${n} condition${n === 1 ? '' : 's'}` : 'any entity'
+        }
+        return `Connections from ${end(draft.sourceWhere)} to ${end(draft.targetWhere)}.`
+    }
     const op = rootGroupOp(draft)
     const tops = topLevelConditions(draft)
     if (tops.length === 0) return 'No filters yet.'

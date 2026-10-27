@@ -71,6 +71,12 @@ export interface SentenceBuilderProps {
     onOpenCode?: (kind: CodeKind) => void
     /** Switch to Code for what a sentence can't show. */
     onEditInCode: () => void
+    /** The subject line's first word: "Find", or "From" / "To" for a
+     *  Connections search's ends. */
+    subjectLead?: string
+    /** Draw the query's shape. Off for a Connections search's ends: the
+     *  connection's own map draws them, side by side. */
+    showMap?: boolean
 }
 
 
@@ -78,9 +84,10 @@ const typeCondition = (types: string[]): Predicate => ({ kind: 'entityType', op:
 
 export function SentenceBuilder({
     viewId, predicate, onSeed, onCommit, discovery, knownEntityTypes, presentEntityTypes,
-    discoveredLayers, isRunning = false, onSubmit, onOpenAdvanced, onOpenCode, onEditInCode,
+    discoveredLayers, isRunning = false, onSubmit, onOpenAdvanced, onOpenCode, onEditInCode, subjectLead,
+    showMap = true,
 }: SentenceBuilderProps) {
-    const sentence = useMemo(() => buildSentence(predicate), [predicate])
+    const sentence = useMemo(() => buildSentence(predicate, subjectLead), [predicate, subjectLead])
     const counts = useClauseCounts(viewId, predicate)
     const [, setLiveCounts] = useLiveCounts()
     const [openToken, setOpenToken] = useState<string | null>(null)
@@ -223,7 +230,7 @@ export function SentenceBuilder({
     return (
         <SentenceContext.Provider value={ctx}>
             <div className="flex flex-col gap-3">
-                {map.nodes.length > 1 && <QueryMap map={map} counts={counts} onOpen={setOpenToken} />}
+                {showMap && map.nodes.length > 1 && <QueryMap map={map} counts={counts} onOpen={setOpenToken} />}
                 {/* Where the numbers would be, why they aren't. */}
                 {counts.status === 'off' && predicate && (
                     <button type="button" onClick={() => setLiveCounts(true)}

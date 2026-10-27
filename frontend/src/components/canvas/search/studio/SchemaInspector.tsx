@@ -30,10 +30,12 @@ const TABS: { value: Tab; label: string }[] = [
 const ITEM = 'flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm transition-colors hover:bg-black/[0.04] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 dark:hover:bg-white/[0.05]'
 
 
-export function SchemaInspector({ viewId, draft, onRefine, mode, initialTab = 'types' }: {
+export function SchemaInspector({ viewId, draft, onRefine, into, mode, initialTab = 'types' }: {
     viewId: string
     draft: Predicate | null
     onRefine: (next: Predicate) => void
+    /** What a click adds to, when not the query itself. */
+    into?: string
     mode: EditorMode
     initialTab?: Tab
 }) {
@@ -58,7 +60,7 @@ export function SchemaInspector({ viewId, draft, onRefine, mode, initialTab = 't
         <div className="flex min-h-0 flex-1 flex-col gap-2">
             <Segmented options={TABS} value={tab} onChange={setTab} label="What to inspect" size="sm" />
             <p className="text-xs text-ink-muted">
-                {cypher ? 'Click to copy it for your Cypher.' : 'Click to add it to the query.'}
+                {cypher ? 'Click to copy it for your Cypher.' : `Click to add it to ${into ?? 'the query'}.`}
                 {copied && <span className="ml-1 inline-flex items-center gap-0.5 text-emerald-600 dark:text-emerald-400">
                     <Check className="h-3 w-3" aria-hidden /> copied {copied}</span>}
             </p>

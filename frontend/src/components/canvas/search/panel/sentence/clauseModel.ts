@@ -333,11 +333,13 @@ export function withSubject(draft: Predicate | null, types: string[]): Predicate
 }
 
 
-export function buildSentence(draft: Predicate | null): Sentence {
+/** ``lead``: the subject line's first word — "Find", or a Connections
+ *  search's "From" and "To" for its ends. */
+export function buildSentence(draft: Predicate | null, lead = 'Find'): Sentence {
     const { subject, clauses, combine, into } = listedClauses(draft)
     const lines: SentenceLine[] = []
     lines.push({
-        kind: 'subject', key: 'subject', depth: 0, lead: 'Find', relationDepth: 0,
+        kind: 'subject', key: 'subject', depth: 0, lead, relationDepth: 0,
         topIndex: subject ? 0 : null, types: subject?.types ?? [], path: subject ? [{ child: 0 }] : null,
     })
 

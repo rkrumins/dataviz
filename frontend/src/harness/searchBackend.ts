@@ -8,6 +8,7 @@
 import type {
     EdgePredicateNode,
     EdgePropertyPredicate,
+    EdgesPredicate,
     NodeRef,
     Predicate,
     RelatedPredicate,
@@ -307,11 +308,62 @@ const ref = (a: HarnessEntity) => ({ urn: a.urn, displayName: a.displayName, ent
 
 const sessions = new Map<string, Predicate>()
 
+/** The edges a Connections search walks: the stored ones, and the tree's
+ *  own for containment or any edge. */
+function connectionEdges(p: EdgesPredicate): HarnessEdge[] {
+    const set = { edgeTypes: p.edgeTypes, edgeClass: p.edgeClass ?? 'links' }
+    const tree = !p.edgeTypes && (set.edgeClass === 'containment' || set.edgeClass === 'any')
+    const contains = tree ? HARNESS_ENTITIES.filter((e) => e.parent)
+        .map((e) => ({ source: e.parent!, target: e.urn, type: 'CONTAINS', properties: {} })) : []
+    const stored = set.edgeClass === 'containment' && !p.edgeTypes ? [] : HARNESS_EDGES.filter((e) => edgeIn(e, set))
+    return [...stored, ...contains]
+}
+
+/** A Connections search: each edge whose source meets From and target To —
+ *  or, either way, the other way round too — in the engine's order. */
+function connections(query: SearchQuery, p: EdgesPredicate) {
+    const from = (e?: HarnessEntity) => !!e && (!p.sourceWhere || matches(e, p.sourceWhere))
+    const to = (e?: HarnessEntity) => !!e && (!p.targetWhere || matches(e, p.targetWhere))
+    const found = connectionEdges(p).filter((edge) => {
+        if (!edgeMatches(edge, p.edgePredicate)) return false
+        const [s, t] = [BY_URN.get(edge.source), BY_URN.get(edge.target)]
+        return (from(s) && to(t)) || (p.direction === 'either' && from(t) && to(s))
+    })
+    const key = (e: HarnessEdge) => [BY_URN.get(e.source)!.displayName.toLowerCase(),
+        BY_URN.get(e.target)!.displayName.toLowerCase(), e.type, e.source, e.target]
+    found.sort((a, b) => {
+        const [ka, kb] = [key(a), key(b)]
+        for (let i = 0; i < ka.length; i++) if (ka[i] !== kb[i]) return ka[i] < kb[i] ? -1 : 1
+        return 0
+    })
+    const offset = Number(query.options?.cursor ?? 0) || 0
+    const size = Math.min(query.options?.pageSize ?? 50, 500)
+    const end = (urn: string) => {
+        const e = BY_URN.get(urn)!
+        const chain = ancestors(e)
+        return { ...ref(e), parent: chain.length ? ref(chain[chain.length - 1]) : null, ancestorPath: chain.map(ref) }
+    }
+    const typeCounts: Record<string, number> = {}
+    for (const e of found) typeCounts[e.type] = (typeCounts[e.type] ?? 0) + 1
+    return {
+        status: 'complete', elapsedMs: 5, sessionId: `harness-edges-${sessions.size + 1}`,
+        totalCount: found.length, candidateCount: found.length, countStatus: 'exact',
+        cursor: offset + size < found.length ? String(offset + size) : null,
+        edgeTypeCounts: typeCounts,
+        edges: found.slice(offset, offset + size).map((e) => {
+            const id = `${e.source}|${e.type}|${e.target}`
+            return { key: id, id, edgeType: e.type, properties: e.properties, source: end(e.source),
+                target: end(e.target) }
+        }),
+    }
+}
+
 function advanced(query: SearchQuery) {
     const p = query.predicate
     if (p?.kind === 'path') {
         return { status: 'complete', elapsedMs: 4, paths: [], totalCount: 0, countStatus: 'exact' }
     }
+    if (p?.kind === 'edges') return connections(query, p)
     const all = inScope().filter((e) => (p ? matches(e, p) : true))
         .sort((a, b) => a.displayName.localeCompare(b.displayName))
     const offset = Number(query.options?.cursor ?? 0) || 0
@@ -354,6 +406,10 @@ function counts(body: { items: Array<{ id: string; predicate: Predicate }> }) {
         counts: Object.fromEntries(body.items.map((item) => {
             if (hasRoute(item.predicate)) {
                 return [item.id, { count: 0, status: 'complete', error: 'A path search has no count.' }]
+            }
+            if (item.predicate.kind === 'edges') {
+                return [item.id, { count: connections({ predicate: item.predicate } as SearchQuery,
+                    item.predicate).totalCount, status: 'complete' }]
             }
             return [item.id, { count: scope.filter((e) => matches(e, item.predicate)).length, status: 'complete' }]
         })),

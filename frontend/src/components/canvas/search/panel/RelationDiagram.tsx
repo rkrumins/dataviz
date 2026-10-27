@@ -13,13 +13,14 @@
  * read queries; the edge opens the steps, edges and direction.
  */
 import { CircleDashed, Crosshair, Filter, MapPin } from 'lucide-react'
-import type { FC, ReactNode } from 'react'
+import { type FC, type ReactNode, useContext } from 'react'
 
 import { cn } from '@/lib/utils'
 import { useEntityVisual } from '@/hooks/useEntityVisual'
 import { useRelationshipTypes } from '@/store/schema'
 import type { Predicate, RelatedPredicate } from '@/types/search'
 
+import { RelationContext } from './relationContext'
 import { TypeIcon } from './sentence/editors'
 import { useTypeName } from './sentence/useTypeName'
 import { axisMeta, farEndTypes, hopRange, linkDirection, refLabel, throughOf } from './relations'
@@ -58,6 +59,8 @@ export const RelationDiagram: FC<{
     /** Open the steps, edges and direction. */
     onEdit?: () => void
 }> = ({ value, onEdit }) => {
+    // In a Connections search's From or To, "this" is an end of the edge.
+    const { end } = useContext(RelationContext)
     const relationshipTypes = useRelationshipTypes()
     const typeName = useTypeName()
     const meta = axisMeta(value.axis)
@@ -111,7 +114,7 @@ export const RelationDiagram: FC<{
         <div role="img" aria-label={sentence}
              className="flex items-center gap-1.5 rounded-xl border border-glass-border/60 bg-gradient-to-r from-accent-lineage/[0.07] via-transparent to-transparent px-2.5 py-2.5">
             <Node icon={<Crosshair className="h-3.5 w-3.5 shrink-0 text-accent-lineage" aria-hidden />}
-                  label="This" sub="what you find" />
+                  label="This" sub={end ? 'an end of the edge' : 'what you find'} />
             <button type="button" onClick={onEdit} disabled={!onEdit} tabIndex={-1} aria-hidden
                     className={cn('group flex min-w-[64px] flex-1 flex-col items-center gap-0.5 px-1',
                         onEdit && 'cursor-pointer')}>

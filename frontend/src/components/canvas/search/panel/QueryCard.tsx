@@ -21,6 +21,7 @@
  */
 import { motion } from 'framer-motion'
 import {
+    Boxes,
     Code2,
     LayoutList,
     Loader2,
@@ -36,6 +37,8 @@ import {
     Tags,
     Undo2,
     Redo2,
+    Waypoints,
+    X,
 } from 'lucide-react'
 import {
     type FC,
@@ -60,7 +63,7 @@ import {
     useSearchStore,
     type RecentQueryEntry,
 } from '@/store/searchStore'
-import type { Predicate, SearchQuery } from '@/types/search'
+import type { EdgesPredicate, Predicate, SearchQuery } from '@/types/search'
 import type { RunState } from '@/hooks/useAdvancedSearch'
 
 import { useDiscovery } from '../builder/useDiscovery'
@@ -75,12 +78,14 @@ import { useAskVocabulary } from './ask/useAskVocabulary'
 import { useEditorMode, type EditorMode } from './builderMode'
 import { CypherView } from './CypherView'
 import { isNativeResult } from './native/nativeCells'
+import { ConnectionBuilder } from './ConnectionBuilder'
+import { ConnectionSentence } from './ConnectionSentence'
 import { CodeMode } from './dsl/CodeMode'
 import type { DslVocabulary } from './dsl/dslLanguage'
 import { useEdgeTypeOptions } from './edgeTypeOptions'
 import { namePathFor, searchEntitiesByName } from './entityNames'
+import { findModeOf, NO_RULE_FOR_CONNECTIONS, queryLabel, toConnections, toEntities, type FindMode } from './findMode'
 import { appendCondition, topLevelConditions } from './predicateComposition'
-import { stringifyPredicate } from './predicateDsl'
 import { buildRunnablePredicate } from './runnablePredicate'
 import { SearchOmnibox } from './omnibox/SearchOmnibox'
 import { SaveQueryDialog } from './SaveQueryDialog'
@@ -120,6 +125,12 @@ const EDITOR_MODES: { value: EditorMode; label: string; icon: typeof Code2 }[] =
     { value: 'sentence', label: 'Sentence', icon: Sparkles },
     { value: 'code', label: 'Code', icon: Code2 },
     { value: 'cypher', label: 'Cypher', icon: Terminal },
+]
+
+/** What the search finds: entities, or the connections between them. */
+const FIND_MODES: { value: FindMode; label: string; icon: typeof Code2 }[] = [
+    { value: 'entities', label: 'Entities', icon: Boxes },
+    { value: 'connections', label: 'Connections', icon: Waypoints },
 ]
 
 
@@ -193,6 +204,26 @@ export const QueryCard: FC<QueryCardProps> = ({
         discovery.keysByEdgeType, edgeTypeOptions, discovery.suggestValues, remote, viewId])
 
     const [mode, setMode] = useEditorMode()
+
+    // Entities or Connections: the draft's own kind. Switching rewrites the
+    // draft as one undo step, and says what it left out.
+    const findMode = findModeOf(draftPredicate)
+    const connections = draftPredicate?.kind === 'edges' ? draftPredicate : null
+    const [switchNotice, setSwitchNotice] = useState<{ text: string; draft: Predicate | null } | null>(null)
+    const handleFindMode = useCallback((next: FindMode) => {
+        const current = useSearchStore.getState().draftPredicate
+        if (findModeOf(current) === next) return
+        const switched = next === 'connections'
+            ? toConnections(current)
+            : toEntities(current as EdgesPredicate)
+        commitDraft(switched.next)
+        setSwitchNotice(switched.dropped.length ? {
+            text: `Left out: ${joinedAnd(switched.dropped)}${next === 'connections'
+                ? ' — a connection is one edge' : ''}. Undo brings ${switched.dropped.length === 1
+                ? 'it' : 'them'} back.`,
+            draft: switched.next,
+        } : null)
+    }, [commitDraft])
 
     /**
      * Code-only palette entries (withinHops) hand off to the main panel's
@@ -299,7 +330,7 @@ export const QueryCard: FC<QueryCardProps> = ({
 
     // Save the current draft into the user's Mine library. Builds a
     // synthetic ``RecentQueryEntry`` from the live predicate +
-    // ``stringifyPredicate`` so SaveQueryDialog can show the DSL
+    // ``queryLabel`` so SaveQueryDialog can show the DSL
     // preview the same way it does for promote-from-recent. On
     // confirm, ``saveDraftAsMineEntry`` persists a pinned + named
     // entry that appears in the Library popover's Mine tab. The
@@ -312,7 +343,7 @@ export const QueryCard: FC<QueryCardProps> = ({
         setSaveTargetEntry({
             viewId,
             predicate: draftPredicate,
-            label: stringifyPredicate(draftPredicate),
+            label: queryLabel(draftPredicate),
             timestamp: Date.now(),
             pinned: true,
             source: 'mine',
@@ -397,8 +428,12 @@ export const QueryCard: FC<QueryCardProps> = ({
     }, [runnable])
 
     // ─── Header summary ────────────────────────────────────────────
-    const completeCount = conditions.filter((c) => !isRowIncomplete(c)).length
-    const incompleteCount = conditions.length - completeCount
+    // A Connections search counts the conditions of its two ends.
+    const summarised = connections
+        ? [...topLevelConditions(connections.sourceWhere ?? null), ...topLevelConditions(connections.targetWhere ?? null)]
+        : conditions
+    const completeCount = summarised.filter((c) => !isRowIncomplete(c)).length
+    const incompleteCount = summarised.length - completeCount
 
     // Empty state in Sentence or Form gets its own premium hero treatment —
     // no QUERY header chrome, no run controls (nothing to act on), just
@@ -456,11 +491,16 @@ export const QueryCard: FC<QueryCardProps> = ({
                     {/* Row 1 — title + editor mode; the modes take a line
                         of their own when the card is too narrow for both. */}
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 px-3 py-2">
-                        <div className="flex items-baseline gap-1.5 min-w-[6.5rem] flex-1">
+                        {/* Sized by its content, so the modes wrap below it
+                            rather than covering it when both don't fit. */}
+                        <div className="flex items-center gap-1.5 min-w-0 flex-auto">
                             <span className="text-[11.5px] font-display font-semibold text-ink leading-tight">
-                                Query
+                                Find
                             </span>
-                            {conditions.length > 0 ? (
+                            <Segmented options={isRunning ? FIND_MODES.map((o) => ({ ...o, disabled: true })) : FIND_MODES}
+                                       value={findMode} onChange={handleFindMode} label="What to find"
+                                       className="shrink-0" />
+                            {summarised.length > 0 ? (
                                 <span className="text-[11px] text-ink-muted/85 tabular-nums truncate">
                                     · {completeCount}
                                     {' '}filter{completeCount === 1 ? '' : 's'}
@@ -472,7 +512,8 @@ export const QueryCard: FC<QueryCardProps> = ({
                                 </span>
                             ) : (
                                 <span className="text-[11px] text-ink-muted/80 italic truncate">
-                                    {mode === 'cypher' ? '· Cypher' : '· Code mode · paste DSL'}
+                                    {connections ? '· any entity to any entity'
+                                        : mode === 'cypher' ? '· Cypher' : '· Code mode · paste DSL'}
                                 </span>
                             )}
                         </div>
@@ -491,7 +532,8 @@ export const QueryCard: FC<QueryCardProps> = ({
                             onClear={handleClearAll}
                             canSave={runnable !== null}
                             onSave={handleOpenSave}
-                            canCreateRule={runnable !== null}
+                            canCreateRule={runnable !== null && !connections}
+                            ruleRefusal={connections ? NO_RULE_FOR_CONNECTIONS : undefined}
                             onCreateRule={handleOpenCreateRule}
                             runMode={runMode}
                             onRunModeChange={setRunMode}
@@ -509,9 +551,16 @@ export const QueryCard: FC<QueryCardProps> = ({
                 'flex flex-col gap-2',
                 isEmptyVisual ? 'p-0' : 'p-2.5',
             )}>
+                {switchNotice && switchNotice.draft === draftPredicate && (
+                    <SwitchNotice text={switchNotice.text} onDismiss={() => setSwitchNotice(null)} />
+                )}
                 {pointing ? (
                     isEmptyVisual ? (
                         <PremiumEmptyHero
+                            findSwitch={
+                                <Segmented options={FIND_MODES} value={findMode} onChange={handleFindMode}
+                                           label="What to find" />
+                            }
                             byFilters={mode === 'form'}
                             entry={mode === 'form' ? omnibox : askBar('hero')}
                             orAsk={mode === 'form' ? askBar('compact') : null}
@@ -539,6 +588,48 @@ export const QueryCard: FC<QueryCardProps> = ({
                             discoveryError={discovery.error}
                             propertyKeyCount={discovery.allKeys.length}
                         />
+                    ) : connections && mode === 'sentence' ? (
+                        <RelationProvider viewId={viewId} edges={edgeDiscovery}>
+                            <ConnectionSentence
+                                viewId={viewId}
+                                value={connections}
+                                onSeed={seedDraftPredicate}
+                                onCommit={commitDraft}
+                                discovery={{
+                                    allKeys: discovery.allKeys,
+                                    keysByEntityType: discovery.keysByEntityType,
+                                    tagValues: discovery.tagValues,
+                                    getValueSamples: discovery.getValueSamples,
+                                    suggestValues: discovery.suggestValues,
+                                }}
+                                knownEntityTypes={knownEntityTypes}
+                                presentEntityTypes={presentEntityTypes}
+                                discoveredLayers={discoveredLayers}
+                                isRunning={isRunning}
+                                onSubmit={dispatchRun}
+                                onEditInCode={() => setMode('code')}
+                            />
+                        </RelationProvider>
+                    ) : connections ? (
+                        <RelationProvider viewId={viewId} edges={edgeDiscovery}>
+                            <ConnectionBuilder
+                                value={connections}
+                                onSeed={seedDraftPredicate}
+                                onCommit={commitDraft}
+                                viewId={viewId}
+                                discovery={{
+                                    allKeys: discovery.allKeys,
+                                    keysByEntityType: discovery.keysByEntityType,
+                                    tagValues: discovery.tagValues,
+                                    getValueSamples: discovery.getValueSamples,
+                                    suggestValues: discovery.suggestValues,
+                                }}
+                                knownEntityTypes={knownEntityTypes}
+                                discoveredLayers={discoveredLayers}
+                                isRunning={isRunning}
+                                onSubmit={dispatchRun}
+                            />
+                        </RelationProvider>
                     ) : mode === 'sentence' ? (
                         <RelationProvider viewId={viewId} edges={edgeDiscovery}>
                             {askBar('compact')}
@@ -668,10 +759,12 @@ export const QueryCard: FC<QueryCardProps> = ({
  * who'd rather paste DSL.
  */
 function PremiumEmptyHero({
-    byFilters, entry, orAsk, palette, recipes, onUseCodeMode,
+    findSwitch, byFilters, entry, orAsk, palette, recipes, onUseCodeMode,
     discoveredEntityTypes, discoveredTags, discoveredLayers,
     discoveryLoading, discoveryError, propertyKeyCount,
 }: {
+    /** Entities or Connections — what the search finds. */
+    findSwitch: ReactNode
     /** Built from filters (Form), or asked in plain words (Sentence). */
     byFilters: boolean
     /** The way in: "add a filter", or the Ask bar. */
@@ -728,6 +821,10 @@ function PremiumEmptyHero({
                                 : 'Ask in plain words — what it is, how it connects, what it\'s tagged — '
                                     + 'and see what it reads as before anything changes. Or browse every kind of condition.'}
                         </p>
+                        <div className="mt-2.5 flex flex-wrap items-center gap-2">
+                            <span className="text-[11px] font-medium text-ink-muted">Find</span>
+                            {findSwitch}
+                        </div>
                     </div>
                 </div>
             </div>
@@ -864,7 +961,7 @@ function HeaderActions({
     canUndo, canRedo, onUndo, onRedo,
     canClear, onClear,
     canSave, onSave,
-    canCreateRule, onCreateRule,
+    canCreateRule, ruleRefusal, onCreateRule,
     runMode, onRunModeChange,
     canRun, hasPendingChanges, isRunning, onRunNow,
 }: {
@@ -877,6 +974,8 @@ function HeaderActions({
     canSave: boolean
     onSave: () => void
     canCreateRule: boolean
+    /** Why this query can make no rule, whatever is filled in. */
+    ruleRefusal?: string
     onCreateRule: () => void
     runMode: 'auto' | 'manual'
     onRunModeChange: (next: 'auto' | 'manual') => void
@@ -928,6 +1027,7 @@ function HeaderActions({
                     <CreateRuleButton
                         onCreateRule={onCreateRule}
                         disabled={!canCreateRule || isRunning}
+                        refusal={ruleRefusal}
                     />
                 </div>
                 <RunButton
@@ -1048,10 +1148,11 @@ function SaveQueryButton({
  * can't edit the view: its rules are the view's.
  */
 function CreateRuleButton({
-    onCreateRule, disabled: noQuery,
+    onCreateRule, disabled: noQuery, refusal,
 }: {
     onCreateRule: () => void
     disabled?: boolean
+    refusal?: string
 }) {
     const canEditView = useLibraryCanEdit()
     const disabled = noQuery || !canEditView
@@ -1062,9 +1163,9 @@ function CreateRuleButton({
             disabled={disabled}
             title={!canEditView
                 ? 'Only people who can edit this view can add display rules'
-                : disabled
+                : refusal ?? (disabled
                     ? 'Add at least one complete filter to tag matches'
-                    : 'Create a display rule from this query'}
+                    : 'Create a display rule from this query')}
             aria-label="Create display rule"
             className={cn(
                 'inline-flex items-center gap-1 px-2 h-7 rounded-md',
@@ -1328,6 +1429,28 @@ function ToggleBtn({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** What a switch between Entities and Connections left out, until the next
+ *  change or dismissed. */
+function SwitchNotice({ text, onDismiss }: { text: string; onDismiss: () => void }) {
+    return (
+        <div role="status" className={cn(
+            'flex items-start gap-2 rounded-lg border px-2.5 py-1.5 text-[11.5px] leading-snug',
+            'border-amber-400/40 bg-amber-500/[0.08] text-amber-900 dark:text-amber-100',
+        )}>
+            <span className="flex-1 min-w-0">{text}</span>
+            <button type="button" onClick={onDismiss} aria-label="Dismiss"
+                    className="shrink-0 rounded p-0.5 text-amber-800/70 hover:text-amber-900 dark:text-amber-100/70 dark:hover:text-amber-100">
+                <X className="w-3 h-3" />
+            </button>
+        </div>
+    )
+}
+
+/** Names as a list reads: "A", "A and B", "A, B and C". */
+function joinedAnd(items: string[]): string {
+    return items.length < 2 ? items.join('') : `${items.slice(0, -1).join(', ')} and ${items[items.length - 1]}`
+}
 
 function useEntityTypeNames(): string[] {
     const schema = useSchemaStore((s) => s.schema)

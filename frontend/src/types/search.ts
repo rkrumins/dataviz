@@ -54,6 +54,9 @@ import type {
     HasIncomingPredicate as GenHasIncomingPredicate,
     HasOutgoingPredicate as GenHasOutgoingPredicate,
     PathPredicate as GenPathPredicate,
+    EdgesPredicate as GenEdgesPredicate,
+    EdgeHit as GenEdgeHit,
+    EdgeEnd as GenEdgeEnd,
     MatchAllPredicate as GenMatchAllPredicate,
     IsPredicate as GenIsPredicate,
     RelatedPredicate as GenRelatedPredicate,
@@ -113,6 +116,9 @@ export type IsRootPredicate = GenIsRootPredicate
 export type HasIncomingPredicate = GenHasIncomingPredicate
 export type HasOutgoingPredicate = GenHasOutgoingPredicate
 export type PathPredicate = GenPathPredicate
+/** A Connections search: the edges from entities meeting one condition to
+ *  entities meeting another. It is the whole query, and answers ``edges``. */
+export type EdgesPredicate = GenEdgesPredicate
 export type MatchAllPredicate = GenMatchAllPredicate
 /** An entity named by its path of display names, or by its URN. */
 export type NodeRef = GenNodeRef
@@ -146,6 +152,7 @@ export type TextTarget = NonNullable<GenTextPredicate['target']>
 export type PropertyOp = NonNullable<GenPropertyPredicate['op']>
 export type TagOp = NonNullable<GenTagPredicate['op']>
 export type PathDirection = NonNullable<GenPathPredicate['direction']>
+export type EdgesDirection = NonNullable<GenEdgesPredicate['direction']>
 export type EdgeClass = NonNullable<GenPathPredicate['edgeClass']>
 export type DegreeOp = NonNullable<GenDegreePredicate['op']>
 export type DegreeDirection = NonNullable<GenDegreePredicate['direction']>
@@ -185,6 +192,10 @@ export type SearchHighlight = GenSearchHighlight
 export type AncestorRef = GenAncestorRef
 export type EdgeRef = GenEdgeRef
 export type PathHit = GenPathHit
+/** One edge a Connections search matched, source → target as stored. */
+export type EdgeHit = GenEdgeHit
+/** One end of such an edge: its name, its parent, the containers above it. */
+export type EdgeEnd = GenEdgeEnd
 
 export type SearchAggregateBucket = RequireKeys<
     GenSearchAggregateBucket,

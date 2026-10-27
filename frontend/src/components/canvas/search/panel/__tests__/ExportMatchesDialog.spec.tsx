@@ -35,6 +35,12 @@ vi.mock('@/providers/GraphProviderContext', () => ({
 vi.mock('@/services/importExportApiService', () => ({
     triggerBrowserDownload: (...args: unknown[]) => triggerBrowserDownload(...args),
 }))
+// The edge properties discovery found, by edge type.
+vi.mock('../../builder/useDiscovery', () => ({
+    useDiscovery: () => ({ keysByEdgeType: {
+        TRANSFORMS: ['mode', 'logic', 'id'], PRODUCES: ['schedule', 'logic', 'id'], CONSUMES: ['id'],
+    } }),
+}))
 
 
 function property(key: string, count: number): SearchCatalogProperty {
@@ -197,5 +203,45 @@ describe('ExportMatchesDialog', () => {
 
         expect(await screen.findByRole('alert')).toHaveTextContent(
             "You can't export matches from this view.")
+    })
+})
+
+
+describe('ExportMatchesDialog — a Connections search', () => {
+    const EDGES: SearchQuery = {
+        predicate: { kind: 'edges', sourceWhere: { kind: 'tag', op: 'hasAny', values: ['PII'] } },
+        scope: { viewId: 'view-1', scopeMode: 'view' },
+    }
+    const open = (query: SearchQuery) => {
+        state = { catalog: null, reading: null, error: null, unavailable: true, refresh: vi.fn() }
+        render(<ExportMatchesDialog viewId="view-1" query={query} matchCount={19} onClose={vi.fn()} />)
+    }
+
+    it('exports its edges: their fixed columns, and the edge properties chosen', async () => {
+        const user = userEvent.setup()
+        const searchExport = vi.spyOn(provider, 'searchExport')
+            .mockResolvedValue(answer({ status: 'complete', downloadToken: 't' }))
+        open(EDGES)
+
+        expect(screen.getByRole('heading', { name: 'Export 19 connections' })).toBeInTheDocument()
+        expect(screen.getByText('Source parent')).toBeInTheDocument()
+        expect(screen.getByText('Properties (JSON)')).toBeInTheDocument()
+        expect(screen.queryByRole('checkbox', { name: /Tags/ })).not.toBeInTheDocument()
+        // Commonest first: carried by every edge type, by two, then by one.
+        expect(rowNames()).toEqual(['id', 'logic', 'mode', 'schedule'])
+        expect(screen.getByText('on Transforms, Produces and 1 more')).toBeInTheDocument()
+        expect(screen.getByText('on Transforms, Produces')).toBeInTheDocument()
+        expect(screen.getByText('14 columns')).toBeInTheDocument()
+
+        await user.click(screen.getByRole('checkbox', { name: /mode/ }))
+        await user.click(screen.getByRole('button', { name: /^Export$/ }))
+        expect(searchExport.mock.calls[0][0]).toEqual({
+            scope: EDGES.scope, predicate: EDGES.predicate, format: 'csv', columns: ['mode'], waitMs: 2000,
+        })
+    })
+
+    it('offers the edge properties of the edge types it goes through', () => {
+        open({ ...EDGES, predicate: { kind: 'edges', edgeTypes: ['PRODUCES'] } })
+        expect(rowNames()).toEqual(['id', 'logic', 'schedule'])
     })
 })
