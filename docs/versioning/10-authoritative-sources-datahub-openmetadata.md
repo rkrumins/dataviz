@@ -134,7 +134,9 @@ the write path does not branch on it (only on fork lineage and `ontology_enforce
 the intended place to distinguish a human-authored graph (`manual`) from one seeded/refreshed from an
 external SoR (`authoritative`) or both (`hybrid`). Nothing sets `authoritative` or `hybrid` today:
 enabling version control makes `manual`, a blank model `blank`, and a fork takes its parent's. See
-[02 — Data Model](02-data-model.md).
+[02 — Data Model](02-data-model.md). How a data source's own graph would become `hybrid` — a
+pipeline that keeps loading into it, its writes captured into the history — is designed in
+`docs/superpowers/specs/2026-10-27-hybrid-own-graph-capture-design.md`.
 
 ---
 
