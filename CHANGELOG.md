@@ -44,6 +44,13 @@ panel says how many entities meet each end and offers the fixes that fit. Connec
 - `from(type:dataJob) to[PRODUCES](type:dataset)` is a Connections search. `linkedTo(…)` makes it
   either way, `.via(…)` adds an edge filter, and `from() to(layer:Gold)` starts from any entity.
 - Suggestions offer the edge types inside `to[` and where the edges go after `from(…)`.
+- **Suggestions cover everything Code mode reads.** After a property's name, every operator in
+  the Form's words (`IN (…)` *is one of*, `BETWEEN … AND …`, `WITHIN LAST …`, `IS SET`…); inside
+  `IN (`, the property's values, leaving out those listed; durations after `WITHIN LAST`; the
+  endings a comparison takes, where they change it; and the words that were missing:
+  `hasUpstream`, `hasDownstream`, `hasIncoming`, `hasOutgoing`, `qname:`, `description:`,
+  `ancestor*2(…)` and `.via(…)`. A test fails if an operator or a keyword the parser reads isn't
+  offered.
 - `⌘I` selects an end, then the whole connection.
 - **Examples** gain three Connections lines.
 

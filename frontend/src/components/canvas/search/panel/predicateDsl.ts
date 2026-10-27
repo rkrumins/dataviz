@@ -857,7 +857,7 @@ const CONNECTION_END = /^(to|linkedto)(?:\[([^\]]*)\])?(\*[\d.]*)?(?:\[([^\]]*)\
 const RELATION_CALL = /^([a-z]+)(?:\[([^\]]*)\])?(?:(\*)(\d*)(\.\.)?(\d*))?(?:\[([^\]]*)\])?$/i
 
 /** A relationship word: the axis it follows, and whether over any link. */
-const RELATION_WORDS: Record<string, { axis: RelatedPredicate['axis']; links?: true }> = {
+export const RELATION_WORDS: Record<string, { axis: RelatedPredicate['axis']; links?: true }> = {
     parent: { axis: 'parent' }, child: { axis: 'child' }, ancestor: { axis: 'ancestor' },
     descendant: { axis: 'descendant' }, root: { axis: 'root' },
     upstream: { axis: 'upstream' }, downstream: { axis: 'downstream' }, neighbor: { axis: 'neighbor' },
@@ -1680,7 +1680,7 @@ class Parser {
 
 /** A graph shape's words, read with ``_`` and ``-`` left out: the shape and
  *  the edges it counts unless brackets say otherwise. */
-const SHAPE_WORDS: Record<string, [ShapeKind, EdgeClass]> = {
+export const SHAPE_WORDS: Record<string, [ShapeKind, EdgeClass]> = {
     noupstream: ['isRoot', 'lineage'], noupstreamlineage: ['isRoot', 'lineage'],
     nodownstream: ['isLeaf', 'lineage'], nodownstreamlineage: ['isLeaf', 'lineage'],
     nolineage: ['isOrphan', 'lineage'], orphan: ['isOrphan', 'lineage'], orphans: ['isOrphan', 'lineage'],
@@ -1821,7 +1821,8 @@ function formatScalar(v: unknown): string {
 }
 
 
-const PROP_OP_STR: Record<PropertyOp, string> = {
+/** Each operator as Code mode writes it — what its completion offers. */
+export const PROP_OP_STR: Record<PropertyOp, string> = {
     eq: '=', neq: '!=',
     lt: '<', lte: '<=',
     gt: '>', gte: '>=',
