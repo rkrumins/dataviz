@@ -121,7 +121,7 @@ The route sits under `/admin/` for historical reasons; it needs only read access
 | `id` | The data source's id (`ds_…`). Stable for its life, including a move to another workspace. |
 | `workspaceId` | The workspace it is in — the one you asked about. |
 | `providerId` | The provider the graph lives on (`prov_…`). |
-| `graphName` | The graph's name on that provider. Unique per workspace and provider. |
+| `graphName` | The graph's name on that provider. Unique per workspace and provider. Turning version control on doesn't change it: the history is kept beside the same graph and publishes are written into it. A name ending in `_copy` comes from importing a view package into a new data source. |
 | `label` | The name people see: the label given to it, else the graph's name on its provider. |
 | `catalogItemId` | The catalog entry it was attached from (`cat_…`), or `null`. |
 | `ontologyId` | The semantic layer that types its entities and relationships, or `null` for the system defaults. |

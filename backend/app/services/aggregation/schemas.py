@@ -749,6 +749,10 @@ class SourceChangedResponse(BaseModel):
     held_by: Optional[str] = Field(None, alias="heldBy")
     held_kind: Optional[str] = Field(None, alias="heldKind")
     held_until: Optional[str] = Field(None, alias="heldUntil")
+    # True when the source is version-controlled: its history is the system of
+    # record, so a load into its graph is drift from it — reported in Data
+    # health, never converged. Nothing was invalidated or queued.
+    version_controlled: bool = Field(False, alias="versionControlled")
 
     class Config:
         populate_by_name = True

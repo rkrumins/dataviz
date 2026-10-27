@@ -471,6 +471,7 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 | `GRAPHVER_REBUILD_LOCK_TTL` / `GRAPHVER_LEASE_TTL` | 120 / 60 | Single-flight rebuild lock / read-lease TTLs (`config.py:139-140`). |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` / `_BUDGETS` | 0 / {} | Per-provider eviction budget (off by default, `config.py:151`). |
 | `GRAPHVER_EVICT_SECS` | 300 | Eviction sweep cadence (`config.py:154`). |
+| `GRAPHVER_PROJECTION_DRIFT_INTERVAL_SECS` | 900 | How often a projection pass recounts what a data source's own graph holds outside its history (§16); Check sync always recounts. |
 
 ---
 
@@ -490,6 +491,52 @@ Consolidated here and expanded in [09 · Scale & Limits](09-scale-limits-and-roa
    (§2).
 7. **Credential rotation reaches the stats service and the control plane only on restart** — the
    other processes drop their copies on a provider-edit broadcast.
+8. **On a data source's own graph, tracking is by stamp** — an outside writer that sets `entityId`
+   or a relationship `id` itself is counted as tracked, and shows as `unexpected` rather than as
+   written outside the history (§16).
+
+---
+
+## 16. A data source's own graph — `owns_falkor_graph` false
+
+Turning version control on for an existing source pins the projection to the graph the source
+already reads: `falkor_graph_name` is the data source's `graph_name` and `owns_falkor_graph` is
+false. Nothing is copied to another graph — a `_copy` graph comes only from importing a view
+package into a new data source. The platform didn't mint this graph and something else may still
+write to it, so the projector treats it as the customer's:
+
+- **Never evicted.** `CacheManager.evict` refuses it, and residency budgets count only graphs the
+  platform owns (`cache_manager.py`).
+- **Additive.** A full replay or a heal writes what `main` holds and the graph lacks
+  (`_reconcile_in_place(owned=False)`, presence-only on a heal) and deletes nothing the platform
+  didn't write: no urn-less node, no item written outside the history, no duplicate copy, no
+  parallel relationship. What `main` deleted still goes, through the tombstone sweep, which
+  confirms each `entityId`. Relationships merge by `r.id` (`_edge_merge_by_id_cypher`), so
+  parallel ones stay apart, and an edit removes only the properties the history held before the
+  window.
+- **Verified by what the history tracks.** `falkor_counts(owned=False)` counts nodes with a urn and
+  an `entityId`, and relationships with an `id` as distinct triples. The graph holding more is not
+  a failure: reads stay on the live graph, as they did before version control.
+- **Drift reported, never acted on.** `projection_state.drift` —
+  `{outsideHistory: {nodes, relationships}, noIdentifier: {nodes}, unexpected?, checkedAt}` — is
+  recounted by a projection pass at most every `GRAPHVER_PROJECTION_DRIFT_INTERVAL_SECS` (each count
+  scans the graph) and by every Check sync, keyed by the identity property the copy used
+  (`copy_identity`). The watermark carries it as `drift`; Data health shows it under **Outside the
+  version history**; `GET /graph/misaligned-items` lists each kind in full
+  (`reconcile.alignment_rows`, read in internal-id windows); Check sync adds `outsideHistory` with
+  examples and is in sync when the graph holds everything the history does.
+- **Lineage summaries.** In-source rollups are maintained as on any graph. A dedicated source's live
+  in `{graph_name}_proj`, which only the aggregation job writes: the edge-type resolver answers with
+  `in_graph=False`, and every window that changes lineage or moves a container — or a full replay
+  or heal that changes raw edges — is handed to the job as a source-changed signal (reason
+  `versioned_publish`): change-gated, marked stale until rebuilt, one rebuild per cooldown.
+- **Outside signals.** A pipeline's `refresh` / `source-changed` signal is recorded and changes
+  nothing (`version_controlled`) — see
+  [Telling us an external data source changed](../features/external-change-notification.md).
+
+A source counts as versioned — to the aggregation sweep, the freshness rows, the Explorer and the
+sync chip — only once its enable job has finished; until then it reads, and is reconciled, as an
+external source.
 
 ---
 

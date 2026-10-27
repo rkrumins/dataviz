@@ -99,8 +99,9 @@ async def _versioned_for_the_sweep_once_enabled() -> None:
         assert (ds in await versioned_sources.projector_health()) is versioned, status
 
 
-def _app():
-    """The versioning router alone, as a reader of every workspace a request names."""
+def _app(*perms: str):
+    """The versioning router alone, as a reader of every workspace a request names (with ``perms``
+    besides)."""
     from types import SimpleNamespace
 
     from fastapi import FastAPI, Request
@@ -114,7 +115,7 @@ def _app():
 
     async def claims(request: Request):
         return PermissionClaims(sid="", global_perms=(), ws_perms={
-            request.path_params["ws_id"]: ("workspace:datasource:read",)})
+            request.path_params["ws_id"]: ("workspace:datasource:read", *perms)})
 
     app = FastAPI()
     app.include_router(versioning.router, prefix="/api/v1/{ws_id}/versioning")
@@ -140,6 +141,30 @@ async def _trashed_graph_answers_nothing() -> None:
 
         assert await purge_worker.restore_graphs_for_data_source(data_source_id=ds, workspace_id="ws_a")
         assert (await c.get(graph)).status_code == 200
+
+
+async def _nothing_drafts_or_exports_a_source_still_being_enabled() -> None:
+    """Until turning version control on has finished there is no history to draft on or export:
+    asking is a 409 with the reason, never a 500 — and never an export of a main parked at
+    genesis, which would hold none of the source's data."""
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.app.services.versioning.import_export.service import ImportExportService
+    from backend.app.services.versioning.service import ConcurrencyError
+
+    svc = GraphVersioningService()
+    ds = _ds()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws_a", actor="alice"))["graph_id"]
+    async with db.graphver_session() as s:
+        s.add(models.JobORM(job_type="bootstrap", graph_id=gid, workspace_id="ws_a",
+                            data_source_id=ds, status="running"))
+    async with AsyncClient(transport=ASGITransport(app=_app("workspace:datasource:manage")),
+                           base_url="http://test") as c:
+        resp = await c.post("/api/v1/ws_a/versioning/resolve", json={"dataSourceId": ds})
+        assert resp.status_code == 409 and "still being enabled" in resp.text, resp.text
+    with pytest.raises(ConcurrencyError, match="still being enabled"):
+        await ImportExportService().create_export_job(
+            workspace_id="ws_a", data_source_id=ds, graph_id=gid, actor="alice")
 
 
 async def _graph(gid):
@@ -270,6 +295,11 @@ def test_main_heads_answer_the_same_one_source_per_read(monkeypatch):
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_the_sweep_sees_a_source_as_versioned_once_turning_it_on_finished():
     asyncio.run(_run(_versioned_for_the_sweep_once_enabled))
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_nothing_drafts_or_exports_a_source_still_being_enabled():
+    asyncio.run(_run(_nothing_drafts_or_exports_a_source_still_being_enabled))
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")

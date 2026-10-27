@@ -100,7 +100,8 @@ function usePackageOption(views: Array<{ id: string }>, preview: ExportPreview[]
         : !canRead ? 'Packaging data needs permission to read this data source.'
           : resolved.isLoading ? null
             : !resolved.data?.graphId ? 'Only a data source under version control can be packaged with its data.'
-              : null
+              : resolved.data.bootstrap ? 'Version control is still being turned on for this data source.'
+                : null
   return {
     available: loaded && !reason && !!resolved.data?.graphId,
     reason,

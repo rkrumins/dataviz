@@ -405,7 +405,7 @@ def _refreshing(monkeypatch, svc: AggregationService) -> list[dict]:
     async def _signal(ds_id, session, **kw):
         calls.append(kw)
         return types.SimpleNamespace(
-            changed=True, job_id="agg_signal", deferred=False, event_id="evt_s",
+            changed=True, job_id="agg_signal", deferred=False, event_id="evt_s", version_controlled=False,
         )
 
     async def _stale(*args):

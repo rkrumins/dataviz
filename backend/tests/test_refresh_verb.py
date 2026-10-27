@@ -194,7 +194,7 @@ def test_auto_delegates_verbatim_and_reuses_signal_event(monkeypatch):
             ds_id=ds_id, force=force, origin=origin, actor=actor, reason=reason,
         )
         return types.SimpleNamespace(
-            changed=True, job_id="agg_123", deferred=False, event_id="evt_signal",
+            changed=True, job_id="agg_123", deferred=False, event_id="evt_signal", version_controlled=False,
         )
 
     monkeypatch.setattr(svc, "signal_source_changed", _fake_signal)
@@ -225,7 +225,7 @@ def test_auto_force_passthrough_maps_forced_gate(monkeypatch):
     async def _fake_signal(ds_id, sess, *, force=False, **kw):
         captured["force"] = force
         return types.SimpleNamespace(
-            changed=True, job_id="agg_1", deferred=False, event_id="evt_x",
+            changed=True, job_id="agg_1", deferred=False, event_id="evt_x", version_controlled=False,
         )
 
     monkeypatch.setattr(svc, "signal_source_changed", _fake_signal)
@@ -240,7 +240,7 @@ def test_auto_unchanged_gate_maps_to_noop(monkeypatch):
 
     async def _fake_signal(ds_id, sess, *, force=False, **kw):
         return types.SimpleNamespace(
-            changed=False, job_id=None, deferred=False, event_id="evt_noop",
+            changed=False, job_id=None, deferred=False, event_id="evt_noop", version_controlled=False,
         )
 
     monkeypatch.setattr(svc, "signal_source_changed", _fake_signal)
@@ -250,6 +250,20 @@ def test_auto_unchanged_gate_maps_to_noop(monkeypatch):
     assert resp.changed is False
     assert resp.job_id is None
     assert resp.actions == []
+
+
+def test_auto_on_a_version_controlled_source_checks_nothing_and_says_why(monkeypatch):
+    svc, session, order, captured = _build(monkeypatch, state=_state())
+
+    async def _fake_signal(ds_id, sess, *, force=False, **kw):
+        return types.SimpleNamespace(
+            changed=False, job_id=None, deferred=False, event_id="evt_vc", version_controlled=True,
+        )
+
+    monkeypatch.setattr(svc, "signal_source_changed", _fake_signal)
+
+    resp = _run(svc.refresh_source("ds-1", session, scope="auto", origin="connector"))
+    assert (resp.gate, resp.changed, resp.actions) == ("n/a", False, ["version_controlled"])
 
 
 # ── read-caches: four actions in order, no marker/trigger/gate ──────────
@@ -427,7 +441,7 @@ def test_unknown_ds_raises_notfound_before_side_effects(monkeypatch, scope):
     async def _fake_signal(*a, **k):
         order.append("signal")  # must NOT be reached
         return types.SimpleNamespace(
-            changed=True, job_id=None, deferred=False, event_id=None,
+            changed=True, job_id=None, deferred=False, event_id=None, version_controlled=False,
         )
 
     monkeypatch.setattr(svc, "signal_source_changed", _fake_signal)

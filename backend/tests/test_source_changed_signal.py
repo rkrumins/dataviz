@@ -123,6 +123,7 @@ def _build(
     cooldown=None,
     emit_raises=False,
     invalidate_purge_count=2,
+    versioned=frozenset(),
 ):
     """Wire a service with all collaborators mocked to record their call
     order. Returns (svc, session, order, captured). The audit emit
@@ -160,6 +161,11 @@ def _build(
         return current_fp
 
     monkeypatch.setattr(svc_mod, "compute_graph_fingerprint", _fake_fp)
+
+    async def _fake_versioned():
+        return frozenset(versioned)
+
+    monkeypatch.setattr(svc_mod, "_platform_mastered_ids", _fake_versioned)
 
     async def _fake_mark_stale(ws, ds_, reason):
         order.append("mark_source_stale")
@@ -1824,3 +1830,34 @@ def test_the_tick_issues_no_candidate_query_either(monkeypatch):
     _run(sched._tick())
 
     assert factory.created[0].executed == 1
+
+
+# ── A version-controlled source: a load into it is drift, not a change to converge ──
+
+
+def test_a_load_into_a_version_controlled_source_is_recorded_and_left_alone(monkeypatch):
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="STORED"), current_fp="NEW",
+        versioned={"ds-1"},
+    )
+    resp = _run(svc.signal_source_changed(
+        "ds-1", session, reason="nightly load", origin="connector"))
+    assert (resp.changed, resp.job_id, resp.version_controlled) == (False, None, True)
+    assert order == [], "nothing marked, invalidated or queued"
+    [event] = svc._events
+    assert (event["origin"], event["gate"], event["outcome"], event["detail"]) == (
+        "connector", "n/a", "noop", "version_controlled")
+
+
+@pytest.mark.parametrize("kw", [
+    {"reason": svc_mod.VERSIONED_PUBLISH},           # the projector's own hand-off
+    {"reason": "reconcile", "origin": "reconcile"},   # re-signalling a rebuild it left deferred
+])
+def test_the_platforms_own_signals_for_a_version_controlled_source_still_converge(monkeypatch, kw):
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="STORED"), current_fp="NEW",
+        versioned={"ds-1"},
+    )
+    resp = _run(svc.signal_source_changed("ds-1", session, **kw))
+    assert resp.changed is True and resp.version_controlled is False
+    assert order == _FULL_SEQUENCE

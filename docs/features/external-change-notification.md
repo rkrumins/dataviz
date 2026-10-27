@@ -89,7 +89,8 @@ Response:
 }
 ```
 
-`gate` is `forced` / `changed` / `unchanged` for `auto`. **`changed: false` is a
+`gate` is `forced` / `changed` / `unchanged` for `auto` (`n/a` for a
+version-controlled source — see the last section). **`changed: false` is a
 success, not a failure** — it means we checked and your load did not actually
 alter the graph shape, so no rebuild was warranted. Treat a `2xx` as "signal
 accepted", never as "rebuild started"; use `jobId` for that.
@@ -97,7 +98,8 @@ accepted", never as "rebuild started"; use `jobId` for that.
 `actions` is the ordered list of what actually ran, drawn from a fixed
 vocabulary: `marker_set`, `marker_cleared`, `content_cleared`,
 `hierarchy_invalidated`, `aggregated_lkg_purged`, `stats_nudged`, `invalidated`,
-`rebuild_queued`, `rebuild_deferred`, `rebuild_conflict`, `rebuild_error`. Log
+`rebuild_queued`, `rebuild_deferred`, `rebuild_conflict`, `rebuild_error`,
+`version_controlled`. Log
 it — when a signal does less than you expected, this says which step declined.
 
 `POST /api/v1/admin/data-sources/{ds}/source-changed` with `{"reason", "force"}`
@@ -230,7 +232,15 @@ and actor, and the resulting job carries a trigger you can filter on.
 - **A source whose rebuilds repeatedly fail stops being retried** once it trips
   the breaker (3 consecutive actions), and is surfaced as "Needs a person"
   rather than being retried forever.
-- **Version-controlled sources ignore all of this.** For them Postgres is the
-  source of truth and the graph is a rebuildable read cache, so the overlay is
-  maintained incrementally on commit. They report as `managed` and the sweep
-  never acts on them. Signalling one has no effect.
+- **Version-controlled sources ignore all of this.** For them the version
+  history is the source of truth and the platform writes the graph from it, so
+  the overlay is maintained on commit — incrementally in the source's own graph,
+  or, for a dedicated projection, by a rebuild the publish itself requests. They
+  report as `managed` and the sweep never acts on them. A load into one from
+  outside is drift from its history, not a change to converge: signalling it
+  changes nothing and says so — `refresh` answers `gate: "n/a"`,
+  `changed: false`, `actions: ["version_controlled"]`, `source-changed` answers
+  `versionControlled: true` — and the signal is kept in the source's refresh
+  history. What the load wrote is reported under **Data health → Outside the
+  version history**. A source counts as version-controlled once turning version
+  control on has finished; until then it is reconciled like any other.

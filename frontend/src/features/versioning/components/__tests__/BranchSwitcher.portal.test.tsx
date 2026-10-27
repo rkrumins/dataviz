@@ -20,6 +20,7 @@ const branchState = {
 }
 
 let branchesData: unknown[] = []
+let resolveData: Record<string, unknown> = { graphId: 'g1', mainHeadCommitSeq: 5 }
 
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
 vi.mock('@/store/auth', () => ({ usePermission: () => true }))
@@ -29,7 +30,7 @@ vi.mock('@/store/branchStore', () => ({
 }))
 vi.mock('../../hooks/useBranchDeepLink', () => ({ useBranchDeepLink: () => {} }))
 vi.mock('../../hooks/useVersioning', () => ({
-  useResolveGraph: () => ({ data: { graphId: 'g1', mainHeadCommitSeq: 5 }, isLoading: false, isError: false }),
+  useResolveGraph: () => ({ data: resolveData, isLoading: false, isError: false }),
   useBranches: () => ({ data: branchesData, isLoading: false, isFetching: false }),
   useMergeRequests: () => ({ data: [{ sourceBranchId: 'br_1', status: 'open' }] }),
   useOpenDraft: () => ({ mutate: vi.fn(), isPending: false }),
@@ -63,6 +64,8 @@ const openMenu = () => {
 describe('BranchSwitcher menu', () => {
   beforeEach(() => {
     branchesData = []
+    resolveData = { graphId: 'g1', mainHeadCommitSeq: 5 }
+    branchState.setResolved.mockClear()
     switchToMain.mockClear()
     switchToDraft.mockClear()
     branchState.currentBranchId = null
@@ -123,5 +126,12 @@ describe('BranchSwitcher menu', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
     expect(screen.queryByRole('dialog', { name: 'Version' })).not.toBeInTheDocument()
     expect(document.activeElement).toBe(screen.getByRole('button', { name: /Published/ }))
+  })
+
+  it('offers nothing to draft on while version control is still being turned on', () => {
+    resolveData = { graphId: 'g1', mainHeadCommitSeq: 1, bootstrap: { jobId: 'job_1', status: 'running' } }
+    renderInBlurredHeader()
+    expect(screen.queryByRole('button', { name: /Published/ })).toBeNull()
+    expect(branchState.setResolved).not.toHaveBeenCalled()
   })
 })

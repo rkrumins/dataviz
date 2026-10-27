@@ -220,4 +220,15 @@ describe('ExportViewDialog — a view with its data', () => {
     expect(screen.getByRole('radio', { name: /View \+ data/ })).toBeDisabled()
     expect(screen.getByRole('radio', { name: /View only/ })).toHaveAttribute('aria-checked', 'true')
   })
+
+  it('says so while version control is still being turned on — its history holds no data yet', async () => {
+    resolveGraphMock.mockReset()
+    resolveGraphMock.mockResolvedValue({
+      graphId: 'g1', mainBranchId: 'main', mainHeadCommitSeq: 1, myDraft: null,
+      bootstrap: { jobId: 'job_1', status: 'running' },
+    })
+    renderDialog()
+    expect(await screen.findByText(/Version control is still being turned on/)).toBeInTheDocument()
+    expect(screen.getByRole('radio', { name: /View \+ data/ })).toBeDisabled()
+  })
 })

@@ -668,6 +668,11 @@ def _is_resumable(job) -> bool:
 #: Every other origin is a caller who watched a write happen.
 _PROBE_ONLY_ORIGINS = frozenset({"drift", "reconcile", "reconcile-sweep"})
 
+#: The ``reason`` of the projector's own hand-off for a version-controlled
+#: dedicated source (``projection_target.make_rollup_rebuild_hook``): the one
+#: signal for such a source that is not drift from its history.
+VERSIONED_PUBLISH = "versioned_publish"
+
 #: ``JobLimitsPatch.reset`` keys (the wire names) → the ``live_overrides``
 #: fields they clear.
 _LIVE_RESET_FIELDS = {
@@ -2491,6 +2496,28 @@ class AggregationService:
             if ds_orm is not None and ds_orm.deleted_at is None:
                 workspace_id = ds_orm.workspace_id
 
+        # A version-controlled source's graph is written by the platform from
+        # its history, so a load into it from outside is drift from that
+        # history — reported (Data health), never converged here, as the sweep
+        # never converges one. Its rollups move only by the projector's own
+        # hand-off (``VERSIONED_PUBLISH``), and by the scheduler re-signalling
+        # a rebuild that hand-off left deferred.
+        if (
+            reason != VERSIONED_PUBLISH and origin != "reconcile"
+            and ds_id in await _platform_mastered_ids()
+        ):
+            event_id = await self._emit_signal_event(
+                workspace_id=workspace_id, ds_id=ds_id, origin=origin,
+                actor=actor, gate="n/a", actions={}, outcome="noop",
+                detail="version_controlled", audit_reason=audit_reason,
+                evidence=evidence, run_id=run_id,
+            )
+            return SourceChangedResponse(
+                changed=False, job_id=None, reason=reason,
+                current_fingerprint="", stored_fingerprint=stored_fp,
+                event_id=event_id, version_controlled=True,
+            )
+
         # 2. Resolve the provider and fingerprint the live graph (same
         # bounded pattern as check_drift / the scheduler). A resolution
         # failure leaves provider=None (content-cache clear is skipped); a
@@ -2937,6 +2964,10 @@ class AggregationService:
                 "changed" if signal.changed else "unchanged"
             )
             actions: List[str] = []
+            if signal.version_controlled:
+                # Nothing was checked: the load is drift from its history.
+                gate = "n/a"
+                actions.append("version_controlled")
             if signal.job_id:
                 actions.append("rebuild_queued")
             elif signal.deferred:

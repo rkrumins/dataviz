@@ -23,7 +23,8 @@ export function useDrawerHistoryScope() {
   const branchId = useEffectiveBranchId(activeView?.workspaceId ?? '', activeView?.dataSourceId ?? null, activeView?.id ?? null)
   return {
     wsId: readOnlyView ? undefined : activeView?.workspaceId,
-    graphId: readOnlyView ? null : (resolve.data?.graphId ?? null),
+    // No history yet while version control is still being turned on.
+    graphId: readOnlyView || resolve.data?.bootstrap ? null : (resolve.data?.graphId ?? null),
     mainBranchId: resolve.data?.mainBranchId ?? null,
     branchId,
   }

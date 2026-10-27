@@ -77,6 +77,46 @@ every data source that reads it, and **Give up** doesn't bring them back. If the
 copy stops part-way, the strip explains why and offers **Resume** or to start
 over.
 
+Your graph stays where it is. Views keep reading the same graph, under the same
+name, and the version history is kept beside it: every publish is written into
+that graph. Nothing is copied to a second graph. (A graph name ending in
+`_copy` comes from importing a view package **Into a new data source**, never
+from turning version control on.)
+
+The copy also stops, before anything is copied, when:
+
+- **A type's spelling differs only in letter case** from the
+  [semantic layer](/guide/semantic-layer) — say `dataset` in the graph and
+  `Dataset` in the semantic layer. The strip lists each one; fix the spelling
+  in either place and choose **Start over**.
+- **Another data source already has this graph under version control.** One
+  history per graph: version control for the other data source covers it.
+
+A source whose items are identified by another property (such as `id`) has
+each identifier filled in from that property first. Each is marked with where
+it came from, and your views read the same as before. A connection whose id
+another item already uses gets a new one (`edge:` followed by the old id).
+Items with no identifier at all don't appear in {brand}, so they aren't
+copied: they stay in the graph as they are, and **Download list (CSV)** lists
+them.
+
+### Changes made outside version control
+
+Once version control is on, change the data through drafts and publishing. If
+a pipeline keeps loading into the graph directly, what it writes is outside the
+version history: it still shows in Views, but not in drafts, and publishing,
+history and restore don't cover it. {brand} never deletes anything it didn't
+write, so those items stay exactly as they are — even when someone rebuilds the
+graph.
+
+The versioning panel's **Data health** tab, shown to people who manage the
+data source, reports them under **Outside the version history**: how many
+items and connections were written outside the history, how many items have no
+identifier, and how many carry version-control ids the history doesn't hold.
+Each kind can be downloaded as a CSV list, and **Check sync** shows examples. A
+pipeline that tells {brand} it has loaded data is answered that the source is
+under version control, and nothing is rebuilt for it.
+
 ![The canvas strip after turning on version control: 'Everything checked out', the list of passed checks, and the View history and Done buttons](/docs-assets/guide/versioning-change-control-enable.png)
 
 ## The life of a change

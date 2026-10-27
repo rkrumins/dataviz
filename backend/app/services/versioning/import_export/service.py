@@ -333,7 +333,10 @@ class ImportExportService:
         ``field_scope``: ``extra_props`` = empty columns to add; ``select_ids``/``select_types`` =
         row-scope to just those entities / entity types. ``package`` makes the job a view package's
         (view_transfer.package): the views' file is built from the versions sealed for it, then the
-        data is written into the package as it streams. ``file_name`` names the download."""
+        data is written into the package as it streams. ``file_name`` names the download.
+
+        Refused (``ConcurrencyError``) while version control is still being turned on: main is
+        parked at genesis until then, so an export would hold none of the source's data."""
         # Who started it: theirs to cancel (cancel_export).
         options: Dict[str, Any] = {"actor": actor}
         if package:
@@ -347,6 +350,7 @@ class ImportExportService:
         if select_types:
             options["types"] = select_types
         async with db.graphver_session() as s:
+            await self._svc._assert_not_bootstrapping(s, graph_id)
             job = JobORM(
                 job_type="export", graph_id=graph_id, workspace_id=workspace_id,
                 data_source_id=data_source_id, provider_id=provider_id,

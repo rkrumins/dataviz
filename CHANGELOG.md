@@ -9,6 +9,74 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Version control on a data source's own graph: nothing lost, everything reported
+
+### Added
+
+**What's outside the version history, reported.** When a data source's own graph is under version
+control, **Data health** shows **Outside the version history**: the items and connections something
+wrote there outside the history, the items with no identifier, and the items carrying
+version-control ids the history doesn't hold — each kind a CSV list, with examples from **Check
+sync**. In the API, `GET /api/v1/{ws_id}/graph/misaligned-items` lists each kind, and the
+watermark carries the counts as `drift`.
+
+**Turning version control on lines the graph up first.** The copy stops before copying anything
+when a type's spelling differs from the semantic layer's only in letter case, and lists each one. A
+source whose items are identified by another property has its identifiers filled in from it, each
+marked with where it came from. A connection whose id another item uses gets `edge:` followed by
+that id. Items with no identifier stay where they are, with a list to download.
+
+### Changed
+
+- **{brand} never deletes from a data source's own graph what it didn't write.** A rebuild or heal
+  there adds what the history holds and removes nothing else, editing an entity removes only the
+  properties the history removed, parallel relationships keep their own ids, and the graph is never
+  evicted to save memory.
+- **Something else writing to the graph no longer holds publishing back.** A publish lands and Views
+  keep reading the live graph; what was written outside the history is reported, not repaired.
+- **A pipeline's refresh signal for a version-controlled source changes nothing, and says so**:
+  `refresh` answers `gate: "n/a"` and `actions: ["version_controlled"]`, `source-changed`
+  `versionControlled: true`. The signal is kept in the source's refresh history.
+- **A data source counts as versioned once turning version control on has finished** — for the
+  Explorer's Versioned filter, the sync status, freshness and the reconciliation sweep. While it
+  runs, Views offer no drafts, History or data packages for it.
+- A graph another data source already has under version control can't be put under version control
+  again (`409 graph_already_versioned`).
+
+### Fixed
+
+- A dedicated data source's lineage summaries were never rebuilt after a publish once it was under
+  version control. A publish that changes lineage now has them rebuilt — at most once per rebuild
+  cooldown, marked out of date meanwhile.
+- Every automatic rebuild of a dedicated data source — after a refresh signal, from the
+  reconciliation sweep, at onboarding — wrote its rollups into the source graph instead of its
+  `_proj` graph. A rebuild now goes where the data source keeps its rollups unless it asks
+  otherwise, and **Re-aggregate** in the Explorer no longer asks for the source graph.
+- **Check sync** said a dedicated data source's lineage summaries had never been built.
+- While version control was being turned on, opening a draft through `POST /versioning/resolve`
+  answered `500`; it answers `409` now. Exporting or packaging the data source's data produced files
+  with none of its data; both are refused until it finishes.
+
+### Upgrading
+
+- Migration `20261027_1200_projection_drift` adds `projection_state.drift`.
+- `GRAPHVER_PROJECTION_DRIFT_INTERVAL_SECS` (default `900`) sets how often a publish recounts what a
+  data source's own graph holds outside its history. Each count reads the whole graph; **Check
+  sync** always recounts.
+
+### Known limitations
+
+- What was written outside the history can't be brought into it yet: stop the writes, or make them
+  through drafts. Re-syncing such writes into the history is planned.
+- An outside writer that sets `entityId`, or an `id` on a relationship, is reported as carrying
+  version-control ids the history doesn't hold, not as written outside the history.
+- A change published while a dedicated source's summaries are being rebuilt can be left out of them
+  until the next change.
+- The Explorer's **Graph Drift Detected** banner can appear after a publish on an in-source
+  version-controlled data source, although its summaries are kept current with every publish.
+
+---
+
 ## [Unreleased] — Search at any width, saved searches across Views, and Code mode that edits like an editor
 
 ### Added

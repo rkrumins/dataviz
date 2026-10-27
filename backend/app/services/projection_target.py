@@ -109,9 +109,10 @@ def make_rollup_rebuild_hook(get_aggregation_service):
             if agg is None:
                 await _queue_on_control_plane(str(ds_id), None, mode)
                 return
+            from backend.app.services.aggregation.service import VERSIONED_PUBLISH
             try:
                 async with get_async_session() as s:
-                    await agg.signal_source_changed(str(ds_id), s, reason="versioned_publish")
+                    await agg.signal_source_changed(str(ds_id), s, reason=VERSIONED_PUBLISH)
                 logger.info("signalled the rollup change for ds=%s (dedicated)", ds_id)
             except Exception as exc:                     # pragma: no cover - infra
                 logger.warning("rollup change for ds=%s not signalled: %s", ds_id, exc)
@@ -157,9 +158,10 @@ async def _queue_on_control_plane(ds_id: str, idempotency_key: Optional[str], mo
             headers=internal_auth_headers(),
         ) as client:
             if mode == "dedicated":
+                from backend.app.services.aggregation.service import VERSIONED_PUBLISH
                 resp = await client.post(
                     f"/aggregation/data-sources/{ds_id}/source-changed",
-                    json={"reason": "versioned_publish"},
+                    json={"reason": VERSIONED_PUBLISH},
                 )
             else:
                 resp = await client.post(

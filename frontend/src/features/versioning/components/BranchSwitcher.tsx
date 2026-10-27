@@ -71,7 +71,9 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   // view's own draft (branch-per-view).
   const originatingViewId = useActiveView()?.id ?? null
   const resolve = useResolveGraph(workspaceId, dataSourceId, originatingViewId)
-  const graphId = resolve.data?.graphId ?? null
+  // While version control is still being turned on there is nothing to draft on yet.
+  const enabling = !!resolve.data?.bootstrap
+  const graphId = enabling ? null : (resolve.data?.graphId ?? null)
   const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
   // Branch-per-view: the switcher lists only THIS view's own drafts (the backend filters by
   // originating_view_id + the viewer's visibility), not every draft on the data source. A data
@@ -102,10 +104,10 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   // Sync the resolve result into the shared branch store (scoped to this data source + view —
   // branch-per-view: switching the active view clears any other view's draft state).
   useEffect(() => {
-    if (resolve.data && dataSourceId) {
+    if (resolve.data && dataSourceId && !enabling) {
       setResolved({ workspaceId, dataSourceId, viewId: originatingViewId }, resolve.data)
     }
-  }, [resolve.data, workspaceId, dataSourceId, originatingViewId, setResolved])
+  }, [resolve.data, enabling, workspaceId, dataSourceId, originatingViewId, setResolved])
 
   // Deep-link: apply ?branch=<id> on load (permission-gated) + keep the URL in step with the
   // active branch, so a view+branch is a shareable link.

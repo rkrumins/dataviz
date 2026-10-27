@@ -229,6 +229,13 @@ async def export_view_package(
             "type": "not_versioned",
             "message": "Only a data source under version control can be packaged with its data.",
         })
+    if ds_id not in await svc.main_heads(workspace_id=workspace_id, data_source_ids=[ds_id]):
+        # Before anything is sealed: its history holds none of the source's data yet.
+        raise HTTPException(status_code=409, detail={
+            "type": "bootstrapping",
+            "message": "Version control is still being turned on for this data source — package "
+                       "its data once that finishes.",
+        })
     actor = _actor(user)
     branch_id = None
     if req.dataVersion == "draft":

@@ -52,8 +52,8 @@ data read & write for every write. Every route below accepts a key except creati
 (`GET /blank-graphs/name-check`), opening a draft by data source (`POST /resolve`), adding or
 removing a draft's members, projection rebuild and reconcile, and on the graph router
 `POST /bootstrap`, `/bootstrap/decision`, `/bootstrap/retry` and `/bootstrap/abandon`, `/resync`
-and `edges/aggregated/materialize` — `GET /bootstrap/status` and `/bootstrap/duplicates` accept
-one. A key limited to particular data sources reaches a graph, branch or request only when the
+and `edges/aggregated/materialize` — `GET /bootstrap/status`, `/bootstrap/duplicates` and
+`/misaligned-items` accept one. A key limited to particular data sources reaches a graph, branch or request only when the
 data source behind it is one of them — otherwise `403 api_key_out_of_scope`, or `404` across
 workspaces; opening a fork's pull request (`POST …/pulls`) also needs the parent graph's data
 source.
@@ -205,9 +205,9 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 
 | Method · Path | Gate | Purpose / key fields |
 |---|---|---|
-| `GET …/watermark` | `_READ` | `WatermarkModel{committed, projected, fresh, status, target, lastError?, lastProjectedAt?, progressDone?, progressTotal?, committedRevision?, projectedRevision?}`. `status` is `idle`, `projecting`, `rebuilding` or `evicted`; each revision is `{commitId, createdAt, actor, message}`. Drives the "refreshing…" badge and the Data health tab |
+| `GET …/watermark` | `_READ` | `WatermarkModel{committed, projected, fresh, status, target, lastError?, lastProjectedAt?, progressDone?, progressTotal?, committedRevision?, projectedRevision?, drift?}`. `status` is `idle`, `projecting`, `rebuilding` or `evicted`; each revision is `{commitId, createdAt, actor, message}`. `drift`, on a data source's own graph under version control, is what it holds outside the history as last counted — `{outsideHistory: {nodes, relationships}, noIdentifier: {nodes}, unexpected?, checkedAt}` (see [04 · Projection & Cache](04-projection-and-cache.md), §16); null otherwise. Drives the "refreshing…" badge and the Data health tab |
 | `POST …/projection/rebuild` | `_MANAGE` | Full replay Postgres → FalkorDB → `{started, alreadyRunning, watermark}`. **409** when there is no real target (unpinned, or the synthetic `gv_<id>`). Idempotent; it also self-heals a stranded status |
-| `POST …/projection/reconcile` | `_MANAGE` | `{deep?}` → `DriftReportModel` (counts and id-set differences; `deep` also compares fields). A request-scoped full scan: a second one for the same graph → **409**; a read-layer failure → **503** |
+| `POST …/projection/reconcile` | `_MANAGE` | `{deep?}` → `DriftReportModel` (counts and id-set differences; `deep` also compares fields). On a data source's own graph (`owned: false`) it also carries `outsideHistory` — the drift counts with bounded examples of each kind — and is `inSync` when the graph holds everything the history does; the counts are kept as the watermark's `drift`. `rollups` is null for a dedicated source, whose rollups live in another graph. A request-scoped full scan: a second one for the same graph → **409**; a read-layer failure → **503** |
 | `POST …/commits/{cid}/revert` | `_MANAGE` | Apply the inverse of one `main` commit as a new `revert` commit. `{message?}` → `{commitId}` — `""` when there was nothing to undo. **409** if a later commit changed the same entities. The genesis commit can't be reverted (**404**) |
 | `GET …/commits/{cid}/restore-preview` | `_READ` | What a restore would do: `{commitsUndone, nodes, edges}`, each with create, update and delete counts. Nothing is written |
 | `POST …/commits/{cid}/restore` | `_MANAGE` | Reset `main` to its state at that commit, as one new `restore` commit (point-in-time rollback). `{message?}` → `{commitId}` — `""` when `main` already matches it. No conflict path: everything after the target is overridden by definition |
@@ -461,6 +461,24 @@ ontology, and fails closed for blank models (**422 `ontology_required`**, **503
   `POST /bootstrap/abandon?dataSourceId=…` drive recovery. The worker reads the source in bounded
   windows, can resume after a crash, and finishes only after an integrity report proves the copy —
   see the [End-to-End Testing Guide](/docs/versioning-e2e).
+  The versioned graph is the source's own: the projection is pinned to the graph it already reads,
+  never a copy. `POST /bootstrap` answers **409 `graph_already_versioned`** when another data source
+  already versions that graph. The job fails before copying anything (`failure.type: "integrity"`,
+  `action: "restart"`) when a type's spelling differs from the semantic layer's only in letter case,
+  listing each in `spelling`; on a source keyed by another property it fills the identifiers in from
+  it first (`identityStamp`), and gives a connection whose id another item uses `edge:` + that id
+  (`rekeyedEdges`). Until the job completes the source is not versioned: opening a draft
+  (`POST /versioning/resolve`, `…/branches`), committing, exporting and packaging its data answer
+  **409**.
+- `GET /misaligned-items?dataSourceId=…&category=…&after&limit(100, max 1,000)` (`workspace:datasource:read`,
+  API keys accepted) lists the items of a data source's graph that don't line up with the model,
+  one `category` at a time in internal-id order — `{items, next}`, or with `format=csv` the whole
+  list as a download: `no_identifier` (any data source; `{internalId, label, name, properties}`),
+  and on a data source's own graph under version control `outside_history_nodes`
+  (`{internalId, label, urn, name, alsoInHistory}` — `alsoInHistory` marks a second copy of a
+  tracked item) and `outside_history_relationships` (`{internalId, source, type, target}`). **422**
+  for an unknown category, an outside-history one elsewhere, or a source not on FalkorDB; **409**
+  while version control is being turned on; **503** when the graph can't be read.
 - `POST /resync?dataSourceId=…&strategy=merge|external_wins` (`_MANAGE` + **Version control**)
   re-syncs a versioned graph from its provider's current state with the service's 3-way merge;
   **404** when the data source isn't versioned. It refuses above `GRAPHVER_RESYNC_MAX_ENTITIES`

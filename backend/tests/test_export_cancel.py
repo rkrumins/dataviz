@@ -52,8 +52,13 @@ def _sessions(row=None, added=None, opened=None):
     return session
 
 
+class _Versioning:
+    async def _assert_not_bootstrapping(self, _session, _graph_id):
+        return None                             # version control is on: the graph may be exported
+
+
 def _service() -> ImportExportService:
-    return ImportExportService(versioning=object(), store=object())
+    return ImportExportService(versioning=_Versioning(), store=object())
 
 
 async def test_an_export_records_who_started_it(monkeypatch):

@@ -35,6 +35,7 @@ class _Versioning:
     def __init__(self):
         self.graphs: dict = {}
         self.drafts: list = []
+        self.enabling: set = set()          # data sources whose version control is still being turned on
 
     def track(self, workspace_id: str, data_source_id: str) -> None:
         self.graphs[data_source_id] = {"graph_id": f"g_{data_source_id}", "workspace_id": workspace_id,
@@ -45,6 +46,11 @@ class _Versioning:
 
     async def get_graph(self, graph_id):
         return next((g for g in self.graphs.values() if g["graph_id"] == graph_id), None)
+
+    async def main_heads(self, *, workspace_id, data_source_ids):
+        return {ds: self.graphs[ds] for ds in data_source_ids
+                if ds in self.graphs and self.graphs[ds]["workspace_id"] == workspace_id
+                and ds not in self.enabling}
 
     async def branch_statuses(self, branch_ids):
         return {d["branch_id"]: d["status"] for d in self.drafts if d["branch_id"] in set(branch_ids)}

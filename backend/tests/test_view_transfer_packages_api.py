@@ -181,6 +181,27 @@ async def test_a_view_is_packaged_by_a_job_the_request_only_queues(test_client, 
     assert sorted(scope["assigned_urns"]) == ["urn:a", "urn:b", "urn:gone"]
 
 
+async def test_a_source_still_being_enabled_is_not_packaged_and_nothing_is_sealed(
+        test_client, db_session, graph, services):
+    from sqlalchemy import func, select
+
+    from backend.app.db.models import ViewVersionORM
+
+    versioning, jobs = services
+    ws = await _workspace(test_client, "Dev")
+    ds = await _data_source(db_session, ws)
+    versioning.track(ws, ds)
+    versioning.enabling.add(ds)
+    view_id = await _view(test_client, ws, dataSourceId=ds)
+
+    resp = await test_client.post(f"{_TRANSFER}/packages", json={"views": [{"viewId": view_id}]})
+    assert resp.status_code == 409 and resp.json()["detail"]["type"] == "bootstrapping", resp.text
+    assert jobs.of("exp") == []
+    sealed = await db_session.scalar(
+        select(func.count()).select_from(ViewVersionORM).where(ViewVersionORM.view_id == view_id))
+    assert sealed == 0, "refused before any version was sealed for it"
+
+
 async def test_a_package_asked_for_again_is_the_same_job(test_client, db_session, graph, services):
     versioning, jobs = services
     ws = await _workspace(test_client, "Dev")

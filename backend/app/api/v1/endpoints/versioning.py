@@ -1465,11 +1465,13 @@ async def resolve_graph_open(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """Resolve and ensure the caller has an open draft to edit on (opens one if none)."""
-    res = await svc.resolve_graph(
-        data_source_id=body.data_source_id, actor=user.id, workspace_id=ws_id,
-        open_draft_if_absent=True, originating_view_id=body.originating_view_id,
-    )
+    """Resolve and ensure the caller has an open draft to edit on (opens one if none). 409 while
+    version control is still being turned on: there is nothing to draft on yet."""
+    with _domain_errors():
+        res = await svc.resolve_graph(
+            data_source_id=body.data_source_id, actor=user.id, workspace_id=ws_id,
+            open_draft_if_absent=True, originating_view_id=body.originating_view_id,
+        )
     if res is None:
         raise HTTPException(status_code=404, detail="no versioned graph for data source")
     draft = res.get("my_draft")
