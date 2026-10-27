@@ -107,19 +107,27 @@ Ask on the query card — **Or ask in plain words…** under the filters in
 | --- | --- |
 | `datasets tagged PII` · `#PII` · `PII columns` | Datasets with the tag · anything tagged · columns tagged |
 | `unused datasets` · `dead ends` · `sources` · `orphaned columns` | The lineage shape: nothing downstream · nothing upstream · no lineage at all |
-| `undocumented datasets` · `unowned datasets` | No `description` · no `owner` |
+| `undocumented datasets` · `unowned datasets` | No `description` · no owner — the View's own owner property (`owner`, else one named for owners) |
 | `datasets that feed dashboards` · `dashboards fed by datasets` | A relationship, up to 3 hops — `directly` for one hop, `within 6 hops` for six (10 at most) |
 | `datasets that feed no dashboards` · `only feed dashboards` · `feed at least 2 dashboards` | None of them · every one · a count |
 | `datasets in Snowflake` · `datasets inside "Sales Ops"` · `datasets in the gold layer` | Inside a container you name · in a layer |
 | `datasets owned by alice@corp` · `with more than 1M rows` · `updated in the last 7 days` | Property comparisons |
-| `datasets that feed "CFO Revenue"` | A named entity, in quotes |
+| `datasets that feed "CFO Revenue"` | A named entity, in quotes — with what is inside it (**it and what's inside**), as the canvas's right-click questions take it; pick **just it** for the entity alone |
+| `what does orders feed` · `what does orders affect` · `impact of orders` · `what breaks if orders changes` | Everything *orders* feeds, up to 3 hops — `directly` or `within 5 hops` as above; `which dashboards does orders feed` keeps to one type |
+| `where does orders come from` · `what does orders depend on` · `what does orders use` | Everything that feeds *orders* |
+| `what does "Sales Ops" contain` · `what is orders linked to` | Everything inside it · everything linked to it |
+| `datasets with more than 100 columns` | How many it holds: a count of the columns inside |
 | `connections from columns tagged PII to dashboards` · `edges from datasets to the gold layer through produces, either way` | A [Connections](#connections-the-edges-themselves) search — each end read as a question of its own; `through …` names edge types or a class, `either way` both directions |
 
 As you type it **reads the question back** — **Reads as**, and how many it
 matches — before anything changes. A word with more than one reading, such as
 a tag that is also a container's name, shows its readings as chips: pick the
 one you mean. A name several entities share says so and lets you pick one.
-Words it can't place are **searched for by name**, and it lists them.
+Words it can't place are **searched for by name**, and it lists them. What it
+leaves out it says, in amber, rather than reading it as something else: an
+owner in a View with no owner property, `without a steward` in a View with no
+such property (never "whose name doesn't contain steward"), relationships
+nested more than 3 deep.
 
 **Enter** applies the question and runs it; **Esc** clears it; **↑** and **↓**
 bring back earlier questions. Start with **and** — `and tagged PII` — to add to
@@ -599,7 +607,8 @@ brings the results back.
 Below the bar, matches are grouped (by layer in a Context View, by parent on
 the other canvases). A group's **Search inside this group** adds an *Inside
 Subtree* filter for it. **Load more** fetches the next thousand; **Load all**
-keeps going until every match is listed.
+keeps going until every match is listed. A page that fails to load says why,
+and **Try again** asks for it once more — the matches already listed stay.
 
 The answer refines the query, not just the list:
 
@@ -622,7 +631,9 @@ exact. Nothing needs clicking.
 spreadsheet) or **NDJSON** file. Each row starts with the URN, name, type and
 qualified name; add up to 200 property columns from the View's properties. The
 file is prepared on the server and downloads when it's ready. (No **Export**?
-Your administrator has turned off **Export graph data**.)
+Your administrator has turned off **Export graph data**.) Every match is in the
+file however the graph store is set up: no read asks for more rows than it
+sends in one reply.
 
 ### Questions from the canvas
 

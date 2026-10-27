@@ -9,6 +9,58 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — No wrong answers: busy graphs, large exports, silent failures and Ask
+
+### Fixed
+
+- **A busy graph no longer answers "0 matches".** When the graph was too busy to list its
+  entity types, a search, a count, a Connections search or a route search finished with nothing
+  found — and kept that answer for 15 minutes; name lookups remembered "not found", value
+  suggestions called their empty list complete, and display rules tagged nothing. Each now says
+  the graph is busy, and the panel asks again; what the graph store said itself (loading,
+  failing over, not answering) reaches the panel as it was.
+- **Large exports keep every row.** FalkorDB's stock image sends at most 10,000 rows in one
+  reply (`RESULTSET_SIZE`) and cuts the rest without saying so. An export lost the rows past
+  it; a search on a property kept raw (`propertiesRaw`) missed matches past it; and containers
+  lost their **N matches inside** badges when a large part of the View's matches sat in more
+  than 10,000 of them. Every such read now goes in pages of at most 10,000 rows. (Our own
+  compose files set no cap; a FalkorDB on its image's defaults has it.)
+- **Failures say so.**
+  - Display rules that couldn't be checked left the canvas without tags, as if nothing
+    matched. The rule list now says so, and why, with **Retry**; the browser also waits as long
+    as the server may take (150 s), instead of giving up at 45 s and asking again.
+  - A page of results after the first that failed to load only logged to the console. It now
+    says why, with **Try again**, and the Studio tables stop asking by themselves.
+  - Errors read the server's own reason — "the graph store node holding this graph is
+    restarting or failing over" — instead of "Too many requests" or a generic message, and an
+    export's failure no longer shows its raw reply.
+- **Ask reads common questions the right way round.**
+  - `what does orders feed`, `what does orders affect`, `impact of orders` and `what breaks if
+    orders changes` ask what *orders* feeds. `where does orders come from`, `what does orders
+    depend on` and `what does orders use` ask what feeds it. All of them read as "orders that
+    feed something" before. The subject is looked up by name, not searched for.
+  - A named relative of a lineage relationship — `datasets that feed "CFO Revenue"` — takes in
+    what is inside it, as the canvas's right-click questions do (a dataset's lineage runs
+    through its columns). **just it** reads the entity alone.
+  - `unowned` and `owned by` use the View's own owner property. In a View without one, Ask now
+    says so instead of matching everything.
+  - `without a steward`, in a View with no such property, is said back. It used to read as
+    "name doesn't contain steward", which is nearly everything.
+  - `datasets with more than 100 columns` keeps the count.
+  - Relationships nested more than 3 deep are said, not dropped.
+  - The Technical example question reads the way data flows.
+
+### Known limitations
+
+- Ask can't tell a container from an entity with nothing inside it before it looks the name up.
+  So **it and what's inside** is offered for every named lineage relative; for an entity with
+  nothing inside it, both readings find the same.
+- When the graph store doesn't answer, the rule list and **Load more** say so in the server's
+  words — "…is not answering; retrying automatically" — but they ask again only when **Retry**
+  or **Try again** is pressed. Making both ride out an outage on their own is the next change.
+
+---
+
 ## [Unreleased] — "Inside" anywhere in a query, searches that start from a thing's ancestors, and layer names with spaces
 
 ### Added

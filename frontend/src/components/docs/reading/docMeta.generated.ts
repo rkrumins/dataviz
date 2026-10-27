@@ -23,7 +23,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-10-27",
+    "updated": "2026-10-28",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -305,7 +305,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "advanced-search": {
-    "updated": "2026-10-27",
+    "updated": "2026-10-28",
     "path": "docs/guide/ADVANCED_SEARCH.md"
   },
   "finding-connections": {
@@ -333,7 +333,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/MANAGING_VIEWS.md"
   },
   "display-rules": {
-    "updated": "2026-10-27",
+    "updated": "2026-10-28",
     "path": "docs/guide/DISPLAY_RULES.md"
   },
   "semantic-layer": {
