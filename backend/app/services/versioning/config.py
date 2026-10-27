@@ -149,6 +149,10 @@ PROJECTION_VERIFY_DEEP: bool = os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP", "1")
 # is skipped on the automatic rebuild (count verify still runs); the on-demand reconcile ("Check sync")
 # can still deep-diff any size when an operator explicitly asks. 0 disables the ceiling.
 PROJECTION_VERIFY_DEEP_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_PROJECTION_VERIFY_DEEP_MAX_ENTITIES", "500000"))
+# On a data source's own graph (one the platform didn't mint), the verify also counts what was
+# written there outside the history — the watermark's ``drift`` report. Each count scans the whole
+# graph, so a projection pass refreshes it at most this often; "Check sync" always counts afresh.
+PROJECTION_DRIFT_INTERVAL_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_DRIFT_INTERVAL_SECS", "900"))
 # Largest rollup change the projector applies itself, by delta (a window's or a reconcile's
 # lineage-edge contributions; a moved container's subtree). Chains are resolved in one batched
 # climb per window and the pair math is in memory, so tens of thousands of edges stay inline;

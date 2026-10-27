@@ -10,18 +10,21 @@
  * (2) an on-demand sync check with a drift breakdown, and (3) a confirmed rebuild that always
  * converges to a terminal state — done (auto-verified) or failed (reason + Retry) — instead of
  * spinning forever. Driven by the two projection mutations plus the watermark poll (forced
- * while a rebuild is being watched, so the terminal transition is never missed).
+ * while a rebuild is being watched, so the terminal transition is never missed). A data source's
+ * own graph under version control adds one more: what it holds outside the version history.
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   Loader2, CheckCircle2, AlertTriangle, Info, ChevronDown, ChevronRight, RefreshCw, RotateCcw,
-  ShieldCheck,
+  ShieldCheck, Download,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { ProgressBar } from '@/components/ui/ProgressBar'
-import type { DriftReport, Watermark } from '@/services/versioningApiService'
+import {
+  misalignedItemsCsvUrl, type DriftReport, type MisalignedCategory, type ProjectionDrift, type Watermark,
+} from '@/services/versioningApiService'
 import { useProjectionWatermark, useReconcileProjection, useRebuildProjection } from '../hooks/useVersioning'
 import { useSyncStatus } from '@/features/sync-status/useSyncStatus'
 import { deriveSync, type SyncLane } from '@/features/sync-status/deriveSync'
@@ -115,6 +118,118 @@ function SyncRow({ label, tech, tone, text }: {
         <span className="truncate">{text}</span>
       </dd>
     </>
+  )
+}
+
+const itemsAndConnections = (nodes: number, relationships: number) =>
+  [nodes > 0 && plural(nodes, 'item', 'items'), relationships > 0 && plural(relationships, 'connection', 'connections')]
+    .filter(Boolean).join(' and ')
+
+/**
+ * A data source's own graph under version control can hold what its history doesn't track — a
+ * pipeline still writing to it. Reported, never changed: the platform deletes nothing there that
+ * it didn't write. Counts as of the last publish or check; examples from this panel's Check sync;
+ * the whole lists as downloads.
+ */
+function OutsideHistoryCard({ wsId, dataSourceId, drift, report }: {
+  wsId: string; dataSourceId?: string | null; drift: ProjectionDrift; report: DriftReport | null
+}) {
+  const [showDetails, setShowDetails] = useState(false)
+  const outside = drift.outsideHistory
+  const bare = drift.noIdentifier.nodes
+  const unexpected = drift.unexpected ?? { nodes: 0, relationships: 0 }
+  const samples = report?.outsideHistory?.samples
+  const stamped = report?.owned === false ? report.extraNodes : []
+  const download = (category: MisalignedCategory, label: string) => dataSourceId && (
+    <a
+      href={misalignedItemsCsvUrl(wsId, dataSourceId, category)}
+      download={`${category.replace(/_/g, '-')}-${dataSourceId}.csv`}
+      className="inline-flex items-center gap-1 font-medium text-accent-lineage hover:underline"
+    >
+      <Download className="w-3 h-3" /> {label}
+    </a>
+  )
+  const checked = <p className="mt-2 text-[11px] text-ink-muted/70">Checked {relativeTime(drift.checkedAt)}</p>
+
+  if (outside.nodes + outside.relationships + bare + unexpected.nodes + unexpected.relationships === 0) {
+    return (
+      <section className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-4">
+        <div className="flex items-start gap-2 text-[12px] text-ink">
+          <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-400" />
+          <span>Everything in this data source's graph is under version control.</span>
+        </div>
+        {checked}
+      </section>
+    )
+  }
+  return (
+    <section className="rounded-xl border border-amber-500/30 bg-amber-500/[0.05] p-4">
+      <h3 className="text-sm font-semibold text-ink font-display tracking-tight">Outside the version history</h3>
+      <p className="mt-1 text-[12px] text-ink-muted leading-relaxed">
+        This data source's own graph holds data its version history doesn't track — usually from a pipeline
+        that still writes to it. It appears in views, but not in drafts, and publishing, history and restore
+        don't cover it. The platform leaves it exactly as it is.
+      </p>
+      <ul className="mt-2.5 space-y-1.5 text-[12px] text-ink">
+        {outside.nodes + outside.relationships > 0 && (
+          <li>
+            {itemsAndConnections(outside.nodes, outside.relationships)} written outside the history
+            <span className="ml-2 inline-flex gap-3 text-[11px]">
+              {outside.nodes > 0 && download('outside_history_nodes', 'Items (CSV)')}
+              {outside.relationships > 0 && download('outside_history_relationships', 'Connections (CSV)')}
+            </span>
+          </li>
+        )}
+        {bare > 0 && (
+          <li>
+            {plural(bare, 'item has', 'items have')} no identifier, so {bare === 1 ? 'it' : 'they'} can't be shown or versioned
+            <span className="ml-2 text-[11px]">{download('no_identifier', 'List (CSV)')}</span>
+          </li>
+        )}
+        {unexpected.nodes + unexpected.relationships > 0 && (
+          <li>
+            {itemsAndConnections(unexpected.nodes, unexpected.relationships)}{' '}
+            {unexpected.nodes + unexpected.relationships === 1 ? 'carries' : 'carry'} version-control ids the
+            history doesn't hold
+          </li>
+        )}
+      </ul>
+      <p className="mt-2.5 text-[11px] text-ink-muted">
+        To keep everything under version control, make changes through drafts and stop writing to the graph directly.
+      </p>
+      {(samples || stamped.length > 0) && (
+        <>
+          <button
+            onClick={() => setShowDetails((v) => !v)}
+            className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-ink-muted hover:text-ink transition-colors"
+          >
+            {showDetails ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
+            Examples
+          </button>
+          {showDetails && (
+            <div className="mt-2 space-y-2.5 rounded-lg bg-canvas-overlay/50 p-2.5 text-[11px] text-ink-muted">
+              <TechList
+                title="Items written outside the history"
+                items={(samples?.nodes ?? []).map((n) =>
+                  `${n.label ?? '—'} · ${n.urn}${n.name ? ` · ${n.name}` : ''}${n.alsoInHistory ? ' — a second copy of a tracked item' : ''}`)}
+              />
+              <TechList
+                title="Connections written outside the history"
+                items={(samples?.relationships ?? []).map((r) => `${r.source} —${r.type}→ ${r.target}`)}
+                mono
+              />
+              <TechList
+                title="Items with no identifier"
+                items={(samples?.noIdentifier ?? []).map((n) =>
+                  `${n.label ?? '—'}${n.name ? ` · ${n.name}` : ''} · properties: ${n.properties.join(', ') || 'none'}`)}
+              />
+              <TechList title="Items with ids the history doesn't hold" items={stamped.map(nodeLabel)} />
+            </div>
+          )}
+        </>
+      )}
+      {checked}
+    </section>
   )
 }
 
@@ -220,10 +335,13 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
     })
   }
 
+  // A data source's own graph: stamped items the history doesn't hold are reported with what else it
+  // holds outside the history (the card below the hero) — a rebuild there deletes nothing.
+  const owned = report?.owned !== false
   const driftLines = report && !report.skippedReason && !report.inSync
     ? [
         report.missingNodes.length && `${plural(report.missingNodes.length, 'item', 'items')} missing from the fast read layer`,
-        report.extraNodes.length && `${plural(report.extraNodes.length, 'item', 'items')} that shouldn't be there`,
+        owned && report.extraNodes.length && `${plural(report.extraNodes.length, 'item', 'items')} that shouldn't be there`,
         report.mismatched.length && `${plural(report.mismatched.length, 'item', 'items')} with differences`,
         report.missingEdges.length && `${plural(report.missingEdges.length, 'connection', 'connections')} missing`,
         report.extraEdges.length && `${plural(report.extraEdges.length, 'connection', 'connections')} that shouldn't be there`,
@@ -322,6 +440,9 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
         </div>
       </section>
 
+      {/* A data source's own graph: what it holds outside the version history */}
+      {wm?.drift && <OutsideHistoryCard wsId={wsId} dataSourceId={dataSourceId} drift={wm.drift} report={report} />}
+
       {/* 2 — Check sync */}
       <section className="rounded-xl border border-glass-border bg-canvas-elevated/40 p-4">
         <div className="flex items-start justify-between gap-3">
@@ -405,7 +526,8 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
               <div className="flex items-start gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/[0.07] px-3 py-2.5 text-[12px] text-ink">
                 <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600 dark:text-emerald-400" />
                 <span>
-                  The fast read layer matches the source of truth — {plural(report.pgNodes, 'item', 'items')} and{' '}
+                  {owned ? 'The fast read layer matches the source of truth' : 'The fast read layer holds everything in the source of truth'}
+                  {' '}— {plural(report.pgNodes, 'item', 'items')} and{' '}
                   {plural(report.pgEdges, 'connection', 'connections')} checked.
                 </span>
               </div>
@@ -435,7 +557,7 @@ export function DataHealthTab({ wsId, graphId, dataSourceId }: { wsId: string; g
                 {showTechnical && (
                   <div className="mt-2 space-y-2.5 rounded-lg bg-canvas-overlay/50 p-2.5 text-[11px] text-ink-muted">
                     <TechList title="Missing items" items={report.missingNodes.map(nodeLabel)} />
-                    <TechList title="Unexpected items" items={report.extraNodes.map(nodeLabel)} />
+                    <TechList title="Unexpected items" items={owned ? report.extraNodes.map(nodeLabel) : []} />
                     {report.mismatched.length > 0 && (
                       <div>
                         <p className="font-semibold text-ink-muted/90 mb-1">Field differences</p>

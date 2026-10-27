@@ -192,33 +192,177 @@ async def falkor_counts(client, *, owned: bool = True) -> Tuple[int, int]:
     return int(fn.result_set[0][0]), int(fe.result_set[0][0])
 
 
-async def outside_history_counts(client) -> Dict[str, Dict[str, int]]:
+def _mapped(identity_property: Optional[str]) -> Optional[str]:
+    """The identity property as a backticked cypher name, when it is not ``urn`` itself."""
+    if not identity_property or identity_property == "urn":
+        return None
+    return "`" + identity_property.replace("`", "``") + "`"
+
+
+def _keyed(var: str, identity_property: Optional[str] = None) -> str:
+    """A node the reader can key: a (non-empty) ``urn`` — or, on a source keyed by another property,
+    a value of that property (the reader's own fallback, ``_node_from_props``)."""
+    clause = f"({var}.urn IS NOT NULL AND {var}.urn <> '')"
+    p = _mapped(identity_property)
+    if p:
+        clause = f"({clause} OR ({var}.{p} IS NOT NULL AND toString({var}.{p}) <> ''))"
+    return clause
+
+
+def _key_of(var: str, identity_property: Optional[str] = None) -> str:
+    """The key the reader gives a keyed node: its urn, else its identity property's value as text."""
+    p = _mapped(identity_property)
+    if not p:
+        return f"{var}.urn"
+    return f"CASE WHEN {var}.urn IS NOT NULL AND {var}.urn <> '' THEN {var}.urn ELSE toString({var}.{p}) END"
+
+
+async def outside_history_counts(client, identity_property: Optional[str] = None,
+                                 ) -> Dict[str, Dict[str, int]]:
     """What a customer's own graph holds that its history does not track — the drift a graph the
     platform does not own can have, because something other than the platform can write to it.
 
-    * ``outsideHistory`` — nodes with a ``urn`` but no ``entityId``, and relationships between two
-      such urn-bearing nodes with no ``id``: neither the copy nor any projector write made them.
-    * ``noIdentifier`` — nodes with no ``urn`` at all: the application cannot show, version or copy
-      them, so they stay as they are.
+    * ``outsideHistory`` — nodes the reader can key (:func:`_keyed`) that carry no ``entityId``, and
+      relationships between two of them that carry no ``id``: neither the copy nor any projector
+      write made them. They show in views, but the history doesn't hold them.
+    * ``noIdentifier`` — nodes the reader cannot key at all: the application cannot show, version or
+      copy them, so they stay as they are.
 
-    Three counts, each one scan; the derived rollup layer and its bookkeeping are never counted."""
+    ``identity_property``: the identity the copy keyed the source by, when not ``urn`` (see
+    :func:`copy_identity`). Three counts, each one scan; the derived rollup layer and its
+    bookkeeping are never counted."""
+    keyed_n, keyed_a, keyed_b = (_keyed(v, identity_property) for v in ("n", "a", "b"))
     nodes = await _bounded_query(
         client,
-        f"MATCH (n) WHERE n.urn IS NOT NULL AND n.urn <> '' AND n.entityId IS NULL "
-        f"AND {_NOT_DERIVED} RETURN count(n) AS c")
+        f"MATCH (n) WHERE {keyed_n} AND n.entityId IS NULL AND {_NOT_DERIVED} RETURN count(n) AS c")
     rels = await _bounded_query(
         client,
-        "MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' AND r.id IS NULL "
-        "AND a.urn IS NOT NULL AND a.urn <> '' AND b.urn IS NOT NULL AND b.urn <> '' "
-        "RETURN count(r) AS c")
+        f"MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' AND r.id IS NULL AND {keyed_a} "
+        f"AND {keyed_b} RETURN count(r) AS c")
     bare = await _bounded_query(
-        client,
-        f"MATCH (n) WHERE (n.urn IS NULL OR n.urn = '') AND {_NOT_DERIVED} RETURN count(n) AS c")
+        client, f"MATCH (n) WHERE NOT {keyed_n} AND {_NOT_DERIVED} RETURN count(n) AS c")
     return {
         "outsideHistory": {"nodes": int(nodes.result_set[0][0]),
                            "relationships": int(rels.result_set[0][0])},
         "noIdentifier": {"nodes": int(bare.result_set[0][0])},
     }
+
+
+async def copy_identity(session, graph_id: str) -> Optional[str]:
+    """The identity property the version-control copy keyed a source by (``summary.identity`` of the
+    graph's enable job), when it was not ``urn`` — what tells, on such a source, an item written
+    there since from one with no identifier at all. None for any other graph."""
+    from .models import JobORM
+    summary = (await session.execute(
+        select(JobORM.summary).where(JobORM.graph_id == graph_id, JobORM.job_type == "bootstrap")
+        .order_by(JobORM.created_at.desc()).limit(1))).scalar_one_or_none()
+    return ((summary or {}).get("identity") or {}).get("identityProperty")
+
+
+#: The kinds of misaligned item :func:`alignment_rows` lists.
+ALIGNMENT_CATEGORIES = ("no_identifier", "outside_history_nodes", "outside_history_relationships")
+
+_NAME_OF = "coalesce(n.displayName, n.name, n.title, n.label)"
+_ALL_ROWS = 2**31 - 1                                    # the largest LIMIT FalkorDB reads as such
+
+
+async def alignment_rows(
+    client, category: str, *, after: int = -1, limit: int = 100,
+    identity_property: Optional[str] = None, window: int = 50_000,
+) -> Tuple[List[dict], Optional[int]]:
+    """One page of the items of a ``category`` (:data:`ALIGNMENT_CATEGORIES`) in a graph, in
+    internal-id order from just past ``after`` — ``(rows, next)``, ``next`` the ``after`` of the
+    following page (None at the end). Read in internal-id windows (each a seek, never a scan of the
+    whole graph), as many as fill the page, each returning no more rows than the page still needs;
+    a relationship is listed with the node it leaves, and a page never splits a node's list.
+
+    * ``no_identifier`` — ``{internalId, label, name, properties}``: nodes the reader cannot key.
+    * ``outside_history_nodes`` — ``{internalId, label, urn, name, alsoInHistory}``: keyed nodes no
+      copy or projector write stamped; ``alsoInHistory`` when the history holds an item under the
+      same label and urn — a second copy of it.
+    * ``outside_history_relationships`` — ``{internalId, source, type, target}``: unstamped
+      relationships between keyed nodes (``internalId`` the source node's).
+    """
+    ip = identity_property
+    if category == "no_identifier":
+        cypher = (f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND NOT {_keyed('n', ip)} "
+                  f"AND {_NOT_DERIVED} RETURN ID(n), labels(n), {_NAME_OF}, keys(n) ORDER BY ID(n)")
+    elif category == "outside_history_nodes":
+        cypher = (f"MATCH (n) WHERE ID(n) >= $lo AND ID(n) < $hi AND {_keyed('n', ip)} "
+                  f"AND n.entityId IS NULL AND {_NOT_DERIVED} "
+                  f"RETURN ID(n), labels(n), {_key_of('n', ip)}, {_NAME_OF} ORDER BY ID(n)")
+    elif category == "outside_history_relationships":
+        cypher = (f"MATCH (a) WHERE ID(a) >= $lo AND ID(a) < $hi AND {_keyed('a', ip)} "
+                  f"MATCH (a)-[r]->(b) WHERE type(r) <> 'AGGREGATED' AND r.id IS NULL "
+                  f"AND {_keyed('b', ip)} "
+                  f"RETURN ID(a), {_key_of('a', ip)}, type(r), {_key_of('b', ip)} ORDER BY ID(a)")
+    else:
+        raise ValueError(f"unknown category {category!r}: one of {', '.join(ALIGNMENT_CATEGORIES)}")
+    cypher += " LIMIT $cap"
+
+    async def read(lo: int, hi: int, cap: int) -> List[dict]:
+        res = await _bounded_query(client, cypher, params={"lo": lo, "hi": hi, "cap": cap})
+        return [_alignment_row(category, row) for row in getattr(res, "result_set", None) or []]
+
+    top = await _one(client, "MATCH (n) RETURN max(ID(n))")
+    rows: List[dict] = []
+    lo, nxt = int(after) + 1, None
+    while top is not None and lo <= int(top):
+        need = limit - len(rows)
+        got = await read(lo, lo + window, need + 1)
+        if len(got) <= need:                             # the window is exhausted
+            rows += got
+            lo += window
+            if len(rows) == limit:
+                nxt = lo - 1 if lo <= int(top) else None
+                break
+            continue
+        # More here than the page takes: end it before the first node it can't take whole (the
+        # rows of the node at the cut may be only some of its relationships).
+        last = got[need]["internalId"]
+        rows += [r for r in got[:need] if r["internalId"] < last]
+        if not rows:                                     # one node with more than a page of them
+            rows = await read(last, last + 1, _ALL_ROWS)
+        nxt = rows[-1]["internalId"]
+        break
+    if category == "outside_history_nodes" and rows:
+        await _mark_also_in_history(client, rows)
+    return rows, nxt
+
+
+def _alignment_row(category: str, row) -> dict:
+    if category == "no_identifier":
+        fid, labels, name, keys = row
+        return {"internalId": int(fid), "label": _first_label(labels), "name": name,
+                "properties": sorted(str(k) for k in (keys or []))}
+    if category == "outside_history_nodes":
+        fid, labels, urn, name = row
+        return {"internalId": int(fid), "label": _first_label(labels), "urn": str(urn),
+                "name": name, "alsoInHistory": False}
+    fid, src, rel, tgt = row
+    return {"internalId": int(fid), "source": src, "type": rel, "target": tgt}
+
+
+def _first_label(labels) -> Optional[str]:
+    return next((str(lab) for lab in (labels or []) if not str(lab).startswith("_")), None)
+
+
+async def _mark_also_in_history(client, rows: List[dict]) -> None:
+    """Flag each outside-history node whose label + urn the history also holds (a stamped node):
+    a second copy of a tracked item. One seek per label, on its urn index."""
+    by_label: Dict[str, List[dict]] = {}
+    for r in rows:
+        if r["label"]:
+            by_label.setdefault(r["label"], []).append(r)
+    for label, items in by_label.items():
+        res = await _bounded_query(
+            client,
+            f"UNWIND $urns AS u MATCH (m:`{label.replace('`', '``')}` {{urn: u}}) "
+            "WHERE m.entityId IS NOT NULL RETURN DISTINCT u",
+            params={"urns": [r["urn"] for r in items]})
+        tracked = {str(row[0]) for row in getattr(res, "result_set", None) or []}
+        for r in items:
+            r["alsoInHistory"] = r["urn"] in tracked
 
 
 @dataclass
@@ -334,6 +478,12 @@ class DriftReport:
     duration_ms: int
     skipped_reason: Optional[str] = None                 # "no projection target" | "projection in flight"
     rollups: Optional[dict] = None                        # {status, aggregated, stubs} — see RollupHealth
+    # A graph the platform doesn't own (a data source's own graph, under version control): what it
+    # holds that the history doesn't track — outside_history_counts' counts plus bounded samples
+    # ({..., samples: {nodes, relationships, noIdentifier}}). Not part of ``in_sync``, which is
+    # about what the history holds; None for a graph the platform owns.
+    owned: bool = True
+    outside_history: Optional[dict] = None
 
 
 _SENTINEL = object()
@@ -411,6 +561,7 @@ class ProjectionReconciler:
             pg_nodes, pg_edges = (
                 await pg_live_counts_projectable(s, graph_id, main_id) if main_id is not None else (0, 0)
             )
+            identity = await copy_identity(s, graph_id) if not owned else None
         fresh = projected >= committed
 
         def _report(**kw) -> DriftReport:
@@ -422,7 +573,7 @@ class ProjectionReconciler:
                 missing_nodes=[], extra_nodes=[], missing_edges=[], extra_edges=[],
                 mismatched=[], edge_mismatched=[], truncated=False, in_sync=False,
                 checked_at=checked_at, duration_ms=int((time.monotonic() - started) * 1000),
-                skipped_reason=None,
+                skipped_reason=None, owned=owned,
             )
             base.update(kw)
             return DriftReport(**base)
@@ -457,10 +608,14 @@ class ProjectionReconciler:
             client, graph_id, main_id, sample_limit, deep)
         truncated = trunc_n or trunc_e
 
+        # A graph the platform doesn't own is in sync when it holds everything the history does:
+        # stamped items beyond that are its drift report's ``unexpected`` (below), which nothing
+        # deletes — so no rebuild would change them.
         in_sync = (
-            not missing_nodes and not extra_nodes
+            not missing_nodes and (not extra_nodes or not owned)
             and not mismatched and not edge_mismatched
-            and pg_nodes == falkor_nodes and pg_edges == falkor_edges
+            and (pg_nodes == falkor_nodes and pg_edges == falkor_edges if owned
+                 else pg_nodes <= falkor_nodes and pg_edges <= falkor_edges)
         )
         try:
             health = await rollup_health(client)
@@ -469,8 +624,29 @@ class ProjectionReconciler:
         except Exception:                                # pragma: no cover - infra
             logger.debug("rollup health unavailable for %s", graph_id, exc_info=True)
             rollups = None
+        outside = None
+        if not owned:
+            counts = await outside_history_counts(client, identity)
+            samples = {}
+            for key, category, n in (
+                    ("nodes", "outside_history_nodes", counts["outsideHistory"]["nodes"]),
+                    ("relationships", "outside_history_relationships",
+                     counts["outsideHistory"]["relationships"]),
+                    ("noIdentifier", "no_identifier", counts["noIdentifier"]["nodes"])):
+                samples[key] = (await alignment_rows(client, category, limit=sample_limit,
+                                                     identity_property=identity))[0] if n else []
+            outside = {**counts, "samples": samples}
+            # The newest drift report, kept as a projection pass keeps its own (the watermark's
+            # ``drift``): stamped items beyond what the history holds are its ``unexpected``.
+            extra = {"nodes": max(0, falkor_nodes - pg_nodes),
+                     "relationships": max(0, falkor_edges - pg_edges)}
+            async with self._session() as s:
+                ps = await s.get(ProjectionStateORM, graph_id)
+                if ps is not None:
+                    ps.drift = {**counts, **({"unexpected": extra} if any(extra.values()) else {}),
+                                "checkedAt": checked_at}
         return _report(
-            rollups=rollups,
+            rollups=rollups, outside_history=outside,
             falkor_nodes=falkor_nodes, falkor_edges=falkor_edges,
             missing_nodes=missing_nodes, extra_nodes=extra_nodes,
             missing_edges=[], extra_edges=[],

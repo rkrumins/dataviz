@@ -698,8 +698,11 @@ export function useRebuildProjection(wsId: string, graphId: string) {
 /** Check the fast read layer against the source of truth (user-triggered). Returns the DriftReport;
  *  a 409 (a check already running) surfaces as a plain error for the caller to notify. */
 export function useReconcileProjection(wsId: string, graphId: string) {
+  const qc = useQueryClient()
   return useMutation({
     mutationFn: (v: { deep?: boolean } = {}) => api.reconcileProjection(wsId, graphId, v),
+    // On a data source's own graph the check also refreshes the watermark's drift report.
+    onSuccess: () => qc.invalidateQueries({ queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId) }),
   })
 }
 

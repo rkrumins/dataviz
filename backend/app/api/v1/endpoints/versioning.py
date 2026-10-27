@@ -880,6 +880,11 @@ class WatermarkModel(_ApiModel):
     # The main revision each side is at: the system of record's head, and what the graph holds.
     committed_revision: Optional[RevisionModel] = Field(default=None, alias="committedRevision")
     projected_revision: Optional[RevisionModel] = Field(default=None, alias="projectedRevision")
+    # A data source's own graph under version control: what the last projection pass or Check
+    # sync found there that the history doesn't track — {outsideHistory: {nodes, relationships},
+    # noIdentifier: {nodes}, unexpected?, checkedAt}. Reported, never a reason to hold reads back.
+    # None for a graph the platform owns.
+    drift: Optional[Dict[str, Any]] = None
 
 
 class BranchFreshnessModel(_ApiModel):
@@ -940,6 +945,12 @@ class DriftReportModel(_ApiModel):
     # Rollup health: {"status": "ok" | "missing" | "untrusted", "aggregated", "stubs"}.
     # "missing"/"untrusted" → "Rebuild fast read layer" hands them to the aggregation job.
     rollups: Optional[Dict[str, Any]] = None
+    # False for a data source's own graph (the platform pinned to it when version control was
+    # turned on); then ``outsideHistory`` reports what it holds that the history doesn't track:
+    # {outsideHistory: {nodes, relationships}, noIdentifier: {nodes}, samples: {nodes,
+    # relationships, noIdentifier}}. Not part of ``inSync``.
+    owned: bool = True
+    outside_history: Optional[Dict[str, Any]] = Field(default=None, alias="outsideHistory")
 
 
 class StateResponse(_ApiModel):
@@ -1816,7 +1827,8 @@ def _watermark_model(wm: dict) -> WatermarkModel:
                           progress_done=wm.get("progress_done"),
                           progress_total=wm.get("progress_total"),
                           committed_revision=_revision_model(wm.get("committed_revision")),
-                          projected_revision=_revision_model(wm.get("projected_revision")))
+                          projected_revision=_revision_model(wm.get("projected_revision")),
+                          drift=wm.get("drift"))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:

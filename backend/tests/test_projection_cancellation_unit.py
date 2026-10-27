@@ -31,6 +31,7 @@ class _FakePS:
         self.falkor_graph_name = "real_pinned_graph"   # != default_graph_name → not "unpinned"
         self.falkor_provider = None
         self.owns_falkor_graph = False                 # a pinned customer graph, as the column defaults
+        self.drift = None                              # never counted
         self.last_projected_at = None
 
 

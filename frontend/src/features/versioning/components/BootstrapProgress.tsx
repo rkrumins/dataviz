@@ -33,7 +33,8 @@ import { ProgressBar } from '@/components/ui/ProgressBar'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
 import {
-  BootstrapDecisionError, bootstrapDuplicatesCsvUrl, type BootstrapJob, type BootstrapPhase, type BootstrapReport,
+  BootstrapDecisionError, bootstrapDuplicatesCsvUrl, misalignedItemsCsvUrl, type BootstrapJob, type BootstrapPhase,
+  type BootstrapReport,
 } from '@/services/versioningApiService'
 import { useAbandonBootstrap, useDecideBootstrapDuplicates, useRetryBootstrap } from '../hooks/useVersioning'
 import { ReasonField } from '@/components/activity/ReasonField'
@@ -550,6 +551,19 @@ export function BootstrapProgress({
             <p className="mt-1 text-[11px] text-ink-muted">
               {num(job.report.skippedWithoutIdentifier!.nodes)} item(s) in the source have no identifier.
               They don't appear anywhere in this app, so they weren't copied — they stay in the graph as they are.
+              {/* A package's were in the package, not in a graph there is to list. */}
+              {!fromPackage && (
+                <>
+                  {' '}
+                  <a
+                    href={misalignedItemsCsvUrl(wsId, dataSourceId, 'no_identifier')}
+                    download={`no-identifier-${dataSourceId}.csv`}
+                    className="inline-flex items-center gap-1 font-medium text-accent-lineage hover:underline"
+                  >
+                    <Download className="w-3 h-3" /> Download list (CSV)
+                  </a>
+                </>
+              )}
             </p>
           )}
           {job.report.merkle === 'deferred' && (

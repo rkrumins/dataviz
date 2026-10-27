@@ -131,7 +131,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "get_distinct_values", "get_ontology_metadata", "get_graph_schema",
         "get_graph_introspection", "get_refresh_status", "get_graph_stats",
         "get_sync_status", "get_alignment_analysis", "get_vocab_alignment",
-        "bootstrap_status_endpoint", "bootstrap_duplicates_endpoint",
+        "bootstrap_status_endpoint", "bootstrap_duplicates_endpoint", "misaligned_items_endpoint",
         "search_discover", "search_schema", "search_values",
         "search_export_download",
         "create_node", "create_edge", "update_edge", "delete_edge",

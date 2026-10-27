@@ -33,8 +33,8 @@ from . import config, db
 from .falkor_indexes import ensure_urn_indexes
 from .merkle import content_hash
 from .reconcile import (
-    falkor_counts, outside_history_counts, pg_live_counts_projectable, reconcile_interrupted,
-    rollup_health,
+    copy_identity, falkor_counts, outside_history_counts, pg_live_counts_projectable,
+    reconcile_interrupted, rollup_health,
 )
 from .projection_reconcile import (
     ActualEdge, ActualNode, EdgeKey, ExpectedEdge, ExpectedNode,
@@ -389,6 +389,17 @@ def _edge_endpoints(payload: dict) -> Tuple[str, str]:
     return src, tgt
 
 
+def _drift_due(checked_at: Optional[str]) -> bool:
+    """Whether a pass should count a graph's drift again: never counted, or counted at least
+    ``PROJECTION_DRIFT_INTERVAL_SECS`` ago (each count scans the whole graph)."""
+    from datetime import datetime, timezone
+    try:
+        age = (datetime.now(timezone.utc) - datetime.fromisoformat(str(checked_at))).total_seconds()
+    except (TypeError, ValueError):
+        return True                                      # never counted (or unreadable)
+    return age >= config.PROJECTION_DRIFT_INTERVAL_SECS
+
+
 class FalkorProjector:
     """Projects committed `main` state of a graph into its FalkorDB graph."""
 
@@ -509,6 +520,7 @@ class FalkorProjector:
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
             provider_id = ps.falkor_provider    # pinned instance; None → env default
             owned = bool(ps.owns_falkor_graph)  # how the verify counts it (falkor_counts)
+            drift_due = not owned and _drift_due((ps.drift or {}).get("checkedAt"))
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
             if name == self.default_graph_name(graph_id):
@@ -611,7 +623,7 @@ class FalkorProjector:
             except Exception:                            # pragma: no cover - infra
                 logger.debug("rollup health unreadable for %s", graph_id, exc_info=True)
             heal_outcome: Dict[str, object] = {}
-            drift: Optional[Dict[str, object]] = None if owned else {}
+            drift: Optional[Dict[str, object]] = {} if drift_due else None
             verify_error, healed = (
                 await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork,
                                             level_map=level_map, heal_outcome=heal_outcome,
@@ -1953,7 +1965,9 @@ class FalkorProjector:
             return None, False
         if drift is not None:
             try:
-                drift.update(await outside_history_counts(client))
+                async with self._session() as s:
+                    ident = await copy_identity(s, graph_id)
+                drift.update(await outside_history_counts(client, ident))
             except Exception:                            # pragma: no cover - best effort
                 logger.debug("drift count skipped for %s", graph_id, exc_info=True)
 

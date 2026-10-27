@@ -335,6 +335,137 @@ async def bootstrap_duplicates_endpoint(
         raise HTTPException(status_code=422, detail=str(exc))
 
 
+_ALIGNMENT_CSV_COLUMNS = {
+    "no_identifier": ("internalId", "label", "name", "properties"),
+    "outside_history_nodes": ("internalId", "label", "urn", "name", "alsoInHistory"),
+    "outside_history_relationships": ("internalId", "source", "type", "target"),
+}
+
+
+@router.get("/misaligned-items")
+async def misaligned_items_endpoint(
+    ws_id: str,
+    dataSourceId: str = Query(..., description="Data source whose graph to list."),
+    category: str = Query(..., description="no_identifier | outside_history_nodes | "
+                                           "outside_history_relationships"),
+    after: Optional[int] = Query(None, description="The previous page's `next`."),
+    limit: int = Query(100, ge=1, le=1000),
+    fmt: Optional[str] = Query(None, alias="format",
+                               description="csv: the whole list, as a download"),
+    _user=Depends(requires("workspace:datasource:read", workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The items of a data source's graph that don't line up with the platform's model, one
+    category at a time in the graph's internal-id order — ``{items, next}``, or with
+    ``format=csv`` the whole list as a download:
+
+    * ``no_identifier`` — items with no identifier (no ``urn``, nor a value of the data source's
+      identity property): the application cannot show, copy or version them. Any data source.
+    * ``outside_history_nodes`` / ``outside_history_relationships`` — a data source whose own graph
+      is under version control: items written there that the history doesn't hold (no copy or
+      edit of the platform's stamped them). A node's ``alsoInHistory`` marks a second copy of an
+      item the history does hold.
+
+    Workspace read permission of its own, as the duplicates list takes (an enumeration of the data
+    source). 422 for an unknown category, an outside-history one on a data source whose graph
+    isn't its own under version control, or a data source that isn't on FalkorDB; 409 while
+    version control is still being turned on; 503 when the graph can't be read."""
+    import csv
+    import inspect
+    import io
+
+    from backend.app.api.v1.endpoints import versioning as versioning_endpoints
+    from backend.app.services.node_identity import load_node_identity
+    from backend.app.services.versioning import reconcile
+
+    ds = await _data_source_in_workspace(session, dataSourceId, ws_id)
+    if category not in reconcile.ALIGNMENT_CATEGORIES:
+        raise HTTPException(status_code=422, detail=(
+            f"category must be one of {', '.join(reconcile.ALIGNMENT_CATEGORIES)}"))
+    name, provider, customer_owned = await _alignment_target(ds, ws_id)
+    if category.startswith("outside_history") and not customer_owned:
+        raise HTTPException(status_code=422, detail=(
+            "Only a data source whose own graph is under version control can hold items written "
+            "outside its history."))
+    if provider not in (None, "", "default"):
+        # The scan windows over FalkorDB's internal ids, as the version-control copy does.
+        from backend.app.db.repositories import provider_repo
+        from backend.common.interfaces.provider import capability_for
+        prov = await provider_repo.get_provider_orm(session, provider)
+        if prov is None or not capability_for(prov.provider_type).supports_copy:
+            raise HTTPException(status_code=422, detail={
+                "type": "provider_unsupported",
+                "message": "Only a FalkorDB data source's graph can be listed this way."})
+    ident = await load_node_identity(session, ds)
+    identity = ident.identity_property if ident.identity_is_mapped else None
+    factory = versioning_endpoints.get_falkor_read_factory()
+    if factory is None or not name:
+        raise HTTPException(status_code=503, detail="the graph can't be read right now")
+    client = factory(name, provider)
+    if inspect.isawaitable(client):
+        client = await client
+
+    async def page(cursor, size):
+        try:
+            return await reconcile.alignment_rows(
+                client, category, after=-1 if cursor is None else cursor, limit=size,
+                identity_property=identity)
+        except Exception as exc:
+            logger.warning("alignment scan failed for %s: %s", dataSourceId, exc)
+            raise HTTPException(status_code=503, detail="the graph can't be read right now")
+
+    if fmt == "csv":
+        columns = _ALIGNMENT_CSV_COLUMNS[category]
+        first, nxt = await page(None, 1000)      # a failure answers 503 before the download starts
+
+        async def rows():
+            out = io.StringIO()
+            writer = csv.writer(out)
+            writer.writerow(columns)
+            batch, cursor = first, nxt
+            while True:
+                for item in batch:
+                    writer.writerow(["|".join(v) if isinstance(v, list) else v
+                                     for v in (item.get(c) for c in columns)])
+                yield out.getvalue()
+                out.seek(0)
+                out.truncate()
+                if cursor is None:
+                    return
+                batch, cursor = await page(cursor, 1000)
+
+        return StreamingResponse(rows(), media_type="text/csv", headers={
+            "Content-Disposition":
+                f'attachment; filename="{category.replace("_", "-")}-{dataSourceId}.csv"'})
+    items, nxt = await page(after, limit)
+    return {"items": items, "next": nxt}
+
+
+async def _alignment_target(ds, ws_id: str):
+    """``(graph name, provider, customer_owned)`` of the graph a data source reads: its own — or,
+    under version control, the one its history projects into, which is the customer's when the
+    platform didn't create it (``owns_falkor_graph``). 409 while version control is still being
+    turned on: there is no history yet to have written anything outside of."""
+    from backend.app.services.versioning import db as vdb
+    from backend.app.services.versioning.bootstrap_worker import bootstrap_status
+    from backend.app.services.versioning.models import ProjectionStateORM
+    from backend.app.services.versioning.service import GraphVersioningService
+
+    graph = await GraphVersioningService().get_graph_by_data_source(ds.id)
+    if graph is None:
+        return ds.graph_name, ds.provider_id, False
+    job = await bootstrap_status(data_source_id=ds.id, workspace_id=ws_id)
+    if job is not None and job["status"] != "completed":
+        raise HTTPException(status_code=409, detail={
+            "type": "bootstrapping",
+            "message": "Version control is still being turned on for this data source."})
+    async with vdb.graphver_session() as s:
+        ps = await s.get(ProjectionStateORM, graph["graph_id"])
+    if ps is None or not ps.falkor_graph_name:
+        return ds.graph_name, ds.provider_id, False
+    return ps.falkor_graph_name, ps.falkor_provider, not ps.owns_falkor_graph
+
+
 class BootstrapDecision(BaseModel):
     action: str = Field(..., description="collapse")
     fingerprint: str = Field(..., description="The `duplicates.fingerprint` that was shown.")

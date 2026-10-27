@@ -7,7 +7,7 @@
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import type { DriftReport, Watermark } from '@/services/versioningApiService'
+import type { DriftReport, ProjectionDrift, Watermark } from '@/services/versioningApiService'
 
 const notify = vi.fn()
 const reconcileMutate = vi.fn()
@@ -220,5 +220,76 @@ describe('DataHealthTab', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Check sync' }))
     expect(screen.queryByText(/lineage summaries/)).toBeNull()
     expect(screen.getByText(/The fast read layer matches the source of truth/)).toBeInTheDocument()
+  })
+
+  describe("a data source's own graph under version control", () => {
+    const drift = (over: Partial<ProjectionDrift> = {}): ProjectionDrift => ({
+      outsideHistory: { nodes: 3, relationships: 1 }, noIdentifier: { nodes: 2 },
+      unexpected: { nodes: 1, relationships: 0 }, checkedAt: new Date().toISOString(), ...over,
+    })
+    const ownGraph = () => render(<DataHealthTab wsId="ws1" graphId="g1" dataSourceId="ds1" />)
+    const csv = (name: string) => new URL(screen.getByRole('link', { name }).getAttribute('href')!, 'http://x')
+
+    it('reports what it holds outside the version history, each kind as a whole list to download', () => {
+      watermark = { committed: 12, projected: 12, fresh: true, status: 'idle', drift: drift() }
+      ownGraph()
+      expect(screen.getByRole('heading', { name: 'Outside the version history' })).toBeInTheDocument()
+      expect(screen.getByText(/3 items and 1 connection written outside the history/)).toBeInTheDocument()
+      expect(screen.getByText(/2 items have no identifier, so they can't be shown or versioned/)).toBeInTheDocument()
+      expect(screen.getByText(/1 item carries version-control ids the history doesn't hold/)).toBeInTheDocument()
+      for (const [name, category] of [['Items (CSV)', 'outside_history_nodes'],
+        ['Connections (CSV)', 'outside_history_relationships'], ['List (CSV)', 'no_identifier']]) {
+        const url = csv(name)
+        expect(url.pathname).toBe('/api/v1/ws1/graph/misaligned-items')
+        expect(Object.fromEntries(url.searchParams)).toEqual({ dataSourceId: 'ds1', category, format: 'csv' })
+      }
+      expect(screen.getByText('Everything is in sync')).toBeInTheDocument()   // reported, not a sync problem
+    })
+
+    it('says so when nothing is outside the history — and shows no card for a graph the platform owns', () => {
+      watermark = { committed: 12, projected: 12, fresh: true, status: 'idle', drift: drift({
+        outsideHistory: { nodes: 0, relationships: 0 }, noIdentifier: { nodes: 0 }, unexpected: undefined }) }
+      const { unmount } = ownGraph()
+      expect(screen.getByText("Everything in this data source's graph is under version control.")).toBeInTheDocument()
+      unmount()
+      watermark = { committed: 12, projected: 12, fresh: true, status: 'idle', drift: null }
+      ownGraph()
+      expect(screen.queryByText(/version history|under version control/)).toBeNull()
+    })
+
+    it('Check sync names examples, and never offers a rebuild for stamped items a rebuild would keep', () => {
+      watermark = { committed: 12, projected: 12, fresh: true, status: 'idle', drift: drift() }
+      reconcileResolve = { ok: true, report: baseReport({
+        owned: false, falkorNodes: 41, extraNodes: [{ entityId: 'ghost', urn: 'ghost' }],
+        outsideHistory: {
+          outsideHistory: { nodes: 3, relationships: 1 }, noIdentifier: { nodes: 2 },
+          samples: {
+            nodes: [{ internalId: 4, label: 'Table', urn: 'u1', name: 'second copy', alsoInHistory: true }],
+            relationships: [{ internalId: 5, source: 'u3', type: 'FLOWS', target: 'u2' }],
+            noIdentifier: [{ internalId: 7, label: 'Thing', name: 'no id', properties: ['name'] }],
+          },
+        } }) }
+      ownGraph()
+      fireEvent.click(screen.getByRole('button', { name: 'Check sync' }))
+      expect(screen.getByText(/The fast read layer holds everything in the source of truth/)).toBeInTheDocument()
+      expect(screen.queryByRole('button', { name: 'Rebuild' })).toBeNull()
+      fireEvent.click(screen.getByRole('button', { name: 'Examples' }))
+      expect(screen.getByText('Table · u1 · second copy — a second copy of a tracked item')).toBeInTheDocument()
+      expect(screen.getByText('u3 —FLOWS→ u2')).toBeInTheDocument()
+      expect(screen.getByText('Thing · no id · properties: name')).toBeInTheDocument()
+      expect(screen.getByText('ghost (ghost)')).toBeInTheDocument()
+    })
+
+    it('an out-of-date check lists what a rebuild writes back, not the stamped items it keeps', () => {
+      watermark = { committed: 12, projected: 12, fresh: true, status: 'idle', drift: drift() }
+      reconcileResolve = { ok: true, report: baseReport({
+        owned: false, inSync: false, falkorNodes: 40,
+        missingNodes: [{ entityId: 'u2', urn: 'u2' }], extraNodes: [{ entityId: 'ghost', urn: 'ghost' }] }) }
+      ownGraph()
+      fireEvent.click(screen.getByRole('button', { name: 'Check sync' }))
+      expect(screen.getByText('1 item missing from the fast read layer')).toBeInTheDocument()
+      expect(screen.queryByText(/shouldn't be there/)).toBeNull()
+      expect(screen.getByRole('button', { name: 'Rebuild' })).toBeInTheDocument()
+    })
   })
 })

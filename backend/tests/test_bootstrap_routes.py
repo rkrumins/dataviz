@@ -221,6 +221,76 @@ async def test_a_view_link_does_not_reach_the_whole_duplicate_list(
         assert (await test_client.get(url)).status_code == 200
 
 
+def _alignment(monkeypatch, *, customer_owned: bool, pages, provider: str = "default"):
+    """The misaligned-items route over a stubbed graph: ``pages`` answers each ``alignment_rows``
+    call in turn (``(rows, next)``); the kwargs of each call are recorded."""
+    from backend.app.api.v1.endpoints import graph as graph_endpoints
+    from backend.app.api.v1.endpoints import versioning as versioning_endpoints
+    from backend.app.services.versioning import reconcile
+
+    async def target(_ds, _ws):
+        return "my_graph", provider, customer_owned
+
+    calls = []
+
+    async def rows(_client, category, **kw):
+        calls.append({"category": category, **kw})
+        return pages[len(calls) - 1]
+
+    monkeypatch.setattr(graph_endpoints, "_alignment_target", target)
+    monkeypatch.setattr(versioning_endpoints, "get_falkor_read_factory",
+                        lambda: (lambda _name, _provider=None: object()))
+    monkeypatch.setattr(reconcile, "alignment_rows", rows)
+    return calls
+
+
+async def test_the_misaligned_items_come_in_pages_and_as_a_download(
+    test_client: AsyncClient, _data_source, monkeypatch,
+):
+    calls = _alignment(monkeypatch, customer_owned=True, pages=[
+        ([{"internalId": 4, "label": "Table", "urn": "u3", "name": "x", "alsoInHistory": False}], 4),
+        ([{"internalId": 4, "label": "Table", "urn": "u3", "name": "x", "alsoInHistory": False}], 4),
+        ([{"internalId": 9, "label": "Table", "urn": "u1", "name": None, "alsoInHistory": True}], None),
+    ])
+    base = f"/api/v1/{WS}/graph/misaligned-items?dataSourceId={DS}&category=outside_history_nodes"
+    resp = await test_client.get(base + "&after=1&limit=50")
+    assert resp.status_code == 200, resp.text
+    assert resp.json() == {"items": [{"internalId": 4, "label": "Table", "urn": "u3", "name": "x",
+                                      "alsoInHistory": False}], "next": 4}
+    assert (calls[0]["after"], calls[0]["limit"]) == (1, 50)
+
+    resp = await test_client.get(base + "&format=csv")
+    assert resp.status_code == 200 and resp.headers["content-type"].startswith("text/csv")
+    assert "attachment" in resp.headers["content-disposition"]
+    assert resp.text.splitlines() == ["internalId,label,urn,name,alsoInHistory",
+                                      "4,Table,u3,x,False", "9,Table,u1,,True"]
+    assert calls[2]["after"] == 4, "the download follows each page's `next`"
+
+
+async def test_an_unknown_category_or_outside_history_on_an_external_source_is_a_422(
+    test_client: AsyncClient, _data_source, monkeypatch,
+):
+    _alignment(monkeypatch, customer_owned=False, pages=[([], None)])
+    base = f"/api/v1/{WS}/graph/misaligned-items?dataSourceId={DS}"
+    assert (await test_client.get(base + "&category=everything")).status_code == 422
+    resp = await test_client.get(base + "&category=outside_history_relationships")
+    assert resp.status_code == 422 and "under version control" in resp.text
+    assert (await test_client.get(base + "&category=no_identifier")).status_code == 200
+
+
+async def test_a_data_source_not_on_falkordb_has_no_list_to_scan(
+    test_client: AsyncClient, _data_source, db_session, monkeypatch,
+):
+    db_session.add(_models.ProviderORM(id="prov_neo", name="neo", provider_type="neo4j",
+                                       host="h", port=7687))
+    await db_session.commit()
+    calls = _alignment(monkeypatch, customer_owned=False, pages=[([], None)], provider="prov_neo")
+    resp = await test_client.get(
+        f"/api/v1/{WS}/graph/misaligned-items?dataSourceId={DS}&category=no_identifier")
+    assert resp.status_code == 422 and resp.json()["detail"]["type"] == "provider_unsupported"
+    assert calls == [], "nothing was scanned"
+
+
 async def test_no_duplicates_is_a_404(test_client: AsyncClient, _data_source, monkeypatch):
     async def none(**_kw):
         raise LookupError("enabling version control found no duplicate identifiers here")

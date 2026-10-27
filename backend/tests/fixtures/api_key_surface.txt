@@ -58,6 +58,7 @@ GET /api/v1/{ws_id}/graph/metadata/entity-types resource
 GET /api/v1/{ws_id}/graph/metadata/ontology resource
 GET /api/v1/{ws_id}/graph/metadata/schema resource
 GET /api/v1/{ws_id}/graph/metadata/tags resource
+GET /api/v1/{ws_id}/graph/misaligned-items resource
 GET /api/v1/{ws_id}/graph/nodes resource
 GET /api/v1/{ws_id}/graph/nodes/by-layer/{layer_id} resource
 GET /api/v1/{ws_id}/graph/nodes/by-tag/{tag} resource

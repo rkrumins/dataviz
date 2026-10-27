@@ -164,6 +164,8 @@ describe('when the copy lands', () => {
     })
     expect(screen.getByText(/2 connection\(s\) had an id another item already uses/)).toBeInTheDocument()
     expect(screen.getByText(/5 item\(s\) in the source have no identifier/)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /Download list \(CSV\)/ })).toHaveAttribute(
+      'href', '/api/v1/ws1/graph/misaligned-items?dataSourceId=ds1&category=no_identifier&format=csv')
   })
 })
 

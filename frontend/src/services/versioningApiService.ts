@@ -128,6 +128,52 @@ export interface Watermark {
   /** Live full-rebuild progress (items applied / total); null unless a full seed is running. */
   progressDone?: number | null
   progressTotal?: number | null
+  /** A data source's own graph under version control: what the last projection pass or Check sync
+   *  found there that the history doesn't track. Reported only — reads stay on the live graph.
+   *  Null for a graph the platform owns (or before anything was checked). */
+  drift?: ProjectionDrift | null
+}
+
+/** What a data source's own graph holds that its version history doesn't track: items written
+ *  there from outside the history (they show in views, but no draft, publish or restore covers
+ *  them), and nodes with no identifier at all (the application can't show or version them). */
+export interface OutsideHistoryCounts {
+  outsideHistory: { nodes: number; relationships: number }
+  noIdentifier: { nodes: number }
+}
+
+/** {@link OutsideHistoryCounts} as last checked. `unexpected`: items carrying the platform's
+ *  stamp that the history no longer holds (e.g. a deleted item a pipeline wrote back). */
+export interface ProjectionDrift extends OutsideHistoryCounts {
+  unexpected?: { nodes: number; relationships: number }
+  checkedAt: string
+}
+
+/** The kinds of misaligned item the whole-list download covers. */
+export type MisalignedCategory = 'no_identifier' | 'outside_history_nodes' | 'outside_history_relationships'
+
+export interface NoIdentifierRow {
+  internalId: number
+  label: string | null
+  name: string | null
+  /** The node's property names — what there is to key it by. */
+  properties: string[]
+}
+
+export interface OutsideHistoryNodeRow {
+  internalId: number
+  label: string | null
+  urn: string
+  name: string | null
+  /** The history holds an item with the same type and identifier — this is a second copy of it. */
+  alsoInHistory: boolean
+}
+
+export interface OutsideHistoryRelationshipRow {
+  internalId: number
+  source: string
+  type: string
+  target: string
 }
 
 /** Result of kicking a full rebuild of the fast read layer. `alreadyRunning` ⇒ a
@@ -182,6 +228,17 @@ export interface DriftReport {
   /** Health of the derived lineage summaries (`:AGGREGATED`) — "missing"/"untrusted" means
    *  "Rebuild fast read layer" hands them to the aggregation job to re-derive. */
   rollups?: { status: 'ok' | 'missing' | 'untrusted'; aggregated: number; stubs: number } | null
+  /** False for a data source's own graph (version control pinned to it rather than copying it). */
+  owned?: boolean
+  /** On a data source's own graph: what it holds that the history doesn't track, with a bounded
+   *  sample of each kind. Not part of `inSync`, which is about what the history holds. */
+  outsideHistory?: (OutsideHistoryCounts & {
+    samples: {
+      nodes: OutsideHistoryNodeRow[]
+      relationships: OutsideHistoryRelationshipRow[]
+      noIdentifier: NoIdentifierRow[]
+    }
+  }) | null
 }
 
 export interface StateResponse {
@@ -857,6 +914,11 @@ export function getBootstrapDuplicates(
 /** The whole duplicate list as a CSV download (the browser sends the session cookie). */
 export function bootstrapDuplicatesCsvUrl(wsId: string, dataSourceId: string): string {
   return `/api/v1/${wsId}/graph/bootstrap/duplicates?${new URLSearchParams({ dataSourceId, format: 'csv' })}`
+}
+
+/** The whole list of one kind of misaligned item in a data source's graph, as a CSV download. */
+export function misalignedItemsCsvUrl(wsId: string, dataSourceId: string, category: MisalignedCategory): string {
+  return `/api/v1/${wsId}/graph/misaligned-items?${new URLSearchParams({ dataSourceId, category, format: 'csv' })}`
 }
 
 /** Collapse the duplicates and let the copy carry on. `fingerprint` is the list's as it was shown:
