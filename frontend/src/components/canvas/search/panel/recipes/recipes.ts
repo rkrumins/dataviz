@@ -304,6 +304,21 @@ const RECIPES: readonly RecipeDef[] = [
         },
     },
     {
+        id: 'layer-to-layer', intent: 'discovery', icon: 'Waypoints',
+        make: (r) => {
+            const [from, to] = r.view.layers
+            return from && to ? {
+                title: `What flows from ${from.label} to ${to.label}`,
+                description: 'The lineage between two stages of the pipeline, edge by edge.',
+                predicate: {
+                    kind: 'edges', edgeClass: 'lineage',
+                    sourceWhere: { kind: 'layer', layerAssignment: from.value },
+                    targetWhere: { kind: 'layer', layerAssignment: to.value },
+                },
+            } : null
+        },
+    },
+    {
         id: 'tagged', intent: 'discovery', icon: 'Tag',
         make: (r) => {
             const tag = r.view.tags.find((t) => !r.sensitive.includes(t) && t !== r.deprecated)
@@ -347,13 +362,14 @@ export function recipesFor(view: RecipeView, name: TypeName): Recipe[] {
 }
 
 
-/** A few to start from: the first ready-to-run recipe of each intent. */
-export function startingRecipes(recipes: readonly Recipe[], max: number): Recipe[] {
+/** One to start from for each intent: its first ready-to-run recipe — or,
+ *  where each has something to fill in, the first of those. */
+export function startingRecipes(recipes: readonly Recipe[]): Recipe[] {
     const out: Recipe[] = []
     for (const { id } of RECIPE_INTENTS) {
-        const first = recipes.find((r) => r.intent === id && !r.blank)
+        const mine = recipes.filter((r) => r.intent === id)
+        const first = mine.find((r) => !r.blank) ?? mine[0]
         if (first) out.push(first)
-        if (out.length === max) break
     }
     return out
 }

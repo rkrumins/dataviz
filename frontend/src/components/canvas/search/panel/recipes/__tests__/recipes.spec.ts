@@ -51,6 +51,7 @@ describe('recipesFor', () => {
             'inside-one': 'Everything inside one container',
             'linked-to-one': 'Everything linked to one entity',
             'in-layer': 'Everything in the Raw layer',
+            'layer-to-layer': 'What flows from Raw to Gold',
             tagged: 'Everything tagged Certified',
         })
     })
@@ -78,6 +79,9 @@ describe('recipesFor', () => {
         ] })
         expect(by['linked-to-one']).toEqual({ kind: 'related', axis: 'neighbor', edgeClass: 'links',
             where: { kind: 'is', refs: [] } })
+        // The lineage from the View's first layer to its next, edge by edge.
+        expect(by['layer-to-layer']).toEqual({ kind: 'edges', edgeClass: 'lineage',
+            sourceWhere: { kind: 'layer', layerAssignment: 'raw' }, targetWhere: { kind: 'layer', layerAssignment: 'gold' } })
         // An owner by another name is still the owner.
         const other = recipesFor({ ...FULL, keys: ['dataOwner'] }, typeName).find((r) => r.id === 'unowned')
         expect(other?.predicate).toEqual({ kind: 'group', op: 'and', children: [
@@ -89,6 +93,10 @@ describe('recipesFor', () => {
         for (const r of recipesFor(FULL, typeName)) {
             if (r.blank) {
                 expect(whyUncountable(r.predicate), r.id).not.toBeNull()
+            } else if (r.predicate.kind === 'edges') {
+                // Connections are counted as the search runs.
+                expect(whyUncountable(r.predicate), r.id).toBe('connections')
+                expect(isRowIncomplete(r.predicate), r.id).toBe(false)
             } else {
                 expect(whyUncountable(r.predicate), r.id).toBeNull()
                 expect(isRowIncomplete(r.predicate), r.id).toBe(false)
@@ -99,10 +107,13 @@ describe('recipesFor', () => {
 
 
 describe('startingRecipes', () => {
-    it('takes the first ready-to-run recipe of each intent', () => {
-        expect(startingRecipes(recipesFor(FULL, typeName), 5).map((r) => r.id))
-            .toEqual(['widely-read', 'feeds-consumers', 'sensitive', 'undocumented', 'unowned'])
-        expect(startingRecipes(recipesFor({ types: [], tags: [], keys: [], layers: [] }, typeName), 5).map((r) => r.id))
-            .toEqual(['lineage-starts', 'no-lineage'])
+    it('takes the first ready-to-run recipe of every intent, the quality checks included', () => {
+        expect(startingRecipes(recipesFor(FULL, typeName)).map((r) => r.id)).toEqual([
+            'widely-read', 'feeds-consumers', 'sensitive', 'undocumented', 'unowned', 'no-lineage', 'all-of-type'])
+    })
+
+    it('takes one to fill in where an intent has nothing ready to run', () => {
+        expect(startingRecipes(recipesFor({ types: [], tags: [], keys: [], layers: [] }, typeName)).map((r) => r.id))
+            .toEqual(['feeds-from-one', 'lineage-starts', 'no-lineage', 'by-name'])
     })
 })
