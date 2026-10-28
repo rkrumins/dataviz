@@ -234,6 +234,11 @@ The query card shows the same query four ways — **Form**, **Sentence**,
 your choice. It opens in **Form**, the filter cards; **Sentence** is the guided
 alternative.
 
+The four are tabs at the top of the card, with **New**, **Save** and **Tag**
+beside them. Below them: **Entities** or **Connections**, **Undo** and
+**Redo**, **Auto** and **Run**. The header is there whether the query is empty
+or not, so another editor — or Undo after **New** — is always a click away.
+
 **Sentence** reads the query the way you'd say it: *Find* **datasets** *that
 are tagged* **#PII** *and* **feed** **a dashboard**. Every highlighted word is
 a token: click one to change it — a type, a tag, a value, a relationship's
@@ -584,9 +589,10 @@ in [Native read-only queries: security](/docs/native-queries).
 
 ### Running
 
-**Auto** (the default) runs the query a moment after each complete edit;
-**Manual** waits for **Run** — handy while you build a large query. Rows you
-haven't finished are left out of the run, never guessed at.
+**Auto** (the switch beside **Run**, on by default) runs the query a moment
+after each complete edit; switched off, the query waits for **Run** — handy
+while you build a large query. Rows you haven't finished are left out of the
+run, never guessed at.
 
 ### Recipes gallery
 

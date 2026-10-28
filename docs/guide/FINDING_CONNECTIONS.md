@@ -74,7 +74,7 @@ View as you follow along.
    which lines count, and which way they point; [Through](#through) explains
    the choices.
 6. **Let it run.** With **Auto** on (the default) the search runs a moment
-   after your last change; with **Manual**, click **Run**.
+   after your last change; with it off, click **Run**.
 7. **Read the answer.** The match bar says how many connections there are,
    the list shows each one, and the canvas lights up the lines that carry
    them. The next section explains what you see.

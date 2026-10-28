@@ -1,7 +1,9 @@
 /**
  * QueryCard — the single Query Lens that holds the entire active query.
  *
- *   ╭─ Query · 3 filters ─────── 🅥 Visual  </> Code  >_ Cypher ╮
+ *   ╭─ Form · Sentence · Code · Cypher ─ New  Save  Tag ─╮
+ *   │ Find  Entities │ Connections     ↶ ↷   Auto  ▶ Run │
+ *   ├────────────────────────────────────────────────────┤
  *   │ ⌕  name contains   [ customer       ]              │
  *   │ #  tag is          [ #PII ] [ + ]                  │
  *   │ ◇  type is in      [ dataset, schemaField   ▾ ]    │
@@ -12,8 +14,9 @@
  * The card subscribes to ``searchStore.draftPredicate`` and renders
  * every top-level condition as a ConditionRow. Editing a row commits
  * back through ``upsertCondition`` and triggers a debounced auto-run.
- * The Visual ↔ Code toggle does NOT lose state — both modes write the
- * same draft, and Cypher shows the Cypher that draft runs as.
+ * The header (QueryHeader) is there in every editor and every state.
+ * Switching editors does NOT lose state — Form, Sentence and Code all
+ * write the same draft, and Cypher shows the Cypher that draft runs as.
  *
  * Discovery telemetry shows next to the Add-filter button as a passive
  * chip ("12 tags · 37 keys · 4 types") so the user sees what
@@ -21,23 +24,9 @@
  */
 import { motion } from 'framer-motion'
 import {
-    Boxes,
-    Code2,
-    LayoutList,
     Loader2,
     AlertCircle,
     Sparkles,
-    Play,
-    Zap,
-    Hand,
-    Terminal,
-    FileCode,
-    Save as SaveIcon,
-    SquarePen,
-    Tags,
-    Undo2,
-    Redo2,
-    Waypoints,
     X,
 } from 'lucide-react'
 import {
@@ -50,7 +39,6 @@ import {
 } from 'react'
 
 import { DocsLink } from '@/components/help/DocsLink'
-import { Segmented } from '@/components/ui/Segmented'
 import { cn } from '@/lib/utils'
 import { useGraphProviderIfAvailable } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
@@ -75,7 +63,7 @@ import { entityTypesInView, useViewLayerOptions, type LayerOption } from './laye
 import { AddFilterPalette } from './AddFilterPalette'
 import { AskBar } from './ask/AskBar'
 import { useAskVocabulary } from './ask/useAskVocabulary'
-import { useEditorMode, type EditorMode } from './builderMode'
+import { useEditorMode } from './builderMode'
 import { CypherView } from './CypherView'
 import { isNativeResult } from './native/nativeCells'
 import { ConnectionBuilder } from './ConnectionBuilder'
@@ -88,6 +76,7 @@ import { findModeOf, NO_RULE_FOR_CONNECTIONS, queryLabel, toConnections, toEntit
 import { appendCondition, topLevelConditions } from './predicateComposition'
 import { buildRunnablePredicate } from './runnablePredicate'
 import { SearchOmnibox } from './omnibox/SearchOmnibox'
+import { QueryHeader } from './QueryHeader'
 import { SaveQueryDialog } from './SaveQueryDialog'
 import { RelationProvider } from './RelationshipEditor'
 import { RecipeGallery } from './recipes/RecipeGallery'
@@ -113,23 +102,6 @@ export interface QueryCardProps {
      *  fill in opens for it. */
     onPickRecipe: (recipe: Recipe) => void
 }
-
-
-/** Form (the filter cards, where the card starts) and Sentence (guided)
- *  build a query by pointing; Code and Cypher by typing. All four edit the
- *  same draft. */
-const EDITOR_MODES: { value: EditorMode; label: string; icon: typeof Code2 }[] = [
-    { value: 'form', label: 'Form', icon: LayoutList },
-    { value: 'sentence', label: 'Sentence', icon: Sparkles },
-    { value: 'code', label: 'Code', icon: Code2 },
-    { value: 'cypher', label: 'Cypher', icon: Terminal },
-]
-
-/** What the search finds: entities, or the connections between them. */
-const FIND_MODES: { value: FindMode; label: string; icon: typeof Code2 }[] = [
-    { value: 'entities', label: 'Entities', icon: Boxes },
-    { value: 'connections', label: 'Connections', icon: Waypoints },
-]
 
 
 export const QueryCard: FC<QueryCardProps> = ({
@@ -401,19 +373,17 @@ export const QueryCard: FC<QueryCardProps> = ({
     }, [runnable])
 
     // ─── Header summary ────────────────────────────────────────────
-    // A Connections search counts the conditions of its two ends.
+    // The filters still to fill in. A Connections search counts the
+    // conditions of its two ends.
     const summarised = connections
         ? [...topLevelConditions(connections.sourceWhere ?? null), ...topLevelConditions(connections.targetWhere ?? null)]
         : conditions
-    const completeCount = summarised.filter((c) => !isRowIncomplete(c)).length
-    const incompleteCount = summarised.length - completeCount
+    const incompleteCount = summarised.filter(isRowIncomplete).length
 
-    // Empty state in Sentence or Form gets its own premium hero treatment —
-    // no QUERY header chrome, no run controls (nothing to act on), just
-    // a confident "start here" surface with example-led onboarding.
+    // An empty Form or Sentence opens on a "start here" body — the ways in —
+    // under the same header as ever, so the other editors stay a click away.
     const pointing = mode === 'sentence' || mode === 'form'
     const isEmptyVisual = pointing && conditions.length === 0
-    const showHeader = !isEmptyVisual
 
     // Form is built from filters, as it always was: the empty card opens
     // on "add a filter" (the omnibox), which stays beneath the rows after,
@@ -446,94 +416,41 @@ export const QueryCard: FC<QueryCardProps> = ({
                 'flex flex-col',
             )}
         >
-            {/* Unified header — title + actions in one bordered
-                region. Previously the title strip and ActionFooter
-                were two separate surfaces (title above body, footer
-                below); per user feedback we merged them so the entire
-                "manage this query" UI reads as one premium block at
-                the top of the card. Body sits cleanly below.
-                Two rows internally so the layout breathes:
-                  Row 1 — Title · filter status               · Visual│Code│Cypher
-                  Row 2 — [↺ Back] [↶][↷] [Auto│Manual]          [🗑] [▷ Run]
-            */}
-            {showHeader && (
-                <div className={cn(
-                    'flex flex-col border-b border-glass-border/60',
-                    'bg-black/[0.015] dark:bg-white/[0.02]',
-                )}>
-                    {/* Row 1 — title + editor mode; the modes take a line
-                        of their own when the card is too narrow for both. */}
-                    <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 px-3 py-2">
-                        {/* Sized by its content, so the modes wrap below it
-                            rather than covering it when both don't fit. */}
-                        <div className="flex items-center gap-1.5 min-w-0 flex-auto">
-                            <span className="text-[11.5px] font-display font-semibold text-ink leading-tight">
-                                Find
-                            </span>
-                            <Segmented options={isRunning ? FIND_MODES.map((o) => ({ ...o, disabled: true })) : FIND_MODES}
-                                       value={findMode} onChange={handleFindMode} label="What to find"
-                                       className="shrink-0" />
-                            {summarised.length > 0 ? (
-                                <span className="text-[11px] text-ink-muted/85 tabular-nums truncate">
-                                    · {completeCount}
-                                    {' '}filter{completeCount === 1 ? '' : 's'}
-                                    {incompleteCount > 0 && (
-                                        <span className="text-amber-500 dark:text-amber-400/90 font-medium">
-                                            {' '}· {incompleteCount} incomplete
-                                        </span>
-                                    )}
-                                </span>
-                            ) : (
-                                <span className="text-[11px] text-ink-muted/80 italic truncate">
-                                    {connections ? '· any entity to any entity'
-                                        : mode === 'cypher' ? '· Cypher' : '· Code mode · paste DSL'}
-                                </span>
-                            )}
-                        </div>
-                        <Segmented options={EDITOR_MODES} value={mode} onChange={setMode}
-                                   label="How to build the query" className="shrink-0 ml-auto" />
-                    </div>
+            {/* The header, in every editor and state: the editors, what
+                to find, history, and the actions on the query. */}
+            <QueryHeader
+                mode={mode}
+                onModeChange={setMode}
+                findMode={findMode}
+                onFindModeChange={handleFindMode}
+                incomplete={incompleteCount}
+                canUndo={canUndo}
+                canRedo={canRedo}
+                onUndo={undo}
+                onRedo={redo}
+                canClear={draftPredicate !== null}
+                onClear={handleClearAll}
+                canSave={runnable !== null}
+                onSave={handleOpenSave}
+                canCreateRule={runnable !== null && !connections}
+                ruleRefusal={connections ? NO_RULE_FOR_CONNECTIONS : undefined}
+                onCreateRule={handleOpenCreateRule}
+                runMode={runMode}
+                onRunModeChange={setRunMode}
+                canRun={runnable !== null}
+                hasPendingChanges={hasPendingChanges}
+                isRunning={isRunning}
+                onRunNow={dispatchRun}
+            />
 
-                    {/* Row 2 — action toolbar (skipped in empty hero) */}
-                    {conditions.length > 0 && (
-                        <HeaderActions
-                            canUndo={canUndo}
-                            canRedo={canRedo}
-                            onUndo={undo}
-                            onRedo={redo}
-                            canClear={true}
-                            onClear={handleClearAll}
-                            canSave={runnable !== null}
-                            onSave={handleOpenSave}
-                            canCreateRule={runnable !== null && !connections}
-                            ruleRefusal={connections ? NO_RULE_FOR_CONNECTIONS : undefined}
-                            onCreateRule={handleOpenCreateRule}
-                            runMode={runMode}
-                            onRunModeChange={setRunMode}
-                            canRun={runnable !== null}
-                            hasPendingChanges={hasPendingChanges}
-                            isRunning={isRunning}
-                            onRunNow={dispatchRun}
-                        />
-                    )}
-                </div>
-            )}
-
-            {/* Body — Visual / Code / Cypher */}
-            <div className={cn(
-                'flex flex-col gap-2',
-                isEmptyVisual ? 'p-0' : 'p-2.5',
-            )}>
+            {/* Body — Form / Sentence / Code / Cypher */}
+            <div className="flex flex-col gap-2 p-2.5">
                 {switchNotice && switchNotice.draft === draftPredicate && (
                     <SwitchNotice text={switchNotice.text} onDismiss={() => setSwitchNotice(null)} />
                 )}
                 {pointing ? (
                     isEmptyVisual ? (
-                        <PremiumEmptyHero
-                            findSwitch={
-                                <Segmented options={FIND_MODES} value={findMode} onChange={handleFindMode}
-                                           label="What to find" />
-                            }
+                        <EmptyStart
                             byFilters={mode === 'form'}
                             entry={mode === 'form' ? omnibox : askBar('hero')}
                             orAsk={mode === 'form' ? askBar('compact', true) : null}
@@ -551,7 +468,6 @@ export const QueryCard: FC<QueryCardProps> = ({
                                 <RecipeGallery viewId={viewId} recipes={recipes} variant="starters"
                                                onPick={onPickRecipe} />
                             )}
-                            onUseCodeMode={() => setMode('code')}
                             discoveredEntityTypes={presentEntityTypes}
                             discoveredTags={discovery.tagValues}
                             discoveredLayers={discoveredLayers}
@@ -718,24 +634,20 @@ export const QueryCard: FC<QueryCardProps> = ({
 
 
 // ---------------------------------------------------------------------------
-// Premium empty hero — the entire QueryCard when no filters exist
+// The empty Form or Sentence — where a search starts
 // ---------------------------------------------------------------------------
 
 /**
- * Owns the whole card surface when the draft is empty. Replaces the
- * dense "QUERY · empty" + dormant controls header with a confident
- * onboarding hero: a refined intro, the way in — "add a filter" in Form,
- * the Ask bar in Sentence — recipes to start from (in the view's own
- * words, each with how many it finds), and a quiet footer for power users
- * who'd rather paste DSL.
+ * The body of an empty Form or Sentence, under the card's header: a line
+ * on how to start, the way in — "add a filter" in Form, the Ask bar in
+ * Sentence — recipes to start from (in the view's own words, each with how
+ * many it finds), and what the view holds to search.
  */
-function PremiumEmptyHero({
-    findSwitch, byFilters, entry, orAsk, palette, recipes, onUseCodeMode,
+function EmptyStart({
+    byFilters, entry, orAsk, palette, recipes,
     discoveredEntityTypes, discoveredTags, discoveredLayers,
     discoveryLoading, discoveryError, propertyKeyCount,
 }: {
-    /** Entities or Connections — what the search finds. */
-    findSwitch: ReactNode
     /** Built from filters (Form), or asked in plain words (Sentence). */
     byFilters: boolean
     /** The way in: "add a filter", or the Ask bar. */
@@ -746,7 +658,6 @@ function PremiumEmptyHero({
     palette: ReactNode
     /** Recipes to start from. */
     recipes: ReactNode
-    onUseCodeMode: () => void
     discoveredEntityTypes: string[]
     discoveredTags: string[]
     discoveredLayers: LayerOption[]
@@ -756,54 +667,45 @@ function PremiumEmptyHero({
 }) {
     return (
         <motion.div
-            initial={{ opacity: 0, y: 6 }}
+            initial={{ opacity: 0, y: 4 }}
             animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.22, ease: [0.22, 1, 0.36, 1] }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
             className={cn(
-                'relative overflow-hidden rounded-2xl flex flex-col',
-                'bg-gradient-to-br from-accent-lineage/[0.08] via-canvas-elevated/30 to-purple-500/[0.06]',
+                'relative overflow-hidden rounded-xl flex flex-col',
+                'bg-gradient-to-br from-accent-lineage/[0.07] via-canvas-elevated/30 to-purple-500/[0.05]',
+                'ring-1 ring-inset ring-accent-lineage/[0.08]',
             )}
         >
             {/* Decorative wash — adds depth without competing for attention */}
             <div className="pointer-events-none absolute -top-12 -right-12 w-40 h-40 rounded-full bg-accent-lineage/10 blur-3xl" />
-            <div className="pointer-events-none absolute -bottom-16 -left-12 w-44 h-44 rounded-full bg-purple-500/8 blur-3xl" />
 
-            {/* Hero */}
-            <div className="relative px-5 pt-5 pb-3">
-                <div className="flex items-start gap-3">
-                    <div className={cn(
-                        'w-10 h-10 rounded-2xl flex items-center justify-center shrink-0',
-                        'bg-gradient-to-br from-accent-lineage/35 to-cyan-500/20',
-                        'shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]',
-                    )}>
-                        <Sparkles className="w-5 h-5 text-accent-lineage" />
-                    </div>
-                    <div className="flex-1 min-w-0">
-                        <div className="flex items-baseline justify-between gap-2">
-                            <div className="text-[15px] font-display font-semibold text-ink leading-tight tracking-tight">
-                                Search this view
-                            </div>
-                            <DocsLink slug="advanced-search" newTab label="Guide" className="text-xs font-medium" />
+            <div className="relative flex items-start gap-2.5 px-4 pt-3.5 pb-2.5">
+                <div className={cn(
+                    'w-7 h-7 rounded-lg flex items-center justify-center shrink-0',
+                    'bg-gradient-to-br from-accent-lineage/30 to-cyan-500/15',
+                    'shadow-[inset_0_0_0_1px_rgba(255,255,255,0.06)]',
+                )}>
+                    <Sparkles className="w-3.5 h-3.5 text-accent-lineage" />
+                </div>
+                <div className="flex-1 min-w-0">
+                    <div className="flex items-baseline justify-between gap-2">
+                        <div className="text-[13px] font-display font-semibold text-ink leading-tight">
+                            {byFilters ? 'Start with a filter' : 'Ask about this view'}
                         </div>
-                        <p className="mt-1 text-[12px] text-ink-muted leading-snug">
-                            {byFilters
-                                ? 'Add filters — what it is, how it connects, what it\'s tagged — '
-                                    + 'and see what matches as you go. Or ask in plain words.'
-                                : 'Ask in plain words — what it is, how it connects, what it\'s tagged — '
-                                    + 'and see what it reads as before anything changes. Or browse every kind of condition.'}
-                        </p>
-                        <div className="mt-2.5 flex flex-wrap items-center gap-2">
-                            <span className="text-[11px] font-medium text-ink-muted">Find</span>
-                            {findSwitch}
-                        </div>
+                        <DocsLink slug="advanced-search" newTab label="Guide" className="text-[11px] font-medium" />
                     </div>
+                    <p className="mt-0.5 text-[11.5px] text-ink-muted leading-snug">
+                        {byFilters
+                            ? 'What it is, how it connects, what it\'s tagged — matches show as you go.'
+                            : 'In plain words — see what it reads as before anything changes.'}
+                    </p>
                 </div>
             </div>
 
             {/* The way in — "add a filter" in Form, a question in plain
                 words in Sentence — then every kind of filter. In Form the
                 Ask bar follows, as the other way in. */}
-            <div className="relative px-5 pb-3 flex flex-col gap-2">
+            <div className="relative px-4 pb-3 flex flex-col gap-2">
                 {entry}
                 <div>{palette}</div>
                 {orAsk}
@@ -812,13 +714,9 @@ function PremiumEmptyHero({
             {/* Recipes — questions people come here with, ready to run
                 against this view. The Ask bar above is the fast path;
                 recents live in the header's Library. */}
-            {recipes && <div className="relative px-3 pb-3">{recipes}</div>}
+            {recipes && <div className="relative px-2.5 pb-2.5">{recipes}</div>}
 
-            {/* Footer — discovery telemetry + DSL escape hatch */}
-            <div className={cn(
-                'relative px-5 py-3 flex items-center justify-between gap-3',
-                'border-t border-glass-border/40 bg-canvas-base/20',
-            )}>
+            <div className="relative px-4 py-2.5 border-t border-glass-border/40 bg-canvas-base/20">
                 <EmptyDiscoveryHint
                     loading={discoveryLoading}
                     error={discoveryError}
@@ -827,17 +725,6 @@ function PremiumEmptyHero({
                     keys={propertyKeyCount}
                     layers={discoveredLayers.length}
                 />
-                <button
-                    type="button"
-                    onClick={onUseCodeMode}
-                    className={cn(
-                        'inline-flex items-center gap-1.5 text-[11px] text-ink-muted',
-                        'hover:text-accent-lineage transition-colors',
-                    )}
-                >
-                    <FileCode className="w-3 h-3" />
-                    Paste DSL instead
-                </button>
             </div>
         </motion.div>
     )
@@ -895,437 +782,6 @@ function EmptyDiscoveryHint({
 
 
 // ---------------------------------------------------------------------------
-// Bits
-// ---------------------------------------------------------------------------
-
-// ---------------------------------------------------------------------------
-// Run controls — Auto/Manual switch + Run button
-// ---------------------------------------------------------------------------
-
-/**
- * The Auto/Manual toggle controls whether edits dispatch automatically
- * after a debounce (default) or wait for an explicit Run click. Manual
- * mode is the relief valve for power users authoring a 5-tier filter
- * who don't want a backend round-trip on every chip add.
- *
- * The Run button is always rendered:
- *   * Manual mode: primary affordance; pulses when there are pending
- *     edits the user hasn't dispatched.
- *   * Auto mode: secondary "run now" shortcut that bypasses the
- *     250ms debounce — useful for impatient power users.
- */
-/**
- * HeaderActions — action toolbar rendered as the second row of the
- * unified QueryCard header. Three groups, separated visually so each
- * reads as a distinct concern:
- *
- *   [↺ Back] [↶][↷]   ·   [Auto │ Manual]   ·   [🗑]  [▷ Run]
- *    history          ·    dispatch mode    ·   destructive + primary
- *
- * The old design had this toolbar as a separate "ActionFooter" below
- * the body. User feedback pushed for one cohesive header surface; this
- * sits inside the header card, sharing its bordered region. Subtle
- * top divider visually separates Row 1 (title + Visual/Code) from
- * Row 2 (this) without splitting the card.
- */
-function HeaderActions({
-    canUndo, canRedo, onUndo, onRedo,
-    canClear, onClear,
-    canSave, onSave,
-    canCreateRule, ruleRefusal, onCreateRule,
-    runMode, onRunModeChange,
-    canRun, hasPendingChanges, isRunning, onRunNow,
-}: {
-    canUndo: boolean
-    canRedo: boolean
-    onUndo: () => void
-    onRedo: () => void
-    canClear: boolean
-    onClear: () => void
-    canSave: boolean
-    onSave: () => void
-    canCreateRule: boolean
-    /** Why this query can make no rule, whatever is filled in. */
-    ruleRefusal?: string
-    onCreateRule: () => void
-    runMode: 'auto' | 'manual'
-    onRunModeChange: (next: 'auto' | 'manual') => void
-    canRun: boolean
-    hasPendingChanges: boolean
-    isRunning: boolean
-    onRunNow: () => void
-}) {
-    return (
-        <div className={cn(
-            'flex items-center gap-2 gap-y-2 flex-wrap',
-            'px-3 pb-2 pt-1.5',
-            'border-t border-slate-200/70 dark:border-glass-border/40',
-        )}>
-            {/* LEFT — secondary utilities (history + mode) */}
-            <div className="flex items-center gap-1 flex-nowrap shrink-0">
-                <UndoRedoButtons
-                    canUndo={canUndo}
-                    canRedo={canRedo}
-                    onUndo={onUndo}
-                    onRedo={onRedo}
-                />
-            </div>
-            <div className="shrink-0">
-                <RunModeToggle
-                    runMode={runMode}
-                    onRunModeChange={onRunModeChange}
-                />
-            </div>
-
-            {/* RIGHT — workflow + primary CTA. ``ml-auto`` anchors the
-                cluster to the trailing edge of the row. Order within
-                the cluster follows form-button convention: workflow
-                actions (New, Save) sit just left of the primary CTA
-                (Run) which is always the rightmost element so the
-                user's mouse naturally lands on the "Go" action.
-                ``gap-2`` between the workflow icons and Run gives
-                Run its own visual breathing room. */}
-            <div className="flex items-center gap-2 ml-auto flex-nowrap shrink-0">
-                <div className="flex items-center gap-1 flex-nowrap">
-                    <NewQueryButton
-                        onClear={onClear}
-                        disabled={!canClear || isRunning}
-                    />
-                    <SaveQueryButton
-                        onSave={onSave}
-                        disabled={!canSave || isRunning}
-                    />
-                    <CreateRuleButton
-                        onCreateRule={onCreateRule}
-                        disabled={!canCreateRule || isRunning}
-                        refusal={ruleRefusal}
-                    />
-                </div>
-                <RunButton
-                    runMode={runMode}
-                    canRun={canRun}
-                    hasPendingChanges={hasPendingChanges}
-                    isRunning={isRunning}
-                    onRunNow={onRunNow}
-                />
-            </div>
-        </div>
-    )
-}
-
-
-/**
- * "New query" — discards the current draft and resets the panel to
- * the empty hero so the user can start fresh without manually
- * deleting filters. Renamed from "Clear all" per user feedback:
- * users couldn't discover the action by intent ("I want to start a
- * new search") because the previous trash icon read as destructive
- * cleanup rather than a workflow step.
- *
- * Icon: ``SquarePen`` — the same "compose new" affordance Linear /
- * Notion / Slack use for "create a new note / message". Reads
- * intuitively as "start writing something new" rather than the
- * generic "+" which is too ambiguous next to the existing "+ Add
- * filter" button inside the body.
- */
-function NewQueryButton({
-    onClear, disabled,
-}: {
-    onClear: () => void
-    disabled?: boolean
-}) {
-    return (
-        <button
-            type="button"
-            onClick={onClear}
-            disabled={disabled}
-            title="New query (clears current filters)"
-            aria-label="New query"
-            className={cn(
-                'inline-flex items-center gap-1 px-2 h-7 rounded-md',
-                'text-[11px] font-medium border transition-colors',
-                disabled
-                    ? cn(
-                        'border-transparent text-ink-muted/40 cursor-not-allowed',
-                    )
-                    : cn(
-                        'border-slate-200 dark:border-glass-border/60',
-                        'text-ink-secondary hover:text-accent-lineage',
-                        'hover:bg-accent-lineage/10 hover:border-accent-lineage/40',
-                    ),
-            )}
-        >
-            <SquarePen className="w-3.5 h-3.5" />
-            New
-        </button>
-    )
-}
-
-
-/**
- * "Save query" — persists the current draft into the user's Mine
- * library via the SaveQueryDialog. Opens the dialog with a synthetic
- * RecentQueryEntry built from the live draft + its DSL stringify;
- * on confirm, the store action ``saveDraftAsMineEntry`` creates a
- * pinned, named entry that shows up in the Library popover's Mine
- * tab. Disabled when there's no runnable draft (nothing to save).
- *
- * Icon: ``Save`` — the universal floppy-disk save glyph. Recognised
- * across business users regardless of technical background; far
- * less ambiguous than the previous ``BookmarkPlus`` which read as
- * "add bookmark" rather than "save to library".
- */
-function SaveQueryButton({
-    onSave, disabled,
-}: {
-    onSave: () => void
-    disabled?: boolean
-}) {
-    return (
-        <button
-            type="button"
-            onClick={onSave}
-            disabled={disabled}
-            title={disabled
-                ? 'Add at least one complete filter to save'
-                : 'Save this query to your library'}
-            aria-label="Save query"
-            className={cn(
-                'inline-flex items-center gap-1 px-2 h-7 rounded-md',
-                'text-[11px] font-medium border transition-colors',
-                disabled
-                    ? cn(
-                        'border-transparent text-ink-muted/40 cursor-not-allowed',
-                    )
-                    : cn(
-                        'border-slate-200 dark:border-glass-border/60',
-                        'text-ink-secondary hover:text-amber-500',
-                        'hover:bg-amber-500/10 hover:border-amber-400/40',
-                    ),
-            )}
-        >
-            <SaveIcon className="w-3.5 h-3.5" />
-            Save
-        </button>
-    )
-}
-
-
-/**
- * "Create rule" — turn the current query into a Property Manager
- * display rule (tags every match with a colored chip on the canvas).
- * Opens the shared DisplayRuleEditor seeded with the query. Disabled
- * when there's no runnable draft (same gate as Save), and for someone who
- * can't edit the view: its rules are the view's.
- */
-function CreateRuleButton({
-    onCreateRule, disabled: noQuery, refusal,
-}: {
-    onCreateRule: () => void
-    disabled?: boolean
-    refusal?: string
-}) {
-    const canEditView = useLibraryCanEdit()
-    const disabled = noQuery || !canEditView
-    return (
-        <button
-            type="button"
-            onClick={onCreateRule}
-            disabled={disabled}
-            title={!canEditView
-                ? 'Only people who can edit this view can add display rules'
-                : refusal ?? (disabled
-                    ? 'Add at least one complete filter to tag matches'
-                    : 'Create a display rule from this query')}
-            aria-label="Create display rule"
-            className={cn(
-                'inline-flex items-center gap-1 px-2 h-7 rounded-md',
-                'text-[11px] font-medium border transition-colors',
-                disabled
-                    ? cn(
-                        'border-transparent text-ink-muted/40 cursor-not-allowed',
-                    )
-                    : cn(
-                        'border-slate-200 dark:border-glass-border/60',
-                        'text-ink-secondary hover:text-accent-lineage',
-                        'hover:bg-accent-lineage/10 hover:border-accent-lineage/40',
-                    ),
-            )}
-        >
-            <Tags className="w-3.5 h-3.5" />
-            Tag
-        </button>
-    )
-}
-
-
-/**
- * Two small icon buttons. Both disabled when the matching stack is
- * empty. Don't render anything when BOTH are disabled and we're in the
- * populated state — keeps the header from looking dead.
- */
-function UndoRedoButtons({
-    canUndo, canRedo, onUndo, onRedo,
-}: {
-    canUndo: boolean
-    canRedo: boolean
-    onUndo: () => void
-    onRedo: () => void
-}) {
-    if (!canUndo && !canRedo) return null
-    return (
-        <div className="inline-flex items-center rounded-md bg-canvas-base/40 border border-glass-border/60 p-0.5">
-            <button
-                type="button"
-                onClick={onUndo}
-                disabled={!canUndo}
-                title="Undo last structural change"
-                aria-label="Undo"
-                className={cn(
-                    'inline-flex items-center justify-center w-6 h-6 rounded',
-                    'transition-colors',
-                    canUndo
-                        ? 'text-ink-secondary hover:text-accent-lineage hover:bg-accent-lineage/10'
-                        : 'text-ink-muted/40 cursor-not-allowed',
-                )}
-            >
-                <Undo2 className="w-3.5 h-3.5" />
-            </button>
-            <button
-                type="button"
-                onClick={onRedo}
-                disabled={!canRedo}
-                title="Redo"
-                aria-label="Redo"
-                className={cn(
-                    'inline-flex items-center justify-center w-6 h-6 rounded',
-                    'transition-colors',
-                    canRedo
-                        ? 'text-ink-secondary hover:text-accent-lineage hover:bg-accent-lineage/10'
-                        : 'text-ink-muted/40 cursor-not-allowed',
-                )}
-            >
-                <Redo2 className="w-3.5 h-3.5" />
-            </button>
-        </div>
-    )
-}
-
-
-/**
- * RunModeToggle — Auto/Manual segmented control. Split out from the
- * old combined ``RunControls`` so the HeaderActions layout can place
- * the mode toggle in the mid-left action cluster while the primary
- * Run CTA anchors to the far right (where users instinctively look
- * for the "Go" action — same affordance as a form's Submit button).
- */
-function RunModeToggle({
-    runMode, onRunModeChange,
-}: {
-    runMode: 'auto' | 'manual'
-    onRunModeChange: (next: 'auto' | 'manual') => void
-}) {
-    const manualLabel = runMode === 'manual'
-        ? 'Manual — only runs on click'
-        : 'Auto — runs on every edit (250ms debounce)'
-    return (
-        <div
-            className="inline-flex rounded-md bg-canvas-base/40 border border-glass-border/60 p-0.5"
-            title={manualLabel}
-        >
-            <ToggleBtn
-                active={runMode === 'auto'}
-                onClick={() => onRunModeChange('auto')}
-            >
-                <Zap className="w-3 h-3" /> Auto
-            </ToggleBtn>
-            <ToggleBtn
-                active={runMode === 'manual'}
-                onClick={() => onRunModeChange('manual')}
-            >
-                <Hand className="w-3 h-3" /> Manual
-            </ToggleBtn>
-        </div>
-    )
-}
-
-
-/**
- * RunButton — primary CTA. Sits at the far right of the action
- * toolbar so it follows the standard form-action convention
- * (primary action on the right; cancel/secondary on the left).
- * Uses the ContextViewHeader primary-action palette (subtle accent
- * gradient + accent text + accent border), not a solid coloured
- * button — reads as the primary action without shouting. Pulse
- * state intensifies the gradient and adds an amber dot when
- * Manual mode has pending edits.
- */
-function RunButton({
-    runMode, canRun, hasPendingChanges, isRunning, onRunNow,
-}: {
-    runMode: 'auto' | 'manual'
-    canRun: boolean
-    hasPendingChanges: boolean
-    isRunning: boolean
-    onRunNow: () => void
-}) {
-    const pulse = runMode === 'manual' && hasPendingChanges && !isRunning
-    return (
-        <button
-            type="button"
-            onClick={onRunNow}
-            disabled={!canRun || isRunning}
-            title={
-                !canRun
-                    ? 'Add at least one complete filter to run'
-                    : hasPendingChanges
-                        ? 'Run the current draft'
-                        : 'Re-run the current draft'
-            }
-            className={cn(
-                'relative inline-flex items-center gap-1.5 px-3 h-7 rounded-lg',
-                'text-[12px] font-semibold transition-all duration-200',
-                'border',
-                !canRun || isRunning
-                    ? cn(
-                        'bg-black/[0.04] border-black/[0.10]',
-                        'text-ink-muted/60 cursor-not-allowed',
-                        'dark:bg-white/[0.04] dark:border-white/[0.08]',
-                    )
-                    : pulse
-                        ? cn(
-                            'bg-gradient-to-r from-accent-lineage/25 to-accent-lineage/15',
-                            'text-accent-lineage border-accent-lineage/50',
-                            'shadow-sm shadow-accent-lineage/20',
-                            'hover:from-accent-lineage/35 hover:to-accent-lineage/20',
-                        )
-                        : cn(
-                            'bg-gradient-to-r from-accent-lineage/15 to-accent-lineage/[0.08]',
-                            'text-accent-lineage border-accent-lineage/35',
-                            'shadow-sm shadow-accent-lineage/10',
-                            'hover:from-accent-lineage/20 hover:to-accent-lineage/[0.12]',
-                            'hover:border-accent-lineage/50',
-                        ),
-            )}
-        >
-            {isRunning ? (
-                <Loader2 className="w-3.5 h-3.5 animate-spin" strokeWidth={2.4} />
-            ) : (
-                <Play className="w-3.5 h-3.5" strokeWidth={2.4} fill="currentColor" />
-            )}
-            Run
-            {pulse && (
-                <span className={cn(
-                    'absolute -top-1 -right-1 w-1.5 h-1.5 rounded-full',
-                    'bg-amber-400 ring-2 ring-amber-400/30 animate-pulse',
-                )} />
-            )}
-        </button>
-    )
-}
-
-
-// ---------------------------------------------------------------------------
 // Run-mode persistence
 // ---------------------------------------------------------------------------
 
@@ -1372,29 +828,6 @@ function useRunMode(): [RunMode, (next: RunMode) => void] {
  * and Run button to detect "the draft hasn't changed since the last
  * dispatch" (no need to re-fire).
  */
-
-
-function ToggleBtn({
-    active, onClick, children,
-}: {
-    active: boolean; onClick: () => void; children: ReactNode
-}) {
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            className={cn(
-                'inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-semibold',
-                'transition-colors',
-                active
-                    ? 'bg-accent-lineage/20 text-accent-lineage'
-                    : 'text-ink-muted hover:text-ink',
-            )}
-        >
-            {children}
-        </button>
-    )
-}
 
 
 // ---------------------------------------------------------------------------

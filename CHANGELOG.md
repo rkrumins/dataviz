@@ -13,6 +13,14 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ### Fixed
 
+- **The query card's header is there in every editor and every state.** An empty Form or
+  Sentence used to replace the whole card with a landing panel — no Form · Sentence · Code ·
+  Cypher switch, no Undo, no Run — so from an empty Form there was no way back to Sentence or
+  Code. The card now opens on the Form under one header: the four editors as tabs, with **New**,
+  **Save** and **Tag** beside them; below them **Entities** or **Connections**, Undo and Redo,
+  **Auto** (a switch: on, the query runs as you edit) and **Run**. Narrow, the editors not chosen
+  show their icons alone. An empty query starts with a filter, or a question in Sentence, under
+  that header.
 - **Edit in Code opens Code.** "Open in Code" on what the Form or the Sentence can't show — a
   group nested too deep, a number of edges in the Sentence — opened the Advanced drawer's
   Options, which can't edit the query. It now reads **Edit in Code** and opens Code mode with
