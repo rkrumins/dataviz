@@ -456,6 +456,11 @@ class ProjectionReconciler:
             and not mismatched and not edge_mismatched
             and pg_nodes == falkor_nodes and pg_edges == falkor_edges
         )
+        if not owned:
+            # A customer's key may also hold what its other writers put there: kept and flagged
+            # (``external_drift``), not out of sync.
+            in_sync = (not missing_nodes and not mismatched and not edge_mismatched
+                       and falkor_nodes >= pg_nodes and falkor_edges >= pg_edges)
         try:
             health = await rollup_health(client)
             rollups = {"status": health.status, "aggregated": health.aggregated,

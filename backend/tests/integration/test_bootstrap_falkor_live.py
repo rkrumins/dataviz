@@ -18,6 +18,9 @@ FalkorDB can answer is pinned here:
   node with no identifier at all stops the enable before anything is copied.
 * L6 — an edge whose id is also a node's urn, re-keyed ``edge:<id>`` in history, keeps the graph's
   own id through an update, and a delete reaches it: every publish goes out fresh.
+* L7 — something else keeps writing to the graph after the enable (a node, a relationship, a
+  property on a node history holds): publishes still go out fresh, the outside writes are kept and
+  counted (``external_drift``), and a Rebuild writes history back while deleting none of them.
 * L4 — a graph that spells its types its own way (``:table``, ``:flows_to``) against an ontology
   that declares ``Table`` and ``FLOWS_TO`` keeps its spelling: history holds the declared one, and
   every publish after the enable lands on the graph's own labels and goes out fresh.
@@ -432,6 +435,73 @@ async def test_an_edge_whose_id_was_a_node_keeps_it_and_a_delete_reaches_it(grap
     # The id the graph uses names the edge, never the node that shares it.
     named = await svc.resolve_edges(graph_id=gid, edge_ids=["X", "Y", "Z"])
     assert (named["X"][0], named["Y"]) == ("edge:X", None) and "Z" not in named, named
+
+
+# ── L7: something else keeps writing to the graph ────────────────────────────
+
+async def _drift(gid):
+    async with db.graphver_session() as s:
+        d = (await s.get(ProjectionStateORM, gid)).external_drift
+    return d and {k: v for k, v in d.items() if k != "at"}
+
+
+async def test_writes_from_outside_history_are_kept_flagged_and_survive_a_rebuild(graph):
+    """An ETL keeps writing after the enable. Views keep reading FalkorDB — ETL data included —
+    because every publish still goes out fresh; what history doesn't hold is counted, not
+    deleted; the platform's own delete still lands; and a Rebuild deletes nothing it didn't
+    write."""
+    name, client = graph
+    for urn in ("urn:a", "urn:b", "urn:c"):
+        await client.query("CREATE (:Table {urn: $u, displayName: $u})", {"u": urn})
+    await client.query("CREATE INDEX FOR (n:Table) ON (n.urn)")
+    await client.query("MATCH (a:Table {urn: 'urn:a'}), (b:Table {urn: 'urn:b'}) "
+                       "CREATE (a)-[:FLOWS {id: 'f1'}]->(b)")
+    _ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+
+    # The ETL, after the enable: a node, a relationship, and a property on a node history holds.
+    await client.query("CREATE (:Table {urn: 'urn:etl', displayName: 'from the etl'})")
+    await client.query("MATCH (a:Table {urn: 'urn:etl'}), (b:Table {urn: 'urn:a'}) "
+                       "CREATE (a)-[:FLOWS {id: 'f9'}]->(b)")
+    await client.query("MATCH (n:Table {urn: 'urn:a'}) SET n.owner = 'etl-team'")
+
+    svc, projector = GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+    for message, op in (
+            ("rename a", {"op": "update", "entity_kind": "node", "entity_id": "urn:a",
+                          "payload": {"urn": "urn:a", "entityType": "Table",
+                                      "displayName": "a renamed"}}),
+            ("delete c", {"op": "delete", "entity_kind": "node", "entity_id": "urn:c",
+                          "payload": None})):
+        await svc.apply_ops(graph_id=gid, actor="bob", message=message, ops=[op])
+        res = await projector.project_graph(gid)
+        assert res.get("verify_error") is None and await _fresh(gid), (message, res)
+    assert await _drift(gid) == {"nodes": 1, "edges": 1, "via": "verify"}
+
+    async def held():
+        return (await _rows(client, "MATCH (n:Table) RETURN n.urn, n.displayName, n.owner "
+                                    "ORDER BY n.urn"),
+                await _rows(client, "MATCH ()-[r:FLOWS]->() RETURN r.id ORDER BY r.id"))
+
+    assert await held() == ([["urn:a", "a renamed", "etl-team"], ["urn:b", "urn:b", None],
+                             ["urn:etl", "from the etl", None]], [["f1"], ["f9"]])
+
+    # A Rebuild writes history back into the graph and deletes nothing history doesn't hold.
+    assert await svc.request_projection_rebuild(gid)
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    assert await held() == ([["urn:a", "a renamed", "etl-team"], ["urn:b", "urn:b", None],
+                             ["urn:etl", "from the etl", None]], [["f1"], ["f9"]])
+    assert await _drift(gid) == {"nodes": 1, "edges": 1, "via": "verify"}
+
+    # Gone from the graph, the flag clears with the next publish.
+    await client.query("MATCH (n:Table {urn: 'urn:etl'}) DETACH DELETE n")
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename b", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "urn:b",
+         "payload": {"urn": "urn:b", "entityType": "Table", "displayName": "b renamed"}}])
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    assert await _drift(gid) is None
 
 
 # ── L4: a graph that spells its types its own way keeps that spelling ────────

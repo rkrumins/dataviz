@@ -36,6 +36,16 @@ limitations** — a changelog that only lists good news is not worth reading.
   connection `<id>` from the canvas deleted the *item* `<id>` instead. Now the graph's own id is
   kept, the delete finds it by either id, and an update or delete of `<id>` acts on the connection
   it names. An id that names only an item is refused (422 `invalid_patch`).
+- **Something else writing to the graph no longer stops publishing.** On a graph enabled in place,
+  another writer (an ETL) may keep writing. The first publish after that counted "extra entities"
+  and held the projection back for good. Views then fell back to Postgres, which holds neither the
+  ETL's data nor the lineage summaries. And the message said to enable version control again,
+  which only answers "already enabled". Now a publish into the customer's own graph keeps what
+  history doesn't hold, goes out, and records how much (`externalDrift` on the watermark). Rebuild
+  and the automatic heal no longer delete what history doesn't hold: they used to delete up to half
+  of the graph, and every duplicate copy. An edit no longer strips a property history never held.
+  In a graph the platform created, a held-back publish now says to bring the changes into history
+  or Rebuild.
 
 ### Upgrading
 

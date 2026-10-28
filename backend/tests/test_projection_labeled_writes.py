@@ -270,3 +270,43 @@ def test_a_customer_graph_keeps_the_id_its_relationship_has():
     _run(_projector()._apply(customer, [_NODE_A, _NODE_B], [_EDGE], [], [], owned=False))
     assert any("SET r.id = item.eid," in c for c in owned.cyphers())
     assert any("SET r.id = coalesce(r.id, item.eid)," in c for c in customer.cyphers())
+
+
+class _HeldClient(_CaptureClient):
+    """Node ``urn:a`` holds ``held`` property names, as the strip's read sees it; an edge merge
+    reports ``landed`` items."""
+
+    def __init__(self, held=(), landed=None):
+        super().__init__()
+        self._held, self._landed = list(held), landed
+
+    async def query(self, cypher, params=None, timeout=None):
+        self.calls.append((cypher, params, timeout))
+        if "RETURN u, keys(n)" in cypher:
+            return SimpleNamespace(result_set=[["urn:a", self._held, None, None]])
+        if "RETURN count(DISTINCT item.eid)" in cypher and self._landed is not None:
+            return SimpleNamespace(result_set=[[self._landed]])
+        return SimpleNamespace(result_set=[])
+
+
+def _gone(client):
+    return [i["gone"] for _c, p, _t in client.calls if p and "batch" in p
+            for i in p["batch"] if "gone" in i]
+
+
+def test_a_customer_key_keeps_the_properties_history_never_held():
+    """A property the node had before the pass and lost is removed; one history never held was
+    written by something else, and stays."""
+    node = ("A", "urn:a", {"urn": "urn:a", "entityType": "Table", "displayName": "a",
+                           "properties": {"kept": 1}})
+    owned, customer = _HeldClient(["kept", "dropped", "etl"]), _HeldClient(["kept", "dropped", "etl"])
+    _run(_projector()._apply(owned, [node], [], [], []))
+    _run(_projector()._apply(customer, [node], [], [], [], owned=False,
+                             prior={"A": {"kept", "dropped"}}))
+    assert _gone(owned) == [{"dropped": None, "etl": None}]
+    assert _gone(customer) == [{"dropped": None}]
+
+
+def test_an_edge_whose_endpoint_is_not_there_is_counted_as_not_landed():
+    assert _run(_projector()._apply(_HeldClient(landed=0), [], [_EDGE], [], [])) == 1
+    assert _run(_projector()._apply(_HeldClient(landed=1), [], [_EDGE], [], [])) == 0

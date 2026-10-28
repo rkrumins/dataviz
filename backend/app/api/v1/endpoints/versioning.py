@@ -925,6 +925,10 @@ class WatermarkModel(_ApiModel):
     failed_attempts: int = Field(default=0, alias="failedAttempts")
     next_retry_at: Optional[str] = Field(default=None, alias="nextRetryAt")
     liveness_error: Optional[str] = Field(default=None, alias="livenessError")
+    # A customer's own graph (`owned` false) may hold what history doesn't — another writer kept
+    # writing to it. Kept, not deleted: `{at, nodes, edges, via}` (`via`: the projector's count,
+    # `verify`, or a change notification), null when there is none.
+    external_drift: Optional[Dict[str, Any]] = Field(default=None, alias="externalDrift")
 
 
 class BranchFreshnessModel(_ApiModel):
@@ -1966,7 +1970,8 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           epoch=wm.get("epoch", 0),
                           failed_attempts=wm.get("failed_attempts", 0),
                           next_retry_at=wm.get("next_retry_at"),
-                          liveness_error=wm.get("liveness_error"))
+                          liveness_error=wm.get("liveness_error"),
+                          external_drift=wm.get("external_drift"))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:

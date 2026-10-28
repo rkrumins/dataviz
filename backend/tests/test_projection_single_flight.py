@@ -31,6 +31,7 @@ class _FakePS:
         self.falkor_provider = None
         self.owns_falkor_graph = False                 # a pinned customer graph, as the column defaults
         self.physical_types = None                     # spelled as declared
+        self.external_drift = None
         self.last_projected_at = None
         self.progress_done = None
         self.progress_total = None

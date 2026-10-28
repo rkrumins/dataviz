@@ -3065,6 +3065,8 @@ class GraphVersioningService:
                                    else None),
                 # Old platform keys a move left, waiting to be dropped (move_projection).
                 "retired_keys": list(ps.retired_keys or []) if ps else [],
+                # What a customer's key holds that history doesn't, kept and flagged.
+                "external_drift": ps.external_drift if ps else None,
             }
 
     async def ensure_projection_target(

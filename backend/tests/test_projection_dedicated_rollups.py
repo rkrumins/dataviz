@@ -86,7 +86,7 @@ class _Graphver:
         self.ps = SimpleNamespace(
             status="idle", last_error=None, projected_commit_seq=1, target_commit_seq=2,
             falkor_graph_name="lineage", falkor_provider=None, owns_falkor_graph=False, epoch=0,
-            failed_attempts=0, next_retry_at=None, physical_types=None)
+            failed_attempts=0, next_retry_at=None, physical_types=None, external_drift=None)
         self.graph = SimpleNamespace(
             id="graph_1", data_source_id="ds_1", workspace_id="ws_1", fork_parent_graph_id=None,
             deleted_at=None, main_head_commit_seq=2)
@@ -120,7 +120,7 @@ def run_window(monkeypatch, rows, *, before=None, resolver=_dedicated, on_rollup
     async def claim(graph_id, seen_epoch, from_seq):
         return seen_epoch + 1, 0
 
-    async def finish(graph_id, mine, *, published, to_seq, error, attempts):
+    async def finish(graph_id, mine, *, published, to_seq, error, attempts, surplus=None):
         return True
 
     async def main_branch_id(s, graph_id):

@@ -257,8 +257,21 @@ reconciles **live node/edge counts** between Postgres and FalkorDB and bounded-h
 - **FalkorDB has *more* than committed main** (`projection.py:773-794`): first `_sweep_tombstoned`
   DETACH-DELETEs anything `main` has tombstoned that the incremental pass stranded (matched by
   committed `urn` with `entityId` confirmed, bounded by delete count — `projection.py:818-861`), then
-  re-counts. Whatever extra remains carries no tombstone (un-imported legacy/aggregation data) and is
-  **not** auto-deleted — it records an error prompting enablement/bootstrap.
+  re-counts. Whatever extra remains carries no tombstone and is **not** deleted. In a key the platform
+  minted it holds the pass back, with an error that says to bring it into history or Rebuild. In a
+  customer's own graph (`owns_falkor_graph` false) it is what the graph's other writers put there —
+  an ETL that kept writing — so the pass publishes, and records how much in
+  `projection_state.external_drift` (`{at, nodes, edges, via}`, `via: verify`), which the next pass
+  that counts none clears (a pass that doesn't count, because the head moved on, leaves it); the
+  watermark's `externalDrift` carries it to the UI. Two guards keep a
+  surplus from hiding a loss: the edge merge returns how many of its items landed, and one whose
+  endpoint wasn't there is a shortfall, healed; and a surplus equal to the one last recorded skips
+  the sweep, which reads every tombstone of the graph.
+- **A customer's graph loses nothing history doesn't hold.** A reconcile into it (Rebuild, the heal
+  below) deletes no node, relationship or duplicate copy history doesn't hold, whatever its share of
+  the graph; it sweeps only what history tombstoned, and hands the rollups to the batch job when it
+  kept anything. An incremental pass removes only properties the node's payload had before the
+  window (`_mark_removed_properties`' `prior`); a reconcile removes none.
 - **FalkorDB has *fewer*** (`projection.py:795-813`): **bounded reseed once** — recompute the full
   `_compute_changes(0, to_seq)`, drop, re-apply, re-verify. Returns `reseeded=True`, which (because it
   wipes rollups) makes the caller queue a rollup rebuild via `on_rollups_stale`.

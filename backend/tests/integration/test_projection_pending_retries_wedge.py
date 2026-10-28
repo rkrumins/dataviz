@@ -31,10 +31,11 @@ from backend.tests.integration.test_versioning_projection import (
 
 
 async def _seed_published_pinned(svc, name: str) -> tuple:
-    """A graph pinned to a REAL FalkorDB target (unpinned graphs are never projected)
+    """A graph pinned to a REAL FalkorDB target (unpinned graphs are never projected) the
+    platform minted — in a customer's, an entity history doesn't hold is flagged, not a failure —
     with two nodes published to main. Returns ``(graph_id, main_head_commit_seq)``."""
     G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                               actor="alice", falkor_graph_name=name)
+                               actor="alice", falkor_graph_name=name, owns_falkor_graph=True)
     gid = G["graph_id"]
     await _edit_publish(svc, gid, "alice", [
         {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": _node("Alpha")},

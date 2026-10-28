@@ -12,8 +12,8 @@
   instance as ``'default'`` and as a provider row, hold one key — a second claim through either
   is refused, also when the two race, and "who else reads it" counts both.
 * Nothing projects into a graph whose version control is still being enabled, or into a
-  tombstoned graph's retained pin; a full replay that would delete most of a key the platform
-  does not own is refused, and the watermark is held back.
+  tombstoned graph's retained pin; a full replay over a key the platform does not own deletes
+  nothing history doesn't hold: it publishes, and flags what it kept (``external_drift``).
 
 FalkorDB is the in-memory ``FakeFalkor`` of ``test_versioning_projection``. Skipped unless
 ``GRAPHVER_E2E=1``.
@@ -234,8 +234,11 @@ async def _run_parking_and_claim() -> None:
                                             "payload": _node("A")}], "seed")
     r = await proj.project_graph(pinned)
     assert fake.graphs[key].entity_ids() == {"X", "A"}                 # the source's node survives
-    # ...and, being one the log does not hold, keeps reads on Postgres until it is imported.
-    assert "extra entities" in (r["verify_error"] or ""), r
+    # ...and, being one the log does not hold, is flagged; the pass still publishes.
+    assert r["verify_error"] is None and r["projected"] == 2, r
+    async with db.graphver_session() as s:
+        drift = (await s.get(ProjectionStateORM, pinned)).external_drift
+    assert (drift["nodes"], drift["edges"], drift["via"]) == (1, 0, "verify"), drift
 
     # One key, one versioned graph — per provider.
     with pytest.raises(ConcurrencyError):
@@ -384,7 +387,7 @@ def test_nothing_projects_while_version_control_is_being_enabled():
     asyncio.run(_run_bootstrap_fence())
 
 
-async def _run_tombstoned_and_refused() -> None:
+async def _run_tombstoned_and_foreign() -> None:
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
     fake = FakeFalkor()
@@ -409,7 +412,7 @@ async def _run_tombstoned_and_refused() -> None:
     assert r.get("skipped") == "deleted", r
     assert fake.graphs == {}
 
-    # A full replay that would delete most of a key the platform does not own is refused.
+    # A full replay over a key the platform does not own deletes nothing history doesn't hold.
     key = _name()
     gid = (await svc.create_graph(data_source_id=_ds(), workspace_id="ws1", actor="a",
                                   falkor_graph_name=key))["graph_id"]
@@ -422,16 +425,15 @@ async def _run_tombstoned_and_refused() -> None:
     assert fake.graphs[key].entity_ids() == {"C0", "C1", "C2", "A"}
     assert await svc.request_projection_rebuild(gid) is True
     r = await proj.project_graph(gid)
-    assert "refusing" in (r.get("verify_error") or ""), r
+    assert r.get("verify_error") is None, r
+    assert fake.graphs[key].entity_ids() == {"C0", "C1", "C2", "A"}
     async with db.graphver_session() as s:
         ps = await s.get(ProjectionStateORM, gid)
-        assert (ps.projected_commit_seq, ps.target_commit_seq, ps.status) == (0, 2, "idle")
-        assert "refusing" in ps.last_error and ps.failed_attempts == 1 and ps.next_retry_at
-    assert fake.graphs[key].entity_ids() == {"C0", "C1", "C2", "A"}
-    assert "refusing" in ((await proj.project_graph(gid)).get("verify_error") or "")
-    assert fake.graphs[key].entity_ids() == {"C0", "C1", "C2", "A"}
+        assert (ps.projected_commit_seq, ps.target_commit_seq, ps.status) == (2, 2, "idle")
+        assert ps.last_error is None and ps.failed_attempts == 0
+        assert (ps.external_drift["nodes"], ps.external_drift["edges"]) == (3, 0), ps.external_drift
     await db.dispose_engine()
 
 
-def test_no_reseed_of_a_tombstoned_pin_or_over_a_foreign_key():
-    asyncio.run(_run_tombstoned_and_refused())
+def test_no_reseed_of_a_tombstoned_pin_and_nothing_deleted_from_a_foreign_key():
+    asyncio.run(_run_tombstoned_and_foreign())
