@@ -11,16 +11,19 @@
  *  - <NodeIdentityField/>  — the editable expert disclosure (detail panel,
  *    ingestion form, onboarding/attach wizards).
  *  - <NodeIdentityBadge/>  — the read-only "mapped" chip (grid cards, headers).
+ *  - <NodeIdentityFacts/>  — an entity's identifier and name properties, with where
+ *    each setting comes from (the entity drawer).
  *  - useNodeIdentitySuggestions() — introspects the real graph (discoverSchema)
  *    to suggest the actual node property keys.
  */
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Fingerprint, KeyRound, ShieldAlert, ChevronDown, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
-import { RESERVED_PROPERTY_KEYS } from '@/lib/nodeFields'
+import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
+import { RESERVED_PROPERTY_KEYS, readSchemaField } from '@/lib/nodeFields'
 import { providerService } from '@/services/providerService'
 import type { DataSourceResponse } from '@/services/workspaceService'
-import { useBranchStore } from '@/store/branchStore'
+import { useActiveView } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 
 // ── helpers (the single normalization contract) ─────────────────────────────
@@ -73,14 +76,96 @@ export function boundFieldIds(
     return ids
 }
 
-/** The resolved mapping of the data source being edited: the branch store's editing scope, looked
- *  up in the workspace list (resolved server-side across all four scopes). Null outside an editing
- *  scope, or before the list has loaded. */
-export function useEditingNodeIdentity(): DataSourceResponse | null {
-    const wsId = useBranchStore((s) => s.workspaceId)
-    const dsId = useBranchStore((s) => s.dataSourceId)
-    return useWorkspacesStore((s) =>
-        s.workspaces.find((w) => w.id === wsId)?.dataSources?.find((d) => d.id === dsId) ?? null)
+/** The resolved mapping of the data source the canvas shows: the active view's — else its
+ *  workspace's primary, which is what a route reads when a view names none — looked up in the
+ *  workspace list, where the server resolved it across all four scopes. Null until that list has
+ *  loaded. */
+export function useCanvasNodeIdentity(): DataSourceResponse | null {
+    const view = useActiveView()
+    const activeWorkspaceId = useWorkspacesStore((s) => s.activeWorkspaceId)
+    const wsId = canvasScopeWorkspaceId(view?.workspaceId, activeWorkspaceId)
+    const dsId = view?.dataSourceId ?? null
+    return useWorkspacesStore((s) => {
+        const sources = s.workspaces.find((w) => w.id === wsId)?.dataSources
+        return (dsId ? sources?.find((d) => d.id === dsId) : sources?.find((d) => d.isPrimary)) ?? null
+    })
+}
+
+/** An entity as the save rule reads it: its display name and its own properties. */
+export interface NamedShape {
+    displayName?: unknown
+    properties?: Record<string, unknown>
+}
+
+const blank = (v: unknown): boolean => v == null || (typeof v === 'string' && !v.trim())
+
+/** What a save stores for an entity's name property and display name: the server's rule
+ *  (`node_identity.bind_node_write`), here so the editor can say what saving does before it does
+ *  it. `backend/tests/fixtures/node_identity/name_binding.json` runs against both, so the two
+ *  cannot drift. `prior` is the entity as read (null for one not saved yet), `value` as it will be
+ *  sent, and `minted` says the server mints its urn — an editor create. Null when the mapping is
+ *  unknown or names a field the platform owns, which the server leaves alone. */
+export function boundName(
+    prior: NamedShape | null,
+    value: NamedShape,
+    mapping: Pick<DataSourceResponse, 'nameProperty'> | null | undefined,
+    minted = false,
+): { property: string; name: unknown; displayName: unknown } | null {
+    if (!mapping) return null
+    const property = normalizeName(mapping.nameProperty)
+    if (RESERVED_PROPERTY_KEYS.has(property)) return null
+    const name = value.properties?.[property]
+    const display = value.displayName
+    let outName = name
+    let outDisplay = display
+    if (!prior) {
+        if (!blank(display) && (minted || blank(name))) outName = display
+        else if (blank(display) && !blank(name) && typeof name === 'string') outDisplay = name
+    } else {
+        const was = prior.properties?.[property]
+        const wasDisplay = prior.displayName
+        if (blank(name)) {
+            if (blank(was) && !blank(display)) outName = display
+        } else if (blank(was) || blank(wasDisplay) || String(was) === String(wasDisplay)) {
+            const displayChanged = display !== wasDisplay
+            const nameChanged = name !== was
+            if (displayChanged && !nameChanged && !blank(display)) outName = display
+            else if (nameChanged && !displayChanged && typeof name === 'string') outDisplay = name
+        }
+    }
+    return { property, name: outName, displayName: outDisplay }
+}
+
+/** What saving does to the name property, for the Name input to say before it happens:
+ *  - `follows` — the property changes with the Name (or, when empty, is filled from it);
+ *  - `renames` — the Name changes with the property;
+ *  - `same` — the two agree, and still will;
+ *  - `apart` — they differ and stay so (`renamed`: this edit changed the Name; `edited`: it
+ *    changed the property). */
+export type NameOnSave =
+    | { kind: 'follows'; property: string; from: unknown; to: unknown }
+    | { kind: 'renames'; property: string; to: unknown }
+    | { kind: 'same'; property: string }
+    | { kind: 'apart'; property: string; value: unknown; renamed: boolean; edited: boolean }
+
+export function nameOnSave(
+    prior: NamedShape | null,
+    value: NamedShape,
+    mapping: Pick<DataSourceResponse, 'nameProperty'> | null | undefined,
+    minted = false,
+): NameOnSave | null {
+    const saved = boundName(prior, value, mapping, minted)
+    if (!saved) return null
+    const { property } = saved
+    const now = value.properties?.[property]
+    if (saved.displayName !== value.displayName) return { kind: 'renames', property, to: saved.displayName }
+    if (saved.name !== now) return { kind: 'follows', property, from: now, to: saved.name }
+    if (blank(now) || String(now) === String(value.displayName)) return { kind: 'same', property }
+    return {
+        kind: 'apart', property, value: now,
+        renamed: !!prior && value.displayName !== prior.displayName,
+        edited: !!prior && now !== prior.properties?.[property],
+    }
 }
 
 /** Where a resolved mapping came from — mirrors the backend's provenance
@@ -98,6 +183,18 @@ const SOURCE_LABELS: Partial<Record<IdentitySource, string>> = {
 /** True when the value in force was set somewhere ABOVE this data source. */
 export const isInherited = (source?: IdentitySource): boolean =>
     !!source && source in SOURCE_LABELS
+
+const SOURCE_PHRASES: Record<IdentitySource, string> = {
+    data_source: 'set on this data source',
+    provider: 'from the provider',
+    workspace: 'from the workspace',
+    global: 'platform default',
+    default: 'built-in default',
+}
+
+/** Where a resolved setting comes from, as an entity's details say it. Empty when unknown. */
+export const identitySourcePhrase = (source?: IdentitySource | null): string =>
+    (source && SOURCE_PHRASES[source]) || ''
 
 /** The provenance line beside a field: either "inherited from X", or — when
  *  this level is the one overriding — the way back to inheriting.
@@ -203,6 +300,58 @@ export function NodeIdentityBadge({
             <Fingerprint className="w-3 h-3" />
             <span className="font-mono">{v}</span>
         </span>
+    )
+}
+
+// ── an entity's identity facts (the entity drawer) ──────────────────────────
+
+function Fact({ label, property, source, children }: {
+    label: string
+    property: string
+    source?: IdentitySource
+    children?: ReactNode
+}) {
+    const from = identitySourcePhrase(source)
+    return (
+        <div className="flex items-start justify-between gap-4 py-1.5">
+            <dt className="text-xs text-ink-muted min-w-[110px]">{label}</dt>
+            <dd className="text-xs text-right min-w-0">
+                <code className="font-mono text-ink">{property}</code>
+                {from && <span className="text-ink-muted"> · {from}</span>}
+                {children != null && <span className="block text-ink-muted break-words">{children}</span>}
+            </dd>
+        </div>
+    )
+}
+
+/** Which property identifies an entity and which holds its name, as its data source is configured
+ *  (across data source, provider, workspace and platform), where each setting comes from, and this
+ *  entity's values. `pending`: not saved yet, so the server has not filled them in. Nothing until
+ *  the workspace list has loaded. */
+export function NodeIdentityFacts({ data, pending = false }: {
+    data: Record<string, unknown>
+    pending?: boolean
+}) {
+    const mapping = useCanvasNodeIdentity()
+    if (!mapping) return null
+    const identity = normalizeIdentity(mapping.identityProperty)
+    const name = normalizeName(mapping.nameProperty)
+    const idValue = readSchemaField(data, identity)
+    const nameValue = readSchemaField(data, name)
+    const display = data.label ?? data.displayName
+    return (
+        <dl className="mt-2" aria-label="How this data source identifies and names entities">
+            <Fact label="Identifier property" property={identity} source={mapping.identityPropertySource}>
+                {identity === 'urn' ? null
+                    : !blank(idValue) ? String(idValue)
+                        : pending ? 'Set to its URN when saved' : 'Not set'}
+            </Fact>
+            <Fact label="Name property" property={name} source={mapping.namePropertySource}>
+                {!blank(nameValue)
+                    ? <>{String(nameValue)}{String(nameValue) !== String(display ?? '') && ' · differs from the name'}</>
+                    : pending ? 'Set from the name when saved' : 'Not set'}
+            </Fact>
+        </dl>
     )
 }
 

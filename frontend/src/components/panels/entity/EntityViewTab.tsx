@@ -13,6 +13,7 @@ import { PropertyEditor } from '../PropertyEditor'
 import { PanelErrorBoundary } from '../PanelErrorBoundary'
 import { LineageNeighbors } from '../LineageNeighbors'
 import { PlacementSummary } from './EntityPlacement'
+import { NodeIdentityFacts } from '@/components/dataSource/NodeIdentity'
 
 type Data = Record<string, unknown>
 
@@ -72,6 +73,7 @@ export function EntityViewTab({
           <IconButton icon={copiedUrn ? Check : Copy} label={copiedUrn ? 'Copied' : 'Copy URN'} size="sm" onClick={onCopyUrn}
             className={copiedUrn ? 'text-emerald-600 dark:text-emerald-400' : undefined} />
         </div>
+        <NodeIdentityFacts data={form} pending={form.isPending === 'create'} />
       </Section>
 
       <DetailsList form={form} />

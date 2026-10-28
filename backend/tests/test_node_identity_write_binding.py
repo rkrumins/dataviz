@@ -7,6 +7,8 @@ renamed in the editor, imported, staged through the API) carried no ``name``/``t
 own. The rule judges a write on the node before and after it, never on the operation that made it.
 """
 import copy
+import json
+from pathlib import Path
 
 import pytest
 
@@ -163,6 +165,27 @@ def test_it_never_mutates_and_binding_twice_changes_nothing_more():
 def test_a_node_already_bound_is_returned_as_is():
     value = _node(name="Orders")
     assert bind_node_write(None, value, DEFAULT, minted=True) is value
+
+
+# ── the shared corpus: the editor says what a save does before it happens ──────
+
+_NAME_CORPUS = Path(__file__).parent / "fixtures" / "node_identity" / "name_binding.json"
+
+
+@pytest.mark.parametrize("case", json.loads(_NAME_CORPUS.read_text())["cases"], ids=lambda c: c["name"])
+def test_the_shared_name_corpus(case):
+    """The editor predicts what a save stores for a name with a TypeScript twin of this rule
+    (``boundName``, ``frontend/src/components/dataSource/NodeIdentity.tsx``), which runs the same
+    cases — so the Name input never says anything the server won't do."""
+    prop = case["mapping"]["nameProperty"]
+
+    def payload(shape):
+        return None if shape is None else {"urn": "urn:x:1", **shape}
+
+    out = bind_node_write(payload(case["prior"]), payload(case["value"]),
+                          ResolvedNodeIdentity(name_property=prop), minted=case["minted"])
+    assert out.get("displayName") == case["expect"]["displayName"]
+    assert (out.get("properties") or {}).get(prop) == case["expect"]["name"]
 
 
 # ── a whole write, as ``_apply_ops_once`` composes one ─────────────────────────

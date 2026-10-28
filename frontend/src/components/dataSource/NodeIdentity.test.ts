@@ -1,7 +1,10 @@
+import { readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
 import { describe, it, expect } from 'vitest'
 import {
     normalizeIdentity, isIdentityOverridden, identityCoalesceExpr,
     normalizeName, isNameOverridden, nameCoalesceExpr, isInherited, boundFieldIds,
+    boundName, nameOnSave, identitySourcePhrase, type NamedShape,
 } from './NodeIdentity'
 
 describe('normalizeIdentity', () => {
@@ -118,5 +121,74 @@ describe('boundFieldIds', () => {
     })
     it('leaves a field the platform owns offered: a mapping onto one is not bound', () => {
         expect(boundFieldIds({ nameProperty: 'description', identityProperty: 'qualifiedName' })).toEqual(new Set(['name']))
+    })
+})
+
+/** backend/tests/fixtures/node_identity/name_binding.json — the server's rule runs the same cases
+ *  (test_node_identity_write_binding.py), so the editor never says a save does what it won't. */
+interface NameCase {
+    name: string
+    mapping: { nameProperty: string }
+    minted: boolean
+    prior: NamedShape | null
+    value: NamedShape
+    expect: { displayName: unknown; name: unknown }
+}
+const CORPUS = join(resolve(__dirname, '../../../..'), 'backend/tests/fixtures/node_identity/name_binding.json')
+const NAME_CASES: NameCase[] = JSON.parse(readFileSync(CORPUS, 'utf-8')).cases
+
+describe('boundName — what a save stores, as the server decides it', () => {
+    it.each(NAME_CASES.map((c) => [c.name, c] as const))('%s', (_name, c) => {
+        const out = boundName(c.prior, c.value, c.mapping, c.minted)
+            ?? { displayName: c.value.displayName, name: c.value.properties?.[c.mapping.nameProperty] }
+        expect(out.displayName).toEqual(c.expect.displayName)
+        expect(out.name ?? null).toEqual(c.expect.name)
+    })
+
+    it('says nothing while the mapping is unknown — the server binds nothing then either', () => {
+        expect(boundName(null, { displayName: 'Orders' }, null, true)).toBeNull()
+    })
+})
+
+describe('nameOnSave', () => {
+    const title = { nameProperty: 'title' }
+    it('a rename carries the name property while the two agree', () => {
+        expect(nameOnSave({ displayName: 'Orders', properties: { title: 'Orders' } },
+            { displayName: 'Sales', properties: { title: 'Orders' } }, title))
+            .toEqual({ kind: 'follows', property: 'title', from: 'Orders', to: 'Sales' })
+    })
+    it('a new entity, or one without the property, gets it filled', () => {
+        expect(nameOnSave(null, { displayName: 'Orders' }, title, true))
+            .toEqual({ kind: 'follows', property: 'title', from: undefined, to: 'Orders' })
+    })
+    it('editing the name property renames the entity while the two agree', () => {
+        expect(nameOnSave({ displayName: 'Orders', properties: { title: 'Orders' } },
+            { displayName: 'Orders', properties: { title: 'Sales' } }, title))
+            .toEqual({ kind: 'renames', property: 'title', to: 'Sales' })
+    })
+    it('the two in step stay so', () => {
+        const node = { displayName: 'Orders', properties: { title: 'Orders' } }
+        expect(nameOnSave(node, node, title)).toEqual({ kind: 'same', property: 'title' })
+    })
+    it('a name kept apart stays apart — through a rename, or set apart by this edit', () => {
+        const prior = { displayName: 'Orders', properties: { title: 'ord' } }
+        expect(nameOnSave(prior, prior, title))
+            .toEqual({ kind: 'apart', property: 'title', value: 'ord', renamed: false, edited: false })
+        expect(nameOnSave(prior, { displayName: 'Sales', properties: { title: 'ord' } }, title))
+            .toEqual({ kind: 'apart', property: 'title', value: 'ord', renamed: true, edited: false })
+        expect(nameOnSave({ displayName: 'Orders', properties: { title: 'Orders' } },
+            { displayName: 'Sales', properties: { title: 'ORD' } }, title))
+            .toEqual({ kind: 'apart', property: 'title', value: 'ORD', renamed: true, edited: true })
+    })
+})
+
+describe('identitySourcePhrase', () => {
+    it('says where each setting comes from, and nothing when that is unknown', () => {
+        expect(identitySourcePhrase('data_source')).toBe('set on this data source')
+        expect(identitySourcePhrase('provider')).toBe('from the provider')
+        expect(identitySourcePhrase('workspace')).toBe('from the workspace')
+        expect(identitySourcePhrase('global')).toBe('platform default')
+        expect(identitySourcePhrase('default')).toBe('built-in default')
+        expect(identitySourcePhrase(undefined)).toBe('')
     })
 })

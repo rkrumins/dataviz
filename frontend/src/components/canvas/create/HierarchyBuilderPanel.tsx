@@ -35,7 +35,7 @@ import {
 } from '@/services/ontologyPreflightService'
 import { relationshipLabel } from '@/lib/relationshipLabel'
 import { useAppNotifications } from '@/components/ui/notifications'
-import { boundFieldIds, useEditingNodeIdentity } from '@/components/dataSource/NodeIdentity'
+import { boundFieldIds, useCanvasNodeIdentity } from '@/components/dataSource/NodeIdentity'
 import { parseIndentedOutline, type ParsedOutlineRow, type OutlineParseContext } from './outlineParser'
 import { useCreateLinkStore } from '../edge-create/createLinkStore'
 import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
@@ -878,7 +878,7 @@ function AddingRow({
 
 /** Committed-row details — seeded from the staged node, saved on blur/change. */
 function RowDetails({ type, node, onSave }: { type?: EntityTypeSchema; node?: LineageNode; onSave: (v: DetailsValue) => void }) {
-  const identity = useEditingNodeIdentity()
+  const identity = useCanvasNodeIdentity()
   const customFields = useMemo(
     () => {
       const bound = boundFieldIds(identity)
@@ -916,7 +916,7 @@ function DetailsForm({
   onChange: (v: DetailsValue) => void
   commitOnBlur?: (v: DetailsValue) => void
 }) {
-  const identity = useEditingNodeIdentity()
+  const identity = useCanvasNodeIdentity()
   const customFields = useMemo(
     () => {
       const bound = boundFieldIds(identity)

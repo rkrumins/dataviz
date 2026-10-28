@@ -17,6 +17,7 @@
  */
 import { memo, useCallback, useId, useMemo, useState } from 'react'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { useFeature } from '@/store/features'
@@ -105,6 +106,11 @@ function OpenEntityDrawer({
 
   // ── The edit ──
   const session = useEntityEditSession(node, summaryQ.data?.value)
+  // The entity as first read — what a save's patch is judged against, kept by a staged edit — or
+  // null for one not saved yet, whose name and identity properties the server derives afresh.
+  const stagedBefore = useStagedChangesStore((s) => s.changes.find(
+    (c) => (c.type === 'update_entity' || c.type === 'rename_entity') && c.targetId === node.id)?.before)
+  const original = unsavedCreate ? null : ((stagedBefore as Record<string, unknown> | undefined) ?? data)
   const { form, dirty, justStaged, edit, stage, discard } = session
   const isGhost = data.isGhost === true
   // An edit is kept only as a change in a draft (useEntityEditing). Where editing isn't offered at
@@ -211,6 +217,7 @@ function OpenEntityDrawer({
                 <EntityEditTab
                   nodeId={node.id}
                   form={form}
+                  original={original}
                   entityType={entityType}
                   urn={urn}
                   userProps={userProps}

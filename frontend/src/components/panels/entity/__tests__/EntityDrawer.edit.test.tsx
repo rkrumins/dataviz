@@ -12,7 +12,6 @@ import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
 import { useSchemaStore } from '@/store/schema'
-import { useBranchStore } from '@/store/branchStore'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { stagedChangesToOps } from '@/features/versioning/model/stagedChangesToOps'
 
@@ -129,6 +128,13 @@ describe('EntityDrawer — an edit in a draft', () => {
 })
 
 describe("EntityDrawer — the source's own name and identity properties", () => {
+  /** The canvas's data source (no view names one here: the workspace's primary) keys entities by
+   *  `id`, set on its provider, and names them under `title`, set on the source itself. */
+  const withProperties = (props: Record<string, unknown>) => useCanvasStore.setState((s) => ({
+    nodes: s.nodes.map((n) => (n.id === 'urn:orders'
+      ? { ...n, data: { ...n.data, properties: { ...(n.data.properties as object), ...props } } } : n)),
+  }) as never)
+
   beforeEach(() => {
     const schema = useSchemaStore.getState().schema!
     useSchemaStore.setState({
@@ -138,14 +144,50 @@ describe("EntityDrawer — the source's own name and identity properties", () =>
         { id: 'id', name: 'Native id', type: 'text' },
       ] as never }] },
     } as never)
-    useBranchStore.setState({ workspaceId: 'ws1', dataSourceId: 'ds1' } as never)
     useWorkspacesStore.setState({
-      workspaces: [{ id: 'ws1', dataSources: [{ id: 'ds1', nameProperty: 'title', identityProperty: 'id' }] }],
+      activeWorkspaceId: 'ws1',
+      workspaces: [{ id: 'ws1', dataSources: [{
+        id: 'ds1', isPrimary: true, nameProperty: 'title', namePropertySource: 'data_source',
+        identityProperty: 'id', identityPropertySource: 'provider',
+      }] }],
     } as never)
+    withProperties({ title: 'Orders', id: 'native-42' })
   })
   afterEach(() => {
-    useBranchStore.setState({ workspaceId: null, dataSourceId: null } as never)
-    useWorkspacesStore.setState({ workspaces: [] } as never)
+    useWorkspacesStore.setState({ activeWorkspaceId: null, workspaces: [] } as never)
+  })
+
+  it('the details say which property identifies the entity and which names it, and where each is set', () => {
+    render(<EntityDrawer canEdit />)
+    const facts = screen.getByLabelText('How this data source identifies and names entities')
+    expect(within(facts).getByText('id')).toBeInTheDocument()
+    expect(within(facts).getByText(/from the provider/)).toBeInTheDocument()
+    expect(within(facts).getByText('native-42')).toBeInTheDocument()
+    expect(within(facts).getByText('title')).toBeInTheDocument()
+    expect(within(facts).getByText(/set on this data source/)).toBeInTheDocument()
+  })
+
+  it('a rename says the name property changes with it', async () => {
+    const user = userEvent.setup()
+    render(<EntityDrawer canEdit />)
+    await user.click(screen.getByRole('tab', { name: /^Edit/ }))
+    expect(screen.getByText(/Also saved as/)).toBeInTheDocument()
+    const name = screen.getByPlaceholderText('Entity name…')
+    await user.clear(name)
+    await user.type(name, 'Sales')
+    expect(screen.getByText(/changes to “Sales” too/)).toBeInTheDocument()
+  })
+
+  it('a rename says it leaves a name property kept apart from the name', async () => {
+    withProperties({ title: 'customer_orders' })
+    const user = userEvent.setup()
+    render(<EntityDrawer canEdit />)
+    await user.click(screen.getByRole('tab', { name: /^Edit/ }))
+    expect(screen.getByText(/is “customer_orders”, kept apart from the name/)).toBeInTheDocument()
+    const name = screen.getByPlaceholderText('Entity name…')
+    await user.clear(name)
+    await user.type(name, 'Sales')
+    expect(screen.getByText(/stays “customer_orders”/)).toBeInTheDocument()
   })
 
   it('are not offered as fields of their own: the server keeps them in step with the Name and the urn', async () => {
