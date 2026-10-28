@@ -174,6 +174,8 @@ export function BootstrapProgress({
   // that runs after (Give up included) puts them back, so the copy must stop promising "untouched".
   // `sourceCollapse` outlives a restart, which re-reads the list (and may find none left).
   const decided = !!dup?.decision || !!job.sourceCollapse
+  // A source keyed by another property had `urn` stamped from it before the copy: its items keep it.
+  const stamped = (job.identityStamped?.stamped ?? 0) > 0 ? job.identityStamped!.property : null
   // Offer only the recovery that can work: resuming an integrity failure fails the same way again,
   // and an internal one is a bug no button fixes. A job from before failures carried an action
   // offers both, as it always did.
@@ -267,7 +269,14 @@ export function BootstrapProgress({
           <>
             This stops the copy and removes everything it wrote.{' '}
             <span className="font-semibold">Duplicate copies already removed from your data source are
-            not put back</span> — otherwise it stays exactly as it is now, just without version control.
+            not put back</span>{stamped && <>, and its items keep the urn they were given from their {stamped}</>}
+            {' '}— otherwise it stays exactly as it is now, just without version control.
+          </>
+        ) : stamped ? (
+          <>
+            This stops the copy and removes everything it wrote.{' '}
+            <span className="font-semibold">Your data source's items keep the urn they were given from
+            their {stamped}</span> — otherwise it stays exactly as it is now, just without version control.
           </>
         ) : (
           <>
@@ -526,8 +535,8 @@ export function BootstrapProgress({
           )}
           {(job.report.skippedWithoutIdentifier?.nodes ?? 0) > 0 && (
             <p className="mt-1 text-[11px] text-ink-muted">
-              {num(job.report.skippedWithoutIdentifier!.nodes)} item(s) in the source have no identifier.
-              They don't appear anywhere in this app, so they weren't copied.
+              {num(job.report.skippedWithoutIdentifier!.nodes)} item(s) in the source had no urn when this
+              copy was made, so they are not in version history.
             </p>
           )}
           {job.report.merkle === 'deferred' && (
@@ -568,7 +577,7 @@ export function BootstrapProgress({
             <div className="min-w-0">
               <p className="text-sm font-semibold text-ink leading-snug">
                 {fromPackage ? 'The copy stopped before the new data source was switched on'
-                  : decided ? 'We stopped before switching it on' : 'We stopped before changing anything'}
+                  : decided || stamped ? 'We stopped before switching it on' : 'We stopped before changing anything'}
               </p>
               <p className="text-[12px] text-ink-muted leading-snug">
                 {finalFailure ?? job.error ?? (fromPackage ? 'The copy did not match the package.' : 'The copy did not match the source graph.')}
@@ -578,7 +587,9 @@ export function BootstrapProgress({
                   ? 'Nothing outside the new data source was touched.'
                   : decided
                     ? 'This data source still reads as it did — except that duplicate copies you chose to collapse may already have been removed.'
-                    : 'This data source is untouched and still reads exactly as it did.'}
+                    : stamped
+                      ? `This data source still reads as it did. Its items were given a urn from their ${stamped}, which they keep.`
+                      : 'This data source is untouched and still reads exactly as it did.'}
               </p>
             </div>
           </div>

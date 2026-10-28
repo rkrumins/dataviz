@@ -184,11 +184,13 @@ tables + semantics) and the code:
 3. **A `versioningEnabled` admin flag** gates every mutating versioning route (403
    `feature_disabled`) and hides the whole UI surface; reads and workers keep running, and
    nothing is deleted. → `api/v1/versioning_gate.py`, `frontend/src/store/features.ts`.
-4. **What "the graph" means is now explicit.** The copy contains exactly what the application
-   can see: the reader ignores nodes without a `urn` and edges whose endpoints have none, so
-   those are counted and disclosed in the integrity report rather than silently dropped (the
-   old bootstrap's behaviour). Derived artifacts (`:AGGREGATED`, `_GVRollupMeta`, `_AggMeta`,
-   `_Projection`) are never imported.
+4. **What "the graph" means is now explicit.** Every item is copied, so every item needs an
+   identifier: a graph that names its items by another property (`id`, its data source's identity
+   property) has `urn` stamped from it first (`urnSource` says where from — the summaries'
+   conformance step), and an item with no identifier at all stops the enable before anything is
+   copied, with the count. (Until 2026-10-28 such items were left out and counted in the report,
+   and an `id`-keyed graph was copied as empty.) Derived artifacts (`:AGGREGATED`,
+   `_GVRollupMeta`, `_AggMeta`, `_Projection`) are never imported.
 
 Chapter 09's keyset-streaming item has moved further since: the *bootstrap* and *exports*
 stream, and the *projector's* full replay reconciles FalkorDB in place from narrow heads instead of

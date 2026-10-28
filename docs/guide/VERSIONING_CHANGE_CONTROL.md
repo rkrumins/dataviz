@@ -71,11 +71,18 @@ sources read the same graph. Someone who can manage the data sources then
 chooses **Collapse *N* duplicates and continue**, **Re-check source** after
 fixing them at the source, or **Give up**.
 
-Turning version control on doesn't change your existing data, unless you
-collapse duplicates: that removes the extra copies from the graph itself, for
-every data source that reads it, and **Give up** doesn't bring them back. If the
-copy stops part-way, the strip explains why and offers **Resume** or to start
-over.
+If the data source names its items by another property than `urn` — an `id`,
+say, set as its identity property — the copy first gives each item a `urn` from
+it, because version history tells items apart by `urn`. Each one also gets a
+`urnSource` saying where it came from. An item with no identifier at all stops
+the copy before anything is copied, and the strip says how many: give them one,
+then start over.
+
+Turning version control on doesn't change your existing data, except in two
+ways. Collapsing duplicates removes the extra copies from the graph itself, for
+every data source that reads it. And items given a `urn` keep it. **Give up**
+undoes neither. If the copy stops part-way, the strip explains why and offers
+**Resume** or to start over.
 
 ![The canvas strip after turning on version control: 'Everything checked out', the list of passed checks, and the View history and Done buttons](/docs-assets/guide/versioning-change-control-enable.png)
 

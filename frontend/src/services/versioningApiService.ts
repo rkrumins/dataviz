@@ -860,8 +860,8 @@ export interface BootstrapReport {
   sampleChecked: number
   sampleMismatched: Array<Record<string, unknown>>
   mergedDuplicateConnections: number
-  /** Entities with no identifier: invisible to the app (they never render, search or
-   *  trace), so they were not copied — stated plainly rather than hidden. */
+  /** Entities with no urn, which the copy left out — only on a job from before an enable stopped
+   *  on them instead. */
   skippedWithoutIdentifier?: { nodes: number; edges: number }
   merkle: 'inline' | 'deferred' | 'pending'
 }
@@ -902,6 +902,10 @@ export interface BootstrapJob {
   /** Set once duplicate copies may have been removed from the source graph — kept through a
    *  restart, since nothing puts them back. */
   sourceCollapse?: { moved: number; deleted: number } | null
+  /** The source's identity property, and how many properties (`urn`, `urnSource`, and a name from
+   *  a custom name property) were stamped from it onto its items before the copy: they stay there
+   *  whatever happens to the enable. */
+  identityStamped?: { property: string; stamped: number } | null
 }
 
 /** Why a job failed, and what can be done: an `integrity` failure (the copy didn't match its source)

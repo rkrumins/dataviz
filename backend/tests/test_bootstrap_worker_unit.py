@@ -315,3 +315,72 @@ def test_the_projector_gets_each_type_the_graph_spells_one_other_way():
     assert _spelled_two_ways(summary) == []
     assert _physical_types({"physicalTypes": {"nodes": {"Column": ["Column"]}}}) is None
     assert _physical_types({}) is None, "a job that started before the tally: as declared"
+
+
+# ── stamping urns before the copy (node_identity.stamp_identity_for_enable) ──
+
+async def _stamp_with(db_session, monkeypatch, *, identity=None, name=None):
+    """Seed a data source whose provider names nodes by ``identity`` / ``name``, and stamp it
+    through a recording stand-in for the cached provider."""
+    from contextlib import asynccontextmanager
+
+    from backend.app.db import engine
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
+    from backend.app.providers import manager
+    from backend.app.services.node_identity import invalidate_global_defaults_cache
+
+    invalidate_global_defaults_cache()
+    db_session.add(ProviderORM(id="prov_st", name="P", provider_type="falkordb",
+                               identity_property=identity, name_property=name))
+    db_session.add(WorkspaceORM(id="ws_st", name="W"))
+    db_session.add(WorkspaceDataSourceORM(id="ds_st", workspace_id="ws_st", provider_id="prov_st",
+                                          graph_name="g"))
+    await db_session.flush()
+    calls = []
+
+    class _Provider:
+        def set_node_identity(self, identity_property, name_property):
+            calls.append(("identity", identity_property, name_property))
+
+        async def stamp_identity_urns(self):
+            calls.append(("stamp",))
+            return 3
+
+    async def get_provider(workspace_id, session, data_source_id):
+        calls.append(("provider", workspace_id, data_source_id))
+        return _Provider()
+
+    @asynccontextmanager
+    async def session():
+        yield db_session
+
+    monkeypatch.setattr(engine, "get_async_session", session)
+    monkeypatch.setattr(manager.provider_manager, "get_provider", get_provider)
+    return calls
+
+
+async def test_an_enable_stamps_urn_from_the_identity_property_first(db_session, monkeypatch):
+    from backend.app.services.node_identity import stamp_identity_for_enable
+
+    calls = await _stamp_with(db_session, monkeypatch, identity="id", name="title")
+    assert await stamp_identity_for_enable("ds_st") == {"property": "id", "stamped": 3}
+    assert calls == [("provider", "ws_st", "ds_st"), ("identity", "id", "title"), ("stamp",)]
+
+
+async def test_an_enable_of_a_source_keyed_by_urn_stamps_nothing(db_session, monkeypatch):
+    from backend.app.services.node_identity import stamp_identity_for_enable
+
+    calls = await _stamp_with(db_session, monkeypatch)
+    assert await stamp_identity_for_enable("ds_st") == {"property": "urn", "stamped": 0}
+    assert await stamp_identity_for_enable("ds_gone") is None
+    assert calls == [], "a conforming source is not even looked up"
+
+
+@pytest.mark.parametrize("count,identity,expected", [
+    (1, "urn", "1 item in the graph has no urn. "),
+    (2, "id", "2 items in the graph have no urn and no id to take one from. "),
+])
+def test_items_with_no_identifier_are_counted_in_plain_language(count, identity, expected):
+    from backend.app.services.versioning.bootstrap_worker import _no_identifier
+
+    assert _no_identifier(count, identity).startswith(expected)

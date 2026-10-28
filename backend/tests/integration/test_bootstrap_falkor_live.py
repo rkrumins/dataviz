@@ -8,11 +8,14 @@ FalkorDB can answer is pinned here:
   INDEX — never a per-row id lookup under UNWIND, which FalkorDB answers with a full scan per row.
 * L2 — a source with duplicate urns (one of them under two labels), ``:AGGREGATED`` rollups,
   parallel relationships with distinct ids, a genuine self-loop, an edge between two copies and
-  a node with no urn: pause, decide, copy — with the collapse crashing once between moving the
+  edges with no id: pause, decide, copy — with the collapse crashing once between moving the
   edges and deleting the copies — and the source graph ends up holding exactly what Postgres
   holds: one node per urn, one relationship per stored edge. Its counts match, and the verify
   after the next publish is clean.
 * L3 — the rollups computed over the deleted copies are handed to the rebuild, and only then.
+* L5 — a graph that keys its nodes by another property (``id``) gets ``urn`` stamped from it
+  before the copy, so the copy holds every node and a publish lands on the node that is there; a
+  node with no identifier at all stops the enable before anything is copied.
 * L4 — a graph that spells its types its own way (``:table``, ``:flows_to``) against an ontology
   that declares ``Table`` and ``FLOWS_TO`` keeps its spelling: history holds the declared one, and
   every publish after the enable lands on the graph's own labels and goes out fresh.
@@ -28,6 +31,7 @@ import pytest
 from falkordb.asyncio import FalkorDB
 from redis.asyncio import ConnectionPool
 
+from backend.app.providers.falkordb_provider import FalkorDBProvider
 from backend.app.services.versioning import bootstrap_worker as bw
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.bootstrap_worker import (
@@ -35,6 +39,7 @@ from backend.app.services.versioning.bootstrap_worker import (
     bootstrap_status,
     create_bootstrap_job,
     decide_duplicates,
+    retry_bootstrap,
 )
 from backend.app.services.versioning.job_lease import Lease
 from backend.app.services.versioning.models import BranchORM, GraphORM, JobORM, ProjectionStateORM
@@ -111,7 +116,7 @@ async def _make_source(client):
     2 a  Table  a-new  synced 2026-02  (kept)
     3 c  Column                        (kept: no times, lower id)
     4 c  Table                         (discarded — the same urn under another label)
-    5 —  Thing  no urn                 (invisible: never copied)
+    5 e  Thing
     6 d  Domain
     """
     for props, label in (
@@ -122,7 +127,7 @@ async def _make_source(client):
              "Table"),
             ({"urn": "urn:c", "displayName": "c-column"}, "Column"),
             ({"urn": "urn:c", "displayName": "c-table"}, "Table"),
-            ({"displayName": "no identifier"}, "Thing"),
+            ({"urn": "urn:e", "displayName": "e"}, "Thing"),
             ({"urn": "urn:d", "displayName": "d"}, "Domain")):
         await client.query(f"CREATE (n:{label}) SET n = $p", {"p": props})
     ids = [r[0] for r in await _rows(client, "MATCH (n) RETURN ID(n) ORDER BY ID(n)")]
@@ -136,7 +141,7 @@ async def _make_source(client):
             (2, 2, "FLOWS", {"id": "e6"}),                                  # a genuine self-loop
             (4, 1, "OWNS", {"id": "e4"}),                                   # cross-label copy
             (6, 4, "CONTAINS", {"id": "e8"}),                               # into it
-            (5, 0, "FLOWS", {}),                                            # from a urn-less node
+            (5, 0, "FLOWS", {}),                                            # no id, into a copy
             (6, 1, "FLOWS", {}), (6, 1, "FLOWS", {}),                       # parallel, no ids
             (0, 6, "AGGREGATED", {"weight": 2}), (6, 1, "AGGREGATED", {"weight": 1})):
         await client.query(f"MATCH (a), (b) WHERE ID(a) = $s AND ID(b) = $t "
@@ -242,20 +247,20 @@ async def test_a_collapse_leaves_the_source_graph_as_the_copy_has_it(graph):
 
     status = await bootstrap_status(data_source_id=ds)
     assert all(c["ok"] for c in status["report"]["checks"]), status["report"]["checks"]
-    assert status["report"]["stored"] == {"nodes": 4, "edges": 7}
+    assert status["report"]["stored"] == {"nodes": 5, "edges": 8}
 
-    # One node per urn — the copies kept — and the urn-less node left alone.
+    # One node per urn — the copies kept.
     nodes = await _rows(client, "MATCH (n) RETURN ID(n), n.urn ORDER BY ID(n)")
-    assert nodes == [[1, "urn:b"], [2, "urn:a"], [3, "urn:c"], [5, None], [6, "urn:d"]], nodes
+    assert nodes == [[1, "urn:b"], [2, "urn:a"], [3, "urn:c"], [5, "urn:e"], [6, "urn:d"]], nodes
     # Every relationship moved to the copy kept, keyed by its id: one per stored edge (the
     # parallel e1/e7 stay two), the edge between two copies gone with them, the rollup over a
-    # deleted copy gone with it — and a relationship from the urn-less node moved too.
+    # deleted copy gone with it — and an id-less relationship into a copy moved too, stamped.
     rels = sorted(tuple(r) for r in await _rows(
         client, "MATCH (a)-[r]->(b) RETURN ID(a), type(r), ID(b), coalesce(r.id, '')"))
     assert rels == sorted([
         (2, "FLOWS", 1, "e1"), (2, "FLOWS", 1, "e7"), (1, "FLOWS", 2, "e5"),
         (2, "FLOWS", 2, "e6"), (3, "OWNS", 1, "e4"), (6, "CONTAINS", 3, "e8"),
-        (5, "FLOWS", 2, ""), (6, "FLOWS", 1, "urn:d|FLOWS|urn:b"),
+        (5, "FLOWS", 2, "urn:e|FLOWS|urn:a"), (6, "FLOWS", 1, "urn:d|FLOWS|urn:b"),
         (6, "FLOWS", 1, "urn:d|FLOWS|urn:b"), (6, "AGGREGATED", 1, "")]), rels
 
     # The counts agree: Postgres' projectable counts against the source counted as a graph the
@@ -264,9 +269,9 @@ async def test_a_collapse_leaves_the_source_graph_as_the_copy_has_it(graph):
         main_id = (await s.execute(select(BranchORM.id).where(
             BranchORM.graph_id == gid, BranchORM.kind == "main"))).scalars().one()
         pg = await pg_live_counts_projectable(s, gid, main_id)
-    assert pg == (4, 6) and await falkor_counts(client, owned=False) == pg
-    # (Counted as a graph the projector owns, the urn-less node and the parallel copies would
-    # read as "extra entities" on every verify.)
+    assert pg == (5, 7) and await falkor_counts(client, owned=False) == pg
+    # (Counted as a graph the projector owns, the parallel copies would read as "extra
+    # entities" on every verify.)
     assert await falkor_counts(client) != pg
     assert hooked == [gid]
 
@@ -317,13 +322,80 @@ async def test_the_rollup_rebuild_is_queued_only_after_a_collapse(graph, falkor)
     assert await _rows(dupes, "MATCH ()-[r:AGGREGATED]->() RETURN count(r)") == [[0]]
 
 
-# ── L4: a graph that spells its types its own way keeps that spelling ────────
-
 async def _fresh(gid) -> bool:
     async with db.graphver_session() as s:
         ps, g = await s.get(ProjectionStateORM, gid), await s.get(GraphORM, gid)
         return ps.projected_commit_seq == g.main_head_commit_seq
 
+
+# ── L5: a graph keyed by another property gets urns before the copy ──────────
+
+async def test_a_graph_keyed_by_another_property_is_stamped_then_copied(graph, monkeypatch):
+    """The data source names its nodes by ``id``. The enable stamps ``urn`` (and ``urnSource``)
+    from it, as the summaries' conformance step does, then copies every node — before, the copy
+    read ``urn`` alone and finished green with nothing in it. A publish then updates the node
+    that is there."""
+    name, client = graph
+    for i in ("x1", "x2"):
+        await client.query("CREATE (:Table {id: $i, name: $i})", {"i": i})
+    await client.query("MATCH (a:Table {id: 'x1'}), (b:Table {id: 'x2'}) "
+                       "CREATE (a)-[:FLOWS {id: 'f1'}]->(b)")
+    provider = FalkorDBProvider(host=os.getenv("FALKORDB_HOST", "localhost"),
+                                port=int(os.getenv("FALKORDB_PORT", "6379")), graph_name=name)
+    provider.set_node_identity("id", "name")
+
+    async def stamp(_job_id):
+        return {"property": "id", "stamped": await provider.stamp_identity_urns()}
+
+    monkeypatch.setattr(bw, "_stamp_identity", stamp)
+    ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+    status = await bootstrap_status(data_source_id=ds)
+    assert status["report"]["stored"] == {"nodes": 2, "edges": 1}, status["report"]
+    assert await _rows(client, "MATCH (n:Table) RETURN n.id, n.urn, n.urnSource ORDER BY n.id") == [
+        ["x1", "x1", "id"], ["x2", "x2", "id"]]
+
+    svc, projector = GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename x1", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "x1",
+         "payload": {"urn": "x1", "entityType": "Table", "displayName": "x1 renamed"}}])
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    assert await _rows(client, "MATCH (n:Table) RETURN n.id, n.displayName ORDER BY n.id") == [
+        ["x1", "x1 renamed"], ["x2", "x2"]], "the node that was there, not a second copy"
+
+
+async def test_a_node_with_no_identifier_stops_the_enable_before_the_copy(graph, monkeypatch):
+    name, client = graph
+    await client.query("CREATE (:Table {id: 'x1'}), (:Table {name: 'nameless'})")
+    provider = FalkorDBProvider(host=os.getenv("FALKORDB_HOST", "localhost"),
+                                port=int(os.getenv("FALKORDB_PORT", "6379")), graph_name=name)
+    provider.set_node_identity("id", "name")
+
+    async def stamp(_job_id):
+        return {"property": "id", "stamped": await provider.stamp_identity_urns()}
+
+    monkeypatch.setattr(bw, "_stamp_identity", stamp)
+    ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "failed", out
+    assert "1 item in the graph has no urn and no id to take one from" in out["error"], out
+    async with db.graphver_session() as s:
+        assert (await s.get(JobORM, job_id)).current_phase == "counting", "nothing was copied"
+    # urn and urnSource on x1; displayName and nameSource, from its name, on the other.
+    assert (await bootstrap_status(data_source_id=ds))["identityStamped"] == {
+        "property": "id", "stamped": 4}
+
+    # Starting over stamps nothing new, and still says what the graph was given.
+    await retry_bootstrap(data_source_id=ds, mode="restart")
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "failed", out
+    assert (await bootstrap_status(data_source_id=ds))["identityStamped"] == {
+        "property": "id", "stamped": 4}
+
+
+# ── L4: a graph that spells its types its own way keeps that spelling ────────
 
 async def test_a_graph_keeps_its_own_spelling_of_its_types(graph, monkeypatch):
     """An update lands on the node that is there, not on a second ``:Table`` copy; a delete finds

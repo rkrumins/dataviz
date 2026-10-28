@@ -541,6 +541,11 @@ ontology, and fails closed for blank models (**422 `ontology_required`**, **503
   `GET /bootstrap/status?dataSourceId=…` → `{jobId, graphId, status, phase, processed, total,
   percent, startedAt, updatedAt, error, report}`; `status` ends `completed`, `failed` or `cancelled`.
   The status route isn't switch-gated, so a job stays observable after the switch is turned off.
+  Before reading, the pre-flight stamps `urn` (with `urnSource`) from the data source's identity
+  property on a graph that names its items by another one (`id`, say), and `identityStamped`
+  (`{property, stamped}`, kept through a restart) counts the properties it set; they stay on the
+  graph whatever happens to the job. An item with no identifier left (no `urn`, nothing to take one
+  from) fails the job before anything is copied (`failure.code` `integrity`, naming the count).
   When the pre-flight finds identifiers used by more than one item, the job pauses before copying
   anything: `status` reads `needs_decision`, with `duplicates` (the counts, the `fingerprint` a
   decision must carry, a sample, and `sharedWith`, the other data sources reading the same graph).

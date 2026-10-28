@@ -178,7 +178,7 @@ _FAILURE_ACTIONS = {"integrity": "restart", "infrastructure": "resume"}
 # puts them back, so a restart must not forget it (the rollups still need rebuilding, and Give up
 # must not promise an untouched source).
 _KEPT_ON_RESTART = ("actor", "origin", "package", "ontology", "target", "duplicatePolicy",
-                    "sourceCollapse")
+                    "sourceCollapse", "identityStamped")
 
 # Which copy of a duplicated urn a collapse keeps — the ranking `_rank_duplicates_sql` applies: the
 # one synced most recently (an unparseable or missing `lastSyncedAt` ranks last), then the lowest
@@ -743,6 +743,13 @@ class BootstrapRunner:
             # any of them, so the tallies start from zero. A recorded decision is kept: the read
             # it was made on may well come out the same (its fingerprint says).
             await self._require_whole_replies(client)
+            # A graph keyed by another property (``id``) gets ``urn`` stamped from it first, so
+            # the read below sees every node. Again on every fresh read: it only fills what is
+            # missing. The tally is kept through a restart, as the stamps are.
+            stamped = await _stamp_identity(lease.job_id)
+            if stamped is not None:
+                before = int((summary.get("identityStamped") or {}).get("stamped", 0))
+                summary["identityStamped"] = {**stamped, "stamped": before + int(stamped["stamped"])}
             summary.update(_fresh_tallies(await self._count(client, _MAX_NODE_ID)))
             summary.pop("duplicates", None)
             async with self._session() as s:
@@ -789,7 +796,17 @@ class BootstrapRunner:
         so it applies only to the list the manager was shown. With duplicates and no decision for
         THIS fingerprint, the job pauses (``awaiting_decision``, pending, no cursor) and holds no
         slot until someone decides; with a matching decision — a re-check that found the same
-        list — it carries on."""
+        list — it carries on.
+
+        First, a node with no identifier (no urn, even after the stamp) stops the enable: version
+        history can't keep it, and copying around it is how an ``id``-keyed graph used to finish
+        green with nothing copied."""
+        async with self._session() as s:
+            summary = dict((await s.get(JobORM, lease.job_id)).summary or {})
+        hidden = int((summary.get("source") or {}).get("invisibleNodes", 0))
+        if hidden:
+            raise BootstrapFailure(_no_identifier(
+                hidden, (summary.get("identityStamped") or {}).get("property") or "urn"), "integrity")
         await self._analyze_bootstrap_nodes(lease)
         async with self._session() as s:
             # A source that shrank since an earlier read of it leaves rows past its new end.
@@ -1959,6 +1976,7 @@ async def bootstrap_status(
             "collapsed": summary.get("collapsed"),
             "rekeyedEdges": int(summary.get("rekeyedEdges") or 0),
             "sourceCollapse": summary.get("sourceCollapse"),
+            "identityStamped": summary.get("identityStamped"),
         }
 
 
@@ -2236,6 +2254,18 @@ def _api_status(job: JobORM) -> str:
     if job.status == "pending" and job.current_phase == AWAITING_DECISION:
         return "needs_decision"
     return job.status
+
+
+def _no_identifier(count: int, identity: str) -> str:
+    """Why nodes with no identifier stop the enable, and what to do."""
+    items = f"{count:,} item{'s' if count != 1 else ''} in the graph {'have' if count != 1 else 'has'}"
+    if identity == "urn":
+        return (f"{items} no urn. Version history can only keep items it can tell apart, so the "
+                "copy would leave them out. Set urn on each of them, or set the data source's "
+                "identity property to one they all have, then start over.")
+    return (f"{items} no urn and no {identity} to take one from. Version history can only keep "
+            f"items it can tell apart, so the copy would leave them out. Set {identity} on each "
+            "of them, then start over.")
 
 
 def _explain_failed_checks(failed: List[dict]) -> str:
@@ -2713,6 +2743,18 @@ def _t(table: str) -> str:
 def _now_minus(secs: int) -> str:
     from datetime import datetime, timedelta, timezone
     return (datetime.now(timezone.utc) - timedelta(seconds=secs)).isoformat()
+
+
+async def _stamp_identity(job_id: str) -> Optional[dict]:
+    """The job's data source's identity stamp (``node_identity.stamp_identity_for_enable``), or
+    None without a data source."""
+    async with db.graphver_session() as s:
+        job = await s.get(JobORM, job_id)
+        ds_id = job.data_source_id if job else None
+    if not ds_id:
+        return None
+    from backend.app.services.node_identity import stamp_identity_for_enable
+    return await stamp_identity_for_enable(ds_id)
 
 
 async def _ontology_rules(job_id: str):

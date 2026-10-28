@@ -436,3 +436,33 @@ async def load_node_identity(
         workspace=workspace,
         defaults=await read_global_defaults(session),
     )
+
+
+async def stamp_identity_for_enable(data_source_id: str) -> Optional[dict]:
+    """Before enabling version control copies a graph that names its nodes by another property
+    (``id``, say), stamp ``urn`` from it — and ``displayName`` from a custom name property — onto
+    every node that lacks them, with ``urnSource`` / ``nameSource`` saying where they came from:
+    the summaries' conformance step, ``FalkorDBProvider.stamp_identity_urns``. The copy keys nodes
+    by ``urn``, so without this an ``id``-keyed graph was copied as empty. The stamps stay on the
+    graph if the enable is abandoned, as the summaries' do.
+
+    Returns ``{"property", "stamped"}`` (how many properties it set); None when the data source
+    is gone."""
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.providers.manager import provider_manager
+
+    async with get_async_session() as session:
+        ds = await session.get(WorkspaceDataSourceORM, data_source_id)
+        if ds is None:
+            return None
+        identity = await load_node_identity(session, ds)
+        if identity.is_default:
+            return {"property": identity.identity_property, "stamped": 0}
+        provider = await provider_manager.get_provider(ds.workspace_id, session, data_source_id)
+    if not hasattr(provider, "stamp_identity_urns"):
+        return {"property": identity.identity_property, "stamped": 0}
+    provider.set_node_identity(identity.identity_property, identity.name_property)
+    return {"property": identity.identity_property,
+            "stamped": await provider.stamp_identity_urns()}
+

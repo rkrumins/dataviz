@@ -21,6 +21,14 @@ limitations** — a changelog that only lists good news is not worth reading.
   from then on, so views read from Postgres. Version history keeps the ontology's spelling. A graph
   that spells one type two ways (`table` and `TABLE`) now stops the enable with a message saying so:
   give each type one spelling in the graph, then start over.
+- **A graph that names its items by another property is copied whole.** On a data source whose
+  identity property isn't `urn` (an `id`, say), enabling version control copied nothing and still
+  finished green: the copy read `urn` alone, and the screen said the items "don't appear anywhere
+  in this app", which wasn't true. The enable now stamps `urn` from the identity property first,
+  with `urnSource`, as the lineage summaries' conformance step does, so every item is copied. The
+  stamps stay on the graph after **Give up**, and the enable screen now says so instead of "not
+  touched". An item with no identifier at all now stops the enable before anything is copied, with
+  the count; before, it was left out and the copy went ahead.
 
 ### Upgrading
 
