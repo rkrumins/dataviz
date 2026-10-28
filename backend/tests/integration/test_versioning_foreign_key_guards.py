@@ -2,7 +2,8 @@
 
 * Eviction drops only keys the platform minted, of live graphs past genesis with no unfinished
   bootstrap; ``evict`` re-checks that in the same statement that marks the row, under the
-  projector's own lock.
+  projector's own lock. Nor does it drop a key another data source or catalog entry reads, or
+  one whose readers cannot be asked.
 * A graph pinned to a key it does not own starts parked at genesis: its first projection is the
   first commit's window, never a full replay over the data source's graph.
 * One key, one versioned graph (``uq_ps_key``): a second claim is refused; a tombstoned holder
@@ -129,6 +130,84 @@ async def _evict_matrix(g0, excluded, provider) -> None:
 
 def test_eviction_drops_only_minted_live_keys_past_genesis():
     asyncio.run(_run_eviction_matrix())
+
+
+async def _resident_read_by(svc, provider, *others) -> tuple:
+    """A resident graph whose key its own data source reads, and so does each of ``others``, each
+    in a workspace of its own (a workspace has one live data source per key,
+    ``uq_ds_ws_prov_graph_live``). Returns ``(graph id, key)``."""
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
+
+    gid = await _resident(svc, provider)
+    async with db.graphver_session() as s:
+        own = (await s.get(GraphORM, gid)).data_source_id
+        key = (await s.get(ProjectionStateORM, gid)).falkor_graph_name
+    async with get_async_session() as s:
+        if await s.get(ProviderORM, provider) is None:
+            s.add(ProviderORM(id=provider, name=provider, provider_type="falkordb"))
+        s.add_all([WorkspaceORM(id="ws_" + ds_id, name=ds_id) for ds_id in (own, *others)])
+        await s.flush()
+        s.add_all([WorkspaceDataSourceORM(id=ds_id, workspace_id="ws_" + ds_id,
+                                          provider_id=provider, graph_name=key)
+                   for ds_id in (own, *others)])
+        await s.commit()
+    return gid, key
+
+
+async def _run_another_reader() -> None:
+    from backend.app.db.engine import close_db
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    provider = "prov_fk_" + os.urandom(3).hex()
+    shared, _ = await _resident_read_by(svc, provider, _ds())
+    alone, alone_key = await _resident_read_by(svc, provider)
+    cm = CacheManager(projector=None)
+    dropped = []
+
+    async def drop_graph(name, provider_id=None):
+        dropped.append(name)
+
+    assert await cm.evict(shared, drop_graph=drop_graph) is False
+    assert await _ps(shared) == ("idle", 2, 2) and dropped == []
+    # The graph's own data source is no other reader.
+    assert await cm.evict(alone, drop_graph=drop_graph) is True
+    assert await _ps(alone) == ("evicted", 0, 2) and dropped == [alone_key]
+    await close_broker_redis()
+    await db.dispose_engine()
+    await close_db()
+
+
+def test_eviction_keeps_a_key_another_data_source_reads():
+    asyncio.run(_run_another_reader())
+
+
+async def _run_readers_unknown() -> None:
+    from backend.app.services.versioning import purge_worker
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    gid = await _resident(svc, "prov_fk_" + os.urandom(3).hex())
+    cm = CacheManager(projector=None)
+    dropped = []
+
+    async def drop_graph(name, provider_id=None):
+        dropped.append(name)
+
+    async def unanswerable(*_args):
+        raise RuntimeError("the management database is unreachable")
+
+    with pytest.MonkeyPatch.context() as m:
+        m.setattr(purge_worker, "graph_key_readers", unanswerable)
+        assert await cm.evict(gid, drop_graph=drop_graph) is False
+    assert await _ps(gid) == ("idle", 2, 2) and dropped == []
+    await close_broker_redis()
+    await db.dispose_engine()
+
+
+def test_eviction_keeps_a_key_whose_readers_cannot_be_asked():
+    asyncio.run(_run_readers_unknown())
 
 
 async def _run_parking_and_claim() -> None:
