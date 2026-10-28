@@ -258,7 +258,7 @@ The item-by-item record, with commits, is the gap audit in the repository,
 - Canvas edits to a versioned graph are written to Postgres only; the projector is FalkorDB's one
   writer for them.
 - `/graph/changes` takes an `Idempotency-Key`, so a retried save lands once; one import runs per draft.
-- A re-sync refuses to undo curation (409 `curation_at_risk`) or delete most of a graph (409
+- A sync refuses to undo curation (409 `curation_at_risk`) or delete most of a graph (409
   `mass_delete_blocked`) unless a workspace admin overrides it.
 - The `versioning-e2e` CI job runs the `GRAPHVER_E2E` suite, informational for now.
 

@@ -95,7 +95,10 @@ reported a change. Someone who can publish chooses **Bring into history** to tak
 it in as one published change. It adds and updates items; it never removes
 anything from the version history. **Rebuild** on that tab writes what version
 history holds back into your own graph: items' fields go back to their values in
-history, and nothing else in the graph is removed.
+history, and nothing else in the graph is removed. **Not in history** counts what
+the tool adds: if it also removes items the version history holds, as many as it
+adds, nothing shows there. **Check sync** lists such missing items, and
+**Rebuild** puts them back.
 
 ## The life of a change
 

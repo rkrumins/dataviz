@@ -157,8 +157,9 @@ Other refusals you will meet on these routers:
 | **422** | `ontology_required` | A blank (ontology-governed) graph whose data source has no ontology assigned |
 | **503** | `ontology_unavailable` | A blank graph's ontology can't be resolved right now; writes wait for it |
 | **422** | `graph_too_large_to_sync` | A sync or re-sync on a graph above the size guard ([§2.9](#29-bulk-ingest--authoritative-sync)) |
-| **409** | `curation_at_risk` | A sync or re-sync while `main` holds people's edits from before its last import or sync; `lastHumanCommit` names the newest. A workspace admin may pass `?force=true` |
-| **409** | `mass_delete_blocked` | A sync or re-sync that would delete more than the limit; `{deletes, live, limit}`. A workspace admin may pass `?allowMassDelete=true` |
+| **409** | `curation_at_risk` | A sync while `main` holds people's edits from before its last import or sync; `lastHumanCommit` names the newest. A workspace admin may pass `?force=true` |
+| **409** | `mass_delete_blocked` | A sync that would delete more than the limit; `{deletes, live, limit}`. A workspace admin may pass `?allowMassDelete=true` |
+| **409** | `platform_copy`, `not_ready`, `spelled_two_ways` | Bringing a graph's changes into history ([§4](#cascade-preview--bootstrapresync)) on a copy the platform made; while the projection doesn't hold main (`{status}`); from a graph that spells a type two ways (`{spelled}`) |
 | **409** | `fork_limit` | A fork of a graph that already has `limit` live forks (`GRAPHVER_MAX_FORKS_PER_GRAPH`, default 10), or the restore of a fork into a graph that has them; `{limit}` |
 | **409** | `not_a_fork` | A fork delete or restore on a graph `…/forks` did not make: a data source's graph, or a fork bound to a data source. It goes to the trash and back with its data source; `{graphId}` |
 | **409** | `live_forks` | The delete of a fork that has live forks of its own; `{graphId, forks}`. Delete those first |
@@ -168,7 +169,7 @@ Other refusals you will meet on these routers:
 | **409** | `version_conflict` | A freeze or unfreeze whose `expectedRev` is no longer current; `{resource: "lifecycle", currentVersion}`. Reload and retry |
 | **409** | `bootstrapping` | A projection rebuild, or a projection move, while version control is still being enabled for the data source |
 | **403** | `feature_disabled` | A switch closed the route ([above](#the-switches-that-close-these-routes)) |
-| **403** | `needs_admin` | `?force` or `?allowMassDelete` on a sync or re-sync by anyone but a workspace admin: `{type: "access_denied", code: "needs_admin", required: "workspace:admin", error: "missing_permission", permission, scope, message}` |
+| **403** | `needs_admin` | `?force` or `?allowMassDelete` on a sync by anyone but a workspace admin: `{type: "access_denied", code: "needs_admin", required: "workspace:admin", error: "missing_permission", permission, scope, message}` |
 | **403** | — | The route's permission is missing: `{error: "missing_permission", permission, scope: {type, id}, message}`, with no `type`. An API key on a route it can't call gets `{error: "api_key_not_allowed", message}` instead ([§1](#api-keys)) |
 | **503** | — | `"Authorization temporarily unavailable"`: a permission check would refuse, but the workspace's grants could not be read. Retry |
 

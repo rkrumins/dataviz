@@ -94,7 +94,6 @@ jobs around such a graph.
   `/source-changed`, which connectors call), the graph is flagged as holding changes not in
   history, even for a property edit, which no count shows: the writer's word is taken before the
   change check, which such an edit passes unseen.
-
 - **A paused or failed enable no longer switches off change detection.** From the moment "Enable
   version control" was queued, the reconciliation sweep treated the data source as versioned: it
   marked it "managed" and took on every change without acting. That held while the enable was
@@ -136,6 +135,24 @@ jobs around such a graph.
   - A change signal on a versioned source (`/refresh` at `auto`, `/source-changed`) returns no
     `jobId`: it queues no rebuild. `/source-changed` records its signal with origin `connector`.
   - The watermark gains `externalDrift`.
+
+### Known limitations
+
+- A publish into a customer's graph checks that its own writes landed and counts the rest. A writer
+  that removes items history holds while adding as many of its own leaves the counts level: the
+  publish goes out, views read the graph without those items, and nothing is flagged. **Check
+  sync** lists the missing items, though relationships only by count, and **Rebuild** writes them
+  back. Bringing changes into history deletes nothing, so history keeps them.
+- Another writer's edit to a field history also holds is overwritten when the platform next writes
+  that item: a publish that changes it, or a Rebuild. Such an edit is flagged only when it changes a
+  count, or when its writer says it wrote (origin `script` or `connector`, or `/source-changed`).
+- On a customer's graph a fresh projection holds at least main. Views and drafts read the other
+  writers' data with it; diffs and reads as of a commit come from Postgres, which holds history
+  alone.
+- Between bringing changes into history and the rebuild it queues, the lineage summaries can count
+  the relationships brought in twice.
+- Bringing changes into history reads the whole graph, so the re-sync size limit applies
+  (`GRAPHVER_RESYNC_MAX_ENTITIES`; above it, 422 `graph_too_large_to_sync`).
 
 ---
 

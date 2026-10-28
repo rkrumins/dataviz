@@ -289,7 +289,10 @@ reconciles **live node/edge counts** between Postgres and FalkorDB and bounded-h
   them by relationships the batch job may already have counted. Two guards keep a
   surplus from hiding a loss: the edge merge returns how many of its items landed, and one whose
   endpoint wasn't there is a shortfall, healed; and a surplus equal to the one last recorded skips
-  the sweep, which reads every tombstone of the graph.
+  the sweep, which reads every tombstone of the graph. Counts can't see a balanced change, though:
+  a writer that removes items history holds and adds as many of its own leaves them level, so the
+  pass publishes, views read the graph without those items, and nothing is flagged. Check sync
+  (§12) lists the missing nodes, but relationships only by count; Rebuild writes them back.
 - **A customer's graph loses nothing history doesn't hold.** A reconcile into it (Rebuild, the heal
   below) deletes no node, relationship or duplicate copy history doesn't hold, whatever its share of
   the graph; it sweeps only what history tombstoned, and hands the rollups to the batch job when it
