@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest'
 import {
     normalizeIdentity, isIdentityOverridden, identityCoalesceExpr,
     normalizeName, isNameOverridden, nameCoalesceExpr, isInherited, boundFieldIds,
-    boundName, nameOnSave, identitySourcePhrase, NodeIdentityField, type NamedShape,
+    boundName, nameOnSave, NodeIdentityField, type NamedShape,
 } from './NodeIdentity'
 
 describe('normalizeIdentity', () => {
@@ -181,17 +181,6 @@ describe('nameOnSave', () => {
         expect(nameOnSave({ displayName: 'Orders', properties: { title: 'Orders' } },
             { displayName: 'Sales', properties: { title: 'ORD' } }, title))
             .toEqual({ kind: 'apart', property: 'title', value: 'ORD', renamed: true, edited: true })
-    })
-})
-
-describe('identitySourcePhrase', () => {
-    it('says where each setting comes from, and nothing when that is unknown', () => {
-        expect(identitySourcePhrase('data_source')).toBe('set on this data source')
-        expect(identitySourcePhrase('provider')).toBe('from the provider')
-        expect(identitySourcePhrase('workspace')).toBe('from the workspace')
-        expect(identitySourcePhrase('global')).toBe('platform default')
-        expect(identitySourcePhrase('default')).toBe('built-in default')
-        expect(identitySourcePhrase(undefined)).toBe('')
     })
 })
 

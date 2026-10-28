@@ -16,13 +16,20 @@
  *  - useNodeIdentitySuggestions() — introspects the real graph (discoverSchema)
  *    to suggest the actual node property keys.
  */
-import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { Fingerprint, KeyRound, ShieldAlert, ChevronDown, Sparkles } from 'lucide-react'
+import { useEffect, useId, useRef, useState, type ReactNode } from 'react'
+import {
+    Fingerprint, KeyRound, ShieldAlert, ChevronDown, Sparkles, ArrowRight, Check, Database, Globe,
+    LayoutTemplate, Server, Settings2, Type, Unlink, type LucideIcon,
+} from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
 import { RESERVED_PROPERTY_KEYS, readSchemaField, toPayloadShape } from '@/lib/nodeFields'
+import { workspaceColor } from '@/lib/workspaceColor'
+import { CopyButton } from '@/components/ui/CopyButton'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { providerService } from '@/services/providerService'
 import type { DataSourceResponse } from '@/services/workspaceService'
+import { usePreferencesStore } from '@/store/preferences'
 import { useActiveView } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 
@@ -184,18 +191,6 @@ const SOURCE_LABELS: Partial<Record<IdentitySource, string>> = {
 export const isInherited = (source?: IdentitySource): boolean =>
     !!source && source in SOURCE_LABELS
 
-const SOURCE_PHRASES: Record<IdentitySource, string> = {
-    data_source: 'set on this data source',
-    provider: 'from the provider',
-    workspace: 'from the workspace',
-    global: 'platform default',
-    default: 'built-in default',
-}
-
-/** Where a resolved setting comes from, as an entity's details say it. Empty when unknown. */
-export const identitySourcePhrase = (source?: IdentitySource | null): string =>
-    (source && SOURCE_PHRASES[source]) || ''
-
 /** The provenance line beside a field: either "inherited from X", or — when
  *  this level is the one overriding — the way back to inheriting.
  *
@@ -305,21 +300,127 @@ export function NodeIdentityBadge({
 
 // ── an entity's identity facts (the entity drawer) ──────────────────────────
 
-function Fact({ label, property, source, children }: {
-    label: string
-    property: string
+const NEUTRAL_TINT = 'border-black/10 bg-black/[0.03] text-ink-secondary dark:border-white/[0.12] dark:bg-white/[0.04]'
+
+/** The scopes a data source's setting is looked up in, in order — the first that sets one wins
+ *  (`node_identity.resolve_node_identity`) — each in the tint and glyph the app already gives that
+ *  layer (ViewScopeBadge, ViewBuiltOn). The workspace's tint is its own colour. */
+const SCOPES: { source: IdentitySource; name: string; says: string; icon: LucideIcon; tint?: string }[] = [
+    { source: 'data_source', name: 'This data source', says: 'Set on this data source', icon: Database,
+        tint: 'border-emerald-500/30 bg-emerald-500/[0.08] text-emerald-600 dark:text-emerald-400' },
+    { source: 'provider', name: 'Its provider', says: 'From the provider', icon: Server,
+        tint: 'border-sky-500/30 bg-sky-500/[0.08] text-sky-600 dark:text-sky-400' },
+    { source: 'workspace', name: 'Its workspace', says: 'From the workspace', icon: LayoutTemplate },
+    { source: 'global', name: 'The platform', says: 'Platform default', icon: Globe, tint: NEUTRAL_TINT },
+    { source: 'default', name: 'Built in', says: 'Built-in default', icon: Settings2, tint: NEUTRAL_TINT },
+]
+
+/** Where a setting comes from, as a pill in its layer's colour. Its tip walks the whole lookup: the
+ *  scopes before the one in force set nothing, and the ones after it were never needed. */
+function ScopePill({ source, property, workspaceId }: {
     source?: IdentitySource
-    children?: ReactNode
+    property: string
+    workspaceId?: string
 }) {
-    const from = identitySourcePhrase(source)
+    const at = SCOPES.findIndex((s) => s.source === source)
+    if (at < 0) return null
+    const { says, icon: Icon, tint } = SCOPES[at]
+    const ws = !tint && workspaceId ? workspaceColor(workspaceId) : null
     return (
-        <div className="flex items-start justify-between gap-4 py-1.5">
-            <dt className="text-xs text-ink-muted min-w-[110px]">{label}</dt>
-            <dd className="text-xs text-right min-w-0">
-                <code className="font-mono text-ink">{property}</code>
-                {from && <span className="text-ink-muted"> · {from}</span>}
-                {children != null && <span className="block text-ink-muted break-words">{children}</span>}
-            </dd>
+        <HoverTip
+            width="data"
+            label="Looked up in this order — the first that sets it wins"
+            detail={
+                <span className="mt-1.5 flex flex-col gap-1">
+                    {SCOPES.map((s, i) => (
+                        <span key={s.source} className={cn('flex items-center gap-2', i > at && 'opacity-50')}>
+                            <s.icon aria-hidden className="h-3 w-3 shrink-0" />
+                            <span className={cn('flex-1', i === at && 'font-semibold text-ink')}>{s.name}</span>
+                            {i === at
+                                ? <code className="rounded bg-black/[0.05] px-1 font-mono font-semibold text-ink dark:bg-white/[0.08]">{property}</code>
+                                : <span>{i < at ? 'not set' : 'not needed'}</span>}
+                        </span>
+                    ))}
+                </span>
+            }
+        >
+            <span className={cn(
+                'inline-flex items-center gap-1 whitespace-nowrap rounded-full border px-2 py-0.5 text-[10px] font-semibold leading-none',
+                tint ?? (ws ? cn(ws.bg, ws.text, ws.border) : NEUTRAL_TINT),
+            )}>
+                <Icon aria-hidden className="h-2.5 w-2.5 shrink-0" />
+                {says}
+            </span>
+        </HoverTip>
+    )
+}
+
+/** A property and its value as one token — `id │ native-42 ⧉`. Without a value it says what will
+ *  be there instead, on a dashed outline when that is nothing yet. */
+function ValueToken({ property, value, empty, dashed = true, mono = false, copy = false }: {
+    property: string
+    value?: string
+    empty: string
+    dashed?: boolean
+    mono?: boolean
+    copy?: boolean
+}) {
+    return (
+        <div className={cn(
+            'flex min-w-0 items-stretch overflow-hidden rounded-lg border bg-white/70 dark:bg-white/[0.03]',
+            value === undefined && dashed ? 'border-dashed border-black/15 dark:border-white/15' : 'border-black/10 dark:border-white/10',
+        )}>
+            <code className="flex shrink-0 items-center border-r border-black/10 bg-black/[0.035] px-2 font-mono text-[11px] font-semibold text-ink-secondary dark:border-white/10 dark:bg-white/[0.05]">
+                {property}
+            </code>
+            {value === undefined ? (
+                <span className="min-w-0 flex-1 truncate px-2.5 py-1.5 text-xs italic text-ink-muted">{empty}</span>
+            ) : (
+                <>
+                    <span title={value} className={cn('min-w-0 flex-1 truncate px-2.5 py-1.5 text-xs text-ink', mono && 'font-mono')}>
+                        {value}
+                    </span>
+                    {copy && <CopyButton value={value} label={`Copy ${property}`} className="mr-1 self-center" />}
+                </>
+            )}
+        </div>
+    )
+}
+
+const NOTE_TONES = {
+    good: 'text-emerald-500',
+    apart: 'text-amber-500',
+    change: 'text-accent-lineage',
+} as const
+
+/** One line on what a save does, or has done, to a property — its glyph says how it stands. Also
+ *  the Name input's hint, so the two read as one. A span, so a hint's paragraph can hold it. */
+export function Note({ tone, icon: Icon, children }: { tone: keyof typeof NOTE_TONES; icon: LucideIcon; children: ReactNode }) {
+    return (
+        <span className="flex items-start gap-1.5 text-[11px] leading-snug text-ink-secondary">
+            <Icon aria-hidden className={cn('mt-px h-3 w-3 shrink-0', NOTE_TONES[tone])} />
+            <span className="min-w-0">{children}</span>
+        </span>
+    )
+}
+
+/** A property's row: its tile and label, where its setting comes from, and what follows. */
+function IdentityFact({ icon: Icon, label, scope, children }: {
+    icon: LucideIcon
+    label: string
+    scope: ReactNode
+    children: ReactNode
+}) {
+    return (
+        <div className="relative py-3 pl-[58px] pr-3">
+            <dt className="flex min-h-[18px] flex-wrap items-center gap-x-2 gap-y-1">
+                <span aria-hidden className="absolute left-3 top-3 flex h-[34px] w-[34px] items-center justify-center rounded-xl border border-violet-500/25 bg-gradient-to-br from-violet-500/15 to-indigo-500/15 text-violet-600 dark:text-violet-400">
+                    <Icon className="h-4 w-4" />
+                </span>
+                <span className="text-[10px] font-bold uppercase tracking-[0.14em] text-ink-muted">{label}</span>
+                <span className="ml-auto">{scope}</span>
+            </dt>
+            <dd className="mt-1.5 space-y-1.5">{children}</dd>
         </div>
     )
 }
@@ -328,40 +429,80 @@ function Fact({ label, property, source, children }: {
  *  (across data source, provider, workspace and platform), where each setting comes from, and this
  *  entity's values as stored. `pending`: not saved yet, so the server has not filled them in.
  *  `edited`: the entity with edits not saved yet — the name property then says what saving stores.
- *  Nothing until the workspace list has loaded. */
+ *
+ *  One line under the URN names the two properties; it opens onto a card for each. Closed by
+ *  default, and the choice is remembered across entities. Nothing until the workspace list has
+ *  loaded. */
 export function NodeIdentityFacts({ data, pending = false, edited }: {
     data: Record<string, unknown>
     pending?: boolean
     edited?: Record<string, unknown>
 }) {
     const mapping = useCanvasNodeIdentity()
+    const open = usePreferencesStore((s) => s.drawerIdentityDetailsOpen)
+    const toggle = usePreferencesStore((s) => s.toggleDrawerIdentityDetails)
+    const cardId = useId()
     if (!mapping) return null
     const identity = normalizeIdentity(mapping.identityProperty)
     const name = normalizeName(mapping.nameProperty)
     const idValue = readSchemaField(data, identity)
     const nameValue = readSchemaField(data, name)
     const display = data.label ?? data.displayName
-    // What a save fills into an empty property — only the ones the server binds.
+    const text = (v: unknown) => (blank(v) ? undefined : String(v))
+    // What a save writes into an empty property — only into the ones the server binds: the name
+    // property from the name, a mapped identifier from the URN (one that is the name property too,
+    // from the name). A save is coming for a new or edited entity; any other waits for its next.
     const bound = boundFieldIds(mapping)
-    const filled = (property: string) => !(pending || edited) ? 'Not set'
-        : property === name && bound.has(name) ? 'Set from the name when saved'
-            : property === identity && bound.has(identity) ? 'Set to its URN when saved' : 'Not set'
+    const fill = (property: string) => (property === name && bound.has(name) ? 'Set from the name'
+        : property === identity && bound.has(identity) ? 'Set to its URN' : null)
+    const saving = pending || edited !== undefined
+    const empty = (property: string) => (fill(property) && saving ? `${fill(property)} when saved` : 'Not set')
+    const later = (property: string) => fill(property) && !saving
+        && <Note tone="change" icon={Sparkles}>{fill(property)} on its next save</Note>
     const saved = edited && boundName(toPayloadShape(data), toPayloadShape(edited), mapping)?.name
-    return (
-        <dl className="mt-2" aria-label="How this data source identifies and names entities">
-            <Fact label="Identifier property" property={identity} source={mapping.identityPropertySource}>
-                {identity === 'urn' ? null : !blank(idValue) ? String(idValue) : filled(identity)}
-            </Fact>
-            <Fact label="Name property" property={name} source={mapping.namePropertySource}>
-                {!blank(nameValue)
-                    ? <>
-                        {String(nameValue)}{String(nameValue) !== String(display ?? '') && ' · differs from the name'}
-                        {!blank(saved) && String(saved) !== String(nameValue) && ` · becomes “${String(saved)}” when saved`}
-                    </>
-                    : filled(name)}
-            </Fact>
-        </dl>
+    const chip = (property: string) => (
+        <code className="rounded bg-black/[0.05] px-1 font-mono text-[10.5px] text-ink-secondary dark:bg-white/[0.08]">{property}</code>
     )
+    return (<>
+        <button
+            type="button"
+            onClick={toggle}
+            aria-expanded={open}
+            aria-controls={cardId}
+            className={cn(
+                'mt-2 -mx-1 flex w-[calc(100%+0.5rem)] items-center gap-1.5 rounded-lg px-1 py-1 text-left text-[11px] text-ink-muted',
+                'transition-colors duration-150 hover:bg-black/[0.04] hover:text-ink-secondary dark:hover:bg-white/[0.06]',
+                'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+            )}
+        >
+            <ChevronDown aria-hidden strokeWidth={2.2}
+                className={cn('h-3.5 w-3.5 shrink-0 transition-transform duration-200', !open && '-rotate-90')} />
+            <span className="min-w-0 truncate">Identified by {chip(identity)} · named by {chip(name)}</span>
+        </button>
+        {open && <dl
+            id={cardId}
+            aria-label="How this data source identifies and names entities"
+            className="mt-2 divide-y divide-black/[0.06] rounded-xl border border-black/10 bg-black/[0.015] animate-in fade-in slide-in-from-top-1 duration-200 dark:divide-white/[0.06] dark:border-white/10 dark:bg-white/[0.02]"
+        >
+            <IdentityFact icon={Fingerprint} label="Identifier property"
+                scope={<ScopePill source={mapping.identityPropertySource} property={identity} workspaceId={mapping.workspaceId} />}>
+                {identity === 'urn' ? <ValueToken property="urn" empty="The URN above" dashed={false} /> : <>
+                    <ValueToken property={identity} value={text(idValue)} empty={empty(identity)} mono copy />
+                    {blank(idValue) && later(identity)}
+                </>}
+            </IdentityFact>
+            <IdentityFact icon={Type} label="Name property"
+                scope={<ScopePill source={mapping.namePropertySource} property={name} workspaceId={mapping.workspaceId} />}>
+                <ValueToken property={name} value={text(nameValue)} empty={empty(name)} />
+                {blank(nameValue) ? later(name)
+                    : !blank(saved) && String(saved) !== String(nameValue)
+                        ? <Note tone="change" icon={ArrowRight}>Becomes “{String(saved)}” when saved</Note>
+                        : bound.has(name) && (String(nameValue) === String(display ?? '')
+                            ? <Note tone="good" icon={Check}>In step with the name — a rename carries it along</Note>
+                            : <Note tone="apart" icon={Unlink}>Kept apart from the name — a rename leaves it</Note>)}
+            </IdentityFact>
+        </dl>}
+    </>)
 }
 
 // ── editable expert disclosure ──────────────────────────────────────────────

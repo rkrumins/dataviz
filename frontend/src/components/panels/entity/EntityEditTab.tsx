@@ -5,14 +5,14 @@
  * decided by `lib/nodeFields`.
  */
 import { useId, useMemo, type ComponentType, type ReactNode } from 'react'
-import { AtSign, Briefcase, Copy, Database, FileText, Layers, Link, Type } from 'lucide-react'
+import { ArrowRight, AtSign, Briefcase, Check, Copy, Database, FileText, Layers, Link, Sparkles, Type, Unlink } from 'lucide-react'
 import { useActiveView } from '@/store/schema'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { readSchemaField, toPayloadShape, withReserved, writeBusinessLabel, writeSchemaField } from '@/lib/nodeFields'
 import { cn } from '@/lib/utils'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import {
-  NodeIdentityFacts, boundFieldIds, nameOnSave, useCanvasNodeIdentity,
+  Note, NodeIdentityFacts, boundFieldIds, nameOnSave, useCanvasNodeIdentity,
 } from '@/components/dataSource/NodeIdentity'
 import { IconButton } from '@/components/ui/Button'
 import { PropertyEditor } from '../PropertyEditor'
@@ -61,17 +61,22 @@ function nameHint(original: Data | null, form: Data, mapping: DataSourceResponse
   switch (effect.kind) {
     case 'follows':
       if (effect.from != null && !(typeof effect.from === 'string' && !effect.from.trim())) {
-        return <>{prop} changes to {quote(effect.to)} too.</>
+        return <Note tone="change" icon={ArrowRight}>{prop} changes to {quote(effect.to)} too.</Note>
       }
-      return original === null ? <>Also saved as {prop}.</> : <>{prop} is empty — it gets {quote(effect.to)} when saved.</>
+      return original === null ? <Note tone="good" icon={Check}>Also saved as {prop}.</Note>
+        : <Note tone="change" icon={Sparkles}>{prop} is empty — it gets {quote(effect.to)} when saved.</Note>
     case 'renames':
-      return <>Saving renames it to {quote(effect.to)} to match {prop}.</>
+      return <Note tone="change" icon={ArrowRight}>Saving renames it to {quote(effect.to)} to match {prop}.</Note>
     case 'same':
-      return <>Also saved as {prop}.</>
+      return <Note tone="good" icon={Check}>Also saved as {prop}.</Note>
     case 'apart':
-      return effect.edited ? <>{prop} is saved as {quote(effect.value)}, apart from the name.</>
-        : effect.renamed ? <>{prop} stays {quote(effect.value)}: it is kept apart from the name.</>
-          : <>{prop} is {quote(effect.value)}, kept apart from the name.</>
+      return (
+        <Note tone="apart" icon={Unlink}>
+          {effect.edited ? <>{prop} is saved as {quote(effect.value)}, apart from the name.</>
+            : effect.renamed ? <>{prop} stays {quote(effect.value)}: it is kept apart from the name.</>
+              : <>{prop} is {quote(effect.value)}, kept apart from the name.</>}
+        </Note>
+      )
   }
 }
 
