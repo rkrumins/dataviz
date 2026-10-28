@@ -56,6 +56,11 @@ limitations** — a changelog that only lists good news is not worth reading.
   rebuilt. It answers 409 `not_ready` while the graph is evicted, being rebuilt or moved. The
   `curation_at_risk` refusal no longer applies once the projection has caught up with main, since
   the graph then holds every edit people made.
+- **The Versioning tab says what the graph holds that history doesn't.** Its fast read layer card
+  has a **Not in history** row: how many items and connections, or that a writer reported a change.
+  People who can publish get **Bring into history** beside it. On a customer's graph, the Rebuild
+  confirmation said "No data is lost", but Rebuild deleted what history didn't hold. It now says
+  that items' fields go back to their values in history and that nothing else is removed.
 - **Changes made outside version control refresh what views read.** The reconciliation sweep
   marked a versioned source "managed" and took on its new counts without acting, so an ETL's writes
   to the graph showed only once each cached read expired, after up to an hour (seven days for some

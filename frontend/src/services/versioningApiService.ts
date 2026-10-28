@@ -164,6 +164,18 @@ export interface Watermark {
   /** Which store serves reads, by the server's own routing rule: published from FalkorDB while the
    *  projection holds the head, else Postgres; a draft is always an overlay on whatever serves it. */
   readRoute?: { main: 'falkordb' | 'postgres'; drafts: 'overlay' }
+  /** What the customer's own graph holds that history doesn't (another writer kept writing to it),
+   *  kept, not deleted; null when there is none. Brought in with {@link bringIntoHistory}. */
+  externalDrift?: ExternalDrift | null
+}
+
+/** Changes in a graph that version history doesn't hold. `via`: `verify` counted them on the last
+ *  publish (`nodes`, `edges`), `notification` — the writer said so; a property edit has no count. */
+export interface ExternalDrift {
+  at?: string | null
+  nodes?: number | null
+  edges?: number | null
+  via?: 'verify' | 'notification'
 }
 
 /** Result of kicking a full rebuild of the fast read layer. `alreadyRunning` ⇒ a
@@ -999,6 +1011,22 @@ export function retryBootstrap(
 ): Promise<{ jobId: string; status: BootstrapJobStatus }> {
   return vfetch(
     `/api/v1/${wsId}/graph/bootstrap/retry?dataSourceId=${encodeURIComponent(dataSourceId)}&mode=${mode}`,
+    withReason({ method: 'POST' }, opts?.reason),
+  )
+}
+
+/** What a re-sync committed: `commit_id` null when there was nothing new. */
+export interface ResyncResult {
+  commit_id: string | null
+  applied: number
+}
+
+/** Bring what the data source's graph holds and history doesn't into history, as one commit on main
+ *  read from the graph itself (`POST /graph/resync`), and clear its {@link ExternalDrift} flag. 409
+ *  while the graph is being rebuilt or moved, or while people's edits are at risk. */
+export function bringIntoHistory(wsId: string, dataSourceId: string, opts?: ActivityOpts): Promise<ResyncResult> {
+  return vfetch<ResyncResult>(
+    `/api/v1/${wsId}/graph/resync?dataSourceId=${encodeURIComponent(dataSourceId)}`,
     withReason({ method: 'POST' }, opts?.reason),
   )
 }

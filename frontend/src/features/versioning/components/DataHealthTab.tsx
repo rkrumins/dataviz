@@ -575,8 +575,14 @@ export function DataHealthTab({ wsId, graphId, dataSourceId, canManage }: {
               <h3 className="text-base font-semibold text-ink tracking-tight">Rebuild the fast read layer?</h3>
             </div>
             <p className="px-6 pb-5 text-[13px] text-ink-muted leading-relaxed">
-              This rebuilds the fast read layer from the source of truth. <span className="font-semibold text-ink">No data is lost</span> —
-              everyone keeps working from the source of truth while it rebuilds.
+              {wm?.owned === false ? (
+                <>This writes what version history holds back into your graph: items&apos; fields go back to their values in
+                  history, and <span className="font-semibold text-ink">nothing history doesn&apos;t hold is removed</span>.
+                  Everyone keeps working from the source of truth while it rebuilds.</>
+              ) : (
+                <>This rebuilds the fast read layer from the source of truth. <span className="font-semibold text-ink">No data is lost</span> —
+                  everyone keeps working from the source of truth while it rebuilds.</>
+              )}
             </p>
             <div className="px-6 py-4 border-t border-glass-border flex items-center justify-end gap-3 bg-canvas-overlay/40">
               <button

@@ -13,7 +13,7 @@
  * resumes it, naming the revision they saw.
  * The data hooks are stubbed; the card itself has its own spec.
  */
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
@@ -67,8 +67,11 @@ vi.mock('@/features/reviews/components/PrListRow', () => ({
 }))
 vi.mock('@/features/reviews/components/PrDetailDrawer', () => ({ PrDetailDrawer: () => null }))
 vi.mock('../ProjectionHealthCard', () => ({
-  ProjectionHealthCard: ({ graphId, showActions }: { graphId: string; showActions?: boolean }) =>
-    <div data-testid="projection-health-card" data-graph={graphId} data-actions={String(!!showActions)} />,
+  ProjectionHealthCard: ({ graphId, showActions, dataSourceId }: {
+    graphId: string; showActions?: boolean; dataSourceId?: string
+  }) =>
+    <div data-testid="projection-health-card" data-graph={graphId} data-actions={String(!!showActions)}
+      data-source={dataSourceId ?? ''} />,
 }))
 
 import { DataSourceVersioningTab } from '../DataSourceVersioningTab'
@@ -113,6 +116,15 @@ describe('DataSourceVersioningTab — projection health', () => {
     canManage = false
     renderTab()
     expect(screen.getByTestId('projection-health-card')).toHaveAttribute('data-actions', 'false')
+  })
+
+  it('lets a publisher bring changes made outside version control into history', () => {
+    renderTab()
+    expect(screen.getByTestId('projection-health-card')).toHaveAttribute('data-source', 'ds1')
+    cleanup()
+    canPublish = false
+    renderTab()
+    expect(screen.getByTestId('projection-health-card')).toHaveAttribute('data-source', '')
   })
 
   it('shows no card while version control is off', () => {

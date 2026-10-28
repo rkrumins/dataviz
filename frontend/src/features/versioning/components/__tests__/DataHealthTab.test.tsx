@@ -143,6 +143,14 @@ describe('DataHealthTab', () => {
     expect(screen.queryByRole('button', { name: 'Rebuild' })).not.toBeInTheDocument()
   })
 
+  it('says what a rebuild of the customer\'s own graph changes, and what it leaves', () => {
+    watermark = { committed: 12, projected: 12, fresh: true, status: 'idle', owned: false }
+    renderTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild fast read layer' }))
+    expect(screen.getByText(/fields go back to their values in history/)).toBeInTheDocument()
+    expect(screen.queryByText(/No data is lost/)).not.toBeInTheDocument()
+  })
+
   it('opens a confirm before rebuilding: confirming calls the mutation, cancelling does not', () => {
     renderTab()
 

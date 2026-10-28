@@ -789,6 +789,17 @@ export function useRebuildProjection(wsId: string, graphId: string) {
   })
 }
 
+/** Bring what the data source's graph holds and history doesn't into history: a new commit on main,
+ *  so everything main-advancing refreshes, the flag on the watermark with it. */
+export function useBringIntoHistory(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
+  return useMutation({
+    mutationFn: (dataSourceId: string) => api.bringIntoHistory(wsId, dataSourceId),
+    onSuccess: () => invalidateAfterMainAdvance(qc, wsId, graphId, bumpMainEpoch),
+  })
+}
+
 /** Check the fast read layer against the source of truth (user-triggered). Returns the DriftReport;
  *  a 409 (a check already running) surfaces as a plain error for the caller to notify. */
 export function useReconcileProjection(wsId: string, graphId: string) {

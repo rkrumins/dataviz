@@ -86,6 +86,16 @@ undoes neither. If the copy stops part-way, the strip explains why and offers
 
 ![The canvas strip after turning on version control: 'Everything checked out', the list of passed checks, and the View history and Done buttons](/docs-assets/guide/versioning-change-control-enable.png)
 
+**If another tool keeps writing to the graph.** Something outside this app (an
+ETL job, say, or a connector) may keep writing to the data source's graph after
+version control is on. What it writes stays in the graph and shows in views, but
+it isn't in the version history. The data source's **Versioning** tab says so
+under **Not in history**: how many items and connections, or that the tool
+reported a change. Someone who can publish chooses **Bring into history** to take
+it in as one published change. **Rebuild** on that tab writes what version
+history holds back into your own graph: items' fields go back to their values in
+history, and nothing else in the graph is removed.
+
 ## The life of a change
 
 ```mermaid
