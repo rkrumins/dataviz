@@ -86,7 +86,7 @@ def test_edge_deletes_are_typed_and_anchored_with_fallback():
     }
     _run(p._apply(client, [], [], [], [resolved, "E-unresolved"]))
     typed = [c for c in client.cyphers()
-             if "[r:FLOWS {id: item.eid}]" in c and "DELETE r" in c]
+             if "-[r:FLOWS]->" in c and "WHERE r.id IN [item.eid, item.pid] DELETE r" in c]
     assert typed, f"no typed anchored edge delete: {client.cyphers()}"
     assert all("(a:Table {urn: item.src})" in c for c in typed)
     # The unresolvable eid still gets deleted via the legacy full form.
@@ -154,7 +154,7 @@ def test_a_pass_writes_and_matches_the_graph_own_spelling_of_its_types():
     assert "MERGE (n:table {urn: item.urn})" in written
     assert "MATCH (a:table {urn: item.src})" in written and "MERGE (a)-[r:flows]->(b)" in written
     assert "MATCH (n:table {urn: u}) DETACH DELETE n" in written
-    assert "[r:flows {id: item.eid}]" in written
+    assert "-[r:flows]->(b:Dataset {urn: item.tgt}) WHERE r.id IN" in written
     assert ":Dataset" in written
     assert ":Table" not in written and ":FLOWS" not in written, written
 
@@ -251,3 +251,22 @@ def test_urnless_node_resolves_to_the_label_it_was_merged_under():
     graph = SimpleNamespace(id="g1", fork_parent_graph_id=None)
     assert _run(p._urn_label_for(_Session(), graph, "main", "B")) == ("gv:B", "Dataset")
     assert _run(p._endpoint(_Session(), graph, "main", "B", {}, {})) == ("gv:B", "Dataset")
+
+
+def test_an_edge_delete_also_finds_the_id_the_graph_knows_it_by():
+    """An edge re-keyed ``edge:<id>`` in history (its id was also a node's) is ``<id>`` in the
+    customer's graph: the delete matches either."""
+    client = _CaptureClient()
+    _run(_projector()._apply(client, [], [], [], [
+        {"eid": "edge:X", "src": "urn:a", "tgt": "urn:b",
+         "rel": "FLOWS", "slb": "Table", "tlb": "Dataset"}]))
+    (params,) = [p for c, p, _t in client.calls if "DELETE r" in c]
+    assert params["batch"] == [{"eid": "edge:X", "pid": "X", "src": "urn:a", "tgt": "urn:b"}]
+
+
+def test_a_customer_graph_keeps_the_id_its_relationship_has():
+    owned, customer = _CaptureClient(), _CaptureClient()
+    _run(_projector()._apply(owned, [_NODE_A, _NODE_B], [_EDGE], [], []))
+    _run(_projector()._apply(customer, [_NODE_A, _NODE_B], [_EDGE], [], [], owned=False))
+    assert any("SET r.id = item.eid," in c for c in owned.cyphers())
+    assert any("SET r.id = coalesce(r.id, item.eid)," in c for c in customer.cyphers())

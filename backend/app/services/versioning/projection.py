@@ -312,13 +312,18 @@ def _node_merge_cypher(label: str) -> str:
     )
 
 
-def _edge_merge_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
+def _edge_merge_cypher(rel_type: str, src_label: str, tgt_label: str, *,
+                       keep_id: bool = False) -> str:
+    """``keep_id``: a customer's graph keeps the id its relationship already has. An edge whose id
+    was also a node's is ``edge:<id>`` in history (``bootstrap_worker._rekey``) and still ``<id>``
+    there, and nothing may rename it under whatever else keys on it."""
+    rid = "coalesce(r.id, item.eid)" if keep_id else "item.eid"
     return (
         f"UNWIND $batch AS item "
         f"MATCH (a:{src_label} {{urn: item.src}}) "
         f"MATCH (b:{tgt_label} {{urn: item.tgt}}) "
         f"MERGE (a)-[r:{rel_type}]->(b) "
-        f"SET r.id = item.eid, r.confidence = item.conf, r.properties = item.props, "
+        f"SET r.id = {rid}, r.confidence = item.conf, r.properties = item.props, "
         f"r.gvHash = item.gvHash"
     )
 
@@ -340,12 +345,13 @@ def _delete_nodes_cypher(label: str) -> str:
 
 def _delete_edges_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
     # Anchored + typed: both endpoints seek their per-label URN index and
-    # the relationship match is bounded by the (a)->(b) adjacency.
+    # the relationship match is bounded by the (a)->(b) adjacency. ``item.pid`` is the id a
+    # customer's graph knows an edge re-keyed ``edge:<id>`` by (``_edge_merge_cypher``).
     return (
         f"UNWIND $batch AS item "
         f"MATCH (a:{src_label} {{urn: item.src}})"
-        f"-[r:{rel_type} {{id: item.eid}}]->"
-        f"(b:{tgt_label} {{urn: item.tgt}}) DELETE r"
+        f"-[r:{rel_type}]->"
+        f"(b:{tgt_label} {{urn: item.tgt}}) WHERE r.id IN [item.eid, item.pid] DELETE r"
     )
 
 
@@ -739,7 +745,8 @@ class FalkorProjector:
                     refused = str(exc)               # held back below, like an unfaithful seed
             else:
                 await self._relabel_in_place(client, retypes)
-                await self._apply(client, *changes, level_map=level_map, provider_id=provider_id)
+                await self._apply(client, *changes, level_map=level_map, provider_id=provider_id,
+                                  owned=owned)
             window_rollups_applied = False
             if rollup_pairs and rollup_pairs != "stale":
                 window_rollups_applied = True
@@ -2057,7 +2064,8 @@ class FalkorProjector:
                         for k in edge_keys]
         await self._apply(client, node_upserts, edge_upserts,
                           [(u, l) for (l, u) in diff.node_deletes], [],
-                          progress=progress, level_map=level_map, provider_id=provider_id)
+                          progress=progress, level_map=level_map, provider_id=provider_id,
+                          owned=owned)
         await self._delete_edges_by_key(client, diff.edge_deletes, progress)
 
         if plan is not None and plan.pairs:
@@ -2354,7 +2362,8 @@ class FalkorProjector:
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
                      progress=None, level_map: Optional[Dict[str, int]] = None,
-                     provider_id: Optional[str] = None, known_empty: bool = False) -> None:
+                     provider_id: Optional[str] = None, known_empty: bool = False,
+                     owned: bool = True) -> None:
         """Apply one pass: nodes in (grouped by label), edges in (grouped by
         type + endpoint labels — the per-label URN indexes drive every node
         match), edges out, nodes out.
@@ -2370,7 +2379,8 @@ class FalkorProjector:
         An upsert's payload may be a :class:`_Pending`; it is read with the batch that writes it.
         ``provider_id`` is the instance ``client`` writes to (None: the default one).
         ``known_empty``: no node being written exists yet (a package seed's own fresh key), so no
-        node can carry a property its payload lost — the read for them is skipped."""
+        node can carry a property its payload lost — the read for them is skipped. ``owned`` is the
+        key's ``owns_falkor_graph``: a customer's graph keeps its relationships' ids."""
         await self._ensure_urn_indexes(client, provider_id, [
             *(p.get("entityType") or "Entity" for _e, _u, p in node_upserts),
             *(lbl for *_rest, slb, tlb in edge_upserts for lbl in (slb, tlb)),
@@ -2437,7 +2447,8 @@ class FalkorProjector:
                     item = _edge_item(eid, su, tu, p)
                     item["gvHash"] = _edge_fingerprint(rel, content_hash(p))
                     chunk.append(item)
-                await _q(client, _edge_merge_cypher(rel, sl, tl), params={"batch": chunk})
+                await _q(client, _edge_merge_cypher(rel, sl, tl, keep_id=not owned),
+                         params={"batch": chunk})
                 if progress:
                     await progress(len(chunk))
 
@@ -2546,7 +2557,8 @@ class FalkorProjector:
                 key = (spelled_type(e.get("rel")), spelled_label(e.get("slb")),
                        spelled_label(e.get("tlb")))
                 del_by.setdefault(key, []).append(
-                    {"eid": e["eid"], "src": e["src"], "tgt": e["tgt"]}
+                    {"eid": e["eid"], "pid": e["eid"].removeprefix("edge:"),
+                     "src": e["src"], "tgt": e["tgt"]}
                 )
             else:
                 fallback.append(e)

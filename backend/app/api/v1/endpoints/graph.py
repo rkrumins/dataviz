@@ -4093,6 +4093,26 @@ def _replay_minters(scope: str, key: str, mint_urn):
         lambda entity_type, ref: mint_urn(entity_type, slug=slug(ref)))
 
 
+async def _aim_edge_ops(svc, graph_id: str, branch_id: str, ops: List[dict]) -> List[dict]:
+    """Each edge update or delete aimed at the edge its id names (``resolve_edges``): an edge
+    copied in whose id was also a node's is ``edge:<id>`` in history, while the graph the canvas
+    reads still calls it ``<id>``. An id that names only a node is refused (422 ``invalid_patch``)
+    rather than the node be deleted as if it were the edge."""
+    asked = [o["entity_id"] for o in ops
+             if o.get("entity_kind") == "edge" and o.get("op") in ("update", "delete")]
+    if not asked:
+        return ops
+    named = await svc.resolve_edges(graph_id=graph_id, edge_ids=asked, branch_id=branch_id)
+    nodes = sorted({i for i in asked if i in named and named[i] is None})
+    if nodes:
+        raise HTTPException(status_code=422, detail={
+            "type": "invalid_patch",
+            "message": f"Not a connection: {', '.join(nodes[:5])} — an item has that id."})
+    return [{**o, "entity_id": named[o["entity_id"]][0]}
+            if o.get("entity_kind") == "edge" and o.get("op") in ("update", "delete")
+            and named.get(o["entity_id"]) else o for o in ops]
+
+
 def _resolve_change_ops(request_ops, mint_id, mint_urn, *, by_ref: bool = False):
     """Translate a batch of canvas edit ops into ONE ``apply_ops`` op list. Two passes so creates AND
     the edges/updates/layer-moves that reference those fresh nodes (by a temp ``ref``) commit together
@@ -4223,6 +4243,7 @@ async def apply_graph_changes(
 
     if not ops:
         return {"commitId": None, "assigned": assigned}
+    ops = await _aim_edge_ops(svc, graph_id, branchId, ops)
 
     from backend.app.services.versioning.entity_audit import ENTITY_VIEW_CAP, entity_views
     try:

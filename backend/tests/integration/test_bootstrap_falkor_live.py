@@ -16,6 +16,8 @@ FalkorDB can answer is pinned here:
 * L5 — a graph that keys its nodes by another property (``id``) gets ``urn`` stamped from it
   before the copy, so the copy holds every node and a publish lands on the node that is there; a
   node with no identifier at all stops the enable before anything is copied.
+* L6 — an edge whose id is also a node's urn, re-keyed ``edge:<id>`` in history, keeps the graph's
+  own id through an update, and a delete reaches it: every publish goes out fresh.
 * L4 — a graph that spells its types its own way (``:table``, ``:flows_to``) against an ontology
   that declares ``Table`` and ``FLOWS_TO`` keeps its spelling: history holds the declared one, and
   every publish after the enable lands on the graph's own labels and goes out fresh.
@@ -393,6 +395,43 @@ async def test_a_node_with_no_identifier_stops_the_enable_before_the_copy(graph,
     assert out["status"] == "failed", out
     assert (await bootstrap_status(data_source_id=ds))["identityStamped"] == {
         "property": "id", "stamped": 4}
+
+
+# ── L6: an edge whose id is also a node's ─────────────────────────────────────
+
+async def test_an_edge_whose_id_was_a_node_keeps_it_and_a_delete_reaches_it(graph):
+    """Nodes and edges share one id space, so the copy re-keys an edge whose id is also a node's
+    urn to ``edge:<id>``, while the graph still calls it ``<id>``. An update leaves the graph's id
+    on it; a delete removes it and only it."""
+    name, client = graph
+    for urn in ("X", "Y", "urn:a", "urn:b"):
+        await client.query("CREATE (:Table {urn: $u})", {"u": urn})
+    await client.query("MATCH (a:Table {urn: 'urn:a'}), (b:Table {urn: 'urn:b'}) "
+                       "CREATE (a)-[:FLOWS {id: 'X'}]->(b), (b)-[:OWNS {id: 'Y'}]->(a)")
+    ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+    assert (await bootstrap_status(data_source_id=ds))["rekeyedEdges"] == 2
+
+    svc, projector = GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+    for message, op in (
+            ("weigh X", {"op": "update", "entity_kind": "edge", "entity_id": "edge:X",
+                         "payload": {"properties": {"w": 2}}}),
+            ("drop Y", {"op": "delete", "entity_kind": "edge", "entity_id": "edge:Y",
+                        "payload": None})):
+        await svc.apply_ops(graph_id=gid, actor="bob", message=message, ops=[op])
+        res = await projector.project_graph(gid)
+        assert res.get("verify_error") is None and await _fresh(gid), (message, res)
+
+    rels = await _rows(client, "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' "
+                               "RETURN type(r), r.id, r.properties")
+    assert [r[:2] for r in rels] == [["FLOWS", "X"]], rels
+    assert json.loads(rels[0][2]) == {"w": 2}
+    assert await _rows(client, "MATCH (n:Table) RETURN n.urn ORDER BY n.urn") == [
+        ["X"], ["Y"], ["urn:a"], ["urn:b"]], "only the edge was deleted"
+    # The id the graph uses names the edge, never the node that shares it.
+    named = await svc.resolve_edges(graph_id=gid, edge_ids=["X", "Y", "Z"])
+    assert (named["X"][0], named["Y"]) == ("edge:X", None) and "Z" not in named, named
 
 
 # ── L4: a graph that spells its types its own way keeps that spelling ────────

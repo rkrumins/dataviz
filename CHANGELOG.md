@@ -29,6 +29,13 @@ limitations** — a changelog that only lists good news is not worth reading.
   stamps stay on the graph after **Give up**, and the enable screen now says so instead of "not
   touched". An item with no identifier at all now stops the enable before anything is copied, with
   the count; before, it was left out and the copy went ahead.
+- **An edge whose id is also an item's is changed and deleted as itself.** Items and connections
+  share one id space, so enabling version control gives such a connection the id `edge:<id>` in
+  history, while the graph keeps `<id>`. Deleting it left it in FalkorDB, and the projection then
+  stayed behind for good ("extra entities"). Changing it overwrote the graph's own id. And deleting
+  connection `<id>` from the canvas deleted the *item* `<id>` instead. Now the graph's own id is
+  kept, the delete finds it by either id, and an update or delete of `<id>` acts on the connection
+  it names. An id that names only an item is refused (422 `invalid_patch`).
 
 ### Upgrading
 

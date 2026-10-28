@@ -190,13 +190,17 @@ class VersionedWriteProvider:
         # `properties` is a PATCH (a removal is PROP_DELETE) that versioning applies onto the
         # stored edge; the answer is the edge as committed. An edge main does not hold is not
         # found (ContextEngine says so), as on VersionedBranchProvider.
+        # The id names the edge it resolves to — never a node that shares it (resolve_edges).
         await _require_versioning_flag()
-        if await self._svc.entity_value(graph_id=await self._graph_id(), entity_id=edge_id) is None:
+        found = (await self._svc.resolve_edges(graph_id=await self._graph_id(),
+                                               edge_ids=[edge_id])).get(edge_id)
+        if found is None:
             return None
-        res = await self._record([{"op": "update", "entity_kind": "edge", "entity_id": edge_id,
+        eid = found[0]
+        res = await self._record([{"op": "update", "entity_kind": "edge", "entity_id": eid,
                                    "payload": {"properties": dict(properties or {})}}],
-                                 f"update edge {edge_id}")
-        _, payload = res.written[edge_id]
+                                 f"update edge {eid}")
+        _, payload = res.written[eid]
         return GraphEdge(
             id=edge_id,
             sourceUrn=payload.get("sourceEntityId") or payload.get("source_entity_id") or "",
@@ -207,10 +211,12 @@ class VersionedWriteProvider:
 
     async def delete_edge(self, edge_id: str) -> bool:
         await _require_versioning_flag()
-        if await self._svc.entity_value(graph_id=await self._graph_id(), entity_id=edge_id) is None:
+        found = (await self._svc.resolve_edges(graph_id=await self._graph_id(),
+                                               edge_ids=[edge_id])).get(edge_id)
+        if found is None:
             return False
         await self._record([{"op": "delete", "entity_kind": "edge",
-                             "entity_id": edge_id, "payload": None}], f"delete edge {edge_id}")
+                             "entity_id": found[0], "payload": None}], f"delete edge {found[0]}")
         return True
 
     async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:

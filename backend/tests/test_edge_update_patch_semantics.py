@@ -108,6 +108,9 @@ class _BranchSvc:
     async def entity_value(self, *, graph_id, entity_id, branch_id=None):
         return self.cur
 
+    async def resolve_edges(self, *, graph_id, edge_ids, branch_id=None):
+        return {i: (i, self.cur) for i in edge_ids} if self.cur is not None else {}
+
     async def apply_ops(self, **kw):
         self.applied.extend(kw["ops"])
         return "c1"
@@ -123,6 +126,23 @@ async def test_branch_provider_commits_the_patch_and_returns_the_patched_edge():
                             "payload": {"properties": {"b": PROP_DELETE, "c": 3}}}]
     assert edge.properties == {"a": 1, "c": 3}              # the marker is never echoed
     assert (edge.source_urn, edge.target_urn, edge.edge_type) == ("a", "b", "FLOWS_TO")
+
+
+@pytest.mark.asyncio
+async def test_branch_provider_acts_on_the_edge_an_id_resolves_to():
+    """A draft deleting ``X``, an edge copied in as ``edge:X`` because a node is ``X``, deletes
+    that edge — the node is never touched."""
+    svc = _BranchSvc({"sourceEntityId": "a", "targetEntityId": "b", "edgeType": "FLOWS_TO"})
+
+    async def resolve_edges(*, graph_id, edge_ids, branch_id=None):
+        assert (edge_ids, branch_id) == (["X"], "br")
+        return {"X": ("edge:X", svc.cur)}
+
+    svc.resolve_edges = resolve_edges
+    provider = VersionedBranchProvider(svc, graph_id="g", branch_id="br")
+    assert await provider.delete_edge("X") is True
+    assert svc.applied == [{"op": "delete", "entity_kind": "edge", "entity_id": "edge:X",
+                            "payload": None}]
 
 
 @pytest.mark.asyncio

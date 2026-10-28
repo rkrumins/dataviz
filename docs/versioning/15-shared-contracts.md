@@ -167,7 +167,7 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 | 422 | `projection_mode_unsupported` | `{type, message}` | an admin projection move of a data source with a dedicated rollup graph |
 | 422 | `provider_unsupported`, `provider_unreachable` | `{type, message}` | a provider that is missing, inactive, not FalkorDB, or offline, for a new versioned graph, a blank model or a projection move |
 | 422 | `ontology_violation` | `{type, violations}` | the ontology gate |
-| 422 | `invalid_patch` | `{type, message}` | an `unsetProperties` that contradicts its op |
+| 422 | `invalid_patch` | `{type, message}` | an `unsetProperties` that contradicts its op; on `/graph/changes`, an edge update or delete whose id names only an item |
 | 422 | `graph_too_large_to_sync` | `{type, entities, limit, estimatedBytes, message}` | a sync or re-sync of a `main` above `GRAPHVER_RESYNC_MAX_ENTITIES` (`main.py` handler) |
 | 422 | `ontology_required` | `{type, message}` | a write to an ontology-governed graph whose data source has no assigned ontology |
 | 422 | `invalid_cursor` | `{type, message}` | an entity-history `before` cursor the server did not issue |

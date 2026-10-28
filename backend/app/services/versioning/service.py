@@ -7875,6 +7875,27 @@ class GraphVersioningService:
             bid = branch_id or await self._main_branch_id(s, graph_id)
             return (await self._current_values(s, graph_id, bid, [entity_id])).get(entity_id)
 
+    async def resolve_edges(
+        self, *, graph_id: str, edge_ids: Collection[str], branch_id: Optional[str] = None,
+    ) -> Dict[str, Optional[Tuple[str, dict]]]:
+        """The edge each id names on a branch (default ``main``): ``{id: (entity id, payload)}``;
+        None for an id that names only a node; an id that names nothing is left out. Nodes and
+        edges share one id space, so an edge whose id was also a node's was re-keyed ``edge:<id>``
+        when its graph was copied in (``bootstrap_worker._rekey``), while the graph still calls it
+        ``<id>``: that edge answers for ``<id>``. A node never does."""
+        ids = list(dict.fromkeys(edge_ids))
+        async with self._session() as s:
+            bid = branch_id or await self._main_branch_id(s, graph_id)
+            vals = await self._current_values(s, graph_id, bid, ids + [f"edge:{i}" for i in ids])
+        out: Dict[str, Optional[Tuple[str, dict]]] = {}
+        for i in ids:
+            eid = next((e for e in (i, f"edge:{i}") if _is_edge_payload(vals.get(e))), None)
+            if eid is not None:
+                out[i] = (eid, vals[eid])
+            elif vals.get(i) is not None:
+                out[i] = None
+        return out
+
     async def _entity_value_at(self, s, graph_id, branch_id, entity_id, seq) -> Optional[dict]:
         """One entity's value at ``seq`` (fork-aware): this graph, else the parent
         at the fork point (recursively)."""

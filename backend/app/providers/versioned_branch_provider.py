@@ -651,13 +651,15 @@ class VersionedBranchProvider:
         return True
 
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
-        cur = await self._svc.entity_value(
-            graph_id=self._gid, entity_id=edge_id, branch_id=self._branch)
-        if cur is None:
+        # The id names the edge it resolves to — never a node that shares it (resolve_edges).
+        found = (await self._svc.resolve_edges(
+            graph_id=self._gid, edge_ids=[edge_id], branch_id=self._branch)).get(edge_id)
+        if found is None:
             return None
+        eid, cur = found
         patch = {"properties": dict(properties or {})}   # a removal is PROP_DELETE
-        await self._commit([{"op": "update", "entity_kind": "edge", "entity_id": edge_id,
-                             "payload": patch}], f"update edge {edge_id}")
+        await self._commit([{"op": "update", "entity_kind": "edge", "entity_id": eid,
+                             "payload": patch}], f"update edge {eid}")
         payload = apply_patch(cur, patch)
         return GraphEdge(
             id=edge_id,
@@ -668,12 +670,12 @@ class VersionedBranchProvider:
             properties=payload.get("properties") or {})
 
     async def delete_edge(self, edge_id: str) -> bool:
-        cur = await self._svc.entity_value(
-            graph_id=self._gid, entity_id=edge_id, branch_id=self._branch)
-        if cur is None:
+        found = (await self._svc.resolve_edges(
+            graph_id=self._gid, edge_ids=[edge_id], branch_id=self._branch)).get(edge_id)
+        if found is None:
             return False
-        await self._commit([{"op": "delete", "entity_kind": "edge", "entity_id": edge_id,
-                             "payload": None}], f"delete edge {edge_id}")
+        await self._commit([{"op": "delete", "entity_kind": "edge", "entity_id": found[0],
+                             "payload": None}], f"delete edge {found[0]}")
         return True
 
     async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:

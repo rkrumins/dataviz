@@ -152,7 +152,7 @@ Other refusals you will meet on these routers:
 
 | Answer | `detail.type` | When |
 |---|---|---|
-| **422** | `invalid_patch` | An `unsetProperties` that contradicts its op or payload |
+| **422** | `invalid_patch` | An `unsetProperties` that contradicts its op or payload; on `/graph/changes`, an edge update or delete whose id names an item, not a connection |
 | **422** | `invalid_cursor` | A history page's `before` cursor isn't one the server issued |
 | **422** | `ontology_required` | A blank (ontology-governed) graph whose data source has no ontology assigned |
 | **503** | `ontology_unavailable` | A blank graph's ontology can't be resolved right now; writes wait for it |
@@ -496,7 +496,9 @@ safe: a save by the same caller on the same draft with a key that already commit
 that first commit and the entities' current values, even if the draft has closed or the graph was
 frozen since; a reused key returns the first result whatever the body. Its refusals, in order:
 **404** for a data source without a versioned graph here, or a draft that is unknown, another
-graph's or one you can't read; **422 `invalid_patch`**; **409 `integrity`** while version control
+graph's or one you can't read; **422 `invalid_patch`** (also for an edge update or delete whose id
+names only an item: an edge copied in as `edge:<id>`, because an item has `<id>`, is still `<id>`
+in the graph, and that id finds it); **409 `integrity`** while version control
 is still being enabled; **409 `main_write_forbidden`** for `main`; **503 `lock_busy`**;
 **409 `graph_not_writable`**; **409 `branch_closed`**; **403 `not_draft_owner`** or
 **`not_owner_or_member`** (**503 `groups_unavailable`** when a group decides). It:

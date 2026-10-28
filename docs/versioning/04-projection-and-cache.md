@@ -71,6 +71,13 @@ through the projector automatically.
   `PROJECTION_FALKOR_WRITE_TIMEOUT_S` (default 60, clamped under the fleet's `TIMEOUT_MAX`) /
   `PROJECTION_FALKOR_READ_TIMEOUT_S` (default 30), plus a client-side hang net. Without an explicit
   budget the FalkorDB fleet's `TIMEOUT_DEFAULT 30000` killed un-budgeted seed batches mid-load.
+- **A graph enabled in place keeps its relationships' ids.** Nodes and edges share one id space, so
+  the enable re-keys an edge whose id is also a node's to `edge:<id>` in history; the graph still
+  calls it `<id>`. On a key the platform doesn't own, the edge merge sets `r.id =
+  coalesce(r.id, item.eid)`, and the typed delete matches `r.id IN [eid, pid]` (`pid` without one
+  `edge:` prefix), so a change or delete reaches it. `GraphVersioningService.resolve_edges` turns
+  the id the canvas holds into the edge it names (never a node that shares it) for both write
+  providers' `update_edge` / `delete_edge` and for `/graph/changes`.
 - **A graph enabled in place keeps its own spelling of its types.** History stores each type as the
   ontology declares it (`Table`, `FLOWS_TO`); the graph may say `table` and `flows_to`. Enabling
   version control records the graph's spelling of every type it spells differently
