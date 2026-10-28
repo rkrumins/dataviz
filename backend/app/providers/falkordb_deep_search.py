@@ -74,6 +74,7 @@ from backend.app.providers.falkordb_typed_ops import compile_comparison, compile
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.app.services.deep_search.edge_types import spell_edge_types
 from backend.app.services.native_query.parse_cost import grouped, negated, operand
+from backend.common.adapters.circuit import ProviderBusy, ProviderTimeout, ProviderUnavailable
 from backend.common.derived_artifacts import is_derived_edge_type, is_derived_label
 from backend.common.edge_properties import (
     EDGE_NATIVE_KEYS,
@@ -2554,6 +2555,12 @@ async def _searchable_labels(provider, *, timeout_s: float) -> List[str]:
     one is excluded before it is added to ``DERIVED_LABELS`` — unless the
     live ontology declares it, which no platform label ever is (a source
     type whose id sanitised to a leading "_" stays searchable).
+
+    A lookup that fails is never an empty answer: "no labels" made a busy
+    graph's search complete with 0 matches — cached — and its display rules
+    match nothing. It raises ``ProviderBusy`` (a 429 the client retries)
+    unless the provider already said what is wrong; only a graph that does
+    not exist yet has no labels.
     """
     try:
         lbl_result = await provider._ro_query(
@@ -2562,15 +2569,27 @@ async def _searchable_labels(provider, *, timeout_s: float) -> List[str]:
         )
         labels = [row[0] for row in (lbl_result.result_set or [])
                   if row and row[0]]
+    except ProviderUnavailable as exc:
+        if not isinstance(exc, ProviderTimeout):
+            raise
+        raise _labels_unread() from exc
     except Exception as exc:
+        if "empty key" in str(exc).lower():
+            return []
         logger.warning("search: CALL db.labels() failed: %s", exc)
-        return []
+        raise _labels_unread() from exc
     declared = set(getattr(provider, "_entity_type_levels", None) or {})
     return [
         lbl for lbl in labels
         if not is_derived_label(lbl)
         and (not str(lbl).startswith("_") or lbl in declared)
     ]
+
+
+def _labels_unread() -> ProviderBusy:
+    return ProviderBusy(provider_name="search",
+                        reason="the graph is busy and its entity types could not be read",
+                        retry_after_seconds=2)
 
 
 async def suggest_property_values(
@@ -2600,7 +2619,13 @@ async def suggest_property_values(
     exactly — only the list is bounded, never a search.
     """
     t0 = time.monotonic()
-    labels = await _searchable_labels(provider, timeout_s=min(budget_s, 1.0))
+    try:
+        labels = await _searchable_labels(provider, timeout_s=min(budget_s, 1.0))
+        read = True
+    except ProviderUnavailable as exc:
+        # Suggestions, not answers: none this time, and the list says so.
+        logger.info("search.values stopped before reading the labels: %s", exc)
+        labels, read = [], False
     if entity_types:
         wanted = {str(t).lower() for t in entity_types}
         # Types match labels case-insensitively, as the compiler's
@@ -2613,7 +2638,7 @@ async def suggest_property_values(
         params["q"] = fold_case(q.strip())
         narrow = f" AND toLower({text_of('_v')}) CONTAINS $q"
     counts: Dict[Tuple[str, Any], int] = {}
-    complete, truncated = True, False
+    complete, truncated = read, False
     for label in labels:
         remaining = budget_s - (time.monotonic() - t0)
         if remaining < 0.2:

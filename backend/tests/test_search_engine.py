@@ -429,10 +429,59 @@ class TestStatements:
         # After the scope clamp: only in-scope matches are tallied.
         assert cypher.index("ID(_r0) IN $_roots0") < cypher.index("(_c)")
         assert cypher.endswith(
-            "WITH n MATCH (_c)-[:CONTAINS*1..12]->(n) "
+            "WITH n MATCH (_c)-[:CONTAINS*1..12]->(n) WHERE ID(_c) > $_tallyafter "
             "WITH _c, labels(n)[0] AS _et, count(DISTINCT n) AS _k "
-            "RETURN _c.urn, _c.displayName, labels(_c)[0], _et, _k")
-        assert params == {"p0": 1, "_lo": 10, "_hi": 20, "_roots0": [3]}
+            "WITH _c, collect([_et, _k]) AS _per ORDER BY ID(_c) LIMIT $_tallypage "
+            "RETURN ID(_c), _c.urn, _c.displayName, labels(_c)[0], _per")
+        assert params == {"p0": 1, "_lo": 10, "_hi": 20, "_roots0": [3],
+                          "_tallyafter": -1, "_tallypage": 10_000}
+
+    async def test_a_tally_past_one_reply_is_read_a_page_at_a_time(self, monkeypatch):
+        """FalkorDB cuts a reply at 10,000 rows on its stock image: a unit
+        whose matches sit in more containers lost the rest of its badges."""
+        monkeypatch.setattr(engine_mod, "REPLY_ROWS_MAX", 2)
+        ancestors = [[i, f"urn:c{i}", f"c{i}", "Container", [["Dataset", i]]]
+                     for i in range(1, 6)]
+        asked = []
+
+        async def run(cypher, params, timeout_s):
+            asked.append(params["_tallyafter"])
+            page = [a for a in ancestors if a[0] > params["_tallyafter"]][:2]
+            return SimpleNamespace(result_set=page)
+
+        tallied = await engine_mod._tally(Unit("range", "A", 10, 20), self._ctx(), [], run, 1.0)
+        assert asked == [-1, 2, 4]
+        assert tallied == [[f"urn:c{i}", f"c{i}", "Container", "Dataset", i]
+                           for i in range(1, 6)]
+
+    async def test_a_raw_probe_past_one_reply_is_read_a_page_at_a_time(self, monkeypatch):
+        from backend.app.providers.falkordb_search.raw_properties import RawLeaf
+        monkeypatch.setattr(engine_mod, "REPLY_ROWS_MAX", 2)
+        leaf = RawLeaf(key="owner", key_match="exact", cmp=None, true_ids="_rt0",
+                       raw_ids="_rr0")
+        ctx = dataclasses.replace(self._ctx(), raw_leaves=(leaf,), raw_labels=frozenset({"A"}))
+        nodes = [[i, '{"owner": "x"}'] for i in range(1, 6)]
+        asked = []
+
+        async def run(cypher, params, timeout_s):
+            asked.append(params["_rawafter"])
+            return SimpleNamespace(result_set=[n for n in nodes if n[0] > params["_rawafter"]][:2])
+
+        out = await engine_mod.unit_context(Unit("range", "A", 10, 20), ctx, run, 1.0)
+        assert asked == [-1, 2, 4]
+        assert out.params["_rt0"] == [1, 2, 3, 4, 5]
+
+    async def test_urns_are_looked_up_half_a_reply_at_a_time(self, monkeypatch):
+        monkeypatch.setattr(plan_mod, "REPLY_ROWS_MAX", 4)
+        sent = []
+
+        async def run(cypher, params):
+            sent.append(list(params["_urns"]))
+            return SimpleNamespace(result_set=[[int(u[1:])] for u in params["_urns"]])
+
+        ids = await plan_mod._ids_of(run, ["A"], [f"u{i}" for i in range(5)])
+        assert sent == [["u0", "u1"], ["u2", "u3"], ["u4"]]
+        assert ids == [0, 1, 2, 3, 4]
 
     def test_a_later_page_filters_before_it_orders(self):
         cypher, params = after_statement(Unit("visible", "A"), self._ctx(visible=["u"]),

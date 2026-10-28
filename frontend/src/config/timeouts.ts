@@ -158,6 +158,11 @@ export const TIMEOUTS = {
   // headroom over the tier so a search is never aborted before the
   // backend's own partial response can arrive.
   SEARCH_ADVANCED_MS:   readMs('VITE_TIMEOUT_SEARCH_ADVANCED_MS',  150_000, _LONG),
+  // /search/membership: which entities on the canvas the display rules tag.
+  // The server may spend its whole 120s graph tier on it; a client that gave
+  // up at the default left the canvas without its chips — and asked again,
+  // doubling the work the server was still doing.
+  SEARCH_MEMBERSHIP_MS: readMs('VITE_TIMEOUT_SEARCH_MEMBERSHIP_MS', 150_000, _LONG),
   PROVIDER_HEALTH_MS:   readMs('VITE_TIMEOUT_PROVIDER_HEALTH_MS',   30_000, _MEDIUM),
   // Per-call deadline for admin/dashboard list fan-outs wrapped in
   // Promise.allSettled. Generous enough for a healthy backend, tight

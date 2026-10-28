@@ -48,6 +48,7 @@ from backend.app.providers.falkordb_deep_search import _edge_properties, _safe_p
 from backend.app.providers.falkordb_search.edges import EdgeContext, _plan, edge_context, edge_match
 from backend.app.providers.falkordb_search.keys import SortKey, SortSpec
 from backend.app.providers.falkordb_search.plan import (
+    REPLY_ROWS_MAX,
     Context,
     Unit,
     _rel,
@@ -73,9 +74,10 @@ from backend.common.models.search import SearchQuery, export_columns
 #: Where exports are kept in the object store: one folder per day an export
 #: began.
 _ROOT = "search-exports"
-#: Rows a walk unit reads per statement (a walk's subtree can be far larger
-#: than a chunk); a range unit is one chunk already.
-_WALK_PAGE = 50_000
+#: Rows a unit reads per statement, in node ID order: never more than a
+#: reply holds (FalkorDB cuts it there silently). A walk's subtree can be far
+#: larger than a page, and so can a range whose nodes outnumber its guess.
+_PAGE = REPLY_ROWS_MAX
 #: Rows encoded and written at a time.
 _ENCODE_BATCH = 5_000
 #: Edges a Connections export's unit reads per statement: a reply holds no
@@ -347,26 +349,37 @@ def _edge_record(row: Sequence[Any], columns: Sequence[str]) -> Dict[str, Any]:
     return record
 
 
+def _page_sized(units: Sequence[Unit]) -> List[Unit]:
+    """Each range cut until it likely holds no more nodes than a page: read
+    in one statement, rather than paged with every page reading the range
+    again. Paging still catches a range whose nodes outnumber its guess."""
+    out: List[Unit] = []
+    pending = list(units)
+    while pending:
+        unit = pending.pop(0)
+        halves = unit.split() if unit.kind == "range" and unit.size > _PAGE else None
+        if halves:
+            pending[0:0] = halves
+        else:
+            out.append(unit)
+    return out
+
+
 async def _unit_rows(unit: Unit, ctx: Context, clamps, columns: Sequence[str], run,
                      timeout_s: float) -> AsyncIterator[List[Any]]:
-    """Every match of one unit: ``[id, propertiesRaw, *columns]``. A walk is
-    read a page at a time, in ID order."""
+    """Every match of one unit: ``[id, propertiesRaw, *columns]``, read a
+    page at a time, in ID order."""
     head, params = match_statement(unit, ctx, clamps)
     project = _projection(columns)
-    if unit.kind != "walk":
-        res = await run(f"{head} RETURN ID(n), n.propertiesRaw, {project}", params, timeout_s)
-        for row in res.result_set or []:
-            yield list(row)
-        return
     after = -1
     while True:
         res = await run(f"{head} WITH n WHERE ID(n) > $_after WITH n ORDER BY ID(n) "
                         f"LIMIT $_page RETURN ID(n), n.propertiesRaw, {project}",
-                        {**params, "_after": after, "_page": _WALK_PAGE}, timeout_s)
+                        {**params, "_after": after, "_page": _PAGE}, timeout_s)
         rows = res.result_set or []
         for row in rows:
             yield list(row)
-        if len(rows) < _WALK_PAGE:
+        if len(rows) < _PAGE:
             return
         after = rows[-1][0]
 
@@ -450,6 +463,7 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
                 width=settings.chunk_width, walk_max=settings.walk_max,
                 timeout_s=max(0.5, deadline + _GRACE_S - time.monotonic()),
             )
+            plan.units = _page_sized(plan.units)
         session = Session.start(sid, query_id, context.data_version, None, 0, plan,
                                 scope_hash=context.scope_hash)
         created = True

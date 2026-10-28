@@ -94,8 +94,13 @@ describe('interpretQuestion — relationships', () => {
             'type:dataset AND feeds*..3(type:dashboard) AND tag:PII'],
         ['datasets that feed dashboards or are tagged PII',
             'type:dataset AND (feeds*..3(type:dashboard) OR tag:PII)'],
-        ['datasets that feed "CFO Revenue"', 'type:dataset AND feeds*..3(@"**/CFO Revenue")'],
-        ['datasets that feed "CFO Revenue" within 6 hops', 'type:dataset AND feeds*..6(@"**/CFO Revenue")'],
+        // A named relative takes in what is inside it, as right-click does.
+        ['datasets that feed "CFO Revenue"',
+            'type:dataset AND feeds*..3(@"**/CFO Revenue" OR ancestor(@"**/CFO Revenue"))'],
+        ['datasets that feed "CFO Revenue" within 6 hops',
+            'type:dataset AND feeds*..6(@"**/CFO Revenue" OR ancestor(@"**/CFO Revenue"))'],
+        ['what depends on orders', 'fedBy*..3(@"**/orders" OR ancestor(@"**/orders"))'],
+        ['datasets with more than 100 columns', 'type:dataset AND count(descendant(type:schemaField)) > 100'],
         ['containers containing columns tagged PII', 'type:container AND descendant(type:schemaField AND tag:PII)'],
         ['top-level containers', 'type:container AND no parent()'],
         ['datasets whose parent is a container', 'type:dataset AND parent(type:container)'],
@@ -105,6 +110,105 @@ describe('interpretQuestion — relationships', () => {
         ['dashboards that feed nothing', 'type:dashboard AND no feeds*..3()'],
         ['what feeds the CFO dashboard', 'feeds*..3(type:dashboard AND CFO)'],
     ])('%s → %s', (q, out) => expect(dsl(q)).toBe(out))
+})
+
+
+const ORDERS = '@"**/orders" OR ancestor(@"**/orders")'
+
+describe('interpretQuestion — the subject first', () => {
+    it.each([
+        // What it feeds: downstream of it.
+        ['what does orders feed', `fedBy*..3(${ORDERS})`],
+        ['What does orders feed into?', `fedBy*..3(${ORDERS})`],
+        ['what does orders affect', `fedBy*..3(${ORDERS})`],
+        ['what does orders impact', `fedBy*..3(${ORDERS})`],
+        ['impact of orders', `fedBy*..3(${ORDERS})`],
+        ['what is the impact of changing orders', `fedBy*..3(${ORDERS})`],
+        ['what breaks if orders changes', `fedBy*..3(${ORDERS})`],
+        ['what would break if I change orders', `fedBy*..3(${ORDERS})`],
+        // What feeds it: upstream of it.
+        ['where does orders come from', `feeds*..3(${ORDERS})`],
+        ['where does orders get its data from?', `feeds*..3(${ORDERS})`],
+        ['what does orders depend on', `feeds*..3(${ORDERS})`],
+        ['what does orders use', `feeds*..3(${ORDERS})`],
+        ['what does orders read from', `feeds*..3(${ORDERS})`],
+        // How far, and which kind of answer.
+        ['what does orders feed directly', `fedBy(${ORDERS})`],
+        ['what does orders feed within 5 hops', `fedBy*..5(${ORDERS})`],
+        ['which dashboards does orders feed', `type:dashboard AND fedBy*..3(${ORDERS})`],
+        // A subject described rather than named.
+        ['what do the finance dashboards depend on', 'feeds*..3(type:dashboard AND tag:Finance)'],
+        // What it holds, what it is linked to.
+        ['what does "Sales Ops" contain', 'ancestor(@"**/Sales Ops")'],
+        ['what is orders linked to', `linkedTo[lineage]*..3(${ORDERS})`],
+    ])('%s → %s', (q, out) => expect(dsl(q)).toBe(out))
+
+    it('looks the subject up rather than searching its name, and offers "just it"', () => {
+        const r = read('what does orders feed')
+        expect(r.unrecognized).toEqual([])
+        expect(r.names).toEqual([{ text: 'orders', ref: { path: ['**', 'orders'] } }])
+        const [orders] = r.ambiguities
+        expect(orders).toMatchObject({ id: '10:orders', text: 'orders', picked: 'withInside' })
+        expect(orders.choices.map((c) => c.id)).toEqual(['withInside', 'itself'])
+        expect(dsl('what does orders feed', { choices: { '10:orders': 'itself' } })).toBe('fedBy*..3(@"**/orders")')
+    })
+
+    it('offers "just it" for a relative named after the verb too', () => {
+        const q = 'datasets that feed "CFO Revenue"'
+        const [cfo] = read(q).ambiguities
+        expect(cfo.choices.map((c) => c.id)).toEqual(['withInside', 'itself'])
+        expect(dsl(q, { choices: { [cfo.id]: 'itself' } })).toBe('type:dataset AND feeds*..3(@"**/CFO Revenue")')
+    })
+
+    it('reads a question that names what it is about after the verb as it always did', () => {
+        expect(dsl('what feeds the CFO dashboard')).toBe('feeds*..3(type:dashboard AND CFO)')
+        expect(dsl('dashboards fed by datasets')).toBe('type:dashboard AND fedBy*..3(type:dataset)')
+    })
+})
+
+
+describe('interpretQuestion — what it leaves out, and says so', () => {
+    const vocabWith = (propertyKeys: string[]) => buildAskVocabulary({
+        entityTypes: [{ id: 'dataset', name: 'Dataset', pluralName: 'Datasets' }],
+        tagValues: [], propertyKeys, valueSamples: [], layers: [],
+    })
+
+    it('uses the view\'s own owner property', () => {
+        const v = vocabWith(['dataOwner', 'rowCount'])
+        expect(stringifyPredicate(interpretQuestion('unowned datasets', v).predicate))
+            .toBe('type:dataset AND not has:dataOwner')
+        expect(stringifyPredicate(interpretQuestion('datasets owned by alice', v).predicate))
+            .toBe('type:dataset AND dataOwner = alice')
+    })
+
+    it('leaves out what needs an owner property in a view without one, and says so', () => {
+        const v = vocabWith(['rowCount'])
+        const unowned = interpretQuestion('unowned datasets', v)
+        expect(stringifyPredicate(unowned.predicate)).toBe('type:dataset')
+        expect(unowned.notes).toEqual(['This view has no owner property, so “unowned” was left out.'])
+        const owned = interpretQuestion('datasets owned by alice', v)
+        expect(stringifyPredicate(owned.predicate)).toBe('type:dataset')
+        expect(owned.notes).toEqual(['This view has no owner property, so “owned by” was left out.'])
+        expect(owned.unrecognized).toEqual([])
+    })
+
+    it('never reads "without" an unknown word as a name it doesn\'t contain', () => {
+        const r = read('datasets without a steward')
+        expect(stringifyPredicate(r.predicate)).toBe('type:dataset')
+        expect(r.notes).toEqual(['This view has no property called “steward”, so that condition was left out.'])
+        expect(r.unrecognized).toEqual([])
+    })
+
+    it('says when relationships nest deeper than a search reads', () => {
+        const r = read('datasets that feed dashboards that feed charts that feed datasets that feed charts')
+        expect(stringifyPredicate(r.predicate))
+            .toBe('type:dataset AND feeds*..3(type:dashboard AND feeds*..3(type:chart AND feeds*..3(type:dataset)))')
+        expect(r.notes).toEqual(['Relationships nest at most 3 deep, so the rest of the question was left out.'])
+    })
+
+    it('has nothing to say about a question it read whole', () => {
+        expect(read('datasets that feed dashboards').notes).toEqual([])
+    })
 })
 
 

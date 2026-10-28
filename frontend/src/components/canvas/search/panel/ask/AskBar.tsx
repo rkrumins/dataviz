@@ -196,6 +196,9 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                             Searched for by name: {interpretation.unrecognized.map((w) => `“${w}”`).join(', ')}
                         </p>
                     )}
+                    {interpretation.notes.map((note) => (
+                        <p key={note} className="text-xs text-amber-700 dark:text-amber-300">{note}</p>
+                    ))}
                 </div>
             ) : hero && (
                 <div className="flex flex-wrap items-center gap-1.5 text-xs">

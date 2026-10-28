@@ -28,11 +28,14 @@ export interface EdgeResultsTableProps {
     onFrame?: (urns: string[]) => void
     canLoadMore: boolean
     isLoadingMore: boolean
+    /** Why the last page failed: the table stops asking by itself and
+     *  offers it again. */
+    loadMoreError?: string | null
     onLoadMore?: () => void
 }
 
 
-export function EdgeResultsTable({ edges, onReveal, onOpen, onFrame, canLoadMore, isLoadingMore, onLoadMore }:
+export function EdgeResultsTable({ edges, onReveal, onOpen, onFrame, canLoadMore, isLoadingMore, loadMoreError, onLoadMore }:
     EdgeResultsTableProps) {
     const scrollRef = useRef<HTMLDivElement>(null)
     const [picked, setPicked] = useState<ReadonlySet<string>>(() => new Set())
@@ -45,8 +48,8 @@ export function EdgeResultsTable({ edges, onReveal, onOpen, onFrame, canLoadMore
 
     // More rows as the end comes into view.
     useEffect(() => {
-        if (canLoadMore && !isLoadingMore && last >= edges.length - 8) onLoadMore?.()
-    }, [last, edges.length, canLoadMore, isLoadingMore, onLoadMore])
+        if (canLoadMore && !isLoadingMore && !loadMoreError && last >= edges.length - 8) onLoadMore?.()
+    }, [last, edges.length, canLoadMore, isLoadingMore, loadMoreError, onLoadMore])
 
     // Rows that are no longer there can't stay picked.
     useEffect(() => {
@@ -134,6 +137,14 @@ export function EdgeResultsTable({ edges, onReveal, onOpen, onFrame, canLoadMore
                     })}
                 </div>
                 {isLoadingMore && <p className="px-3 py-2 text-xs text-ink-muted">Loading more…</p>}
+                {loadMoreError && !isLoadingMore && (
+                    <p role="alert" className="px-3 py-2 text-xs text-amber-700 dark:text-amber-300">
+                        Couldn’t load more. {loadMoreError}{' '}
+                        <button type="button" onClick={onLoadMore} className="font-semibold underline">
+                            Try again
+                        </button>
+                    </p>
+                )}
             </div>
         </div>
     )

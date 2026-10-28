@@ -48,6 +48,7 @@ from backend.app.providers.falkordb_deep_search import (
 from backend.app.providers.falkordb_search.keys import build_sort_spec
 from backend.app.providers.falkordb_search.keys import SortKey, SortSpec
 from backend.app.providers.falkordb_search.plan import (
+    REPLY_ROWS_MAX,
     Context,
     Unit,
     after_statement,
@@ -543,9 +544,16 @@ async def unit_context(unit: Unit, ctx: Context, run, timeout_s: float) -> Conte
         return ctx
     lists = empty_params(ctx.raw_leaves)
     if unit.label is None or unit.label in ctx.raw_labels:
-        cypher, params = raw_probe_statement(unit, ctx)
-        res = await run(cypher, params, timeout_s)
-        lists = evaluate_rows(res.result_set or [], ctx.raw_leaves)
+        rows: List[Any] = []
+        after = -1
+        while True:
+            cypher, params = raw_probe_statement(unit, ctx, after)
+            page = (await run(cypher, params, timeout_s)).result_set or []
+            rows += page
+            if len(page) < REPLY_ROWS_MAX:
+                break
+            after = page[-1][0]
+        lists = evaluate_rows(rows, ctx.raw_leaves)
     return dataclasses.replace(
         ctx, where=answered(ctx.where, ctx.raw_leaves, lists),
         tail=tuple(answered(t, ctx.raw_leaves, lists) for t in ctx.tail),
@@ -571,9 +579,12 @@ async def _run_unit(unit: Unit, session: Session, ctx: Context, run, timeout_s: 
         return 0, [list(r) for r in (res.result_set or [])], []
     count, rows, tallied = 0, [], []
     statements = page_statements(unit, ctx, session.clamps, session.k)
+    reads = [run(c, p, timeout_s) for c, p, _ in statements]
     if ctx.tally:
-        statements.append((*tally_statement(unit, ctx, session.clamps), "tally"))
-    results = await asyncio.gather(*(run(c, p, timeout_s) for c, p, _ in statements))
+        reads.append(_tally(unit, ctx, session.clamps, run, timeout_s))
+    results = await asyncio.gather(*reads)
+    if ctx.tally:
+        tallied = results.pop()
     for (_, _, yields), res in zip(statements, results):
         rs = res.result_set or []
         if yields == "both":
@@ -581,11 +592,24 @@ async def _run_unit(unit: Unit, session: Session, ctx: Context, run, timeout_s: 
                 count, rows = int(rs[0][0]), [list(r) for r in (rs[0][1] or [])]
         elif yields == "count":
             count = int(rs[0][0]) if rs else 0
-        elif yields == "tally":
-            tallied = [list(r) for r in rs]
         else:
             rows = [list(r) for r in rs]
     return count, rows, tallied
+
+
+async def _tally(unit: Unit, ctx: Context, clamps, run, timeout_s: float) -> List[List[Any]]:
+    """The unit's ``[urn, name, label, entity type, matches]`` rows, read a
+    page of ancestors at a time (``tally_statement``)."""
+    tallied: List[List[Any]] = []
+    after = -1
+    while True:
+        cypher, params = tally_statement(unit, ctx, clamps, after)
+        page = (await run(cypher, params, timeout_s)).result_set or []
+        for _, urn, name, label, per in page:
+            tallied += [[urn, name, label, et, k] for et, k in per or []]
+        if len(page) < REPLY_ROWS_MAX:
+            return tallied
+        after = page[-1][0]
 
 
 def _is_pressure(exc: BaseException) -> bool:

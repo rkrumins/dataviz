@@ -13,7 +13,7 @@ export function askExamples(types: readonly string[], tags: readonly string[],
     const tag = tags[0]
     const out: string[] = []
     if (persona === 'technical') {
-        if (a && b) out.push(`${a} fed by ${b} within 2 hops`)
+        if (a && b) out.push(`${b} fed by ${a} within 2 hops`)
         if (a) out.push(`${a} with no downstream`)
         if (a && tag) out.push(`${a} tagged ${tag} without an owner`)
     } else {

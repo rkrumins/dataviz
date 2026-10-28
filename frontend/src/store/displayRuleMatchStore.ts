@@ -45,6 +45,12 @@ interface DisplayRuleMatchState {
      *  store (avoids cross-store subscription churn). Ordered for stable
      *  chip rendering. */
     ruleMeta: ReadonlyArray<DisplayRuleTag>
+    /** Why the last ask failed — which entities the rules tag, or how many
+     *  they match — in words; null when it didn't. Shown with a Retry. */
+    membershipError: string | null
+    countsError: string | null
+    /** Bumped by ``retryChecks`` to ask both again. */
+    retryToken: number
 
     /** Fold in one membership answer: for each rule asked about, the
      *  evaluated URNs it matches now — and no longer the others. */
@@ -61,6 +67,10 @@ interface DisplayRuleMatchState {
     setRuleMeta: (rules: ReadonlyArray<DisplayRuleConfig>) => void
     /** Prune any match sets / counts whose ruleId is not in the keep-set. */
     retainRules: (keepIds: Iterable<string>) => void
+    setMembershipError: (error: string | null) => void
+    setCountsError: (error: string | null) => void
+    /** Ask again: every loaded entity, and every rule's count. */
+    retryChecks: () => void
     /** Wipe everything (view switch / unmount). */
     clear: () => void
 }
@@ -76,6 +86,9 @@ export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => (
     matchUrnsByRule: EMPTY_MATCHES,
     countsByRule: EMPTY_COUNTS,
     ruleMeta: EMPTY_META,
+    membershipError: null,
+    countsError: null,
+    retryToken: 0,
 
     applyMembership: (ruleIds, evaluated, matches) => {
         set((s) => {
@@ -120,8 +133,15 @@ export const useDisplayRuleMatchStore = create<DisplayRuleMatchState>((set) => (
         })
     },
 
+    setMembershipError: (error) => set({ membershipError: error }),
+    setCountsError: (error) => set({ countsError: error }),
+    retryChecks: () => set((s) => ({
+        membershipError: null, countsError: null, retryToken: s.retryToken + 1,
+    })),
+
     clear: () => set({
         matchUrnsByRule: EMPTY_MATCHES, countsByRule: EMPTY_COUNTS, ruleMeta: EMPTY_META,
+        membershipError: null, countsError: null,
     }),
 }))
 

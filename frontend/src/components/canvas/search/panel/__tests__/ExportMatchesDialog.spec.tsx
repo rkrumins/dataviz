@@ -96,6 +96,21 @@ beforeEach(() => {
 
 
 describe('ExportMatchesDialog', () => {
+    it("says why an export failed in the server's words, not its raw reply", async () => {
+        const user = userEvent.setup()
+        vi.spyOn(provider, 'searchExport').mockRejectedValue(new Error(
+            'API Error 500: {"detail":{"code":"SEARCH_FAILED","reason":"the search could not finish '
+            + 'on part of the graph; narrow the scope or the conditions and run it again",'
+            + '"technical":"search failed: boom"}}'))
+        renderDialog()
+
+        await user.click(screen.getByRole('button', { name: /^Export$/ }))
+
+        expect(await screen.findByText("Couldn't export — The search could not finish on part of the "
+            + 'graph; narrow the scope or the conditions and run it again.')).toBeInTheDocument()
+        expect(screen.queryByText(/API Error|SEARCH_FAILED/)).not.toBeInTheDocument()
+    })
+
     it("lists the view's properties by how many entities carry them", () => {
         renderDialog()
 

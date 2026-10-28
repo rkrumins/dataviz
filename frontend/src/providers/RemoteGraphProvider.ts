@@ -582,6 +582,7 @@ export class RemoteGraphProvider implements GraphDataProvider {
             method: 'POST',
             body: JSON.stringify(body),
             signal: opts?.signal,
+            timeoutMs: TIMEOUTS.SEARCH_MEMBERSHIP_MS,
         })
     }
 
