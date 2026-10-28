@@ -488,6 +488,33 @@ def test_stamp_identity_urns_noop_for_default_and_dedicated():
     assert _run(p.stamp_identity_urns()) == 0
 
 
+def test_stamp_identity_urns_stamps_a_dedicated_source_its_caller_writes():
+    """Version control enabled in place writes into the data source's graph itself, so its
+    stamp is not held back by a dedicated projection the summaries left the provider in."""
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "id"
+    p._projection_mode = "dedicated"
+    calls = []
+
+    async def _noop():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[10]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        calls.append(cypher)
+        r = _Result()
+        r.properties_set = 2
+        return r
+
+    p._ensure_connected = _noop
+    p._ro_query = _ro
+    p._query = _wq
+    assert _run(p.stamp_identity_urns(source_writable=True)) >= 2
+    assert any("n.`urnSource`" in c and "n.`id`" in c for c in calls), calls
+
+
 def test_stamp_display_name_from_custom_name_property():
     """A custom name_property (identity conforming) still triggers a standalone
     displayName stamp, so a non-`displayName` node name renders across the whole

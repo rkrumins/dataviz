@@ -5117,7 +5117,7 @@ class FalkorDBProvider(GraphDataProvider):
             logger.error(f"Seed failed: {e}")
 
     async def stamp_identity_urns(
-        self, *, on_batch: Optional[Any] = None,
+        self, *, on_batch: Optional[Any] = None, source_writable: bool = False,
     ) -> int:
         """Stamp per-source CONFORMANCE properties onto every node that lacks them, so the entire
         urn-keyed write / index / read / trace stack works for an onboarded graph that keys nodes
@@ -5142,7 +5142,8 @@ class FalkorDBProvider(GraphDataProvider):
         mapping is now re-stamped from the new property.
 
         Safe: in-source projection only (never mutates a possibly read-only source behind a
-        dedicated projection); a node with NO marker carried its own native ``urn`` /
+        dedicated projection), unless the caller writes to the source itself (``source_writable``:
+        version control enabled in place); a node with NO marker carried its own native ``urn`` /
         ``displayName`` and is never touched, so this can only ever overwrite values it wrote
         itself; batched by internal ID range (no property index needed); best-effort per batch.
         Idempotent — a re-run with an unchanged mapping only touches nodes added since the last
@@ -5175,7 +5176,7 @@ class FalkorDBProvider(GraphDataProvider):
         stamp_name = bool(name_prop) and name_prop != "displayName" and (stamp_urn or name_prop != "name")
         if not stamp_urn and not stamp_name:
             return 0
-        if getattr(self, "_projection_mode", None) == "dedicated":
+        if getattr(self, "_projection_mode", None) == "dedicated" and not source_writable:
             return 0  # projection is separate; don't write to the (maybe read-only) source
         await self._ensure_connected()
         try:

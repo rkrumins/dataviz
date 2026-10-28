@@ -445,7 +445,9 @@ async def stamp_identity_for_enable(data_source_id: str) -> Optional[dict]:
     lacks them, with ``urnSource`` / ``nameSource`` saying where they came from: the summaries'
     conformance step, ``FalkorDBProvider.stamp_identity_urns``. The copy keys nodes by ``urn``, so
     without this an ``id``-keyed graph was copied as empty. The stamps stay on the graph if the
-    enable is abandoned, as the summaries' do.
+    enable is abandoned, as the summaries' do. A graph whose summaries are dedicated is stamped
+    too: version control writes into it on every publish, whatever mode a summaries job left the
+    shared provider in.
 
     Returns ``{"property", "stamped"}`` (how many properties it set); None when the data source
     is gone."""
@@ -465,5 +467,5 @@ async def stamp_identity_for_enable(data_source_id: str) -> Optional[dict]:
         return {"property": identity.identity_property, "stamped": 0}
     provider.set_node_identity(identity.identity_property, identity.name_property)
     return {"property": identity.identity_property,
-            "stamped": await provider.stamp_identity_urns()}
+            "stamped": await provider.stamp_identity_urns(source_writable=True)}
 

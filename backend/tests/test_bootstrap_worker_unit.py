@@ -346,8 +346,8 @@ async def _stamp_with(db_session, monkeypatch, *, identity=None, name=None):
         def set_node_identity(self, identity_property, name_property):
             calls.append(("identity", identity_property, name_property))
 
-        async def stamp_identity_urns(self):
-            calls.append(("stamp",))
+        async def stamp_identity_urns(self, **kw):
+            calls.append(("stamp", kw))
             return 3
 
     async def get_provider(workspace_id, session, data_source_id):
@@ -368,7 +368,9 @@ async def test_an_enable_stamps_urn_from_the_identity_property_first(db_session,
 
     calls = await _stamp_with(db_session, monkeypatch, identity="id", name="title")
     assert await stamp_identity_for_enable("ds_st") == {"property": "id", "stamped": 3}
-    assert calls == [("provider", "ws_st", "ds_st"), ("identity", "id", "title"), ("stamp",)]
+    # Version control writes into the graph, whatever mode a summaries job left the provider in.
+    assert calls == [("provider", "ws_st", "ds_st"), ("identity", "id", "title"),
+                     ("stamp", {"source_writable": True})]
 
 
 async def test_an_enable_of_a_source_keyed_by_urn_stamps_nothing(db_session, monkeypatch):

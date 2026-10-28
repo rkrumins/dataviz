@@ -37,10 +37,11 @@ jobs around such a graph.
   identity property isn't `urn` (an `id`, say), enabling version control copied nothing and still
   finished green: the copy read `urn` alone, and the screen said the items "don't appear anywhere
   in this app", which wasn't true. The enable now stamps `urn` from the identity property first,
-  with `urnSource`, as the lineage summaries' conformance step does, so every item is copied. The
-  stamps stay on the graph after **Give up**, and the enable screen now says so instead of "not
-  touched". An item with no identifier at all now stops the enable before anything is copied, with
-  the count; before, it was left out and the copy went ahead.
+  with `urnSource`, as the lineage summaries' conformance step does, so every item is copied, even
+  where those summaries are dedicated and their step leaves the graph alone. The stamps stay on
+  the graph after **Give up**, and the enable screen now says so instead of "not touched". An item
+  with no identifier at all now stops the enable before anything is copied, with the count; before,
+  it was left out and the copy went ahead.
 - **An edge whose id is also an item's is changed and deleted as itself.** Items and connections
   share one id space, so enabling version control gives such a connection the id `edge:<id>` in
   history, while the graph keeps `<id>`. Deleting it left it in FalkorDB, and the projection then

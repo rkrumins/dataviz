@@ -572,10 +572,13 @@ async def test_bring_into_history_takes_in_what_the_graph_holds_and_nothing_else
         ["X"], ["f1"], ["f9"], ["urn:b"]], "the graph's own ids, and no copies"
 
 
-async def _enabled_over_http(name, client, relationships):
+async def _enabled_over_http(name, client, relationships, *, identity=(None, None),
+                             dedicated=False):
     """A data source on the env FalkorDB reading graph ``name``, with an ontology declaring
     ``Table`` and ``relationships``, enabled for version control. Returns the workspace, data
-    source and graph, and a function that posts ``POST /graph/resync`` for it as the UI does."""
+    source and graph, and a function that posts ``POST /graph/resync`` for it as the UI does.
+    ``identity``: the provider's identity and name properties. ``dedicated``: the data source's
+    lineage summaries are dedicated, and a job of theirs has left its shared provider so."""
     from httpx import ASGITransport, AsyncClient
 
     from backend.app.db.engine import PoolRole, get_session_factory
@@ -591,7 +594,8 @@ async def _enabled_over_http(name, client, relationships):
         s.add_all([WorkspaceORM(id=ws, name=ws),
                    ProviderORM(id=prov, name=prov, provider_type="falkordb",
                                host=os.getenv("FALKORDB_HOST", "localhost"),
-                               port=int(os.getenv("FALKORDB_PORT", "6379"))),
+                               port=int(os.getenv("FALKORDB_PORT", "6379")),
+                               identity_property=identity[0], name_property=identity[1]),
                    # The data source's own ontology: a deployment always resolves one (the
                    # system default is seeded at start-up, which this process never ran).
                    OntologyORM(id=ont, name=ont, is_published=True,
@@ -599,8 +603,11 @@ async def _enabled_over_http(name, client, relationships):
                                relationship_type_definitions=json.dumps(relationships))])
         await s.flush()
         s.add(WorkspaceDataSourceORM(id=ds, workspace_id=ws, provider_id=prov, graph_name=name,
-                                     ontology_id=ont))
+                                     ontology_id=ont,
+                                     projection_mode="dedicated" if dedicated else None))
         await s.commit()
+        if dedicated:
+            await (await provider_manager.get_provider(ws, s, ds)).set_projection_mode("dedicated")
     await models.create_schema_and_partitions()
     job = await create_bootstrap_job(data_source_id=ds, workspace_id=ws, actor="alice",
                                      falkor_graph_name=name, falkor_provider=prov)
@@ -728,6 +735,36 @@ async def test_bring_into_history_reads_what_the_enable_reads_and_deletes_nothin
     assert (await svc.entity_value(graph_id=gid, entity_id="urn:n5")) is not None
     res = await FalkorProjector(lambda _n, _p=None: client).project_graph(gid)
     assert res.get("verify_error") is None and await _fresh(gid), res
+
+
+async def test_a_graph_whose_summaries_are_dedicated_is_stamped_too(graph, monkeypatch):
+    """Dedicated lineage summaries live in a graph of their own, and their conformance step leaves
+    the data source's graph unstamped, as one that may be read-only. Providers are shared, so a
+    summaries job leaves the data source's provider that way. Version control enabled in place
+    writes into the graph on every publish, so the enable and Bring into history stamp it as any
+    other. Before, the enable then stopped saying its items had no id."""
+    from backend.app.services import projection_target
+
+    name, client = graph
+    for i in ("x1", "x2"):
+        await client.query("CREATE (:Table {id: $i, name: $i})", {"i": i})
+    await client.query("MATCH (a:Table {id: 'x1'}), (b:Table {id: 'x2'}) "
+                       "CREATE (a)-[:FLOWS {id: 'f1'}]->(b)")
+    _ws, ds, _gid, bring_in = await _enabled_over_http(
+        name, client, {"FLOWS": {"name": "FLOWS", "is_lineage": True}},
+        identity=("id", "name"), dedicated=True)
+    assert (await bootstrap_status(data_source_id=ds))["report"]["stored"] == {
+        "nodes": 2, "edges": 1}
+    assert await _rows(client, "MATCH (n:Table) RETURN n.id, n.urn, n.urnSource ORDER BY n.id") == [
+        ["x1", "x1", "id"], ["x2", "x2", "id"]]
+
+    async def queue(_ds_id, _key, _mode):
+        pass
+
+    monkeypatch.setattr(projection_target, "_queue_on_control_plane", queue)
+    await client.query("CREATE (:Table {id: 'x3', name: 'from the etl'})")
+    r = await bring_in()
+    assert r.status_code == 200 and r.json()["applied"] == 1, r.text
 
 
 # ── L4: a graph that spells its types its own way keeps that spelling ────────
