@@ -2624,7 +2624,7 @@ async def suggest_property_values(
         read = True
     except ProviderUnavailable as exc:
         # Suggestions, not answers: none this time, and the list says so.
-        logger.info("search.values key=%s stopped: %s", key, exc)
+        logger.info("search.values stopped before reading the labels: %s", exc)
         labels, read = [], False
     if entity_types:
         wanted = {str(t).lower() for t in entity_types}
