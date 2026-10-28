@@ -1330,7 +1330,9 @@ class FalkorProjector:
         under containers that were MOVED in the window. O(window delta × chain depth²).
 
         Returns ``{(src_urn, tgt_urn): {"dw": int, "types": set}}``, ``None`` when nothing
-        rollup-affecting changed, or the sentinel ``"stale"`` when a move exceeded the cap."""
+        rollup-affecting changed, or the sentinel ``"stale"`` when a move exceeded the cap —
+        and, for a data source whose rollups live in a dedicated key (the resolver's
+        ``"dedicated"``), whenever lineage or containment changed: none is written here."""
         try:
             sets = await self._edge_types_resolver(self._svc, graph.id)
         except Exception:                                # pragma: no cover - app-layer resolution
@@ -1398,6 +1400,10 @@ class FalkorProjector:
                 elif et in cont_types:
                     moved.add(_edge_endpoints(new)[1])
         moved.discard("")
+        if "dedicated" in sets[3:]:
+            # The aggregation job builds these rollups in a key of their own: this key gets
+            # none, and a window that changes lineage or containment hands them to the job.
+            return "stale" if lineage_creates or lineage_deletes or moved else None
         if len(lineage_creates) + len(lineage_deletes) > self._MOVE_EDGE_CAP:
             # Past the inline cap the aggregation JOB takes over — it too writes only the
             # difference. Below it the chains come from one batched climb (``prefetch``).
@@ -1947,7 +1953,9 @@ class FalkorProjector:
         base, this pass already moved them from Postgres's window (``rollups_moved_this_pass``
         — a heal after a publish window; its deltas assumed raw writes that did not land, so a
         second delta would double-count), rollup cells went with a node that had to be deleted
-        outright, or the graph is a fork (its chains span the parent's rows).
+        outright, or the graph is a fork (its chains span the parent's rows). For a data source
+        whose rollups live in a dedicated key none is read or written here: ``"stale"`` when
+        lineage or containment changed, else ``"none"``.
 
         ``owned`` is the graph's ``owns_falkor_graph``. In a key the platform did not mint, what
         the log never held is never deleted — urn-less nodes, extra copies of a relationship — and
@@ -2006,7 +2014,13 @@ class FalkorProjector:
         if sets:
             cont_types = {t.upper() for t in (sets[0] or [])}
             lineage_types = {t.upper() for t in (sets[1] or [])}
-            if lineage_types:
+            if lineage_types and "dedicated" in sets[3:]:
+                # The aggregation job builds these rollups in a key of their own: this key's are
+                # neither read nor written, and a change to lineage or containment is the job's.
+                relevant = lineage_types | cont_types
+                changed = urn_triples(edges.keys()) ^ urn_triples(actual_edges.keys())
+                rollups = "stale" if any(k[1].upper() in relevant for k in changed) else "none"
+            elif lineage_types:
                 expected_triples = urn_triples(edges.keys())
                 actual_triples = urn_triples(actual_edges.keys())
                 plan = await asyncio.to_thread(

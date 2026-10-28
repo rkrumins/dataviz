@@ -27,17 +27,20 @@ async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: 
     ancestor cross-product writes leaf/mixed cells the canonical boundary excludes,
     which the on-demand reader then double-counts. ``None`` on any failure or when
     the ontology defines no lineage types (the projector then skips rollup
-    maintenance for that window)."""
+    maintenance for that window).
+
+    A data source in dedicated mode answers ``(containment, lineage, {}, "dedicated")``:
+    the projector maintains none of its rollups, so it needs no level map; the types only
+    tell it which changes reach them, and those it hands to the aggregation job."""
     try:
         meta = await svc.get_graph(graph_id)
         if not meta or not meta.get("data_source_id"):
             return None
-        if await _projection_mode(str(meta["data_source_id"])) == "dedicated":
-            # In dedicated mode the aggregation worker writes rollups to {graph_name}_proj —
-            # a different graph than the projector's target — and the projector's full-seed
-            # wipe doesn't touch them. Incremental maintenance would write where nothing
-            # reads; leave dedicated-mode rollups entirely to the aggregation job.
-            return None
+        # In dedicated mode the aggregation worker writes rollups to {graph_name}_proj —
+        # a different graph than the projector's target — and the projector's full-seed
+        # wipe doesn't touch them. Incremental maintenance would write where nothing
+        # reads; leave dedicated-mode rollups entirely to the aggregation job.
+        dedicated = await _projection_mode(str(meta["data_source_id"])) == "dedicated"
         from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
         from backend.app.ontology.service import LocalOntologyService
         async with get_async_session() as s:
@@ -49,6 +52,8 @@ async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: 
         lin = list(getattr(resolved, "lineage_edge_types", None) or [])
         if not lin:
             return None
+        if dedicated:
+            return (cont, lin, {}, "dedicated")
         try:
             from backend.app.services.ontology_levels import derive_level_map
             levels = derive_level_map(resolved)
@@ -78,7 +83,12 @@ def make_rollup_rebuild_hook(get_aggregation_service):
     ``get_aggregation_service`` is a lazy getter (app.state in direct mode). With no service
     in this process — proxy mode, the deployed web tier — the job is queued on the control
     plane over internal-auth HTTP instead: skipping it there left the 2026-09-22 heal's
-    rollups unrebuilt, while the reconcile sweeper skipped the source trusting this hook."""
+    rollups unrebuilt, while the reconcile sweeper skipped the source trusting this hook.
+
+    A data source in dedicated mode has every publish that changes its lineage or containment
+    handed over here, since the projector maintains none of its rollups: its summaries are
+    marked stale (``source_changed``, which the job's completion clears) and the rebuild is
+    queued in dedicated mode."""
     async def _hook(graph_id: str) -> None:
         svc = GraphVersioningService()
         meta = await svc.get_graph(graph_id)
@@ -88,10 +98,9 @@ def make_rollup_rebuild_hook(get_aggregation_service):
         agg = get_aggregation_service()
         mode = await _projection_mode(str(ds_id))
         if mode == "dedicated":
-            # The projector never touches a dedicated-mode {graph_name}_proj graph, so
-            # there is nothing to heal — and a wrong-mode rebuild would write rollups
-            # into the source graph, where nothing reads them for this data source.
-            return
+            # Its {graph_name}_proj is behind the graph until the rebuild lands; reads say so.
+            from backend.app.services.graph_cache import mark_source_stale
+            await mark_source_stale(meta["workspace_id"], str(ds_id), "source_changed")
         # One job per projected commit: evict/restore churn at the same commit collapses
         # into it (the service's idempotent-replay window), while a later change is never
         # swallowed by an earlier job that already ran — a key per GRAPH did exactly that
@@ -110,7 +119,9 @@ def make_rollup_rebuild_hook(get_aggregation_service):
                 # idempotency_key: evict/restore churn (each restore is a full seed) collapses
                 # to one job per hour via the service's idempotent-replay window.
                 await agg.trigger(
-                    str(ds_id), AggregationTriggerRequest(idempotency_key=key), "api", s)
+                    str(ds_id),
+                    AggregationTriggerRequest(idempotency_key=key, projection_mode=mode),
+                    "api", s)
             logger.info("queued aggregation rebuild for ds=%s (rollups stale after projection)", ds_id)
         except Exception as exc:                         # active-job conflict etc. — benign
             logger.info("rollup rebuild for ds=%s not queued: %s", ds_id, exc)
