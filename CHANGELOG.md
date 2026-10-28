@@ -46,6 +46,16 @@ limitations** — a changelog that only lists good news is not worth reading.
   of the graph, and every duplicate copy. An edit no longer strips a property history never held.
   In a graph the platform created, a held-back publish now says to bring the changes into history
   or Rebuild.
+- **Bringing changes into history reads the graph.** `POST /graph/resync` read whatever served
+  views at the time, which for a projection behind main is Postgres itself, so it brought nothing
+  in. On a graph the projector writes, a read also came back with the graph's own spelling of each
+  type and the empty fields the projector fills in, so every node it had written read as changed. It
+  now reads the data source's FalkorDB graph through the projection's pin, stamps `urn` first as the
+  enable does, and reads its rows as history holds them. Only what was written outside history
+  comes in, as one commit. Then the `externalDrift` flag clears, and the lineage summaries are
+  rebuilt. It answers 409 `not_ready` while the graph is evicted, being rebuilt or moved. The
+  `curation_at_risk` refusal no longer applies once the projection has caught up with main, since
+  the graph then holds every edit people made.
 
 ### Upgrading
 

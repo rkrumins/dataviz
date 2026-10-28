@@ -927,7 +927,8 @@ class WatermarkModel(_ApiModel):
     liveness_error: Optional[str] = Field(default=None, alias="livenessError")
     # A customer's own graph (`owned` false) may hold what history doesn't — another writer kept
     # writing to it. Kept, not deleted: `{at, nodes, edges, via}` (`via`: the projector's count,
-    # `verify`, or a change notification), null when there is none.
+    # `verify`, or a change notification), null when there is none. Bring it into history with
+    # POST /graph/resync.
     external_drift: Optional[Dict[str, Any]] = Field(default=None, alias="externalDrift")
 
 

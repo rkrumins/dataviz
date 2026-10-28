@@ -337,8 +337,19 @@ async def test_a_resync_is_recorded_once(test_client, db_session, estate, versio
     async def _resync(self, **k):
         return {"commit_id": "c_1", "commit_seq": 7}
 
+    async def _watermark(self, _gid):
+        return {"fresh": True, "status": "idle", "falkor_graph_name": None}
+
+    async def _cleared(self, _gid):
+        return None
+
+    from backend.tests.test_sync_stopgap_guards import read_the_graph
+
     monkeypatch.setattr(GraphVersioningService, "resolve_graph", _resolve)
     monkeypatch.setattr(GraphVersioningService, "resync_from_provider", _resync)
+    monkeypatch.setattr(GraphVersioningService, "projection_watermark", _watermark)
+    monkeypatch.setattr(GraphVersioningService, "clear_external_changes", _cleared)
+    read_the_graph(monkeypatch)
     engine = types.SimpleNamespace(provider=object(), _db_session=db_session)
     monkeypatch.setitem(app.dependency_overrides, graph.get_context_engine, lambda: engine)
 

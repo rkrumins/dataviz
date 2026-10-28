@@ -263,7 +263,10 @@ reconciles **live node/edge counts** between Postgres and FalkorDB and bounded-h
   an ETL that kept writing — so the pass publishes, and records how much in
   `projection_state.external_drift` (`{at, nodes, edges, via}`, `via: verify`), which the next pass
   that counts none clears (a pass that doesn't count, because the head moved on, leaves it); the
-  watermark's `externalDrift` carries it to the UI. Two guards keep a
+  watermark's `externalDrift` carries it to the UI. Bringing those changes into history (`POST
+  /graph/resync`, [06](06-api-reference.md)) reads the graph and commits them, clears the flag, and
+  queues a rebuild of the rollups, since the publish that follows moves them by relationships the
+  batch job may already have counted. Two guards keep a
   surplus from hiding a loss: the edge merge returns how many of its items landed, and one whose
   endpoint wasn't there is a shortfall, healed; and a surplus equal to the one last recorded skips
   the sweep, which reads every tombstone of the graph.

@@ -440,11 +440,12 @@ async def load_node_identity(
 
 async def stamp_identity_for_enable(data_source_id: str) -> Optional[dict]:
     """Before enabling version control copies a graph that names its nodes by another property
-    (``id``, say), stamp ``urn`` from it — and ``displayName`` from a custom name property — onto
-    every node that lacks them, with ``urnSource`` / ``nameSource`` saying where they came from:
-    the summaries' conformance step, ``FalkorDBProvider.stamp_identity_urns``. The copy keys nodes
-    by ``urn``, so without this an ``id``-keyed graph was copied as empty. The stamps stay on the
-    graph if the enable is abandoned, as the summaries' do.
+    (``id``, say) — and before its outside changes are brought into history (``/graph/resync``) —
+    stamp ``urn`` from it, and ``displayName`` from a custom name property, onto every node that
+    lacks them, with ``urnSource`` / ``nameSource`` saying where they came from: the summaries'
+    conformance step, ``FalkorDBProvider.stamp_identity_urns``. The copy keys nodes by ``urn``, so
+    without this an ``id``-keyed graph was copied as empty. The stamps stay on the graph if the
+    enable is abandoned, as the summaries' do.
 
     Returns ``{"property", "stamped"}`` (how many properties it set); None when the data source
     is gone."""

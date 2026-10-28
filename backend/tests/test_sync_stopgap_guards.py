@@ -87,7 +87,7 @@ async def test_resync_force_skips_precheck_and_passes_flags(monkeypatch):
     from backend.app.providers import versioned_bootstrap
 
     async def _rows(*_a, **_kw):
-        return {"nodes": [], "edges": []}
+        return []
     monkeypatch.setattr(versioned_bootstrap, "collect_provider_rows", _rows)
     calls: list = []
     await _resync_svc(_HUMAN, calls).resync_from_provider(
@@ -233,6 +233,39 @@ async def test_resync_route_override_requires_workspace_admin(
     _needs_admin(await test_client.post(f"/api/v1/{WS}/graph/resync?dataSourceId=ds_x&{flag}=true"))
 
 
+def read_the_graph(monkeypatch):
+    """The resync route reads the graph's own key, which it finds fresh and served, and stamps
+    urns first; summaries are rebuilt after. Returns the request to call the route with."""
+    from types import SimpleNamespace
+
+    from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.services import node_identity, projection_target
+    from backend.app.services.context_engine import ContextEngine
+
+    async def _for_the_graph(cls, *_a):
+        return SimpleNamespace(provider=None)
+
+    async def _none(*_a, **_kw):
+        return None
+
+    monkeypatch.setattr(ContextEngine, "for_the_graph", classmethod(_for_the_graph))
+    monkeypatch.setattr(node_identity, "stamp_identity_for_enable", _none)
+    monkeypatch.setattr(graph_ep, "_resolve_ontology_rules", _none)
+    monkeypatch.setattr(projection_target, "make_rollup_rebuild_hook", lambda _get: _none)
+    return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+
+class _ReadsTheGraph:
+    async def resolve_graph(self, **_kw):
+        return {"graph_id": "g1"}
+
+    async def projection_watermark(self, _gid):
+        return {"fresh": True, "status": "idle", "falkor_graph_name": None}
+
+    async def clear_external_changes(self, _gid):
+        return None
+
+
 async def test_resync_records_the_overrides_it_used(monkeypatch):
     from backend.app.api.v1 import versioning_gate
     from backend.app.api.v1.endpoints import graph as graph_ep
@@ -240,10 +273,7 @@ async def test_resync_records_the_overrides_it_used(monkeypatch):
 
     seen = {}
 
-    class _Svc:
-        async def resolve_graph(self, **_kw):
-            return {"graph_id": "g1"}
-
+    class _Svc(_ReadsTheGraph):
         async def resync_from_provider(self, **kw):
             seen.update(kw)
             return {"commit_id": "c1", "overrides": ["curation_at_risk"]}
@@ -253,9 +283,10 @@ async def test_resync_records_the_overrides_it_used(monkeypatch):
     monkeypatch.setattr(svc_mod, "GraphVersioningService", _Svc)
     monkeypatch.setattr(graph_ep, "_record_versioning", _record)
     await graph_ep.resync_versioned_graph_endpoint(
-        ws_id="ws1", dataSourceId="ds1", strategy="merge", _gate=None, _perm=None, user=None,
+        read_the_graph(monkeypatch), ws_id="ws1", dataSourceId="ds1", strategy="merge",
+        _gate=None, _perm=None, user=None,
         overrides=versioning_gate.SyncOverrides(force=True, allow_mass_delete=False),
-        engine=type("_E", (), {"provider": None})(), session=None)
+        session=None)
     assert (seen["allow_curation_risk"], seen["allow_mass_delete"]) == (True, False)
     assert seen["record"] == ("workspace.versioning.resynced",
                               {"strategy": "merge", "commitId": "c1",

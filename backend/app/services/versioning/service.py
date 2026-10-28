@@ -312,6 +312,13 @@ class ApprovalRequired(RuntimeError):
 # truth in the refusal message, and to size the default limit.
 _SYNC_BYTES_PER_ENTITY = 4_600
 
+# A node's fields a read of a FalkorDB graph hands back filled in when the node has none: the
+# projector writes each so (`projection._node_item`), and the reader's model defaults some. Empty
+# like this, a field the node's history doesn't hold is not a change (_as_history_holds).
+_FILLED_IN = {"displayName": "", "qualifiedName": "", "description": "", "tags": [],
+              "layerAssignment": "", "childCount": 0, "sourceSystem": "", "lastSyncedAt": "",
+              "properties": {}}
+
 
 class GraphTooLargeToSync(RuntimeError):
     """A re-sync of this graph would not fit in memory, so we refuse it instead of dying.
@@ -3068,6 +3075,15 @@ class GraphVersioningService:
                 # What a customer's key holds that history doesn't, kept and flagged.
                 "external_drift": ps.external_drift if ps else None,
             }
+
+    async def clear_external_changes(self, graph_id: str) -> None:
+        """What the graph held that history didn't has been brought into it: the flag goes,
+        whichever check raised it (``projection_state.external_drift``)."""
+        async with self._session() as s:
+            await s.execute(update(ProjectionStateORM)
+                            .where(ProjectionStateORM.graph_id == graph_id)
+                            .values(external_drift=None)
+                            .execution_options(synchronize_session=False))
 
     async def ensure_projection_target(
         self, *, graph_id: str, falkor_graph_name: str, provider_aliases: Sequence[str] = (),
@@ -6203,6 +6219,7 @@ class GraphVersioningService:
         strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None, batch: int = 2000,
         allow_curation_risk: bool = False, allow_mass_delete: bool = False,
+        ontology_rules=None, holds_main: bool = False,
     ) -> Dict[str, object]:
         """Re-synchronize a versioned graph from its provider's CURRENT state, on demand —
         runnable at any time for any versioned graph (requirement: on-demand sync). Pages
@@ -6211,7 +6228,12 @@ class GraphVersioningService:
         clobbering user edits (a field both sides changed conflicts unless
         ``strategy='external_wins'``). The projector then refreshes FalkorDB. The
         ``collect_provider_rows`` output shape (kind/urn/entityType for nodes;
-        edgeType/source/target for edges) is exactly what ``sync_ingest`` consumes."""
+        edgeType/source/target for edges) is exactly what ``sync_ingest`` consumes.
+
+        The rows are spelled as history spells them first (``ontology_rules``, as the enable
+        does). ``holds_main``: the provider reads the graph's own key, published up to main's
+        head, so every edit people made is in what it reads, and none can read back as the
+        source's old value — ``curation_at_risk`` does not apply."""
         # Refuse BEFORE paging the provider. `collect_provider_rows` is the first of the six
         # whole-graph allocations, and by the time it has finished the process may already be
         # dead — so the check that saves us has to come before it, not inside sync_ingest's
@@ -6222,20 +6244,56 @@ class GraphVersioningService:
             await self._assert_writable(s, graph_id)
         # A sync refused for curation at risk is refused whatever the provider holds, so ask
         # first. sync_ingest asks again under the lock.
-        if not allow_curation_risk:
+        if not (allow_curation_risk or holds_main):
             async with self._session() as s:
                 main_id = await self._main_branch_id(s, graph_id)
                 human = await self._human_commit_in_sync_base(
                     s, graph_id, main_id, await self._last_sync_seq(s, graph_id, main_id))
             if human is not None:
                 raise _curation_at_risk(human)
-        from backend.app.providers.versioned_bootstrap import collect_provider_rows
+        from backend.app.providers.versioned_bootstrap import canonicalize_rows, collect_provider_rows
         rows = await collect_provider_rows(provider, batch=batch)
+        canonicalize_rows(rows, ontology_rules)
+        await self._as_history_holds(graph_id, rows)
         return await self.sync_ingest(
             graph_id=graph_id, rows=rows, actor=actor, source=source,
             strategy=strategy, resolutions=resolutions,
             containment_edge_types=containment_edge_types, message="resync from provider",
-            allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete)
+            allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete,
+            holds_main=holds_main)
+
+    async def _as_history_holds(self, graph_id: str, rows: List[dict]) -> None:
+        """Make a FalkorDB graph's rows say what history would, so a sync of them holds only
+        real changes. A field filled in empty (:data:`_FILLED_IN`) that the node's head doesn't
+        hold is dropped, and an edge whose id is also a node's is ``edge:<id>``, as the enable
+        keys it (``bootstrap_worker._rekey``) — else it would take the node's place in the
+        merge. One indexed lookup per chunk."""
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            nodes = [r for r in rows if r.get("kind") == "node" and r.get("urn")]
+            for chunk in _chunks(nodes, 5000):
+                held = dict((await s.execute(
+                    select(NodeVersionORM.urn, NodeVersionORM.payload)
+                    .join(EntityHeadORM, (EntityHeadORM.graph_id == NodeVersionORM.graph_id)
+                          & (EntityHeadORM.head_version_id == NodeVersionORM.id))
+                    .where(EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                           EntityHeadORM.is_tombstone.is_(False),
+                           NodeVersionORM.urn.in_([r["urn"] for r in chunk])))).all())
+                for r in chunk:
+                    head = held.get(r["urn"])
+                    for k, empty in (_FILLED_IN.items() if head is not None else ()):
+                        if k in r and k not in head and r[k] == empty:
+                            del r[k]
+            named = {r["id"] for r in nodes if r.get("id")}       # a new node's id is its urn
+            edges = [r for r in rows if r.get("kind") == "edge" and r.get("id")]
+            for chunk in _chunks([r["id"] for r in edges if r["id"] not in named], 10000):
+                named.update((await s.execute(select(EntityHeadORM.entity_id).where(
+                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                    EntityHeadORM.entity_kind == "node",
+                    EntityHeadORM.entity_id.in_(chunk)))).scalars())
+            for r in edges:
+                if r["id"] in named:
+                    r["id"] = f"edge:{r['id']}"
 
     async def _assert_syncable(self, graph_id: str) -> None:
         """Refuse a sync the machine cannot survive, with the number that proves it.
@@ -6337,6 +6395,7 @@ class GraphVersioningService:
         strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         allow_curation_risk: bool = False, allow_mass_delete: bool = False,
+        holds_main: bool = False,
     ) -> Dict[str, object]:
         """Re-sync an authoritative/external snapshot into ``main`` as a single ``sync``
         commit **without clobbering user edits** (plan §D5). 3-way merge: base = the
@@ -6357,7 +6416,9 @@ class GraphVersioningService:
         older than the last import or sync (``allow_curation_risk``), and
         :class:`MassDeleteBlocked` when the sync would delete more than
         max(``SYNC_DELETE_MAX_ABS``, ``SYNC_DELETE_MAX_FRACTION`` x live) entities
-        (``allow_mass_delete``)."""
+        (``allow_mass_delete``). ``holds_main``: the snapshot is the graph's own published key
+        (:meth:`resync_from_provider`), which nothing people did is missing from, so
+        :class:`CurationAtRisk` does not apply."""
         await self._assert_syncable(graph_id)
         rows = list(rows)        # every attempt reads it; a spent iterator would delete everything
         return await self._retry_seq(
@@ -6366,14 +6427,15 @@ class GraphVersioningService:
                 graph_id=graph_id, rows=rows, actor=actor, source=source,
                 idempotency_key=idempotency_key, message=message, strategy=strategy,
                 resolutions=resolutions, containment_edge_types=containment_edge_types,
-                allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete))
+                allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete,
+                holds_main=holds_main))
 
     async def _sync_ingest_once(
         self, *, graph_id: str, rows, actor: str, source: str,
         idempotency_key: Optional[str], message: str, strategy: str,
         resolutions: Optional[Mapping[str, Optional[dict]]],
         containment_edge_types: Optional[Sequence[str]],
-        allow_curation_risk: bool, allow_mass_delete: bool,
+        allow_curation_risk: bool, allow_mass_delete: bool, holds_main: bool = False,
     ) -> Dict[str, object]:
         """One attempt at :meth:`sync_ingest`, under the graph lock: the idempotent replay, the
         last sync and main's head are all read with main held still."""
@@ -6400,7 +6462,8 @@ class GraphVersioningService:
             last_seq = await self._last_sync_seq(s, graph_id, main_id)
             # After the replay, so a retried key still answers; before any O(graph) work.
             overrides: List[str] = []
-            human = await self._human_commit_in_sync_base(s, graph_id, main_id, last_seq)
+            human = (None if holds_main
+                     else await self._human_commit_in_sync_base(s, graph_id, main_id, last_seq))
             if human is not None:
                 if not allow_curation_risk:
                     raise _curation_at_risk(human)

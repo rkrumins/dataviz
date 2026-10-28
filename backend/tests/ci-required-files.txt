@@ -66,6 +66,7 @@ tests/test_bootstrap_window_writes.py
 tests/test_bootstrap_worker_unit.py
 tests/test_branding_endpoint.py
 tests/test_branding_repo.py
+tests/test_bring_into_history.py
 tests/test_bulkhead.py
 tests/test_cache_refresh_route.py
 tests/test_canvas_endpoints.py

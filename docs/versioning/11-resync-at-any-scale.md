@@ -11,6 +11,13 @@
 > size guard (`GRAPHVER_RESYNC_MAX_ENTITIES`, default 250,000) still refuses what would not
 > survive. This chapter is how that guard gets deleted. It exists so the next person does not
 > have to re-derive any of it.
+>
+> **2026-10-28:** a re-sync now reads the graph's own key and makes its rows say what history
+> would before the merge (`_as_history_holds`: the data source's spelling, no empty field a read
+> fills in that the item never held, and `edge:<id>` for a connection whose id is an item's).
+> `test_bring_into_history_takes_in_what_the_graph_holds_and_nothing_else` re-syncs a bootstrapped
+> graph that the projector has also written, and asserts that only what was written outside
+> history is applied.
 
 ## The problem, measured
 

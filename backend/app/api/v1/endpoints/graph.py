@@ -558,6 +558,7 @@ async def _assert_copyable(session: AsyncSession, provider_id: Optional[str]) ->
 
 @router.post("/resync")
 async def resync_versioned_graph_endpoint(
+    request: Request,
     ws_id: str,
     dataSourceId: str = Query(..., description="Data source whose versioned graph to re-sync."),
     strategy: str = Query("merge", description="merge | external_wins"),
@@ -572,17 +573,24 @@ async def resync_versioned_graph_endpoint(
     _perm=Depends(require_ws_manage),
     _publish=Depends(require_ws_publish),          # a sync advances main
     user=Depends(get_optional_user),
-    # Before `engine`: dependencies resolve in order, so a refused override never builds a provider.
+    # Before `session`: dependencies resolve in order, so a refused override never builds a provider.
     overrides: SyncOverrides = Depends(sync_override_gate),
-    engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_engine_session),
 ):
-    """Re-sync a versioned graph from its provider's CURRENT state on demand — runnable at
-    any time for any versioned graph. 3-way merge preserves user edits (a field both the
-    source and a user changed conflicts under ``merge``; pass ``external_wins`` to take the
-    source). 404 if the data source isn't versioned yet (enable it first). 409
-    ``curation_at_risk`` / ``mass_delete_blocked`` unless a workspace admin passes ``force`` /
+    """Bring what the data source's FalkorDB graph holds into history: re-sync its versioned
+    graph from the graph's CURRENT state on demand — runnable at any time for any versioned
+    graph. It reads the graph itself, the key the projection publishes into, never whatever
+    serves reads now (a main the projection lags reads Postgres, which holds nothing new), so
+    what other writers put there (``externalDrift`` on the watermark) comes in as one ``sync``
+    commit, and the flag goes. 3-way merge preserves user edits (a field both the source and a
+    user changed conflicts under ``merge``; pass ``external_wins`` to take the source). 404 if
+    the data source isn't versioned yet (enable it first). 409 ``not_ready`` while the graph is
+    evicted, being rebuilt or moved; ``curation_at_risk`` (only while the projection is behind
+    main) / ``mass_delete_blocked`` unless a workspace admin passes ``force`` /
     ``allowMassDelete``."""
+    from backend.app.services import versioned_sources
+    from backend.app.services.node_identity import stamp_identity_for_enable
+    from backend.app.services.projection_target import make_rollup_rebuild_hook
     from backend.app.services.versioning.service import GraphVersioningService
     actor = user.id if user else "system"
     svc = GraphVersioningService()
@@ -590,15 +598,42 @@ async def resync_versioned_graph_endpoint(
         data_source_id=dataSourceId, actor=actor, workspace_id=ws_id, open_draft_if_absent=False)
     if res is None:
         raise HTTPException(status_code=404, detail="data source is not versioned; enable versioning first")
+    gid = res["graph_id"]
+    engine = await ContextEngine.for_the_graph(ws_id, provider_manager, session, dataSourceId)
+    wm = await svc.projection_watermark(gid)
+    # An evicted key is gone and one being reseeded is partial: what is missing would read as
+    # deletions. A key the projection moved off is not the graph.
+    if wm.get("status") in ("evicted", "rebuilding") or not versioned_sources.serves_pin(
+            getattr(engine.provider, "manager_cache_key", None), wm.get("falkor_provider"),
+            wm.get("falkor_graph_name"), gid):
+        raise HTTPException(status_code=409, detail={
+            "type": "not_ready", "status": wm.get("status"),
+            "message": "The graph is being rebuilt or moved. Bring its changes into history "
+                       "once it has caught up."})
+    # A node the graph names by another property gets its urn first, as at the enable.
+    await stamp_identity_for_enable(dataSourceId)
     from backend.app.services.versioning.service import ConcurrencyError, MergeConflict
     try:
         result = await svc.resync_from_provider(
-            graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy,
+            graph_id=gid, provider=engine.provider, actor=actor, strategy=strategy,
+            ontology_rules=await _resolve_ontology_rules(engine),
+            # Published up to main's head, the graph holds every edit people made.
+            holds_main=bool(wm.get("fresh")),
             allow_curation_risk=overrides.force, allow_mass_delete=overrides.allow_mass_delete)
     except MergeConflict as exc:
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
+    await svc.clear_external_changes(gid)
+    if (result or {}).get("commit_id"):
+        # The publish that follows moves the lineage summaries by relationships that were
+        # already in the graph, which the batch job may have counted: rebuilt, they converge.
+        try:
+            await make_rollup_rebuild_hook(
+                lambda: getattr(request.app.state, "aggregation_service", None))(gid)
+        except Exception:                                # pragma: no cover - infra
+            logger.warning("resync of %s: the lineage summaries' rebuild was not queued", gid,
+                           exc_info=True)
     details = {"strategy": strategy, "commitId": (result or {}).get("commit_id")}
     if (result or {}).get("overrides"):
         details["overrides"] = result["overrides"]       # an admin overrode a sync safety check
