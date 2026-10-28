@@ -65,6 +65,7 @@ import {
 import { queryLabel } from '@/components/canvas/search/panel/findMode'
 import { readableSearchError } from '@/components/canvas/search/panel/errorPaths'
 import { currentScope, requestOptions, requestPredicate } from '@/components/canvas/search/searchRequest'
+import { pause, rideOut, waitsOut } from '@/services/rideOut'
 import { recordEvent } from '@/services/telemetryService'
 
 
@@ -333,40 +334,52 @@ function loadedContainerUrns(): string[] {
  *  within a second and its exact count when the scan ends. */
 export const PROGRESS_WAIT_MS = 800
 
-/** A follow-up that fails is retried this often, backing off, before the
- *  search stops where it is. */
-const CONTINUE_ATTEMPTS = 3
+/** A follow-up that brings nothing new is followed by a longer wait, up to
+ *  this — and a tab out of sight never asks more often than this. */
+const IDLE_POLL_MAX_MS = 5_000
 
 function progressive(query: SearchQuery): SearchQuery {
     return { ...query, options: { ...(query.options ?? {}), waitMs: PROGRESS_WAIT_MS } }
 }
 
+/** The next answer of a running search, or why it was interrupted. */
+type Continued = { page: SearchResultPage } | { interrupted: string }
+
 /**
  * The next answer of a running search: the same request, naming its
- * session. A failure is retried; if it persists, the search stops at the
- * last answer — marked as cut short, so the count reads as a floor and the
- * panel says the search did not finish.
+ * session. While the graph can't answer — busy, failing over, restarting —
+ * it is asked again, for minutes (``rideOut``); still not answering, the
+ * search is interrupted where it is, its session kept for Resume. A search
+ * the server could not finish, or a refused request, throws at once.
  */
 async function continueSession(
     provider: RemoteGraphProvider,
     query: SearchQuery,
     last: SearchResultPage,
     signal: AbortSignal,
-): Promise<SearchResultPage> {
+): Promise<Continued> {
     const next: SearchQuery = {
         ...query, options: { ...(query.options ?? {}), sessionId: last.sessionId ?? undefined },
     }
-    for (let attempt = 0; ; attempt++) {
-        try {
-            return await provider.searchAdvanced(next, { signal })
-        } catch (e) {
-            if (signal.aborted || attempt + 1 >= CONTINUE_ATTEMPTS) {
-                if (signal.aborted) throw e
-                return { ...last, status: undefined, truncated: true, deadlineExceeded: true }
-            }
-            await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt))
-        }
+    try {
+        return { page: await rideOut(() => provider.searchAdvanced(next, { signal }), signal) }
+    } catch (e) {
+        if (signal.aborted || !waitsOut(e)) throw e
+        return { interrupted: readableSearchError(e instanceof Error ? e.message : String(e)) }
     }
+}
+
+/** How long to wait before asking a running search again: at once after an
+ *  answer that moved it on, longer after each that didn't — and never less
+ *  than ``IDLE_POLL_MAX_MS`` while the tab is out of sight. */
+export function pollDelayMs(idle: number, hidden: boolean): number {
+    const delay = idle === 0 ? 0 : Math.min(IDLE_POLL_MAX_MS, 250 * 2 ** idle)
+    return hidden ? Math.max(IDLE_POLL_MAX_MS, delay) : delay
+}
+
+function sameProgress(a: SearchResultPage, b: SearchResultPage): boolean {
+    return a.progress?.scanned === b.progress?.scanned
+        && a.progress?.matched === b.progress?.matched
 }
 
 
@@ -384,11 +397,30 @@ export type PanelView =
     | { kind: 'results'; template: SearchTemplate;               // cards/rows
         inputs: Record<string, string | number>;
         query: SearchQuery; result: SearchResultPage;
-        elapsedMs: number }
+        elapsedMs: number;
+        /** When the run started (``performance.now()``): a scan's clock. */
+        startedAt?: number;
+        /** A running search no longer followed — Resume picks it up. */
+        halted?: Halted }
     | { kind: 'error'; template: SearchTemplate;                 // error card
         inputs: Record<string, string | number>;
         query: SearchQuery; message: string;
         elapsedMs: number }
+
+/** What following one run's answers needs to know about it. */
+interface FollowedRun {
+    template: SearchTemplate
+    inputs: Record<string, string | number>
+    query: SearchQuery
+    startedAt: number
+    runKey: string | null
+}
+
+/** Why a running search is no longer being followed: the user stopped it,
+ *  or the graph stayed out of reach. Its session keeps what it found. */
+export type Halted =
+    | { kind: 'stopped' }
+    | { kind: 'interrupted'; reason: string }
 
 /**
  * Which draft the panel has actually dispatched, and how that went.
@@ -438,6 +470,11 @@ export interface UseAdvancedSearchResult {
                    optionsOverride?: SearchQuery['options']) => Promise<void>
     /** Abort any in-flight query and return to idle. */
     cancel: () => void
+    /** Stop following a running search: its matches so far stay, and
+     *  ``resume`` picks its session up again. */
+    stop: () => void
+    /** Follow a stopped or interrupted search again, from its session. */
+    resume: () => Promise<void>
     /** Fetch the next page of hits using the cursor on the current
      *  result. No-op when ``view.kind !== 'results'`` or the result has
      *  no cursor. New hits are APPENDED to the existing list — the
@@ -620,6 +657,132 @@ export function useAdvancedSearch(
         [viewId],
     )
 
+    // What the canvas shows of a result: its matches, edges, where they
+    // sit and how many each container holds.
+    const publish = useCallback((query: SearchQuery, result: SearchResultPage) => {
+        const ancestorPaths = collectAncestorPaths(result)
+        rememberUrnLabels(ancestorPaths.flatMap((p) => p.path))
+        useSearchStore.getState().setResult({
+            viewId,
+            matchUrns: collectMatchUrns(result),
+            edgeKeys: collectEdgeKeys(result),
+            matchedEdges: collectMatchedEdges(result),
+            matchedEdgesComplete: !result.cursor && result.status !== 'running',
+            ancestorPaths,
+            ancestorCounts: collectAncestorCounts(query, result),
+            queryHash: JSON.stringify(query),
+        })
+    }, [viewId])
+
+    // A run's last answer: shown, published, measured and remembered.
+    const finish = useCallback((run: FollowedRun, result: SearchResultPage) => {
+        const { template, inputs, query, startedAt, runKey } = run
+        setView({
+            kind: 'results', template, inputs, query, result, startedAt,
+            elapsedMs: Math.round(performance.now() - startedAt),
+        })
+        if (runKey) setRunState({ hash: runKey, status: 'done' })
+        // Every ancestor ref and aggregate bucket ships a
+        // displayName. Remember them so a scope row built from
+        // these results can render "inside GOLD" rather than the
+        // raw URN — the container often isn't loaded on the canvas,
+        // so this response is the only place the name exists.
+        for (const facet of result.aggregates ?? []) {
+            rememberUrnLabels(facet.map((b) => ({
+                urn: b.ancestorUrn,
+                displayName: b.ancestorDisplayName,
+            })))
+        }
+        // A search that finds nothing is its own event type, mirroring the
+        // `docs.search_miss` precedent: the zero-result queries are the
+        // interesting ones — they say what people expected the graph to
+        // contain and it didn't. The predicate is deliberately NOT sent;
+        // it can carry node names, and this store holds no PII beyond the
+        // actor id. The shape of the query is enough to spot a pattern.
+        // A Connections search counts its edges.
+        const matches = result.edges?.length ?? collectMatchUrns(result).length
+        recordEvent(matches > 0 ? 'graph.search' : 'graph.search_miss', {
+            matches,
+            template: template.id,
+            ...(result.edges ? { connections: true } : {}),
+            elapsedMs: Math.round(performance.now() - startedAt),
+        })
+        // Publish the match URN set so the ContextView canvas
+        // (W3 — useSearchHighlight + SearchPinOverlay +
+        // ChevronMatchBadge) can react. JSON.stringify is
+        // deterministic enough for the consumer's "did the query
+        // change?" check; a real fingerprint can replace it if
+        // ordering ever becomes an issue.
+        publish(query, result)
+        // Auto-save the dispatched predicate to per-view Recent.
+        // Skips path-mode / template queries whose predicate isn't
+        // a meaningful "free-form draft" the user could re-author.
+        if (isRecentablePredicate(query.predicate)) {
+            useSearchStore.getState().addRecent({
+                viewId,
+                predicate: query.predicate,
+                label: queryLabel(query.predicate),
+            })
+        }
+    }, [publish, viewId])
+
+    // A run that failed: the error, with the query kept to fix.
+    const fail = useCallback((run: FollowedRun, e: unknown) => {
+        const { template, inputs, query, startedAt, runKey } = run
+        setView({
+            kind: 'error', template, inputs, query,
+            message: (e as Error).message,
+            elapsedMs: Math.round(performance.now() - startedAt),
+        })
+        // Remember the failure against this draft so the auto-run
+        // effect doesn't hammer a query that can't succeed. The
+        // explicit Run button still forces a retry.
+        if (runKey) setRunState({ hash: runKey, status: 'failed' })
+        // On error, drop any previously-published result-set so the
+        // canvas doesn't keep highlighting stale matches — but keep the
+        // query itself, so the user can fix it.
+        useSearchStore.getState().clearSearchResults()
+    }, [])
+
+    // Every answer of a running search is shown as it lands — the hits are
+    // already in their final order, only more of them are still coming —
+    // until it is complete. One the graph stays out of reach for is left
+    // interrupted where it is, for Resume.
+    const follow = useCallback(async (
+        run: FollowedRun, first: SearchResultPage, controller: AbortController,
+    ) => {
+        const { template, inputs, query, startedAt } = run
+        const show = (result: SearchResultPage, halted?: Halted) => {
+            setView({
+                kind: 'results', template, inputs, query, result, startedAt,
+                elapsedMs: Math.round(performance.now() - startedAt),
+                ...(halted ? { halted } : {}),
+            })
+            publish(query, result)
+        }
+        let result = first
+        let idle = 0
+        while (result.status === 'running' && result.sessionId) {
+            show(result)
+            const wait = pollDelayMs(idle, document.visibilityState === 'hidden')
+            if (wait > 0) {
+                await pause(wait, controller.signal)
+                if (controller.signal.aborted) return
+            }
+            const next = await continueSession(
+                provider as RemoteGraphProvider, progressive(query), result, controller.signal)
+            if (controller.signal.aborted) return
+            if ('interrupted' in next) {
+                show(result, { kind: 'interrupted', reason: next.interrupted })
+                if (run.runKey) setRunState({ hash: run.runKey, status: 'done' })
+                return
+            }
+            idle = sameProgress(result, next.page) ? idle + 1 : 0
+            result = next.page
+        }
+        finish(run, result)
+    }, [provider, publish, finish])
+
     const runWithInputs = useCallback(async (
         template: SearchTemplate,
         inputs: Record<string, string | number>,
@@ -645,116 +808,49 @@ export function useAdvancedSearch(
         const startedAt = performance.now()
         setView({ kind: 'running', template, inputs, query, startedAt })
         if (runKey) setRunState({ hash: runKey, status: 'running' })
-
-        // Every page of a running search is shown as it lands: the hits are
-        // already in their final order, only more of them are still coming.
-        const show = (result: SearchResultPage) => {
-            setView({
-                kind: 'results', template, inputs, query, result,
-                elapsedMs: Math.round(performance.now() - startedAt),
-            })
-            const ancestorPaths = collectAncestorPaths(result)
-            rememberUrnLabels(ancestorPaths.flatMap((p) => p.path))
-            useSearchStore.getState().setResult({
-                viewId,
-                matchUrns: collectMatchUrns(result),
-                edgeKeys: collectEdgeKeys(result),
-                matchedEdges: collectMatchedEdges(result),
-                matchedEdgesComplete: !result.cursor && result.status !== 'running',
-                ancestorPaths,
-                ancestorCounts: collectAncestorCounts(query, result),
-                queryHash: JSON.stringify(query),
-            })
-        }
+        const run: FollowedRun = { template, inputs, query, startedAt, runKey }
 
         try {
-            let result = await provider.searchAdvanced(
+            const first = await provider.searchAdvanced(
                 progressive(query), { signal: controller.signal })
             // An aborted run has been superseded — the newer run owns
             // both the view and the run state, so touch neither.
             if (controller.signal.aborted) return
-            while (result.status === 'running' && result.sessionId) {
-                show(result)
-                result = await continueSession(
-                    provider, progressive(query), result, controller.signal)
-                if (controller.signal.aborted) return
-            }
-            setView({
-                kind: 'results', template, inputs, query, result,
-                elapsedMs: Math.round(performance.now() - startedAt),
-            })
-            if (runKey) setRunState({ hash: runKey, status: 'done' })
-            // Every ancestor ref and aggregate bucket ships a
-            // displayName. Remember them so a scope row built from
-            // these results can render "inside GOLD" rather than the
-            // raw URN — the container often isn't loaded on the canvas,
-            // so this response is the only place the name exists.
-            const ancestorPaths = collectAncestorPaths(result)
-            rememberUrnLabels(ancestorPaths.flatMap((p) => p.path))
-            for (const facet of result.aggregates ?? []) {
-                rememberUrnLabels(facet.map((b) => ({
-                    urn: b.ancestorUrn,
-                    displayName: b.ancestorDisplayName,
-                })))
-            }
-            // Publish the match URN set so the ContextView canvas
-            // (W3 — useSearchHighlight + SearchPinOverlay +
-            // ChevronMatchBadge) can react. JSON.stringify is
-            // deterministic enough for the consumer's "did the query
-            // change?" check; a real fingerprint can replace it if
-            // ordering ever becomes an issue.
-            const matchUrns = collectMatchUrns(result)
-            // A search that finds nothing is its own event type, mirroring the
-            // `docs.search_miss` precedent: the zero-result queries are the
-            // interesting ones — they say what people expected the graph to
-            // contain and it didn't. The predicate is deliberately NOT sent;
-            // it can carry node names, and this store holds no PII beyond the
-            // actor id. The shape of the query is enough to spot a pattern.
-            // A Connections search counts its edges.
-            const matches = result.edges?.length ?? matchUrns.length
-            recordEvent(matches > 0 ? 'graph.search' : 'graph.search_miss', {
-                matches,
-                template: template.id,
-                ...(result.edges ? { connections: true } : {}),
-                elapsedMs: Math.round(performance.now() - startedAt),
-            })
-            useSearchStore.getState().setResult({
-                viewId,
-                matchUrns,
-                edgeKeys: collectEdgeKeys(result),
-                matchedEdges: collectMatchedEdges(result),
-                matchedEdgesComplete: !result.cursor && result.status !== 'running',
-                ancestorPaths,
-                ancestorCounts: collectAncestorCounts(query, result),
-                queryHash: JSON.stringify(query),
-            })
-            // Auto-save the dispatched predicate to per-view Recent.
-            // Skips path-mode / template queries whose predicate isn't
-            // a meaningful "free-form draft" the user could re-author.
-            if (isRecentablePredicate(query.predicate)) {
-                useSearchStore.getState().addRecent({
-                    viewId,
-                    predicate: query.predicate,
-                    label: queryLabel(query.predicate),
-                })
-            }
+            await follow(run, first, controller)
         } catch (e) {
             if (controller.signal.aborted) return
-            setView({
-                kind: 'error', template, inputs, query,
-                message: (e as Error).message,
-                elapsedMs: Math.round(performance.now() - startedAt),
-            })
-            // Remember the failure against this draft so the auto-run
-            // effect doesn't hammer a query that can't succeed. The
-            // explicit Run button still forces a retry.
-            if (runKey) setRunState({ hash: runKey, status: 'failed' })
-            // On error, drop any previously-published result-set so the
-            // canvas doesn't keep highlighting stale matches — but keep the
-            // query itself, so the user can fix it.
-            useSearchStore.getState().clearSearchResults()
+            fail(run, e)
         }
-    }, [provider, stampScope, viewId])
+    }, [provider, stampScope, follow, fail])
+
+    // Stop following a running search where it is: what it found stays on
+    // the canvas, and its session waits for Resume.
+    const stop = useCallback(() => {
+        if (view.kind !== 'results' || view.result.status !== 'running' || view.halted) return
+        abortRef.current?.abort()
+        setView({ ...view, halted: { kind: 'stopped' } })
+        setRunState((state) => state && { ...state, status: 'done' })
+    }, [view])
+
+    // Follow a stopped or interrupted search again, from its session.
+    const resume = useCallback(async () => {
+        if (view.kind !== 'results' || !view.halted
+            || !(provider instanceof RemoteGraphProvider)) return
+        abortRef.current?.abort()
+        const controller = new AbortController()
+        abortRef.current = controller
+        const run: FollowedRun = {
+            template: view.template, inputs: view.inputs, query: view.query,
+            startedAt: view.startedAt ?? performance.now(), runKey: null,
+        }
+        setView({ ...view, halted: undefined })
+        try {
+            await follow(run, view.result, controller)
+        } catch (e) {
+            if (controller.signal.aborted) return
+            fail(run, e)
+        }
+    }, [view, provider, follow, fail])
 
     const run = useCallback(async () => {
         if (view.kind === 'idle' || view.kind === 'running') return
@@ -874,15 +970,18 @@ export function useAdvancedSearch(
                     results: connections ? 'edges' : 'hits',
                 },
             }
-            let nextPage = await provider.searchAdvanced(
-                nextQuery, { signal: controller.signal })
+            // The graph busy or failing over: asked again, for minutes.
+            let nextPage = await rideOut(() => provider.searchAdvanced(
+                nextQuery, { signal: controller.signal }), controller.signal)
             if (controller.signal.aborted) return
             // A later page past what the search's session holds is a scan
             // of its own; a large one may take more than one request.
             while (nextPage.status === 'running' && nextPage.sessionId) {
-                nextPage = await continueSession(
+                const next = await continueSession(
                     provider, nextQuery, nextPage, controller.signal)
                 if (controller.signal.aborted) return
+                if ('interrupted' in next) throw new Error(next.interrupted)
+                nextPage = next.page
             }
             // Merge: append new hits, replace cursor (may now be null
             // signalling "no more pages"), keep aggregates from p1.
@@ -980,12 +1079,15 @@ export function useAdvancedSearch(
         runTemplate,
         runPredicate,
         cancel,
+        stop,
+        resume,
         loadMore,
         isLoadingMore,
         loadMoreError: view.kind === 'results' && loadMoreFailure
             && view.result.cursor === loadMoreFailure.cursor ? loadMoreFailure.message : null,
     }), [
         view, runState, selectTemplate, setInput, resetTemplate,
-        run, runTemplate, runPredicate, cancel, loadMore, isLoadingMore, loadMoreFailure,
+        run, runTemplate, runPredicate, cancel, stop, resume, loadMore, isLoadingMore,
+        loadMoreFailure,
     ])
 }

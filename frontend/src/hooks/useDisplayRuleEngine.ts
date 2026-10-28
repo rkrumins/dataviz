@@ -23,6 +23,7 @@ import { useEffect, useMemo, useRef } from 'react'
 import { readableSearchError } from '@/components/canvas/search/panel/errorPaths'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { rideOut } from '@/services/rideOut'
 import { countRules } from '@/services/ruleCounts'
 import { useCanvasStore } from '@/store/canvas'
 import { useDisplayRules, useReferenceModelStore } from '@/store/referenceModelStore'
@@ -95,11 +96,12 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
                     for (let j = 0; j < askable.length; j += RULES_PER_REQUEST) {
                         const group = askable.slice(j, j + RULES_PER_REQUEST)
                         try {
-                            const answer = await provider.searchMembership({
+                            // The graph busy or failing over: asked again, for minutes.
+                            const answer = await rideOut(() => provider.searchMembership({
                                 scope: { viewId, scopeMode: 'view' },
                                 items: group.map(asItem),
                                 urns: batch,
-                            }, { signal: controller.signal })
+                            }, { signal: controller.signal }), controller.signal)
                             if (controller.signal.aborted) return
                             applyMembership(group.map((r) => r.id), batch, answer.matches)
                         } catch (err) {

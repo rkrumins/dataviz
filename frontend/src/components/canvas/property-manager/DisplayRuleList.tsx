@@ -183,6 +183,13 @@ function RuleCountLine({ enabled, count }: {
         return <span title={count.error}>At least {n} · <span className="text-rose-400">count stopped</span></span>
     }
     if (!count.complete) return <>{n} so far · counting {count.percent}%</>
+    if (count.lowerBound) {
+        return (
+            <span title="Part of the view couldn’t be checked in time and was left out">
+                At least {n} {count.count === 1 ? 'match' : 'matches'} in this view
+            </span>
+        )
+    }
     return <>{n} {count.count === 1 ? 'match' : 'matches'} in this view</>
 }
 
