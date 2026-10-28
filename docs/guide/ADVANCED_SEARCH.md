@@ -831,7 +831,7 @@ type:dataset owner IS EMPTY
 type:dataset rowCount >= 1000000
 ```
 
-**Orphans — no lineage in or out.** Entity type is `dataset` and **No lineage
+**No lineage in or out.** Entity type is `dataset` and **No lineage
 edges**. Swap in **No upstream lineage** for sources nothing feeds.
 
 ```text

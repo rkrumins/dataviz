@@ -95,3 +95,16 @@ describe('MatchBar — a count that is a floor', () => {
         expect(screen.queryByRole('status')).not.toBeInTheDocument()
     })
 })
+
+
+describe('MatchBar — how long a finished search took', () => {
+    it.each([
+        [432, '· 432 ms'],
+        [4_200, '· 4.2 s'],
+        // Past a minute, the clock a running search shows: not "87146 ms".
+        [87_146, '· 1:27'],
+    ])('%s ms reads %s', (elapsedMs, text) => {
+        renderBar({ elapsedMs })
+        expect(screen.getByText(text)).toBeInTheDocument()
+    })
+})

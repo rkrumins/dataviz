@@ -1243,9 +1243,10 @@ function getKindMeta(p: Predicate): KindMeta {
             const link = axisMeta(p.axis).lineage
             return {
                 icon: link ? '⇄' : '⊶',
-                label: link ? 'Connection' : 'Hierarchy',
+                // Not "Connection": that is a Connections search, the edges themselves.
+                label: link ? 'Related to…' : 'Hierarchy',
                 description: link
-                    ? 'A condition on what it is connected to — steps and edges under More options.'
+                    ? 'A condition on what it is related to — steps and edges under More options.'
                     : 'A condition on its containers or what it contains.',
             }
         }
