@@ -634,7 +634,7 @@ async def resync_versioned_graph_endpoint(
                                                      "message": str(exc)})
     except AmbiguousSpelling as exc:                # a type the graph spells two ways
         raise HTTPException(status_code=exc.status_code, detail=exc.detail)
-    await svc.clear_external_changes(gid)
+    await svc.clear_external_changes(gid, seen_at=(wm.get("external_drift") or {}).get("at"))
     if (result or {}).get("commit_id"):
         # The publish that follows moves the lineage summaries by relationships that were
         # already in the graph, which the batch job may have counted: rebuilt, they converge.

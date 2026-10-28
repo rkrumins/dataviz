@@ -277,13 +277,14 @@ reconciles **live node/edge counts** between Postgres and FalkorDB and bounded-h
   `projection_state.external_drift` (`{at, nodes, edges, via}`, `via: verify`), which the next pass
   that counts none clears (a pass that doesn't count, because the head moved on, leaves it); the
   watermark's `externalDrift` carries it to the UI. A loader's or connector's change notification
-  (`signal_source_changed` with origin `script` or `connector`) flags it too, `via: notification`,
-  which no pass clears, since a property edit changes no count; a key the platform minted is never
-  flagged. Bringing those changes into history (`POST /graph/resync`, [06](06-api-reference.md))
+  (`signal_source_changed` with origin `script` or `connector`; `/source-changed` is a connector's)
+  flags it too, `via: notification`, before the signal's change check, which a property edit
+  passes unseen; no pass clears it, since such an edit changes no count. A key the platform minted
+  is never flagged. Bringing those changes into history (`POST /graph/resync`, [06](06-api-reference.md))
   reads the graph, only while it holds main, as the enable reads it, and commits what history
-  doesn't hold; it deletes nothing from history. It clears the flag, and queues a rebuild of the
-  rollups, since the publish that follows moves them by relationships the batch job may already
-  have counted. Two guards keep a
+  doesn't hold; it deletes nothing from history. It clears the flag it began under (one raised
+  while it read stays), and queues a rebuild of the rollups, since the publish that follows moves
+  them by relationships the batch job may already have counted. Two guards keep a
   surplus from hiding a loss: the edge merge returns how many of its items landed, and one whose
   endpoint wasn't there is a shortfall, healed; and a surplus equal to the one last recorded skips
   the sweep, which reads every tombstone of the graph.

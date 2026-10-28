@@ -246,6 +246,44 @@ def test_a_writer_saying_it_wrote_flags_changes_outside_history(monkeypatch, ori
     assert captured.get("flagged", []) == (["ds-1"] if flagged else [])
 
 
+def test_a_writer_saying_it_wrote_flags_even_a_change_no_count_shows(monkeypatch):
+    """A property edit moves no count, so the fingerprint matches and nothing else runs: the
+    writer's own word that it wrote still flags the change as not in history."""
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="SAME"), current_fp="SAME", versioned=True)
+    resp = _run(svc.signal_source_changed("ds-1", session, origin="connector"))
+    assert captured.get("flagged") == ["ds-1"]
+    assert resp.changed is False and order == []
+
+
+@pytest.mark.parametrize("route", ["api", "control plane"])
+def test_source_changed_is_a_connectors_word_that_it_wrote(monkeypatch, route):
+    """``POST …/source-changed`` is what connectors call after writing to the graph themselves:
+    its signal says so (origin ``connector``), which flags a versioned source's change as not in
+    history. It carried the default origin, ``api``, which flags nothing."""
+    seen = {}
+
+    class _Svc:
+        async def signal_source_changed(self, ds_id, session, **kw):
+            seen.update(kw, ds_id=ds_id)
+            return "signalled"
+
+    if route == "api":
+        from backend.app.api.v1.endpoints import aggregation as ep
+
+        class _Request:
+            async def body(self):
+                return b""
+
+        monkeypatch.setattr(ep, "_PROXY_ENABLED", False)
+        _run(ep.source_changed("ds-1", _Request(), svc=_Svc(), session=None))
+    else:
+        from backend.app.services.aggregation import controlplane
+        from backend.app.services.aggregation.schemas import SourceChangedRequest
+        _run(controlplane.source_changed("ds-1", SourceChangedRequest(), svc=_Svc(), session=None))
+    assert (seen["ds_id"], seen["origin"]) == ("ds-1", "connector"), seen
+
+
 def test_an_unversioned_source_is_never_flagged(monkeypatch):
     # Regression guard (passes before the change): nothing to bring into history.
     svc, session, order, captured = _build(

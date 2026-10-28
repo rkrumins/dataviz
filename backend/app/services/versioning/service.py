@@ -3082,12 +3082,17 @@ class GraphVersioningService:
                 "external_drift": ps.external_drift if ps else None,
             }
 
-    async def clear_external_changes(self, graph_id: str) -> None:
+    async def clear_external_changes(self, graph_id: str, seen_at: Optional[str] = None) -> None:
         """What the graph held that history didn't has been brought into it: the flag goes,
-        whichever check raised it (``projection_state.external_drift``)."""
+        whichever check raised it (``projection_state.external_drift``) — the flag as it was when
+        the graph was read (``seen_at``, its ``at``; None: there was none). One raised since, say
+        by a writer's notification that arrived during the read, stays: what it reports may not
+        be in what was read."""
+        at = ProjectionStateORM.external_drift["at"].astext
         async with self._session() as s:
             await s.execute(update(ProjectionStateORM)
-                            .where(ProjectionStateORM.graph_id == graph_id)
+                            .where(ProjectionStateORM.graph_id == graph_id,
+                                   func.coalesce(at, "") == (seen_at or ""))
                             .values(external_drift=None)
                             .execution_options(synchronize_session=False))
 

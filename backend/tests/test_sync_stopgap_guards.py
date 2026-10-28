@@ -242,7 +242,7 @@ class _ReadsTheGraph:
     async def projection_watermark(self, _gid):
         return {"fresh": True, "status": "idle", "falkor_graph_name": None}
 
-    async def clear_external_changes(self, _gid):
+    async def clear_external_changes(self, _gid, **_k):
         return None
 
 

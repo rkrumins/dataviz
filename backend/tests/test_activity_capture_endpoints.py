@@ -340,7 +340,7 @@ async def test_a_resync_is_recorded_once(test_client, db_session, estate, versio
     async def _watermark(self, _gid):
         return {"fresh": True, "status": "idle", "falkor_graph_name": None}
 
-    async def _cleared(self, _gid):
+    async def _cleared(self, _gid, **_k):
         return None
 
     from backend.tests.test_sync_stopgap_guards import read_the_graph

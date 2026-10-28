@@ -50,7 +50,8 @@ def world(monkeypatch, db_session):
 
     seen = {"steps": []}
     wm = {"fresh": True, "status": "idle", "falkor_provider": "prov_b",
-          "falkor_graph_name": "g_b", "owns_falkor_graph": False}
+          "falkor_graph_name": "g_b", "owns_falkor_graph": False,
+          "external_drift": {"at": "t1", "nodes": 2, "edges": 1, "via": "verify"}}
 
     async def resolve(self, **_k):
         return {"graph_id": "vg_b"}
@@ -63,9 +64,10 @@ def world(monkeypatch, db_session):
         seen["bring"] = k
         return {"commit_id": "c_b", "commit_seq": 9, "applied": 3}
 
-    async def clear(self, gid, **_k):
+    async def clear(self, gid, **k):
         seen["steps"].append("clear")
         seen["cleared"] = gid
+        seen["clear"] = k
 
     async def for_the_graph(cls, _ws_id, _registry, session, ds_id):
         return types.SimpleNamespace(provider="the data source's reader", _data_source_id=ds_id,
@@ -114,6 +116,8 @@ async def test_it_reads_the_projections_key_then_clears_the_flag_and_rebuilds_th
         "vg_b", "the graph's client", "the source's rules", "merge")
     assert seen["steps"] == ["stamp", "bring", "clear", "rebuild"]
     assert seen["cleared"] == seen["rebuilt"] == "vg_b"
+    # Only the flag the read began under goes: one raised since may report what it didn't read.
+    assert seen["clear"] == {"seen_at": "t1"}
 
 
 async def test_a_key_the_platform_owns_has_nothing_to_bring_in(test_client, source,

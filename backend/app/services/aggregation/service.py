@@ -2501,6 +2501,14 @@ class AggregationService:
             if ds_orm is not None and ds_orm.deleted_at is None:
                 workspace_id = ds_orm.workspace_id
 
+        # A writer said it wrote to the graph: on a source under version control, history doesn't
+        # hold that until it is brought in. Its word is the evidence, so it comes before the change
+        # gate: a property edit moves no count, and so no fingerprint either.
+        versioned = await _version_controlled(ds_id)
+        if versioned and origin in _OUTSIDE_WRITER_ORIGINS:
+            from backend.app.services import versioned_sources
+            await versioned_sources.flag_external_changes(ds_id)
+
         # 2. Resolve the provider and fingerprint the live graph (same
         # bounded pattern as check_drift / the scheduler). A resolution
         # failure leaves provider=None (content-cache clear is skipped); a
@@ -2602,7 +2610,6 @@ class AggregationService:
         # rollups, and a job queued beside it is the loop the reconciliation
         # sweep guards against (reconcile._guard). What serves reads is
         # refreshed below; nothing is marked or rebuilt.
-        versioned = await _version_controlled(ds_id)
         status = (state.aggregation_status if state else None) or "none"
         applicable = status not in self._AGG_NOT_APPLICABLE and not versioned
 
@@ -2762,11 +2769,6 @@ class AggregationService:
             # the cockpit needs to tell "nothing changed" apart from
             # "changed, but aggregation doesn't apply to this source".
             trigger_detail = "version_controlled" if versioned else "not_applicable"
-        if versioned and origin in _OUTSIDE_WRITER_ORIGINS:
-            # A writer said it wrote to the graph: history doesn't hold that until it is
-            # brought in, and a property edit moves no count the projector could flag it by.
-            from backend.app.services import versioned_sources
-            await versioned_sources.flag_external_changes(ds_id)
 
         # Audit outcome: not-applicable and the unchanged-gate no-op above
         # both leave nothing queued ("noop"); otherwise deferred/accepted/

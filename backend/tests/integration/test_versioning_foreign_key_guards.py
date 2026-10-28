@@ -15,7 +15,8 @@
   tombstoned graph's retained pin; a full replay over a key the platform does not own deletes
   nothing history doesn't hold: it publishes, and flags what it kept (``external_drift``).
 * A loader's change notification flags a customer's graph only: nothing else writes to a key the
-  platform minted, so there is nothing there to bring into history.
+  platform minted, so there is nothing there to bring into history. Bringing changes in clears the
+  flag it began under, and never one raised since.
 
 FalkorDB is the in-memory ``FakeFalkor`` of ``test_versioning_projection``. Skipped unless
 ``GRAPHVER_E2E=1``.
@@ -464,3 +465,35 @@ async def _run_notification_flags() -> None:
 
 def test_a_notification_flags_the_customers_graph_and_never_a_platform_copy():
     asyncio.run(_run_notification_flags())
+
+
+async def _run_clear_what_was_read() -> None:
+    from backend.app.services import versioned_sources
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    ds = _ds()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="a",
+                                  falkor_graph_name=_name()))["graph_id"]
+
+    async def flag():
+        await versioned_sources.flag_external_changes(ds)
+        return ((await svc.projection_watermark(gid))["external_drift"] or {}).get("at")
+
+    # A notification that arrives while the graph is read is not cleared with what was read.
+    read_under = await flag()
+    await asyncio.sleep(0.01)
+    raised_since = await flag()
+    assert raised_since != read_under
+    await svc.clear_external_changes(gid, seen_at=read_under)
+    assert (await svc.projection_watermark(gid))["external_drift"] is not None
+    # Nor when nothing was flagged as the read began.
+    await svc.clear_external_changes(gid, seen_at=None)
+    assert (await svc.projection_watermark(gid))["external_drift"] is not None
+    await svc.clear_external_changes(gid, seen_at=raised_since)
+    assert (await svc.projection_watermark(gid))["external_drift"] is None
+    await db.dispose_engine()
+
+
+def test_bringing_changes_in_clears_the_flag_it_began_under_and_no_newer_one():
+    asyncio.run(_run_clear_what_was_read())

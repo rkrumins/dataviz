@@ -1464,5 +1464,5 @@ async def source_changed(
     raw = await request.body()
     body = SourceChangedRequest(**(_json.loads(raw) if raw else {}))
     return await svc.signal_source_changed(
-        ds_id, session, reason=body.reason, force=body.force,
+        ds_id, session, reason=body.reason, force=body.force, origin="connector",
     )

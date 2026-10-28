@@ -71,7 +71,8 @@ jobs around such a graph.
   500 on a relationship to such a node, and brought in the summaries' own rollups and nodes. It
   answers 409 `not_ready` while the projection is behind main, evicted, being rebuilt or moved, and
   409 `platform_copy` on a graph the platform created, which nothing else writes to. A loader's
-  change notification flags only a customer's own graph.
+  change notification flags only a customer's own graph, and bringing changes in clears only the
+  flag it began under: one that arrives while it reads stays.
 - **The Versioning tab says what the graph holds that history doesn't.** Its fast read layer card
   has a **Not in history** row: how many items and connections, or that a writer reported a change.
   People who can publish get **Bring into history** beside it. On a customer's graph, the Rebuild
@@ -84,9 +85,10 @@ jobs around such a graph.
   change signal on a versioned source (`/refresh` at `auto`, `/source-changed`) used to mark it
   stale and queue an aggregation rebuild, although the projection maintains its rollups and the
   docs said such a signal had no effect. It now refreshes the caches, clears the stale marker and
-  queues nothing. When a loader or connector says it wrote (origin `script` or `connector`), the
-  graph is flagged as holding changes not in history, even for a property edit, which no count
-  shows.
+  queues nothing. When a loader or connector says it wrote (origin `script` or `connector`, and
+  `/source-changed`, which connectors call), the graph is flagged as holding changes not in
+  history, even for a property edit, which no count shows: the writer's word is taken before the
+  change check, which such an edit passes unseen.
 
 - **A paused or failed enable no longer switches off change detection.** From the moment "Enable
   version control" was queued, the reconciliation sweep treated the data source as versioned: it
@@ -122,7 +124,7 @@ jobs around such a graph.
     platform created, and 503 `graph_unavailable` without a graph server. It deletes nothing from
     history and no longer takes `force` or `allowMassDelete`.
   - A change signal on a versioned source (`/refresh` at `auto`, `/source-changed`) returns no
-    `jobId`: it queues no rebuild.
+    `jobId`: it queues no rebuild. `/source-changed` records its signal with origin `connector`.
   - The watermark gains `externalDrift`.
 
 ---

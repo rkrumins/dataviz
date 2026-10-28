@@ -1088,7 +1088,7 @@ async def source_changed(
     session: AsyncSession = Depends(_get_session),
 ):
     return await svc.signal_source_changed(
-        ds_id, session, reason=body.reason, force=body.force,
+        ds_id, session, reason=body.reason, force=body.force, origin="connector",
     )
 
 

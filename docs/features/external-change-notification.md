@@ -101,8 +101,9 @@ vocabulary: `marker_set`, `marker_cleared`, `content_cleared`,
 it — when a signal does less than you expected, this says which step declined.
 
 `POST /api/v1/admin/data-sources/{ds}/source-changed` with `{"reason", "force"}`
-is the older equivalent of `scope=auto`. It still works and connectors already
-wired to it need not migrate, but new integrations should use `refresh`.
+is the older equivalent of `scope=auto`, and its signal is recorded as a
+connector's (origin `connector`). It still works and connectors already wired to
+it need not migrate, but new integrations should use `refresh`.
 
 ### Authentication
 
@@ -239,6 +240,7 @@ and actor, and the resulting job carries a trigger you can filter on.
   `/source-changed`), which clears the stale marker instead of setting it. What
   you wrote is not in its version history until someone brings it in (**Bring
   into history**). The next publish counts what you added and flags it. A
-  refresh with origin `script` or `connector` flags it straight away, including
-  a property edit, which changes no count. The explicit `rollups` and `full`
-  refresh scopes still queue a rebuild.
+  refresh with origin `script` or `connector`, or `/source-changed`, flags it
+  straight away, including a property edit, which changes no count: the
+  writer's word is taken before the change check. The explicit `rollups` and
+  `full` refresh scopes still queue a rebuild.
