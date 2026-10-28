@@ -395,7 +395,7 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
                   icon={mode === 'business' ? Zap : Layers}
                   label={`Switch to ${mode === 'business' ? 'Technical' : 'Business'} View`}
                   description={mode === 'business'
-                    ? 'Show each entity’s qualified name (or URN) under its name'
+                    ? 'Show each entity’s identifier (its data source’s identifier property, or its URN) under its name'
                     : 'Show names only, without technical identifiers'}
                   shortcut="⌘/"
                   onSelect={() => handleAction('toggle-persona')}

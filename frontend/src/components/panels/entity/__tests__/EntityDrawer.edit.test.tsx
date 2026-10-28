@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
+import { usePersonaStore } from '@/store/persona'
 import { usePreferencesStore } from '@/store/preferences'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
@@ -189,6 +190,18 @@ describe("EntityDrawer — the source's own name and identity properties", () =>
     expect(within(facts).getByText('title')).toBeInTheDocument()
     expect(within(facts).getByText('Set on this data source')).toBeInTheDocument()
     expect(within(facts).getByText('In step with the name — a rename carries it along')).toBeInTheDocument()
+  })
+
+  it("in the Technical view, the line under the title is the source's identifier, not the URN", () => {
+    usePreferencesStore.setState({ drawerIdentityDetailsOpen: false })
+    usePersonaStore.setState({ mode: 'technical' })
+    try {
+      render(<EntityDrawer canEdit />)
+      const title = screen.getByRole('heading', { level: 2, name: 'Orders' })
+      expect(title.nextElementSibling).toHaveTextContent(/^native-42$/)
+    } finally {
+      usePersonaStore.setState({ mode: 'business' })
+    }
   })
 
   it('a setting\'s pill walks the lookup: what came before it set nothing, what follows was not needed', async () => {

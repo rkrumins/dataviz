@@ -98,6 +98,13 @@ export function useCanvasNodeIdentity(): DataSourceResponse | null {
     })
 }
 
+/** The identifier property of the data source the canvas shows (`id`, `identifier`, …), or `urn`,
+ *  the platform's own, when it maps none or the workspace list has not loaded. What the technical
+ *  view shows under every name (`technicalIdentity`). */
+export function useCanvasIdentityProperty(): string {
+    return normalizeIdentity(useCanvasNodeIdentity()?.identityProperty)
+}
+
 /** An entity as the save rule reads it: its display name and its own properties. */
 export interface NamedShape {
     displayName?: unknown

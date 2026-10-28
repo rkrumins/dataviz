@@ -25,7 +25,8 @@ import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { NO_VERSION_CONTROL, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
-import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
+import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
+import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
 import { userProperties } from '@/lib/nodeFields'
 import { nodeIndexOf } from '@/lib/storeIndex'
 import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
@@ -132,7 +133,11 @@ function OpenEntityDrawer({
   const urn = (form.urn as string | undefined) || node.id
   const userProps = useMemo(() => userProperties(form.properties), [form.properties])
   const title = useMemo(() => resolveEntityName(node.data, personaMode, node.id), [node.data, personaMode, node.id])
-  const technicalLine = useMemo(() => technicalSubtitle(node.data, personaMode), [node.data, personaMode])
+  const identityProperty = useCanvasIdentityProperty()
+  const technicalLine = useMemo(
+    () => technicalIdentity(node.data, personaMode, { identityProperty, urn: node.id, name: title })?.value,
+    [node.data, personaMode, identityProperty, node.id, title],
+  )
   const externalUrl = useMemo(() => getExternalUrl?.(urn) ?? null, [getExternalUrl, urn])
 
   const [copiedUrn, setCopiedUrn] = useState(false)

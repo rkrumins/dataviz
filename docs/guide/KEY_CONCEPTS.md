@@ -206,8 +206,9 @@ The **Business** / **Technical** switch in the top bar changes how entities are
 named, everywhere at once:
 
 - **Business** — the name people use, and nothing else.
-- **Technical** — the same name, with each entity's qualified name (or its URN)
-  underneath, on the canvas and in the entity's details panel.
+- **Technical** — the same name, with each entity's identifier underneath (its
+  data source's identifier property, such as `id`, or its URN), on the canvas
+  and in the entity's details panel.
 
 It changes labels only: the graph, its lineage and your access stay the same.
 The words **Business View** or **Technical View** under the {brandShort} name at

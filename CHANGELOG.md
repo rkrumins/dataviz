@@ -48,9 +48,21 @@ limitations** — a changelog that only lists good news is not worth reading.
   deleted stays deleted.
 - The entity editors no longer offer the mapped name or identity property as a field of its own.
   The Name input is the name property, and the platform assigns the identity property.
+- **The Technical view no longer shows an entity's URN twice.** An entity with no name of its own
+  showed its URN as its name and again underneath. It now shows it once.
+- **A lineage trace row shows its identifier before its details load.** In the Technical view, a
+  row whose details hadn't loaded yet showed nothing under its name. It now shows its URN.
 
 ### Changed
 
+- **The Technical view shows the same kind of identifier under every name.** On Context View rows,
+  Graph cards and the entity drawer, Technical mode now shows the property the data source
+  identifies entities by, such as `id`. That property is set on the data source, its provider or
+  its workspace. A source that uses the platform's own key shows the URN, as does an entity with
+  no value of its own. The view used to show the qualified name where a loader set one that
+  differed from the name, and the URN everywhere else, so one column mixed paths with URNs.
+  Hovering the line names the property, as in `id: ORD-000417`. The qualified name is still in
+  the entity's details. The line still appears only in the Technical view.
 - A rename shows as two changed fields in history and in the Changes tab: the display name and
   the name property.
 - A draft rename now conflicts at publish with a re-sync of main that changed the same name

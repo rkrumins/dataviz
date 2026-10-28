@@ -147,7 +147,7 @@ graph LR
 | **Ontology-First** | Entity types, relationships, visual styling, and hierarchy defined in versioned, immutable ontologies | Schema governance without code changes; teams customize independently |
 | **Workspace-Centric** | Provider (infrastructure) + Ontology (semantics) + Workspace (context) as independent entities | Multi-tenancy, team isolation, and infrastructure reuse built in from day one |
 | **Interactive-First** | Canvas-based exploration with trace, expand, filter, and zoom -- not static reports | Users discover relationships through interaction, not pre-built dashboards |
-| **Dual-Audience** | The top bar's **Business** / **Technical** toggle shows the names people use, or adds each entity's qualified name (or URN) under its name, on the canvas and in the entity drawer | One source of truth, two experiences; bridges the gap between data teams and stakeholders |
+| **Dual-Audience** | The top bar's **Business** / **Technical** toggle shows the names people use, or adds each entity's identifier under its name (its data source's identifier property, such as `id`, or its URN), on the canvas and in the entity drawer | One source of truth, two experiences; bridges the gap between data teams and stakeholders |
 
 ---
 
@@ -177,7 +177,7 @@ flowchart LR
 1. **Switch to business names** — choose **Business** in the top bar's **Business** / **Technical** toggle, so every entity shows the name people use
 2. **Search** the **Dashboard** for a view, workspace or data source, or press ⌘K / Ctrl-K anywhere to search pages, views, workspaces and docs
 3. **Open a view** to see the high-level flow — with containers closed, the lineage between domains and applications is shown rolled up
-4. **Drill down** by opening containers; switch to **Technical** to see each entity's qualified name (or URN) under its name
+4. **Drill down** by opening containers; switch to **Technical** to see each entity's identifier (its data source's identifier property, or its URN) under its name
 5. **Favorite** the views you return to in the **Explorer**; they appear under **Favorites** in the top bar
 
 ### For Platform Admins

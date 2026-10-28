@@ -60,7 +60,7 @@ sidebar are **Getting started** (your checklist), **User Guide** and
 | --- | --- |
 | The {brandShort} name, with **Business View** or **Technical View** under it | Shows which naming mode is on |
 | **Search pages, views, workspaces, docs…** (`⌘K` / `Ctrl-K`) | Opens the command palette: jump to any page, view, workspace or guide page |
-| **Business** / **Technical** | Switches how entities are named — Technical adds each one's qualified name |
+| **Business** / **Technical** | Switches how entities are named — Technical adds each one's identifier |
 | The star (**Favorites**) | Your favourite views, plus the ones you opened recently |
 | The bell (**Inbox**) | Messages for you — for example, a view someone shared with you |
 | The theme button | Cycles between light, dark and your system's theme |
