@@ -486,6 +486,177 @@ grants can't be read.
 
 ---
 
+## [Unreleased] — "Inside" anywhere in a query, searches that start from a thing's ancestors, and layer names with spaces
+
+### Added
+
+- **"Inside a container" anywhere in a query.** Under an **OR** or a **NOT** group, or as a
+  relationship's condition, **Inside a container named…** (`inside @"…"` in Code mode) tests each
+  entity: the container itself, or anything up to 12 levels below it (fewer in a shallower View).
+  At the top of a query it still limits the whole search. So a thing's *family* — it, everything
+  inside it and every container above it — is one query: `inside @"X" OR descendant(@"X")`. It
+  works at either end of a Connections search, and in display rules. Inside a relationship's
+  condition, the Form's palette now offers **Inside a container named…**, **Inside Subtree** and
+  **Root in view is…**.
+- **Layer names with spaces in Code mode.** `layer:Reporting layer` and `layer = Reporting layer`
+  read as one name when the View has a layer called that, ignoring case and spacing; the
+  longest name the words spell wins, and the words after it are the rest of the query. Quoted,
+  `layer:"Reporting layer"` always reads whole. Suggestions offer the View's layers while a name
+  of several words is typed, with or without a quote, and write the picked name in quotes,
+  closing an open quote once. A type, tag or property name that needs quotes is written in them
+  when picked, as the first value after `type:`, `tag:`, `layer:` or `has:`.
+
+### Changed
+
+- **A search starts from the things it names.** A condition in the query's top-level AND that
+  names entities — `@"X"`, its parent (`child(@"X")`), its ancestors (`descendant(@"X")`), or an
+  OR of those with `inside @"X"` — is now where the search starts: those entities are found from
+  *X*, up or down the hierarchy, and only they are tested by the rest of the query. A
+  Connections end that names its entities this way is the end it starts from. On 2 million
+  entities and 6.85 million edges, against the previous version on the same machine, with every
+  count exact: the 100,000 connections out of a column's containers in 1.6 s rather than 15 s;
+  those from one container's family to another's in 0.55 s rather than 28 s; and those from a
+  layer into a container's family in 1 s rather than 110 s.
+- **An ANY query holding an "inside" row runs as written.** Before, the panel lifted an **Inside
+  a container named…** row out of an **ANY** (OR) query and used it to limit the whole search,
+  because the server couldn't read it there. It is now one of the alternatives, as the builder
+  shows it, and the **inside *X*** chip is shown only when it limits the whole search.
+- **Code mode writes a value with a quote in it in the other kind of quote** — `owner = 'say "hi"'`,
+  `tag:"O'Brien"` — and a value holding both kinds as JSON. Each reads back as it was.
+
+### Known limitations
+
+- **With both ends named, a Connections search starts from From.** A From whose things have
+  very many edges then costs more than starting from To would: 1.9 s rather than 0.5 s, measured
+  from a column's containers, one of them a dataset with 100,000 edges, into a container.
+- **Unquoted layer names need the View's layers.** Code mode reads `layer:Reporting layer` as
+  one name only where it knows the View's layers. The filter palette's typed-in query, which
+  doesn't, reads it as `layer:Reporting` and a name search for `layer`: quote the name there.
+
+---
+
+## [Unreleased] — Connections in the search panel, on the canvas, in Code mode and Ask
+
+### Added
+
+**Find: Entities · Connections.** The Advanced Search query card can find the edges themselves.
+Switch **Find** to **Connections** and the query becomes **From** → **Through** → **To**:
+- **From** and **To** are each an ordinary query, with its live count.
+- **Through** picks the edges: any link, lineage, containment, any edge or chosen edge types. It
+  sets the direction (From → To, or either way) and takes an edge filter.
+
+The results list every edge: source → type → target, each end with its parent, and type chips
+counted exactly. A row shows both ends on the canvas, opens either end, or copies the edge's id.
+The match bar counts connections, and `J` / `K` step through them. When nothing matches, the
+panel says how many entities meet each end and offers the fixes that fit. Connections also work in:
+- **Search Studio**, as a table;
+- **Export**, with fixed edge columns;
+- the **Library**, with a **Connections** badge;
+- the **Sentence** view, which reads them as "Connections from … to …".
+
+**Connections on the canvas.**
+- **Both ends light up**, with their containers, and so do the lines that draw the matched edges.
+  Each line has a badge saying how many matches it draws (**N+** while more pages remain), and the
+  other lines dim.
+- **Matches folded inside collapsed containers** light the line between the containers on screen,
+  even where no summary of their connections was built. Opening a container moves the light down
+  to the exact edges.
+- **On Hover and Adaptive** draw the lit lines too, up to 1,000, with a chip for the rest.
+- **Hidden kinds of flow:** a match of a kind hidden in the **Flows** panel stays hidden, and the
+  match bar offers **Show them**.
+- **The Graph canvas** lights its matched lines as well, alongside your own highlights.
+
+**Code mode.**
+- `from(type:dataJob) to[PRODUCES](type:dataset)` is a Connections search. `linkedTo(…)` makes it
+  either way, `.via(…)` adds an edge filter, and `from() to(layer:Gold)` starts from any entity.
+- Suggestions offer the edge types inside `to[` and where the edges go after `from(…)`.
+- **Suggestions cover everything Code mode reads.** After a property's name, every operator in
+  the Form's words (`IN (…)` *is one of*, `BETWEEN … AND …`, `WITHIN LAST …`, `IS SET`…); inside
+  `IN (`, the property's values, leaving out those listed; durations after `WITHIN LAST`; the
+  endings a comparison takes, where they change it; and the words that were missing:
+  `hasUpstream`, `hasDownstream`, `hasIncoming`, `hasOutgoing`, `qname:`, `description:`,
+  `ancestor*2(…)` and `.via(…)`. A test fails if an operator or a keyword the parser reads isn't
+  offered.
+- `⌘I` selects an end, then the whole connection.
+- **Examples** gain three Connections lines.
+
+**Ask** reads "connections from columns tagged PII to dashboards through produces, either way".
+Each end is read as a question of its own.
+
+**A guide page for everyone.** [Finding Connections](/guide/finding-connections) explains what a
+connection is and walks through a first search step by step, with pictures. It gives worked
+examples in the Form, Ask and Code, explains what the canvas shows, and says what to do when
+nothing matches. It covers everything coming into one thing, the hierarchy at either end (a
+parent, a grandparent, what a thing holds and how many), and how the canvas rolls the actual
+connections up between closed containers. The glossary gains *Connection*, *Edge type*,
+*Either way*, *From / To* and *Through*, and the guide's home page gains a card and a question
+for it.
+
+### Changed
+
+- **"Connection" means the edges search now.** Code mode's errors call a relationship a
+  relationship: "A relationship follows [lineage], [links] or edge types…", and ".via(…) follows
+  feeds, fedBy, linkedTo or a connection's to(…)".
+
+### Fixed
+
+- **Load more past an entity search's first page.** The next page dropped the facets the first
+  page asked for, so the server refused its cursor as issued for a different query.
+- **The canvas search box** counted a Connections answer as "8 matches · 0 layers". It now says
+  "8 connections".
+
+### Known limitations
+
+- **Connections are direct edges only.** Multi-hop connections are future scope: the edges of
+  every route of up to N hops between a From and a To match.
+- **The canvas lights the first 2,000 matched edges loaded.** The list, counts and export cover
+  every match.
+- **On a Graph view, the search panel squeezes the canvas to nothing.** This is an existing layout
+  fault, and closing the panel ends the search, so no search's highlight shows there yet.
+  Context Views show it in full.
+- **Unlit lines don't dim on the Graph canvas.** That holds for a search and for a click
+  highlight: its lineage lines ignore the opacity they're given. The lit lines still stand out.
+
+---
+
+## [Unreleased] — Connections: edges as search results (API)
+
+### Added
+
+**Connections: a search that returns edges.** A new predicate, `edges`, asks for edges instead of
+entities: every direct edge whose source meets one condition (`sourceWhere`, "From") and whose
+target meets another (`targetWhere`, "To"). It can go through named edge types or a class, and
+each edge can meet an edge filter. Edges are taken as stored, or `either` way, each edge once.
+"Every edge from a string column called bob to anything whose parent's family is smith" is one
+query. So is "from a table or any of its columns into the Sales layer". Each end takes any entity
+condition: properties, types, tags, names, "inside a container", layers, and relationships such as
+"its parent is…".
+- **Every match, counted exactly.** It runs on the uncapped engine and pages through every match
+  in a fixed order (source name, target name, type), with exact totals per edge type.
+- **What each edge carries:** its id, type and properties, and both ends, each with its parent and
+  containers.
+- **The other search endpoints:**
+  - **Counts** take a Connections search as an item.
+  - **Exports** write each edge with its ends and their parents.
+  - **Explain** shows the whole search as one statement, ready to edit and run in the Cypher tab.
+- **Scale:** on 2 million entities and 6.85 million edges, a selective search answers in about a
+  second, and one matching 127,000 edges finishes in 13 s, exactly.
+
+See [the developer reference](docs/features/search-and-rules-reference.md#connections-edges-as-results).
+The search panel, highlighting on the canvas, Code mode and Ask are in the block above.
+
+### Known limitations
+
+- **Connections are direct edges only.** Multi-hop connections are future scope: the edges of every
+  route of up to N hops between a From and a To match, with conditions on the entities between.
+  Until then, a path pattern lists routes, and a relationship tests reach.
+- **Both ends read native property values only**: a value kept as raw JSON doesn't match at either
+  end, as in a relationship's condition.
+- **A Connections search needs the uncapped engine.** It isn't a display rule, can't be used through
+  a share link, and has no facets or sort.
+
+---
+
 ## [Unreleased] — Search at any width, saved searches across Views, and Code mode that edits like an editor
 
 ### Added

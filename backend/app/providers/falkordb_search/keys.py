@@ -118,12 +118,12 @@ def _less(x: Any, y: Any) -> bool:
 _URN = SortKey("n.urn")
 
 
-def name_text(name_key: Optional[str]) -> str:
+def name_text(name_key: Optional[str], var: str = "n") -> str:
     """The display name the ranking reads, lower-cased — the same fallbacks
     ``_rows_to_candidates`` applies (displayName, the source's name
     property, name, title, label)."""
     from backend.app.providers.falkordb_search.relevance import display_name_expr
-    return f"toLower(coalesce({display_name_expr(name_key)}, ''))"
+    return f"toLower(coalesce({display_name_expr(name_key, var)}, ''))"
 
 
 def build_sort_spec(

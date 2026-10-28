@@ -23,7 +23,11 @@ export function describeQueryPath(path: string): string {
     for (const [, name, index] of path.matchAll(SEGMENT)) {
         const n = index === undefined ? null : Number(index) + 1
         if (name === 'predicate') continue
-        if (name === 'children') parts.push(`${parts.length ? 'condition' : 'filter'} ${n}`)
+        // Only a Connections search has ends at the root: anything else is
+        // sent inside a group.
+        if (!parts.length && name === 'sourceWhere') parts.push('From')
+        else if (!parts.length && name === 'targetWhere') parts.push('To')
+        else if (name === 'children') parts.push(`${parts.length ? 'condition' : 'filter'} ${n}`)
         else if (name === 'items') parts.push(`rule ${n}`)
         else if (name === 'refs') parts.push(`name ${n}`)
         else if (name === 'sourceRefs') parts.push('where it starts', `name ${n}`)

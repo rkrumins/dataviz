@@ -8,6 +8,10 @@ on the canvas, counts them in every container, and keeps the searches you use
 again, for you or for everyone who opens the View. This page shows you how to
 ask, narrow the results, act on the matches, and save the searches you reuse.
 
+It can find the **edges themselves** too: every relationship from the entities
+you describe to the ones you describe next, with both ends and their parents —
+see [Finding Connections](/guide/finding-connections).
+
 > **Note:** *The one-sentence model* — A search is a set of **filters** (joined
 > with AND, OR and NOT) run over **one View**. The same filters power the quick
 > search box, the Advanced Search panel, saved searches and
@@ -109,6 +113,7 @@ Ask on the query card — **Or ask in plain words…** under the filters in
 | `datasets in Snowflake` · `datasets inside "Sales Ops"` · `datasets in the gold layer` | Inside a container you name · in a layer |
 | `datasets owned by alice@corp` · `with more than 1M rows` · `updated in the last 7 days` | Property comparisons |
 | `datasets that feed "CFO Revenue"` | A named entity, in quotes |
+| `connections from columns tagged PII to dashboards` · `edges from datasets to the gold layer through produces, either way` | A [Connections](#connections-the-edges-themselves) search — each end read as a question of its own; `through …` names edge types or a class, `either way` both directions |
 
 As you type it **reads the question back** — **Reads as**, and how many it
 matches — before anything changes. A word with more than one reading, such as
@@ -294,12 +299,13 @@ entity's own conditions under it.
 **Following lineage far.** A relationship is tested from each candidate up to
 3 steps. Past that, one asking for **at least one**, at the top of the search —
 not under an OR group or a NOT group, and not inside another relationship — is
-walked from its far end instead, up to 10 steps: from the entities it names,
-or — one such relationship a search — from everything its far end matches
-across the data source. A far end matching more than 200,000 entities, or a
-walk reaching more than 500,000, is refused in plain words: narrow the far end,
-or follow fewer steps. For **no**, **only** or a count that deep, write it in
-[Cypher](#your-own-cypher).
+walked from its far end instead, up to 10 steps: from the entities it names
+(with what's inside them, their parent or children, or every container above
+them), or — one such relationship a search — from everything its far end
+matches across the data source. A far end matching more than 200,000
+entities, or a walk reaching more than 500,000, is refused in plain words:
+narrow the far end, or follow fewer steps. For **no**, **only** or a count
+that deep, write it in [Cypher](#your-own-cypher).
 
 **Edges and their counts.** Under **Graph shape**, **No upstream lineage**,
 **No links at all**, **No edges at all** and the rest find entities by the
@@ -317,6 +323,17 @@ in the View (`** / orders`). Because names mean the same everywhere, a saved
 search or rule that uses them keeps working when it moves to another View or
 environment. A path that names several entities uses all of them; one that
 names nothing matches nothing.
+
+**Inside a container, anywhere in the query.** At the top of the query,
+**Inside a container named…** (or **Inside Subtree**) limits the whole search
+to that container. Under an **OR** or a **NOT** group, or as a relationship's
+condition, it tests each entity instead: the container itself, or anything
+below it, up to 12 levels down (fewer if the View is shallower). So
+*fact_orders' family* — `fact_orders`, everything inside it and every
+container above it — is an **OR** group of **Inside a container named…**
+`** / fact_orders` and **Contains, at any depth…** with **Is a named
+entity…** `** / fact_orders`; in Code,
+`inside @"**/fact_orders" OR descendant(@"**/fact_orders")`.
 
 **Paths from A to B** lists the routes between two ends, each end entities you
 name or **Any entity where…** a condition: "every route from a topic to a
@@ -342,6 +359,39 @@ A condition can't point back at an entity's own layer, so "into another layer"
 names it, as above; to ask it of every layer at once, join one such condition
 per layer with OR.
 
+### Connections: the edges themselves
+
+A relationship finds *entities* by what they're linked to. **Connections** finds
+the *edges*: every relationship from the entities you describe to the ones you
+describe next — "every edge from a string field called bob to anything whose
+parent's family is smith", "every edge from `fact_orders`, or anything inside
+it, into the Reporting layer". Each answer is one edge, with both of its ends
+and the containers each sits in.
+
+Switch **Find** in the query card's first row from **Entities** to
+**Connections**: your conditions become **From**, and switching back brings
+them back. Then say where the edges end (**To**) and which edges count
+(**Through**: **Any link**, **Lineage**, **Containment**, **Any edge** or
+**These edge types…**; **From → To** or **Either way**; and **Only edges
+where…**). Each end is an ordinary query of its own and shows its live count.
+The results list each edge; the canvas lights the lines that carry them, each
+badged with how many it carries; Search Studio, **Export** and the **Library**
+take them too. A Connections search finds direct edges, one edge from a From
+match to a To match (see [Limits](#limits)), and it can't be made into a
+display rule.
+
+**[Finding Connections](/guide/finding-connections)** walks through a first
+search step by step, with pictures; gives worked examples in the Form, Ask and
+Code, among them
+[everything coming into one thing](/guide/finding-connections#everything-coming-into-one-thing)
+and [the hierarchy at either end](/guide/finding-connections#up-and-down-the-hierarchy);
+explains what the canvas shows, actual connections and rolled-up lines alike;
+and says what to do when nothing matches.
+
+> **Note:** Both ends read the values each entity keeps as its own. A value kept
+> only inside an entity's raw properties JSON doesn't match at either end — the
+> same as in a relationship's condition.
+
 ### Code mode
 
 Switch the query card to **Code** to type the query instead. Every mode edits
@@ -354,16 +404,36 @@ The editor helps as you type:
 - **Colours** show how each word is read — a keyword, a property, a value, a
   relationship — and a red underline marks where a query stops making sense,
   with the reason below it.
-- **Suggestions** (or `Ctrl+Space`) offer what fits where the cursor is: entity
-  types after `type:`, tags after `tag:`, layers after `layer:`, a property's
-  values after `owner =`, other properties inside `{`, edge types inside
-  `outgoing[` (each with the entity types it joins), edge properties inside
-  `.via(`, and entities by name after `@"`. They come from this View's own
-  data, and an edge type the data source doesn't know is underlined as you
-  type.
+- **Suggestions** (or `Ctrl+Space`) offer what fits where the cursor is:
+  - after a property's name, every operator, in the Form's words: `IN (…)`
+    *is one of*, `NOT IN (…)` *is none of*, `BETWEEN … AND …` *is between*,
+    `WITHIN LAST …`, `IS SET` and the rest. They open by themselves after a
+    property this View lists; after any other name, start typing the operator
+    (`IN`, `IS`, `NOT`…) or press `Ctrl+Space`. After `name` or `description`
+    they're the text operators, and after `type`, `IN (…)`;
+  - a property's values after `owner =` and inside `tier IN (`, each list
+    leaving out the values already in it, and entity types inside
+    `type IN (`;
+  - how long after `WITHIN LAST`, and the endings a comparison takes
+    (`AS TEXT`, `MATCH CASE`, `INCLUDING MISSING`), only where they change
+    what it means;
+  - entity types after `type:`, tags after `tag:`, layers after `layer:`,
+    other properties inside `{`, edge types inside `outgoing[` and `to[` (each
+    with the entity types it joins), `.via(…)` after a relationship and edge
+    properties inside it, entities by name after `@"`, and after `from(…)`
+    where the edges go.
+
+  They come from this View's own data, and an edge type the data source
+  doesn't know is underlined as you type. A value with spaces or quotes in it
+  is written in quotes when you pick it (`type:"data product"`), and a layer
+  whose name is several words is offered while you type it, quoted or not.
+  For *status is one of Active, Demised or Suspended*, type `status `, pick
+  **IN (…)**, then pick each value as it's offered:
+  `status IN (Active, Demised, Suspended)`.
 - **Reads as** says the query in words, and lists any words that will be
   searched as plain text in names.
-- **Examples** insert a ready-made condition at the cursor.
+- **Examples** insert a ready-made condition at the cursor; a connection
+  takes the whole query's place.
 - **Selecting** works as in any code editor — double-click a word, drag, select
   all, copy and paste — and takes whole conditions too: double-click the word a
   condition starts with (`tag` of `tag:PII`, `outgoing`, `NOT`, a property's
@@ -393,7 +463,7 @@ it.
 | `edges(out) > 10` · `edges[PRODUCES](in) >= 2` | How many edges, which way (`in`, `out`, `both`): links unless brackets say otherwise |
 | `"Asset Owner" = Bob` | A property name with spaces, quoted |
 | `freshnessHours > {slaHours}` | Compared with another property of the same entity (`=`, `!=`, `<`, `<=`, `>`, `>=`) |
-| `layer:Raw` · `layer:"Reporting layer"` | In that layer, as the View places it |
+| `layer:Raw` · `layer:Reporting layer` · `layer:"Reporting layer"` | In that layer, as the View places it. A name of several words needs no quotes when the View has a layer called that; quoted, it always reads whole |
 | `… AS NUMBER` · `… MATCH CASE` · `… INCLUDING MISSING` | After a property comparison: its type, case-sensitivity, and whether entities without the property match |
 | `a AND (b OR c)` · `NOT tag:PII` · `!tag:PII` | Grouping; words side by side mean AND |
 | `parent(type:domain)` · `root(@"Country")` · `ancestor(region = EMEA)` | Its parent is a domain · its top-level container is *Country* · any container above it has region EMEA |
@@ -404,6 +474,9 @@ it.
 | `count(child(type:column)) > 100` | How many relatives match |
 | `fedBy(…).via(confidence >= 0.8)` | Every edge walked meets the condition |
 | `@"Country/United Kingdom"` · `inside @"Country/**/London"` | The entity named by that path · anything inside it (`\/` is a slash in a name, `\\` a backslash) |
+| `from(type:dataJob) to(type:dataset)` | A [connection](#connections-the-edges-themselves): the edges from a job to a dataset, any link, the way each edge points — the whole query |
+| `from(…) to[PRODUCES](…)` · `to[lineage](…)` · `to[containment](…)` | Through these edge types, or a class: `[lineage]`, `[links]`, `[any]`, `[containment]` |
+| `from(…) linkedTo(…)` · `from(…) to(…).via(confidence >= 0.8)` · `from() to(layer:Gold)` | Either way · every edge meets the condition · an empty end is any entity |
 
 A relationship word counts only when `(` follows it directly — after its
 `[edge types]` and `*steps`, if any: `root cause`, `feeds data` and
@@ -418,6 +491,12 @@ the word is the class. A named edge type prints with `outgoing` or
 data's. The older words read as they always have: `upstream`, `downstream` and
 `neighbor` are `fedBy`, `feeds` and `linkedTo[lineage]`, and **Code** prints
 them in the new words.
+
+A connection is the whole query: `NOT from(…)`, or one beside other conditions,
+is refused — put those conditions in its ends. `linkedTo` right after
+`from(…)` is its far end, either way; anywhere else it is a relationship.
+`from (…)` or `to (…)` with a space is refused with a hint rather than searched
+for as words, and `to*..3(…)` is refused too: a connection is one edge.
 
 Anything the words can't spell — within N hops, a path, a depth-limited
 subtree — appears as its own JSON, such as `{"kind": "withinHops", …}`, and
@@ -651,7 +730,8 @@ tab. To put one library on every View of a data source, see
 [display rule](/guide/display-rules): every match gets a coloured chip on the
 canvas, for everyone who opens the View. It needs at least one complete filter
 and permission to edit the View. A rule can't use *Within N hops*, a *Path*, or
-a lineage relationship of more than one hop.
+a lineage relationship of more than one hop, and can't be a Connections search,
+which finds edges, not entities.
 
 From the **Library**, **Make a display rule** (the tag) on any saved search —
 this View's, another View's or your own — opens the rule editor on it, named
@@ -788,7 +868,7 @@ hops, whose container somewhere above is *Country / United Kingdom*:
 fedBy*..2(ancestor(@"Country/United Kingdom"))
 ```
 
-### Connections, worked through
+### Links and edge types, worked through
 
 Each gives the question, the Form clicks and the Code-mode text. Swap the
 types, tags, edge types and properties for your data's own.
@@ -923,7 +1003,7 @@ LIMIT 200
 | Filters in one query | 64 |
 | Nesting depth of groups | 6 levels |
 | Filters directly inside one OR group | 24 |
-| *Inside Subtree*, *Within N hops*, *Path* | Only at the top level (not inside OR or NOT, nor in a relationship's condition); one *Path* per query |
+| *Within N hops*, *Path* | Only at the top level (not inside OR or NOT, nor in a relationship's condition); one *Path* per query |
 | Relationships inside relationships | 3 deep |
 | Lineage hops in a relationship | 3; 10 for **at least one** at the top level — walked from the entities it names, or, one a search, traced from what its far end matches (at most 200,000 entities, reaching at most 500,000) |
 | **In layer…** | A View that places at most 1,000 entities by hand, and no more layer rules than FalkorDB can follow quickly |
@@ -939,6 +1019,16 @@ LIMIT 200
 | Counts as you build | FalkorDB data sources; not for a *Path*, or a filter not yet filled in |
 | **Narrow to** chips | The 12 commonest types, counted when not every match is loaded |
 | **Keep only these** (Search Studio) | 64 rows |
+| Connections | Direct edges: one edge from a From match to a To match |
+| Connections lit on the canvas | The first 2,000 loaded; under **On Hover** or **Adaptive**, the 1,000 lines drawing the most |
+| A page of connections | 500 |
+
+**Future scope: multi-hop connections.** A Connections search finds direct
+edges. The edges of every route of up to *N* hops from a From match to a To
+match — with conditions on the entities between, exact counts, paging and
+highlighting — are planned, not built. Until then, a *Path* lists routes
+between the entities it names, and a relationship such as **Feeds** within 3
+steps tests reach.
 
 ---
 
@@ -949,7 +1039,7 @@ LIMIT 200
 | **No matches**, but you know it's there | The property name or value differs from what you typed, or the entity is outside the View | Pick the property and value from the suggestions; check the scope menu; try **Entire data source** |
 | A **draft**'s new entity isn't found | Search reads the published graph; changes on a draft aren't searchable until they're published | Publish, or look in the draft's canvas directly |
 | "*This view has no boundaries yet, so searching for a word on its own…*" | A plain word over **Everything**, in a View that doesn't limit itself to any entities or types, would read the whole data source | Add a type, tag or property filter, or set **Look in** to **Name** |
-| "*…only allowed in the top-level AND group*" | *Inside Subtree*, *Within N hops* or *Path* sits inside an OR or NOT group | Move it to the top level of the query |
+| "*…only allowed in the top-level AND group*" | *Within N hops* or *Path* sits inside an OR or NOT group | Move it to the top level of the query |
 | "*between needs a lower and an upper value*", "*give a duration like P30D*" | A value can't be compared the way the filter asks | Fix the value the message names |
 | "*… names no entity*" under **No matches**, or **not found** on a name | A name path is spelled differently, or starts below the top | Start at a top-level entity and name each container on the way down, or start with `**` |
 | "*… follows lineage 4 hops. Following more than 3 works for 'at least one' at the top of the query…*" | The relationship asks for none, every one or a count, sits under an OR or NOT group, or is inside another condition | Ask for **at least one** at the top of the query, follow at most 3 steps, or write it in Cypher |
@@ -957,7 +1047,7 @@ LIMIT 200
 | "*More than 200,000 entities match the far end…*", "*… reaches more than 500,000 entities*" | A relationship followed past 3 hops starts from everything its far end matches | Narrow the far end (a type, a tag, a container), or follow fewer hops |
 | "*Following lineage more than 3 hops works for a search that lists its matches, not for its group counts*" | Group counts (aggregations) can't follow a relationship that far | List the matches, or follow at most 3 hops |
 | "*Edge type 'PRODUCE' isn't in this data source — did you mean PRODUCES?*" | The data source has no edges of that type: a typo, or a type from another data source | Pick it from **Edge types**, or use the name suggested |
-| "*CONTAINS is a containment edge — follow it with Contains or Is inside…*" | A connection names one of the hierarchy's edge types | Use **Directly contains**, **Contains**, **Is directly inside** or **Is inside** |
+| "*CONTAINS is a containment edge — follow it with Contains or Is inside…*" | A relationship names one of the hierarchy's edge types | Use **Directly contains**, **Contains**, **Is directly inside** or **Is inside** |
 | "*No layer in this view is called “…”*" under the results | The layer filter names no layer of this View, so it matched entities whose stored layer has that name | Pick the layer from **In layer…** |
 | "*2 layers in this view are called “…”*" | Two layers share the name | Rename one, or name the layer by its id |
 | "*This view places … entities by hand…*", "*… too many for a layer filter to follow quickly*" | The layer filter follows the View's own placement, and this View's is too big to follow | Filter by type, tag or container instead |
@@ -974,11 +1064,18 @@ LIMIT 200
 | No counts beside the Sentence lines, recipes or Ask | **Live counts** is off, the data source isn't FalkorDB, or you opened the View through a share link | Turn on **Options → Live counts**, or run the query to see its count |
 | **Searched for by name: …** under the Ask bar | Those words aren't a type, tag, property, layer or container the View holds | Rephrase with the View's own words, pick a reading, or keep the name search |
 | **Nothing matches from here** on a Sentence line | That line leaves nothing of what the lines above it found | Apply one of the fixes beside it, or change the line |
+| "*A connection is the whole query…*" in **Code** | `from(…) to(…)` sits in an AND, OR or NOT, or inside a relationship | Put the other conditions in its ends: `from(type:dataset tag:PII) to(…)` |
+| "*Say where the edges go…*" in **Code** | `from(…)` isn't followed by `to(…)` or `linkedTo(…)` | Add the far end — `to()` for any entity |
+| "*A connection is one edge…*" in **Code** | Steps such as `to*..3(` ask for routes | Find direct edges, or follow reach with a relationship (**Feeds** within *N* steps) or a *Path* |
+| **0 connections**, and both ends have matches | No direct edge joins them the way the search asks | Try **Either way**, **Any link**, or drop the edge condition — the empty answer offers each. See [When nothing matches](/guide/finding-connections#when-nothing-matches) |
 
 ---
 
 ## Where to next
 
+- [Finding Connections](/guide/finding-connections) — when you want the lines
+  between things rather than the things: every connection from one set of
+  entities to another.
 - [Display Rules](/guide/display-rules) — when you want to colour the canvas by
   a rule you write.
 - [Tracing Lineage on the Canvas](/guide/exploring-graph) — when you've found an

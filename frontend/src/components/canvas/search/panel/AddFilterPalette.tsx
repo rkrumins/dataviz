@@ -130,7 +130,7 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
     const [query, setQuery] = useState('')
     // How many relationships this builder's conditions sit inside, and
     // whether it is a display rule's (a rule tests one entity: no routes).
-    const { depth: relationDepth, rule } = useContext(RelationContext)
+    const { depth: relationDepth, rule, end } = useContext(RelationContext)
     const wrapperRef = useRef<HTMLDivElement>(null)
     const buttonRef = useRef<HTMLButtonElement>(null)
     const popoverRef = useRef<HTMLDivElement>(null)
@@ -235,13 +235,13 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
         label: string
         entries: PaletteEntry[]
     }[]>(() => kindsAvailable({
-        relationDepth, rule, canCode: !!onOpenCode, canAdvanced: !!onOpenAdvanced,
+        relationDepth, rule, end, canCode: !!onOpenCode, canAdvanced: !!onOpenAdvanced,
     }).map((cat) => ({
         label: cat.label,
         entries: cat.entries.map((e): PaletteEntry => (e.countKey
             ? { ...e, count: counts[e.countKey], samples: samples?.[e.countKey] }
             : e)),
-    })), [counts, samples, onOpenCode, onOpenAdvanced, relationDepth, rule])
+    })), [counts, samples, onOpenCode, onOpenAdvanced, relationDepth, rule, end])
 
     const filteredCategories = useMemo(() => {
         const q = query.trim().toLowerCase()

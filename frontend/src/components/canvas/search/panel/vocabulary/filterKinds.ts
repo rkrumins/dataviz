@@ -537,15 +537,18 @@ export function filterKindById(id: string): FilterKind | undefined {
 }
 
 
-/** Entries that scope the whole search, which a relationship's condition
- *  can't hold. */
-const SCOPE_ENTRIES = new Set(['root-in-view', 'inside-subtree', 'inside-named', 'path', 'within-hops'])
+/** Routes through the graph, which a relationship's condition can't hold —
+ *  "inside a container" it can: there it is the relative's own test. */
+const ROUTE_ENTRIES = new Set(['path', 'within-hops'])
 
 export interface KindContext {
     /** How many relationships the conditions being added sit inside. */
     relationDepth: number
     /** A display rule's: it tests one entity, so it has no routes. */
     rule: boolean
+    /** A Connections search's From or To: a connection is one edge, so it
+     *  has no routes either. */
+    end?: boolean
     /** Whether Code mode is there to hand off to. */
     canCode: boolean
     /** Whether the Advanced drawer is there to hand off to. */
@@ -553,16 +556,17 @@ export interface KindContext {
 }
 
 /** The categories, holding only what can be added where the conditions
- *  stand: a relationship's condition is about the relative (the scope of
- *  the search is the query's alone), and relationships nest only so deep.
- *  Categories left empty are dropped. */
-export function availableCategories({ relationDepth, rule, canCode, canAdvanced }: KindContext): FilterCategory[] {
+ *  stand: a relationship's condition is about the relative (it follows no
+ *  route), and relationships nest only so deep. Categories left empty are
+ *  dropped. */
+export function availableCategories({ relationDepth, rule, end, canCode, canAdvanced }: KindContext): FilterCategory[] {
     return FILTER_CATEGORIES
         .map((cat) => ({
             ...cat,
             entries: cat.entries.filter((e) => {
-                if (relationDepth > 0 && SCOPE_ENTRIES.has(e.id)) return false
+                if (relationDepth > 0 && ROUTE_ENTRIES.has(e.id)) return false
                 if (rule && e.id === 'path') return false
+                if (end && (e.id === 'path' || e.id === 'within-hops')) return false
                 if (relationDepth >= RELATION_DEPTH_MAX && e.id.startsWith('rel-')) return false
                 // Two relationships deep: one more level than a single one.
                 if (relationDepth >= RELATION_DEPTH_MAX - 1 && e.id === 'rel-inside-feeds') return false

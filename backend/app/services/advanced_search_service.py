@@ -54,6 +54,7 @@ from backend.common.models.search import (
     AncestorRef,
     EdgeGroupPredicate,
     EdgePropertyPredicate,
+    EdgesPredicate,
     GroupPredicate,
     LayerPredicate,
     MatchAllPredicate,
@@ -89,6 +90,7 @@ from backend.common.models.search import (
     WithinHopsPredicate,
     export_columns,
     traced_from_far_end,
+    unwrap_edges,
 )
 from backend.common.search_semantics import SemanticsError, resolve_predicate
 
@@ -123,7 +125,7 @@ class ValidationError(ValueError):
 
 
 def _validate_predicate(predicate, *, depth: int = 1, path: str = "$", rule: bool = False,
-                        relations: int = 0, top: bool = True) -> int:
+                        relations: int = 0, top: bool = True, end: bool = False) -> int:
     """Walk the tree, enforce caps, return leaf count for the subtree.
 
     Each leaf and each group counts as one node toward depth; OR groups
@@ -135,7 +137,9 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$", rule: boo
     A relationship's condition is part of the tree: it nests one level
     deeper and its leaves count. ``rule``: the predicate is a display
     rule's (``_validate_relation``). ``relations``: how many relationships
-    the subtree sits in; ``top``: whether it sits in the top-level AND.
+    the subtree sits in; ``top``: whether it sits in the top-level AND;
+    ``end``: whether it is a Connections search's From or To
+    (``_validate_edges``).
     """
     s = get_deep_search_settings()
     if depth > s.max_tree_depth:
@@ -156,16 +160,23 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$", rule: boo
         for i, child in enumerate(predicate.children):
             total += _validate_predicate(
                 child, depth=depth + 1, path=f"{path}.children[{i}]", rule=rule,
-                relations=relations, top=top and predicate.op == "and",
+                relations=relations, top=top and predicate.op == "and", end=end,
             )
         return total
     if isinstance(predicate, RelatedPredicate):
         return _validate_relation(predicate, depth=depth, path=path, rule=rule,
-                                  relations=relations, top=top)
-    if relations and predicate.kind in ("descendantOf", "withinHops", "path"):
+                                  relations=relations, top=top, end=end)
+    if isinstance(predicate, EdgesPredicate):
+        return _validate_edges(predicate, depth=depth, path=path, rule=rule)
+    if relations and predicate.kind in ("withinHops", "path"):
         raise ValidationError(
             f"{predicate.kind} at {path} can't sit inside a relationship's or a path "
-            "end's condition — use an ancestor or lineage relationship there instead"
+            "end's condition — use a lineage relationship there instead"
+        )
+    if end and predicate.kind in ("withinHops", "path"):
+        raise ValidationError(
+            f"{predicate.kind} at {path} can't sit in a Connections search's From or To — "
+            "a connection is one edge; use a lineage relationship there instead"
         )
     _validate_comparisons(predicate, path)
     if isinstance(predicate, PathPredicate):
@@ -178,17 +189,41 @@ def _validate_predicate(predicate, *, depth: int = 1, path: str = "$", rule: boo
     return 1  # leaf
 
 
-def _path_ends(predicate: PathPredicate):
+def _path_ends(predicate):
+    """A path's or a Connections search's two ends, each with its JSON name."""
     return ((predicate.source_where, "sourceWhere"), (predicate.target_where, "targetWhere"))
 
 
+def _validate_edges(p: EdgesPredicate, *, depth: int, path: str, rule: bool) -> int:
+    """A Connections search is the whole query, and never a display rule's
+    (a rule tags entities; this returns edges). Its From and To are each
+    held to a top-level condition's caps — inside a container included —
+    but follow no route (``withinHops``, a path) and trace nothing: the
+    engine tests one end per entity and the other per edge."""
+    if rule:
+        raise ValidationError(
+            f"A display rule tags entities, and the Connections search at {path} returns "
+            "edges — make the rule from its From or To condition instead"
+        )
+    if depth > 1:
+        raise ValidationError(
+            f"The Connections search at {path} must be the whole query — not beside other "
+            "conditions, under a NOT, or inside another condition"
+        )
+    if p.edge_predicate is not None:
+        _validate_edge_filter(p.edge_predicate, f"{path}.edgePredicate")
+    return 1 + sum(
+        _validate_predicate(where, depth=depth + 1, path=f"{path}.{alias}", top=False, end=True)
+        for where, alias in _path_ends(p) if where is not None)
+
+
 def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool,
-                       relations: int, top: bool) -> int:
+                       relations: int, top: bool, end: bool = False) -> int:
     """A relationship's caps: how deep relationships nest, how far lineage
     goes — tested from every candidate, a few hops; in the top-level AND,
     asking for at least one relative, walked from its far end as far as
     withinHops: from the entities it names (``anchor_groups`` — an ``is``,
-    inside one, or an OR of those) or what its condition matches
+    inside one, above one, or an OR of those) or what its condition matches
     (``traced_from_far_end``, once a query: ``_check_traces``); in a display
     rule, one — and its edge filter's."""
     s = get_deep_search_settings()
@@ -208,6 +243,11 @@ def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool
                 f"relationship at {path}: a rule follows {walks} one hop — it is "
                 "asked of every entity on the canvas"
             )
+        if hops > s.relation_max_hops and end:
+            raise ValidationError(
+                f"relationship at {path} follows {walks} {hops} hops. In a Connections "
+                f"search's From or To, a relationship follows at most {s.relation_max_hops}."
+            )
         if hops > s.relation_max_hops and not (named or traced):
             raise ValidationError(
                 f"relationship at {path} follows {walks} {hops} hops. Following more than "
@@ -226,7 +266,7 @@ def _validate_relation(p: RelatedPredicate, *, depth: int, path: str, rule: bool
     if p.where is None:
         return 1
     return 1 + _validate_predicate(p.where, depth=depth + 1, path=f"{path}.where", rule=rule,
-                                   relations=relations + 1, top=False)
+                                   relations=relations + 1, top=False, end=end)
 
 
 #: An edge filter tests one edge's properties: groups nest at most this
@@ -378,6 +418,12 @@ def _is_unbounded_text_any(predicate) -> bool:
         if not predicate.children:
             return False
         return all(_is_unbounded_text_any(c) for c in predicate.children)
+    if isinstance(predicate, EdgesPredicate):
+        # One end bounded is enough: it is the one the engine starts from.
+        # An end left out is every entity — bounding nothing either.
+        ends = [w for w, _ in _path_ends(predicate) if w is not None]
+        return (any(_is_unbounded_text_any(w) for w in ends)
+                and all(_is_unbounded_text_any(w) for w in ends))
     if isinstance(predicate, TextPredicate):
         return (predicate.target or "any") == "any"
     return False
@@ -448,7 +494,7 @@ def _reject_unbounded_text_any(
 SHARED_LINK_RELATIONSHIPS = (
     "This link can't follow lineage or relationships: they lead outside its view."
 )
-_ROUTE_KINDS = frozenset({"path", "withinHops", "related"})
+_ROUTE_KINDS = frozenset({"path", "withinHops", "related", "edges"})
 
 
 def follows_relationships(predicate) -> bool:
@@ -484,7 +530,7 @@ def _path_refs(predicate, path: str = "$") -> list:
            for field, alias in _REF_FIELDS.get(predicate.kind, ())
            for i, ref in enumerate(getattr(predicate, field) or ())
            if ref.path is not None]
-    if isinstance(predicate, PathPredicate):
+    if isinstance(predicate, (PathPredicate, EdgesPredicate)):
         own += [found for where, alias in _path_ends(predicate) if where is not None
                 for found in _path_refs(where, f"{path}.{alias}")]
     return own
@@ -513,12 +559,12 @@ def _with_resolved_refs(predicate, named: dict):
     if predicate.kind in ("descendantOf", "withinHops") and predicate.refs:
         found = urns(predicate.urns, predicate.refs)
         return predicate.model_copy(update={"urns": found, "refs": None}) if found else _NOTHING
-    if predicate.kind == "path":
+    if predicate.kind in ("path", "edges"):
         update = {f"{side}_where": _with_resolved_refs(where, named)
                   for side, where in (("source", predicate.source_where),
                                       ("target", predicate.target_where))
                   if where is not None}
-        if predicate.source_refs or predicate.target_refs:
+        if predicate.kind == "path" and (predicate.source_refs or predicate.target_refs):
             update.update({
                 "source_urns": urns(predicate.source_urns, predicate.source_refs),
                 "source_refs": None,
@@ -555,7 +601,7 @@ def _has_layer(predicate) -> bool:
         return any(_has_layer(c) for c in predicate.children)
     if isinstance(predicate, RelatedPredicate):
         return predicate.where is not None and _has_layer(predicate.where)
-    if isinstance(predicate, PathPredicate):
+    if isinstance(predicate, (PathPredicate, EdgesPredicate)):
         return any(w is not None and _has_layer(w)
                    for w in (predicate.source_where, predicate.target_where))
     return False
@@ -597,7 +643,7 @@ def _with_resolved_layers(predicate, eff_scope: EffectiveViewScope, notes: list)
     if isinstance(predicate, RelatedPredicate):
         return predicate.model_copy(update={
             "where": _with_resolved_layers(predicate.where, eff_scope, notes)})
-    if isinstance(predicate, PathPredicate):
+    if isinstance(predicate, (PathPredicate, EdgesPredicate)):
         return predicate.model_copy(update={
             f"{side}_where": _with_resolved_layers(where, eff_scope, notes)
             for side, where in (("source", predicate.source_where),
@@ -643,6 +689,35 @@ def _validate_items(items, *, rule: bool = True) -> None:
         _check_traces(item.predicate)
 
 
+def _with_result_shape(query: SearchQuery) -> SearchQuery:
+    """A Connections search answers edges: ``options.results`` left out is
+    filled in, and what a page of edges can't carry — another result
+    shape, facets, a sort — is a 400, never a page quietly without it. One
+    sent inside an AND group of its own is the search itself
+    (``unwrap_edges``)."""
+    query = query.model_copy(update={"predicate": unwrap_edges(query.predicate)})
+    options = query.options
+    if not isinstance(query.predicate, EdgesPredicate):
+        if options.results == "edges":
+            raise ValidationError(
+                "options.results 'edges' is for a Connections search — a predicate of kind "
+                "edges")
+        return query
+    given = options.model_fields_set
+    if "results" in given and options.results != "edges":
+        raise ValidationError(
+            f"A Connections search returns edges, not {options.results} — leave "
+            "options.results out or set it to edges")
+    if options.aggregations:
+        raise ValidationError(
+            "A Connections search has no facets — leave options.aggregations out")
+    if options.sort_property or ("sort" in given and options.sort != "relevance"):
+        raise ValidationError(
+            "A Connections search is ordered by source name, target name and edge type — "
+            "leave options.sort out")
+    return query.model_copy(update={"options": options.model_copy(update={"results": "edges"})})
+
+
 def _returns_hits(query: SearchQuery) -> bool:
     """Whether a search is one the uncapped engine runs: it returns hits,
     and it isn't a path search (a different statement and response)."""
@@ -668,6 +743,8 @@ def _empty_page(query: SearchQuery) -> SearchResultPage:
     return SearchResultPage(
         aggregates=[] if results_shape in ("aggregates", "both") else None,
         hits=[] if results_shape in ("hits", "both") else None,
+        edges=[] if results_shape == "edges" else None,
+        edge_type_counts={} if results_shape == "edges" else None,
         cursor=None,
         truncated=False,
         candidate_count=0,
@@ -812,7 +889,9 @@ class AdvancedSearchService:
         returns hits runs on the uncapped engine when the provider has it;
         everything else — and every search on a provider without it — runs
         ``deep_search`` inside one admission, as the endpoint used to wrap it.
+        A Connections search runs on the uncapped engine too.
         """
+        query = _with_result_shape(query)
         _count_and_validate(query)
 
         client_requested_urns = bool(query.scope.root_urns)
@@ -891,7 +970,8 @@ class AdvancedSearchService:
         run_context: Optional[SearchRunContext],
     ) -> SearchResultPage:
         provider = self._engine.provider
-        if (run_context is not None and _returns_hits(query)
+        if (run_context is not None
+                and (_returns_hits(query) or isinstance(query.predicate, EdgesPredicate))
                 and getattr(provider, "supports_search_sessions", False)):
             return await provider.deep_search_session(
                 query, context=replace(run_context, scope_hash=eff_scope.scope_hash),
@@ -948,6 +1028,9 @@ class AdvancedSearchService:
         work), then moves on the least advanced counts until its wait is
         spent — so many rules all progress, none starve."""
         started = time.monotonic()
+        request = request.model_copy(update={"items": [
+            item.model_copy(update={"predicate": unwrap_edges(item.predicate)})
+            for item in request.items]})
         _validate_items(request.items, rule=request.purpose == "rule")
         scope, eff = await self._rule_scope(request.scope)
         if scope is None:
@@ -1048,6 +1131,7 @@ class AdvancedSearchService:
         to a file — exactly, however many, in the view's scope resolved here
         as a search's is. A large export takes more than one request; the
         answer that completes it carries a download token for ``principal``."""
+        request = request.model_copy(update={"predicate": unwrap_edges(request.predicate)})
         leaves = _validate_predicate(request.predicate, path="$.predicate")
         max_leaves = get_deep_search_settings().max_leaf_count
         if leaves > max_leaves:
@@ -1055,8 +1139,10 @@ class AdvancedSearchService:
         scope, eff = await self._rule_scope(request.scope)
         if scope is None:
             # Every root the client named lies outside the view: nothing.
-            return SearchExportResult(session_id="", status="complete", format=request.format,
-                                      columns=export_columns(request.columns))
+            return SearchExportResult(
+                session_id="", status="complete", format=request.format,
+                columns=export_columns(request.columns,
+                                       edges=isinstance(request.predicate, EdgesPredicate)))
         op = self._provider_op("deep_search_export")
         context = replace(run_context or SearchRunContext(), scope_hash=eff.scope_hash)
         predicate, _resolved = await self._resolve_predicate_refs(
@@ -1194,6 +1280,7 @@ class AdvancedSearchService:
         ``search()`` would actually run — including the view-derived
         ``root_urns`` and ``entity_types``.
         """
+        query = _with_result_shape(query)
         _count_and_validate(query)
         eff_scope = await self._resolve_scope(query.scope)
         await self._guard_view_data_source(eff_scope)

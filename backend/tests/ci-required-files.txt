@@ -225,6 +225,7 @@ tests/test_saved_view_filters.py
 tests/test_schema_upgrades.py
 tests/test_search_catalog.py
 tests/test_search_edge_properties.py
+tests/test_search_edges.py
 tests/test_search_engine.py
 tests/test_search_export.py
 tests/test_search_paths.py

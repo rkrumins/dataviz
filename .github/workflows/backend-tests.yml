@@ -157,7 +157,8 @@ jobs:
             tests/integration/test_parse_cost_live.py \
             tests/integration/test_search_crash_guard_live.py \
             tests/integration/test_search_layers_live.py \
-            tests/integration/test_search_generic_ontology_live.py -q
+            tests/integration/test_search_generic_ontology_live.py \
+            tests/integration/test_search_edges_live.py -q
 
   versioning-e2e:
     # The versioned graph against real Postgres, FalkorDB and Redis.

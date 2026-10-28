@@ -16,6 +16,8 @@ import { axisMeta, hopRange, maxHopsFor, RELATION_DEPTH_MAX } from '../relations
 export type Uncountable =
     /** A route search answers with routes, not a number of entities. */
     | 'route'
+    /** A Connections search answers with edges, counted as it runs. */
+    | 'connections'
     /** Something in it is still to be filled in. */
     | 'unfinished'
     /** It follows lineage further than a search tests from every entity. */
@@ -25,6 +27,7 @@ export type Uncountable =
 
 export const UNCOUNTABLE_WORDS: Record<Uncountable, string> = {
     route: 'Routes are found when the search runs',
+    connections: 'Connections are counted when the search runs',
     unfinished: 'Counted once it is filled in',
     'too-far': 'Too many steps to count — only “at least one” at the top of the search goes past 3',
     'too-deep': 'Nested too deep to count',
@@ -49,6 +52,7 @@ function walk(p: Predicate, topLevel: boolean, relations: number): Uncountable |
         return null
     }
     if (p.kind === 'path') return 'route'
+    if (p.kind === 'edges') return 'connections'
     if (relations > 0 && (p.kind === 'descendantOf' || p.kind === 'withinHops')) return 'unfinished'
     if (p.kind === 'related') {
         if (relations + 1 > RELATION_DEPTH_MAX) return 'too-deep'

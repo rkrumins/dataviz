@@ -32,7 +32,7 @@ import * as Popover from '@radix-ui/react-popover'
 import { motion } from 'framer-motion'
 import {
     ArrowDownToLine, BookmarkPlus, CopyPlus, FolderOpen, LayoutGrid, Loader2, Package, Pin,
-    PinOff, Search as SearchIcon, Star, Tags, Trash2, Upload, Users, X,
+    PinOff, Search as SearchIcon, Star, Tags, Trash2, Upload, Users, Waypoints, X,
 } from 'lucide-react'
 import { type FC, type KeyboardEvent, type ReactNode, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -55,7 +55,7 @@ import { type RecentQueryEntry, useSearchStore } from '@/store/searchStore'
 import { useLibraryCanEdit, useSavedViewQueries, useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { Predicate } from '@/types/search'
 
-import { stringifyPredicate } from './predicateDsl'
+import { NO_RULE_FOR_CONNECTIONS, asDraft, queryLabel } from './findMode'
 import type { Recipe } from './recipes/recipes'
 import { ViewRecipes } from './recipes/ViewRecipes'
 
@@ -573,7 +573,10 @@ function MineRow({
 }) {
     const isNamed = entry.source === 'mine' && Boolean(entry.name)
     const canShare = useLibraryCanEdit()
-    const displayLabel = isNamed ? entry.name! : entry.label || '(empty)'
+    // A Connections search reads as its ends, not as the JSON it is kept as.
+    const connections = asDraft(entry.predicate).kind === 'edges'
+    const label = connections ? queryLabel(entry.predicate) : entry.label
+    const displayLabel = isNamed ? entry.name! : label || '(empty)'
     const truncated = displayLabel.length > 80
         ? displayLabel.slice(0, 77) + '…'
         : displayLabel
@@ -606,6 +609,7 @@ function MineRow({
                     )}>
                         {truncated}
                     </span>
+                    {connections && <ConnectionsBadge />}
                 </div>
                 {isNamed && entry.description && (
                     <span className="text-[10.5px] text-ink-muted truncate w-full pl-[18px]">
@@ -614,7 +618,7 @@ function MineRow({
                 )}
                 {isNamed && (
                     <span className="text-[10px] font-mono text-ink-muted/60 truncate w-full pl-[18px]">
-                        {entry.label}
+                        {label}
                     </span>
                 )}
             </button>
@@ -636,7 +640,8 @@ function MineRow({
                         <BookmarkPlus className="w-3.5 h-3.5" />
                     </button>
                 )}
-                <KeepActions label={displayLabel} onKeep={onKeep} onMakeRule={onMakeRule} />
+                <KeepActions label={displayLabel} onKeep={onKeep} onMakeRule={onMakeRule}
+                             refusal={connections ? NO_RULE_FOR_CONNECTIONS : undefined} />
                 {isNamed && canShare && (
                     <button
                         type="button"
@@ -765,7 +770,8 @@ function SavedRow({
 }) {
     // Removing a query removes it for everyone: the first click asks.
     const [confirming, setConfirming] = useState(false)
-    const dsl = useMemo(() => stringifyPredicate(query.predicate), [query.predicate])
+    const dsl = useMemo(() => queryLabel(query.predicate), [query.predicate])
+    const connections = asDraft(query.predicate).kind === 'edges'
     return (
         <div
             className={cn(
@@ -787,6 +793,7 @@ function SavedRow({
                     <span className="text-[12px] truncate font-display font-semibold text-ink">
                         {query.name}
                     </span>
+                    {connections && <ConnectionsBadge />}
                 </div>
                 {query.description && (
                     <span className="text-[10.5px] text-ink-muted truncate w-full pl-[18px]">
@@ -801,7 +808,8 @@ function SavedRow({
                 'flex items-stretch shrink-0 transition-opacity',
                 confirming ? 'opacity-100' : 'opacity-0 group-hover/row:opacity-100 focus-within:opacity-100',
             )}>
-                {!confirming && <KeepActions label={query.name} onKeep={onKeep} onMakeRule={onMakeRule} />}
+                {!confirming && <KeepActions label={query.name} onKeep={onKeep} onMakeRule={onMakeRule}
+                                             refusal={connections ? NO_RULE_FOR_CONNECTIONS : undefined} />}
                 {canEdit && (confirming ? (
                         <button
                             type="button"
@@ -830,22 +838,35 @@ function SavedRow({
 }
 
 
+/** Marks a saved Connections search: it finds edges, not entities. */
+function ConnectionsBadge() {
+    return (
+        <span className="inline-flex shrink-0 items-center gap-0.5 rounded-full bg-accent-lineage/12 px-1.5 text-[9.5px] font-semibold uppercase tracking-wider text-accent-lineage">
+            <Waypoints className="h-2.5 w-2.5" aria-hidden /> Connections
+        </span>
+    )
+}
+
+
 /** Download a saved query as a file, and — for someone who can edit the
- *  view — make a display rule of it. */
-function KeepActions({ label, onKeep, onMakeRule }: {
+ *  view — make a display rule of it, unless it can make none (``refusal``
+ *  says why). */
+function KeepActions({ label, onKeep, onMakeRule, refusal }: {
     label: string
     onKeep: () => void
     onMakeRule?: () => void
+    refusal?: string
 }) {
     const action = cn(
         'inline-flex items-center justify-center w-7',
         'text-ink-muted hover:text-accent-lineage hover:bg-accent-lineage/10',
+        'disabled:opacity-40 disabled:hover:bg-transparent disabled:hover:text-ink-muted',
     )
     return (
         <>
             {onMakeRule && (
-                <button type="button" onClick={onMakeRule} className={action}
-                        title="Make a display rule of it — tag every entity it matches"
+                <button type="button" onClick={onMakeRule} className={action} disabled={!!refusal}
+                        title={refusal ?? 'Make a display rule of it — tag every entity it matches'}
                         aria-label={`Make a display rule of “${label}”`}>
                     <Tags className="w-3.5 h-3.5" />
                 </button>
@@ -986,7 +1007,8 @@ function OtherRow({ query, from, mine = false, onLoad, onKeep, onMakeRule }: {
     const saveQuery = useViewLibraryStore((s) => s.saveQuery)
     const { notify } = useAppNotifications()
     const [copying, setCopying] = useState(false)
-    const dsl = useMemo(() => stringifyPredicate(query.predicate), [query.predicate])
+    const dsl = useMemo(() => queryLabel(query.predicate), [query.predicate])
+    const connections = asDraft(query.predicate).kind === 'edges'
 
     // Copied under its own name — or, when this view has a query by that
     // name, under one that says where it came from.
@@ -1026,6 +1048,7 @@ function OtherRow({ query, from, mine = false, onLoad, onKeep, onMakeRule }: {
                         ? <Star className="w-3 h-3 text-amber-400 shrink-0" fill="currentColor" />
                         : <LayoutGrid className="w-3 h-3 text-accent-lineage shrink-0" />}
                     <span className="text-[12px] truncate font-display font-semibold text-ink">{query.name}</span>
+                    {connections && <ConnectionsBadge />}
                 </div>
                 {query.description && (
                     <span className="text-[10.5px] text-ink-muted truncate w-full pl-[18px]">{query.description}</span>
@@ -1044,7 +1067,8 @@ function OtherRow({ query, from, mine = false, onLoad, onKeep, onMakeRule }: {
                         {copying ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <CopyPlus className="w-3.5 h-3.5" />}
                     </button>
                 )}
-                <KeepActions label={query.name} onKeep={onKeep} onMakeRule={onMakeRule} />
+                <KeepActions label={query.name} onKeep={onKeep} onMakeRule={onMakeRule}
+                             refusal={connections ? NO_RULE_FOR_CONNECTIONS : undefined} />
             </div>
         </div>
     )

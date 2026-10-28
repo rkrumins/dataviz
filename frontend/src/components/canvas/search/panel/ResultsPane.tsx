@@ -20,6 +20,7 @@ import {
 } from '@/store/searchStore'
 import type {
     AncestorRef,
+    EdgesPredicate,
     Predicate,
     SearchAggregateBucket,
     SearchHit,
@@ -34,6 +35,7 @@ import { ZeroResultsDiagnostic } from '../ZeroResultsDiagnostic'
 import { useViewSearchSessionOptional } from '../session/ViewSearchSessionContext'
 import { ShownQueryContext } from '../session/shownQueryContext'
 
+import { EdgeResultsList, NoConnections } from './EdgeResultsList'
 import { ErrorView } from './ErrorView'
 import { HitsByLayer, groupHitsByLayer } from './HitsByLayer'
 import { HitsByParent } from './HitsByParent'
@@ -87,7 +89,7 @@ export interface ResultsPaneProps {
         ancestorDisplayName: string
         ancestorEntityType: string
     }) => void
-    onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
+    onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void | Promise<unknown>
     onOpen?: (urn: string) => void
     /** W2.2 — Fetch the next page of hits using the current cursor.
      *  Only invoked when ``view.result.cursor`` is set. */
@@ -163,6 +165,25 @@ function Dispatch({
         case 'error':
             return <ErrorView message={view.message} />
         case 'results':
+            // A Connections search answers edges, not entities.
+            if (view.result.edges) {
+                return (
+                    <ConnectionsContent
+                        view={view}
+                        viewId={viewId}
+                        onReveal={onReveal}
+                        onOpen={onOpen}
+                        onLoadMore={onLoadMore}
+                        isLoadingMore={isLoadingMore}
+                        onLoadAll={onLoadAll}
+                        isLoadingAll={isLoadingAll}
+                        onCancelLoadAll={onCancelLoadAll}
+                        draft={draft}
+                        onRefine={onRefine}
+                        scrollElementRef={scrollElementRef}
+                    />
+                )
+            }
             return (
                 <ShownQueryContext.Provider value={view.query.predicate}>
                     <ResultsContent
@@ -497,72 +518,157 @@ function ResultsContent({
                             cursor set and appends the new hits onto this
                             list — same query, longer result. */}
                         {result.cursor && onLoadMore && (
-                            <div className="mt-2 px-3 pb-2">
-                                {isLoadingAll ? (
-                                    /* One page at a time, so the count moves
-                                       and the user can stop it. What is
-                                       already loaded stays either way. */
-                                    <div className="flex items-center gap-2">
-                                        <span className="flex-1 min-w-0 text-[11.5px] text-ink-muted tabular-nums">
-                                            Loading everything — {hits.length.toLocaleString()}
-                                            {' of '}{totalMatches.toLocaleString()}
-                                        </span>
-                                        <button
-                                            type="button"
-                                            onClick={onCancelLoadAll}
-                                            className={cn(
-                                                'rounded-lg px-3 py-1.5 shrink-0',
-                                                'border border-glass-border',
-                                                'text-[12px] font-medium text-ink',
-                                                'hover:bg-glass/40 transition-colors',
-                                            )}
-                                        >
-                                            Stop
-                                        </button>
-                                    </div>
-                                ) : (
-                                    <div className="flex items-center gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => onLoadMore()}
-                                            disabled={isLoadingMore}
-                                            className={cn(
-                                                'flex-1 rounded-lg px-3 py-2',
-                                                'border border-glass-border',
-                                                'bg-canvas-base/40 hover:bg-canvas-base/60',
-                                                'text-[12px] font-medium text-ink',
-                                                'transition-colors',
-                                                'disabled:opacity-60 disabled:cursor-progress',
-                                                'flex items-center justify-center gap-2',
-                                            )}
-                                        >
-                                            {isLoadingMore
-                                                ? 'Loading…'
-                                                : `Load more (${hits.length} so far)`}
-                                        </button>
-                                        {onLoadAll && (
-                                            <button
-                                                type="button"
-                                                onClick={onLoadAll}
-                                                disabled={isLoadingMore}
-                                                title={`Keep paging until all ${totalMatches.toLocaleString()} are loaded`}
-                                                className={cn(
-                                                    'rounded-lg px-3 py-2 shrink-0',
-                                                    'border border-glass-border',
-                                                    'text-[12px] font-medium text-ink-secondary',
-                                                    'hover:text-ink hover:bg-glass/40 transition-colors',
-                                                    'disabled:opacity-60',
-                                                )}
-                                            >
-                                                Load all
-                                            </button>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
+                            <LoadMoreFooter
+                                loaded={hits.length}
+                                total={totalMatches}
+                                onLoadMore={onLoadMore}
+                                isLoadingMore={isLoadingMore}
+                                onLoadAll={onLoadAll}
+                                isLoadingAll={isLoadingAll}
+                                onCancelLoadAll={onCancelLoadAll}
+                            />
                         )}
                     </div>
                 </section>
+            )}
+        </div>
+    )
+}
+
+
+/** A Connections search's answer: the edges, the exact count of each
+ *  type, and the next page — or, when it found none, why. */
+function ConnectionsContent({
+    view, viewId, onReveal, onOpen, onLoadMore, isLoadingMore,
+    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine, scrollElementRef,
+}: Omit<ResultsPaneProps, 'onScopeToGroup' | 'view'> & {
+    view: Extract<PanelView, { kind: 'results' }>
+    scrollElementRef: RefObject<HTMLDivElement | null>
+}) {
+    const { result } = view
+    const edges = result.edges ?? []
+    const total = result.totalCount ?? edges.length
+    const scanning = result.status === 'running'
+    if (edges.length === 0 && !scanning) {
+        return (
+            <div className="p-4">
+                <NoConnections query={view.query.predicate as EdgesPredicate} viewId={viewId} onRefine={onRefine} />
+            </div>
+        )
+    }
+    return (
+        <div className="flex flex-col">
+            <div className="px-4 pt-4 pb-1">
+                <p className="text-[13px] font-medium text-ink/90">
+                    {total.toLocaleString()}
+                    {scanning ? ' found so far' : total === 1 ? ' connection' : ' connections'}
+                </p>
+                {edges.length < total && !scanning && (
+                    <p className="mt-1 text-[11px] leading-relaxed text-ink-muted/70">
+                        The list shows the first {edges.length.toLocaleString()}; the counts by edge type
+                        cover every one.
+                    </p>
+                )}
+            </div>
+            <EdgeResultsList
+                edges={edges}
+                typeCounts={result.edgeTypeCounts ?? {}}
+                draft={draft?.kind === 'edges' ? draft : null}
+                onRefine={onRefine}
+                onReveal={onReveal}
+                onOpen={onOpen}
+                scrollElementRef={scrollElementRef}
+                footer={result.cursor && onLoadMore ? (
+                    <LoadMoreFooter
+                        loaded={edges.length}
+                        total={total}
+                        onLoadMore={onLoadMore}
+                        isLoadingMore={isLoadingMore}
+                        onLoadAll={onLoadAll}
+                        isLoadingAll={isLoadingAll}
+                        onCancelLoadAll={onCancelLoadAll}
+                    />
+                ) : null}
+            />
+        </div>
+    )
+}
+
+
+/** "Load more" and "Load all" under a page of results — hits or edges. */
+function LoadMoreFooter({
+    loaded, total, onLoadMore, isLoadingMore, onLoadAll, isLoadingAll, onCancelLoadAll,
+}: {
+    loaded: number
+    total: number
+    onLoadMore: () => void
+    isLoadingMore?: boolean
+    onLoadAll?: () => void
+    isLoadingAll?: boolean
+    onCancelLoadAll?: () => void
+}) {
+    return (
+        <div className="mt-2 px-3 pb-2">
+            {isLoadingAll ? (
+                /* One page at a time, so the count moves
+                   and the user can stop it. What is
+                   already loaded stays either way. */
+                <div className="flex items-center gap-2">
+                    <span className="flex-1 min-w-0 text-[11.5px] text-ink-muted tabular-nums">
+                        Loading everything — {loaded.toLocaleString()}
+                        {' of '}{total.toLocaleString()}
+                    </span>
+                    <button
+                        type="button"
+                        onClick={onCancelLoadAll}
+                        className={cn(
+                            'rounded-lg px-3 py-1.5 shrink-0',
+                            'border border-glass-border',
+                            'text-[12px] font-medium text-ink',
+                            'hover:bg-glass/40 transition-colors',
+                        )}
+                    >
+                        Stop
+                    </button>
+                </div>
+            ) : (
+                <div className="flex items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={() => onLoadMore()}
+                        disabled={isLoadingMore}
+                        className={cn(
+                            'flex-1 rounded-lg px-3 py-2',
+                            'border border-glass-border',
+                            'bg-canvas-base/40 hover:bg-canvas-base/60',
+                            'text-[12px] font-medium text-ink',
+                            'transition-colors',
+                            'disabled:opacity-60 disabled:cursor-progress',
+                            'flex items-center justify-center gap-2',
+                        )}
+                    >
+                        {isLoadingMore
+                            ? 'Loading…'
+                            : `Load more (${loaded} so far)`}
+                    </button>
+                    {onLoadAll && (
+                        <button
+                            type="button"
+                            onClick={onLoadAll}
+                            disabled={isLoadingMore}
+                            title={`Keep paging until all ${total.toLocaleString()} are loaded`}
+                            className={cn(
+                                'rounded-lg px-3 py-2 shrink-0',
+                                'border border-glass-border',
+                                'text-[12px] font-medium text-ink-secondary',
+                                'hover:text-ink hover:bg-glass/40 transition-colors',
+                                'disabled:opacity-60',
+                            )}
+                        >
+                            Load all
+                        </button>
+                    )}
+                </div>
             )}
         </div>
     )

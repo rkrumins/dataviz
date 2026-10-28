@@ -289,7 +289,26 @@ interface SearchStoreState {
     orderedMatchUrns: ReadonlyArray<string>
 
     /**
-     * Index into ``orderedMatchUrns`` of the match the user is currently
+     * A Connections search's edges, by key, in the order the results list
+     * them. When there are any, they — not ``orderedMatchUrns``, which then
+     * holds both ends of each edge for the canvas — are what the stepper
+     * walks and ``focusedMatchIndex`` points into. Empty for any other
+     * search.
+     */
+    orderedEdgeKeys: ReadonlyArray<string>
+
+    /**
+     * A Connections search's matched edges, for the canvas to light the
+     * lines that draw them: the first ``MATCHED_EDGES_CAP`` loaded, in list
+     * order. Empty for any other search.
+     */
+    matchedEdges: ReadonlyArray<MatchedEdge>
+    /** Every matched edge is loaded: no page of them remains. */
+    matchedEdgesComplete: boolean
+
+    /**
+     * Index into ``orderedMatchUrns`` (``orderedEdgeKeys`` for a
+     * Connections search) of the match the user is currently
      * focused on via the MatchBar stepper or keyboard (J/K/↑/↓). Drives:
      *   - ResultsPane auto-scrolls the focused row into view.
      *   - useRevealSearchHit auto-fires for the focused URN.
@@ -329,6 +348,25 @@ interface SearchStoreState {
 
 
 /**
+ * One edge a Connections search matched, as the canvas lights it: its ends,
+ * its type, and the containers each end sits in, parent first — where to
+ * file an end the canvas has not loaded.
+ */
+export interface MatchedEdge {
+    key: string
+    /** The edge's id, by the canvas's own rule for a raw edge's. */
+    id: string
+    source: string
+    target: string
+    edgeType: string
+    sourceChain: readonly string[]
+    targetChain: readonly string[]
+}
+
+/** The most matched edges the canvas lights: the first loaded. */
+export const MATCHED_EDGES_CAP = 2000
+
+/**
  * Per-hit input to the ancestor rollup derivation. The leaf entity type
  * is needed alongside the path so the breakdown map can tally matches
  * by what kind of node sits at the end of each path.
@@ -354,6 +392,13 @@ interface SearchStoreActions {
     setResult: (input: {
         viewId: string
         matchUrns: Iterable<string>
+        /** A Connections search's edge keys, in list order — what the
+         *  stepper walks. Left out for any other search. */
+        edgeKeys?: Iterable<string>
+        /** A Connections search's edges, in list order, for the canvas — and
+         *  whether they are all loaded. Left out for any other search. */
+        matchedEdges?: readonly MatchedEdge[]
+        matchedEdgesComplete?: boolean
         /** Per-hit ancestor info (path + the entityType of the hit at the
          *  end of that path). Used to derive both ``ancestorMatchCounts``
          *  and ``ancestorMatchTypeBreakdowns`` so the canvas can surface
@@ -570,6 +615,7 @@ const CANVAS_FILTER_STORAGE_KEY = 'synodic.advancedSearch.canvasFilterMode.v1'
 const EMPTY_HISTORY: ReadonlyArray<Predicate | null> = Object.freeze([])
 const EMPTY_RECENT: ReadonlyArray<RecentQueryEntry> = Object.freeze([])
 const EMPTY_ORDERED_URNS: ReadonlyArray<string> = Object.freeze([])
+const EMPTY_MATCHED_EDGES: ReadonlyArray<MatchedEdge> = Object.freeze([])
 
 
 /**
@@ -645,6 +691,12 @@ function saveCanvasFilterMap(map: CanvasFilterModeMap): void {
     }
 }
 
+/** What the stepper walks: a Connections search's edges, else the matches. */
+function steps(s: Pick<SearchStoreState, 'orderedMatchUrns' | 'orderedEdgeKeys'>): ReadonlyArray<string> {
+    return s.orderedEdgeKeys.length > 0 ? s.orderedEdgeKeys : s.orderedMatchUrns
+}
+
+
 export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set, get) => ({
     viewId: null,
     matchUrnSet: EMPTY_SET,
@@ -671,6 +723,9 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     selectionParent: null,
     selectedIndices: [],
     orderedMatchUrns: EMPTY_ORDERED_URNS,
+    orderedEdgeKeys: EMPTY_ORDERED_URNS,
+    matchedEdges: EMPTY_MATCHED_EDGES,
+    matchedEdgesComplete: true,
     focusedMatchIndex: null,
     // Initial mode is 'highlight'; per-view persisted overrides are
     // applied via the setCanvasFilterMode action on first read. We
@@ -682,7 +737,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     pendingOpenBlank: false,
     pendingAskFocus: false,
 
-    setResult: ({ viewId, matchUrns, ancestorPaths, ancestorCounts, queryHash }) => {
+    setResult: ({ viewId, matchUrns, edgeKeys, matchedEdges, matchedEdgesComplete, ancestorPaths, ancestorCounts, queryHash }) => {
         const next = new Set<string>()
         // Build the ordered list and the set in one pass so iteration
         // order from the caller (backend hit order) is preserved for
@@ -719,19 +774,26 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         // ordering a page arrives in can put new matches ahead of the
         // focused one, and an index alone would then point at a different
         // match — the very thing the old reset was guarding against.
+        //
+        // A Connections search steps through its edges, so its focus is
+        // carried by edge key the same way.
+        const edges = edgeKeys ? [...new Set(edgeKeys)] : []
         const prev = get()
-        const focusedUrn = prev.focusedMatchIndex !== null
-            ? prev.orderedMatchUrns[prev.focusedMatchIndex]
+        const focusedKey = prev.focusedMatchIndex !== null
+            ? steps(prev)[prev.focusedMatchIndex]
             : undefined
         const sameQuery = prev.queryHash === queryHash
-        const carriedFocus = sameQuery && focusedUrn !== undefined
-            ? ordered.indexOf(focusedUrn)
+        const carriedFocus = sameQuery && focusedKey !== undefined
+            ? (edges.length > 0 ? edges : ordered).indexOf(focusedKey)
             : -1
 
         set({
             viewId,
             matchUrnSet: next,
             orderedMatchUrns: ordered.length === 0 ? EMPTY_ORDERED_URNS : ordered,
+            orderedEdgeKeys: edges.length === 0 ? EMPTY_ORDERED_URNS : edges,
+            matchedEdges: matchedEdges?.length ? matchedEdges.slice(0, MATCHED_EDGES_CAP) : EMPTY_MATCHED_EDGES,
+            matchedEdgesComplete: matchedEdgesComplete ?? true,
             // A new query, or a focused match this result set no longer
             // holds, still resets: landing the user on a different match
             // than they expected is worse than landing them on none.
@@ -892,6 +954,9 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             viewId: null,
             matchUrnSet: EMPTY_SET,
             orderedMatchUrns: EMPTY_ORDERED_URNS,
+            orderedEdgeKeys: EMPTY_ORDERED_URNS,
+            matchedEdges: EMPTY_MATCHED_EDGES,
+            matchedEdgesComplete: true,
             focusedMatchIndex: null,
             queryHash: null,
             ancestorMatchCounts: EMPTY_MAP,
@@ -974,6 +1039,9 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             viewId: null,
             matchUrnSet: EMPTY_SET,
             orderedMatchUrns: EMPTY_ORDERED_URNS,
+            orderedEdgeKeys: EMPTY_ORDERED_URNS,
+            matchedEdges: EMPTY_MATCHED_EDGES,
+            matchedEdgesComplete: true,
             focusedMatchIndex: null,
             queryHash: null,
             draftPredicate: null,
@@ -992,9 +1060,11 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     },
 
     stepFocus: (direction) => {
-        const { orderedMatchUrns, focusedMatchIndex } = get()
-        if (orderedMatchUrns.length === 0) return
-        const last = orderedMatchUrns.length - 1
+        const state = get()
+        const { focusedMatchIndex } = state
+        const stepped = steps(state)
+        if (stepped.length === 0) return
+        const last = stepped.length - 1
         let nextIndex: number
         if (focusedMatchIndex === null) {
             // First press always lands on index 0, regardless of
@@ -1009,16 +1079,16 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     },
 
     setFocusedMatchIndex: (index) => {
-        const { orderedMatchUrns } = get()
+        const stepped = steps(get())
         if (index === null) {
             set({ focusedMatchIndex: null })
             return
         }
-        if (orderedMatchUrns.length === 0) {
+        if (stepped.length === 0) {
             set({ focusedMatchIndex: null })
             return
         }
-        const last = orderedMatchUrns.length - 1
+        const last = stepped.length - 1
         // Coerce to valid range — out-of-band callers (stale render,
         // race with a new query) should land on the nearest valid
         // index rather than crash a downstream reveal lookup.
@@ -1218,6 +1288,17 @@ export function useOrderedMatchUrns(): ReadonlyArray<string> {
     return useSearchStore((s) => s.orderedMatchUrns)
 }
 
+/** Subscribe to a Connections search's edge keys, in list order (empty for
+ *  any other search). */
+export function useOrderedEdgeKeys(): ReadonlyArray<string> {
+    return useSearchStore((s) => s.orderedEdgeKeys)
+}
+
+/** How many matches the stepper walks: edges for a Connections search. */
+export function useStepCount(): number {
+    return useSearchStore((s) => steps(s).length)
+}
+
 /** Subscribe to the focused-match index (or null when none). */
 export function useFocusedMatchIndex(): number | null {
     return useSearchStore((s) => s.focusedMatchIndex)
@@ -1231,8 +1312,18 @@ export function useFocusedMatchIndex(): number | null {
  */
 export function useFocusedMatchUrn(): string | null {
     return useSearchStore((s) =>
-        s.focusedMatchIndex !== null
+        s.focusedMatchIndex !== null && s.orderedEdgeKeys.length === 0
             ? s.orderedMatchUrns[s.focusedMatchIndex] ?? null
+            : null,
+    )
+}
+
+/** The key of the edge the stepper is on, for a Connections search; null
+ *  otherwise. */
+export function useFocusedEdgeKey(): string | null {
+    return useSearchStore((s) =>
+        s.focusedMatchIndex !== null
+            ? s.orderedEdgeKeys[s.focusedMatchIndex] ?? null
             : null,
     )
 }
@@ -1251,9 +1342,16 @@ export function useCanvasFilterMode(): CanvasFilterMode {
  */
 export function useIsFocusedMatch(urn: string | undefined): boolean {
     return useSearchStore((s) => {
-        if (!urn || s.focusedMatchIndex === null) return false
+        if (!urn || s.focusedMatchIndex === null || s.orderedEdgeKeys.length > 0) return false
         return s.orderedMatchUrns[s.focusedMatchIndex] === urn
     })
+}
+
+/** Whether one edge row is the one the stepper is on — per row, as
+ *  ``useIsFocusedMatch``. */
+export function useIsFocusedEdge(key: string): boolean {
+    return useSearchStore((s) =>
+        s.focusedMatchIndex !== null && s.orderedEdgeKeys[s.focusedMatchIndex] === key)
 }
 
 /**

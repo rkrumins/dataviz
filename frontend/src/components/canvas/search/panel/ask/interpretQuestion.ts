@@ -14,17 +14,23 @@
  * A relationship's relative is described by the words after its verb:
  * "that feed finance dashboards" is a dashboard tagged Finance.
  *
+ * A question about the edges themselves reads as a connection, each end
+ * read as a question of its own:
+ *
+ *   "connections from columns tagged PII to dashboards through produces, either way"
+ *     → from(type:schemaField AND tag:PII) linkedTo[PRODUCES](type:dashboard)
+ *
  * Words it can't place are read as a name to search for, and said so; a
  * word with several readings (a tag, a container's name, a name) is read
  * one way and offers the others. Pure and synchronous: the same question
  * with the same picks always reads the same.
  */
-import type { NodeRef, Predicate, RelatedPredicate } from '@/types/search'
+import type { EdgeClass, EdgesPredicate, NodeRef, Predicate, RelatedPredicate } from '@/types/search'
 
 import { axisMeta, maxHopsFor, RELATION_DEPTH_MAX, RELATION_MAX_HOPS, type RelationAxis } from '../relations'
 import { FILTER_CATEGORIES } from '../vocabulary/filterKinds'
 
-import { phraseKey, type AskMeaning, type AskVocabulary } from './askVocabulary'
+import { identifierWords, phraseKey, type AskMeaning, type AskVocabulary } from './askVocabulary'
 
 
 // ---------------------------------------------------------------------------
@@ -299,7 +305,100 @@ const READING_LABEL: Record<AskReading, string> = {
 }
 
 
+// ---------------------------------------------------------------------------
+// Connections: "connections from A to B through T, either way"
+// ---------------------------------------------------------------------------
+
+/** What opens a question about the edges themselves: "connections from". */
+const CONNECTION_OPEN = /\b(?:edges?|connections?|links?|relationships?)\s+(?:that\s+)?(?:(?:go|goes|run|runs|lead|leads|point|points)\s+)?from\s+/i
+/** Either way, said at the end. */
+const EITHER_WAY = /\s*,?\s+(?:either\s+way|both\s+ways|in\s+either\s+direction|either\s+direction|in\s+both\s+directions|both\s+directions|in\s+any\s+direction)[\s?.!]*$/i
+/** What the edges are: "through PRODUCES", "via lineage". */
+const THROUGH = /\s+(?:through|via|over|of\s+types?)\s+/gi
+/** The classes "through …" may name, by their words. */
+const EDGE_CLASS_WORDS: Record<string, EdgeClass> = {
+    lineage: 'lineage', containment: 'containment', hierarchy: 'containment', 'the hierarchy': 'containment',
+    'any edge': 'any', 'any kind': 'any', 'any link': 'links', link: 'links',
+}
+
+/** ``text`` from ``from`` to ``to``, blank before it: an end read on its
+ *  own keeps the places of its words. */
+function masked(text: string, from: number, to: number): string {
+    return ' '.repeat(from) + text.slice(from, to)
+}
+
+/** "through PRODUCES and DEFINED_BY": edge types the view knows, or one
+ *  class — and the words that are neither. */
+function readThrough(words: string, vocab: AskVocabulary): { set: Pick<EdgesPredicate, 'edgeTypes' | 'edgeClass'>; unread: string[] } {
+    const types: string[] = []
+    const unread: string[] = []
+    let edgeClass: EdgeClass | undefined
+    const byPhrase = new Map((vocab.edgeTypes ?? []).map((t) => [phraseKey(identifierWords(t)), t]))
+    for (const raw of words.replace(/[?.!]+$/, '').split(/\s*(?:,|&|\band\b|\bor\b)\s*/i)) {
+        const phrase = raw.trim().replace(/^the\s+/i, '').replace(/\s+(?:edges?|links?|relationships?|connections?)$/i, '')
+        if (!phrase) continue
+        const type = byPhrase.get(phraseKey(phrase.split(/\s+/)))
+        const named = EDGE_CLASS_WORDS[phraseKey(phrase.split(/\s+/))]
+        if (type) types.push(type)
+        else if (named) edgeClass = named
+        else unread.push(raw.trim())
+    }
+    // Types named, the class doesn't count; any link is a connection's own.
+    return { set: types.length ? { edgeTypes: types } : edgeClass && edgeClass !== 'links' ? { edgeClass } : {}, unread }
+}
+
+/** A question about the edges themselves, read as a connection — or null
+ *  when it isn't one. Its ends are read as questions of their own; From
+ *  ends at the "to" that leaves the fewest words unread. */
+function readConnection(text: string, vocab: AskVocabulary, picks: AskPicks): Interpretation | null {
+    const open = CONNECTION_OPEN.exec(text)
+    if (!open) return null
+    // Only filler before it: "show me all the connections from …".
+    if (!classify(lex(text.slice(0, open.index)), vocab).every((t) => t.kind === 'grammar' && t.unit?.u === 'filler')) {
+        return null
+    }
+    const start = open.index + open[0].length
+    const either = EITHER_WAY.exec(text)
+    const eitherWay = either !== null && either.index >= start
+    const end = eitherWay ? either.index : text.length
+    let through: { from: number; to: number } | null = null
+    for (const m of text.slice(start, end).matchAll(THROUGH)) {
+        through = { from: start + (m.index ?? 0), to: start + (m.index ?? 0) + m[0].length }
+    }
+    const farEnd = through ? through.from : end
+    let best: { unread: number; from: Interpretation; to: Interpretation } | null = null
+    for (const m of text.slice(start, farEnd).matchAll(/\s+to\s+/gi)) {
+        const split = start + (m.index ?? 0)
+        const from = interpretQuestion(masked(text, start, split), vocab, picks)
+        const to = interpretQuestion(masked(text, split + m[0].length, farEnd), vocab, picks)
+        if (from.predicate?.kind === 'edges' || to.predicate?.kind === 'edges') continue
+        const unread = from.unrecognized.length + to.unrecognized.length
+        if (!best || unread < best.unread) best = { unread, from, to }
+    }
+    if (!best) return null
+    const { from, to } = best
+    const edgeSet = through ? readThrough(text.slice(through.to, end), vocab) : { set: {}, unread: [] }
+    const connection: EdgesPredicate = {
+        kind: 'edges',
+        ...(from.predicate ? { sourceWhere: from.predicate } : {}),
+        ...(to.predicate ? { targetWhere: to.predicate } : {}),
+        ...(eitherWay ? { direction: 'either' as const } : {}),
+        ...edgeSet.set,
+    }
+    return {
+        predicate: connection,
+        // A connection is the whole query: it never adds to one.
+        mode: 'replace',
+        ambiguities: [...from.ambiguities, ...to.ambiguities],
+        unrecognized: [...from.unrecognized, ...to.unrecognized, ...edgeSet.unread],
+        names: [...from.names, ...to.names.filter((n) => !from.names.some((f) => f.text === n.text))],
+    }
+}
+
+
 export function interpretQuestion(text: string, vocab: AskVocabulary, picks: AskPicks = {}): Interpretation {
+    const connection = readConnection(text, vocab, picks)
+    if (connection) return connection
     const toks = classify(lex(text), vocab)
     const ambiguities: AskAmbiguity[] = []
     const unrecognized: string[] = []

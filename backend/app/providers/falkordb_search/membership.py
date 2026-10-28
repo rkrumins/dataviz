@@ -61,7 +61,7 @@ async def evaluate_membership(
         return _result(matches, errors, started)
     raw_labels = await graph_raw_labels(provider, run, data_version)
     columns, params, hoisted, raw_leaves = _compile(provider, items, errors,
-                                                    raw=bool(raw_labels))
+                                                    raw=bool(raw_labels), scope_depth=scope.max_depth)
     if not columns:
         return _result(matches, errors, started)
 
@@ -170,14 +170,14 @@ def _chunks(columns: Sequence[Tuple[str, str]]) -> List[List[int]]:
     return out
 
 
-def _compile(provider, items, errors, *, raw: bool = False
+def _compile(provider, items, errors, *, raw: bool = False, scope_depth: Optional[int] = None
              ) -> Tuple[List[Tuple[str, str]], Dict[str, Any],
                         Dict[str, List[Tuple[Set[str], Optional[int]]]], List[RawLeaf]]:
     """Each rule's WHERE fragment — parameters numbered on from the last
     rule's, so every rule shares one statement — its ``descendantOf`` URN
-    sets with each one's own ``maxDepth`` (None: the scope's) and, when the
-    graph keeps properties ``raw``, every rule's property conditions to
-    answer for them."""
+    sets with each one's own ``maxDepth`` (None: the scope's, ``scope_depth``,
+    as for one under an OR or a NOT) and, when the graph keeps properties
+    ``raw``, every rule's property conditions to answer for them."""
     columns: List[Tuple[str, str]] = []
     params: Dict[str, Any] = {}
     hoisted: Dict[str, List[Tuple[Set[str], Optional[int]]]] = {}
@@ -193,7 +193,7 @@ def _compile(provider, items, errors, *, raw: bool = False
         if raw:
             compiler.raw_leaves = []
         try:
-            where = " AND ".join(grouped(w) for w in [compiler.compile(predicate),
+            where = " AND ".join(grouped(w) for w in [compiler.compile(predicate, scope_depth=scope_depth),
                                                       *compiler.tail] if w != "true")
         except CompileError as exc:
             errors[item_id] = str(exc)

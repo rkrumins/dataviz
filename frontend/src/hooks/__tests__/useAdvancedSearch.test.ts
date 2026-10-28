@@ -8,8 +8,8 @@
  * path names container `A` rolls up to 1; the bucket says 42.
  *
  * The same must hold after `loadMore`: page 2 carries no aggregates
- * (the hook drops them from the follow-up query), so the counts have to
- * be recomputed from the MERGED result, which retains page 1's.
+ * (the follow-up asks for rows only), so the counts have to be
+ * recomputed from the MERGED result, which retains page 1's.
  */
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -315,6 +315,137 @@ describe('useAdvancedSearch — exact counts for every loaded container', () => 
         await new Promise((r) => setTimeout(r, 250))
         expect(searchAncestorCounts).toHaveBeenCalledTimes(1)
         expect(useSearchStore.getState().ancestorMatchCounts.get('B')).toBeUndefined()
+    })
+})
+
+
+describe('useAdvancedSearch — a later page', () => {
+    it('names the same facets, so the session honours its cursor', async () => {
+        searchAdvanced.mockResolvedValueOnce(page({
+            hits: [HIT], aggregates: [[BUCKET]], cursor: 'cursor-1',
+        }))
+        searchAdvanced.mockResolvedValueOnce(page({ hits: [] }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        await act(async () => {
+            await result.current.loadMore()
+        })
+
+        // The facets are part of what the session answers: a follow-up
+        // without them is "a different query", and its cursor is refused.
+        const next = searchAdvanced.mock.calls[1][0].options
+        expect(next.aggregations).toEqual(SEARCH_OPTIONS?.aggregations)
+        expect(next.cursor).toBe('cursor-1')
+        expect(next.results).toBe('hits')
+    })
+})
+
+
+describe('useAdvancedSearch — a Connections search', () => {
+    const CONNECTIONS: Predicate = {
+        kind: 'edges',
+        sourceWhere: { kind: 'property', key: 'first_name', op: 'eq', value: 'bob' },
+        edgeTypes: ['DERIVES'],
+    }
+
+    function end(urn: string, parent: string) {
+        return {
+            urn, displayName: urn, entityType: 'column',
+            parent: { urn: parent, displayName: parent, entityType: 'table' },
+            ancestorPath: [{ urn: parent, displayName: parent, entityType: 'table' }],
+        }
+    }
+
+    function edge(key: string, source: string, target: string) {
+        return {
+            key, id: key, edgeType: 'DERIVES', properties: {},
+            source: end(source, 'A'), target: end(target, 'B'),
+        }
+    }
+
+    it('asks for edges with no facets or sort, the predicate as it is', async () => {
+        searchAdvanced.mockResolvedValue(page({ edges: [], totalCount: 0 }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(CONNECTIONS, { ...SEARCH_OPTIONS, sort: 'displayName' })
+        })
+
+        const [query] = searchAdvanced.mock.calls[0]
+        expect(query.predicate).toEqual(CONNECTIONS)
+        expect(query.options.results).toBe('edges')
+        expect(query.options).not.toHaveProperty('aggregations')
+        expect(query.options).not.toHaveProperty('sort')
+        expect(query.options.pageSize).toBe(SEARCH_OPTIONS?.pageSize)
+    })
+
+    it('highlights both ends, counts each end once and steps through the edges', async () => {
+        searchAdvanced.mockResolvedValue(page({
+            edges: [edge('e1', 'bob', 'x'), edge('e2', 'bob', 'y')], totalCount: 2,
+        }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(CONNECTIONS, SEARCH_OPTIONS)
+        })
+
+        const s = useSearchStore.getState()
+        expect([...s.matchUrnSet].sort()).toEqual(['bob', 'x', 'y'])
+        expect(s.orderedEdgeKeys).toEqual(['e1', 'e2'])
+        // The edges themselves, for the canvas to light the lines that draw them.
+        expect(s.matchedEdges).toEqual([
+            { key: 'e1', id: 'e1', source: 'bob', target: 'x', edgeType: 'DERIVES', sourceChain: ['A'], targetChain: ['B'] },
+            { key: 'e2', id: 'e2', source: 'bob', target: 'y', edgeType: 'DERIVES', sourceChain: ['A'], targetChain: ['B'] },
+        ])
+        expect(s.matchedEdgesComplete).toBe(true)
+        // bob is the source of both edges, and counts once under A.
+        expect(s.ancestorMatchCounts.get('A')).toBe(1)
+        expect(s.ancestorMatchCounts.get('B')).toBe(2)
+    })
+
+    it("files each end under its containers, its parent first", async () => {
+        const deep = {
+            ...edge('e1', 'bob', 'x'),
+            source: { ...end('bob', 'T'), ancestorPath: [
+                { urn: 'DB', displayName: 'DB', entityType: 'database' },
+                { urn: 'T', displayName: 'T', entityType: 'table' },
+            ] },
+        }
+        searchAdvanced.mockResolvedValue(page({ edges: [deep], totalCount: 1 }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(CONNECTIONS, SEARCH_OPTIONS)
+        })
+
+        expect(useSearchStore.getState().matchedEdges[0].sourceChain).toEqual(['T', 'DB'])
+    })
+
+    it('appends a later page of edges, asking for edges again', async () => {
+        searchAdvanced.mockResolvedValueOnce(page({
+            edges: [edge('e1', 'bob', 'x')], totalCount: 2, cursor: 'cursor-1',
+        }))
+        searchAdvanced.mockResolvedValueOnce(page({ edges: [edge('e2', 'bob', 'y')], totalCount: 2 }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(CONNECTIONS, SEARCH_OPTIONS)
+        })
+        // A page of them remains.
+        expect(useSearchStore.getState().matchedEdgesComplete).toBe(false)
+        await act(async () => {
+            await result.current.loadMore()
+        })
+
+        expect(useSearchStore.getState().matchedEdges.map((e) => e.key)).toEqual(['e1', 'e2'])
+        expect(useSearchStore.getState().matchedEdgesComplete).toBe(true)
+        expect(searchAdvanced.mock.calls[1][0].options.results).toBe('edges')
+        const view = result.current.view
+        expect(view.kind === 'results' && view.result.edges?.map((e) => e.key)).toEqual(['e1', 'e2'])
+        expect(useSearchStore.getState().orderedEdgeKeys).toEqual(['e1', 'e2'])
     })
 })
 

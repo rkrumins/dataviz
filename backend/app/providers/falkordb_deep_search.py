@@ -291,6 +291,9 @@ class _Compiler:
         # traces nothing: it is compiled as a candidate's own test.
         self.trace_beyond: Optional[int] = None
         self.hoisted_trace: Optional[Dict[str, Any]] = None
+        # How far below a container "inside" reaches when it names no
+        # depth: the search scope's (``compile``), as a hoisted one does.
+        self.scope_depth = 12
 
     def _next(self) -> str:
         n = self._param_counter
@@ -303,12 +306,15 @@ class _Compiler:
         name used twice makes the second list come back empty."""
         return self._next()[1:]
 
-    def compile(self, predicate) -> str:
+    def compile(self, predicate, *, scope_depth: Optional[int] = None) -> str:
         """The head: the WHERE fragment every candidate is filtered by
         first. Relationships and edge counts, and any OR / NOT holding one,
         go to ``self.tail`` — a comprehension fails in a clause's WHERE, and
         is built for every row that reaches it, so it runs only on what the
-        head lets through."""
+        head lets through. ``scope_depth``: the search scope's ``maxDepth``,
+        how far below a container an "inside" naming none reaches."""
+        if scope_depth is not None:
+            self.scope_depth = int(scope_depth)
         if not _has_relation(predicate):
             return self._visit(predicate, in_or=False, at_top_and=True)
         head: List[str] = []
@@ -365,11 +371,10 @@ class _Compiler:
             return self._visit_related(p)
         if kind == "descendantOf":
             if in_or or not at_top_and:
-                raise CompileError(
-                    "DescendantOf is only allowed in the top-level AND group "
-                    "in v1. Move it to scope.root_urns or split into "
-                    "multiple queries."
-                )
+                # Under an OR or a NOT, or in a relative's condition, each
+                # entity is tested itself — only the top-level AND's bounds
+                # the search (``_has_relation`` keeps it in a projection).
+                return self._inside(p, int(p.max_depth or self.scope_depth))
             urns = list(p.urns) + _ref_urns(p.refs, "descendantOf")
             if not urns:
                 # Its references named nothing: nothing is inside nothing.
@@ -405,6 +410,12 @@ class _Compiler:
                     "Only one Path predicate is allowed per query."
                 )
             return self._visit_path(p)
+        if kind == "edges":
+            # Its ends are compiled one at a time (``falkordb_search.edges``),
+            # never the whole of it: what compiles it whole can't answer it.
+            raise CompileError(
+                "A Connections search returns edges, which only the uncapped search "
+                "engine answers — as a search of its own.")
         raise CompileError(f"unknown predicate kind: {kind!r}")
 
     def _visit_group(self, g, *, in_or: bool, at_top_and: bool) -> str:
@@ -936,8 +947,8 @@ class _Compiler:
     def _anchorable(self, p) -> bool:
         """A top-level relationship whose far end is named entities: walked
         from them rather than tested from every candidate alone. Lineage
-        takes anything ``anchor_groups`` reads as named entities — "is X or
-        inside X" included; up the tree, an ``is``."""
+        takes anything ``anchor_groups`` reads as named entities — "is X",
+        inside X and above X included; up the tree, an ``is``."""
         if (p.kind != "related" or p.quantifier != "any" or p.count is not None
                 or p.where is None):
             return False
@@ -957,7 +968,12 @@ class _Compiler:
             self.hoisted_root_urns.append(urns)
             self.hoisted_max_depths.append(hi)
             return "true"
-        groups = [{"urns": _ref_urns(g.refs, "a relationship"), "lo": g.lo, "hi": g.hi}
+        # Each group: the named entities, or what lies lo..hi levels below
+        # them — above them, ``up`` — an "inside" naming no depth as deep as
+        # the scope reaches.
+        groups = [{"urns": _ref_urns(g.refs, "a relationship"), "lo": g.lo,
+                   "hi": self.scope_depth if g.hi is None else g.hi,
+                   **({"up": True} if g.up else {})}
                   for g in anchor_groups(p.where)]
         groups = [g for g in groups if g["urns"]]
         if not groups:
@@ -971,8 +987,8 @@ class _Compiler:
             "edge_where": self._emit_edge_predicate_fragment(p.edge),
         }
         if any(g["hi"] for g in groups):
-            # Not only the entities themselves: what is inside them too,
-            # reached down the containment edges.
+            # Not only the entities themselves: what is inside them, or
+            # above them, too — reached along the containment edges.
             if self._containment_edge_types is None:
                 raise CompileError(
                     "a relationship to what is inside an entity requires the provider's "
@@ -1130,6 +1146,80 @@ class _Compiler:
         # nested relationship's list, is built whatever comes before.
         return filters, operand(f"coalesce({' AND '.join(tests)}, false)")
 
+    # ---- Connections: a search whose results are edges ----
+
+    def connection_edge_types(self, p) -> List[str]:
+        """A Connections search's edges, as the graph spells them: the types
+        it names, else its class's — every link when it names none — never
+        a rollup, which summarises other edges."""
+        if p.edge_types:
+            types = self._named_edge_types(p.edge_types)
+        else:
+            types = self._resolve_degree_edge_types(
+                p.model_copy(update={"edge_class": p.edge_class or "links"}))
+        return sorted(t for t in types if not is_derived_edge_type(t))
+
+    def compile_far_end(self, where, var: str, depth: int, *,
+                        projected: bool = False) -> Tuple[str, List[str]]:
+        """A Connections search's far end, tested on ``var`` for each edge a
+        unit's nodes have: its plain conditions as the edge MATCH's WHERE
+        (``"true"`` for none), the rest as stages projected after it —
+        "inside a container" (``_inside``), then each relationship,
+        cheapest first. Native values only, as a relative's: the raw-property
+        probe answers for a unit's own nodes. ``projected``: the plain
+        conditions are for a projection too (``condition``)."""
+        if where is None:
+            return "true", []
+        members = _conjuncts(where)
+        for m in members:
+            # Hoisted, they would be the anchor's walk — not this end's test.
+            if m.kind in ("withinHops", "path"):
+                raise CompileError(f"{m.kind} can't sit in a Connections search's From or To")
+        saved = (self._var, self.raw_leaves, self.projected, self.scope_depth)
+        self._var, self.raw_leaves, self.projected, self.scope_depth = var, None, projected, depth
+        try:
+            head = [self._visit(m, in_or=False, at_top_and=True) for m in members
+                    if m.kind != "descendantOf" and not _has_relation(m)]
+            stages = [self._inside(m, int(m.max_depth or depth)) for m in members
+                      if m.kind == "descendantOf"]
+            stages += [self._projected_stage(m) for m in sorted(
+                (m for m in members if _has_relation(m)), key=_relation_cost)]
+        finally:
+            self._var, self.raw_leaves, self.projected, self.scope_depth = saved
+        head = [h for h in head if h != "true"]
+        if not head:
+            return "true", stages
+        return (head[0] if len(head) == 1 else "(" + " AND ".join(head) + ")"), stages
+
+    def condition(self, where, var: str, depth: int) -> str:
+        """``where`` on ``var`` as one boolean to project: the second pass of
+        a search either way tests each edge's ends against the other end's
+        condition too, as ``compile_far_end`` reads it."""
+        head, stages = self.compile_far_end(where, var, depth, projected=True)
+        parts = [head] if head != "true" else []
+        parts += stages
+        if not parts:
+            return "true"
+        return parts[0] if len(parts) == 1 else "(" + " AND ".join(operand(p) for p in parts) + ")"
+
+    def _inside(self, p, depth: int) -> str:
+        """"Inside a container" tested on the entity itself: the container,
+        or an entity below it at most ``depth`` levels — what a walk down
+        from it reads. A Connections search's far end, and one under an OR
+        or a NOT or in a relative's condition, where no walk bounds it."""
+        urns = list(p.urns) + _ref_urns(p.refs, "descendantOf")
+        if not urns:
+            return "false"      # its references named nothing
+        if self._containment_edge_types is None:
+            raise CompileError(
+                "inside a container requires the provider's containment edge types — "
+                "ontology resolution must complete before search.")
+        k, v = self._name(), self._var
+        rel = "|".join(_sanitize_label(t) for t in sorted(self._containment_edge_types))
+        bound = self._bind(urns)
+        return (f"({v}.urn IN {bound} OR ANY(_xb{k} IN [({v})<-[:{rel}*1..{int(depth)}]"
+                f"-(_xr{k}) WHERE _xr{k}.urn IN {bound} | true] WHERE _xb{k}))")
+
     # ---- Edge-predicate compilation (inside PathPredicate / WithinHops) ----
 
     def _emit_edge_predicate_fragment(self, ep) -> str:
@@ -1238,10 +1328,20 @@ _SIMPLE_KINDS = frozenset({"text", "property", "tag", "hasProperty", "entityType
 def _has_relation(p) -> bool:
     """Whether ``p`` is evaluated in a projection — a relationship, an edge
     count (``_counts_edges``), a layer as the canvas places it
-    (``_places``) — or is a group holding one."""
+    (``_places``) — or is a group holding one, or an OR / NOT holding an
+    "inside", which reads the entity's ancestors there (``_inside``)."""
     if p.kind == "related" or _counts_edges(p) or _places(p):
         return True
-    return p.kind == "group" and any(_has_relation(c) for c in p.children)
+    if p.kind != "group":
+        return False
+    if p.op != "and" and any(_holds_inside(c) for c in p.children):
+        return True
+    return any(_has_relation(c) for c in p.children)
+
+
+def _holds_inside(p) -> bool:
+    return p.kind == "descendantOf" or (
+        p.kind == "group" and any(_holds_inside(c) for c in p.children))
 
 
 def _places(p) -> bool:
@@ -1910,7 +2010,9 @@ def within_hops_parts(
     The anchor is one of the entry's URNs; for an entry with ``groups``
     ("is X or inside X"), one of them or ``lo..hi`` containment levels
     below one — checked upward from the anchor, a chain with one parent a
-    step."""
+    step. A group ``up`` of one (X's parent, its ancestors) is checked down
+    from the anchor instead; one chain can't go both ways, so such an
+    entry tests each group on the anchor in a projection."""
     parts: List[str] = []
     params: Dict[str, Any] = {}
     pid = next_param_id
@@ -1920,6 +2022,28 @@ def within_hops_parts(
             continue
         pattern, conds = within_hops_walk(entry, idx)
         groups = entry.get("groups")
+        if groups and any(g.get("up") for g in groups):
+            crel = "|".join(_sanitize_label(t) for t in entry.get("containment") or ())
+            tests: List[str] = []
+            for j, g in enumerate(groups):
+                p = f"_whUrns{pid}"
+                pid += 1
+                params[p] = list(g["urns"])
+                lo, hi = int(g["lo"]), int(g["hi"])
+                one = [f"anchor.urn IN ${p}"] if lo == 0 else []
+                if hi > 0:
+                    k = f"{idx}_{j}"
+                    chain = (f"(anchor)-[:{crel}*{max(1, lo)}..{hi}]->(_whX{k})" if g.get("up")
+                             else f"(anchor)<-[:{crel}*{max(1, lo)}..{hi}]-(_whX{k})")
+                    one.append(f"ANY(_whB{k} IN [{chain} WHERE _whX{k}.urn IN ${p} | true] "
+                               f"WHERE _whB{k})")
+                tests.append(" OR ".join(one))
+            where = (" WHERE " + " AND ".join(conds)) if conds else ""
+            parts.append(
+                f"MATCH {pattern}{where} WITH n, ({' OR '.join(tests)}) AS _whA{idx} "
+                f"WHERE _whA{idx} WITH DISTINCT n"
+            )
+            continue
         if groups:
             crel = "|".join(_sanitize_label(t) for t in entry.get("containment") or ())
             top = max(int(g["hi"]) for g in groups)
@@ -2205,6 +2329,9 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
     continuation isn't materialised here (would be ~one extra line
     per AggregationSpec — left to caller's understanding).
     """
+    if query.predicate.kind == "edges":
+        from backend.app.providers.falkordb_search.edges import explain_edges
+        return explain_edges(provider, query)
     _s = get_deep_search_settings()
     effective_candidate_cap = _resolve_candidate_cap(query, _s)
     notes: List[str] = []
@@ -2219,7 +2346,7 @@ def explain_deep_search(provider, query: SearchQuery) -> Dict[str, Any]:
             "engine finds what its far end matches across the data source and walks out "
             "from there. The statement below tests each candidate itself, which can be "
             "slow on a large graph.")
-    where_fragment = compiler.compile(query.predicate)
+    where_fragment = compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
     base_params: Dict[str, Any] = dict(compiler.params)
 
     # Collect the URN sets to apply as scope continuations. Each set
@@ -3148,7 +3275,7 @@ async def execute_deep_search(
 
     # 1. Compile predicate → Cypher WHERE fragment + scope/withinHops hoisting
     compiler = _build_compiler_for_provider(provider)
-    where_fragment = compiler.compile(query.predicate)
+    where_fragment = compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
     refuse_trace(compiler)
     base_params: Dict[str, Any] = dict(compiler.params)
 
@@ -4527,13 +4654,23 @@ async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:
     """
     if not hits:
         return
+    paths = await _ancestor_refs(provider, [h.node.urn for h in hits])
+    for h in hits:
+        h.ancestor_path = paths.get(h.node.urn, [])
 
-    async def _safe_chain(h: SearchHit) -> Tuple[str, List[str]]:
+
+async def _ancestor_refs(provider, urns: List[str]) -> Dict[str, List[AncestorRef]]:
+    """Each of ``urns``' containers, root first — ``_hydrate_ancestors``'
+    reading, for any entities (a Connections search's edge ends too)."""
+    if not urns:
+        return {}
+
+    async def _safe_chain(urn: str) -> Tuple[str, List[str]]:
         try:
-            chain = await provider._get_ancestor_chain(h.node.urn)
+            chain = await provider._get_ancestor_chain(urn)
         except Exception:
             chain = []
-        return h.node.urn, chain
+        return urn, chain
 
     # 1. Every hit's ancestor chain: in one pass where the provider reads
     # them in bulk (one pipelined cache read, one Cypher for the misses) —
@@ -4543,18 +4680,18 @@ async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:
     chains: Dict[str, List[str]] = {}
     if bulk is not None:
         try:
-            chains = await bulk([h.node.urn for h in hits])
+            chains = await bulk(list(urns))
         except Exception:
             logger.warning("deep_search: bulk ancestor chains failed; "
                            "ancestor_path will be empty on this page")
     else:
         chain_results = await asyncio.gather(
-            *(_safe_chain(h) for h in hits), return_exceptions=False,
+            *(_safe_chain(u) for u in urns), return_exceptions=False,
         )
         chains = dict(chain_results)
     needed_urns: set = set()
-    for urns in chains.values():
-        needed_urns.update(urns)
+    for chain in chains.values():
+        needed_urns.update(chain)
 
     # 2. Single batched node fetch for every unique ancestor URN —
     # collapses what was N round-trips into one.
@@ -4574,14 +4711,16 @@ async def _hydrate_ancestors(provider, hits: List[SearchHit]) -> None:
                 "ancestor_path will be empty on this page",
             )
 
-    for h in hits:
-        chain = chains.get(h.node.urn, [])
+    paths: Dict[str, List[AncestorRef]] = {}
+    for urn in urns:
+        chain = chains.get(urn, [])
         # chain is parent → ... → root; reverse to root → parent
         refs = []
-        for urn in reversed(chain):
-            if urn in summaries:
-                name, etype = summaries[urn]
+        for anc in reversed(chain):
+            if anc in summaries:
+                name, etype = summaries[anc]
                 refs.append(AncestorRef(
-                    urn=urn, display_name=name, entity_type=etype,
+                    urn=anc, display_name=name, entity_type=etype,
                 ))
-        h.ancestor_path = refs
+        paths[urn] = refs
+    return paths

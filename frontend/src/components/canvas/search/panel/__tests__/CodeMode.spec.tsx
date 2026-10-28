@@ -146,6 +146,18 @@ describe('Code mode', () => {
         expect(text()).toContain('type:dataset')
     })
 
+    it('puts a connection example in place of the query — a connection is the whole query', () => {
+        render(<Panel initial={null} onCommit={vi.fn()} />)
+        type('tag:PII')
+        fireEvent.click(screen.getByRole('button', { name: /^Add from\(type:dataset\) to\(type:dashboard\): / }))
+        expect(text()).toBe('from(type:dataset) to(type:dashboard)')
+        expect(screen.getByRole('status')).toHaveTextContent(/Connections from/i)
+        // Its name example leaves the cursor between the quotes.
+        fireEvent.click(screen.getByRole('button', { name: /^Add from\(inside @""\) to\[PRODUCES\]\(\): / }))
+        expect(text()).toBe('from(inside @"") to[PRODUCES]()')
+        expect(editor().state.selection.main.head).toBe('from(inside @"'.length)
+    })
+
     it('offers links through the view’s own edge types, and reads them back as words', () => {
         render(<CodeMode draft={null} isRunning={false} onCommit={vi.fn()} vocabulary={{
             ...VOCABULARY, edgeTypes: [{ id: 'CONTAINS', containment: true }, { id: 'DEFINED_BY' }],
@@ -170,6 +182,23 @@ describe('Code mode', () => {
         // Nothing wider: the whole query stays selected.
         press('i', true)
         expect(selected()).toBe(text())
+    })
+
+    it('reads a layer name of several words, unquoted, against the View’s layers', () => {
+        const onCommit = vi.fn()
+        render(<CodeMode draft={null} isRunning={false} onCommit={onCommit}
+                         vocabulary={{ ...VOCABULARY, layers: ['My Cool Layer'] }} />)
+        type('layer:My Cool Layer AND type:dataset')
+        expect(screen.getByRole('status')).toHaveTextContent('Reads as:')
+        expect(screen.getByRole('status')).not.toHaveTextContent('searched as text')
+        // ⌘I takes the whole name with it.
+        act(() => { editor().dispatch({ selection: { anchor: text().indexOf('Cool') } }) })
+        press('i', true)
+        expect(selected()).toBe('layer:My Cool Layer')
+        press('Enter', true)
+        expect(onCommit).toHaveBeenCalledWith({
+            kind: 'group', op: 'and', children: [{ kind: 'layer', layerAssignment: 'My Cool Layer' }, DATASETS],
+        })
     })
 
     it('points at Cypher for what the words can’t say', () => {

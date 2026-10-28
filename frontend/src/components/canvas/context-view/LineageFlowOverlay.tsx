@@ -117,6 +117,7 @@ export function LineageFlowOverlay({
   traceResult = null,
   highlightedEdges,
   isHighlightActive = false,
+  countLabels,
   resolveEdgeColor,
   resolveEdgeStrokeStyle,
   onEdgeDoubleClick,
@@ -148,6 +149,9 @@ export function LineageFlowOverlay({
   traceResult?: any | null,
   highlightedEdges?: Set<string>,
   isHighlightActive?: boolean,
+  /** Per highlighted line, what its badge says instead of its weight — a
+   *  Connections search's matches on it. Shown on each such line. */
+  countLabels?: ReadonlyMap<string, string>,
   resolveEdgeColor?: (edgeType: string) => string,
   /** Sibling of `resolveEdgeColor` — the ontology's stroke style for the
    *  edge's primary type, honoured by `edgeDashArray` when the edge is not
@@ -1866,6 +1870,7 @@ export function LineageFlowOverlay({
               ? (isThisEdgeHovered ? 1 : 0.08)
               : 1
           const detailed = renderTier === 'premium' || isHighlighted
+          const countLabel = isConnectedToSelected ? countLabels?.get(edge.id) : undefined
           return (
             <EdgeLine
               key={edge.id}
@@ -1881,7 +1886,9 @@ export function LineageFlowOverlay({
               // The bundle count, on the lines being looked at only: on every
               // line, the counts of a fan stacked into columns of numbers.
               // A trace keeps its wires bare (the cards say "N on this lineage").
-              showCount={!isTracing && isHighlighted && edge.isBundled && edge.edgeCount > 1}
+              showCount={countLabel !== undefined
+                || (!isTracing && isHighlighted && edge.isBundled && edge.edgeCount > 1)}
+              countLabel={countLabel}
             />
           )
         })}
@@ -2278,13 +2285,15 @@ interface EdgeLineProps {
   stagedColor: string | undefined
   isExpanding: boolean
   showCount: boolean
+  /** What the badge says, when not the line's weight. */
+  countLabel?: string
 }
 
 const LINE_TRANSITION = { transition: 'opacity 0.12s ease' }
 
 const EdgeLine = React.memo(function EdgeLine({
   edge, groupOpacity, isHighlighted, isHovered, premiumLook, dash, showDirection,
-  stagedColor, isExpanding, showCount,
+  stagedColor, isExpanding, showCount, countLabel,
 }: EdgeLineProps) {
   const { pathD, color, dynamicStrokeWidth, edgeOpacity, isGhost, sx, sy, tx, ty } = edge
   // Per-edge gradient id — direction is encoded in the stroke itself. Fades
@@ -2373,10 +2382,12 @@ const EdgeLine = React.memo(function EdgeLine({
       />
 
       {showCount && (
-        <g data-edge-badge={edge.edgeCount} transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
-          <rect x="-8" y="-6" width="16" height="12" rx="6" fill="currentColor" opacity="0.08" />
+        <g data-edge-badge={countLabel ?? edge.edgeCount} transform={`translate(${(sx + tx) / 2}, ${(sy + ty) / 2})`}>
+          <rect x={-badgeHalfWidth(countLabel ?? String(edge.edgeCount))} y="-6"
+                width={2 * badgeHalfWidth(countLabel ?? String(edge.edgeCount))} height="12" rx="6"
+                fill="currentColor" opacity="0.08" />
           <text x="0" y="3" fill="currentColor" fontSize="8px" fontWeight="500" textAnchor="middle" opacity="0.6">
-            {edge.edgeCount}
+            {countLabel ?? edge.edgeCount}
           </text>
         </g>
       )}
@@ -2406,8 +2417,15 @@ const EdgeLine = React.memo(function EdgeLine({
   && a.stagedColor === b.stagedColor
   && a.isExpanding === b.isExpanding
   && a.showCount === b.showCount
+  && a.countLabel === b.countLabel
   && sameRow(a.edge, b.edge),
 )
+
+/** Half the width of a line badge that holds `text`: 16px for up to two
+ *  characters, as it always was, growing ~4.5px a character past that. */
+function badgeHalfWidth(text: string): number {
+  return Math.max(8, 3 + text.length * 2.25)
+}
 
 const HIT_DENSITY_LIMIT = 1200
 

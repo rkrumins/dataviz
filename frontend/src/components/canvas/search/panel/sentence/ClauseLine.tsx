@@ -252,8 +252,9 @@ function RelationTokens({ line, tokenState }: {
     const relativeBlank = (relative.kind === 'names' && relative.refs.length === 0)
         || (relative.kind === 'types' && relative.types.length === 0)
 
-    // In the top-level AND: a listed clause, while the listed clauses all must hold.
-    const top = line.topIndex !== null && ctx.combine === 'and'
+    // In the top-level AND: a listed clause, while the listed clauses all must
+    // hold — unless the whole sentence isn't (a Connections search's end).
+    const top = relationCtx.top !== false && line.topIndex !== null && ctx.combine === 'and'
     const nested = useMemo(() => ({ ...relationCtx, depth: line.relationDepth, top }),
         [relationCtx, line.relationDepth, top])
     const relationEditor = (

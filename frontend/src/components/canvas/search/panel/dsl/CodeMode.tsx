@@ -47,7 +47,9 @@ export function CodeMode({
         if (shown !== applied && !typed) setText(shown)
     }
 
-    const parsed = useMemo(() => parsePredicate(text), [text])
+    // Read against the View's layers: ``layer:My Cool Layer`` is one name.
+    const layers = vocabulary.layers
+    const parsed = useMemo(() => parsePredicate(text, { layers }), [text, layers])
     const commit = useCallback(() => {
         // A query that doesn't parse is never applied: the one you had stays.
         if (!typed || parsed.error) return
@@ -95,7 +97,9 @@ export function CodeMode({
                 onInsert={(example) => {
                     // "|" marks where the cursor goes: between the quotes of @"".
                     const caret = example.indexOf('|')
-                    editor.current?.insert(example.replace('|', ''), caret >= 0 ? caret : undefined)
+                    // A connection is a whole query: it takes the query's place.
+                    editor.current?.insert(example.replace('|', ''), caret >= 0 ? caret : undefined,
+                                           example.startsWith('from('))
                 }}
             />
             <div className="text-[10.5px] text-ink-muted/70 px-1">
@@ -191,6 +195,11 @@ function exampleGroups(v: DslVocabulary): { task: string; items: [string, string
             [`noIncoming[${edgeType}]`, `no ${edgeType} edge comes into it`],
             ['noLinks', 'nothing links to it or from it'],
             ['edges(both) > 10', 'more than 10 links, either way'],
+        ] },
+        { task: 'Connections — the edges themselves', items: [
+            [`from(type:${type}) to(type:${otherType})`, `the edges from a ${type} to a ${otherType}`],
+            [`from(inside @"|") to[${edgeType}]()`, `${edgeType} edges out of anything inside an entity`],
+            [`from(type:${type}) linkedTo(type:${otherType}).via(confidence >= 0.8)`, 'either way, confident edges only'],
         ] },
         { task: 'Containers and names', items: [
             [`parent(type:${type})`, `its container is a ${type}`],

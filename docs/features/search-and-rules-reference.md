@@ -5,7 +5,8 @@ keep searches and display rules in a View's library, and move that library
 between Views: the query model, every endpoint with its permissions and errors,
 the library pack format, and ready-to-run recipes.
 
-The user guides are [Advanced Search](/guide/advanced-search) and
+The user guides are [Advanced Search](/guide/advanced-search),
+[Finding Connections](/guide/finding-connections) and
 [Display Rules](/guide/display-rules). How the search service is built — the
 validate → scope → execute pipeline and its configuration — is in
 [Search: Deep & Advanced](/docs/services-search).
@@ -110,11 +111,14 @@ Keys are camelCase (snake_case is accepted too); unknown keys are ignored.
 
 > **Important:** Send a **group** at the root, as the panel does — wrap a
 > single condition as `{"kind": "group", "op": "and", "children": [ … ]}`.
-> Display rules are wrapped this way before they are counted or matched.
+> Display rules are wrapped this way before they are counted or matched. A
+> [Connections search](#connections-edges-as-results) is the whole query: send
+> it at the root, or as the only child of that group.
 
 ### Predicates
 
-`kind` picks the predicate. There are 19 node predicates:
+`kind` picks the predicate. There are 19 node predicates, and `edges`, which
+returns edges instead ([Connections](#connections-edges-as-results)):
 
 | `kind` | Fields (defaults) | Limits | Matches |
 | --- | --- | --- | --- |
@@ -124,7 +128,7 @@ Keys are camelCase (snake_case is accepted too); unknown keys are ignored.
 | `hasProperty` | `key`, `negate` (false), `keyMatch`: `exact` · `prefix` · `contains` (`exact`) | key 1–128 | The property is present — by its exact name, or (`prefix`, `contains`) by part of its name, ignoring case |
 | `all` | — | — | Every entity in scope (an empty group is refused; ask for everything with this) |
 | `entityType` | `op`: `in` · `notIn` (`in`), `values` | 1–32 values | The entity's type |
-| `descendantOf` | `urns`, `refs`, `maxDepth` | 1–64 urns or [references](#names-instead-of-urns); depth 1–20 | Inside those containers |
+| `descendantOf` | `urns`, `refs`, `maxDepth` | 1–64 urns or [references](#names-instead-of-urns); depth 1–20 | Inside those containers, or one of them. In the top-level AND it bounds the search; under `or` or `not`, or in a relationship's or a Connections end's condition, it tests each entity, `maxDepth` (else the scope's `maxDepth`) deep |
 | `withinHops` | `urns`, `refs`, `hops`, `direction`: `out` · `in` · `both` (`both`), `edgeClass` (`lineage`), `edgeTypes`, `edgePredicate` | 1–64 urns or references; hops 1–10 | Within N hops of those entities |
 | `path` | each end named (`sourceUrns` / `sourceRefs`, `targetUrns` / `targetRefs`) or a condition (`sourceWhere`, `targetWhere`); `direction`: `outgoing` · `incoming` · `any` (`outgoing`), `edgeClass` (`lineage`), `edgeTypes`, `maxHops` (4), `maxPaths` (32), `edgePredicate` | 1–8 urns or references an end; hops 1–6 — 4 with an end a condition, 3 with both; paths 1–128 | Routes between them (`results: "paths"`): [path patterns](#path-patterns) |
 | `is` | `refs` | 1–64 references | The entities those [references](#names-instead-of-urns) name |
@@ -248,8 +252,12 @@ What they mean, for an entity *n* whose relatives along the axis are *R(n)*:
 **Fast when the far end is named.** A relationship in the top-level AND whose
 `where` is just an `is` — "under *Country / United Kingdom*", "fed by
 *Sales / orders*" — is walked **from** those entities, so it costs about what
-`descendantOf` or `withinHops` does, and lineage may go up to 10 hops. Any
-other relationship is tested from each candidate — after the rest of the query
+`descendantOf` or `withinHops` does, and lineage may go up to 10 hops. A
+lineage relationship's `where` may also name them as what's inside one
+(`descendantOf`), one's parent or children, its ancestors or descendants (a
+`parent`, `child`, `ancestor` or `descendant` relationship whose `where` is an
+`is`), or an `or` of those: the walk starts from all of them. Any other
+relationship is tested from each candidate — after the rest of the query
 has narrowed them — and lineage goes at most 3 hops
 (`DEEP_SEARCH_RELATION_MAX_HOPS`), with one exception: one relationship a query,
 in the top-level AND and asking for at least one relative, may follow lineage
@@ -260,6 +268,13 @@ is refused past 200,000 such matches or 500,000 entities reached, and it runs
 for a search that lists its matches, not for group counts. The related
 entities may sit anywhere in the data source; the matches are always inside
 the View.
+
+**Fast when the query names its matches.** The same in the top-level AND —
+`descendant(@"X")` (X's ancestors), `child(@"X")` (its parent),
+`inside @"X" OR descendant(@"X")` — is where the search starts: those entities
+are found from *X*, up or down the hierarchy, and only they are tested by the
+rest of the query, rather than every entity in the scope. A Connections end
+that names its entities so is the end the search starts from.
 
 Code mode writes them as words — `parent(type:domain)`, `every
 child(description IS NOT EMPTY)`, `count(child(type:column)) > 100`,
@@ -289,6 +304,168 @@ passes no entity twice. Each end's condition follows a relationship's rules
 (it nests one relationship deep). At most `maxPaths` routes come back, with
 `truncated` when there were more — for complete, counted sets of sources or
 targets, use a [relationship](#relationships).
+
+### Connections: edges as results
+
+`edges` asks for edges, not entities: every direct edge whose source meets
+`sourceWhere` (From) and whose target meets `targetWhere` (To). "Every edge from
+a string column called bob to anything whose parent's family is smith":
+
+```json
+{"predicate": {"kind": "edges",
+   "sourceWhere": {"kind": "group", "op": "and", "children": [
+     {"kind": "property", "key": "dataType", "op": "eq", "value": "string"},
+     {"kind": "property", "key": "first_name", "op": "eq", "value": "bob"}]},
+   "targetWhere": {"kind": "related", "axis": "parent", "where":
+     {"kind": "property", "key": "family", "op": "eq", "value": "smith"}}},
+ "scope": {"viewId": "view_abc", "scopeMode": "view"},
+ "options": {"pageSize": 100}}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `sourceWhere` · `targetWhere` | any entity | Each end's condition: any node predicate but `withinHops` and `path`. "Inside a container" (`descendantOf`) is allowed anywhere in it |
+| `direction` | `outgoing` | `outgoing`: edges stored From → To. `either`: stored either way, each edge once |
+| `edgeClass` | links | `lineage`, `containment`, `links` (every edge but the hierarchy's) or `any` |
+| `edgeTypes` | — | Named edge types instead of a class (1–32); a containment type may be named |
+| `edgePredicate` | — | An [edge filter](#predicates) every returned edge meets |
+
+More examples:
+
+```json
+{"kind": "edges", "sourceWhere": {"kind": "descendantOf", "refs": [{"path": ["Finance", "orders"]}], "maxDepth": 1},
+ "targetWhere": {"kind": "layer", "layerAssignment": "Sales"}}
+```
+— from a table, or any of its columns, into the Sales layer.
+
+```json
+{"kind": "edges", "targetWhere": {"kind": "related", "axis": "child",
+   "where": {"kind": "is", "refs": [{"urn": "urn:col:42"}]}},
+ "edgeTypes": ["FEEDS"], "direction": "either"}
+```
+— every `FEEDS` edge, either way, touching the parent of a column.
+
+```json
+{"kind": "edges", "targetWhere": {"kind": "is", "refs": [{"path": ["**", "rpt_daily_revenue"]}]}}
+```
+— every edge into one entity: on the demo platform graph, 5 (4 `CONSUMES`, 1
+`PRODUCES`). Leave `sourceWhere` out for any source.
+
+```json
+{"kind": "edges", "targetWhere": {"kind": "related", "axis": "ancestor", "minHops": 2, "maxHops": 2,
+   "where": {"kind": "is", "refs": [{"path": ["**", "Snowflake"]}]}}}
+```
+— every edge into anything whose grandparent is `Snowflake`: 33 on the demo
+graph, as `parent` within `parent` finds.
+
+```json
+{"kind": "edges", "edgeTypes": ["TRANSFORMS"],
+ "sourceWhere": {"kind": "related", "axis": "parent", "where": {"kind": "is", "refs": [{"path": ["**", "fact_orders"]}]}},
+ "targetWhere": {"kind": "related", "axis": "parent", "where": {"kind": "is", "refs": [{"path": ["**", "rpt_daily_revenue"]}]}}}
+```
+— column lineage between two tables: 6 on the demo graph.
+
+**In Code mode.** The panel's Code mode writes a Connections search as words,
+and a library pack or saved search may hold either form:
+
+| Code | JSON |
+| --- | --- |
+| `from(type:dataJob) to(type:dataset)` | `{"kind": "edges", "sourceWhere": {"kind": "entityType", "op": "in", "values": ["dataJob"]}, "targetWhere": {"kind": "entityType", "op": "in", "values": ["dataset"]}}` |
+| `from(…) to[PRODUCES, CONSUMES](…)` | Adds `"edgeTypes": ["PRODUCES", "CONSUMES"]` |
+| `from(…) to[lineage](…)` | Adds `"edgeClass": "lineage"`; `[containment]` and `[any]` likewise. `[links]` is the default, left out |
+| `from(…) linkedTo(…)` | Adds `"direction": "either"` |
+| `from(…) to(…).via(confidence >= 0.8)` | Adds `"edgePredicate": {"kind": "edgeProperty", "key": "confidence", "op": "gte", "value": 0.8}` |
+| `from() to(layer:Gold)` | No `sourceWhere`: any entity. `{"kind": "edges", "targetWhere": {"kind": "layer", "layerAssignment": "Gold"}}` |
+
+Inside an end, Code mode writes the hierarchy as words:
+
+| In an end | JSON |
+| --- | --- |
+| `@"**/rpt_daily_revenue"` | `{"kind": "is", "refs": [{"path": ["**", "rpt_daily_revenue"]}]}` |
+| `inside @"**/rpt_daily_revenue"` | `{"kind": "descendantOf", "refs": [{"path": ["**", "rpt_daily_revenue"]}]}`: the entity and everything below it |
+| `inside @"**/fact_orders" OR descendant(@"**/fact_orders")` | `{"kind": "group", "op": "or", "children": [{"kind": "descendantOf", "refs": […]}, {"kind": "related", "axis": "descendant", "where": {"kind": "is", "refs": […]}}]}`: its family — the entity, everything below it and every container above it |
+| `parent(…)` · `child(…)` | `{"kind": "related", "axis": "parent", "where": …}`; `"axis": "child"` likewise |
+| `ancestor*2(…)` · `ancestor(…)` · `descendant(…)` | `"axis": "ancestor", "minHops": 2, "maxHops": 2`; no hops for any depth, 1–20; `"axis": "descendant"` likewise |
+| `every child(…)` · `no child(…)` | Adds `"quantifier": "all"` · `"quantifier": "none"` |
+| `count(child(…)) >= 6` | Adds `"count": {"op": "gte", "value": 6}` |
+
+**What it returns.** `options.results` is `edges` (left out, it is filled in;
+another value is a `400`). The page lists `edges` in order: the source's name,
+the target's name, the edge type, then the URNs. Each edge has:
+- `key`, unique in the answer;
+- `id`, the canvas's id for it: its own `id`, else `source|TYPE|target`;
+- `edgeType` and its `properties` — the JSON-kept ones parsed, beside the
+  platform's own fields;
+- `source` and `target`, each `{urn, displayName, entityType, parent,
+  ancestorPath}`, the path root first, as a hit's.
+
+`edgeTypeCounts` gives the matches per edge type, exact once the search is
+complete; `totalCount` gives all of them. Pages hold at most 500 edges, and
+`cursor` and `waitMs` work as for entities.
+
+The answer to "every edge from `fact_orders`, or anything inside it, to the
+Reporting layer" on the demo platform graph, cut to its first edge:
+
+```json
+{"status": "complete", "totalCount": 8, "edgeTypeCounts": {"TRANSFORMS": 8},
+ "edges": [
+  {"key": "704", "id": "e-00000647", "edgeType": "TRANSFORMS",
+   "properties": {"logic": "COUNT(DISTINCT)", "id": "e-00000647", "confidence": 1},
+   "source": {"urn": "urn:li:schemaField:customer_key_000005db", "displayName": "customer_key",
+              "entityType": "schemaField",
+              "parent": {"urn": "urn:li:dataset:fact_orders_000005d4", "displayName": "fact_orders",
+                         "entityType": "dataset"},
+              "ancestorPath": [
+                {"urn": "urn:li:domain:enterprise_data_platform_00000001",
+                 "displayName": "Enterprise Data Platform", "entityType": "domain"},
+                {"urn": "urn:li:dataPlatform:snowflake_0000000f", "displayName": "Snowflake",
+                 "entityType": "dataPlatform"},
+                {"urn": "urn:li:container:analytics_gold_0000057b", "displayName": "ANALYTICS.GOLD",
+                 "entityType": "container"},
+                {"urn": "urn:li:dataset:fact_orders_000005d4", "displayName": "fact_orders",
+                 "entityType": "dataset"}]},
+   "target": {"urn": "urn:li:schemaField:unique_customers_00000645", "displayName": "unique_customers",
+              "entityType": "schemaField",
+              "parent": {"urn": "urn:li:dataset:rpt_daily_revenue_00000631",
+                         "displayName": "rpt_daily_revenue", "entityType": "dataset"},
+              "ancestorPath": [
+                {"urn": "urn:li:domain:enterprise_data_platform_00000001",
+                 "displayName": "Enterprise Data Platform", "entityType": "domain"},
+                {"urn": "urn:li:dataPlatform:snowflake_0000000f", "displayName": "Snowflake",
+                 "entityType": "dataPlatform"},
+                {"urn": "urn:li:container:analytics_reporting_00000628",
+                 "displayName": "ANALYTICS.REPORTING", "entityType": "container"},
+                {"urn": "urn:li:dataset:rpt_daily_revenue_00000631",
+                 "displayName": "rpt_daily_revenue", "entityType": "dataset"}]}}]}
+```
+
+**The rules:**
+- It is the whole query. It can't sit beside other conditions, under a `not`,
+  or inside another condition, and it can't be a display rule.
+- Both ends must be in the search's scope.
+- Both ends read native property values only, as a relationship's condition
+  does.
+- `outgoing` follows each edge the way it is stored. On the demo graph,
+  `CONSUMES` is stored from the reader to what it reads, so a chart's
+  `CONSUMES` edge counts as coming into the dataset it reads; name `edgeTypes`
+  to keep only the kinds that carry data in.
+- Rollups (`AGGREGATED`) are never returned, and can't be named: they summarise
+  other edges. Naming one is a `422`: *AGGREGATED edges are rollups of other
+  edges — ask for the edges themselves*. To roll edges up to tables,
+  containers or layers, group them by an entry of each end's `ancestorPath`;
+  the canvas places its lit lines the same way.
+- An end's relationships nest at most 3 deep (`DEEP_SEARCH_MAX_RELATION_DEPTH`),
+  and its containment axes go 1–20 levels.
+- `aggregations` and `sort` are refused: the order is fixed.
+- An end's relationship follows lineage at most 3 hops.
+- Explain shows the search as one statement, ready to edit and run.
+- Counts take a Connections search as an item, counting its edges.
+- Exports write each edge's fixed columns: `edgeKey`, `edgeId`, `edgeType`, then
+  each end's urn, name, type, parent's urn and name, then `properties` as JSON.
+  Chosen `columns` add the edge's own keys after them.
+- Share links refuse it (`403`).
+- It runs on the uncapped engine only: with `DEEP_SEARCH_ENGINE=legacy` it is
+  a `400`.
 
 **Text targets**: `name` (display name or qualified name), `qualifiedName`,
 `description`, `tags`, `property` (with `propertyKey`), `any` (the entity's
@@ -337,7 +514,7 @@ P30D").
 | Leaves in the whole tree | 64 | `DEEP_SEARCH_MAX_LEAF_COUNT` |
 | Children of one `or` group | 24 | `DEEP_SEARCH_MAX_OR_BRANCH` |
 | A `not` group | exactly one child | — |
-| `descendantOf`, `withinHops`, `path` | only in the top-level AND (never under `or` / `not`, nor in a relationship's or path end's condition); one `path` per query | — |
+| `withinHops`, `path` | only in the top-level AND (never under `or` / `not`, nor in a relationship's or path end's condition); one `path` per query | — |
 | Relationships inside relationships (and path ends) | 3 deep | `DEEP_SEARCH_MAX_RELATION_DEPTH` |
 | Lineage hops a relationship tests from each candidate | 3 (at most 6) | `DEEP_SEARCH_RELATION_MAX_HOPS` |
 | Lineage hops when the far end is named (an `is`, in the top-level AND) | 10 | — |
@@ -372,9 +549,9 @@ searched."
 
 | Field | Default | Range / values |
 | --- | --- | --- |
-| `results` | `aggregates` | `aggregates` · `hits` · `both` · `paths`. **The default returns no hits** — set `hits` or `both` |
+| `results` | `aggregates` | `aggregates` · `hits` · `both` · `paths` · `edges`. **The default returns no hits** — set `hits` or `both`. A [Connections search](#connections-edges-as-results) answers `edges`, filled in when left out |
 | `aggregations` | — | A list of facets (below) |
-| `pageSize` | 50 | 1–5,000 |
+| `pageSize` | 50 | 1–5,000; a Connections search's pages hold at most 500 |
 | `cursor` | — | From the previous page |
 | `sort` | `relevance` | `relevance` · `displayName` · `qualifiedName` · `depth` · `matchCount` |
 | `sortProperty` | — | Order by this property instead |
@@ -396,7 +573,8 @@ refused (`400`).
 **Which engine runs it.** With the default `DEEP_SEARCH_ENGINE=v2`, a search
 that returns hits (`hits` or `both`, no `path`) runs on the uncapped engine:
 every match is found and counted exactly, however many, and `candidateCap`
-applies only to facets. `aggregates` and `paths` run on the capped engine.
+applies only to facets. A Connections search does too. `aggregates` and
+`paths` run on the capped engine.
 
 **Paging and progress.** Repeat the same query with `options.cursor` set to the
 last answer's `cursor` for the next page. With `waitMs` (the panel sends 800),
@@ -414,6 +592,8 @@ what it has and a `sessionId` to continue from.
 | `hits` | `[{node, score, matchedPredicates, highlights, ancestorPath}]` in the **server's order** — don't re-sort by `score` |
 | `aggregates` | One bucket list per requested aggregation: `{ancestorUrn, ancestorDisplayName, ancestorEntityType, ancestorDepthFromScopeRoot, matchCount, typeCounts, sampleHits}` |
 | `paths` | `[{nodes: [{urn, displayName, entityType}], edges: [{sourceUrn, targetUrn, edgeType, properties}], hopCount}]` |
+| `edges` | A Connections search's page: `[{key, id, edgeType, properties, source, target}]`, each end `{urn, displayName, entityType, parent, ancestorPath}` |
+| `edgeTypeCounts` | A Connections search's matches per edge type — exact once `complete` |
 | `cursor` | The next page, when there is one |
 | `totalCount` | Exact matches in scope; `null` while unknown |
 | `candidateCount` · `countStatus` | Matches found; `exact` or `lowerBound` |
@@ -439,16 +619,16 @@ primary data source; one outside the workspace is `404`) and `branchId`.
 | Method · path | Body → answer | Notes |
 | --- | --- | --- |
 | `POST /search/advanced` | `SearchQuery` → `SearchResultPage` | The search |
-| `POST /search/explain` | `SearchQuery` → `{cypher, hits_cypher, inlinedCypher, params, candidate_cap, hoisted_root_urns, effective_root_urns, notes, resolvedScope}` | Compiles without running. `inlinedCypher` is the statement with its values written in, or `null` when a value has no Cypher literal |
+| `POST /search/explain` | `SearchQuery` → `{cypher, hits_cypher, inlinedCypher, params, candidate_cap, hoisted_root_urns, effective_root_urns, notes, resolvedScope}` | Compiles without running. `inlinedCypher` is the statement with its values written in, or `null` when a value has no Cypher literal. A Connections search answers `{cypher, hits_cypher, params, notes, anchor, edge_types}`: the whole scope in one statement (two joined by `UNION ALL` either way) |
 | `GET /search/schema` | → the `SearchQuery` JSON Schema | `ETag`, `X-Schema-Version`; cached 5 min |
 | `GET /search/discover?samplePerLabel=` | → `{labels, tagValues, edges, blobOnlyLabels, missingContainment, missingSearchableText, elapsedMs}` | Samples 1–2,000 (default 200) nodes per type; `edges[].storedAs` says where each edge key is kept. Not for share links |
 | `POST /search/resolve` | `{scope, refs}` → `{results: [{count, matches: [{urn, displayName, entityType, ancestorPath}], error}], dataVersion, elapsedMs}` | What each of up to 32 [name references](#names-instead-of-urns) names in the View — how many, the first 10 with their containers. What the name picker checks as a path is typed |
 | `GET /search/values?viewId=&key=&q=&limit=` | → `{key, values: [{value, count}], complete, truncated, elapsedMs}` | A property's most common values in the View; `limit` 1–50 (25); about 1.5 s. Not for share links |
-| `POST /search/membership` | `{scope, items: [{id, predicate}], urns}` → `{matches: {id: [urn]}, errors: {id: why}, dataVersion, elapsedMs}` | Which of these entities (≤ 1,000) match which rules (≤ 32). What display-rule chips use |
+| `POST /search/membership` | `{scope, items: [{id, predicate}], urns}` → `{matches: {id: [urn]}, errors: {id: why}, dataVersion, elapsedMs}` | Which of these entities (≤ 1,000) match which rules (≤ 32). What display-rule chips use. A Connections search is no rule (`400`) |
 | `POST /search/counts` | `{scope, items, waitMs, sessions}` → `{counts: {id: {count, status, sessionId, progress, error}}, dataVersion, elapsedMs}` | Exact matches per rule (≤ 32). Repeat with `sessions` until each is `complete`; a request works for at most 5 s whatever `waitMs` (0–60,000, default 1,000) says |
 | `POST /search/catalog` | `{scope, waitMs, sessionId, refresh}` → every property of the View's entities, exactly | Repeat with `sessionId` until `complete` |
 | `POST /search/ancestor-counts` | `{scope, sessionId, urns}` → `{counts: {urn: {count, typeCounts, displayName, entityType}}, status}` | Matches inside each container (≤ 2,000), from a search's session. `expired`: run the search again |
-| `POST /search/exports` | `{scope, predicate, format: csv\|ndjson, columns, waitMs, sessionId}` → `{sessionId, status, rows, progress, format, columns, filename, downloadToken}` | Every match to a file; ≤ 200 property columns. Repeat until `complete`. Needs the **Export graph data** feature |
+| `POST /search/exports` | `{scope, predicate, format: csv\|ndjson, columns, waitMs, sessionId}` → `{sessionId, status, rows, progress, format, columns, filename, downloadToken}` | Every match to a file; ≤ 200 property columns — a Connections search's edges with their [fixed columns](#connections-edges-as-results). Repeat until `complete`. Needs the **Export graph data** feature |
 | `GET /search/exports/{sessionId}/download?token=` | → the file | For the user who exported it, for an hour |
 | `POST /search` | `{query, limit, offset}` → nodes | Legacy free-text search |
 | `POST /search/native?viewId=` | `{query, limit, timeoutMs}` → `{engine, columns, rows, rowCount, truncated, truncatedReason, limitApplied, timeoutMs, executedQuery, queryHash, elapsedMs, notes, requestId}` | Your own read-only Cypher, on FalkorDB and Neo4j. Not the rule above: it needs `workspace:native-query:read` with data-source access, or a direct share of `viewId` with `canQuerySource`; never an API key or a draft, and never a View's visibility alone. Never retried by the app. See [Native read-only queries: security](/docs/native-queries) |
@@ -457,7 +637,7 @@ primary data source; one outside the workspace is `404`) and `branchId`.
 
 | Status | When |
 | --- | --- |
-| `400` | A rule of the query broken (caps, types, values, placement, `fulltext`/`regex`, `subAggregation`), an unbounded text-only query, a View of another data source, an entity type the View doesn't show |
+| `400` | A rule of the query broken (caps, types, values, placement, `fulltext`/`regex`, `subAggregation`, a Connections search that isn't the whole query), an unbounded text-only query, a View of another data source, an entity type the View doesn't show |
 | `401` | Not signed in |
 | `403` | No access to the workspace's data; a share link leaving its View, or following lineage or relationships ("This link can't follow lineage or relationships: they lead outside its view."); the CSRF header missing; an export feature off (`feature_disabled`); an expired download link |
 | `404` | The View (`view_not_found: …`) or the data source isn't there |
@@ -492,10 +672,10 @@ applies.
 A rule's predicate is checked as a search's is, and additionally may not use:
 
 - `withinHops` or `path` — "A rule can't use 'within hops' or a path…"
+- `edges` — a rule tags entities, and a Connections search returns edges
 - a lineage relationship of more than one hop — a rule is asked of every
   entity on the canvas
 - `text` with `match` `regex` or `fulltext`
-- `descendantOf` under an `or` or `not` group
 
 Relationships are otherwise allowed — "has a child tagged PII", "its parent is a
 domain", "fed by a topic" — and name references too, which keep a rule working
@@ -876,9 +1056,9 @@ curl -s -b "$JAR" -o pii.csv \
 - **Rules only add chips.** No node colour, hiding, priority, first-match,
   description, owner or per-rule scope.
 - **A rule can't use** `withinHops`, `path`, lineage relationships past one
-  hop, `regex` or `fulltext` text, or `descendantOf` under `or` / `not`.
-- **Share links can't follow lineage or relationships**: `related`, `path` and
-  `withinHops` answer `403` for them, as do rules that use them.
+  hop, or `regex` or `fulltext` text.
+- **Share links can't follow lineage or relationships**: `related`, `path`,
+  `withinHops` and `edges` answer `403` for them, as do rules that use them.
 - **Relationships tested from each candidate follow lineage 3 hops**. Up to 10
   goes for one in the top-level AND asking for at least one relative — walked
   from the entities it names, or traced from what its condition matches (one a
@@ -892,6 +1072,14 @@ curl -s -b "$JAR" -o pii.csv \
   name past the native budget) doesn't match there.
 - **Path patterns return at most 128 routes**; relationships return the
   complete sets.
+- **Connections are direct edges only.** Multi-hop connections — the edges of
+  every route of up to N hops from a From match to a To match, with conditions
+  on the entities between — are future scope. Until then, a path pattern lists
+  routes, and a relationship tests reach.
+- **A Connections search's ends read native values only**: a value kept as raw
+  JSON doesn't match at either end. It runs on the uncapped engine, so not with
+  `DEEP_SEARCH_ENGINE=legacy` or on a branch the projection hasn't caught up
+  with. Its order is fixed, and it has no facets.
 - **`fulltext` and `regex` text matches** and **`subAggregation`** are in the
   model but refused.
 - **Draft data isn't searchable**: searches, counts and chips read the published
@@ -922,6 +1110,7 @@ curl -s -b "$JAR" -o pii.csv \
 | Validation, scoping, routing, name resolution | `backend/app/services/advanced_search_service.py` |
 | Cypher: relationships, path patterns, edge filters | `backend/app/providers/falkordb_deep_search.py` |
 | Name paths to entities | `backend/app/providers/falkordb_search/refs.py` |
+| Connections: plan, statements, answer, explain | `backend/app/providers/falkordb_search/edges.py` |
 | Where an edge keeps a property | `backend/common/edge_properties.py` |
 | What every construct means, in Python (the test oracle) | `backend/graph/adapters/stub_deep_search.py` |
 | Search endpoints | `backend/app/api/v1/endpoints/graph.py` |

@@ -28,11 +28,12 @@ import { refLabel } from './relations'
 
 /**
  * The draft minus its container clamp — a NOT-rooted draft passes
- * through untouched, because ``topLevelConditions`` doesn't unwrap one
- * and a scope row can't legally live inside one anyway (the compiler
- * only accepts DescendantOf in the top-level AND).
+ * through untouched, because ``topLevelConditions`` doesn't unwrap one,
+ * and so does an ANY-rooted one: an "inside" row there is one of the
+ * alternatives, not the scope (``findScopeCondition``).
  */
 export function withoutScope(draft: Predicate | null): Predicate | null {
+    if (rootGroupOp(draft) === 'or') return draft
     const rest = topLevelConditions(draft).filter((c) => c.kind !== 'descendantOf')
     if (rest.length === 0) return null
     if (rest.length === 1) return rest[0]

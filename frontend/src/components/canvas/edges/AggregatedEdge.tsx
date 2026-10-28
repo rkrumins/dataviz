@@ -26,6 +26,8 @@ interface AggregatedEdgeData {
   // Trace flags for consistent highlighting
   isTraced?: boolean
   isDimmed?: boolean
+  /** A Connections search matched an edge this roll-up summarises. */
+  isSearchMatch?: boolean
   [key: string]: unknown
 }
 
@@ -47,6 +49,7 @@ export const AggregatedEdge = memo(function AggregatedEdge({
   const sourceCount = data?.sourceEdgeCount ?? 1
   const isTraced = data?.isTraced ?? false
   const isDimmed = data?.isDimmed ?? false
+  const isSearchMatch = data?.isSearchMatch ?? false
 
   // Calculate path
   const [edgePath, labelX, labelY] = getBezierPath({
@@ -93,9 +96,9 @@ export const AggregatedEdge = memo(function AggregatedEdge({
         style={{
           ...(style as React.CSSProperties),
           stroke: isDimmed ? '#9ca3af' : isTraced ? traceColor : edgeColor,
-          strokeWidth: isDimmed ? 0.75 : isTraced ? 2 : selected ? 2 : 1.5,
+          strokeWidth: isDimmed ? 0.75 : isTraced || isSearchMatch || selected ? 2 : 1.5,
           strokeDasharray: '6 4',
-          opacity: isDimmed ? 0.15 : isHovered ? 0.9 : 0.6,
+          opacity: isDimmed ? 0.15 : isHovered || isSearchMatch ? 0.9 : 0.6,
           filter: isTraced && !isDimmed ? `drop-shadow(0 0 2px ${traceColor}40)` : undefined,
         }}
         interactionWidth={20}
@@ -103,7 +106,7 @@ export const AggregatedEdge = memo(function AggregatedEdge({
       />
 
       {/* Animated Flow Particles — only on interaction */}
-      {!isDimmed && (isHovered || selected || isTraced) && (
+      {!isDimmed && (isHovered || selected || isTraced || isSearchMatch) && (
         <path
           d={edgePath}
           fill="none"

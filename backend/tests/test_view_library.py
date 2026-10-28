@@ -133,17 +133,19 @@ async def test_a_rule_the_engines_cannot_evaluate_is_refused_with_why(test_clien
     for rule_id, predicate, why in [
         ("rx", {"kind": "text", "value": "^ord", "match": "regex"}, "regex"),
         ("ft", {"kind": "text", "value": "orders", "match": "fulltext"}, "fulltext"),
-        ("or", {"kind": "group", "op": "or", "children": [
-            {"kind": "descendantOf", "urns": ["urn:a"]},
-            {"kind": "tag", "values": ["PII"]}]}, "top-level AND"),
     ]:
         resp = await test_client.put(f"{base}/{rule_id}", json=_rule(rule_id, rule_id, predicate=predicate))
         assert resp.status_code == 422, rule_id
         assert why in resp.json()["detail"], resp.json()["detail"]
+    # Inside a container under an OR is each entity's own test: a rule may be one.
+    either = await test_client.put(f"{base}/or", json=_rule("or", "Inside or PII", predicate={
+        "kind": "group", "op": "or", "children": [
+            {"kind": "descendantOf", "urns": ["urn:a"]}, {"kind": "tag", "values": ["PII"]}]}))
+    assert either.status_code == 200, either.text
     lineage = await test_client.put(f"{base}/root", json=_rule("root", "Roots", predicate={
         "kind": "isRoot", "edgeClass": "lineage"}))
     assert lineage.status_code == 200, lineage.text
-    assert [r["id"] for r in (await _library(test_client, view_id))["displayRules"]] == ["root"]
+    assert [r["id"] for r in (await _library(test_client, view_id))["displayRules"]] == ["or", "root"]
 
 
 async def test_a_stored_rule_the_engines_cannot_evaluate_is_flagged(test_client: AsyncClient):

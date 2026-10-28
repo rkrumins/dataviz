@@ -96,8 +96,9 @@ logger = logging.getLogger(__name__)
 #: Bumped when a session's meaning changes, so no session from an older
 #: build answers a newer one's request. (3: a search asking for the
 #: ``ancestor`` facet tallies it during the scan. 4: a descendantOf reaches
-#: its own ``maxDepth``, which older sessions ignored.)
-ENGINE_VERSION = "4"
+#: its own ``maxDepth``, which older sessions ignored. 5: a unit carries a
+#: band of edge IDs and a pass, a Connections search's.)
+ENGINE_VERSION = "5"
 
 #: Slack past the last unit's budget before a request stops waiting for it
 #: (the budget ends a unit first), and in the request's lease.
@@ -125,6 +126,9 @@ _FACET_TASKS: Dict[str, "asyncio.Task[None]"] = {}
 async def execute_session_search(
     provider, query: SearchQuery, *, context: SearchRunContext,
 ) -> SearchResultPage:
+    if query.predicate.kind == "edges":
+        from backend.app.providers.falkordb_search.edges import execute_edge_search
+        return await execute_edge_search(provider, query, context=context)
     settings = get_deep_search_settings()
     started = time.monotonic()
     options = query.options
@@ -138,7 +142,7 @@ async def execute_session_search(
             return await provider._ro_query(cypher, params=params, timeout=timeout_s)
 
     compiler, raw_labels = await _compiler_for(provider, run, context, settings)
-    where = compiler.compile(query.predicate)
+    where = compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
     if compiler.hoisted_path is not None:
         raise CompileError("path search is not run by the uncapped engine")
     hops, hop_params, hop_parts = within_hops(compiler)
@@ -220,6 +224,9 @@ async def execute_count_session(
             return {"count": 0, "status": "running", "sessionId": None, "progress": None,
                     "dataVersion": context.data_version, "notes": []}
         return _count_answer(session)
+    if query.predicate.kind == "edges":
+        from backend.app.providers.falkordb_search.edges import execute_edge_count
+        return await execute_edge_count(provider, query, context=context)
     settings = get_deep_search_settings()
     started = time.monotonic()
     options = query.options
@@ -233,7 +240,7 @@ async def execute_count_session(
             return await provider._ro_query(cypher, params=params, timeout=timeout_s)
 
     compiler, raw_labels = await _compiler_for(provider, run, context, settings)
-    where = compiler.compile(query.predicate)
+    where = compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
     if compiler.hoisted_path is not None:
         raise CompileError("a path search has no count")
     hops, hop_params, hop_parts = within_hops(compiler)
@@ -622,7 +629,7 @@ async def _compute_facets(provider, query: SearchQuery, specs, sid: str, store: 
     """Each of ``specs``, by the capped engine's statement for it."""
     started = time.monotonic()
     compiler = _build_compiler_for_provider(provider)
-    where = compiler.compile(query.predicate)
+    where = compiler.compile(query.predicate, scope_depth=query.scope.max_depth)
     params: Dict[str, Any] = dict(compiler.params)
     try:
         refuse_trace(compiler)

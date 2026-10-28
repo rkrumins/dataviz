@@ -148,6 +148,10 @@ def IS(*ids):
     return {"kind": "is", "refs": [{"urn": U(i)} for i in ids]}
 
 
+def INSIDE(*ids, **kw):
+    return {"kind": "descendantOf", "urns": [U(i) for i in ids], **kw}
+
+
 OWNER = {"kind": "hasProperty", "key": "owner"}
 DESCRIBED = {"kind": "property", "key": "description", "op": "isNotEmpty"}
 UNFED = {"kind": "degree", "direction": "in", "op": "eq", "value": 0, "edgeClass": "lineage"}
@@ -282,6 +286,22 @@ def _matrix():
         rel("child", STALE), rel("child", ON_TIME, quantifier="none"),
         rel("child", STALE, count={"op": "gte", "value": 1}),
         rel("downstream", STALE, maxHops=2), rel("parent", rel("child", STALE)),
+        # Inside a container wherever a condition goes — under OR and NOT, in
+        # a relative's condition — each entity tested itself.
+        OR(INSIDE(14), TYPE("topic")), OR(INSIDE(14), INSIDE(18)), NOT(INSIDE(13)),
+        AND(TYPE("dataset"), NOT(INSIDE(9))), OR(INSIDE(1, maxDepth=1), TYPE("workspace")),
+        rel("parent", INSIDE(1)), rel("child", INSIDE(14), quantifier="all"),
+        # Above a named entity — its parent, its ancestors — walked up from it,
+        # and a table with all it holds and all that holds it.
+        rel("descendant", IS(15)), rel("child", IS(15)), rel("descendant", IS(15), minHops=2),
+        rel("descendant", IS(21)), OR(IS(14), INSIDE(14), rel("descendant", IS(14))),
+        AND(TYPE("dataset", "domain"), OR(rel("descendant", IS(15)), IS(18))),
+        # Lineage to what is inside an entity, or above it: walked from them.
+        rel("downstream", INSIDE(13)), rel("upstream", INSIDE(13), maxHops=3),
+        rel("downstream", rel("descendant", IS(15)), maxHops=3),
+        rel("upstream", OR(IS(11), rel("descendant", IS(11))), maxHops=3),
+        rel("downstream", rel("child", IS(19)), maxHops=2),
+        rel("downstream", OR(INSIDE(18), rel("descendant", IS(17))), maxHops=2),
     ]
     return cases
 

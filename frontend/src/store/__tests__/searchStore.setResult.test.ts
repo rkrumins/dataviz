@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 
-import { useSearchStore } from '../searchStore'
+import { MATCHED_EDGES_CAP, type MatchedEdge, useSearchStore } from '../searchStore'
 
 
 beforeEach(() => {
@@ -191,5 +191,72 @@ describe('searchStore.setResult — the focused match survives pagination', () =
         publish(['a', 'b', 'c'], 'q1')
 
         expect(useSearchStore.getState().focusedMatchIndex).toBeNull()
+    })
+})
+
+
+describe('searchStore — a Connections search steps through its edges', () => {
+    function publish(keys: string[], queryHash = 'q') {
+        useSearchStore.getState().setResult({
+            viewId: 'view-1', matchUrns: ['a', 'b', 'c'], edgeKeys: keys, queryHash,
+        })
+    }
+
+    it('walks the edges, not the ends', () => {
+        publish(['a→b', 'a→c'])
+        const store = useSearchStore.getState()
+        store.stepFocus('next')
+        store.stepFocus('next')
+        const s = useSearchStore.getState()
+        expect(s.focusedMatchIndex).toBe(1)
+        expect(s.orderedEdgeKeys[s.focusedMatchIndex!]).toBe('a→c')
+        // Wraps after the second edge, though three ends are highlighted.
+        s.stepFocus('next')
+        expect(useSearchStore.getState().focusedMatchIndex).toBe(0)
+    })
+
+    it('keeps the focused edge across a later page of the same search', () => {
+        publish(['a→b', 'a→c'])
+        useSearchStore.getState().setFocusedMatchIndex(1)
+        publish(['x→a', 'a→b', 'a→c'])
+        expect(useSearchStore.getState().focusedMatchIndex).toBe(2)
+    })
+
+    it('an entity search after it steps through matches again', () => {
+        publish(['a→b'])
+        useSearchStore.getState().setResult({ viewId: 'view-1', matchUrns: ['a', 'b'], queryHash: 'q2' })
+        expect(useSearchStore.getState().orderedEdgeKeys).toEqual([])
+        useSearchStore.getState().stepFocus('next')
+        useSearchStore.getState().stepFocus('next')
+        expect(useSearchStore.getState().focusedMatchIndex).toBe(1)
+    })
+})
+
+
+describe("searchStore — a Connections search's edges, for the canvas", () => {
+    const matched = (i: number): MatchedEdge => ({
+        key: `k${i}`, id: `e${i}`, source: 'a', target: `b${i}`, edgeType: 'T', sourceChain: [], targetChain: [],
+    })
+
+    it('keeps the first edges loaded, as many as the canvas lights, and whether all are', () => {
+        const edges = Array.from({ length: MATCHED_EDGES_CAP + 5 }, (_, i) => matched(i))
+        useSearchStore.getState().setResult({
+            viewId: 'view-1', matchUrns: ['a'], matchedEdges: edges, matchedEdgesComplete: false, queryHash: 'q',
+        })
+        const s = useSearchStore.getState()
+        expect(s.matchedEdges).toHaveLength(MATCHED_EDGES_CAP)
+        expect(s.matchedEdges[0].key).toBe('k0')
+        expect(s.matchedEdgesComplete).toBe(false)
+    })
+
+    it('holds none for an entity search, or once cleared', () => {
+        useSearchStore.getState().setResult({ viewId: 'view-1', matchUrns: ['a'], matchedEdges: [matched(1)], queryHash: 'q' })
+        useSearchStore.getState().setResult({ viewId: 'view-1', matchUrns: ['a'], queryHash: 'q2' })
+        expect(useSearchStore.getState().matchedEdges).toEqual([])
+        expect(useSearchStore.getState().matchedEdgesComplete).toBe(true)
+
+        useSearchStore.getState().setResult({ viewId: 'view-1', matchUrns: ['a'], matchedEdges: [matched(1)], queryHash: 'q' })
+        useSearchStore.getState().clear()
+        expect(useSearchStore.getState().matchedEdges).toEqual([])
     })
 })

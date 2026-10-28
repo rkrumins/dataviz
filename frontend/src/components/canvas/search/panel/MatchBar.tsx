@@ -35,12 +35,13 @@ import { createPortal } from 'react-dom'
 
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { cn } from '@/lib/utils'
+import { useConnectionVisibility, useConnectionVisibilityStore } from '@/store/connectionVisibility'
 import { usePersonaMode } from '@/store/persona'
 import {
     useCanvasFilterMode,
     useFocusedMatchIndex,
-    useOrderedMatchUrns,
     useSearchStore,
+    useStepCount,
     type CanvasFilterMode,
 } from '@/store/searchStore'
 
@@ -78,14 +79,17 @@ export interface MatchBarProps {
     onClear?: () => void
     /** Export every match to a file. Shown only when there are matches. */
     onExport?: () => void
-    /** What ``count`` counts: a search's matches, or a path search's
-     *  routes — which stop at the path limit, not the candidate cap, and
-     *  say so beside the paths themselves. */
-    unit?: 'match' | 'path'
+    /** What ``count`` counts: a search's matches, a path search's routes
+     *  — which stop at the path limit, not the candidate cap, and say so
+     *  beside the paths themselves — or a Connections search's edges. */
+    unit?: MatchUnit
     /** The view this panel is bound to — passed to setCanvasFilterMode
      *  so the choice persists for this view in localStorage. */
     viewId: string
 }
+
+
+export type MatchUnit = 'match' | 'path' | 'connection'
 
 
 export const MatchBar: FC<MatchBarProps> = ({
@@ -93,7 +97,8 @@ export const MatchBar: FC<MatchBarProps> = ({
     deadlineExceeded, candidateCount, scanning, progress, onFrame,
     onShowFocusedOnCanvas, onClear, onExport, unit = 'match', viewId,
 }) => {
-    const orderedMatchUrns = useOrderedMatchUrns()
+    // What the stepper walks: the matches, or a Connections search's edges.
+    const stepCount = useStepCount()
     const focusedMatchIndex = useFocusedMatchIndex()
     const canvasFilterMode = useCanvasFilterMode()
     const stepFocus = useSearchStore((s) => s.stepFocus)
@@ -109,7 +114,7 @@ export const MatchBar: FC<MatchBarProps> = ({
         deadlineExceeded && !isRunning && !isError,
     )
 
-    const hasMatches = orderedMatchUrns.length > 0
+    const hasMatches = stepCount > 0
     // 1-based display for humans; the stored index is 0-based.
     const displayPosition = useMemo(() => {
         if (!hasMatches) return null
@@ -147,7 +152,7 @@ export const MatchBar: FC<MatchBarProps> = ({
             {hasMatches && !isRunning && !isError && (
                 <ToolbarStrip
                     stepperPosition={displayPosition ?? 0}
-                    stepperTotal={orderedMatchUrns.length}
+                    stepperTotal={stepCount}
                     onStepPrev={() => stepFocus('prev')}
                     onStepNext={() => stepFocus('next')}
                     onShowFocused={onShowFocusedOnCanvas}
@@ -157,6 +162,7 @@ export const MatchBar: FC<MatchBarProps> = ({
                     onFrame={onFrame}
                 />
             )}
+            {unit === 'connection' && hasMatches && !isRunning && !isError && <HiddenTypesNote viewId={viewId} />}
             {((showTruncation && unit === 'match') || showDeadlineExceeded) && (
                 <WarningBanner
                     truncated={showTruncation && unit === 'match'}
@@ -164,6 +170,45 @@ export const MatchBar: FC<MatchBarProps> = ({
                     candidateCount={candidateCount ?? null}
                 />
             )}
+        </div>
+    )
+}
+
+
+/** A Connections search's matches the canvas keeps hidden, their edge types
+ *  hidden there by the reader: how many, and a way to show them. */
+function HiddenTypesNote({ viewId }: { viewId: string }) {
+    const matched = useSearchStore((s) => s.matchedEdges)
+    const { hiddenTypes } = useConnectionVisibility(viewId)
+    const hidden = useMemo(() => {
+        if (hiddenTypes.size === 0) return null
+        const types = new Set<string>()
+        let count = 0
+        for (const m of matched) {
+            const type = m.edgeType.toUpperCase()
+            if (hiddenTypes.has(type)) { count++; types.add(type) }
+        }
+        return count > 0 ? { count, types } : null
+    }, [matched, hiddenTypes])
+    if (!hidden) return null
+    return (
+        <div className={cn(
+            'flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-ink-secondary',
+            'border-t border-slate-200/70 dark:border-glass-border/40',
+        )}>
+            <EyeOff className="w-3 h-3 shrink-0 text-ink-muted" aria-hidden />
+            <span className="min-w-0 flex-1">
+                {hidden.count.toLocaleString()} of these {hidden.count === 1 ? 'connection is' : 'connections are'} of{' '}
+                {hidden.types.size === 1 ? 'a type' : 'types'} hidden on the canvas.
+            </span>
+            <button
+                type="button"
+                onClick={() => useConnectionVisibilityStore.getState().setHidden(
+                    viewId, [...hiddenTypes].filter((t) => !hidden.types.has(t)))}
+                className="shrink-0 rounded-md px-1.5 py-0.5 font-medium text-accent-lineage hover:bg-accent-lineage/10"
+            >
+                Show them
+            </button>
         </div>
     )
 }
@@ -196,7 +241,7 @@ function SummaryStrip({
     scannedPercent: number | null
     onClear?: () => void
     onExport?: () => void
-    unit: 'match' | 'path'
+    unit: MatchUnit
 }) {
     return (
         <div className={cn(
@@ -218,7 +263,9 @@ function SummaryStrip({
                     <button
                         type="button"
                         onClick={onExport}
-                        title="Export every match to a CSV or NDJSON file"
+                        title={unit === 'connection'
+                            ? 'Export every connection to a CSV or NDJSON file'
+                            : 'Export every match to a CSV or NDJSON file'}
                         className={cn(
                             'inline-flex items-center gap-1 px-2 h-7 rounded-md shrink-0',
                             'text-[11px] font-medium text-ink-secondary transition-colors',
@@ -358,7 +405,7 @@ function CountReadout({
     elapsedMs: number | null
     showPlus: boolean
     scannedPercent: number | null
-    unit: 'match' | 'path'
+    unit: MatchUnit
 }) {
     return (
         <div className="flex items-baseline gap-2 min-w-0 flex-1">
@@ -397,7 +444,9 @@ function CountReadout({
                     <span className="text-[12px] text-ink-secondary leading-none">
                         {unit === 'path'
                             ? (count === 1 ? 'path' : 'paths')
-                            : (count === 1 ? 'match' : 'matches')}
+                            : unit === 'connection'
+                                ? (count === 1 ? 'connection' : 'connections')
+                                : (count === 1 ? 'match' : 'matches')}
                     </span>
                     {elapsedMs !== null && (
                         <span className="text-[10.5px] text-ink-muted/70 tabular-nums leading-none">

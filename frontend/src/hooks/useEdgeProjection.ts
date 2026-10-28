@@ -15,6 +15,7 @@ import { useMemo, useRef } from 'react'
 import type { AggregatedEdgeInfo } from '@/providers/GraphDataProvider'
 import { normalizeEdgeType } from '@/store/schema'
 import type { HierarchyNode } from '@/types/hierarchy'
+import type { MatchedEdge } from '@/store/searchStore'
 import { NO_PLACE_FOUND, containmentUpPath } from './useAncestorChains'
 
 // ============================================
@@ -120,6 +121,11 @@ export interface UseEdgeProjectionOptions {
    * unknown: never outside, never a stub.
    */
   openScope?: boolean
+  /**
+   * A Connections search's matched edges. Each lights the line that draws it
+   * (`searchMatches` on the line) and adds nothing to it; see section D.
+   */
+  searchEdges?: readonly MatchedEdge[]
 }
 
 // ============================================
@@ -302,6 +308,7 @@ export function useEdgeProjection({
   promotedAnchors,
   holderEdges,
   openScope,
+  searchEdges,
 }: UseEdgeProjectionOptions): { lineageEdges: any[], visibleLineageEdges: any[], unresolvedEdgeCount: number, unresolvedAggregatedCount: number, hiddenInsideCollapsedCount: number, offCanvasByNode: ReadonlyMap<string, OffCanvasLineage> } {
 
   // Throttle for the dev-facing console warning about dropped edges. The
@@ -877,6 +884,26 @@ export function useEdgeProjection({
         }
       })
 
+    // D. A Connections search's matches. Each lights the line that draws it
+    // and adds no weight to it: a match the store holds is already that
+    // line's member, or summarised by one of its roll-ups. One the canvas
+    // has not loaded still finds its line, its ends filed by their chains
+    // like any other: two drawn containers with no roll-up loaded between
+    // them get a line of their own. Containment is drawn as nesting, not as
+    // a line, so such a match lights only its ends.
+    searchEdges?.forEach(match => {
+      if (isContainmentEdge(match.edgeType)) return
+      const [S, T] = placePair(match.source, match.target)
+      if (S.at !== 'row' || T.at !== 'row' || S.id === T.id) return
+      addEdgeToGroup(S.id, T.id, {
+        id: `search:${match.key}`,
+        _searchKey: match.key,
+        _origSource: match.source,
+        _origTarget: match.target,
+        data: { edgeType: match.edgeType, relationship: match.edgeType },
+      }, match.edgeType, S.id !== idOf(match.source) || T.id !== idOf(match.target))
+    })
+
     if (unresolvedThisPass > 0) {
       const now = Date.now()
       if (now - lastWarnAtRef.current > 1000) {
@@ -928,6 +955,14 @@ export function useEdgeProjection({
         : groupEdges
       if (members.length === 0) return
 
+      // A search match lights the line and adds nothing to it: its weight,
+      // size, types and look are the other members'. A line made of matches
+      // alone, with no roll-up loaded between its ends, stands for them.
+      const matched = new Set<string>()
+      members.forEach((e: { _searchKey?: string }) => { if (e._searchKey !== undefined) matched.add(e._searchKey) })
+      const own = matched.size === 0 ? members : members.filter((e: { _searchKey?: string }) => e._searchKey === undefined)
+      const drawn = own.length > 0 ? own : members
+
       const distinctTypes = new Set<string>()
       let isAggregated = false
       let maxConfidence = 0
@@ -937,7 +972,7 @@ export function useEdgeProjection({
       const sourceId = members[0].source
       const targetId = members[0].target
 
-      members.forEach(e => {
+      drawn.forEach(e => {
         if (e.data?.isAggregated) { isAggregated = true; rollupWeight += memberWeight(e) }
         else rawWeight += memberWeight(e)
         memberTypes(e).forEach((et: string) => {
@@ -949,9 +984,9 @@ export function useEdgeProjection({
 
       // A bundle is a roll-up when it summarises something other than the raw
       // relationship between the two cards it touches.
-      const isGhost = isAggregated || members.some((e: any) => e._lifted === true)
+      const isGhost = isAggregated || drawn.some((e: any) => e._lifted === true)
       // Nothing but the rest of an open container's children: a faint line.
-      const isResidual = members.every((e: { _residual?: boolean }) => e._residual === true)
+      const isResidual = drawn.every((e: { _residual?: boolean }) => e._residual === true)
 
       // TWO NUMBERS, because this bundle answers two different questions and
       // one field was doing both jobs.
@@ -969,7 +1004,7 @@ export function useEdgeProjection({
       // weight let a heavy roll-up outrank — and evict — the raw edges the user
       // had just expanded to see.
       const edgeCount = Math.max(rawWeight, rollupWeight)
-      const bundleSize = members.length
+      const bundleSize = drawn.length
       const typesArray = Array.from(distinctTypes)
 
       // Reverse-flow annotation: layer-index of target strictly less than
@@ -1000,9 +1035,11 @@ export function useEdgeProjection({
         isDelegated: false,
         isResidual,
         isBidirectional: false,
+        // How many of a Connections search's matches this line draws.
+        searchMatches: matched.size,
         // `members`: the relationships this line stands for (by reference —
         // nothing is copied), read when the line is clicked.
-        data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount, bundleSize, members }
+        data: { edgeTypes: typesArray, confidence: maxConfidence, edgeCount, bundleSize, members: drawn }
       })
     })
 
@@ -1053,6 +1090,7 @@ export function useEdgeProjection({
           isDelegated: false,
           isResidual: fwd.isResidual && rev.isResidual,
           isBidirectional: true,
+          searchMatches: fwd.searchMatches + rev.searchMatches,
           data: {
             edgeTypes: typesArr, confidence: Math.max(fwd.confidence, rev.confidence), edgeCount, bundleSize,
             members: [...(fwd.data?.members ?? []), ...(rev.data?.members ?? [])],
@@ -1066,7 +1104,7 @@ export function useEdgeProjection({
     const offCanvasResult: ReadonlyMap<string, OffCanvasLineage> = offCanvas.size > 0 ? offCanvas : NO_OFF_CANVAS
     if (consumed.size === 0) return { edges: projected, unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
     return { edges: [...projected.filter(p => !consumed.has(p)), ...merged], unresolvedCount: unresolvedThisPass, hiddenInsideCount: hiddenInsideThisPass, offCanvas: offCanvasResult }
-  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap, holderEdges, expandedNodes, loadedChildCounts, openScope, layerOfNode])
+  }, [ancestorMap, lineageEdges, edges, aggregatedEdges, displayMap, urnToIdMap, showLineageFlow, isTracing, traceContextSet, isContainmentEdge, suppressedAggEdgeKeys, traceAddedEdgeIds, traceBundleParentMap, entityTypeLevels, traceFocusLevel, nodeIndex, nodeLayerIndexMap, hiddenEdgeTypes, ancestorChains, promotedAnchors, browseBundleParentMap, holderEdges, expandedNodes, loadedChildCounts, openScope, layerOfNode, searchEdges])
 
   const projectedEdges = projection.edges
 

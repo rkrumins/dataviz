@@ -28,6 +28,7 @@ from backend.app.providers.falkordb_deep_search import (
     explain_deep_search,
     refuse_trace,
     tail_clauses,
+    within_hops_parts,
 )
 from backend.app.providers.falkordb_search import membership
 from backend.app.providers.falkordb_search.keys import SortKey, SortSpec
@@ -117,14 +118,29 @@ class TestModel:
 
     def test_named_entities_a_walk_can_start_from(self):
         inside = rel("ancestor", IS("x"))
-        spans = lambda raw: [(g.lo, g.hi) for g in anchor_groups(P(raw))]  # noqa: E731
-        assert spans(IS("x")) == [(0, 0)]
-        assert spans(inside) == [(1, 20)]
-        assert spans(OR(IS("x"), inside)) == [(0, 0), (1, 20)]
-        assert spans(AND(IS("x"))) == [(0, 0)]
+        spans = lambda raw: [(g.lo, g.hi, g.up) for g in anchor_groups(P(raw))]  # noqa: E731
+        assert spans(IS("x")) == [(0, 0, False)]
+        assert spans(inside) == [(1, 20, False)]
+        assert spans(OR(IS("x"), inside)) == [(0, 0, False), (1, 20, False)]
+        assert spans(AND(IS("x"))) == [(0, 0, False)]
+        # Its children; above it, its parent and its ancestors.
+        assert spans(rel("parent", IS("x"))) == [(1, 1, False)]
+        assert spans(rel("child", IS("x"))) == [(1, 1, True)]
+        assert spans(rel("descendant", IS("x"))) == [(1, 20, True)]
+        assert spans(rel("descendant", IS("x"), minHops=2, maxHops=3)) == [(2, 3, True)]
+        # "Inside" itself, as deep as it says or the scope's (None).
+        inside_x = {"kind": "descendantOf", "urns": ["x"]}
+        assert spans(inside_x) == [(0, None, False)]
+        assert spans({**inside_x, "maxDepth": 4}) == [(0, 4, False)]
+        assert [r.urn for r in anchor_groups(P(inside_x))[0].refs] == ["x"]
+        # X, everything inside it and everything above it.
+        assert spans(OR(inside_x, rel("descendant", IS("x")))) == [
+            (0, None, False), (1, 20, True)]
         for raw in (TYPE("x"), AND(IS("x"), TYPE("t")), OR(IS("x"), TYPE("t")),
                     rel("ancestor", IS("x"), quantifier="none"), rel("ancestor", TYPE("t")),
-                    rel("parent", IS("x")), {"kind": "group", "op": "not", "children": [IS("x")]}):
+                    rel("descendant", IS("x"), count={"op": "gte", "value": 1}),
+                    rel("child", TYPE("t")), rel("root", IS("x")),
+                    {"kind": "group", "op": "not", "children": [IS("x")]}):
             assert anchor_groups(P(raw)) is None, raw
 
     def test_how_far_each_axis_reaches_by_default(self):
@@ -222,13 +238,17 @@ class TestValidation:
             view_library._check_predicate(raw, rule=True)
 
     @pytest.mark.parametrize("inner", [
-        {"kind": "descendantOf", "urns": ["u"]},
         {"kind": "withinHops", "urns": ["u"], "hops": 2},
         {"kind": "path", "sourceUrns": ["a"], "targetUrns": ["b"]},
     ])
     def test_route_kinds_cant_sit_in_a_relationships_condition(self, inner):
         with pytest.raises(ValidationError, match=r"\$.where.*can't sit inside"):
             _validate_predicate(P(rel("parent", inner)))
+
+    def test_inside_a_container_may_be_a_relatives_condition(self):
+        inside = {"kind": "descendantOf", "urns": ["u"]}
+        assert _validate_predicate(P(rel("parent", inside))) == 2
+        assert _validate_predicate(P(rel("downstream", OR(inside, TYPE("t"))))) == 3
 
     def test_rollups_are_followed_one_hop(self):
         _validate_predicate(P(rel("downstream", edgeTypes=["AGGREGATED"])))
@@ -560,6 +580,19 @@ class TestStatements:
         assert columns == [("r", "(ANY(_xb0 IN [(n)<-[:FLOWS_TO]-(_xr0) WHERE ID(_xr0) <> "
                                  "ID(n) AND _xr0.urn IN $p1 | true] WHERE _xb0))")]
 
+    def test_a_rule_reads_inside_under_an_or_as_deep_as_the_scope(self):
+        """Under an OR, "inside" is each entity's own test, read from its
+        ancestors — as far up as the View's scope reaches, as a search's."""
+        provider = SimpleNamespace(_get_lineage_edge_types=lambda: {"FLOWS_TO"},
+                                   _get_containment_edge_types=lambda: {"CONTAINS"})
+        rule = P(OR({"kind": "descendantOf", "urns": ["x"]}, TYPE("domain")))
+        for scope_depth, reach in ((3, "*1..3]"), (None, "*1..12]")):
+            errors = {}
+            [(_, where)] = membership._compile(provider, [("r", rule)], errors,
+                                               scope_depth=scope_depth)[0]
+            assert not errors
+            assert f"(n)<-[:CONTAINS{reach}-(_xr" in where
+
 
 def replace_raw(ctx):
     return replace(ctx, raw_leaves=(RawLeaf("k", None, "exact", "r", "t"),))
@@ -685,6 +718,106 @@ class TestReachPlan:
                                          _query({"kind": "all"}), self._compiled(IS("ds")),
                                          ["Column"], ("CONTAINS",), width=2, notes=notes)
         assert plan.units == [] and "not in the graph" in notes[0]
+
+
+class TestAboveX:
+    """X's parent and ancestors are named entities too: found by walking up
+    from X — a handful of nodes — never by every entity testing whether X
+    lies below it."""
+
+    @staticmethod
+    def _run(seen, *, found=(10,), walked=(3, 4)):
+        async def run(cypher, params):
+            seen.append((cypher, params))
+            if cypher.startswith("MATCH (r:"):                      # the named entities
+                return SimpleNamespace(result_set=[[i] for i in found])
+            if "collect(ID(_a))" in cypher:                         # the walk from them
+                return SimpleNamespace(result_set=[[list(walked)]])
+            if "labels(n)" in cypher:                               # the scope's check
+                return SimpleNamespace(result_set=[
+                    [i, f"u{i}", ["Column"], []] for i in params["_ids"]])
+            raise AssertionError(cypher)
+        return run
+
+    async def test_ancestors_are_walked_up_and_children_down(self):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+        seen = []
+        entry = {"groups": [{"urns": ["x"], "lo": 1, "hi": 20, "up": True},
+                            {"urns": ["x"], "lo": 1, "hi": 1}], "containment": ["CONTAINS"]}
+        assert await plan_mod._anchor_ids(self._run(seen), ["Column"], entry) == [3, 4]
+        walks = [cy for cy, _ in seen if "collect(ID(_a))" in cy]
+        assert "MATCH (_a)-[:CONTAINS*1..20]->(_w)" in walks[0]
+        assert "MATCH (_w)-[:CONTAINS*1..1]->(_a)" in walks[1]
+
+    async def test_a_search_naming_x_and_its_family_starts_from_them(self):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+        seen = []
+        family = OR(IS("x"), rel("ancestor", IS("x")), rel("descendant", IS("x")))
+        query = _query(AND(family, TYPE("column")))
+        c = _compiler()
+        c.compile(query.predicate)
+        plan = await plan_mod.named_plan(self._run(seen, walked=(3, 4)), SimpleNamespace(
+            _entity_type_levels={}), query, c, ["Column"], ("CONTAINS",), width=2, notes=[])
+        # X itself, what is below it, what is above it — each still tested.
+        assert [(u.kind, u.roots, u.satisfies) for u in plan.units] == [
+            ("ids", [3, 4], None), ("ids", [10], None)]
+        walks = [cy for cy, _ in seen if "collect(ID(_a))" in cy]
+        assert any("(_w)-[:CONTAINS*1..20]->(_a)" in w for w in walks)
+        assert any("(_a)-[:CONTAINS*1..20]->(_w)" in w for w in walks)
+
+    async def test_what_the_scopes_walk_bounds_is_left_to_it(self):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+        for where in ({"kind": "descendantOf", "urns": ["x"]}, rel("ancestor", IS("x")),
+                      rel("parent", IS("x")), TYPE("column")):
+            query = _query(where)
+            c = _compiler()
+            c.compile(query.predicate)
+            assert await plan_mod.named_plan(self._run([]), SimpleNamespace(
+                _entity_type_levels={}), query, c, ["Column"], ("CONTAINS",),
+                width=2, notes=[]) is None, where
+
+    async def test_inside_under_an_or_reaches_as_deep_as_the_scope(self):
+        from backend.app.providers.falkordb_search import plan as plan_mod
+        seen = []
+        query = SearchQuery.model_validate({
+            "predicate": OR(IS("y"), {"kind": "descendantOf", "urns": ["x"]}),
+            "scope": {"viewId": "v", "maxDepth": 4}, "options": {"results": "hits"}})
+        c = _compiler()
+        c.compile(query.predicate, scope_depth=query.scope.max_depth)
+        await plan_mod.named_plan(self._run(seen), SimpleNamespace(_entity_type_levels={}),
+                                  query, c, ["Column"], ("CONTAINS",), width=2, notes=[])
+        assert any("(_w)-[:CONTAINS*0..4]->(_a)" in cy for cy, _ in seen)
+        assert "(n)<-[:CONTAINS*1..4]-(_xr" in c.tail[0]
+
+    def test_lineage_to_x_or_above_it_is_tested_on_the_walks_start(self):
+        c = _compiler()
+        c.compile(P(rel("upstream", OR(IS("x"), rel("descendant", IS("x"))), maxHops=3)))
+        [entry] = c.hoisted_within_hops
+        assert entry["groups"] == [{"urns": ["x"], "lo": 0, "hi": 0},
+                                   {"urns": ["x"], "lo": 1, "hi": 20, "up": True}]
+        [part], params, _ = within_hops_parts(c.hoisted_within_hops, 0)
+        # One chain can't climb and descend at once: each group is a test on
+        # the anchor, projected after the walk.
+        assert re.fullmatch(
+            r"MATCH _whP0 = \(anchor\)-\[:FLOWS_TO\*1\.\.3\]->\(n\) WHERE ID\(anchor\) <> ID\(n\) "
+            r"WITH n, \(anchor\.urn IN \$_whUrns0 OR ANY\(_whB0_1 IN \[\(anchor\)-\[:CONTAINS\*1\.\.20\]"
+            r"->\(_whX0_1\) WHERE _whX0_1\.urn IN \$_whUrns1 \| true\] WHERE _whB0_1\)\) AS _whA0 "
+            r"WHERE _whA0 WITH DISTINCT n", part), part
+        assert params == {"_whUrns0": ["x"], "_whUrns1": ["x"]}
+
+    def test_lineage_to_what_is_inside_x_keeps_its_chain(self):
+        c = _compiler()
+        c.compile(P(rel("upstream", {"kind": "descendantOf", "urns": ["x"]}, maxHops=3)),
+                  scope_depth=6)
+        [entry] = c.hoisted_within_hops
+        assert entry["groups"] == [{"urns": ["x"], "lo": 0, "hi": 6}]
+        [part], _, _ = within_hops_parts(c.hoisted_within_hops, 0)
+        assert "MATCH _whC0 = (anchor)<-[:CONTAINS*0..6]-(_whG0)" in part
+
+    def test_lineage_above_x_goes_as_far_as_named_entities_do(self):
+        # Walked from X's ancestors, so past the hops a candidate tests itself.
+        assert _validate_predicate(P(rel("downstream", rel("descendant", IS("x")),
+                                         maxHops=6))) == 3
 
 
 def _tracing() -> _Compiler:

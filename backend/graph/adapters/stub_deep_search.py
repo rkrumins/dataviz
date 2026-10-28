@@ -42,14 +42,19 @@ from backend.common.search_semantics import (
 from backend.common.derived_artifacts import is_derived_edge_type
 from backend.common.edge_properties import EDGE_NATIVE_KEYS, json_holds
 from backend.common.models.search import (
+    EDGES_PAGE_MAX,
     NODE_REF_ANY_DEPTH,
     NODE_REF_MATCHES_MAX,
     AncestorRef,
     DegreePredicate,
+    DescendantOfPredicate,
+    EdgeEnd,
+    EdgeHit,
     EdgeRef,
     EdgeGroupPredicate,
     EdgeHasPropertyPredicate,
     EdgePropertyPredicate,
+    EdgesPredicate,
     EntityTypePredicate,
     GroupPredicate,
     HasIncomingPredicate,
@@ -141,6 +146,14 @@ class StubDeepSearchProvider:
         deadline_ms: Optional[int] = None,
     ) -> SearchResultPage:
         start = time.monotonic()
+        if isinstance(query.predicate, EdgesPredicate):
+            found = self._connections(query.predicate, query.scope)
+            return SearchResultPage(
+                edges=found[:min(query.options.page_size, EDGES_PAGE_MAX)],
+                edge_type_counts=dict(Counter(e.edge_type for e in found)),
+                truncated=False, candidate_count=len(found), total_count=len(found),
+                deadline_exceeded=False, elapsed_ms=int((time.monotonic() - start) * 1000),
+                cache_hit=False)
         path = _path_of(query.predicate)
         if path is not None:
             routes = self._routes(path, query.scope)
@@ -200,8 +213,11 @@ class StubDeepSearchProvider:
     async def deep_search_count(self, query: SearchQuery, *, context=None,
                                 advance: bool = True) -> Dict[str, Any]:
         """A rule's total over the fixture — complete in one answer."""
-        count = sum(1 for n in self._in_scope(query.scope)
-                    if _matches(n, query.predicate, self))
+        if isinstance(query.predicate, EdgesPredicate):
+            count = len(self._connections(query.predicate, query.scope))
+        else:
+            count = sum(1 for n in self._in_scope(query.scope)
+                        if _matches(n, query.predicate, self))
         return {"count": count, "status": "complete", "sessionId": None,
                 "progress": {"scanned": 1, "total": 1, "matched": count},
                 "dataVersion": None, "notes": []}
@@ -220,13 +236,18 @@ class StubDeepSearchProvider:
         return {"matches": matches, "errors": errors, "elapsedMs": 0}
 
     def _in_scope(self, scope) -> List[Dict[str, Any]]:
-        """The fixture nodes inside a resolved scope, as ``deep_search``
-        clamps them."""
+        """The fixture nodes inside a resolved scope: on the canvas, in
+        ``visible`` mode; within ``maxDepth`` below the view's roots; else of
+        the view's entity types."""
         nodes = list(self._nodes)
+        if getattr(scope, "scope_mode", None) == "visible" and getattr(scope, "visible_urns", None):
+            shown = set(scope.visible_urns)
+            return [n for n in nodes if n.get("urn") in shown]
         if scope.root_urns:
             roots = set(scope.root_urns)
+            depth = int(getattr(scope, "max_depth", None) or 12)
             nodes = [n for n in nodes if n.get("urn") in roots
-                     or any(a in roots for a in self._ancestors(n))]
+                     or any(a in roots for a in self._ancestors(n)[:depth])]
         elif scope.entity_types:
             allowed = set(scope.entity_types)
             nodes = [n for n in nodes if n.get("entityType") in allowed]
@@ -431,6 +452,65 @@ class StubDeepSearchProvider:
         for source in sources:
             walk([source], [])
         return sorted(routes, key=lambda r: (r.hop_count, [n.urn for n in r.nodes]))
+
+    def _connections(self, p: EdgesPredicate, scope) -> List[EdgeHit]:
+        """Every edge a Connections search matches, in its order — what the
+        FalkorDB engine is held to: an edge of its types meeting its filter,
+        whose source is in scope and meets From and target is in scope and
+        meets To; either way, also one whose ends meet them the other way
+        round — once."""
+        in_scope = {n["urn"] for n in self._in_scope(scope)}
+        types = self._edge_types(p.edge_class, p.edge_types, walk=True)
+        depth = int(scope.max_depth or 12)
+
+        def meets(urn: str, where) -> bool:
+            return urn in in_scope and (where is None or _matches(
+                self._by_urn[urn], where, self, depth=depth))
+
+        found = []
+        for i, e in enumerate(self._edges):
+            s, t = e.get("source"), e.get("target")
+            if (s not in self._by_urn or t not in self._by_urn
+                    or str(e.get("type")).upper() not in types
+                    or not _edge_passes(e, p.edge_predicate)):
+                continue
+            if ((meets(s, p.source_where) and meets(t, p.target_where))
+                    or (p.direction == "either"
+                        and meets(s, p.target_where) and meets(t, p.source_where))):
+                found.append(i)
+        return [self._edge_hit(i) for i in sorted(found, key=self._edge_order)]
+
+    def _edge_order(self, i: int):
+        """The engine's order: the source's name, the target's, the type
+        (without case), the two urns, the edge — its index standing in for
+        its ID."""
+        e = self._edges[i]
+        return (_name_of(self._by_urn[e["source"]]).lower(),
+                _name_of(self._by_urn[e["target"]]).lower(),
+                str(e.get("type")).upper(), e["source"], e["target"], i)
+
+    def _edge_hit(self, i: int) -> EdgeHit:
+        e = self._edges[i]
+        native = {k: v for k, v in e.items()
+                  if k not in ("source", "target", "type", "properties")}
+
+        def end(urn: str) -> EdgeEnd:
+            node = self._by_urn[urn]
+            path = [self._ref(a) for a in reversed(self._ancestors(node)) if a in self._by_urn]
+            return EdgeEnd(urn=urn, display_name=str(node.get("displayName") or ""),
+                           entity_type=str(node.get("entityType") or ""),
+                           parent=path[-1] if path else None, ancestor_path=path)
+
+        return EdgeHit(key=str(i),
+                       id=str(e.get("id") or f"{e['source']}|{e.get('type')}|{e['target']}"),
+                       edge_type=str(e.get("type")),
+                       properties={**(e.get("properties") or {}), **native},
+                       source=end(e["source"]), target=end(e["target"]))
+
+    def _ref(self, urn: str) -> AncestorRef:
+        node = self._by_urn[urn]
+        return AncestorRef(urn=urn, display_name=str(node.get("displayName") or ""),
+                           entity_type=str(node.get("entityType") or ""))
 
     def _route(self, nodes: List[str], edges: List[int]) -> PathHit:
         def ref(urn: str) -> AncestorRef:
@@ -735,23 +815,36 @@ def _edge_passes(edge: Dict[str, Any], ep) -> bool:
     raise CompileError(f"stub: unsupported edge predicate {type(ep).__name__}")
 
 
-def _matches(node: Dict[str, Any], predicate, graph=None) -> bool:
+def _matches(node: Dict[str, Any], predicate, graph=None, depth: int = 12) -> bool:
     """Walk the predicate tree against an in-memory node dict.
 
     ``graph`` (the stub) answers what needs more than the node: its
     relationships and degree. Unsupported kinds raise ``CompileError`` with
     a clear message — the stub is honest about what it can do rather than
-    silently returning wrong results.
+    silently returning wrong results. ``depth``: how far below its
+    containers a ``descendantOf`` naming no ``maxDepth`` reaches (the
+    scope's).
     """
     if isinstance(predicate, GroupPredicate):
         if predicate.op == "and":
-            return all(_matches(node, c, graph) for c in predicate.children)
+            return all(_matches(node, c, graph, depth) for c in predicate.children)
         if predicate.op == "or":
-            return any(_matches(node, c, graph) for c in predicate.children)
+            return any(_matches(node, c, graph, depth) for c in predicate.children)
         if predicate.op == "not":
             # Validator enforces exactly one child.
-            return not _matches(node, predicate.children[0], graph)
+            return not _matches(node, predicate.children[0], graph, depth)
         raise CompileError(f"stub: unsupported group op {predicate.op!r}")
+
+    if isinstance(predicate, DescendantOfPredicate) and graph is not None:
+        urns = set(predicate.urns)
+        for ref in predicate.refs or ():
+            if ref.urn is None:
+                raise CompileError(
+                    f"descendantOf: the name reference '{ref.label()}' was not resolved")
+            urns.add(ref.urn)
+        reach = int(predicate.max_depth or depth)
+        return node.get("urn") in urns or any(
+            a in urns for a in graph._ancestors(node)[:reach])
 
     if isinstance(predicate, RelatedPredicate) and graph is not None:
         return graph._relation_holds(node, predicate)
@@ -891,6 +984,16 @@ def _matches(node: Dict[str, Any], predicate, graph=None) -> bool:
         f"stub: predicate kind {type(predicate).__name__} not implemented. "
         f"Extend backend/graph/adapters/stub_deep_search.py as tests need it."
     )
+
+
+def _name_of(node: Dict[str, Any]) -> str:
+    """A node's display name as the engine orders by it: its first non-empty
+    text of displayName, name, title, label."""
+    for key in ("displayName", "name", "title", "label"):
+        value = node.get(key)
+        if isinstance(value, str) and value:
+            return value
+    return ""
 
 
 def _to_search_hit(node: Dict[str, Any]) -> SearchHit:

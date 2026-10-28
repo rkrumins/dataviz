@@ -83,6 +83,9 @@ import { QuerySentence } from './panel/QuerySentence'
 import { useEditorMode } from './panel/builderMode'
 import { ResultsAskBar } from './panel/ask/ResultsAskBar'
 import { PANEL_MAX_WIDTH, PANEL_MIN_WIDTH, ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
+import { withEnd } from './panel/ConnectionBuilder'
+import { revealEdge } from './panel/EdgeResultsList'
+import { asDraft } from './panel/findMode'
 import { ResultsPane } from './panel/ResultsPane'
 import { SaveQueryDialog } from './panel/SaveQueryDialog'
 import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
@@ -97,6 +100,7 @@ import { usePendingSearchRun } from './usePendingSearchRun'
 import type { Recipe } from './panel/recipes/recipes'
 import { SearchCoachmark } from './panel/guidance/SearchCoachmark'
 import { ViewRecipes } from './panel/recipes/ViewRecipes'
+import { EdgeResultsTable } from './studio/EdgeResultsTable'
 import { ResultsTable } from './studio/ResultsTable'
 import { SchemaInspector } from './studio/SchemaInspector'
 import { SearchStudio } from './studio/SearchStudio'
@@ -131,7 +135,9 @@ export interface SearchMapPanelProps {
     onClose: () => void
     /** REQUIRED. The view this panel is bound to. */
     viewId: string
-    onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
+    /** Reveal an entity on the canvas — awaited where two are revealed in
+     *  turn (both ends of an edge). */
+    onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void | Promise<unknown>
     onOpenNode?: (urn: string) => void
     onFrameMatches?: (urns: string[]) => void
     /** The canvas's own search pipeline, when it has one. A canvas that
@@ -234,7 +240,7 @@ interface PanelInnerProps {
     session: UseAdvancedSearchResult
     /** The session's own teardown, when there is one. */
     onClear?: () => void
-    onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
+    onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void | Promise<unknown>
     onOpenNode?: (urn: string) => void
     onFrameMatches?: (urns: string[]) => void
 }
@@ -410,13 +416,14 @@ function PanelInner({
 
     // A query from the library runs as it loads, as a recipe does — the
     // builder may be folded away, with nothing on screen to run it.
+    // A Connections search kept in an AND group of its own loads as itself.
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
-        handleRefine(entry.predicate)
+        handleRefine(asDraft(entry.predicate))
         setLibraryOpen(false)
     }, [handleRefine])
 
     const handleLoadSaved = useCallback((query: SavedViewQuery) => {
-        handleRefine(query.predicate)
+        handleRefine(asDraft(query.predicate))
         setLibraryOpen(false)
     }, [handleRefine])
 
@@ -516,7 +523,7 @@ function PanelInner({
     // Reveal and Frame go to the canvas, so Search Studio steps aside first.
     const revealNode = useMemo(() => onRevealNode && ((urn: string, path: AncestorRef[]) => {
         useSearchStore.getState().setStudioOpen(false)
-        onRevealNode(urn, path)
+        return onRevealNode(urn, path)
     }), [onRevealNode])
     const frameMatches = useMemo(() => onFrameMatches && ((urns: string[]) => {
         useSearchStore.getState().setStudioOpen(false)
@@ -525,8 +532,15 @@ function PanelInner({
 
     const revealFocusedOnCanvas = useCallback(() => {
         if (!onRevealNode) return
-        const { orderedMatchUrns, focusedMatchIndex } = useSearchStore.getState()
+        const { orderedMatchUrns, orderedEdgeKeys, focusedMatchIndex } = useSearchStore.getState()
         if (focusedMatchIndex === null) return
+        // A Connections search steps through edges: show both ends.
+        if (orderedEdgeKeys.length > 0) {
+            const key = orderedEdgeKeys[focusedMatchIndex]
+            const edge = view.kind === 'results' ? view.result.edges?.find((e) => e.key === key) : undefined
+            if (edge && revealNode) void revealEdge(edge, revealNode)
+            return
+        }
         const urn = orderedMatchUrns[focusedMatchIndex]
         if (!urn) return
         const hits = view.kind === 'results' ? (view.result.hits ?? []) : []
@@ -555,6 +569,8 @@ function PanelInner({
     }, [])
     const [studioHost, setStudioHost] = useState<Element | null>(null)
     const [studioView, setStudioView] = useState<'table' | 'cards'>('table')
+    // A Connections search takes what its inspector adds into its From end.
+    const connectionsDraft = draftPredicate?.kind === 'edges' ? draftPredicate : null
     useLayoutEffect(() => {
         if (studioOpen) setStudioHost(panelRef.current?.closest('[data-panel="search-map-panel"]')?.parentElement ?? null)
     }, [studioOpen])
@@ -644,7 +660,8 @@ function PanelInner({
                 ? handleClear
                 : undefined}
             onExport={canExport ? () => setExportOpen(true) : undefined}
-            unit={view.kind === 'results' && view.result.paths ? 'path' : 'match'}
+            unit={view.kind !== 'results' ? 'match'
+                : view.result.paths ? 'path' : view.result.edges ? 'connection' : 'match'}
             viewId={viewId}
         />
     )
@@ -664,8 +681,10 @@ function PanelInner({
             onRefine={handleRefine}
         />
     )
-    // A table only for rows: not routes, not nothing.
+    // A table only for rows: not routes, not nothing. A Connections search's
+    // rows are its edges.
     const tableHits = view.kind === 'results' && !view.result.paths ? view.result.hits ?? [] : []
+    const tableEdges = view.kind === 'results' ? view.result.edges ?? [] : []
 
     return (
         <div
@@ -762,7 +781,9 @@ function PanelInner({
                                 {/* With the builder folded away this is the
                                     only statement of what was asked — and
                                     a new question is still one line away. */}
-                                {!refineOpen && <ResultsAskBar viewId={viewId} onRun={handleRun} />}
+                                {!refineOpen && draftPredicate?.kind !== 'edges' && (
+                                    <ResultsAskBar viewId={viewId} onRun={handleRun} />
+                                )}
                                 {!sentenceShowing && <QuerySentence draftPredicate={draftPredicate} />}
                                 {matchBar}
                                 {resultsPane}
@@ -787,7 +808,7 @@ function PanelInner({
                     results={(
                         <>
                             {showResultsSection && matchBar}
-                            {tableHits.length > 0 && (
+                            {(tableHits.length > 0 || tableEdges.length > 0) && (
                                 <Segmented size="sm" className="self-start" label="How to show the results"
                                            value={studioView} onChange={setStudioView}
                                            options={[{ value: 'table', label: 'Table' }, { value: 'cards', label: 'Cards' }]} />
@@ -799,6 +820,16 @@ function PanelInner({
                                     </p>
                                     <ViewRecipes viewId={viewId} onPick={handlePickRecipe} />
                                 </div>
+                            ) : tableEdges.length > 0 && studioView === 'table' && view.kind === 'results' ? (
+                                <EdgeResultsTable
+                                    edges={tableEdges}
+                                    onReveal={revealNode}
+                                    onOpen={onOpenNode}
+                                    onFrame={frameMatches}
+                                    canLoadMore={!!view.result.cursor}
+                                    isLoadingMore={isLoadingMore}
+                                    onLoadMore={loadMore}
+                                />
                             ) : tableHits.length > 0 && studioView === 'table' && view.kind === 'results' ? (
                                 <ResultsTable
                                     hits={tableHits}
@@ -822,7 +853,12 @@ function PanelInner({
                         </>
                     )}
                     inspector={(
-                        <SchemaInspector viewId={viewId} draft={draftPredicate} onRefine={handleRefine}
+                        <SchemaInspector viewId={viewId}
+                                         draft={connectionsDraft ? connectionsDraft.sourceWhere ?? null : draftPredicate}
+                                         onRefine={connectionsDraft
+                                             ? (w) => handleRefine(withEnd(connectionsDraft, 'sourceWhere', w))
+                                             : handleRefine}
+                                         into={connectionsDraft ? 'From' : undefined}
                                          mode={editorMode}
                                          initialTab={persona === 'technical' ? 'properties' : 'types'} />
                     )}
