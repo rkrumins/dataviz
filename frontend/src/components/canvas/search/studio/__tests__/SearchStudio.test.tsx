@@ -29,7 +29,7 @@ const hit = (urn: string, name: string): SearchHit => ({
 } as unknown as SearchHit)
 
 const RESULTS = {
-    kind: 'results', template: {}, inputs: {}, query: { predicate: { kind: 'tag', op: 'hasAny', values: ['PII'] } },
+    kind: 'results', query: { predicate: { kind: 'tag', op: 'hasAny', values: ['PII'] } },
     result: { candidateCount: 2, truncated: false, deadlineExceeded: false, cacheHit: false, elapsedMs: 4,
         hits: [hit('a', 'orders'), hit('b', 'customers')] },
     elapsedMs: 4,
@@ -46,7 +46,7 @@ const edge = (key: string, source: string, target: string, properties: Record<st
 const PII: Predicate = { kind: 'tag', op: 'hasAny', values: ['PII'] }
 
 const CONNECTIONS = {
-    kind: 'results', template: {}, inputs: {}, query: { predicate: { kind: 'edges', sourceWhere: PII } },
+    kind: 'results', query: { predicate: { kind: 'edges', sourceWhere: PII } },
     result: { candidateCount: 1, totalCount: 1, truncated: false, deadlineExceeded: false, cacheHit: false,
         elapsedMs: 4, hits: [], edges: [edge('e1', 'amount', 'amount_usd')], edgeTypeCounts: { TRANSFORMS: 1 } },
     elapsedMs: 4,

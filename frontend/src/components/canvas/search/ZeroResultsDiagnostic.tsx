@@ -151,6 +151,11 @@ const MATCH_MODES: ReadonlyArray<{ value: QuickMatch; label: string; verb: strin
     { value: 'exact', label: 'Is exactly', verb: 'is exactly' },
 ]
 
+/** The ways of matching that find all a way finds, and more. */
+const BROADER: Record<QuickMatch, readonly QuickMatch[]> = {
+    exact: ['substring', 'prefix', 'suffix'], prefix: ['substring'], suffix: ['substring'], substring: [],
+}
+
 
 function TimedOutLead() {
     return (
@@ -182,9 +187,10 @@ function MissLead({
     const mode = MATCH_MODES.find((m) => m.value === text?.match)
     // A query with no text leaf — a builder query about tags, types or
     // lineage — has no word to re-match, so it gets the statement
-    // without the chips.
+    // without the chips. Only broader ways: a narrower match of nothing
+    // finds nothing too.
     const others = mode && onSwitchMatch
-        ? MATCH_MODES.filter((m) => m.value !== mode.value)
+        ? MATCH_MODES.filter((m) => BROADER[mode.value].includes(m.value))
         : []
 
     return (

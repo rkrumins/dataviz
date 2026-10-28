@@ -35,7 +35,7 @@ function pane(loadMoreError: string | null) {
     render(
         <ResultsPane
             view={{
-                kind: 'results', template: { id: '__builder__' }, inputs: {},
+                kind: 'results',
                 query: { predicate: { kind: 'edges' } }, result, elapsedMs: 1,
             } as never}
             viewId="v1"
@@ -74,7 +74,7 @@ describe('ResultsPane — a match set too large to list', () => {
         render(
             <ResultsPane
                 view={{
-                    kind: 'results', template: { id: '__builder__' }, inputs: {},
+                    kind: 'results',
                     query: { predicate: { kind: 'edges' } }, result, elapsedMs: 1,
                 } as never}
                 viewId="v1"

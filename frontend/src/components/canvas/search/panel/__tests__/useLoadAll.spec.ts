@@ -24,8 +24,6 @@ import { useLoadAll } from '../useLoadAll'
 function page(cursor: string | null): PanelView {
     return {
         kind: 'results',
-        template: { id: 't', name: 't' },
-        inputs: {},
         query: {},
         result: {
             hits: [], truncated: false, candidateCount: 0,

@@ -13,8 +13,8 @@
  *   │  [ customer                                       ]  │
  *   └──────────────────────────────────────────────────────┘
  *
- * Pattern is borrowed from the existing PredicateBuilder leaf editors:
- * generous padding, mono uppercase field labels, full-width inputs.
+ * The pattern: generous padding, mono uppercase field labels,
+ * full-width inputs.
  * All `<select>` controls become OperatorMenu chips (portal-mounted)
  * so finite-enum dropdowns render outside the panel's scroll container
  * and don't clip.
@@ -22,11 +22,10 @@
  * UnifiedPicker (used for multi-value editors — tags, types, property
  * values) is invoked with ``portal={true}`` for the same reason.
  */
-import { ChevronDown, ExternalLink, KeyRound, Type, X } from 'lucide-react'
+import { ChevronDown, Code2, KeyRound, Type, X } from 'lucide-react'
 import { type FC, type ReactNode, memo, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
-import { formatUrnLabel } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
 import type {
     DegreePredicate,
@@ -45,6 +44,7 @@ import type {
     TextMatchMode,
     TextPredicate,
     TextTarget,
+    WithinHopsPredicate,
 } from '@/types/search'
 
 import { useEntityTypes } from '@/store/schema'
@@ -73,6 +73,7 @@ import { NodeRefList } from './NodeRefPicker'
 import { OperatorMenu } from './OperatorMenu'
 import { PathEditor } from './PathEditor'
 import { RelationshipEditor } from './RelationshipEditor'
+import { WithinHopsEditor } from './WithinHopsEditor'
 import { axisMeta } from './relations'
 import { shapeLabel } from './vocabulary/edgeWords'
 import { RowCard } from './builder-atoms/RowCard'
@@ -80,7 +81,7 @@ import { RowMenu } from './builder-atoms/RowMenu'
 import { RowSelectionCheckbox } from './builder-atoms/RowSelectionCheckbox'
 import type { OpTone } from './builder-atoms/tones'
 import type { LayerOption } from './layerOptions'
-import { useCanvasAnchorOptions, useTopLevelCanvasContainers } from './useCanvasViewRoots'
+import { useTopLevelCanvasContainers } from './useCanvasViewRoots'
 
 
 /** FE-only augmentation on DescendantOfPredicate so we can route to
@@ -115,8 +116,9 @@ export interface ConditionRowProps {
     autoFocus?: boolean
     onChange: (next: Predicate) => void
     onRemove: () => void
-    /** Omitted where there is no Advanced drawer (the rule editor). */
-    onOpenAdvanced?: () => void
+    /** Edit a condition the Form can't show in Code mode, with it
+     *  selected. Omitted where there is no Code mode (the rule editor). */
+    onEditInCode?: (target: Predicate) => void
     /** Pressing Enter inside a scalar value field fires this. The
      *  panel wires it to the same dispatch the Run button uses. */
     onSubmit?: () => void
@@ -146,7 +148,7 @@ const FOLDABLE = new Set<string>([
 
 const ConditionRowImpl: FC<ConditionRowProps> = ({
     value, discovery, knownEntityTypes, activeEntityTypes, discoveredLayers,
-    isRunning, autoFocus, onChange, onRemove, onOpenAdvanced, onSubmit,
+    isRunning, autoFocus, onChange, onRemove, onEditInCode, onSubmit,
     onWrap, onDuplicate, parentPath, index,
 }) => {
     const meta = getKindMeta(value)
@@ -155,7 +157,7 @@ const ConditionRowImpl: FC<ConditionRowProps> = ({
         value, onChange, discovery, knownEntityTypes,
         activeEntityTypes, discoveredLayers, isRunning,
         autoFocus: autoFocus ?? false, onSubmit,
-        onOpenAdvanced,
+        onEditInCode,
     }
     const editor = renderEditor(ctx)
 
@@ -319,7 +321,7 @@ interface EditorCtx {
     discoveredLayers: LayerOption[]
     isRunning: boolean
     autoFocus: boolean
-    onOpenAdvanced?: () => void
+    onEditInCode?: (target: Predicate) => void
     /** Fires when the user presses Enter inside a scalar editor —
      *  signals "run this query now." Optional; rows that don't have
      *  an Enter-able input ignore it. */
@@ -411,17 +413,20 @@ function renderEditor(ctx: EditorCtx): ReactNode {
             // The header label + description already says everything.
             return null
         case 'withinHops':
-            // No visual editor — Code-only. Saved queries that still
-            // contain it render this banner; editing happens via the JSON
-            // view in the Advanced drawer.
-            return <CodeOnlyHint onOpen={ctx.onOpenAdvanced} />
+            return (
+                <WithinHopsEditor value={value as WithinHopsPredicate} onChange={ctx.onChange}
+                                  discovery={ctx.discovery} knownEntityTypes={ctx.knownEntityTypes}
+                                  discoveredLayers={ctx.discoveredLayers} isRunning={ctx.isRunning}
+                                  autoFocus={ctx.autoFocus} />
+            )
         case 'group': {
             const g = value as GroupPredicate
+            const { onEditInCode } = ctx
             return (
                 <GroupRowHint
                     op={g.op ?? 'and'}
                     count={g.children.length}
-                    onOpen={ctx.onOpenAdvanced}
+                    onOpen={onEditInCode && (() => onEditInCode(g))}
                 />
             )
         }
@@ -721,53 +726,20 @@ function RootInViewEditor({
 
 
 /**
- * InsideSubtreeEditor — power-user entry: anchor to ANY canvas-loaded
- * node (Layer, Object, Container, deeper). Fed by
- * ``useCanvasAnchorOptions``. The BE Cypher has no label restriction
- * on the anchor, so this works for arbitrary sub-tree isolation.
- * Multi-select: pick one or more anchors → union of subtrees.
+ * InsideSubtreeEditor — anchor to any entity in the View (a layer, an
+ * object, a container, deeper), found by name as every name picker finds
+ * it — loaded on the canvas or not. The server's walk has no label
+ * restriction on the anchor, so this isolates any subtree; several anchors
+ * are the union of their subtrees.
  */
 function InsideSubtreeEditor({
-    value, onChange, autoFocus,
+    value, onChange, autoFocus, isRunning,
 }: Omit<EditorCtx, 'value'> & { value: DescendantOfPredicateWithScope }) {
-    const anchors = useCanvasAnchorOptions()
-    // The canvas only knows about nodes it has loaded, and an anchor
-    // picked out of search results usually isn't one of them — that's
-    // often the point of scoping to it. Fold any such URN in as its own
-    // option so the picker shows "GOLD", not a bare URN or a blank.
-    const options = useMemo(() => {
-        const known = new Set(anchors.map((r) => r.urn))
-        const extra = (value.urns ?? [])
-            .filter((urn) => urn && !known.has(urn))
-            .map((urn) => ({
-                value: urn,
-                label: formatUrnLabel(urn),
-                description: 'not loaded on this canvas',
-            }))
-        return [
-            ...anchors.map((r) => ({
-                value: r.urn,
-                label: r.displayName,
-                description: r.entityType,
-            })),
-            ...extra,
-        ]
-    }, [anchors, value.urns])
     return (
-        <Field label="Anchor nodes">
-            <UnifiedPicker
-                multiple
-                value={value.urns ?? []}
-                onChange={(next) => onChange({ ...value, urns: next })}
-                options={options}
-                placeholder="pick one or more anchors from this canvas…"
-                emptyHint={
-                    'No nodes loaded on the canvas yet. Open the view '
-                    + 'or wait for it to hydrate.'
-                }
-                autoFocus={autoFocus}
-                portal
-            />
+        <Field label="Anchor nodes" group>
+            <NodeRefList value={[...(value.urns ?? []).map((urn) => ({ urn })), ...(value.refs ?? [])]}
+                         autoFocus={autoFocus} disabled={isRunning}
+                         onChange={(refs) => onChange({ ...value, urns: [], refs: refs.length ? refs : undefined })} />
         </Field>
     )
 }
@@ -1041,34 +1013,6 @@ function CheckToggle({
 }
 
 
-function CodeOnlyHint({ onOpen }: { onOpen?: () => void }) {
-    return (
-        <div className={cn(
-            'rounded-lg border border-glass-border/60 bg-canvas-base/30',
-            'px-3 py-2.5 flex items-center justify-between gap-3',
-        )}>
-            <span className="text-[11.5px] text-ink-muted">
-                {onOpen
-                    ? 'This filter lives in Code mode — open the JSON view to edit it.'
-                    : "This filter is edited as JSON in Advanced Search — it can't be changed here."}
-            </span>
-            {onOpen && <button
-                type="button"
-                onClick={onOpen}
-                className={cn(
-                    'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md shrink-0',
-                    'text-[11px] font-medium text-accent-lineage',
-                    'bg-accent-lineage/10 hover:bg-accent-lineage/20 transition-colors',
-                )}
-            >
-                <ExternalLink className="w-3 h-3" />
-                Open in Code
-            </button>}
-        </div>
-    )
-}
-
-
 function GroupRowHint({
     op, count, onOpen,
 }: { op: string; count: number; onOpen?: () => void }) {
@@ -1090,8 +1034,8 @@ function GroupRowHint({
                     'bg-accent-lineage/10 hover:bg-accent-lineage/20 transition-colors',
                 )}
             >
-                <ExternalLink className="w-3 h-3" />
-                Edit in Advanced
+                <Code2 className="w-3 h-3" />
+                Edit in Code
             </button>}
         </div>
     )
@@ -1275,7 +1219,7 @@ function getKindMeta(p: Predicate): KindMeta {
         }
         case 'withinHops': return {
             icon: '⇿', label: 'Within N hops',
-            description: 'N-hop neighbourhood of an anchor URN.',
+            description: 'Everything a few edges from the entities you name, through the edges you choose.',
         }
         case 'path': return {
             icon: '⤇', label: 'Paths',
@@ -1299,15 +1243,16 @@ function getKindMeta(p: Predicate): KindMeta {
             const link = axisMeta(p.axis).lineage
             return {
                 icon: link ? '⇄' : '⊶',
-                label: link ? 'Connection' : 'Hierarchy',
+                // Not "Connection": that is a Connections search, the edges themselves.
+                label: link ? 'Related to…' : 'Hierarchy',
                 description: link
-                    ? 'A condition on what it is connected to — steps and edges under More options.'
+                    ? 'A condition on what it is related to — steps and edges under More options.'
                     : 'A condition on its containers or what it contains.',
             }
         }
         case 'group': return {
             icon: '⊕', label: 'Composite group',
-            description: 'OR / NOT composition — edit in Advanced builder.',
+            description: 'OR / NOT composition — edit it in Code.',
         }
         default: return { icon: '·', label: String(p.kind) }
     }
@@ -1355,7 +1300,7 @@ function isIncomplete(p: Predicate): boolean {
         case 'property':     return !p.key.trim() || (p.valueKey != null ? !p.valueKey.trim()
             : valueProblem(p.op ?? 'eq', p.valueType ?? 'auto', p.value) !== null)
         case 'descendantOf': return !p.urns?.length && !p.refs?.length
-        case 'withinHops':   return !p.urns?.length && !p.refs?.length
+        case 'withinHops':   return (!p.urns?.length && !p.refs?.length) || p.edgeTypes?.length === 0
         case 'path':
             return !(p.sourceUrns?.length || p.sourceRefs?.length || p.sourceWhere)
                 || !(p.targetUrns?.length || p.targetRefs?.length || p.targetWhere)

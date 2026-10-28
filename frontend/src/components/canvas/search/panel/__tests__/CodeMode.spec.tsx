@@ -184,6 +184,20 @@ describe('Code mode', () => {
         expect(selected()).toBe(text())
     })
 
+    it('opens on the condition "Edit in Code" was pressed on, selected', () => {
+        const pii: Predicate = { kind: 'tag', op: 'hasAny', values: ['PII'] }
+        const either: Predicate = { kind: 'group', op: 'or', children: [pii, { kind: 'hasProperty', key: 'owner' }] }
+        const draft: Predicate = { kind: 'group', op: 'and', children: [DATASETS, either] }
+        const { unmount } = render(<CodeMode draft={draft} isRunning={false} vocabulary={VOCABULARY}
+                                             onCommit={vi.fn()} focus={either} />)
+        expect(text()).toBe(stringifyPredicate(draft))
+        expect(selected()).toBe(`(${stringifyPredicate(either)})`)
+        unmount()
+
+        render(<CodeMode draft={draft} isRunning={false} vocabulary={VOCABULARY} onCommit={vi.fn()} focus={pii} />)
+        expect(selected()).toBe('tag:PII')
+    })
+
     it('reads a layer name of several words, unquoted, against the View’s layers', () => {
         const onCommit = vi.fn()
         render(<CodeMode draft={null} isRunning={false} onCommit={onCommit}

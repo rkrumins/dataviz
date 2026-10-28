@@ -139,7 +139,9 @@ export function leafSegments(p: Predicate, many = false): Segment[] {
                 const how = p.keyMatch === 'prefix' ? 'starts with' : 'contains'
                 return [txt(`${has} a property whose name ${how}`, 'phrase'), txt(' '), val(p.key, true, 'key')]
             }
-            return [txt(`${has} a`, 'phrase'), txt(' '), val(p.key, true, 'key'), txt(' property')]
+            // "an “owner” property", not "a".
+            return [txt(`${has} ${/^[aeiou]/i.test(p.key) ? 'an' : 'a'}`, 'phrase'), txt(' '), val(p.key, true, 'key'),
+                txt(' property')]
         }
         case 'property':
             return propertySegments(p)

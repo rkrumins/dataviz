@@ -13,8 +13,8 @@ import type { QuickQuery } from '@/components/canvas/search/session/quickPredica
 import type { AncestorRef, SearchHit } from '@/types/search'
 
 import {
-    TOP_MATCHES, depthNote, formatPath, listboxKind, narrowingHints,
-    topMatches, whyLabel,
+    TOP_MATCHES, depthNote, formatPath, listboxKind, narrowingHints, nothingFound,
+    topMatches, whyLabel, wideningHints,
 } from '../dropdownModel'
 
 
@@ -220,6 +220,27 @@ describe('narrowingHints', () => {
         expect(narrowingHints(5000, {
             ...DEFAULT_QUICK, lookIn: 'name', match: 'prefix',
         })).toEqual([])
+    })
+})
+
+
+// Nothing found: only a search that finds more can help.
+describe('wideningHints and nothingFound', () => {
+    it('offers nothing past the broadest search, and says what that was', () => {
+        expect(wideningHints(DEFAULT_QUICK)).toEqual([])
+        expect(nothingFound('ord', DEFAULT_QUICK)).toBe('Nothing in this view contains "ord"')
+    })
+
+    it('undoes each narrowing, one click each', () => {
+        const quick = { ...DEFAULT_QUICK, match: 'exact' as const, lookIn: { property: 'owner' },
+            scope: { insideUrn: 'urn:s', label: 'Sales' } }
+        expect(wideningHints(quick)).toEqual([
+            { label: 'Contains', patch: { match: 'substring' } },
+            { label: 'Look in everything', patch: { lookIn: 'everything' } },
+            { label: 'Whole view', patch: { scope: 'view' } },
+        ])
+        expect(nothingFound('ord', quick)).toBe('No owner value inside Sales is exactly "ord"')
+        expect(nothingFound('pii', { ...DEFAULT_QUICK, lookIn: 'tags' })).toBe('No tag in this view contains "pii"')
     })
 })
 

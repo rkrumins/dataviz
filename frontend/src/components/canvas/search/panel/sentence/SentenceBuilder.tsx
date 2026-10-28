@@ -27,7 +27,6 @@ import { layoutQueryMap } from '../map/layoutQueryMap'
 import { QueryMap } from '../map/QueryMap'
 import { RescueNote } from '../rescue/RescueFixes'
 import { useRescue } from '../rescue/useRescue'
-import type { CodeKind } from '../vocabulary/filterKinds'
 
 import {
     buildSentence,
@@ -67,10 +66,9 @@ export interface SentenceBuilderProps {
     discoveredLayers: LayerOption[]
     isRunning?: boolean
     onSubmit?: () => void
-    onOpenAdvanced?: () => void
-    onOpenCode?: (kind: CodeKind) => void
-    /** Switch to Code for what a sentence can't show. */
-    onEditInCode: () => void
+    /** Switch to Code for what a sentence can't show — with ``target``,
+     *  that condition selected. */
+    onEditInCode: (target?: Predicate) => void
     /** The subject line's first word: "Find", or "From" / "To" for a
      *  Connections search's ends. */
     subjectLead?: string
@@ -84,7 +82,7 @@ const typeCondition = (types: string[]): Predicate => ({ kind: 'entityType', op:
 
 export function SentenceBuilder({
     viewId, predicate, onSeed, onCommit, discovery, knownEntityTypes, presentEntityTypes,
-    discoveredLayers, isRunning = false, onSubmit, onOpenAdvanced, onOpenCode, onEditInCode, subjectLead,
+    discoveredLayers, isRunning = false, onSubmit, onEditInCode, subjectLead,
     showMap = true,
 }: SentenceBuilderProps) {
     const sentence = useMemo(() => buildSentence(predicate, subjectLead), [predicate, subjectLead])
@@ -138,20 +136,19 @@ export function SentenceBuilder({
                 : named))
         },
         editInCode: onEditInCode,
-        onOpenCode,
         setOpenToken,
-    }), [onSeed, onCommit, onEditInCode, onOpenCode])
+    }), [onSeed, onCommit, onEditInCode])
 
     const ctx = useMemo<SentenceContextValue>(() => ({
         ...actions,
         editorProps: {
-            discovery, knownEntityTypes, discoveredLayers, isRunning, onSubmit, onOpenAdvanced,
+            discovery, knownEntityTypes, discoveredLayers, isRunning, onSubmit, onEditInCode,
             activeEntityTypes: sentence.lines[0].kind === 'subject' ? sentence.lines[0].types : [],
         },
         presentTypes: presentEntityTypes.length ? presentEntityTypes : knownEntityTypes,
         isRunning,
         combine: sentence.combine,
-    }), [actions, discovery, knownEntityTypes, discoveredLayers, isRunning, onSubmit, onOpenAdvanced,
+    }), [actions, discovery, knownEntityTypes, discoveredLayers, isRunning, onSubmit, onEditInCode,
         sentence, presentEntityTypes])
 
     // Open the clause just added for its first value.

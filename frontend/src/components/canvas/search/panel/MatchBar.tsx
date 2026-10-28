@@ -301,6 +301,14 @@ function formatClock(seconds: number): string {
     return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
 }
 
+/** How long a finished search took, as people read it: "432 ms", "4.2 s",
+ *  and past a minute the clock a running one shows, "1:27". */
+function formatElapsed(ms: number): string {
+    if (ms < 1_000) return `${Math.round(ms)} ms`
+    if (ms < 60_000) return `${(ms / 1_000).toFixed(1)} s`
+    return formatClock(Math.round(ms / 1_000))
+}
+
 
 /** A scan no longer followed: why, and Resume — its session kept what it
  *  found, so nothing is read twice. */
@@ -600,7 +608,7 @@ function CountReadout({
                     </span>
                     {elapsedMs !== null && (
                         <span className="text-[10.5px] text-ink-muted/70 tabular-nums leading-none">
-                            · {elapsedMs} ms
+                            · {formatElapsed(elapsedMs)}
                         </span>
                     )}
                 </>

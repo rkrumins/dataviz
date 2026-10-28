@@ -102,14 +102,21 @@ describe('VisualQueryBuilder', () => {
         kind: 'withinHops', urns: ['urn:x'], hops: 2, direction: 'both',
     } as Predicate
 
-    it('shows a condition only Code edits as such, never as unsupported', async () => {
-        const onOpenAdvanced = vi.fn()
-        render(<VisualQueryBuilder {...baseProps({ predicate: near, onOpenAdvanced })} />)
+    it('edits "within N hops" in the Form: how far, which way, through which edges', async () => {
+        const onSeed = vi.fn()
+        render(<VisualQueryBuilder {...baseProps({ predicate: near, onSeed, onEditInCode: vi.fn() })} />)
 
         expect(screen.getByText('Within N hops')).toBeInTheDocument()
         expect(screen.queryByText('unsupported')).not.toBeInTheDocument()
-        await userEvent.setup().click(screen.getByRole('button', { name: /Open in Code/ }))
-        expect(onOpenAdvanced).toHaveBeenCalled()
+        expect(screen.queryByRole('button', { name: /in Code/ })).not.toBeInTheDocument()
+        expect(screen.getByLabelText('Most hops')).toHaveValue(2)
+        expect(screen.getByRole('button', { name: 'Direction' })).toHaveTextContent('Either way')
+        expect(screen.getByRole('button', { name: 'Through which edges' })).toHaveTextContent('Lineage')
+
+        const hops = screen.getByLabelText('Most hops')
+        await userEvent.setup().type(hops, '{selectall}12')
+        // Ten is as far as the server reaches.
+        expect(onSeed).toHaveBeenLastCalledWith(expect.objectContaining({ kind: 'withinHops', hops: 10 }))
     })
 
     it('edits an edge count in the Form: how many, which way, through which edges', () => {
@@ -160,11 +167,28 @@ describe('VisualQueryBuilder', () => {
         expect(screen.getByRole('button', { name: 'Through which edges' })).toHaveTextContent('Any link')
     })
 
-    it('offers no hand-off where there is no Code mode, and says where it is edited', () => {
-        render(<VisualQueryBuilder {...baseProps({ predicate: near })} />)
+    const tag = (value: string): Predicate => ({ kind: 'tag', op: 'hasAny', values: [value] })
+    const deepest: Predicate = { kind: 'group', op: 'and', children: [tag('e'), tag('f')] }
+    const deep: Predicate = { kind: 'group', op: 'and', children: [tag('a'), {
+        kind: 'group', op: 'or', children: [tag('b'), {
+            kind: 'group', op: 'and', children: [tag('c'), {
+                kind: 'group', op: 'or', children: [tag('d'), deepest] }] }] }] }
 
-        expect(screen.getByText(/edited as JSON in Advanced Search/)).toBeInTheDocument()
-        expect(screen.queryByRole('button', { name: /Open in Code/ })).not.toBeInTheDocument()
+    it('hands a group nested deeper than the Form shows to Code, that group selected', async () => {
+        const onEditInCode = vi.fn()
+        render(<VisualQueryBuilder {...baseProps({ predicate: deep, onEditInCode })} />)
+
+        expect(screen.getByText(/Nested deeper than the Form shows/)).toBeInTheDocument()
+        await userEvent.setup().click(screen.getByRole('button', { name: /Edit in Code/ }))
+        expect(onEditInCode).toHaveBeenCalledWith(deepest)
+        expect(onEditInCode.mock.lastCall?.[0]).toBe(deepest)
+    })
+
+    it('offers no hand-off where there is no Code mode', () => {
+        render(<VisualQueryBuilder {...baseProps({ predicate: deep })} />)
+
+        expect(screen.getByText(/Nested deeper than the Form shows/)).toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: /Edit in Code/ })).not.toBeInTheDocument()
     })
 
     it('shows every entity as a condition with nothing to fill in', () => {

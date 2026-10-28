@@ -34,7 +34,7 @@ export function ResultsAskBar({ viewId, onRun }: {
     const draft = useDraftPredicate()
     const commitDraft = useSearchStore((s) => s.commitDraft)
     const onAsk = useCallback((result: Predicate) => {
-        commitDraft(result)
+        commitDraft(result, 'ask')
         const next = buildRunnablePredicate(result)
         if (next) onRun(next.predicate, SEARCH_OPTIONS)
     }, [commitDraft, onRun])

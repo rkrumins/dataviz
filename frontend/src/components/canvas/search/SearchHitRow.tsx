@@ -434,7 +434,8 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                                 onClick={(e) => {
                                     e.stopPropagation()
                                     rememberUrnLabels([hit.node])
-                                    useSearchStore.getState().requestSearchRun(routes)
+                                    const store = useSearchStore.getState()
+                                    store.showRoutes(routes, store.draftPredicate ?? shownQuery!)
                                 }}
                                 className={cn(
                                     "inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg",
@@ -444,7 +445,7 @@ export const SearchHitRow: FC<SearchHitRowProps> = ({
                                     "hover:bg-glass/70 hover:text-ink",
                                     "transition-all",
                                 )}
-                                title="The routes from this entity to the relatives it was matched by — undo to come back to these results"
+                                title="The routes from this entity to the relatives it was matched by — Back to results comes back here"
                             >
                                 <Route className="w-3 h-3" />
                                 How it matches

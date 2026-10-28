@@ -215,7 +215,7 @@ list. (Or on the **Properties** tab: `owner` → **Find missing this** → **Tag
 ]}
 ```
 
-**Orphan.** Indigo, **CircleDot**. **Add filter → Graph shape → No lineage
+**No lineage.** Indigo, **CircleDot**. **Add filter → Graph shape → No lineage
 edges**: nothing flows in or out.
 
 ```json
