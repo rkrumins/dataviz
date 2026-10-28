@@ -24,10 +24,11 @@ const vocabulary = buildAskVocabulary({
     tagValues: ['PII', 'Finance'], propertyKeys: ['owner'], valueSamples: [], layers: [],
 })
 
-function setup(draft: Predicate | null = null, variant: 'hero' | 'compact' = 'compact', examples?: boolean) {
+function setup(draft: Predicate | null = null, variant: 'hero' | 'compact' = 'compact', examples?: boolean,
+    countOf: (p: Predicate) => number = () => 12) {
     const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
     const searchCounts = vi.fn(async (body: SearchCountsRequest) => ({
-        counts: Object.fromEntries(body.items.map((i) => [i.id, { count: 12, status: 'complete' }])),
+        counts: Object.fromEntries(body.items.map((i) => [i.id, { count: countOf(i.predicate), status: 'complete' }])),
     }))
     const resolveSearchRefs = vi.fn(async (body: SearchResolveRequest) => ({
         results: body.refs.map(() => ({ count: 2, matches: [
@@ -164,6 +165,26 @@ describe('AskBar', () => {
         setup(null, 'compact', true)
         expect(screen.getByText('Try')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'datasets tagged PII' })).toBeInTheDocument()
+    })
+
+    it('offers the view\'s word for one a letter or two off, and takes it', () => {
+        const { ask, input } = setup()
+        ask('dashbaords')
+        fireEvent.click(screen.getByRole('button', { name: '“dashboards”' }))
+        expect(input).toHaveValue('dashboards')
+        expect(screen.getByText('Find')).toBeInTheDocument()
+    })
+
+    it('offers the fixes that would find something when the reading finds nothing', async () => {
+        // Nothing is tagged PII.
+        const needsPII = (p: Predicate): boolean => p.kind === 'tag' ? p.values.includes('PII')
+            : p.kind === 'group' ? (p.op === 'or' ? p.children.every(needsPII) : p.children.some(needsPII)) : false
+        const { ask, onAsk } = setup(null, 'compact', undefined, (p) => (needsPII(p) ? 0 : 5))
+        ask('datasets tagged Finance and PII')
+        expect(await screen.findByText('no matches')).toBeInTheDocument()
+        fireEvent.click(await screen.findByRole('button', { name: /Without “are tagged #PII”/ }))
+        expect(onAsk).toHaveBeenCalledWith({ kind: 'group', op: 'and', children: [
+            { kind: 'entityType', op: 'in', values: ['dataset'] }, { kind: 'tag', op: 'hasAny', values: ['Finance'] }] })
     })
 
     it('brings back earlier questions, and Esc clears', () => {

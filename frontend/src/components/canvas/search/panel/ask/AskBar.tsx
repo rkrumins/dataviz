@@ -10,9 +10,11 @@
  *
  * What it reads is shown before anything changes, in the Sentence's own
  * words, with roughly how many it matches; a word with other readings
- * offers them, and names are looked up in the view. Enter applies it —
- * replacing the query, or adding to it when the question starts with
- * "and". ↑ / ↓ bring back earlier questions; Esc clears.
+ * offers them, and names are looked up in the view; a word a letter or
+ * two off one of the view's offers that word, and a reading that finds
+ * nothing offers the fixes that would. Enter applies it — replacing the
+ * query, or adding to it when the question starts with "and". ↑ / ↓ bring
+ * back earlier questions; Esc clears.
  */
 import * as Popover from '@radix-ui/react-popover'
 import { CheckCircle2, ChevronDown, CornerDownLeft, Loader2, Sparkles, X } from 'lucide-react'
@@ -26,8 +28,11 @@ import { usePersonaMode } from '@/store/persona'
 import { useSearchStore } from '@/store/searchStore'
 import type { NodeRef, Predicate } from '@/types/search'
 
+import { useClauseCounts } from '../counts/useClauseCounts'
 import type { CountState } from '../counts/useCounts'
 import { namedEntityOf, namePathFor } from '../entityNames'
+import { FixChips } from '../rescue/RescueFixes'
+import { useRescue } from '../rescue/useRescue'
 import { useTypeName } from '../sentence/useTypeName'
 
 import { askExamples } from './askExamples'
@@ -202,6 +207,23 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                             Searched for by name: {interpretation.unrecognized.map((w) => `“${w}”`).join(', ')}
                         </p>
                     )}
+                    {interpretation.suggestions?.map((s) => (
+                        <p key={s.text} className="text-xs text-ink-muted">
+                            Did you mean{' '}
+                            <button type="button" onClick={() => { setQuestion(corrected(question, s.text, s.suggestion)); setPicks({}) }}
+                                    className="font-medium text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+                                “{s.suggestion}”
+                            </button>?
+                        </p>
+                    ))}
+                    {result && viewId && preview.countStatus === 'done' && preview.count?.complete
+                        && preview.count.count === 0 && (
+                        <AskRescue viewId={viewId} query={result} onApply={(p) => {
+                            remember(question.trim())
+                            onAsk(p)
+                            clear()
+                        }} />
+                    )}
                     {interpretation.notes.map((note) => (
                         <p key={note} className="text-xs text-amber-700 dark:text-amber-300">{note}</p>
                     ))}
@@ -219,6 +241,30 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                 </div>
             )}
             <div aria-live="polite" className="sr-only">{live}</div>
+        </div>
+    )
+}
+
+
+/** ``question`` with ``text`` — however it was spaced — put as ``word``. */
+function corrected(question: string, text: string, word: string): string {
+    const escaped = text.split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')
+    return question.replace(new RegExp(escaped, 'i'), word)
+}
+
+
+/** A reading that finds nothing: where its matches run out, and the fixes
+ *  that would find something — each applied as the question would be. */
+function AskRescue({ viewId, query, onApply }: { viewId: string; query: Predicate; onApply: (p: Predicate) => void }) {
+    const counts = useClauseCounts(viewId, query)
+    const rescue = useRescue(viewId, query, counts)
+    if (rescue.clause === null) return null
+    return (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-ink-muted">
+                Nothing matches{rescue.line ? <> past “{rescue.line}”</> : null} — try
+            </span>
+            <FixChips fixes={rescue.fixes} onApply={onApply} line={rescue.line} counting={rescue.status === 'counting'} />
         </div>
     )
 }
