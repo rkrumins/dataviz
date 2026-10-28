@@ -197,7 +197,8 @@ export interface ViewSearchSession {
      */
     runNow: (patch?: Partial<QuickQuery>) => void
     /** The × : abort, drop the results, the highlights and the draft, and
-     *  empty the box. The same teardown a view switch performs. */
+     *  empty the box — the teardown a view switch performs, the draft one
+     *  Undo away. */
     clearQuery: () => void
     /** Clamp the search to one container (the row box, a result group). */
     setScope: (scope: Exclude<QuickScope, 'view'>) => void
@@ -289,7 +290,7 @@ export function useViewSearchSessionController(
     const advancedRef = useRef(advanced)
     useEffect(() => { advancedRef.current = advanced })
 
-    const teardown = useCallback(() => {
+    const teardown = useCallback((undoable = false) => {
         // `resetTemplate` is the pipeline's own teardown: it aborts the
         // in-flight request, drops the run state and rewinds the view to
         // idle. Plain `cancel` leaves `view.kind === 'results'`, so the
@@ -297,8 +298,9 @@ export function useViewSearchSessionController(
         // gone.
         advancedRef.current.resetTemplate()
         // What the session itself published: the draft it commits on every
-        // dispatch, and the highlights on the canvas.
-        useSearchStore.getState().clear()
+        // dispatch, and the highlights on the canvas — the draft one Undo
+        // away when the person cleared it.
+        useSearchStore.getState().clear({ undoable })
         setQuickState(DEFAULT_QUICK)
         // Same rule `openPanel` applies, applied to the state this just
         // produced: there are no results any more, so a panel still open
@@ -310,6 +312,7 @@ export function useViewSearchSessionController(
     // does not remount when the canvas swaps views, so everything above
     // would otherwise still describe the view the user just left.
     useEffect(() => () => { teardown() }, [viewId, teardown])
+    const clearQuery = useCallback(() => teardown(true), [teardown])
 
     const dispatch = useCallback((runnable: { predicate: Predicate; hash: string }) => {
         useSearchStore.getState().commitDraft(runnable.predicate)
@@ -431,7 +434,7 @@ export function useViewSearchSessionController(
 
     return useMemo(() => ({
         viewId,
-        quick, setQuick, runNow, clearQuery: teardown, setScope, clearScope,
+        quick, setQuick, runNow, clearQuery, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
         refineOpen, refine, closeRefine,
         resultMatchesQuick,
@@ -440,7 +443,7 @@ export function useViewSearchSessionController(
         advanced, rowSearch,
     }), [
         viewId,
-        quick, setQuick, runNow, teardown, setScope, clearScope,
+        quick, setQuick, runNow, clearQuery, setScope, clearScope,
         panelOpen, openPanel, closePanel, togglePanel,
         refineOpen, refine, closeRefine, resultMatchesQuick,
         resolveLayer, layers, revealHit, prefetchHit, advanced, rowSearch,

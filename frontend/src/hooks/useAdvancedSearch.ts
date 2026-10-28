@@ -635,8 +635,9 @@ export function useAdvancedSearch(
         abortRef.current?.abort()
         // Drop any in-flight result-set publication from a prior run so
         // the canvas stops highlighting matches the moment the user
-        // backs out of the form.
-        useSearchStore.getState().clear()
+        // backs out of the form. The query is the caller's to clear —
+        // undoably, when the person asked.
+        useSearchStore.getState().clearSearchResults()
         setRunState(null)
         setView({ kind: 'idle' })
     }, [])

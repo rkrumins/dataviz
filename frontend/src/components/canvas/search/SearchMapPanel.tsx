@@ -384,14 +384,14 @@ function PanelInner({
         //                     ``showResultsSection`` gate keeps them
         //                     visible for any non-idle kind) so the X
         //                     button looked like it did nothing.
-        //   3. clearStore()   wipes the draft predicate / undo stack
-        //                     too so the QueryCard returns to its
-        //                     empty hero rather than redisplaying the
-        //                     same filter rows the cleared run came
-        //                     from.
+        //   3. clearStore()   wipes the draft predicate too so the
+        //                     QueryCard returns to its empty hero
+        //                     rather than redisplaying the same filter
+        //                     rows the cleared run came from — one Undo
+        //                     brings them back.
         cancel()
         resetTemplate()
-        clearStore()
+        clearStore({ undoable: true })
     }, [onClear, cancel, resetTemplate, clearStore])
 
     /**
@@ -587,6 +587,14 @@ function PanelInner({
             || target.tagName === 'TEXTAREA'
             || target.isContentEditable
         )) return
+        // ⌘Z / Ctrl+Z steps back through the changes to the query, with ⇧
+        // forward again — in Search Studio too, whose keys bubble up here.
+        if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
+            e.preventDefault()
+            if (e.shiftKey) useSearchStore.getState().redo()
+            else useSearchStore.getState().undo()
+            return
+        }
         // Search Studio and the popovers are portaled: their keys are theirs.
         if (!panelRef.current?.contains(target)) return
         switch (e.key) {

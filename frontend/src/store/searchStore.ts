@@ -459,7 +459,10 @@ interface SearchStoreActions {
      *  the canvas spotlight to go away but the user must still be able
      *  to undo back to their previous draft. */
     clearSearchResults: () => void
-    clear: () => void
+    /** Drop the results, the highlights and the query. ``undoable`` — the
+     *  person's own Clear — keeps the query one Undo away; otherwise (the
+     *  panel closing, the View switching) the undo history goes too. */
+    clear: (options?: { undoable?: boolean }) => void
     /** Load a predicate into the builder AND request the panel run it —
      *  the "open in Advanced Search + run" bridge used by the Property
      *  Manager. The caller also opens the panel. */
@@ -1034,7 +1037,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         set({ selectionParent: null, selectedIndices: [] })
     },
 
-    clear: () => {
+    clear: (options) => {
         set((s) => ({
             viewId: null,
             matchUrnSet: EMPTY_SET,
@@ -1050,12 +1053,17 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             builderValidation: EMPTY_ISSUES,
             ancestorMatchCounts: EMPTY_MAP,
             ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
-            // Wipe the in-memory undo stack — the panel is closing,
-            // it would be confusing to "undo" into a query the user
-            // can't see the chips for. Recent + Pinned persist
-            // separately via localStorage.
-            historyPast: EMPTY_HISTORY,
-            historyFuture: EMPTY_HISTORY,
+            // A Clear the person asked for is one more undo step. Otherwise
+            // wipe the in-memory undo stack — the panel is closing, it
+            // would be confusing to "undo" into a query the user can't see
+            // the chips for. Recent + Pinned persist separately via
+            // localStorage.
+            ...(!options?.undoable
+                ? { historyPast: EMPTY_HISTORY, historyFuture: EMPTY_HISTORY }
+                : s.draftPredicate === null ? {} : {
+                    historyPast: [...s.historyPast, s.draftPredicate].slice(-HISTORY_CAP),
+                    historyFuture: EMPTY_HISTORY,
+                }),
         }))
     },
 

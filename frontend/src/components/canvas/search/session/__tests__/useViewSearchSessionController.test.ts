@@ -510,6 +510,9 @@ describe('useViewSearchSessionController — clearQuery', () => {
         expect(result.current.quick.scope).toBe('view')
         expect(mocks.resetTemplate).toHaveBeenCalledTimes(1)
         expect(useSearchStore.getState().draftPredicate).toBeNull()
+        // The person's own Clear: one Undo brings the query back.
+        act(() => { useSearchStore.getState().undo() })
+        expect(useSearchStore.getState().draftPredicate).toEqual(LEAF)
     })
 
     it('a Clear does not shut a panel the user opened on purpose', () => {
@@ -647,6 +650,8 @@ describe('useViewSearchSessionController — view lifetime', () => {
         expect(mocks.resetTemplate).toHaveBeenCalledTimes(1)
         expect(useSearchStore.getState().draftPredicate).toBeNull()
         expect(useSearchStore.getState().matchUrnSet.size).toBe(0)
+        // Nothing to undo into: that query was the other View's.
+        expect(useSearchStore.getState().historyPast).toHaveLength(0)
     })
 })
 
