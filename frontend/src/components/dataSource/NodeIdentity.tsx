@@ -20,7 +20,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Fingerprint, KeyRound, ShieldAlert, ChevronDown, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
-import { RESERVED_PROPERTY_KEYS, readSchemaField } from '@/lib/nodeFields'
+import { RESERVED_PROPERTY_KEYS, readSchemaField, toPayloadShape } from '@/lib/nodeFields'
 import { providerService } from '@/services/providerService'
 import type { DataSourceResponse } from '@/services/workspaceService'
 import { useActiveView } from '@/store/schema'
@@ -326,11 +326,13 @@ function Fact({ label, property, source, children }: {
 
 /** Which property identifies an entity and which holds its name, as its data source is configured
  *  (across data source, provider, workspace and platform), where each setting comes from, and this
- *  entity's values. `pending`: not saved yet, so the server has not filled them in. Nothing until
- *  the workspace list has loaded. */
-export function NodeIdentityFacts({ data, pending = false }: {
+ *  entity's values as stored. `pending`: not saved yet, so the server has not filled them in.
+ *  `edited`: the entity with edits not saved yet — the name property then says what saving stores.
+ *  Nothing until the workspace list has loaded. */
+export function NodeIdentityFacts({ data, pending = false, edited }: {
     data: Record<string, unknown>
     pending?: boolean
+    edited?: Record<string, unknown>
 }) {
     const mapping = useCanvasNodeIdentity()
     if (!mapping) return null
@@ -339,17 +341,24 @@ export function NodeIdentityFacts({ data, pending = false }: {
     const idValue = readSchemaField(data, identity)
     const nameValue = readSchemaField(data, name)
     const display = data.label ?? data.displayName
+    // What a save fills into an empty property — only the ones the server binds.
+    const bound = boundFieldIds(mapping)
+    const filled = (property: string) => !(pending || edited) ? 'Not set'
+        : property === name && bound.has(name) ? 'Set from the name when saved'
+            : property === identity && bound.has(identity) ? 'Set to its URN when saved' : 'Not set'
+    const saved = edited && boundName(toPayloadShape(data), toPayloadShape(edited), mapping)?.name
     return (
         <dl className="mt-2" aria-label="How this data source identifies and names entities">
             <Fact label="Identifier property" property={identity} source={mapping.identityPropertySource}>
-                {identity === 'urn' ? null
-                    : !blank(idValue) ? String(idValue)
-                        : pending ? 'Set to its URN when saved' : 'Not set'}
+                {identity === 'urn' ? null : !blank(idValue) ? String(idValue) : filled(identity)}
             </Fact>
             <Fact label="Name property" property={name} source={mapping.namePropertySource}>
                 {!blank(nameValue)
-                    ? <>{String(nameValue)}{String(nameValue) !== String(display ?? '') && ' · differs from the name'}</>
-                    : pending ? 'Set from the name when saved' : 'Not set'}
+                    ? <>
+                        {String(nameValue)}{String(nameValue) !== String(display ?? '') && ' · differs from the name'}
+                        {!blank(saved) && String(saved) !== String(nameValue) && ` · becomes “${String(saved)}” when saved`}
+                    </>
+                    : filled(name)}
             </Fact>
         </dl>
     )

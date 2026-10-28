@@ -16,7 +16,8 @@ limitations** — a changelog that only lists good news is not worth reading.
 - **An entity's details say how its data source identifies and names entities.** The
   Identifier section shows the identifier property and the name property, the entity's value for
   each, and where each setting comes from: this data source, the provider, the workspace, the
-  platform default or the built-in default.
+  platform default or the built-in default. With an edit not saved yet, it also says what the save
+  will store, such as a name property that becomes the new name.
 - **The Name input says what saving does to the name property** before you save: it changes too,
   it stays because it is kept apart from the name, or an empty one gets filled in.
 - **The mapping setting says what the editor writes.** Wherever the identity and display-name

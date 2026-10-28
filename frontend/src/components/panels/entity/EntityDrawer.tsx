@@ -198,6 +198,7 @@ function OpenEntityDrawer({
               <EntityViewTab
                 nodeId={node.id}
                 form={form}
+                original={unsavedCreate || stagedBefore !== undefined || dirty ? original : undefined}
                 urn={urn}
                 childCount={Number(form.childCount || form._collapsedChildCount || 0)}
                 tagColors={colors}

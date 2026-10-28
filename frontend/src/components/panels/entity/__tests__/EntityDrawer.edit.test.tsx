@@ -197,4 +197,53 @@ describe("EntityDrawer — the source's own name and identity properties", () =>
     expect(screen.queryByLabelText('Title')).not.toBeInTheDocument()
     expect(screen.queryByLabelText('Native id')).not.toBeInTheDocument()
   })
+
+  /** Rename Orders to Sales, stage it, and read the View tab's details. */
+  const stageRename = async () => {
+    const user = userEvent.setup()
+    render(<EntityDrawer canEdit />)
+    await user.click(screen.getByRole('tab', { name: /^Edit/ }))
+    const name = screen.getByPlaceholderText('Entity name…')
+    await user.clear(name)
+    await user.type(name, 'Sales')
+    await user.click(screen.getByRole('button', { name: /Stage changes/ }))
+    await user.click(screen.getByRole('tab', { name: /^View/ }))
+    return screen.getByLabelText('How this data source identifies and names entities')
+  }
+
+  it('a staged rename: the details say what saving stores, not that the two differ', async () => {
+    const facts = await stageRename()
+    expect(facts).toHaveTextContent('Orders · becomes “Sales” when saved')
+    expect(facts).not.toHaveTextContent('differs from the name')
+  })
+
+  it('a staged rename leaves a name property kept apart as it is', async () => {
+    withProperties({ title: 'customer_orders' })
+    const facts = await stageRename()
+    expect(facts).toHaveTextContent('customer_orders · differs from the name')
+    expect(facts).not.toHaveTextContent('when saved')
+  })
+
+  it('an entity not saved yet is promised only what the server fills in', () => {
+    useCanvasStore.setState((s) => ({
+      nodes: s.nodes.map((n) => ({ ...n, data: { ...n.data, isPending: 'create', properties: {} } })),
+    }) as never)
+    const mapped = (nameProperty: string, identityProperty: string) => useWorkspacesStore.setState({
+      workspaces: [{ id: 'ws1', dataSources: [{ id: 'ds1', isPrimary: true, nameProperty, identityProperty }] }],
+    } as never)
+    const facts = () => screen.getByLabelText('How this data source identifies and names entities')
+
+    // A name property the platform owns is never written.
+    mapped('description', 'id')
+    const { unmount } = render(<EntityDrawer canEdit />)
+    expect(facts()).toHaveTextContent('Set to its URN when saved')
+    expect(facts()).not.toHaveTextContent('Set from the name when saved')
+    unmount()
+
+    // An identifier that is also the name property is written as the name, not the urn.
+    mapped('title', 'title')
+    render(<EntityDrawer canEdit />)
+    expect(facts()).not.toHaveTextContent('Set to its URN when saved')
+    expect(within(facts()).getAllByText('Set from the name when saved')).toHaveLength(2)
+  })
 })
