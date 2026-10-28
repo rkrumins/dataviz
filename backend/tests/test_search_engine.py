@@ -1347,7 +1347,8 @@ class TestResilience:
         unit = Unit("ids", roots=[7], size=1)
         assert await engine_mod._recover(session, _Export(), unit, 1.0) is True
         assert session.pending == [dataclasses.replace(unit, last_try=True)]
-        assert await engine_mod._recover(session, _Export(), session.pending.pop(), 1.0) is False
+        last_try = session.pending.pop()
+        assert await engine_mod._recover(session, _Export(), last_try, 1.0) is False
         assert session.left_out == 0
 
     async def test_a_graph_failing_over_keeps_the_session_and_answers_why(self, scan,
