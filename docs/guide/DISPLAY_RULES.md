@@ -107,6 +107,7 @@ The line under the chip says how many entities in the View match:
 | --- | --- |
 | **N matches in this view** | The exact count |
 | **N so far · counting P%** | Still counting a large View — it finishes on its own |
+| **At least N matches in this view** | Counted, except for one part of the View that couldn't be checked in time and was left out — hover for more |
 | **At least N · count stopped** | The count stopped part-way; hover for why |
 | **Can't be counted** | The criteria can't be run as a rule — hover for why, then edit it |
 | **Disabled** | The rule is off |
@@ -114,7 +115,8 @@ The line under the chip says how many entities in the View match:
 Chips are worked out for the entities loaded on the canvas; the count covers
 the whole View.
 
-When the rules can't be checked — the graph is busy, or doesn't answer — the
+Checks and counts wait out a graph store that's busy, restarting or failing
+over, for up to 3 minutes. When the rules still can't be checked, the
 list says so above the cards, with why: **Couldn’t check the display rules, so
 some tags or counts may be missing.** The canvas would otherwise just show no
 chips, as if nothing matched. **Retry** checks them again; so does loading more
