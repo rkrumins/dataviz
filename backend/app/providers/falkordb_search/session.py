@@ -62,6 +62,9 @@ class Session:
     scope_hash: str = ""              # the resolved view scope it was planned for
     # How far below its roots each clamp reaches (``Plan.clamp_depths``).
     clamp_depths: List[int] = field(default_factory=list)
+    # Units left out — read as done, their matches not counted: the count
+    # is then a floor, and ``notes`` say which parts of the graph.
+    left_out: int = 0
 
     @classmethod
     def start(cls, sid: str, query_id: str, data_version: str,
@@ -88,7 +91,7 @@ class Session:
             "total": self.total, "scanned": self.scanned, "count": self.count,
             "rows": self.rows, "status": self.status, "error": self.error,
             "notes": self.notes, "created": self.created, "sh": self.scope_hash,
-            "cd": self.clamp_depths,
+            "cd": self.clamp_depths, "lo": self.left_out,
         }, separators=(",", ":"))
 
     @classmethod
@@ -105,6 +108,7 @@ class Session:
                 [list(r) for r in d.get("rows") or []], d["status"], d.get("error"),
                 list(d.get("notes") or []), float(d.get("created") or 0.0),
                 str(d.get("sh") or ""), [int(x) for x in d.get("cd") or []],
+                int(d.get("lo") or 0),
             )
         except Exception as exc:                     # noqa: BLE001 — a miss, not an error
             logger.debug("search session unreadable: %r", exc)

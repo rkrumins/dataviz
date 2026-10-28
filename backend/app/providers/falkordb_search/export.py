@@ -52,6 +52,7 @@ from backend.app.providers.falkordb_search.plan import (
     Context,
     Unit,
     _rel,
+    expand_unit,
     make_plan,
     match_statement,
 )
@@ -215,6 +216,9 @@ class _ExportWork:
     def __init__(self, session: Session, ctx: Context, run, objects, manifest: Manifest) -> None:
         self.session, self.ctx, self.run, self.objects = session, ctx, run, objects
         self.manifest = manifest
+
+    async def expand(self, unit: Unit, timeout_s: float) -> Optional[List[Unit]]:
+        return await expand_unit(unit, self.ctx, self.run, timeout_s)
 
     async def begin(self, store: SessionStore) -> None:
         # Read with the lease held: the parts of the latest commit.

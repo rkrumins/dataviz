@@ -100,6 +100,8 @@ logger = logging.getLogger(__name__)
 #: for: the last count's unit may run its whole budget past it, and the
 #: request must still end inside the request timeout.
 _COUNTS_WAIT_S = 5.0
+#: A rule whose count the graph could not finish, in the user's terms.
+_COUNT_FAILED = "The graph could not finish counting this rule. Try again later."
 
 
 # Predicate-tree caps now live in DeepSearchSettings (env-overridable).
@@ -1062,6 +1064,11 @@ class AdvancedSearchService:
                     context=context, advance=False)
             except CompileError as exc:
                 errors[item.id] = str(exc)
+            except SearchFailed:
+                # A count the client names that already failed (the engine
+                # keeps it a while): that rule's error alone.
+                logger.warning("rule %s could not be counted", item.id, exc_info=True)
+                errors[item.id] = _COUNT_FAILED
 
         def done(item: SearchRuleItem) -> float:
             progress = answers[item.id].get("progress") or {}
@@ -1085,7 +1092,7 @@ class AdvancedSearchService:
             except SearchFailed:
                 # What the graph said stays in the log, not on the page.
                 logger.warning("rule %s could not be counted", item.id, exc_info=True)
-                errors[item.id] = "The graph could not finish counting this rule. Try again later."
+                errors[item.id] = _COUNT_FAILED
 
         counts = {}
         for item in request.items:
@@ -1099,6 +1106,7 @@ class AdvancedSearchService:
                 session_id=answer["sessionId"],
                 progress=(SearchProgress(**answer["progress"])
                           if answer.get("progress") else None),
+                lower_bound=bool(answer.get("lowerBound")),
             )
         return SearchCountsResult(counts=counts, data_version=context.data_version or None,
                                   elapsed_ms=int((time.monotonic() - started) * 1000))
