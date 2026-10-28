@@ -399,16 +399,20 @@ the watermark is pinned → reads fall back to Postgres → the overlay reads as
 wiped → the sweep queues a job. Each turn increments the breaker until the
 source is suspended.
 
-Identification is a live `graphver.graphs` row, resolved by
+Identification is a live `graphver.graphs` row whose "enable version control"
+job has finished, resolved by
 `services/versioned_sources.py` — an app-layer bridge in the same position as
 `projection_target.py`, since the versioning package stays decoupled from the
-management DB. `workspace_data_sources.source_mode` cannot answer it: `'managed'`
+management DB. Until the enable finishes, the FalkorDB graph is still the source
+of truth, so a source whose enable is pending, paused or failed is reconciled
+like any other. `workspace_data_sources.source_mode` cannot answer it: `'managed'`
 is written only by the blank-model wizard and a one-off script, never by the
 bootstrap path, so most versioned sources have it NULL. The read runs **before**
-the advisory lock (a second engine may be a second database), caches for 10
-minutes, serves the last good answer through a blip, and on a cold failure
-**defers the whole sweep** to the next 60s tick — both fail-open answers are
-wrong, and an hourly check loses nothing by waiting.
+the advisory lock (a second engine may be a second database), on every tick,
+not from the lookup's 10-minute cache, so a source is guarded from the tick after
+its enable finishes. It serves the last good answer through a blip, and on a cold
+failure **defers the whole sweep** to the next 60s tick — both fail-open answers
+are wrong, and an hourly check loses nothing by waiting.
 
 The baseline is still adopted on every pass, so a source later taken back out of
 versioning does not read as drifted on its first sweep afterwards. A baseline

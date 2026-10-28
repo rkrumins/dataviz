@@ -11,6 +11,11 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ## [Unreleased] — Versioning: enabling version control on a graph that already exists
 
+Fixes for what went wrong after enabling version control on a FalkorDB graph that already existed,
+which other tools may keep writing to. They cover how the graph spells its types and names its items,
+ids that an item and a connection share, writes made outside version control, and the background
+jobs around such a graph.
+
 ### Fixed
 
 - **A graph that spells its types its own way keeps that spelling.** When a graph's labels differ
@@ -72,6 +77,25 @@ limitations** — a changelog that only lists good news is not worth reading.
   graph is flagged as holding changes not in history, even for a property edit, which no count
   shows.
 
+- **A paused or failed enable no longer switches off change detection.** From the moment "Enable
+  version control" was queued, the reconciliation sweep treated the data source as versioned: it
+  marked it "managed" and took on every change without acting. That held while the enable was
+  pending, paused for a decision or failed, and for up to ten minutes after it was given up. Now only
+  a source whose enable has finished is treated so. The sweep reads that list on every tick, and
+  giving up clears it at once.
+- **One FalkorDB graph is one versioned graph, however it is reached.** Two provider rows for the
+  same server, or the default instance named both ways, could each claim the same graph for a
+  different versioned graph, and both then wrote into it. A claim now compares servers, not provider
+  ids, and two claims that race for a graph's name wait for each other. `POST /graphs` answers 409
+  `graph_key_in_use`; it answered 409 `integrity`, or 500 when two raced.
+- **Dedicated lineage summaries are rebuilt after a publish.** For a data source whose summaries
+  live in a graph of their own (dedicated mode), a publish that changed lineage or containment never
+  refreshed them: the projector writes none there and handed nothing on. Such a publish now marks
+  them stale and queues their rebuild in dedicated mode.
+- **Eviction keeps a graph something else reads.** Freeing memory could drop a platform copy that
+  another data source or a catalog entry also read, or one whose readers could not be checked.
+  Eviction now skips it and frees the next coldest graph instead.
+
 ### Upgrading
 
 - Run `20261028_1000_gv_ps_unowned` after `20261018_1200_gv_lifecycle`; it is the new head. It
@@ -80,6 +104,13 @@ limitations** — a changelog that only lists good news is not worth reading.
   No rewrite; it waits at most 5 s for the table's lock. With a separate `GRAPHVER_DB_URL`, the
   versioning worker adds them when it starts, so start the workers on this release before the API
   pods, as for Stage 2. Downgrading drops both and logs how many graphs had each.
+- **What API callers see change.**
+  - `POST /graphs` answers 409 `graph_key_in_use` where it answered `integrity`.
+  - `POST /graph/resync` reads the data source's own graph, and answers 409 `not_ready` while that
+    graph is evicted, being rebuilt or moved.
+  - A change signal on a versioned source (`/refresh` at `auto`, `/source-changed`) returns no
+    `jobId`: it queues no rebuild.
+  - The watermark gains `externalDrift`.
 
 ---
 

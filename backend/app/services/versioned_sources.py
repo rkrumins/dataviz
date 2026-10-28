@@ -19,7 +19,8 @@ they are.
 ``workspace_data_sources.source_mode`` cannot answer it: ``'managed'`` is
 written only by the blank-model wizard and a one-off script, never by the
 bootstrap path that versions an existing source, so most versioned sources have
-it NULL. A live ``graphver.graphs`` row is the definitive signal.
+it NULL. A live ``graphver.graphs`` row is the definitive signal, once its enable has finished
+(``finished_only``): until then the FalkorDB graph is still the source of truth.
 
 The read follows the shape ``insights_service.discovery`` already established
 for this store — lazy imports, its own engine, never joined into a

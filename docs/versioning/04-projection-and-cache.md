@@ -313,17 +313,20 @@ rollups are fresh without waiting for a full aggregation job.
 flowchart LR
     P["project_graph"] -->|"full seed<br/>OR rollup_pairs == 'stale'<br/>OR heal reseeded"| H["on_rollups_stale(graph_id)"]
     H --> MK["make_rollup_rebuild_hook<br/>(projection_target.py:62)"]
-    MK -->|"dedicated mode → skip"| SKIP["no-op<br/>(_proj graph untouched)"]
+    MK -->|"dedicated mode → mark stale"| TRIG
     MK -->|"in_source mode"| TRIG["AggregationService.trigger<br/>idempotency: gv-rollup-rebuild:&lt;graph_id&gt;"]
     TRIG --> AW["AggregationWorker MERGEs :AGGREGATED"]
 ```
 
 The hook fires after the watermark is durable (`projection.py:376-382`) so the rebuild sees the
 projected raw edges. `make_rollup_rebuild_hook` (`projection_target.py:62-98`) resolves the data
-source, **skips dedicated mode** (the `{graph_name}_proj` graph is never wiped by the projector,
-`:81-85`), and otherwise triggers the aggregation service with a stable idempotency key that collapses
-churn to one job. `resolve_aggregation_edge_types` (`projection_target.py:22-49`) likewise returns
-`None` in dedicated mode (incremental maintenance would write where nothing reads).
+source and triggers the aggregation service with a stable idempotency key that collapses churn to one
+job. A source in **dedicated mode** keeps its rollups in `{graph_name}_proj`, which the projector never
+writes, so every publish that changes its lineage or containment comes here: its summaries are marked
+stale (`source_changed`, cleared when the job completes) and the job is queued in dedicated mode.
+`resolve_aggregation_edge_types` (`projection_target.py:22-49`) answers such a source's types with
+`"dedicated"` after them, and `_compute_rollup_deltas` and `_reconcile_in_place` then answer `"stale"`
+for a window or reconcile that changes lineage or containment, writing no rollup.
 
 > **Fixed (standalone-worker rollup gap).** The standalone worker now wires
 > `on_rollups_stale=make_rollup_rebuild_hook(...)` like the in-process worker and the interactive
@@ -447,12 +450,14 @@ provider per request:
   (`cache_manager.py:46-63`, TTL `LEASE_TTL=60s`, `config.py:140`) refcount in-flight reads so a
   graph isn't evicted mid-read. The neighbors endpoint pins the graph on the FalkorDB path
   (`versioning.py:1750`). Best-effort — a broker outage never fails a read.
-- **Evict** — `evict` (`cache_manager.py:87`) **skips a pinned graph**, marks `status=evicted` +
+- **Evict** — `evict` (`cache_manager.py:87`) **skips a pinned graph**, and a key another data source
+  or catalog entry reads, or whose readers can't be asked (`purge_worker.graph_key_readers`); marks `status=evicted` +
   `projected_commit_seq=0` (so the poll loop rebuilds it), and drops the FalkorDB key on the graph's
   pinned provider. Reads of an evicted graph serve the bounded Postgres fallback meanwhile.
 - **Per-provider RAM budget** — `ProjectionWorker.evict_once` (`worker.py:86`) evicts the coldest
   resident graphs per provider (`lru_candidates` by `last_projected_at`, `cache_manager.py:159`) down
-  to that provider's budget. Budgets come from `make_registry_budget_resolver` (`eviction_budget.py:24`,
+  to that provider's budget, taking the next coldest when one is refused, so a provider whose other
+  graphs are all refused stays above it. Budgets come from `make_registry_budget_resolver` (`eviction_budget.py:24`,
   provider row → `vconfig.falkor_budget_for` fallback).
 
 > **Limitation (no budget set by default).** RAM is a property of a FalkorDB *instance*, so each
