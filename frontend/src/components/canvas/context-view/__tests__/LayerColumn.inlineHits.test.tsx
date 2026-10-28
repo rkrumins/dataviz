@@ -59,8 +59,6 @@ function hit(urn: string, path: string[]): SearchHit {
 function results(hits: SearchHit[]): PanelView {
     return {
         kind: 'results',
-        template: { id: 't', name: 't' },
-        inputs: {},
         query: {},
         result: {
             hits, truncated: false, candidateCount: hits.length,

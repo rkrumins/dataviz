@@ -72,15 +72,6 @@ const KNOWN = new Map<string, { count: number; why: string }>([
       + 'it is the next one likely to be reported as "the menu opens under something".' },
   ],
   [
-    'components/canvas/search/builder/GroupRow.tsx',
-    { count: 3, why: 'Two surfaces under the row card\'s `backdrop-blur-sm`, three ways in: the '
-      + 'leaf picker declared in this file, reached directly and again through the '
-      + 'nested GroupRow, and UnifiedPicker, which CAN portal but only when its '
-      + 'caller passes `portal` — '
-      + 'GroupRow does not, so it takes the inline branch. That one is a prop away '
-      + 'from being fixed, which makes it the cheapest of the four.' },
-  ],
-  [
     'components/canvas/trace/TraceBottomDock.tsx',
     { count: 1, why: 'The dock carries `backdrop-blur-2xl`, and its edge-filter popover sits four '
       + 'components down inside it. The dock already publishes its own height band to '
@@ -102,8 +93,8 @@ const isBlurred = (tag: string) => /backdrop-blur|backdrop-filter|glass-panel/.t
  *   - `role="separator"`: a drag handle pinned to its parent's edge.
  *
  * Narrowing it further to "looks like a menu" was tried and let a real one
- * through: `GroupRow`'s leaf picker is `absolute z-40 mt-1.5 left-0` — a dropdown
- * that hangs off its trigger without ever saying `top-full`.
+ * through: the old builder's leaf picker was `absolute z-40 mt-1.5 left-0` — a
+ * dropdown that hung off its trigger without ever saying `top-full`.
  *
  * `fixed` counts for the same reason `absolute` does, and it is the dangerous
  * one: backdrop-filter makes a containing block AND a stacking context for

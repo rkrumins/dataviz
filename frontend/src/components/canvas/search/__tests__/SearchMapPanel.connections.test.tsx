@@ -34,7 +34,7 @@ const BOTH: Predicate = { kind: 'group', op: 'and', children: [DATASETS, PII] }
 const EDGES: EdgesPredicate = { kind: 'edges', sourceWhere: PII }
 
 const CONNECTIONS = {
-    kind: 'results', template: {}, inputs: {},
+    kind: 'results',
     query: { predicate: EDGES, scope: { viewId: 'view-1' }, options: { results: 'edges' } },
     result: {
         candidateCount: 1, totalCount: 1, truncated: false, deadlineExceeded: false, cacheHit: false, elapsedMs: 4,

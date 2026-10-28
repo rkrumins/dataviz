@@ -860,6 +860,38 @@ describe('useAdvancedSearch — a failed or cancelled run keeps the query', () =
 })
 
 
+/** The error card's Try again: the same question, asked of the view as it
+ *  is now — not the canvas the failed run saw. */
+describe('useAdvancedSearch — Try again', () => {
+    it('asks the failed query again, in the scope as it is now', async () => {
+        useCanvasStore.setState({ nodes: [canvasNode('A')], edges: [] })
+        useSearchStore.getState().setScopeMode('visible')
+        searchAdvanced
+            .mockRejectedValueOnce(new Error('API Error 500: {"detail":"boom"}'))
+            .mockResolvedValueOnce(page({ hits: [HIT] }))
+        const leaf: Predicate = { kind: 'text', target: 'any', match: 'substring', value: 'cust' }
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(leaf, SEARCH_OPTIONS)
+        })
+        expect(result.current.view.kind).toBe('error')
+
+        useCanvasStore.setState({ nodes: [canvasNode('A'), canvasNode('B')], edges: [] })
+        await act(async () => {
+            await result.current.run()
+        })
+
+        const [first, again] = searchAdvanced.mock.calls.map((c) => c[0])
+        expect(again.predicate).toEqual(first.predicate)
+        expect(again.options).toEqual(first.options)
+        expect(first.scope.visibleUrns).toEqual(['A'])
+        expect(again.scope.visibleUrns).toEqual(['A', 'B'])
+        expect(result.current.view.kind).toBe('results')
+    })
+})
+
+
 /**
  * The session hands this whole object to the panel and re-exposes it on a
  * context. A fresh object literal every render would make the session

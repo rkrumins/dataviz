@@ -12,8 +12,8 @@ import type { Predicate, SearchQuery, SearchScope } from '@/types/search'
 
 /** The scope a search in ``viewId`` runs in, read now: how wide (the view,
  *  what's on the canvas, the whole data source) and, on the canvas, which
- *  entities. ``base`` — a template's own scope — is kept underneath. */
-export function currentScope(viewId: string, base?: Partial<SearchScope>): SearchScope {
+ *  entities. */
+export function currentScope(viewId: string): SearchScope {
     const scopeMode = useSearchStore.getState().scopeMode
     // Always attach the canvas's URNs in visible mode, so the server never
     // has to guess them.
@@ -28,7 +28,6 @@ export function currentScope(viewId: string, base?: Partial<SearchScope>): Searc
     // roots from ``scope.viewId`` and only ever intersects a client hint
     // with them.
     return {
-        ...(base ?? {}),
         viewId,
         scopeMode,
         ...(visibleUrns ? { visibleUrns } : {}),

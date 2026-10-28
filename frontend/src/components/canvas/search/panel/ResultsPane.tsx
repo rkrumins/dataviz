@@ -129,9 +129,9 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
     // viewport when the hit page exceeds the virtualization threshold.
     const scrollContainerRef = useRef<HTMLDivElement>(null)
 
-    // The panel doesn't render ResultsPane for idle / templateSelected —
-    // the AskBar is the empty state. Defensive null kept for safety.
-    if (view.kind === 'idle' || view.kind === 'templateSelected') return null
+    // The panel doesn't render ResultsPane while idle — the AskBar is the
+    // empty state. Defensive null kept for safety.
+    if (view.kind === 'idle') return null
 
     return (
         <div className={cn(

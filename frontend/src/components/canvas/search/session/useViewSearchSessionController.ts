@@ -243,11 +243,11 @@ export interface ViewSearchSession {
      * The pipeline underneath, whole.
      *
      * Not a curated subset: the header renders `view`, and the panel needs
-     * `runState` for its own same-hash defence plus the template surface
-     * (`isIdle`, `selectTemplate`, `setInput`, `run`, `runTemplate`,
-     * `resetTemplate`) that it destructures from its own hook instance
-     * today. Handing it `session.advanced` wholesale is what lets it stop
-     * running a second search of its own.
+     * `runState` for its own same-hash defence plus the rest of the
+     * pipeline (`run`, `resetTemplate`, `stop`, `resume`, `loadMore`…)
+     * that it destructures from its own hook instance today. Handing it
+     * `session.advanced` wholesale is what lets it stop running a second
+     * search of its own.
      */
     advanced: UseAdvancedSearchResult
 

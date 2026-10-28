@@ -28,7 +28,6 @@ import { createElement, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type { PanelView, RunState } from '@/hooks/useAdvancedSearch'
-import type { SearchTemplate } from '@/components/canvas/search/searchTemplates'
 import type { Predicate, SearchHit } from '@/types/search'
 import type { LayerAssignmentEntry, ViewLayerConfig } from '@/types/schema'
 
@@ -53,12 +52,8 @@ vi.mock('@/hooks/useAdvancedSearch', () => ({
         return {
             view: mocks.state.view,
             runState: mocks.state.runState,
-            isIdle: mocks.state.view.kind === 'idle',
-            selectTemplate: vi.fn(),
-            setInput: vi.fn(),
             resetTemplate: mocks.resetTemplate,
             run: vi.fn(),
-            runTemplate: vi.fn(),
             runPredicate: mocks.runPredicate,
             cancel: mocks.cancel,
             loadMore: mocks.loadMore,
@@ -85,18 +80,10 @@ const VIEW_ID = 'view-1'
 
 const LEAF: Predicate = { kind: 'text', target: 'any', value: 'cust', match: 'substring' }
 
-const TEMPLATE: SearchTemplate = {
-    id: '__builder__', label: 'Custom query', description: '',
-    icon: 'Wand2', section: 'find', inputs: [],
-    build: () => ({ predicate: LEAF }),
-}
-
 /** A result set from the pipeline — the shape `view.kind === 'results'` carries. */
 function resultsView(elapsedMs = 12): PanelView {
     return {
         kind: 'results',
-        template: TEMPLATE,
-        inputs: {},
         query: { predicate: LEAF, scope: { viewId: VIEW_ID } },
         result: {
             hits: [], aggregates: [], truncated: false, candidateCount: 0,
@@ -153,14 +140,12 @@ describe('useViewSearchSessionController — composition', () => {
         const { result } = renderSession()
 
         // The panel needs `runState` for its own same-hash defence, and the
-        // template surface it destructures from its own hook instance today.
+        // rest of the pipeline it destructures from its own hook instance today.
         expect(result.current.advanced.runState).toEqual({ hash: 'h1', status: 'running' })
         expect(result.current.advanced.view).toEqual({ kind: 'idle' })
-        expect(result.current.advanced.isIdle).toBe(true)
         expect(result.current.advanced.isLoadingMore).toBe(false)
         for (const fn of [
-            'selectTemplate', 'setInput', 'resetTemplate', 'run', 'runTemplate',
-            'runPredicate', 'cancel', 'loadMore',
+            'resetTemplate', 'run', 'runPredicate', 'cancel', 'loadMore',
         ] as const) {
             expect(typeof result.current.advanced[fn]).toBe('function')
         }
@@ -465,7 +450,7 @@ describe('useViewSearchSessionController — panel', () => {
     it('an error card is something to fall back to as well', () => {
         const { result, rerender } = renderSession()
         mocks.state.view = {
-            kind: 'error', template: TEMPLATE, inputs: {},
+            kind: 'error',
             query: { predicate: LEAF, scope: { viewId: VIEW_ID } },
             message: 'the provider is warming up', elapsedMs: 8,
         }

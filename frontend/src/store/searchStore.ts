@@ -13,9 +13,8 @@
  *     ancestors that contain matches (W3 — derived via
  *     useContainmentHierarchy.descendantHasMatch).
  *
- * The panel's internal UI state machine (idle → templateSelected →
- * running → results) stays in `useAdvancedSearch` — that's panel-
- * private. Only the cross-cutting "what URNs matched the last query?"
+ * The panel's internal UI state machine (idle → running → results)
+ * stays in `useAdvancedSearch` — that's panel-private. Only the cross-cutting "what URNs matched the last query?"
  * lives here.
  */
 import { useMemo } from 'react'
@@ -26,8 +25,7 @@ import type { AggregationSpec, AncestorRef, Predicate } from '@/types/search'
 
 /**
  * Options the builder passes into ``runPredicate`` (formerly hardcoded
- * inside ``useAdvancedSearch``). Templates set their own options via
- * ``SearchTemplate.build``; this is for the visual-builder / JSON-editor
+ * inside ``useAdvancedSearch``), for the visual-builder / JSON-editor
  * authoring flow.
  *
  * The defaults are exposed as ``DEFAULT_DRAFT_OPTIONS`` so the OptionsPanel
@@ -45,26 +43,11 @@ export const DEFAULT_DRAFT_OPTIONS: DraftOptions = {
     // No default aggregation — when a builder or free-form query
     // returns N matches, the user wants to SEE the N matches, not a
     // single "1 group · N items" bucket that hides every entity name
-    // until they drill in. Templates that genuinely want aggregation
-    // (e.g. "Overview by entity type") set their own ``options`` in
-    // ``SearchTemplate.build`` and bypass this default entirely.
+    // until they drill in.
     aggregations: [],
     pageSize: 50,
     candidateCap: 5000,
     includeAncestorPath: true,
-}
-
-
-/**
- * One validation issue reported by the visual builder's reducer.
- * Mirrors ``ValidationIssue`` from ``useBuilderReducer`` — we re-export
- * the shape here so consumers outside the builder (the new QueryFooter)
- * can read it without depending on the reducer module.
- */
-export interface BuilderValidationIssue {
-    path: readonly number[]
-    message: string
-    severity: 'error' | 'warn'
 }
 
 
@@ -147,12 +130,10 @@ interface SearchStoreState {
     queryHash: string | null
     /**
      * The predicate currently being authored. Single source of truth
-     * shared across the visual builder, the JSON editor, and templates.
+     * shared across the builders and the JSON editor.
      *
-     * - Visual builder mirrors its reducer tree here on every change.
+     * - The builders write here as the query changes.
      * - JSON editor reads from here and writes back on valid edits.
-     * - Templates write here via ``seedDraftPredicate`` when the user
-     *   picks one or customises it.
      *
      * ``null`` means "no draft yet — show the empty-state hero in the
      * builder, blank textarea in the JSON editor".
@@ -160,32 +141,18 @@ interface SearchStoreState {
     draftPredicate: Predicate | null
     /**
      * Monotonic counter incremented whenever ``draftPredicate`` is
-     * REPLACED from outside the visual builder (e.g. by a template
-     * seed or a JSON-editor commit). The builder's effect uses this to
-     * decide whether to call ``loadSeed`` and reset its reducer tree.
-     * Changes that originate INSIDE the builder bump the value, but
-     * the builder's effect ignores its own writes by tracking the
-     * counter it last applied.
+     * REPLACED (e.g. by a JSON-editor commit or a loaded query). The
+     * JSON editor uses it to decide whether to reformat its buffer, and
+     * ignores its own writes by tracking the counter it last applied.
      */
     draftRevision: number
     /**
      * Per-request options (aggregation, page size, candidate cap,
      * include-ancestor-path) the visual builder / JSON editor flow uses
-     * when calling the backend. ``null`` means "use defaults".
-     *
-     * Templates supply their own options via ``SearchTemplate.build`` and
-     * therefore ignore this field — only ``runPredicate`` reads it.
+     * when calling the backend. ``null`` means "use defaults". Only
+     * ``runPredicate`` reads it.
      */
     draftOptions: DraftOptions | null
-    /**
-     * Validation issues emitted by the builder reducer on every change.
-     * Mirrored into the store so the QueryFooter (which is rendered by
-     * the panel shell, not the builder) can gate the Run button without
-     * re-deriving the issue set.
-     *
-     * Empty when there is no draft, or when the tree validates cleanly.
-     */
-    builderValidation: ReadonlyArray<BuilderValidationIssue>
     /**
      * For every node URN that's an ancestor of one or more matches,
      * the total number of matches sitting anywhere in its subtree.
@@ -418,8 +385,8 @@ interface SearchStoreActions {
         ancestorCounts?: Iterable<AncestorCountInfo>
         queryHash: string
     }) => void
-    /** Replace the draft with a value from outside the builder (template /
-     *  JSON editor / load-saved-query). Bumps ``draftRevision``.
+    /** Replace the draft with a value from outside the builder (JSON
+     *  editor / load-saved-query). Bumps ``draftRevision``.
      *
      *  Does NOT push to undo history — call ``commitDraft`` for that.
      *  This is the no-history mutation used by per-keystroke value
@@ -436,15 +403,9 @@ interface SearchStoreActions {
     undo: () => void
     /** Symmetric to ``undo``. No-op when future is empty. */
     redo: () => void
-    /** Mirror an internal builder-reducer state into the store. Does NOT
-     *  bump ``draftRevision`` since the change originated in the builder
-     *  itself — bumping would cause an infinite loadSeed loop. */
-    syncDraftFromBuilder: (predicate: Predicate | null) => void
     /** Update the per-request options the visual builder uses. Pass a
      *  partial to merge; pass ``null`` to reset to defaults. */
     setDraftOptions: (patch: Partial<DraftOptions> | null) => void
-    /** Mirror the current builder validation issues into the store. */
-    setBuilderValidation: (issues: ReadonlyArray<BuilderValidationIssue>) => void
     /** Auto-save a dispatched query to the per-view Recent list. Dedup
      *  by ``(viewId, JSON.stringify(predicate))`` — re-running the same
      *  query bumps the existing entry to the top rather than duplicating.
@@ -598,8 +559,6 @@ function overlayServerAncestorCounts(
     }
 }
 
-const EMPTY_ISSUES: ReadonlyArray<BuilderValidationIssue> = Object.freeze([])
-
 /**
  * Maximum entries kept in the undo stack. Generous — the user typically
  * cares about the last few; this just bounds memory in pathological
@@ -713,7 +672,6 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     draftPredicate: null,
     draftRevision: 0,
     draftOptions: null,
-    builderValidation: EMPTY_ISSUES,
     ancestorMatchCounts: EMPTY_MAP,
     ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
     historyPast: EMPTY_HISTORY,
@@ -884,13 +842,6 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         })
     },
 
-    syncDraftFromBuilder: (predicate) => {
-        // Internal mirror — do not bump revision. The builder is the
-        // ORIGIN of this change; bumping would loop us back into
-        // loadSeed in the builder's effect.
-        set({ draftPredicate: predicate })
-    },
-
     setDraftOptions: (patch) => {
         if (patch === null) {
             set({ draftOptions: null })
@@ -899,10 +850,6 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         set((s) => ({
             draftOptions: { ...(s.draftOptions ?? DEFAULT_DRAFT_OPTIONS), ...patch },
         }))
-    },
-
-    setBuilderValidation: (issues) => {
-        set({ builderValidation: issues.length === 0 ? EMPTY_ISSUES : issues })
     },
 
     addRecent: ({ viewId, predicate, label }) => {
@@ -1062,7 +1009,6 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             draftPredicate: null,
             draftRevision: s.draftRevision + 1,
             draftOptions: null,
-            builderValidation: EMPTY_ISSUES,
             ancestorMatchCounts: EMPTY_MAP,
             ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
             routesFrom: null,
@@ -1215,11 +1161,6 @@ export function useDraftRevision(): number {
 /** Subscribe to the current draft options (or null when defaults apply). */
 export function useDraftOptions(): DraftOptions | null {
     return useSearchStore((s) => s.draftOptions)
-}
-
-/** Subscribe to the builder's validation issues. */
-export function useBuilderValidation(): ReadonlyArray<BuilderValidationIssue> {
-    return useSearchStore((s) => s.builderValidation)
 }
 
 /**

@@ -20,7 +20,7 @@ import { SearchMapPanel } from '../SearchMapPanel'
 
 const RESULTS = {
     kind: 'results',
-    template: {}, inputs: {}, query: {},
+    query: {},
     result: {
         candidateCount: 1, truncated: false, deadlineExceeded: false, cacheHit: false, elapsedMs: 4,
         hits: [{ node: { urn: 'a', displayName: 'orders', entityType: 'table', properties: {} }, ancestorPath: [] }],

@@ -13,8 +13,8 @@
  *   │  [ customer                                       ]  │
  *   └──────────────────────────────────────────────────────┘
  *
- * Pattern is borrowed from the existing PredicateBuilder leaf editors:
- * generous padding, mono uppercase field labels, full-width inputs.
+ * The pattern: generous padding, mono uppercase field labels,
+ * full-width inputs.
  * All `<select>` controls become OperatorMenu chips (portal-mounted)
  * so finite-enum dropdowns render outside the panel's scroll container
  * and don't clip.

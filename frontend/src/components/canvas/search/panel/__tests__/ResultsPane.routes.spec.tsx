@@ -38,7 +38,7 @@ function pane(draft: Predicate) {
     render(
         <ResultsPane
             view={{
-                kind: 'results', template: { id: '__builder__' }, inputs: {},
+                kind: 'results',
                 query: { predicate: ROUTES }, result, elapsedMs: 1,
             } as never}
             viewId="v1"

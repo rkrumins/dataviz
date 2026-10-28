@@ -30,7 +30,7 @@ const HIT = {
 
 function resultsView(result: Record<string, unknown>): PanelView {
     return {
-        kind: 'results', template: {}, inputs: {},
+        kind: 'results',
         query: {
             predicate: { kind: 'text', target: 'any', value: 'orders', match: 'substring' },
             scope: { viewId: 'view-1' },

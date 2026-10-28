@@ -2,8 +2,8 @@
  * State machine + provider orchestration for the SearchMapPanel.
  *
  * Three responsibilities:
- *   1. Hold the current view: idle → templateSelected → running → results,
- *      with the active template inputs / parsed query alongside.
+ *   1. Hold the current view: idle → running → results (or error), with
+ *      the query it sent alongside.
  *   2. Talk to the backend through RemoteGraphProvider.searchAdvanced,
  *      with abort-on-restart so a stale request can never overwrite a
  *      fresh one (e.g. user re-runs while a slow query is still in flight).
@@ -20,18 +20,15 @@
  * own draft: visible, editable, undoable, and compiled into the very
  * same root-URN clamp server-side. See `predicateComposition.setScopeCondition`.
  *
- * The view's OWN roots aren't computed here either. `scope.rootUrns` is
- * now only ever a caller-supplied narrowing (a template that targets one
- * container): the backend resolves the view's boundary from
- * `scope.viewId` on every request and only ever intersects a client hint
- * with it, so sending a client-side guess could narrow the search but
- * never widen it — and when the guess was stale or truncated it hid real
- * matches.
+ * The view's OWN roots aren't computed here either: the backend resolves
+ * the view's boundary from `scope.viewId` on every request and only ever
+ * intersects a client hint with it, so sending a client-side guess could
+ * narrow the search but never widen it — and when the guess was stale or
+ * truncated it hid real matches.
  *
  * Not stored: the raw-JSON / Explain / Discover surfaces — those live
  * in the SearchMapPanel's "Power tools" tab and share the same query
- * pipeline through `runPredicate`. The hook stays focused on
- * template-driven + visual-builder paths.
+ * pipeline through `runPredicate`.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -57,23 +54,18 @@ import type {
     SearchScope,
 } from '@/types/search'
 
-import {
-    defaultInputs,
-    findTemplate,
-    type SearchTemplate,
-} from '@/components/canvas/search/searchTemplates'
 import { queryLabel } from '@/components/canvas/search/panel/findMode'
 import { readableSearchError } from '@/components/canvas/search/panel/errorPaths'
-import { currentScope, requestOptions, requestPredicate } from '@/components/canvas/search/searchRequest'
+import { buildSearchRequest } from '@/components/canvas/search/searchRequest'
 import { pause, rideOut, waitsOut } from '@/services/rideOut'
 import { recordEvent } from '@/services/telemetryService'
 
 
 /**
  * Whitelist of predicate kinds the user might want to re-run from the
- * Recent list. Path-mode and aggregation-driven templates aren't
- * meaningfully "re-runnable as a free-form draft" — they need their
- * full SearchQuery context, not just the predicate.
+ * Recent list. Path-mode queries aren't meaningfully "re-runnable as a
+ * free-form draft" — they need their full SearchQuery context, not just
+ * the predicate.
  */
 const RECENTABLE_KINDS = new Set([
     'group', 'text', 'property', 'tag', 'hasProperty',
@@ -388,29 +380,21 @@ function sameProgress(a: SearchResultPage, b: SearchResultPage): boolean {
 // ---------------------------------------------------------------------------
 
 export type PanelView =
-    | { kind: 'idle' }                                          // template picker
-    | { kind: 'templateSelected'; template: SearchTemplate;     // params form
-        inputs: Record<string, string | number> }
-    | { kind: 'running'; template: SearchTemplate;               // spinner
-        inputs: Record<string, string | number>;
-        query: SearchQuery; startedAt: number }
-    | { kind: 'results'; template: SearchTemplate;               // cards/rows
-        inputs: Record<string, string | number>;
+    | { kind: 'idle' }                                          // nothing run yet
+    | { kind: 'running'; query: SearchQuery; startedAt: number } // spinner
+    | { kind: 'results';                                        // cards/rows
         query: SearchQuery; result: SearchResultPage;
         elapsedMs: number;
         /** When the run started (``performance.now()``): a scan's clock. */
         startedAt?: number;
         /** A running search no longer followed — Resume picks it up. */
         halted?: Halted }
-    | { kind: 'error'; template: SearchTemplate;                 // error card
-        inputs: Record<string, string | number>;
+    | { kind: 'error';                                          // error card
         query: SearchQuery; message: string;
         elapsedMs: number }
 
 /** What following one run's answers needs to know about it. */
 interface FollowedRun {
-    template: SearchTemplate
-    inputs: Record<string, string | number>
     query: SearchQuery
     startedAt: number
     runKey: string | null
@@ -444,31 +428,20 @@ export interface UseAdvancedSearchResult {
     /** Which draft produced the current view, and how it went. Null
      *  before the first run and after an explicit cancel/reset. */
     runState: RunState | null
-    /** True when no template has been selected yet. */
-    isIdle: boolean
-    /** Pick a template — moves the view to `templateSelected` with default inputs. */
-    selectTemplate: (templateId: string) => void
-    /** Update one input on the active template. */
-    setInput: (name: string, value: string | number) => void
-    /** Pop back to the template picker. */
+    /** Abort any run and go back to idle, its matches off the canvas. */
     resetTemplate: () => void
-    /** Run the search with the current template + inputs. */
+    /** Run the current search again (the error card's Try again), in the
+     *  view's scope as it is now. */
     run: () => Promise<void>
-    /** Run a template directly without going through the templateSelected
-     *  intermediate state — used by the AskBar's one-click chips so the
-     *  user never sees the form flash before results appear. Uses
-     *  ``defaultInputs(template)`` unless explicit inputs are supplied. */
-    runTemplate: (template: SearchTemplate,
-                  inputs?: Record<string, string | number>) => Promise<void>
-    /** Run a raw predicate tree (from the visual builder OR the AskBar).
-     *  Bypasses the template form: stamps view scope, dispatches through
-     *  the same running → results state machine.
+    /** Run a raw predicate tree (from the visual builder OR the AskBar):
+     *  stamps view scope and dispatches through the running → results
+     *  state machine.
      *  Optional ``optionsOverride`` lets free-form searches opt out of
      *  the default aggregation (so a 49-hit search renders 49 rows, not
      *  one bucket containing 49). */
     runPredicate: (predicate: Predicate,
                    optionsOverride?: SearchQuery['options']) => Promise<void>
-    /** Abort any in-flight query and return to idle. */
+    /** Abort any in-flight query and drop its matches; the query stays. */
     cancel: () => void
     /** Stop following a running search: its matches so far stay, and
      *  ``resume`` picks its session up again. */
@@ -615,48 +588,15 @@ export function useAdvancedSearch(
         }
     }, [view, provider, viewId])
 
-    const selectTemplate = useCallback((templateId: string) => {
-        const t = findTemplate(templateId)
-        setView({
-            kind: 'templateSelected',
-            template: t,
-            inputs: defaultInputs(t),
-        })
-    }, [])
-
-    const setInput = useCallback((name: string, value: string | number) => {
-        setView((v) => {
-            if (v.kind === 'idle' || v.kind === 'running') return v
-            return { ...v, inputs: { ...v.inputs, [name]: value } }
-        })
-    }, [])
-
     const resetTemplate = useCallback(() => {
         abortRef.current?.abort()
         // Drop any in-flight result-set publication from a prior run so
-        // the canvas stops highlighting matches the moment the user
-        // backs out of the form. The query is the caller's to clear —
-        // undoably, when the person asked.
+        // the canvas stops highlighting matches at once. The query is the
+        // caller's to clear — undoably, when the person asked.
         useSearchStore.getState().clearSearchResults()
         setRunState(null)
         setView({ kind: 'idle' })
     }, [])
-
-    const stampScope = useCallback(
-        (template: SearchTemplate,
-         inputs: Record<string, string | number>): SearchQuery => {
-            const raw = template.build(inputs)
-            // ALWAYS stamp the viewId — the backend's ViewScopeResolver
-            // requires it on every request. Scope and the root wrap are
-            // ``searchRequest``'s, the same the Cypher tab shows.
-            return {
-                ...raw,
-                predicate: requestPredicate(raw.predicate),
-                scope: currentScope(viewId, raw.scope),
-            }
-        },
-        [viewId],
-    )
 
     // What the canvas shows of a result: its matches, edges, where they
     // sit and how many each container holds.
@@ -677,9 +617,9 @@ export function useAdvancedSearch(
 
     // A run's last answer: shown, published, measured and remembered.
     const finish = useCallback((run: FollowedRun, result: SearchResultPage) => {
-        const { template, inputs, query, startedAt, runKey } = run
+        const { query, startedAt, runKey } = run
         setView({
-            kind: 'results', template, inputs, query, result, startedAt,
+            kind: 'results', query, result, startedAt,
             elapsedMs: Math.round(performance.now() - startedAt),
         })
         if (runKey) setRunState({ hash: runKey, status: 'done' })
@@ -704,7 +644,6 @@ export function useAdvancedSearch(
         const matches = result.edges?.length ?? collectMatchUrns(result).length
         recordEvent(matches > 0 ? 'graph.search' : 'graph.search_miss', {
             matches,
-            template: template.id,
             ...(result.edges ? { connections: true } : {}),
             elapsedMs: Math.round(performance.now() - startedAt),
         })
@@ -716,8 +655,8 @@ export function useAdvancedSearch(
         // ordering ever becomes an issue.
         publish(query, result)
         // Auto-save the dispatched predicate to per-view Recent.
-        // Skips path-mode / template queries whose predicate isn't
-        // a meaningful "free-form draft" the user could re-author.
+        // Skips path-mode queries, whose predicate isn't a meaningful
+        // "free-form draft" the user could re-author.
         if (isRecentablePredicate(query.predicate)) {
             useSearchStore.getState().addRecent({
                 viewId,
@@ -729,9 +668,9 @@ export function useAdvancedSearch(
 
     // A run that failed: the error, with the query kept to fix.
     const fail = useCallback((run: FollowedRun, e: unknown) => {
-        const { template, inputs, query, startedAt, runKey } = run
+        const { query, startedAt, runKey } = run
         setView({
-            kind: 'error', template, inputs, query,
+            kind: 'error', query,
             message: (e as Error).message,
             elapsedMs: Math.round(performance.now() - startedAt),
         })
@@ -752,10 +691,10 @@ export function useAdvancedSearch(
     const follow = useCallback(async (
         run: FollowedRun, first: SearchResultPage, controller: AbortController,
     ) => {
-        const { template, inputs, query, startedAt } = run
+        const { query, startedAt } = run
         const show = (result: SearchResultPage, halted?: Halted) => {
             setView({
-                kind: 'results', template, inputs, query, result, startedAt,
+                kind: 'results', query, result, startedAt,
                 elapsedMs: Math.round(performance.now() - startedAt),
                 ...(halted ? { halted } : {}),
             })
@@ -784,15 +723,18 @@ export function useAdvancedSearch(
         finish(run, result)
     }, [provider, publish, finish])
 
-    const runWithInputs = useCallback(async (
-        template: SearchTemplate,
-        inputs: Record<string, string | number>,
+    const runQuery = useCallback(async (
+        predicate: Predicate,
+        options: SearchQuery['options'],
         runKey: string | null,
     ) => {
+        // ALWAYS stamp the viewId — the backend's ViewScopeResolver
+        // requires it on every request. Scope and the root wrap are
+        // ``searchRequest``'s, the same the Cypher tab shows.
+        const query = buildSearchRequest(predicate, options, viewId)
         if (!(provider instanceof RemoteGraphProvider)) {
             setView({
-                kind: 'error', template, inputs,
-                query: stampScope(template, inputs),
+                kind: 'error', query,
                 message:
                     'Active provider is not the remote backend — ' +
                     'advanced search only works against the live API.',
@@ -805,11 +747,10 @@ export function useAdvancedSearch(
         const controller = new AbortController()
         abortRef.current = controller
 
-        const query = stampScope(template, inputs)
         const startedAt = performance.now()
-        setView({ kind: 'running', template, inputs, query, startedAt })
+        setView({ kind: 'running', query, startedAt })
         if (runKey) setRunState({ hash: runKey, status: 'running' })
-        const run: FollowedRun = { template, inputs, query, startedAt, runKey }
+        const run: FollowedRun = { query, startedAt, runKey }
 
         try {
             const first = await provider.searchAdvanced(
@@ -822,7 +763,7 @@ export function useAdvancedSearch(
             if (controller.signal.aborted) return
             fail(run, e)
         }
-    }, [provider, stampScope, follow, fail])
+    }, [provider, viewId, follow, fail])
 
     // Stop following a running search where it is: what it found stays on
     // the canvas, and its session waits for Resume.
@@ -841,8 +782,7 @@ export function useAdvancedSearch(
         const controller = new AbortController()
         abortRef.current = controller
         const run: FollowedRun = {
-            template: view.template, inputs: view.inputs, query: view.query,
-            startedAt: view.startedAt ?? performance.now(), runKey: null,
+            query: view.query, startedAt: view.startedAt ?? performance.now(), runKey: null,
         }
         setView({ ...view, halted: undefined })
         try {
@@ -853,30 +793,17 @@ export function useAdvancedSearch(
         }
     }, [view, provider, follow, fail])
 
+    // The query as it was sent: stamped again, it asks in the view's scope
+    // as it is now.
     const run = useCallback(async () => {
         if (view.kind === 'idle' || view.kind === 'running') return
-        await runWithInputs(view.template, view.inputs, null)
-    }, [view, runWithInputs])
-
-    const runTemplate = useCallback(
-        async (template: SearchTemplate,
-               inputs?: Record<string, string | number>) => {
-            await runWithInputs(template, inputs ?? defaultInputs(template), null)
-        },
-        [runWithInputs],
-    )
+        await runQuery(view.query.predicate, view.query.options, null)
+    }, [view, runQuery])
 
     const runPredicate = useCallback(async (
         predicate: Predicate,
         optionsOverride?: SearchQuery['options'],
     ) => {
-        // Synthesize a transient template so the existing
-        // running → results state machine handles builder-sourced
-        // queries identically to template-sourced ones. The
-        // SearchMapPanel reads view.template.id to distinguish
-        // "back to builder" from "back to template form" — see the
-        // `__builder__` id below.
-        //
         // ``options`` MUST be set explicitly. The backend defaults to
         // ``results: 'aggregates'`` with ``aggregations: None`` — which
         // means a request with no options returns ``aggregates: []``
@@ -902,25 +829,12 @@ export function useAdvancedSearch(
             }
         const options = optionsOverride ?? defaultOptions
 
-        const syntheticTemplate: SearchTemplate = {
-            id: '__builder__',
-            label: 'Custom query',
-            description: 'Built from the predicate editor.',
-            icon: 'Wand2',
-            section: 'find',
-            inputs: [],
-            build: () => ({
-                predicate,
-                scope: undefined,
-                options: requestOptions(predicate, options),
-            }),
-        }
         // The run key must match the hash ``buildRunnablePredicate``
         // computes, so the editor can tell "these results are for the
         // draft I'm looking at" — hash the predicate as handed in,
-        // before stampScope's defensive AND-wrap.
-        await runWithInputs(syntheticTemplate, {}, JSON.stringify(predicate))
-    }, [runWithInputs])
+        // before ``requestPredicate``'s defensive AND-wrap.
+        await runQuery(predicate, options, JSON.stringify(predicate))
+    }, [runQuery])
 
     // ---------------------------------------------------------------
     // loadMore — cursor pagination (W2.2).
@@ -1053,15 +967,8 @@ export function useAdvancedSearch(
         // state here — otherwise it would sit at 'running' forever and
         // the editor would think the draft was already dispatched.
         setRunState(null)
-        if (view.kind === 'running') {
-            // Restore the form so the user can adjust + retry without
-            // losing their inputs.
-            setView({
-                kind: 'templateSelected',
-                template: view.template,
-                inputs: view.inputs,
-            })
-        }
+        // Nothing is running any more: the query stays in the builder.
+        if (view.kind === 'running') setView({ kind: 'idle' })
     }, [view])
 
     // Memoised because callers hold this object, not its fields: the view
@@ -1072,12 +979,8 @@ export function useAdvancedSearch(
     return useMemo(() => ({
         view,
         runState,
-        isIdle: view.kind === 'idle',
-        selectTemplate,
-        setInput,
         resetTemplate,
         run,
-        runTemplate,
         runPredicate,
         cancel,
         stop,
@@ -1087,8 +990,8 @@ export function useAdvancedSearch(
         loadMoreError: view.kind === 'results' && loadMoreFailure
             && view.result.cursor === loadMoreFailure.cursor ? loadMoreFailure.message : null,
     }), [
-        view, runState, selectTemplate, setInput, resetTemplate,
-        run, runTemplate, runPredicate, cancel, stop, resume, loadMore, isLoadingMore,
+        view, runState, resetTemplate,
+        run, runPredicate, cancel, stop, resume, loadMore, isLoadingMore,
         loadMoreFailure,
     ])
 }
