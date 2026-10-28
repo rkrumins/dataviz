@@ -33,8 +33,6 @@ const HIT = {
 function resultsView(result: Record<string, unknown>, options?: Record<string, unknown>): PanelView {
     return {
         kind: 'results',
-        template: {},
-        inputs: {},
         // The empty-result path renders the diagnostic, which reads the
         // predicate that produced it.
         query: {

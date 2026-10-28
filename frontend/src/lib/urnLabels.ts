@@ -11,7 +11,7 @@
  * Search responses already carry the answer: every ``AncestorRef`` and
  * every aggregate bucket ships a ``displayName`` alongside the URN. So
  * we remember them as they stream past and let the pure formatters
- * (``QueryChips.describePredicate``, ``predicateSentence.leafSentence``)
+ * (``predicateSentence.leafSentence``)
  * read them back synchronously.
  *
  * Deliberately a module-level Map rather than store state: the readers

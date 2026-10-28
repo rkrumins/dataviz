@@ -1,9 +1,10 @@
 /**
  * RecipeGallery — ready-made questions, each with how many it finds here.
- * The empty query card starts with a few, one per intent, and opens out to
- * all of them; the Library and an idle Search Studio show them all, by
- * intent. Counts are rough, asked once the gallery comes into sight; a
- * recipe with something to fill in says so instead.
+ * The empty query card starts with one per intent, and opens out to all of
+ * them; the Library and an idle Search Studio show them all, by intent.
+ * Counts are rough, asked once the gallery comes into sight; a recipe with
+ * something to fill in says so instead, and one that finds nothing in this
+ * view says that.
  */
 import { ArrowRight, ChevronDown } from 'lucide-react'
 import { useMemo, useRef, useState } from 'react'
@@ -14,11 +15,11 @@ import { useSharedIntersectionObserver } from '@/hooks/useSharedIntersectionObse
 import { cn } from '@/lib/utils'
 
 import { countId } from '../counts/clauseItems'
+import { whyUncountable } from '../counts/countable'
 import { useCounts, type CountState, type CountsStatus } from '../counts/useCounts'
 import { RECIPE_INTENTS, startingRecipes, type Recipe } from './recipes'
 
 
-const STARTERS = 5
 const NOWHERE = { current: null }
 
 /** Seen once it has been in sight — at once where nothing can tell. */
@@ -44,17 +45,20 @@ export function RecipeGallery({ viewId, recipes, variant, filter = '', onPick }:
     const all = variant === 'all' || expanded
 
     const shown = useMemo(() => {
-        if (!all) return startingRecipes(recipes, STARTERS)
+        if (!all) return startingRecipes(recipes)
         const q = filter.trim().toLowerCase()
         return q ? recipes.filter((r) => `${r.title} ${r.description}`.toLowerCase().includes(q)) : recipes
     }, [all, recipes, filter])
-    const items = useMemo(() => shown.filter((r) => !r.blank)
+    // A Connections recipe is counted when it runs: the count request would
+    // refuse it, and every other count with it.
+    const items = useMemo(() => shown.filter((r) => !r.blank && !whyUncountable(r.predicate))
         .map((r) => ({ id: countId(r.predicate), predicate: r.predicate })), [shown])
     const { counts, status } = useCounts(viewId, items, { rough: true, enabled: seen })
 
     if (recipes.length === 0) return null
     const row = (r: Recipe, detail: string) => (
-        <RecipeRow key={r.id} recipe={r} detail={detail} onPick={onPick} status={status}
+        <RecipeRow key={r.id} recipe={r} detail={detail} onPick={onPick}
+                   status={whyUncountable(r.predicate) ? 'idle' : status}
                    count={r.blank ? null : counts.get(countId(r.predicate)) ?? null} />
     )
     const intentTitle = (id: Recipe['intent']) => RECIPE_INTENTS.find((i) => i.id === id)?.title ?? ''
@@ -108,6 +112,7 @@ function RecipeRow({ recipe, detail, count, status, onPick }: {
     status: CountsStatus
     onPick: (recipe: Recipe) => void
 }) {
+    const none = !!count?.complete && count.count === 0
     return (
         <div role="listitem">
             <button type="button" onClick={() => onPick(recipe)}
@@ -116,7 +121,9 @@ function RecipeRow({ recipe, detail, count, status, onPick }: {
                     <DynamicIcon name={recipe.icon} className="h-3.5 w-3.5" />
                 </span>
                 <span className="flex min-w-0 flex-1 flex-col">
-                    <span className="truncate text-sm font-medium text-ink">{recipe.title}</span>
+                    <span className={cn('truncate text-sm font-medium', none ? 'text-ink-muted' : 'text-ink')}>
+                        {recipe.title}
+                    </span>
                     <span className="truncate text-2xs text-ink-muted">{detail}</span>
                 </span>
                 <RecipeCount blank={recipe.blank} count={count} status={status} />
@@ -130,7 +137,7 @@ function RecipeRow({ recipe, detail, count, status, onPick }: {
 function RecipeCount({ blank, count, status }: { blank: boolean; count: CountState | null; status: CountsStatus }) {
     if (blank) return <span className="shrink-0 rounded-md border border-dashed border-accent-lineage/40 px-1.5 text-2xs text-accent-lineage">fill in</span>
     if (!count) return status === 'counting' ? <Skeleton className="h-4 w-8 shrink-0 rounded-md" /> : null
-    if (count.complete && count.count === 0) return <span className="shrink-0 text-xs text-ink-muted">none</span>
+    if (count.complete && count.count === 0) return <span className="shrink-0 text-xs text-ink-muted">none in this view</span>
     return (
         <span className="shrink-0 text-xs font-medium tabular-nums text-ink">
             {count.count.toLocaleString()}{count.complete ? '' : '+'}

@@ -9,7 +9,6 @@ import { createContext, useContext } from 'react'
 import type { NodeRef, Predicate } from '@/types/search'
 
 import type { ConditionEditorProps } from '../ConditionRow'
-import type { CodeKind } from '../vocabulary/filterKinds'
 
 import type { Path, SentenceLine } from './clauseModel'
 
@@ -26,8 +25,8 @@ export interface SentenceActions {
     setRelativeRefs: (line: Extract<SentenceLine, { kind: 'relation' }>, refs: NodeRef[]) => void
     /** Join the listed clauses by "and" (all of them) or "or" (any). */
     setCombine: (op: 'and' | 'or') => void
-    editInCode: () => void
-    onOpenCode?: (kind: CodeKind) => void
+    /** Switch to Code — with ``target``, that condition selected. */
+    editInCode: (target?: Predicate) => void
     setOpenToken: (key: string | null) => void
 }
 

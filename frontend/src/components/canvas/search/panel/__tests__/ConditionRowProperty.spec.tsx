@@ -62,7 +62,7 @@ function Harness({ initial, samples, onChange, suggestValues }: {
             isRunning={false}
             onChange={(p) => { setValue(p); onChange(p) }}
             onRemove={vi.fn()}
-            onOpenAdvanced={vi.fn()}
+            onEditInCode={vi.fn()}
         />
     )
 }
@@ -224,7 +224,7 @@ describe('has-property row by name', () => {
                     isRunning={false}
                     onChange={(p) => { setValue(p); onChange(p) }}
                     onRemove={vi.fn()}
-                    onOpenAdvanced={vi.fn()}
+                    onEditInCode={vi.fn()}
                 />
             )
         }

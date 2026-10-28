@@ -20,7 +20,7 @@ import { SearchMapPanel } from '../SearchMapPanel'
 
 const RESULTS = {
     kind: 'results',
-    template: {}, inputs: {}, query: {},
+    query: {},
     result: {
         candidateCount: 1, truncated: false, deadlineExceeded: false, cacheHit: false, elapsedMs: 4,
         hits: [{ node: { urn: 'a', displayName: 'orders', entityType: 'table', properties: {} }, ancestorPath: [] }],
@@ -61,6 +61,7 @@ describe('SearchMapPanel — asking over an answer', () => {
         const tagged = { kind: 'tag', op: 'hasAny', values: ['PII'] }
         expect(useSearchStore.getState().draftPredicate).toMatchObject({ kind: 'group', op: 'and',
             children: [tagged, { kind: 'text', value: 'orders' }] })
+        expect(useSearchStore.getState().draftSource).toBe('ask')
         expect(advanced.runPredicate).toHaveBeenCalledTimes(1)
     })
 

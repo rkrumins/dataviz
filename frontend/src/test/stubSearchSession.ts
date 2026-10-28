@@ -26,12 +26,8 @@ export function stubAdvanced(
     return {
         view: { kind: 'idle' },
         runState: null,
-        isIdle: true,
-        selectTemplate: vi.fn(),
-        setInput: vi.fn(),
         resetTemplate: vi.fn(),
         run: vi.fn(async () => {}),
-        runTemplate: vi.fn(async () => {}),
         runPredicate: vi.fn(async () => {}),
         cancel: vi.fn(),
         stop: vi.fn(),

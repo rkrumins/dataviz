@@ -319,6 +319,103 @@ describe('interpretQuestion — the names a question points at', () => {
 })
 
 
+describe('interpretQuestion — what flows from one place to another', () => {
+    it.each([
+        ['what flows from bronze to gold', 'from(layer:bronze) to[lineage](layer:gold)'],
+        ['what flows from the bronze layer to the gold layer', 'from(layer:bronze) to[lineage](layer:gold)'],
+        ['what data moves from datasets to dashboards?', 'from(type:dataset) to[lineage](type:dashboard)'],
+        ['connections between datasets and dashboards', 'from(type:dataset) linkedTo(type:dashboard)'],
+        ['the links between PII columns and charts', 'from(type:schemaField AND tag:PII) linkedTo(type:chart)'],
+    ])('%s → %s', (q, out) => {
+        const r = read(q)
+        expect(stringifyPredicate(r.predicate)).toBe(out)
+        expect(r.mode).toBe('replace')
+        expect(r.unrecognized).toEqual([])
+    })
+
+    it('reads a named place as it and what is inside it, and offers just it', () => {
+        const r = read('what flows from Sales to dashboards')
+        expect(stringifyPredicate(r.predicate)).toBe('from(@"**/Sales" OR ancestor(@"**/Sales")) to[lineage](type:dashboard)')
+        expect(r.names.map((n) => n.text)).toEqual(['Sales'])
+        const [sales] = r.ambiguities
+        expect(sales.choices.map((c) => c.id)).toEqual(['withInside', 'itself'])
+        expect(dsl('what flows from Sales to dashboards', { choices: { [sales.id]: 'itself' } }))
+            .toBe('from(@"**/Sales") to[lineage](type:dashboard)')
+    })
+})
+
+
+describe('interpretQuestion — routes', () => {
+    const route = (q: string) => read(q).predicate
+
+    it('reads how one thing reaches another as the routes from it, downstream', () => {
+        expect(route('how does orders reach revenue')).toEqual({
+            kind: 'path', sourceUrns: [], targetUrns: [], direction: 'outgoing', edgeClass: 'lineage', maxHops: 4,
+            sourceRefs: [{ path: ['**', 'orders'] }], targetRefs: [{ path: ['**', 'revenue'] }],
+        })
+        expect(read('how does orders reach revenue').names.map((n) => n.text)).toEqual(['orders', 'revenue'])
+        expect(route('show me the paths from orders to dashboards')).toMatchObject({
+            kind: 'path', direction: 'outgoing', sourceRefs: [{ path: ['**', 'orders'] }],
+            targetWhere: { kind: 'entityType', op: 'in', values: ['dashboard'] },
+        })
+    })
+
+    it('reads two things connected, or the routes between them, either way', () => {
+        expect(route('how is orders connected to revenue')).toMatchObject({ kind: 'path', direction: 'any' })
+        // Two conditions for ends: as far as the server goes for both, three hops.
+        expect(route('routes between datasets tagged PII and dashboards')).toMatchObject({
+            kind: 'path', direction: 'any', maxHops: 3,
+            sourceWhere: { kind: 'group', op: 'and', children: [
+                { kind: 'entityType', op: 'in', values: ['dataset'] }, { kind: 'tag', op: 'hasAny', values: ['PII'] }] },
+            targetWhere: { kind: 'entityType', op: 'in', values: ['dashboard'] },
+        })
+    })
+
+    it('reads anything else as it always did', () => {
+        expect(route('how many datasets')?.kind).not.toBe('path')
+        expect(route('datasets in the path folder')?.kind).not.toBe('path')
+    })
+})
+
+
+describe('interpretQuestion — a layer, and the words catalogs use', () => {
+    it('reads "the gold layer" as the layer, the others a click away', () => {
+        const r = read('the gold layer')
+        expect(stringifyPredicate(r.predicate)).toBe('layer:gold')
+        expect(r.ambiguities[0].choices.map((c) => c.id)).toEqual(['layer', 'inside', 'name'])
+    })
+
+    it('reads a catalog\'s word as the view\'s own type: tables are its datasets, fields its columns', () => {
+        expect(dsl('tables tagged PII')).toBe('type:dataset AND tag:PII')
+        const fields = buildAskVocabulary({ entityTypes: [{ id: 'schemaField', name: 'Schema field' }],
+            tagValues: [], propertyKeys: [], valueSamples: [], layers: [] })
+        expect(stringifyPredicate(interpretQuestion('fields', fields).predicate)).toBe('type:schemaField')
+    })
+
+    it('maps a catalog\'s word only to a type the view holds, and never over its own', () => {
+        const without = buildAskVocabulary({ entityTypes: [{ id: 'dataset' }], tagValues: [], propertyKeys: [],
+            valueSamples: [], layers: [], presentTypes: ['dashboard'] })
+        expect(stringifyPredicate(interpretQuestion('tables', without).predicate)).toBe('tables')
+        const own = buildAskVocabulary({ entityTypes: [{ id: 'dataset' }, { id: 'table' }], tagValues: [],
+            propertyKeys: [], valueSamples: [], layers: [] })
+        expect(stringifyPredicate(interpretQuestion('tables', own).predicate)).toBe('type:table')
+    })
+})
+
+
+describe('interpretQuestion — did you mean', () => {
+    it('offers the view\'s word a typed one is a letter or two off', () => {
+        expect(read('dashbaords').suggestions).toEqual([{ text: 'dashbaords', suggestion: 'dashboards' }])
+        expect(read('datasets tagged pij').suggestions).toEqual([{ text: 'pij', suggestion: 'PII' }])
+    })
+
+    it('offers nothing for a word it read, or one nothing is close to', () => {
+        expect(read('datasets tagged PII').suggestions).toEqual([])
+        expect(read('zebra').suggestions).toEqual([])
+    })
+})
+
+
 describe('interpretQuestion — connections', () => {
     const edgeVocab = buildAskVocabulary({
         entityTypes: [

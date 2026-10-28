@@ -50,6 +50,8 @@ export interface DslEditorHandle {
      *  it when ``whole`` — and focus, the cursor ``caret`` characters into
      *  it, or after it. */
     insert: (text: string, caret?: number, whole?: boolean) => void
+    /** Select ``from``–``to``, scrolled into view, and focus. */
+    select: (from: number, to: number) => void
 }
 
 /** Marks a change that came from ``value``, not from typing. */
@@ -172,6 +174,12 @@ export const DslEditor = forwardRef<DslEditorHandle, DslEditorProps>(function Ds
                 selection: { anchor: from + (caret ?? text.length) },
                 userEvent: 'input',
             })
+            editor.focus()
+        },
+        select: (from: number, to: number) => {
+            const editor = view.current
+            if (!editor) return
+            editor.dispatch({ selection: EditorSelection.single(from, to), scrollIntoView: true, userEvent: 'select' })
             editor.focus()
         },
     }), [])

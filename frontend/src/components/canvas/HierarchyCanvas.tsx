@@ -619,7 +619,7 @@ export function HierarchyCanvas({ className }: HierarchyCanvasProps) {
             open={propertyManagerOpen}
             onClose={() => setPropertyManagerOpen(false)}
             onSearchPredicate={(p) => {
-              useSearchStore.getState().requestSearchRun(p)
+              useSearchStore.getState().requestSearchRun(p, 'property-manager')
               setAdvancedSearchOpen(true)
             }}
           />

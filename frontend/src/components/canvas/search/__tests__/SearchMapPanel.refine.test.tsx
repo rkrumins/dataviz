@@ -31,7 +31,7 @@ const BUILDER = { name: 'New query' }
 
 const RESULTS = {
     kind: 'results',
-    template: {}, inputs: {}, query: {},
+    query: {},
     result: {
         candidateCount: 1, truncated: false, deadlineExceeded: false,
         cacheHit: false, elapsedMs: 4,

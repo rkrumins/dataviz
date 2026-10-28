@@ -30,19 +30,28 @@
  *   "connections from columns tagged PII to dashboards through produces, either way"
  *     → from(type:schemaField AND tag:PII) linkedTo[PRODUCES](type:dashboard)
  *
+ * So does what flows from one place to another — a name there is the place
+ * and what is inside it, a layer's word the layer — and the edges between
+ * two kinds of thing, either way; a route between two things reads as the
+ * routes themselves:
+ *
+ *   "what flows from bronze to gold"   → from(layer:bronze) to[lineage](layer:gold)
+ *   "how does orders reach revenue"    → the lineage routes from orders to revenue
+ *
  * Words it can't place are read as a name to search for, and said so; a
  * word with several readings (a tag, a container's name, a name) is read
  * one way and offers the others; what it leaves out — a property the view
- * doesn't have, relationships nested too deep — it says (``notes``). Pure
- * and synchronous: the same question with the same picks always reads the
- * same.
+ * doesn't have, relationships nested too deep — it says (``notes``). A word
+ * a letter or two off one of the view's own is offered as that word
+ * ("Did you mean"). Pure and synchronous: the same question with the same
+ * picks always reads the same.
  */
-import type { EdgeClass, EdgesPredicate, NodeRef, Predicate, RelatedPredicate } from '@/types/search'
+import type { EdgeClass, EdgesPredicate, NodeRef, PathPredicate, Predicate, RelatedPredicate } from '@/types/search'
 
 import { axisMeta, maxHopsFor, RELATION_DEPTH_MAX, RELATION_MAX_HOPS, type RelationAxis } from '../relations'
 import { FILTER_CATEGORIES } from '../vocabulary/filterKinds'
 
-import { identifierWords, phraseKey, type AskMeaning, type AskVocabulary } from './askVocabulary'
+import { identifierWords, normalWord, phraseKey, type AskMeaning, type AskVocabulary } from './askVocabulary'
 
 
 // ---------------------------------------------------------------------------
@@ -85,6 +94,15 @@ export interface Interpretation {
     names: AskName[]
     /** What the question asked that the query leaves out, and why. */
     notes: string[]
+    /** Words a letter or two off one of the view's own, and that word. */
+    suggestions?: AskSuggestion[]
+}
+
+/** "Did you mean …": a word as typed, and the view's word it is likely
+ *  to be. */
+export interface AskSuggestion {
+    text: string
+    suggestion: string
 }
 
 
@@ -339,6 +357,45 @@ function namedWhere(ref: NodeRef, lineage: boolean, picked: AskReading): Predica
 }
 
 
+/** The view's word ``text`` is a letter or two off — one for a short word,
+ *  two for a longer one — among the meanings of ``kinds`` (any, when not
+ *  given); null when none is that close. */
+function didYouMean(text: string, vocab: AskVocabulary, kinds?: ReadonlyArray<AskMeaning['kind']>): string | null {
+    const words = text.trim().split(/\s+/)
+    const key = phraseKey(words)
+    const most = key.length <= 5 ? 1 : 2
+    let best: { key: string; d: number } | null = null
+    for (const [candidate, meanings] of vocab.phrases) {
+        if (candidate === key || Math.abs(candidate.length - key.length) > most) continue
+        if (kinds && !meanings.some((m) => kinds.includes(m.kind))) continue
+        const d = editDistance(key, candidate, most)
+        if (d <= most && (!best || d < best.d)) best = { key: candidate, d }
+    }
+    if (!best) return null
+    // A type in the question's own case and number: "dashbaords" → "dashboards".
+    let word = vocab.display?.get(best.key) ?? best.key
+    if (vocab.phrases.get(best.key)!.every((m) => m.kind === 'type')) word = word.toLowerCase()
+    const typed = words[words.length - 1]
+    const last = word.split(' ').pop()!
+    return normalWord(typed) !== typed.toLowerCase() && normalWord(last) === last.toLowerCase() ? `${word}s` : word
+}
+
+/** Letters to change, add or drop to turn ``a`` into ``b`` — given up as
+ *  ``most + 1`` once past ``most``. */
+function editDistance(a: string, b: string, most: number): number {
+    let prev = Array.from({ length: b.length + 1 }, (_, j) => j)
+    for (let i = 1; i <= a.length; i += 1) {
+        const row = [i]
+        for (let j = 1; j <= b.length; j += 1) {
+            row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+        }
+        if (Math.min(...row) > most) return most + 1
+        prev = row
+    }
+    return prev[b.length]
+}
+
+
 // ---------------------------------------------------------------------------
 // Connections: "connections from A to B through T, either way"
 // ---------------------------------------------------------------------------
@@ -427,7 +484,139 @@ function readConnection(text: string, vocab: AskVocabulary, picks: AskPicks): In
         unrecognized: [...from.unrecognized, ...to.unrecognized, ...edgeSet.unread],
         names: [...from.names, ...to.names.filter((n) => !from.names.some((f) => f.text === n.text))],
         notes: [...from.notes, ...to.notes],
+        suggestions: [...from.suggestions ?? [], ...to.suggestions ?? []],
     }
+}
+
+
+// ---------------------------------------------------------------------------
+// Areas and routes: "what flows from bronze to gold", "path from A to B"
+// ---------------------------------------------------------------------------
+
+/** What flows from one place to another: "what flows from bronze to gold". */
+const FLOWS_OPEN = /^\s*(?:(?:show|tell)\s+me\s+)?what\s+(?:data\s+)?(?:flows?|moves?|goes|runs?)\s+from\s+/i
+/** The edges between two kinds of thing, either way. */
+const BETWEEN_OPEN = /^\s*(?:(?:show|find|give)\s+me\s+)?(?:(?:all\s+)?the\s+|any\s+)?(?:edges?|connections?|links?|relationships?)\s+between\s+/i
+/** The routes themselves: "path from A to B", "routes between A and B". */
+const ROUTE_OPEN = /^\s*(?:(?:show|find|give)\s+me\s+)?(?:(?:all\s+)?the\s+|any\s+)?(?:paths?|routes?)\s+(from|between)\s+/i
+/** How one thing reaches another: "how does orders reach revenue". */
+const HOW_REACH = /^(\s*how\s+(?:does|do|did|can|could|would|is|are)\s+)(.+?)\s+(?:(reach(?:es)?|gets?\s+to|flows?\s+(?:to|into)|feeds?(?:\s+into)?|leads?\s+to)|(connects?\s+to|connected\s+(?:to|with)))\s+(.+?)\s*[?.!]*\s*$/i
+
+/** One end, read as a question of its own. Between places, a word that
+ *  names a layer is the layer, unless another reading is picked. */
+function readEnd(text: string, from: number, to: number, vocab: AskVocabulary, picks: AskPicks): Interpretation {
+    const read = interpretQuestion(masked(text, from, to), vocab, picks)
+    const layer = read.ambiguities.find((a) => a.picked !== 'layer' && picks.choices?.[a.id] === undefined
+        && a.choices.some((c) => c.id === 'layer'))
+    return layer
+        ? interpretQuestion(masked(text, from, to), vocab, { ...picks, choices: { ...picks.choices, [layer.id]: 'layer' } })
+        : read
+}
+
+/** The two ends of ``text`` from ``start`` to ``end``, split at the ``sep``
+ *  that leaves the fewest words unread — or null when no split reads. */
+function readEnds(text: string, start: number, end: number, sep: RegExp, vocab: AskVocabulary,
+    picks: AskPicks): { from: Interpretation; to: Interpretation; at: [number, number] } | null {
+    let best: { unread: number; from: Interpretation; to: Interpretation; at: [number, number] } | null = null
+    for (const m of text.slice(start, end).matchAll(sep)) {
+        const split = start + (m.index ?? 0)
+        const at: [number, number] = [start, split + m[0].length]
+        const from = readEnd(text, start, split, vocab, picks)
+        const to = readEnd(text, at[1], end, vocab, picks)
+        if (!from.predicate || !to.predicate || from.predicate.kind === 'edges' || to.predicate.kind === 'edges'
+            || from.mode === 'add' || to.mode === 'add') continue
+        const unread = from.unrecognized.length + to.unrecognized.length
+        if (!best || unread < best.unread) best = { unread, from, to, at }
+    }
+    return best
+}
+
+/** An end that reads as a name alone is the entity it names — looked up,
+ *  never searched for: a place with what is inside it ("just it" offered),
+ *  a route's end itself. Anything else is the condition it reads as. */
+function namedEnd(read: Interpretation, text: string, from: number, picks: AskPicks, place: boolean) {
+    const p = read.predicate
+    if (p?.kind !== 'text' || p.target !== 'name') return { ...read, where: p, ref: null as NodeRef | null }
+    const start = from + text.slice(from).search(/\S/)
+    const ref = picks.names?.[p.value] ?? { path: ['**', p.value] }
+    const names: AskName[] = [{ text: p.value, ref }]
+    if (!place) return { ...read, where: null, ref, names, ambiguities: [], unrecognized: [] }
+    const id = `${start}:${p.value}`
+    const choices: AskReading[] = ['withInside', 'itself']
+    const want = picks.choices?.[id] as AskReading | undefined
+    const picked = want && choices.includes(want) ? want : 'withInside'
+    return {
+        ...read, where: namedWhere(ref, true, picked), ref: null, names, unrecognized: [],
+        ambiguities: [{ id, text: p.value, choices: choices.map((c) => ({ id: c, label: READING_LABEL[c] })), picked }],
+    }
+}
+
+/** What both ends asked, said back once. */
+function both(from: Interpretation, to: Interpretation): Omit<Interpretation, 'predicate' | 'mode'> {
+    return {
+        ambiguities: [...from.ambiguities, ...to.ambiguities],
+        unrecognized: [...from.unrecognized, ...to.unrecognized],
+        names: [...from.names, ...to.names.filter((n) => !from.names.some((f) => f.text === n.text))],
+        notes: [...from.notes, ...to.notes],
+        suggestions: [...from.suggestions ?? [], ...to.suggestions ?? []],
+    }
+}
+
+/** What flows from one place to another, or the edges between two kinds of
+ *  thing, read as a connection — or null when it isn't one. */
+function readArea(text: string, vocab: AskVocabulary, picks: AskPicks): Interpretation | null {
+    const flows = FLOWS_OPEN.exec(text)
+    const between = flows ? null : BETWEEN_OPEN.exec(text)
+    const open = flows ?? between
+    if (!open) return null
+    const end = text.replace(/[\s?.!]+$/, '').length
+    const ends = readEnds(text, open[0].length, end, flows ? /\s+to\s+/gi : /\s+and\s+/gi, vocab, picks)
+    if (!ends) return null
+    const from = namedEnd(ends.from, text, ends.at[0], picks, true)
+    const to = namedEnd(ends.to, text, ends.at[1], picks, true)
+    const connection: EdgesPredicate = {
+        kind: 'edges',
+        ...(from.where ? { sourceWhere: from.where } : {}),
+        ...(to.where ? { targetWhere: to.where } : {}),
+        // What flows, flows along lineage; what lies between is either way.
+        ...(flows ? { edgeClass: 'lineage' as const } : { direction: 'either' as const }),
+    }
+    return { predicate: connection, mode: 'replace', ...both(from, to) }
+}
+
+/** The routes from one thing to another, read as a route search — or null
+ *  when it isn't one. Downstream when one reaches the other; either way
+ *  when they are only connected. */
+function readRoute(text: string, vocab: AskVocabulary, picks: AskPicks): Interpretation | null {
+    const open = ROUTE_OPEN.exec(text)
+    const how = open ? null : HOW_REACH.exec(text)
+    let ends: { from: Interpretation; to: Interpretation; at: [number, number] } | null
+    let either: boolean
+    if (open) {
+        const end = text.replace(/[\s?.!]+$/, '').length
+        either = open[1].toLowerCase() === 'between'
+        ends = readEnds(text, open[0].length, end, either ? /\s+and\s+/gi : /\s+to\s+/gi, vocab, picks)
+    } else if (how) {
+        const [, lead, subject, , connected, target] = how
+        either = !!connected
+        const toAt = text.lastIndexOf(target)
+        const from = readEnd(text, lead.length, lead.length + subject.length, vocab, picks)
+        const to = readEnd(text, toAt, toAt + target.length, vocab, picks)
+        ends = from.predicate && to.predicate && from.predicate.kind !== 'edges' && to.predicate.kind !== 'edges'
+            ? { from, to, at: [lead.length, toAt] } : null
+    } else return null
+    if (!ends) return null
+    const from = namedEnd(ends.from, text, ends.at[0], picks, false)
+    const to = namedEnd(ends.to, text, ends.at[1], picks, false)
+    const route: PathPredicate = {
+        kind: 'path', sourceUrns: [], targetUrns: [],
+        direction: either ? 'any' : 'outgoing', edgeClass: 'lineage',
+        // The server's reach: four hops, three when both ends are conditions.
+        maxHops: from.where && to.where ? 3 : 4,
+        ...(from.ref ? { sourceRefs: [from.ref] } : { sourceWhere: from.where! }),
+        ...(to.ref ? { targetRefs: [to.ref] } : { targetWhere: to.where! }),
+    }
+    return { predicate: route, mode: 'replace', ...both(from, to) }
 }
 
 
@@ -525,13 +714,16 @@ function readSubjectFirst(text: string, vocab: AskVocabulary, picks: AskPicks): 
     const predicate: Predicate = type?.kind === 'type'
         ? { kind: 'group', op: 'and', children: [{ kind: 'entityType', op: 'in', values: [type.type] }, rel] }
         : rel
-    return { predicate, mode: 'replace', ambiguities, unrecognized, names, notes: read.notes }
+    return { predicate, mode: 'replace', ambiguities, unrecognized, names, notes: read.notes,
+        suggestions: read.suggestions }
 }
 
 
 export function interpretQuestion(text: string, vocab: AskVocabulary, picks: AskPicks = {}): Interpretation {
     const connection = readConnection(text, vocab, picks)
     if (connection) return connection
+    const area = readArea(text, vocab, picks) ?? readRoute(text, vocab, picks)
+    if (area) return area
     const subjectFirst = readSubjectFirst(text, vocab, picks)
     if (subjectFirst) return subjectFirst
     const toks = classify(lex(text), vocab)
@@ -539,6 +731,7 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
     const unrecognized: string[] = []
     const names: AskName[] = []
     const notes: string[] = []
+    const suggestions: AskSuggestion[] = []
     const owner = ownerKey(vocab)
     /** Relationships nested deeper than a search reads: the rest is left out. */
     let tooDeep = false
@@ -942,7 +1135,7 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
 
     const predicate = build(root)
     if (predicate) clampHops(predicate)
-    return { predicate, mode, ambiguities, unrecognized, names, notes }
+    return { predicate, mode, ambiguities, unrecognized, names, notes, suggestions }
 
 
     // -- the readers the loop hands off to --------------------------------
@@ -981,7 +1174,12 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
 
     /** Words read as a name: a relative named, or a name to search for. */
     function onName(phrase: { text: string; start: number }) {
-        if (pend.tagged) { addTag(phrase.text); return }
+        if (pend.tagged) {
+            const meant = didYouMean(phrase.text, vocab, ['tag'])
+            if (meant) suggestions.push({ text: phrase.text, suggestion: meant })
+            addTag(phrase.text)
+            return
+        }
         if (pend.named) { add(nameText(phrase.text)); return }
         // "feeds the CFO dashboard": a dashboard by that name, not one named so.
         if (emptyTarget(frame) && !typeOf(peek())) { nameTarget(phrase); return }
@@ -995,6 +1193,8 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
         const picked = ambiguity(phrase, ['name', 'inside'], 'name')
         if (picked === 'inside') { inside(phrase.text); return }
         unrecognized.push(phrase.text)
+        const meant = didYouMean(phrase.text, vocab)
+        if (meant) suggestions.push({ text: phrase.text, suggestion: meant })
         add(nameText(phrase.text))
     }
 

@@ -63,7 +63,6 @@ interface Roles {
     sensitive: string[]
     deprecated?: string
     ownerKey?: string
-    described: boolean
     view: RecipeView
 }
 
@@ -176,9 +175,11 @@ const RECIPES: readonly RecipeDef[] = [
             predicate: and(typeIs(r.data), { kind: 'tag', op: 'notHas', values: r.sensitive }),
         } : null),
     },
+    // A description is every entity's own field — discovery lists a type's
+    // properties, not it — so these are offered wherever the type is.
     {
         id: 'undocumented', intent: 'documentation', icon: 'FileQuestion',
-        make: (r, name) => (r.data && r.described ? {
+        make: (r, name) => (r.data ? {
             title: `${cap(name(r.data, true))} without a description`,
             description: 'Nothing says what they hold or how to use them.',
             predicate: and(typeIs(r.data), lacks('description')),
@@ -186,7 +187,7 @@ const RECIPES: readonly RecipeDef[] = [
     },
     {
         id: 'undocumented-fields', intent: 'documentation', icon: 'Columns3',
-        make: (r, name) => (r.field && r.described ? {
+        make: (r, name) => (r.field ? {
             title: `${cap(name(r.field, true))} without a description`,
             description: 'Fields no one has explained yet.',
             predicate: and(typeIs(r.field), lacks('description')),
@@ -304,6 +305,21 @@ const RECIPES: readonly RecipeDef[] = [
         },
     },
     {
+        id: 'layer-to-layer', intent: 'discovery', icon: 'Waypoints',
+        make: (r) => {
+            const [from, to] = r.view.layers
+            return from && to ? {
+                title: `What flows from ${from.label} to ${to.label}`,
+                description: 'The lineage between two stages of the pipeline, edge by edge.',
+                predicate: {
+                    kind: 'edges', edgeClass: 'lineage',
+                    sourceWhere: { kind: 'layer', layerAssignment: from.value },
+                    targetWhere: { kind: 'layer', layerAssignment: to.value },
+                },
+            } : null
+        },
+    },
+    {
         id: 'tagged', intent: 'discovery', icon: 'Tag',
         make: (r) => {
             const tag = r.view.tags.find((t) => !r.sensitive.includes(t) && t !== r.deprecated)
@@ -329,7 +345,6 @@ function rolesOf(view: RecipeView): Roles {
         sensitive: view.tags.filter((t) => SENSITIVE.test(t)),
         deprecated: view.tags.find((t) => /deprecat/i.test(t)),
         ownerKey: view.keys.includes('owner') ? 'owner' : view.keys.find((k) => /owner/i.test(k)),
-        described: view.keys.includes('description'),
         view,
     }
 }
@@ -347,13 +362,14 @@ export function recipesFor(view: RecipeView, name: TypeName): Recipe[] {
 }
 
 
-/** A few to start from: the first ready-to-run recipe of each intent. */
-export function startingRecipes(recipes: readonly Recipe[], max: number): Recipe[] {
+/** One to start from for each intent: its first ready-to-run recipe — or,
+ *  where each has something to fill in, the first of those. */
+export function startingRecipes(recipes: readonly Recipe[]): Recipe[] {
     const out: Recipe[] = []
     for (const { id } of RECIPE_INTENTS) {
-        const first = recipes.find((r) => r.intent === id && !r.blank)
+        const mine = recipes.filter((r) => r.intent === id)
+        const first = mine.find((r) => !r.blank) ?? mine[0]
         if (first) out.push(first)
-        if (out.length === max) break
     }
     return out
 }

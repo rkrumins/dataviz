@@ -9,6 +9,85 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Every flow works: Edit in Code, Ask in every mode, undo, Back to results, recipes
+
+### Fixed
+
+- **The query card's header is there in every editor and every state.** An empty Form or
+  Sentence used to replace the whole card with a landing panel — no Form · Sentence · Code ·
+  Cypher switch, no Undo, no Run — so from an empty Form there was no way back to Sentence or
+  Code. The card now opens on the Form under one header: the four editors as tabs, with **New**,
+  **Save** and **Tag** beside them; below them **Entities** or **Connections**, Undo and Redo,
+  **Auto** (a switch: on, the query runs as you edit) and **Run**. Narrow, the editors not chosen
+  show their icons alone. An empty query starts with a filter, or a question in Sentence, under
+  that header.
+- **Edit in Code opens Code.** "Open in Code" on what the Form or the Sentence can't show — a
+  group nested too deep, a number of edges in the Sentence — opened the Advanced drawer's
+  Options, which can't edit the query. It now reads **Edit in Code** and opens Code mode with
+  that part selected.
+- **Within N hops is built in the Form and the Sentence.** Adding it inserted an empty list of
+  URNs to fill in as JSON. It now has an editor: the entities by name, the direction, how many
+  hops (up to 10), and which edges.
+- **Inside Subtree picks its container by name, from anywhere in the View**, not only from what
+  is loaded on the canvas.
+- **Ask is there in Connections**, and its **Try** questions show in the Form as well as the
+  Sentence. A question never adds to a connection; it replaces it.
+- **⌘Z / Ctrl+Z undoes in the panel**, as the guide said it did, and ⌘⇧Z / Ctrl+Shift+Z redoes —
+  except in a text field, which keeps its own. **Clear** is one more step: Undo brings the
+  query back.
+- **How it matches offers Back to results**, instead of needing Undo to get back.
+- **The search box offers broader searches when nothing matches** — **Contains**, **Look in
+  everything**, **Whole view** — and says what it looked for. It offered only narrower ones.
+- **Recipes.** The empty card starts with one recipe per intent instead of the first five, so
+  the quality checks show too. The documentation checks never showed: they waited for a
+  `description` property, which discovery doesn't list (it is every entity's own field). They
+  now show wherever their type does. A recipe that finds nothing in this View says **none in
+  this view**.
+- **Wording.** The relationship card reads **Related to…**, not "Connection", which is the
+  edges search. "Orphan" reads **no lineage**. "a “owner” property" reads "an “owner”
+  property". A finished search's time reads *8.6 s* or *1:23*, not *87146 ms*.
+
+### Added
+
+- **Ask reads more questions.**
+  - Routes: `path from orders to revenue`, `how does orders reach revenue`, `how is orders
+    connected to revenue`.
+  - What lies between two places: `what flows from bronze to gold`, `connections between
+    datasets and dashboards`. A word that names a layer reads as the layer, with chips for its
+    other readings.
+  - The words catalogs use — tables, columns, fields, reports, databases, pipelines, jobs — for
+    the View's own types, when the View has them and none of its own goes by the word.
+  - **Did you mean “datasets”?** for a misspelt type or tag.
+  - A reading that finds nothing offers the fixes an empty answer does.
+- **A Connections recipe**: *What flows from Bronze to Gold*, the lineage edges from the View's
+  first layer to its second.
+- **Telemetry: where a search came from and how it ended.** `graph.search` and
+  `graph.search_miss` carry `source` and `outcome`; still no query text.
+  - `source` is one of ask, recipe, library, results, right-click, property-manager or header,
+    or else the editor: form, sentence or code. `studio` is set when Search Studio was open.
+  - `outcome` is complete, atLeast, stopped, interrupted or failed. A failure's `reason` is
+    the server's code or HTTP status.
+  - Stopped, interrupted and failed searches are recorded now too, so **Searches that
+    matched** counts a failed search as one that found nothing. A search resumed after a Stop
+    reports again, marked `resumed`.
+
+### Removed
+
+- Code nothing in the app reached:
+  - the template runner (`searchTemplates.ts`, `TemplateForm`);
+  - `QueryChips` and `RunBar`;
+  - the first builder (`PredicateBuilder`, its rows, reducer and leaf editors).
+- `graph.search` events no longer carry `template`, which was always `__builder__`.
+
+### Known limitations
+
+- In the Sentence, **Number of edges…** still says **Edit in Code**; the Form edits it.
+- A search's `source` is what last put the query in its shape: a recipe whose blank is filled
+  in the Sentence reads as `sentence`.
+- **Searches that matched** counts events, so a search stopped and then resumed counts twice.
+
+---
+
 ## [Unreleased] — Resilient searches: big subtrees, outages, Stop and Resume
 
 ### Fixed

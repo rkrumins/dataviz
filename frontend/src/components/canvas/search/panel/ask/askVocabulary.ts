@@ -4,7 +4,8 @@
  * sampled values and layers. Each is filed under its phrase as people
  * type it — lowercase, plural or not, an identifier's words apart — so
  * "data platforms", "row count" and "rows" find `dataPlatform` and
- * `rowCount`.
+ * `rowCount`. A catalog's word for a type the view names otherwise —
+ * "tables" for its datasets — finds that type, where no type goes by it.
  *
  * Pure: built from what discovery and the schema already hold.
  */
@@ -22,6 +23,9 @@ export interface AskVocabulary {
     phrases: ReadonlyMap<string, readonly AskMeaning[]>
     /** The longest phrase, in words. */
     longest: number
+    /** Phrase → the words it was first filed under, as written: what a
+     *  "Did you mean" offers. */
+    display?: ReadonlyMap<string, string>
     tags: readonly string[]
     keys: readonly string[]
     /** Edge types, for a connection's "through …". */
@@ -35,6 +39,8 @@ export interface AskVocabularyInput {
     valueSamples: ReadonlyArray<{ key: string; value: string }>
     layers: ReadonlyArray<{ value: string; label: string }>
     edgeTypes?: readonly string[]
+    /** The types the view holds: a catalog's word finds only one of these. */
+    presentTypes?: readonly string[]
 }
 
 
@@ -66,13 +72,22 @@ export function phraseKey(words: readonly string[]): string {
  *  for rowCount, "updated" for updatedAt. */
 const KEY_SUFFIX = /^(?:count|num|number|total|at|on|date|time|ts|timestamp)$/i
 
+/** The words catalogs use for a type, and the type: "tables" are datasets,
+ *  "fields" columns. */
+const CATALOG_WORDS: ReadonlyArray<[word: string, type: string]> = [
+    ['table', 'dataset'], ['field', 'schemaField'], ['column', 'schemaField'], ['report', 'dashboard'],
+    ['database', 'container'], ['pipeline', 'dataFlow'], ['job', 'dataJob'],
+]
+
 
 export function buildAskVocabulary(input: AskVocabularyInput): AskVocabulary {
     const phrases = new Map<string, AskMeaning[]>()
+    const display = new Map<string, string>()
     let longest = 1
     const file = (words: readonly string[], meaning: AskMeaning) => {
         if (!words.length) return
         const key = phraseKey(words)
+        if (!display.has(key)) display.set(key, words.join(' '))
         const list = phrases.get(key) ?? []
         if (!list.some((m) => JSON.stringify(m) === JSON.stringify(meaning))) list.push(meaning)
         phrases.set(key, list)
@@ -105,6 +120,14 @@ export function buildAskVocabulary(input: AskVocabularyInput): AskVocabulary {
         fileText(label, meaning)
         file([...label.trim().split(/\s+/), 'layer'], meaning)
     }
+    // Only where the view holds the type, and nothing here goes by the word.
+    const present = input.presentTypes ?? input.entityTypes.map((t) => t.id)
+    for (const [word, type] of CATALOG_WORDS) {
+        const held = present.find((t) => t.toLowerCase() === type.toLowerCase())
+        if (held && !phrases.has(phraseKey([word]))) file([word], { kind: 'type', type: held })
+    }
 
-    return { phrases, longest, tags: input.tagValues, keys: input.propertyKeys, edgeTypes: input.edgeTypes ?? [] }
+    return {
+        phrases, longest, display, tags: input.tagValues, keys: input.propertyKeys, edgeTypes: input.edgeTypes ?? [],
+    }
 }
