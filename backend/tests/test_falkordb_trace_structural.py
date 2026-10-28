@@ -30,7 +30,17 @@ def _label(urn):
     """The fake's label convention: the urn's prefix before any '_'.
     `tbl_a` is a `tbl`, `ctr1` is a `ctr1`. Enough to exercise the
     label-filtered branch without a real graph."""
-    return urn.split("_")[0]
+    return urn.split("_")[0] if isinstance(urn, str) else None
+
+
+#: The far-end addressability predicate's text (``_has_urn('o')``): a fake
+#: branch honours it only when the query carries it, as the database would.
+_FAR_FILTER = "typeOf(o.urn) = 'String'"
+
+
+def _addressable(urn):
+    """What ``_has_urn`` lets through: non-empty text."""
+    return isinstance(urn, str) and urn != ""
 
 
 def _run(coro):
@@ -57,6 +67,7 @@ class _TraceFake:
         self.fail_walk_degrees = False
         #   fail_coarse — the coarse (rollup-cell) read raises.
         self.fail_coarse = False
+        self.degree_asks = []  # addressable_only per get_node_degrees call
 
     def contain(self, parent, child):
         self.children.setdefault(parent, []).append(child)
@@ -70,6 +81,21 @@ class _TraceFake:
         # **kwargs: the provider's query wrappers pass telemetry kwargs
         # (op=...) — a fake that rejects them fails as 'descendants_failed'.
         params = params or {}
+        if "AS partner" in cypher and "[r:" in cypher:
+            # trace_closure_coarse — every rollup cell INCIDENT to the focus,
+            # one direction per query, heaviest first, capped. Read from the
+            # projection graph, where aggregation writes the cells.
+            if self.fail_coarse:
+                raise RuntimeError("coarse read timed out")
+            incoming = "<-[r" in cypher
+            rows = []
+            for (src, tgt), e in self.agg.items():
+                near, far = (tgt, src) if incoming else (src, tgt)
+                if near != params["urn"]:
+                    continue
+                rows.append([far, _label(far), e["weight"], e["sd"], e["td"], None, e["types"]])
+            rows.sort(key=lambda r: (-r[2], str(r[0])))
+            return _Result(rows[:params["cap"]])
         if "_AggMeta" in cypher:
             regime, stamp = self.meta
             return _Result([[regime, stamp, None, "2026-07-11T00:00:00Z"]])
@@ -117,20 +143,6 @@ class _TraceFake:
 
     async def ro_query(self, cypher, params=None, timeout=None, **kwargs):
         params = params or {}
-        if "AS partner" in cypher and "[r:" in cypher:
-            # trace_closure_coarse — every rollup cell INCIDENT to the focus,
-            # one direction per query, heaviest first, capped.
-            if self.fail_coarse:
-                raise RuntimeError("coarse read timed out")
-            incoming = "<-[r" in cypher
-            rows = []
-            for (src, tgt), e in self.agg.items():
-                near, far = (tgt, src) if incoming else (src, tgt)
-                if near != params["urn"]:
-                    continue
-                rows.append([far, _label(far), e["weight"], e["sd"], e["td"], None, e["types"]])
-            rows.sort(key=lambda r: (-r[2], r[0]))
-            return _Result(rows[:params["cap"]])
         if "RETURN 'd' AS side" in cypher and "RETURN 'p' AS side" in cypher:
             # The ASYMMETRIC collectors: one side steps, the partner
             # contributes itself and its whole subtree.
@@ -161,22 +173,25 @@ class _TraceFake:
                 if s in params["sUrns"] and t in params["tUrns"] and et in params["ltypes"]:
                     rows.append([s, t, et, f"raw-{s}-{t}", {}])
             return _Result(rows)
-        if "count(r) AS degree" in cypher:
+        if "AS degree" in cypher:
             # _lineage_degrees: the WALK's own per-anchor degree read (one
             # query per direction per label bucket). Computed from the
             # lineage list, so the walk's estimates are exact against the
-            # fake; `fail_walk_degrees` turns it into a failed bucket.
+            # fake; `fail_walk_degrees` turns it into a failed bucket. Rows
+            # are [urn, addressable degree, all edges]: the degree counts
+            # only far ends with a usable urn, as the expand returns them.
             if self.fail_walk_degrees:
                 raise RuntimeError("degree query failed")
             incoming = "<-[r" in cypher
             wanted = set(params["urns"])
-            counts = {u: 0 for u in wanted}
+            counts = {u: [0, 0] for u in wanted}
             for s, t, _ in self.lineage:
-                if incoming and t in wanted:
-                    counts[t] += 1
-                elif not incoming and s in wanted:
-                    counts[s] += 1
-            return _Result([[u, c] for u, c in counts.items()])
+                near, far = (t, s) if incoming else (s, t)
+                if near in wanted:
+                    counts[near][1] += 1
+                    if _FAR_FILTER not in cypher or _addressable(far):
+                        counts[near][0] += 1
+            return _Result([[u, c[0], c[1]] for u, c in counts.items()])
         if "WHERE id(r) >= $after" in cypher:
             # _page_raw_lineage_single: cursor page over ONE node's
             # adjacency. `self.adjacency[(urn, direction)]` is an ordered
@@ -193,17 +208,19 @@ class _TraceFake:
             limit = params["limit"]
             incoming = "<-[r" in cypher
             key = (urn, "incoming" if incoming else "outgoing")
+            keep = (lambda o: _addressable(o)) if _FAR_FILTER in cypher else (lambda o: True)
             if key in self.adjacency:
                 edges = self.adjacency[key]
-                page = [(eid, other, et) for eid, (other, et) in enumerate(edges) if eid >= after][:limit]
+                page = [(eid, other, et) for eid, (other, et) in enumerate(edges)
+                        if eid >= after and keep(other)][:limit]
             else:
                 page = []
                 for eid, (s, t, et) in enumerate(self.lineage):
                     if eid < after:
                         continue
-                    if incoming and t == urn:
+                    if incoming and t == urn and keep(s):
                         page.append((eid, s, et))
-                    elif not incoming and s == urn:
+                    elif not incoming and s == urn and keep(t):
                         page.append((eid, t, et))
                 page = page[:limit]
             rows = []
@@ -235,6 +252,8 @@ class _TraceFake:
                 elif not incoming and s in frontier:
                     other = t
                 else:
+                    continue
+                if _FAR_FILTER in cypher and not _addressable(other):
                     continue
                 rows.append([s, t, f"raw-{eid}", et, other, None])
             # `LIMIT $limit` is part of the query, not an afterthought the
@@ -271,7 +290,10 @@ class _TraceFake:
                     if c not in desc:
                         desc.add(c)
                         stack.append(c)
-            matched = sorted(u for u in desc if u in lin_nodes)
+            matched = sorted(
+                u for u in desc
+                if u in lin_nodes and ("typeOf(d.urn) = 'String'" not in cypher or _addressable(u))
+            )
             if after is not None:
                 # Keyset resume, INCLUSIVE: the cursor names the next
                 # anchor to consider (`d.urn >= $after`).
@@ -308,9 +330,11 @@ def _make_provider(fake, levels=None, hydrate=True):
     async def _no_ancestors(urns, ctypes):
         return []
 
-    async def _degrees(urns, edge_types=None):
+    async def _degrees(urns, edge_types=None, *, addressable_only=False):
         # Mirrors get_node_degrees' contract: a urn ABSENT from the result is
-        # unknown, not zero.
+        # unknown, not zero. `fake.degrees` is already in the closure's
+        # terms (addressable edges); the flag is recorded for the tests.
+        fake.degree_asks.append(addressable_only)
         return {u: dict(fake.degrees[u]) for u in urns if u in fake.degrees}
 
     p._ensure_connected = _noop

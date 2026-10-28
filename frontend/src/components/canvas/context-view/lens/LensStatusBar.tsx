@@ -19,6 +19,7 @@
  */
 import { cn } from '@/lib/utils'
 import { useLineageDirectionColors } from '@/hooks/useLineageDirectionColors'
+import { unresolvedFlowsLabel, unresolvedFlowsNote } from '@/components/canvas/context-view/connections/connectionUnits'
 
 
 /** The gestures, most essential first. A narrow bar DROPS the last ones
@@ -99,10 +100,13 @@ export interface LensStatusBarProps {
    *  it: upstream → only what feeds the focus, again → both. Without
    *  this the legend stays a key and nothing in it is clickable. */
   onDirection?: (direction: LensStatusDirection) => void
+  /** Flows the server left out because their other end has no URN — a
+   *  quiet fact, not a failure. Hidden at 0. */
+  unresolvedFlows?: number
   className?: string
 }
 
-export function LensStatusBar({ cards, wires, bundles, zoom, direction = 'both', onDirection, className }: LensStatusBarProps) {
+export function LensStatusBar({ cards, wires, bundles, zoom, direction = 'both', onDirection, unresolvedFlows = 0, className }: LensStatusBarProps) {
   const facts = [
     plural(cards, 'card', 'cards'),
     plural(wires, 'wire', 'wires'),
@@ -173,6 +177,9 @@ export function LensStatusBar({ cards, wires, bundles, zoom, direction = 'both',
         className="flex-shrink-0 pl-4 border-l border-black/[0.08] dark:border-white/[0.08] text-[10.5px] tabular-nums text-ink-muted whitespace-nowrap"
       >
         {facts.join(' · ')}
+        {unresolvedFlows > 0 && (
+          <span title={unresolvedFlowsNote(unresolvedFlows)}>{` · ${unresolvedFlowsLabel(unresolvedFlows)}`}</span>
+        )}
       </p>
     </div>
   )

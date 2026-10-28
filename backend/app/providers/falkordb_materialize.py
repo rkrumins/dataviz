@@ -97,6 +97,7 @@ from backend.app.providers.shard_capacity import (
 )
 from backend.common.providers.identity import (
     node_identity_expr as _shared_identity_expr,
+    quote_property,
 )
 from backend.common.providers.pair_rules import (
     ancestor_closure,
@@ -1626,6 +1627,7 @@ class AggregationPipeline:
         self._identity_sample_total = 0             # nodes sampled by that probe
         self._identity_autohealed = False           # ran the auto-detect + stamp recovery once
         self._autohealed_identity: Optional[str] = None  # property the auto-heal adopted
+        self._identity_gaps: Optional[Dict[str, Any]] = None  # lineage nodes with no usable urn
 
     # -- tuning knob resolution ---------------------------------------------
 
@@ -2689,6 +2691,7 @@ class AggregationPipeline:
             self._mark_phase("apply_s")
             await self._apply_missing(existing)
             self._mark_phase("done")
+            await self._probe_lineage_identity_gaps()
 
             final_total = len(self._flushed | set(self._acc.keys()))
             await self._stamp_run_meta(final_total)
@@ -2808,6 +2811,45 @@ class AggregationPipeline:
                     "because an endpoint had no resolvable identity (a deleted "
                     "node, or a missing `urn`/identity property)."
                 ),
+            })
+        gaps = self._identity_gaps
+        if gaps:
+            ident = gaps["identity_property"]
+            labels = ", ".join(
+                f"{lbl} ({n})" for lbl, n in sorted(gaps["by_label"].items(), key=lambda kv: -kv[1])[:5]
+            )
+            others = ", ".join(
+                f"`{c}` ({n})" for c, n in sorted(gaps["carry"].items(), key=lambda kv: -kv[1]) if c != ident
+            )
+            message = (
+                f"{gaps['nodes']} lineage-bearing node(s) have no usable `urn` — {labels} — so "
+                "traces, the canvas and exports leave their lineage out."
+            )
+            if gaps["non_text"]:
+                message += (
+                    f" {gaps['non_text']} carry a urn that is not text: re-aggregating rewrites the "
+                    "ones this platform stamped; a native one must be fixed where it was loaded."
+                )
+            if gaps["mapped"]:
+                message += (
+                    f" {gaps['mapped']} carry `{ident}`, the configured Node Identity Property, "
+                    "but have no urn of their own"
+                    + (" — this source is never stamped in dedicated projection mode."
+                       if getattr(self.p, "_projection_mode", None) == "dedicated"
+                       else " — re-aggregate so the identity stamp fills it.")
+                )
+            elif others:
+                message += (
+                    f" They carry {others}: set the data source's Node Identity Property to the "
+                    "one that holds the node id and re-aggregate."
+                )
+            elif not gaps["non_text"]:
+                message += " They carry none of the usual identity properties: fix the loader that wrote them."
+            advisories.append({
+                "kind": "lineage_identity_gaps",
+                "severity": "warning",
+                **{k: gaps[k] for k in ("identity_property", "nodes", "non_text", "mapped", "carry", "by_label")},
+                "message": message,
             })
         if self._autohealed_identity:
             advisories.append({
@@ -5405,6 +5447,65 @@ class AggregationPipeline:
         except Exception as exc:
             logger.debug("identity candidate probe failed: %s", exc)
             return {}, 0
+
+    async def _probe_lineage_identity_gaps(self) -> None:
+        """Read-only, best effort, once per run: the lineage-bearing nodes that
+        have no usable urn (none, or not text). Every read leaves their edges
+        out — a trace, the canvas, an export — so this is where an operator
+        hears how much lineage that hides, per label, and what the nodes DO
+        carry: ``mapped`` counts the configured identity property (a mapping
+        that never reached them), ``carry`` every likely-unique candidate.
+        Never fails or slows a run past one scan budget."""
+        types = list(getattr(self, "_effective_types", None) or [])
+        if not types:
+            return
+        from backend.app.providers.falkordb_provider import _has_urn, _sanitize_label
+        from backend.common.derived_artifacts import is_derived_label
+
+        ident = str(getattr(self.p, "_node_identity_property", None) or "urn").strip() or "urn"
+        cands = [c for c in dict.fromkeys((ident, *self._AUTOHEAL_IDENTITY_PRIORITY)) if c != "urn"]
+        sums = "".join(
+            f", sum(CASE WHEN n.{quote_property(c)} IS NOT NULL THEN 1 ELSE 0 END)" for c in cands
+        )
+        rel_alt = "|".join(_sanitize_label(t) for t in types)
+        try:
+            res = await self.p._ro_query(
+                f"MATCH (n) WHERE NOT {_has_urn('n')} AND (n)-[:{rel_alt}]-() "
+                "RETURN labels(n)[0], count(n), sum(CASE WHEN n.urn IS NULL THEN 0 ELSE 1 END)"
+                + sums,
+                timeout=self._scan_timeout(),
+            )
+        except Exception as exc:
+            logger.debug("lineage identity gap probe failed: %s", exc)
+            return
+        by_label: Dict[str, int] = {}
+        non_text = 0
+        carry: Dict[str, int] = {}
+        for row in res.result_set or []:
+            label = str(row[0] or "")
+            if is_derived_label(label) or not row[1]:
+                continue
+            by_label[label] = by_label.get(label, 0) + int(row[1])
+            non_text += int(row[2] or 0)
+            for c, n in zip(cands, row[3:]):
+                if n:
+                    carry[c] = carry.get(c, 0) + int(n)
+        if not by_label:
+            return
+        self._identity_gaps = {
+            "identity_property": ident,
+            "nodes": sum(by_label.values()),
+            "non_text": non_text,
+            "mapped": carry.get(ident, 0) if ident != "urn" else 0,
+            "carry": carry,
+            "by_label": by_label,
+        }
+        logger.warning(
+            "aggregation pipeline on %s: %d lineage-bearing node(s) have no usable urn "
+            "(non-text %d, carrying `%s` %d): %s",
+            self.p._graph_name, self._identity_gaps["nodes"], non_text, ident,
+            self._identity_gaps["mapped"], by_label,
+        )
 
     async def _resolve_ids(self, ids: List[int]) -> Dict[int, Tuple[str, str]]:
         """Resolve node IDs → (urn, first label) from the range-scanned

@@ -76,3 +76,16 @@ export function formatUnitCount(count: number, unit: ConnectionCountUnit): strin
 export function unitMeaning(unit: ConnectionCountUnit): string {
   return CONNECTION_COUNT_UNITS[unit].meaning
 }
+
+/** The sentence for flows the server left out because their other end has
+ *  no URN. "At least": pages count per response, so the walk keeps a max. */
+export function unresolvedFlowsNote(count: number): string {
+  return count === 1
+    ? `At least ${formatUnitCount(count, 'flows')} isn't shown — the entity at its other end has no URN.`
+    : `At least ${formatUnitCount(count, 'flows')} aren't shown — the entities at their other ends have no URN.`
+}
+
+/** `"at least 3 underlying flows not shown"` — the short form of the note. */
+export function unresolvedFlowsLabel(count: number): string {
+  return `at least ${formatUnitCount(count, 'flows')} not shown`
+}

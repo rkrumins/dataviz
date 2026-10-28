@@ -434,6 +434,37 @@ def test_stamp_never_overwrites_a_native_urn():
     assert "n.`urnSource` <> $ident" in stamp
 
 
+def test_stamp_writes_the_urn_as_text_and_repoints_one_it_stamped_otherwise():
+    """Every urn lookup binds a string, so an integer `id` copied as-is could
+    never be found again — its lineage could not be walked at all. The stamp
+    writes text, and rewrites a non-text urn it stamped on an earlier run."""
+    p = _make_provider(_FakeFalkor())
+    p._node_identity_property = "id"
+    p._projection_mode = "in_source"
+    calls = []
+
+    async def _noop_connect():
+        return None
+
+    async def _ro(cypher, params=None, **kw):
+        return _Result([[100]]) if "max(ID(n))" in cypher else _Result([])
+
+    async def _wq(cypher, params=None, **kw):
+        calls.append(cypher)
+        r = _Result()
+        r.properties_set = 1
+        return r
+
+    p._ensure_connected = _noop_connect
+    p._ro_query = _ro
+    p._query = _wq
+    _run(p.stamp_identity_urns())
+
+    stamp = next(c for c in calls if "n.`urnSource`" in c)
+    assert "THEN toString(n.`id`) ELSE n.`urn` END" in stamp
+    assert "(n.`urnSource` = $ident AND typeOf(n.`urn`) <> 'String')" in stamp
+
+
 def test_stamp_repoints_nodes_it_previously_stamped():
     """Re-pointing a source from `id` to `uuid` must rewrite the nodes stamped
     under `id`. The fill-only pass could not: `urn` was already set, so the
@@ -764,6 +795,66 @@ def test_clean_run_emits_no_advisories_key():
     """A conforming run's run_stats must be unchanged — no advisories noise."""
     pipe = _make_pipeline()
     assert "advisories" not in pipe._result(10)["run_stats"]
+
+
+def _gap_probe(pipe, rows):
+    """Run the identity-gap probe against canned rows; returns the Cypher."""
+    pipe._effective_types = ["FLOWS"]
+    seen = []
+
+    async def _ro(cypher, params=None, **kw):
+        seen.append(cypher)
+        return _Result(rows)
+
+    pipe.p._ro_query = _ro
+    _run(pipe._probe_lineage_identity_gaps())
+    return seen
+
+
+def test_identity_gaps_names_the_labels_and_the_property_the_nodes_carry():
+    """A urn-keyed source where some lineage-bearing nodes carry only `id`:
+    every read leaves their lineage out, and 'In sync' counts never showed
+    it. The advisory says how many, where, and what to set."""
+    pipe = _make_pipeline()
+    # label, nodes, non-text urns, then one carry count per candidate
+    # (id, uuid, guid, qualifiedName, key); bookkeeping labels are ignored.
+    seen = _gap_probe(pipe, [["Column", 3, 0, 3, 0, 0, 0, 0], ["_AggMeta", 9, 0, 0, 0, 0, 0, 0]])
+
+    assert "typeOf(n.urn) = 'String'" in seen[0] and "(n)-[:FLOWS]-()" in seen[0]
+    hit = next(a for a in pipe._result(5)["run_stats"]["advisories"] if a["kind"] == "lineage_identity_gaps")
+    assert hit["severity"] == "warning"
+    assert (hit["nodes"], hit["by_label"], hit["carry"], hit["mapped"]) == (3, {"Column": 3}, {"id": 3}, 0)
+    assert "Column (3)" in hit["message"] and "`id` (3)" in hit["message"]
+    assert "Node Identity Property" in hit["message"]
+
+
+def test_identity_gaps_counts_the_configured_property_as_mapped():
+    """`mapped` > 0 means the nodes carry the configured identity property but
+    no urn — the case read-time identity would have to cover."""
+    pipe = _make_pipeline()
+    pipe.p._node_identity_property = "id"
+    pipe.p._projection_mode = "dedicated"
+    _gap_probe(pipe, [["Column", 4, 1, 3, 0, 0, 0, 0]])
+
+    hit = next(a for a in pipe._result(5)["run_stats"]["advisories"] if a["kind"] == "lineage_identity_gaps")
+    assert (hit["mapped"], hit["non_text"]) == (3, 1)
+    assert "never stamped in dedicated projection mode" in hit["message"]
+    assert "not text" in hit["message"]
+
+
+def test_identity_gaps_probe_failure_is_silent_and_a_clean_graph_reports_nothing():
+    pipe = _make_pipeline()
+    pipe._effective_types = ["FLOWS"]
+
+    async def _boom(cypher, params=None, **kw):
+        raise RuntimeError("scan timed out")
+
+    pipe.p._ro_query = _boom
+    _run(pipe._probe_lineage_identity_gaps())
+    assert "advisories" not in pipe._result(5)["run_stats"]
+
+    _gap_probe(pipe, [])
+    assert "advisories" not in pipe._result(5)["run_stats"]
 
 
 # ── semantics ────────────────────────────────────────────────────────────

@@ -134,10 +134,14 @@ function summariesLane(s: SyncSummaries | null | undefined, doc: SyncStatus, now
   if (s.driftState === 'neverBuilt' || s.aggregationStatus === 'none') {
     return { ...lane, tone: 'warn', short: 'not built', status: 'Not built yet', lines: [], next }
   }
+  // What the counts can never show: entities whose lineage no read can draw. A fact, not a fault.
+  const gaps = s.identityGaps
+    ? [`${num(s.identityGaps)} ${s.identityGaps === 1 ? 'entity has' : 'entities have'} lineage but no usable URN, so it isn't shown — see the last rebuild's advisory`]
+    : []
   if (!versioned && changed) {
-    return { ...lane, tone: 'warn', short: 'out of date', status: 'Out of date', lines: [built], next }
+    return { ...lane, tone: 'warn', short: 'out of date', status: 'Out of date', lines: [built, ...gaps], next }
   }
-  return { ...lane, tone: 'ok', short: 'up to date', status: 'Up to date', lines: [built], next }
+  return { ...lane, tone: 'ok', short: 'up to date', status: 'Up to date', lines: [built, ...gaps], next }
 }
 
 export function deriveSync(doc: SyncStatus | undefined, now: number = Date.now()): SyncVerdict {
