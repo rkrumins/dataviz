@@ -35,6 +35,7 @@ import { followExport } from '@/services/searchExport'
 import type { SearchExportResult, SearchQuery } from '@/types/search'
 
 import { useDiscovery } from '../builder/useDiscovery'
+import { readableSearchError } from './errorPaths'
 import { edgeTypeName } from './vocabulary/edgeWords'
 
 
@@ -540,22 +541,11 @@ function failureMessage(e: unknown): string {
     if (status === 403) return "You can't export matches from this view."
     if (status === 404) return 'This view is no longer available.'
     if (status === 501) return "This data source can't export search matches."
-    const detail = serverDetail(e)
-    if (status === 400 && detail) return detail
-    return `Couldn't export — ${detail ?? (e as Error)?.message ?? 'unknown error'}`
-}
-
-
-function serverDetail(e: unknown): string | null {
-    const message = (e as Error)?.message ?? ''
-    const body = message.replace(/^API Error \d+: /, '')
-    try {
-        const parsed = JSON.parse(body) as { detail?: unknown }
-        if (typeof parsed.detail === 'string') return parsed.detail
-    } catch {
-        // Not JSON: no detail to show.
-    }
-    return null
+    // The server's own words — its reason for a busy or failed graph too —
+    // never the raw ``API Error 500: {…}`` body.
+    const text = readableSearchError((e as Error)?.message ?? '')
+    if (status === 400) return text
+    return `Couldn't export — ${text || 'unknown error'}`
 }
 
 

@@ -114,6 +114,12 @@ The line under the chip says how many entities in the View match:
 Chips are worked out for the entities loaded on the canvas; the count covers
 the whole View.
 
+When the rules can't be checked — the graph is busy, or doesn't answer — the
+list says so above the cards, with why: **Couldn’t check the display rules, so
+some tags or counts may be missing.** The canvas would otherwise just show no
+chips, as if nothing matched. **Retry** checks them again; so does loading more
+of the canvas.
+
 ---
 
 ## Who sees rules, and who can change them

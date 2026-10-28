@@ -145,6 +145,37 @@ describe('useAdvancedSearch — exact ancestor counts from the aggregation', () 
         expect(useSearchStore.getState().ancestorMatchCounts.get('A')).toBe(42)
     })
 
+    it('says why a later page failed, keeps the result, and clears once it loads', async () => {
+        searchAdvanced.mockResolvedValueOnce(page({ hits: [HIT], cursor: 'cursor-1' }))
+        searchAdvanced.mockRejectedValueOnce(new Error(
+            'API Error 503: {"detail":{"code":"PROVIDER_UNAVAILABLE",'
+            + '"reason":"the graph store for this provider is not answering; retrying automatically"}}'))
+        searchAdvanced.mockResolvedValueOnce(page({
+            hits: [{ ...HIT, node: { ...HIT.node, urn: 'hit-2' } }],
+        }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        expect(result.current.loadMoreError).toBeNull()
+        await act(async () => {
+            await result.current.loadMore()
+        })
+        expect(result.current.loadMoreError).toBe(
+            'The graph store for this provider is not answering; retrying automatically.')
+        const view = result.current.view
+        expect(view.kind === 'results' && view.result.hits?.map((h) => h.node.urn)).toEqual(['hit-1'])
+
+        await act(async () => {
+            await result.current.loadMore()
+        })
+        expect(result.current.loadMoreError).toBeNull()
+        const after = result.current.view
+        expect(after.kind === 'results' && after.result.hits?.map((h) => h.node.urn))
+            .toEqual(['hit-1', 'hit-2'])
+    })
+
     it('falls back to the path rollup when the run asked for no aggregation', async () => {
         searchAdvanced.mockResolvedValue(page({ hits: [HIT] }))
 

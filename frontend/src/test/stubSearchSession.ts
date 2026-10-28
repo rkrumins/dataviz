@@ -36,6 +36,7 @@ export function stubAdvanced(
         cancel: vi.fn(),
         loadMore: vi.fn(async () => {}),
         isLoadingMore: false,
+        loadMoreError: null,
         ...over,
     }
 }

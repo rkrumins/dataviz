@@ -45,6 +45,21 @@ describe('readableSearchError — a failed request in plain words', () => {
         )).toBe('Missing permission: workspace:datasource:read')
     })
 
+    it('reads the server’s reason for a busy, failing-over or timed-out graph', () => {
+        expect(readableSearchError(
+            'API Error 429: {"detail":{"code":"PROVIDER_BUSY","providerName":"search",'
+            + '"reason":"the graph is busy and its entity types could not be read","retryAfterSeconds":2}}',
+        )).toBe('The graph is busy and its entity types could not be read.')
+        expect(readableSearchError(
+            'API Error 503: {"detail":{"code":"PROVIDER_FAILING_OVER","reason":"the graph store node '
+            + 'holding this graph is restarting or failing over — retrying automatically"}}',
+        )).toBe('The graph store node holding this graph is restarting or failing over — retrying automatically.')
+        expect(readableSearchError(
+            'API Error 504: {"detail":{"code":"REQUEST_TIMEOUT","reason":"Request timed out after 120s. '
+            + 'The graph service is still available — retry shortly."}}',
+        )).toBe('Request timed out after 120s. The graph service is still available — retry shortly.')
+    })
+
     it('reads FastAPI validation entries as positions', () => {
         expect(readableSearchError(
             'API Error 422: {"detail":[{"loc":["body","predicate","children",0,"value"],"msg":"Field required","type":"missing"},'

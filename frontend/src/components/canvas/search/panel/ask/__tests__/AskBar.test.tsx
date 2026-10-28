@@ -119,6 +119,28 @@ describe('AskBar', () => {
         expect(within(list).getByText('in Tableau')).toBeInTheDocument()
     })
 
+    it('says what it left out, instead of reading it as something else', () => {
+        const { ask } = setup()
+        ask('datasets without a steward')
+        expect(screen.getByText('This view has no property called “steward”, so that condition was left out.'))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/Searched for by name/)).not.toBeInTheDocument()
+    })
+
+    it('reads "what does X feed" as what X feeds, X looked up with what is inside it', async () => {
+        const { ask, input, onAsk, resolveSearchRefs } = setup()
+        ask('what does orders feed')
+        await screen.findByRole('button', { name: /names 2 entities/ })
+        expect(resolveSearchRefs).toHaveBeenCalledWith(
+            { scope: { viewId: 'view-a' }, refs: [{ path: ['**', 'orders'] }] }, expect.anything())
+        expect(screen.getByRole('button', { name: 'it and what’s inside' })).toHaveAttribute('aria-pressed', 'true')
+        fireEvent.click(screen.getByRole('button', { name: 'just it' }))
+        fireEvent.keyDown(input, { key: 'Enter' })
+        expect(onAsk).toHaveBeenCalledWith(expect.objectContaining({
+            kind: 'related', axis: 'upstream', where: { kind: 'is', refs: [{ path: ['**', 'orders'] }] },
+        }))
+    })
+
     it('offers questions to try in the view\'s own words, plainer for Business', () => {
         const { input } = setup(null, 'hero')
         expect(screen.getByRole('button', { name: 'datasets that feed dashboards' })).toBeInTheDocument()

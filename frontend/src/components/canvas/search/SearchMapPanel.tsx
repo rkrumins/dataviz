@@ -261,7 +261,7 @@ function PanelInner({
 }: PanelInnerProps) {
     const {
         view, runState, runPredicate, cancel,
-        resetTemplate, loadMore, isLoadingMore,
+        resetTemplate, loadMore, isLoadingMore, loadMoreError,
     } = session
     // The canvas's session, when there is one. `session` above is only
     // its PIPELINE; everything the results-first layout needs beyond that
@@ -674,6 +674,7 @@ function PanelInner({
             onOpen={onOpenNode}
             onLoadMore={loadMore}
             isLoadingMore={isLoadingMore}
+            loadMoreError={loadMoreError}
             onLoadAll={loadAll}
             isLoadingAll={isLoadingAll}
             onCancelLoadAll={cancelLoadAll}
@@ -828,6 +829,7 @@ function PanelInner({
                                     onFrame={frameMatches}
                                     canLoadMore={!!view.result.cursor}
                                     isLoadingMore={isLoadingMore}
+                                    loadMoreError={loadMoreError}
                                     onLoadMore={loadMore}
                                 />
                             ) : tableHits.length > 0 && studioView === 'table' && view.kind === 'results' ? (
@@ -843,6 +845,7 @@ function PanelInner({
                                     onFrame={frameMatches}
                                     canLoadMore={!!view.result.cursor}
                                     isLoadingMore={isLoadingMore}
+                                    loadMoreError={loadMoreError}
                                     onLoadMore={loadMore}
                                     viewId={viewId}
                                     total={view.result.totalCount ?? view.result.candidateCount ?? null}
