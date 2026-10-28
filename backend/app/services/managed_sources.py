@@ -36,30 +36,49 @@ logger = logging.getLogger(__name__)
 
 async def same_server_providers(session: AsyncSession, provider_id: Optional[str]) -> List[str]:
     """``provider_id`` (``None`` or ``'default'``: the env instance) and every other id that
-    reaches the same FalkorDB server — each FalkorDB provider row, and ``'default'``, whose host
-    and port resolve (``resolve_falkordb_target``) to the same target. ``'default'`` is the env's
-    ``FALKORDB_HOST`` / ``FALKORDB_PORT``. Provider rows are not unique by server, so a key's
-    provider id alone does not say which physical graph it is: who claims or reads a key asks
-    under every one of these. ``provider_id`` comes first; an id no FalkorDB row has stands
-    alone."""
+    reaches the same FalkorDB server — each FalkorDB provider row, and ``'default'``, whose
+    connection (:func:`_endpoints`) meets this one's. ``'default'`` is the env's ``FALKORDB_*``
+    settings. Provider rows are not unique by server, so a key's provider id alone does not say
+    which physical graph it is: who claims or reads a key asks under every one of these.
+    ``provider_id`` comes first; an id no FalkorDB row has stands alone."""
     from backend.app.db.models import ProviderORM
-    from backend.app.providers.falkordb_provider import resolve_falkordb_target
     from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER as default
 
-    def server(host, port):
-        return resolve_falkordb_target(host, int(port or 6379))
-
     rows = (await session.execute(
-        select(ProviderORM.id, ProviderORM.host, ProviderORM.port)
+        select(ProviderORM.id, ProviderORM.host, ProviderORM.port, ProviderORM.extra_config)
         .where(ProviderORM.provider_type == "falkordb").order_by(ProviderORM.id))).all()
-    servers = {pid: server(host, port) for pid, host, port in rows}
-    servers[default] = server(os.getenv("FALKORDB_HOST", "localhost"),
-                              os.getenv("FALKORDB_PORT", "6379"))
+    servers = {pid: _endpoints(host, port, extra) for pid, host, port, extra in rows}
+    servers[default] = _endpoints(os.getenv("FALKORDB_HOST", "localhost"),
+                                  os.getenv("FALKORDB_PORT", "6379"), None)
     own = provider_id or default
     if own not in servers:
         return [own]
-    return [own] + [pid for pid, target in servers.items()
-                    if pid != own and target == servers[own]]
+    return [own] + [pid for pid, ends in servers.items() if pid != own and ends & servers[own]]
+
+
+def _endpoints(host, port, extra_config: Optional[str]) -> set:
+    """Where a FalkorDB connection starts, as the provider's connection settings say
+    (``falkordbConnection`` in ``extra_config``, the env for what it leaves out): its host and
+    port; for a sentinel topology each sentinel with the master it serves; for a cluster, its
+    seed nodes. Sentinel and cluster providers leave the host blank, so it says nothing there.
+    Two connections whose endpoints meet reach one server; two seed lists of one cluster that
+    share no node are not seen as one. Unreadable settings: the host and port."""
+    from backend.app.providers.falkordb_connection import load_connection_config
+    from backend.app.providers.falkordb_provider import resolve_falkordb_target
+
+    target = resolve_falkordb_target(host, int(port or 6379))
+    try:
+        conn = (json.loads(extra_config) if extra_config else {}).get("falkordbConnection")
+        cfg = load_connection_config(conn, host=target[0], port=target[1], username=None,
+                                     password=None)
+    except Exception:                                # pragma: no cover - malformed settings
+        return {target}
+    if cfg.mode == "sentinel":
+        return {("sentinel", cfg.sentinel_master, *resolve_falkordb_target(h, p))
+                for h, p in cfg.sentinel_nodes}
+    if cfg.mode == "cluster":
+        return {resolve_falkordb_target(h, p) for h, p in cfg.cluster_nodes}
+    return {target}
 
 
 async def graph_key_bindings(session: AsyncSession, provider_id: Optional[str], graph_name: str,

@@ -284,6 +284,34 @@ def test_source_changed_is_a_connectors_word_that_it_wrote(monkeypatch, route):
     assert (seen["ds_id"], seen["origin"]) == ("ds-1", "connector"), seen
 
 
+def test_a_versioned_source_whose_summaries_are_dedicated_is_marked_and_rebuilt(monkeypatch):
+    """The projector writes none of a dedicated source's summaries, so a change leaves them
+    behind as for any source: marked, and rebuilt. The versioned refresh cleared the marker a
+    publish had just set while that publish's rebuild still waited, and queued nothing."""
+    dedicated = types.SimpleNamespace(id="ds-1", workspace_id="ws-1", deleted_at=None,
+                                      projection_mode="dedicated")
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="OLD"), ds=dedicated, current_fp="NEW",
+        versioned=True)
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert order == _FULL_SEQUENCE and resp.job_id == "agg_new"
+
+
+@pytest.mark.parametrize("mode, stored", [("dedicated", "BEFORE"), ("in_source", "AFTER"),
+                                          (None, "AFTER")])
+def test_a_finished_run_is_compared_by_the_graph_its_summaries_hold(mode, stored):
+    """A dedicated run writes its summaries into a graph of their own, so the source graph's
+    fingerprint moves while it runs only by what others write — a publish, say, whose rebuild
+    the running job turned away — and its summaries may not hold that: the gate keeps the
+    fingerprint taken before the run, so a later sweep sees the change. An in-source run writes
+    into the graph it fingerprints, so it keeps the one taken after."""
+    from backend.app.services.aggregation.worker import _gate_fingerprint
+
+    job = types.SimpleNamespace(projection_mode=mode, graph_fingerprint_before="BEFORE",
+                                graph_fingerprint_after="AFTER")
+    assert _gate_fingerprint(job) == stored
+
+
 def test_an_unversioned_source_is_never_flagged(monkeypatch):
     # Regression guard (passes before the change): nothing to bring into history.
     svc, session, order, captured = _build(

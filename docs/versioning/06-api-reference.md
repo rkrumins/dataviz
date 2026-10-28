@@ -194,7 +194,7 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 
 | Method · Path | Gate | Purpose / key fields |
 |---|---|---|
-| `POST /graphs` | `_MANAGE` | Create a versioned graph holding only its genesis commit. `{dataSourceId, workspaceId, kind?, baseOntologyId?, tenantId?, ontologySpec?, ontologyEnforcement?}` → **201** `{graphId, mainBranchId, genesisCommitId}`. The graph projects into the data source's own FalkorDB graph on its own provider; the caller does not choose them. `workspaceId` must equal the path (else **400**); a data source not in this workspace is a **404**; a source that isn't FalkorDB is **422 `provider_unsupported`**; a FalkorDB graph another versioned graph already projects into, through any provider on the same server, is **409 `graph_key_in_use`**. To copy a data source's existing graph in, use **bootstrap** ([§4](#cascade-preview--bootstrapresync)) instead |
+| `POST /graphs` | `_MANAGE` | Create a versioned graph holding only its genesis commit. `{dataSourceId, workspaceId, kind?, baseOntologyId?, tenantId?, ontologySpec?, ontologyEnforcement?}` → **201** `{graphId, mainBranchId, genesisCommitId}`. The graph projects into the data source's own FalkorDB graph on its own provider; the caller does not choose them. `workspaceId` must equal the path (else **400**); a data source not in this workspace is a **404**; a source that isn't FalkorDB is **422 `provider_unsupported`**; a FalkorDB graph another versioned graph already projects into, through any provider on the same server (for a sentinel or cluster provider, the server its topology names), is **409 `graph_key_in_use`**. To copy a data source's existing graph in, use **bootstrap** ([§4](#cascade-preview--bootstrapresync)) instead |
 | `GET /graphs/{gid}` | `_READ` | Graph metadata (`GraphResponse`: `graphId`, `workspaceId`, `tenantId`, `kind`, `baseOntologyId`, `forkParentGraphId`, `forkBaseCommitSeq`, `mainHeadCommitSeq`, `createdBy`, `createdAt`, `userNames`) |
 | `GET /resolve` | `_READ`, or read access to the view in `viewId` | `?dataSourceId&viewId` → `ResolveResponse{graphId, mainBranchId, mainHeadCommitSeq, myDraft?, kind, bootstrap?, lifecycleState, lifecycleRev}`. **Read-only — never opens a draft.** `kind` is `manual`, `authoritative`, `hybrid` or `blank`; `bootstrap` is the enablement job while the graph is still at genesis and that job is pending, running, waiting for a decision (`needs_decision`) or failed — the graph is versioned only once `bootstrap` is `null`. `lifecycleState` is `live` or `frozen` (editing is paused), and `lifecycleRev` is what a freeze or unfreeze names. **404** when no versioned graph backs the data source. For every data source of a workspace at once, `GET /api/v1/admin/workspaces/{ws_id}/data-sources?include=versioning` gives each one's `graphId`, `kind` and the head of `main` — see [Graph Metadata & History API](/docs/graph-metadata-api) |
 | `POST /resolve` | `_MANAGE` | `{dataSourceId, originatingViewId?}` → the same shape, but **opens the caller's draft if there is none** (the frontend's `resolveAndOpenDraft`); on a frozen graph that has none, **409 `graph_not_writable`** |
@@ -496,12 +496,14 @@ safe: a save by the same caller on the same draft with a key that already commit
 that first commit and the entities' current values, even if the draft has closed or the graph was
 frozen since; a reused key returns the first result whatever the body. Its refusals, in order:
 **404** for a data source without a versioned graph here, or a draft that is unknown, another
-graph's or one you can't read; **422 `invalid_patch`** (also for an edge update or delete whose id
-names only an item: an edge copied in as `edge:<id>`, because an item has `<id>`, is still `<id>`
-in the graph, and that id finds it); **409 `integrity`** while version control
+graph's or one you can't read; **422 `invalid_patch`**; **409 `integrity`** while version control
 is still being enabled; **409 `main_write_forbidden`** for `main`; **503 `lock_busy`**;
 **409 `graph_not_writable`**; **409 `branch_closed`**; **403 `not_draft_owner`** or
-**`not_owner_or_member`** (**503 `groups_unavailable`** when a group decides). It:
+**`not_owner_or_member`** (**503 `groups_unavailable`** when a group decides); then **422
+`invalid_patch`** for an edge update or delete whose id names only an item on the draft. An edge
+copied in as `edge:<id>`, because an item has `<id>`, is still `<id>` in the graph, and that id
+finds it; the ids are matched only once the draft is found writable by you, and a retry is aimed
+as its first attempt was. It:
 
 1. Finds the data source's versioned graph and asserts it is in `ws_id` (else **404**).
 2. Translates each op into a service op: `create` mints or echoes `ref → entityId`; `delete` passes

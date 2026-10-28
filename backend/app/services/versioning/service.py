@@ -48,7 +48,8 @@ from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionE
                      CurationAtRisk, DraftNotReadable,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
-                     MainWriteForbidden, MassDeleteBlocked, NotAFork, NotDraftOwner, PersonRequired,
+                     MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
+                     PersonRequired,
                      ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted, SelfReview,
                      VersionConflict)
 from .ids import prefixed_id
@@ -7035,12 +7036,17 @@ class GraphVersioningService:
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
         allow_main: bool = False,
         idempotency_key: Optional[str] = None,
+        aim_edges: bool = False,
     ) -> ApplyResult:
         """:meth:`apply_ops`, answering with every addressed entity's value after the batch.
 
         With ``idempotency_key``, a batch whose commit on the branch already carries the key is
         not applied again: the answer is that commit, with the addressed entities' current values.
-        A replay runs no ``on_commit``, so the two never go together."""
+        A replay runs no ``on_commit``, so the two never go together.
+
+        ``aim_edges``: each edge update or delete goes to the edge its id names on the branch
+        (:meth:`resolve_edges`), once the branch has been found writable by ``actor`` and a
+        retry answered; an id that names only an item is refused (:class:`NotAnEdge`)."""
         assert not (idempotency_key and on_commit), "a replay would skip on_commit"
         return await self._retry_seq(
             f"apply_ops on {graph_id}/{branch_id or 'main'}",
@@ -7048,7 +7054,7 @@ class GraphVersioningService:
                 graph_id=graph_id, ops=ops, actor=actor, message=message,
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
                 ontology_rules=ontology_rules, on_commit=on_commit, allow_main=allow_main,
-                idempotency_key=idempotency_key),
+                idempotency_key=idempotency_key, aim_edges=aim_edges),
         )
 
     async def _apply_ops_once(
@@ -7059,6 +7065,7 @@ class GraphVersioningService:
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
         allow_main: bool = False,
         idempotency_key: Optional[str] = None,
+        aim_edges: bool = False,
     ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
@@ -7103,6 +7110,8 @@ class GraphVersioningService:
                     CommitORM.graph_id == graph_id, CommitORM.branch_id == bid,
                     CommitORM.idempotency_key == idempotency_key))
                 if prior is not None:
+                    if aim_edges:                  # at the edges that save wrote, as it aimed them
+                        ops = await self._aimed_as_written(s, graph_id, prior, ops)
                     kinds = {o["entity_id"]: o.get("entity_kind", "node") for o in ops}
                     cur = await self._current_values(s, graph_id, bid, list(kinds))
                     return ApplyResult(
@@ -7114,6 +7123,8 @@ class GraphVersioningService:
             if bid != main_id:
                 self._require_open(branch)
                 await self._require_edit(s, branch, actor, ())
+            if aim_edges:
+                ops = await self._aimed(s, graph_id, bid, ops)
 
             ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
 
@@ -8036,10 +8047,14 @@ class GraphVersioningService:
         edges share one id space, so an edge whose id was also a node's was re-keyed ``edge:<id>``
         when its graph was copied in (``bootstrap_worker._rekey``), while the graph still calls it
         ``<id>``: that edge answers for ``<id>``. A node never does."""
-        ids = list(dict.fromkeys(edge_ids))
         async with self._session() as s:
             bid = branch_id or await self._main_branch_id(s, graph_id)
-            vals = await self._current_values(s, graph_id, bid, ids + [f"edge:{i}" for i in ids])
+            return await self._edges_named(s, graph_id, bid, edge_ids)
+
+    async def _edges_named(self, s, graph_id: str, bid: str, edge_ids: Collection[str]
+                           ) -> Dict[str, Optional[Tuple[str, dict]]]:
+        ids = list(dict.fromkeys(edge_ids))
+        vals = await self._current_values(s, graph_id, bid, ids + [f"edge:{i}" for i in ids])
         out: Dict[str, Optional[Tuple[str, dict]]] = {}
         for i in ids:
             eid = next((e for e in (i, f"edge:{i}") if _is_edge_payload(vals.get(e))), None)
@@ -8048,6 +8063,34 @@ class GraphVersioningService:
             elif vals.get(i) is not None:
                 out[i] = None
         return out
+
+    async def _aimed(self, s, graph_id: str, bid: str, ops: Sequence[Mapping]) -> List[Mapping]:
+        """``ops`` with each edge update or delete aimed at the edge its id names on the branch
+        (:meth:`_edges_named`). An id that names only an item there is refused
+        (:class:`NotAnEdge`); one that names nothing goes as it came."""
+        asked = [o["entity_id"] for o in ops
+                 if o.get("entity_kind") == "edge" and o.get("op") in ("update", "delete")]
+        if not asked:
+            return list(ops)
+        named = await self._edges_named(s, graph_id, bid, asked)
+        items = {i for i in asked if i in named and named[i] is None}
+        if items:
+            raise NotAnEdge(items)
+        return [{**o, "entity_id": named[o["entity_id"]][0]}
+                if o.get("entity_kind") == "edge" and o.get("op") in ("update", "delete")
+                and named.get(o["entity_id"]) else o for o in ops]
+
+    async def _aimed_as_written(self, s, graph_id: str, commit_id: str,
+                                ops: Sequence[Mapping]) -> List[Mapping]:
+        """A retried batch's edge ops aimed as its first attempt aimed them: at the ``edge:<id>``
+        that attempt's commit wrote, when it wrote that and not ``<id>``. The edge may be deleted
+        since, so what the branch holds now can't say."""
+        wrote = set((await s.execute(select(EdgeVersionORM.entity_id).where(
+            EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.commit_id == commit_id)
+        )).scalars())
+        return [{**o, "entity_id": f"edge:{o['entity_id']}"}
+                if o.get("entity_kind") == "edge" and o["entity_id"] not in wrote
+                and f"edge:{o['entity_id']}" in wrote else o for o in ops]
 
     async def _entity_value_at(self, s, graph_id, branch_id, entity_id, seq) -> Optional[dict]:
         """One entity's value at ``seq`` (fork-aware): this graph, else the parent

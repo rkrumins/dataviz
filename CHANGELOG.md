@@ -47,7 +47,11 @@ jobs around such a graph.
   stayed behind for good ("extra entities"). Changing it overwrote the graph's own id. And deleting
   connection `<id>` from the canvas deleted the *item* `<id>` instead. Now the graph's own id is
   kept, the delete finds it by either id, and an update or delete of `<id>` acts on the connection
-  it names. An id that names only an item is refused (422 `invalid_patch`).
+  it names. An id that names only an item is refused (422 `invalid_patch`). On `/graph/changes` the
+  ids are matched only once the draft is found writable by the caller and a retry answered: a
+  retry of such a delete answers as its first attempt did, `main` answers 409
+  `main_write_forbidden` (it answered 500 with a connection op), and someone else's private draft
+  tells nothing of what it holds.
 - **Something else writing to the graph no longer stops publishing.** On a graph enabled in place,
   another writer (an ETL) may keep writing. The first publish after that counted "extra entities"
   and held the projection back for good. Views then fell back to Postgres, which holds neither the
@@ -99,12 +103,17 @@ jobs around such a graph.
 - **One FalkorDB graph is one versioned graph, however it is reached.** Two provider rows for the
   same server, or the default instance named both ways, could each claim the same graph for a
   different versioned graph, and both then wrote into it. A claim now compares servers, not provider
-  ids, and two claims that race for a graph's name wait for each other. `POST /graphs` answers 409
+  ids, and two claims that race for a graph's name wait for each other. A sentinel or cluster
+  provider is the server its topology names, not the host it leaves blank: two clusters no longer
+  read as one, so one's graph name no longer refuses the other's. `POST /graphs` answers 409
   `graph_key_in_use`; it answered 409 `integrity`, or 500 when two raced.
 - **Dedicated lineage summaries are rebuilt after a publish.** For a data source whose summaries
   live in a graph of their own (dedicated mode), a publish that changed lineage or containment never
   refreshed them: the projector writes none there and handed nothing on. Such a publish now marks
-  them stale and queues their rebuild in dedicated mode.
+  them stale and queues their rebuild in dedicated mode. A change signal on such a source marks and
+  rebuilds them as for any source, instead of clearing that mark while the rebuild waits. A
+  dedicated rebuild is compared afterwards against the graph as it was when it started, so a
+  publish made while it ran, whose own rebuild it turned away, is rebuilt for next.
 - **Eviction keeps a graph something else reads.** Freeing memory could drop a platform copy that
   another data source or a catalog entry also read, or one whose readers could not be checked.
   Eviction now skips it and frees the next coldest graph instead.

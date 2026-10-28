@@ -2609,9 +2609,16 @@ class AggregationService:
         # So for a source under version control: the projector maintains its
         # rollups, and a job queued beside it is the loop the reconciliation
         # sweep guards against (reconcile._guard). What serves reads is
-        # refreshed below; nothing is marked or rebuilt.
+        # refreshed below; nothing is marked or rebuilt. Unless its summaries
+        # are dedicated: the projector writes none of those, so they fall
+        # behind as any source's do.
+        maintained = versioned
+        if versioned:
+            from backend.app.db.models import WorkspaceDataSourceORM
+            ds_row = await session.get(WorkspaceDataSourceORM, ds_id)
+            maintained = getattr(ds_row, "projection_mode", None) != "dedicated"
         status = (state.aggregation_status if state else None) or "none"
-        applicable = status not in self._AGG_NOT_APPLICABLE and not versioned
+        applicable = status not in self._AGG_NOT_APPLICABLE and not maintained
 
         # 4-7. Best-effort convergence (sequential awaits; the helpers never
         # raise). workspace-scoped helpers only fire once a workspace is
@@ -2768,7 +2775,7 @@ class AggregationService:
             # Distinguishes this noop from the unchanged-gate noop above —
             # the cockpit needs to tell "nothing changed" apart from
             # "changed, but aggregation doesn't apply to this source".
-            trigger_detail = "version_controlled" if versioned else "not_applicable"
+            trigger_detail = "version_controlled" if maintained else "not_applicable"
 
         # Audit outcome: not-applicable and the unchanged-gate no-op above
         # both leave nothing queued ("noop"); otherwise deferred/accepted/

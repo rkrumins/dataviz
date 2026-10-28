@@ -10,7 +10,8 @@
   that does not own the key lets go of it.
 * A key is one physical graph however it is reached: two provider rows for one server, or the env
   instance as ``'default'`` and as a provider row, hold one key — a second claim through either
-  is refused, also when the two race, and "who else reads it" counts both.
+  is refused, also when the two race, and "who else reads it" counts both. A sentinel or cluster
+  provider is the server its topology names, not the host it leaves blank.
 * Nothing projects into a graph whose version control is still being enabled, or into a
   tombstoned graph's retained pin; a full replay over a key the platform does not own deletes
   nothing history doesn't hold: it publishes, and flags what it kept (``external_drift``).
@@ -22,6 +23,7 @@ FalkorDB is the in-memory ``FakeFalkor`` of ``test_versioning_projection``. Skip
 ``GRAPHVER_E2E=1``.
 """
 import asyncio
+import json
 import os
 
 import pytest
@@ -497,3 +499,45 @@ async def _run_clear_what_was_read() -> None:
 
 def test_bringing_changes_in_clears_the_flag_it_began_under_and_no_newer_one():
     asyncio.run(_run_clear_what_was_read())
+
+
+async def _run_topologies_are_servers() -> None:
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.models import ProviderORM
+    from backend.app.services.managed_sources import same_server_providers
+
+    tag = os.urandom(3).hex()
+
+    def cluster(*seeds):
+        return {"mode": "cluster", "cluster": {"startupNodes": [list(s) for s in seeds]}}
+
+    def sentinel(master, *nodes):
+        return {"mode": "sentinel", "sentinel": {"masterName": master,
+                                                 "nodes": [list(n) for n in nodes]}}
+
+    # Sentinel and cluster providers keep their addresses in their topology and leave the host
+    # blank, which once read as localhost:6379: every one of them, and the env instance, "one
+    # server", so one cluster's graph name refused another's and their readers mixed.
+    seeds = {"a": f"c1-a-{tag}", "b": f"c1-b-{tag}", "c": f"c1-c-{tag}", "d": f"c2-a-{tag}",
+             "s": f"s-a-{tag}"}
+    rows = {"c1": cluster((seeds["a"], 7000), (seeds["b"], 7001)),
+            "c1_seeded_otherwise": cluster((seeds["b"], 7001), (seeds["c"], 7002)),
+            "c2": cluster((seeds["d"], 7000)),
+            "s1": sentinel("m1", (seeds["s"], 26379)),
+            "s1_another_master": sentinel("m2", (seeds["s"], 26379))}
+    ids = {k: f"prov_{k}_{tag}" for k in rows}
+    async with get_async_session() as ms:
+        ms.add_all([ProviderORM(id=ids[k], name=ids[k], provider_type="falkordb", host=None,
+                                port=None, extra_config=json.dumps({"falkordbConnection": cfg}))
+                    for k, cfg in rows.items()])
+        await ms.commit()
+        same = {k: set(await same_server_providers(ms, ids[k])) for k in rows}
+    assert same["c1"] == same["c1_seeded_otherwise"] == {ids["c1"], ids["c1_seeded_otherwise"]}
+    assert same["c2"] == {ids["c2"]}
+    assert same["s1"] == {ids["s1"]}, "a sentinel's other master is another server"
+    assert same["s1_another_master"] == {ids["s1_another_master"]}
+    await db.dispose_engine()
+
+
+def test_a_sentinel_or_cluster_provider_is_the_server_its_topology_names():
+    asyncio.run(_run_topologies_are_servers())

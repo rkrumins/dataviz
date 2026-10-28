@@ -77,7 +77,9 @@ through the projector automatically.
   coalesce(r.id, item.eid)`, and the typed delete matches `r.id IN [eid, pid]` (`pid` without one
   `edge:` prefix), so a change or delete reaches it. `GraphVersioningService.resolve_edges` turns
   the id the canvas holds into the edge it names (never a node that shares it) for both write
-  providers' `update_edge` / `delete_edge` and for `/graph/changes`.
+  providers' `update_edge` / `delete_edge`; `/graph/changes` has the service do the same
+  (`apply_ops_detailed(aim_edges=True)`) once the draft is found writable by the caller and a retry
+  answered, a retry aimed as its first attempt was.
 - **A graph enabled in place keeps its own spelling of its types.** History stores each type as the
   ontology declares it (`Table`, `FLOWS_TO`); the graph may say `table` and `flows_to`. Enabling
   version control records the graph's spelling of every type
@@ -340,6 +342,11 @@ source and triggers the aggregation service with a stable idempotency key that c
 job. A source in **dedicated mode** keeps its rollups in `{graph_name}_proj`, which the projector never
 writes, so every publish that changes its lineage or containment comes here: its summaries are marked
 stale (`source_changed`, cleared when the job completes) and the job is queued in dedicated mode.
+A change signal on such a source (the reconciliation sweep's, a loader's) marks and rebuilds it as
+any source's, rather than only refreshing reads as for a versioned source the projector maintains.
+A publish whose job is turned away because one is already running is not lost: a dedicated job is
+compared afterwards against the fingerprint it took before it ran (`worker._gate_fingerprint`), so
+the sweep sees what was written while it ran and queues another.
 `resolve_aggregation_edge_types` (`projection_target.py:22-49`) answers such a source's types with
 `"dedicated"` after them, and `_compute_rollup_deltas` and `_reconcile_in_place` then answer `"stale"`
 for a window or reconcile that changes lineage or containment, writing no rollup.
