@@ -1674,7 +1674,7 @@ export function GraphCanvas({ className }: { className?: string }) {
             onClose={() => setPropertyManagerOpen(false)}
             knownEntityTypes={schemaEntityTypes.map((et) => et.id)}
             onSearchPredicate={(p) => {
-              useSearchStore.getState().requestSearchRun(p)
+              useSearchStore.getState().requestSearchRun(p, 'property-manager')
               setAdvancedSearchOpen(true)
             }}
           />

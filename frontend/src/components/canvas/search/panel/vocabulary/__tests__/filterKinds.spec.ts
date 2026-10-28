@@ -11,7 +11,7 @@ import { FILTER_CATEGORIES, availableCategories, filterKindById } from '../filte
 
 
 const ids = (cats: ReturnType<typeof availableCategories>) => cats.flatMap((c) => c.entries.map((e) => e.id))
-const everywhere = { relationDepth: 0, rule: false, canCode: true, canAdvanced: true }
+const everywhere = { relationDepth: 0, rule: false, canAdvanced: true }
 
 
 describe('filterKinds — the catalog', () => {
@@ -22,10 +22,6 @@ describe('filterKinds — the catalog', () => {
 
     it('starts every added condition as a fresh condition of its kind', () => {
         for (const entry of FILTER_CATEGORIES.flatMap((c) => c.entries)) {
-            if (entry.action === 'code') {
-                expect(entry.codeKind).toBeTruthy()
-                continue
-            }
             const a = entry.build!()
             const b = entry.build!()
             expect(a.kind).toBeTruthy()
@@ -60,16 +56,21 @@ describe('filterKinds — what can be added where', () => {
         expect(deepest.some((id) => id.startsWith('rel-'))).toBe(false)
     })
 
-    it('gives a display rule no routes, and hands off to Code only where Code is', () => {
-        expect(ids(availableCategories({ ...everywhere, rule: true }))).not.toContain('path')
-        const noCode = ids(availableCategories({ ...everywhere, canCode: false }))
-        expect(noCode).not.toContain('within-hops')
-        // An edge count is built in the Form.
-        expect(noCode).toContain('degree')
+    it('gives a display rule no routes: the server refuses them there', () => {
+        const rule = ids(availableCategories({ ...everywhere, rule: true }))
+        expect(rule).not.toContain('path')
+        expect(rule).not.toContain('within-hops')
+        // An edge count tests the entity itself.
+        expect(rule).toContain('degree')
+    })
+
+    it('keeps routes out of a connection\'s ends', () => {
+        const end = ids(availableCategories({ ...everywhere, end: true }))
+        for (const route of ['path', 'within-hops']) expect(end).not.toContain(route)
     })
 
     it('drops a category left with nothing in it', () => {
-        const cats = availableCategories({ ...everywhere, relationDepth: RELATION_DEPTH_MAX, canCode: false })
+        const cats = availableCategories({ ...everywhere, relationDepth: RELATION_DEPTH_MAX, rule: true })
         expect(cats.every((c) => c.entries.length > 0)).toBe(true)
     })
 })

@@ -3520,10 +3520,10 @@ export function ContextViewCanvas({
           .filter((e) => e.displayName !== e.urn))
         const store = useSearchStore.getState()
         if (q.refine) {
-          store.commitDraft(q.predicate)
+          store.commitDraft(q.predicate, 'right-click')
           search.refine()
         } else {
-          store.requestSearchRun(q.predicate)
+          store.requestSearchRun(q.predicate, 'right-click')
           search.openPanel()
         }
         interactions.closeContextMenu()
@@ -7302,7 +7302,7 @@ export function ContextViewCanvas({
         knownEntityTypes={activeView?.content.visibleEntityTypes ?? []}
         knownLayers={storeLayers.map((l) => l.name)}
         onSearchPredicate={(p) => {
-          useSearchStore.getState().requestSearchRun(p)
+          useSearchStore.getState().requestSearchRun(p, 'property-manager')
           search.openPanel()
         }}
       />

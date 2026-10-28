@@ -201,7 +201,7 @@ export type SentenceLine =
      *  relationship's condition. */
     | (LineBase & { kind: 'add'; into: Path; joiner: 'and' | 'or' | 'that' })
     /** Nested past what the Sentence shows: edited in Code. */
-    | (LineBase & { kind: 'code'; path: Path })
+    | (LineBase & { kind: 'code'; path: Path; predicate: Predicate })
 
 export interface Sentence {
     lines: SentenceLine[]
@@ -348,7 +348,7 @@ export function buildSentence(draft: Predicate | null, lead = 'Find'): Sentence 
         const key = pathKey(path)
         const base = { key, depth, lead, relationDepth, topIndex, ...(combines ? { combines } : {}) }
         if (relationDepth > RELATION_DEPTH_MAX) {
-            lines.push({ ...base, kind: 'code', path })
+            lines.push({ ...base, kind: 'code', path, predicate: p })
             return
         }
         if (p.kind === 'group' && !isOrInside(p)) {

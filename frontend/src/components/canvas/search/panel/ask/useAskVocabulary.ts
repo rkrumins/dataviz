@@ -28,6 +28,7 @@ export function useAskVocabulary(
         return buildAskVocabulary({
             entityTypes: [...types.values()], tagValues, propertyKeys: allKeys, valueSamples,
             layers: layers.map((l) => ({ value: l.value, label: l.label })), edgeTypes,
+            presentTypes: Object.keys(result?.labels ?? {}),
         })
     }, [schemaTypes, result, tagValues, allKeys, getValueSamples, layers, edgeTypes])
 }

@@ -14,8 +14,6 @@
  *   - **Options** — group-by aggregation, page size, candidate cap,
  *     include-ancestor-path. Live tuning the QueryCard never touches.
  *   - **JSON** — the literal Predicate DSL, validated. Read + edit.
- *     Use this for OR / NOT / path composition the row UI can't
- *     express yet.
  *
  * The compiled Cypher is the Query card's own Cypher tab.
  *

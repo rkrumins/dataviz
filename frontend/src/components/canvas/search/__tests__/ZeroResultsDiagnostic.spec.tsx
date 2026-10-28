@@ -4,7 +4,7 @@
  * The card used to open on ontology diagnostics — edge-type flags,
  * root-URN clamps, compiled Cypher. All true, none of it actionable by
  * the person who typed a word and got nothing. The lead now says what
- * was looked for and offers the other three ways to match it; the
+ * was looked for and offers the ways to match it that find more; the
  * engine-level causes move under "Technical details".
  */
 import { render, screen, fireEvent } from '@testing-library/react'
@@ -30,7 +30,8 @@ const QUERY = {
     options: {},
 } as unknown as SearchQuery
 
-function renderCard(onSwitchMatch?: (m: QuickMatch) => void, result: SearchResultPage = EMPTY) {
+function renderCard(onSwitchMatch?: (m: QuickMatch) => void, result: SearchResultPage = EMPTY,
+    query: SearchQuery = QUERY) {
     const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
     render(
         <ProviderOverride value={{
@@ -40,7 +41,7 @@ function renderCard(onSwitchMatch?: (m: QuickMatch) => void, result: SearchResul
         } as never}>
             <ZeroResultsDiagnostic
                 result={result}
-                query={QUERY}
+                query={query}
                 viewId="view-1"
                 onSwitchMatch={onSwitchMatch}
             />
@@ -57,13 +58,21 @@ describe('ZeroResultsDiagnostic', () => {
         expect(screen.getByText(/custmer/)).toBeInTheDocument()
     })
 
-    it('offers the other match modes as one click each', () => {
+    it('offers the ways to match that find more, one click each — never a narrower one', () => {
         const onSwitchMatch = vi.fn()
-        renderCard(onSwitchMatch)
+        renderCard(onSwitchMatch, EMPTY, { ...QUERY, predicate: { ...QUERY.predicate, match: 'exact' } } as SearchQuery)
 
+        expect(screen.getByText(/Nothing in this view is exactly/)).toBeInTheDocument()
         fireEvent.click(screen.getByRole('button', { name: 'Starts with' }))
-
         expect(onSwitchMatch).toHaveBeenCalledWith('prefix')
+        expect(screen.getByRole('button', { name: 'Contains' })).toBeInTheDocument()
+    })
+
+    it('offers no other match when the word was already matched anywhere', () => {
+        renderCard(vi.fn())
+
+        expect(screen.queryByRole('button', { name: 'Starts with' })).not.toBeInTheDocument()
+        expect(screen.queryByRole('button', { name: 'Is exactly' })).not.toBeInTheDocument()
     })
 
     it('keeps the engine-level causes behind Technical details', () => {

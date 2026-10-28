@@ -199,6 +199,36 @@ export function narrowingHints(
 }
 
 
+/**
+ * The searches worth offering when a query found nothing: each finds all
+ * this one would, and more — matching anywhere in the word, looking in
+ * everything, the whole view. A narrower search of nothing finds nothing,
+ * so none is offered.
+ */
+export function wideningHints(quick: QuickQuery): { label: string; patch: Partial<QuickQuery> }[] {
+    const hints: { label: string; patch: Partial<QuickQuery> }[] = []
+    if (quick.match !== 'substring') hints.push({ label: 'Contains', patch: { match: 'substring' } })
+    if (quick.lookIn !== 'everything') hints.push({ label: 'Look in everything', patch: { lookIn: 'everything' } })
+    if (quick.scope !== 'view') hints.push({ label: 'Whole view', patch: { scope: 'view' } })
+    return hints
+}
+
+
+const MATCH_VERB: Record<QuickQuery['match'], string> = {
+    substring: 'contains', prefix: 'starts with', suffix: 'ends with', exact: 'is exactly',
+}
+
+/** What a query that found nothing looked for, as it was asked: "Nothing
+ *  in this view contains "ord"", "No name inside Sales starts with "ord"". */
+export function nothingFound(text: string, quick: QuickQuery): string {
+    const where = quick.scope === 'view' ? 'in this view' : `inside ${quick.scope.label}`
+    const what = quick.lookIn === 'everything' ? 'Nothing'
+        : typeof quick.lookIn === 'object' ? `No ${quick.lookIn.property} value`
+            : `No ${quick.lookIn === 'tags' ? 'tag' : quick.lookIn}`
+    return `${what} ${where} ${MATCH_VERB[quick.match]} "${text}"`
+}
+
+
 /** What the list under the box is a list OF, if anything. */
 export type ListboxKind = 'rows' | 'recents' | 'none'
 

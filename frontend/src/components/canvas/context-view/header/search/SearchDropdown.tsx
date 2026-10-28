@@ -42,7 +42,9 @@ import type { QuickQuery } from '@/components/canvas/search/session/quickPredica
 import type { SearchHit } from '@/types/search'
 
 import { TopMatchRow } from './TopMatchRow'
-import { TOP_MATCHES, listboxKind, narrowingHints, topMatches, whyLabel } from './dropdownModel'
+import {
+    TOP_MATCHES, listboxKind, narrowingHints, nothingFound, topMatches, whyLabel, wideningHints,
+} from './dropdownModel'
 
 
 /** The row ids the input's `aria-activedescendant` points at. Derived in
@@ -202,7 +204,7 @@ export const SearchDropdown: FC<SearchDropdownProps> = ({
             if (trimmed === '') return <Note>{GUIDANCE}</Note>
             if (error) return <ErrorState message={error} onRetry={onRetry} />
             if (zero) {
-                return <ZeroState text={trimmed} onNarrow={onNarrow} onRefine={onRefine} />
+                return <ZeroState text={trimmed} quick={quick} onWiden={onNarrow} onRefine={onRefine} />
             }
             if (oneChar) {
                 return <Note>{`Keep typing — or press ↵ to search for "${trimmed}"`}</Note>
@@ -415,20 +417,19 @@ function RecentsList({ listId, recents, activeIndex, onActivate, onRecent }: {
 }
 
 
-function ZeroState({ text, onNarrow, onRefine }: {
+function ZeroState({ text, quick, onWiden, onRefine }: {
     text: string
-    onNarrow: (patch: Partial<QuickQuery>) => void
+    quick: QuickQuery
+    onWiden: (patch: Partial<QuickQuery>) => void
     onRefine: () => void
 }) {
     return (
         <div className="px-3 py-3">
-            <p className="text-[12.5px] text-ink">
-                {`Nothing in this view contains "${text}"`}
-            </p>
+            <p className="text-[12.5px] text-ink">{nothingFound(text, quick)}</p>
             <div className="mt-2 flex flex-wrap items-center gap-1.5">
-                <Chip onClick={() => onNarrow({ match: 'prefix' })}>Starts with</Chip>
-                <Chip onClick={() => onNarrow({ match: 'exact' })}>Is exactly</Chip>
-                <Chip onClick={() => onNarrow({ lookIn: 'name' })}>Names only</Chip>
+                {wideningHints(quick).map((hint) => (
+                    <Chip key={hint.label} onClick={() => onWiden(hint.patch)}>{hint.label}</Chip>
+                ))}
                 <Chip onClick={onRefine} accent>
                     <LucideIcons.Sparkles className="w-3 h-3" strokeWidth={2.4} />
                     Refine
