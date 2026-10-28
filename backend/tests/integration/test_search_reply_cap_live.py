@@ -149,5 +149,6 @@ async def test_every_container_past_one_reply_is_tallied(provider):
                                       scope_hash="tally")
     assert read["status"] == "complete"
     counts = {u: c["count"] for u, c in read["counts"].items()}
-    assert counts.pop("urn:root") == N
+    root = counts.pop("urn:root")
+    assert root == N
     assert set(counts.values()) == {1}
