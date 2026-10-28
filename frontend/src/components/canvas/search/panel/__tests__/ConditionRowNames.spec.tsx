@@ -43,7 +43,7 @@ describe('a row naming entities', () => {
                     value={{ kind: 'is', refs: [{ urn: 'urn:orders' }] }}
                     discovery={{ allKeys: [], keysByEntityType: {}, tagValues: [], getValueSamples: () => [] }}
                     knownEntityTypes={[]} activeEntityTypes={[]} discoveredLayers={[]} isRunning={false}
-                    onChange={onChange} onRemove={vi.fn()} onOpenAdvanced={vi.fn()}
+                    onChange={onChange} onRemove={vi.fn()} onEditInCode={vi.fn()}
                 />
             </RelationContext.Provider>,
         )

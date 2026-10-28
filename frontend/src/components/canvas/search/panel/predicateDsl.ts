@@ -344,6 +344,34 @@ function formatExpr(p: Predicate, isTopLevel: boolean): string {
 }
 
 
+/** Where ``target`` — a condition or group in ``p``, that very object — is
+ *  written in ``stringifyPredicate(p)``; null when ``p`` doesn't hold it
+ *  outside a condition of its own (a relationship's, a connection's end). */
+export function spanOf(p: Predicate | null, target: Predicate): DslSpan | null {
+    return p ? locate(p, target, /*isTopLevel*/ true, 0) : null
+}
+
+
+/** ``spanOf`` for ``p`` written from ``at``, as ``formatExpr`` writes it. */
+function locate(p: Predicate, target: Predicate, isTopLevel: boolean, at: number): DslSpan | null {
+    if (p === target) return { from: at, to: at + formatExpr(p, isTopLevel).length }
+    if (p.kind !== 'group') return null
+    if ((p.op ?? 'and') === 'not') {
+        return p.children[0] ? locate(p.children[0], target, false, at + 'NOT '.length) : null
+    }
+    const sep = p.op === 'or' ? ' OR ' : ' AND '
+    let pos = isTopLevel ? at : at + 1
+    for (const child of p.children) {
+        const text = formatExpr(child, false)
+        if (!text) continue
+        const found = locate(child, target, false, pos)
+        if (found) return found
+        pos += text.length + sep.length
+    }
+    return null
+}
+
+
 /** One condition as DSL: the first spelling that reads back as this very
  *  condition, or — when none does — the condition itself as JSON, which
  *  always does. A `[withinHops]` once came back as a name search. */

@@ -72,7 +72,7 @@ import { SEARCH_OPTIONS } from '../searchOptions'
 import { isRowIncomplete } from './ConditionRow'
 import { CreateRuleModal } from './CreateRuleModal'
 import { entityTypesInView, useViewLayerOptions, type LayerOption } from './layerOptions'
-import { AddFilterPalette, type CodeKind } from './AddFilterPalette'
+import { AddFilterPalette } from './AddFilterPalette'
 import { AskBar } from './ask/AskBar'
 import { useAskVocabulary } from './ask/useAskVocabulary'
 import { useEditorMode, type EditorMode } from './builderMode'
@@ -109,8 +109,6 @@ export interface QueryCardProps {
      *  referentially stable — the auto-run debounce keys its timer on
      *  it. */
     onRun: (predicate: Predicate, options?: SearchQuery['options']) => void
-    /** Open Advanced drawer (for OR/NOT/path authoring). */
-    onOpenAdvanced: () => void
     /** Start from a recipe: one ready to run runs; one with something to
      *  fill in opens for it. */
     onPickRecipe: (recipe: Recipe) => void
@@ -135,7 +133,7 @@ const FIND_MODES: { value: FindMode; label: string; icon: typeof Code2 }[] = [
 
 
 export const QueryCard: FC<QueryCardProps> = ({
-    viewId, isRunning, runState, onRun, onOpenAdvanced, onPickRecipe,
+    viewId, isRunning, runState, onRun, onPickRecipe,
 }) => {
     const draftPredicate = useDraftPredicate()
     const seedDraftPredicate = useSearchStore((s) => s.seedDraftPredicate)
@@ -225,39 +223,14 @@ export const QueryCard: FC<QueryCardProps> = ({
         } : null)
     }, [commitDraft])
 
-    /**
-     * Code-only palette entries (withinHops) hand off to the main panel's
-     * Code view rather than the AdvancedDrawer JSON tab. Seed a stub
-     * predicate into the draft (preserving existing work via AND-wrap),
-     * then flip the local mode to 'code' so the user lands directly in
-     * the DSL editor.
-     */
-    const handleOpenCode = useCallback((_kind: CodeKind) => {
-        const stub = {
-            kind: 'withinHops',
-            urns: [],
-            hops: 2,
-            direction: 'both',
-            edgeClass: 'lineage',
-        } as unknown as Predicate
-        const current = useSearchStore.getState().draftPredicate
-        let next: Predicate
-        if (!current) {
-            next = stub
-        } else if (current.kind === 'group' && current.op === 'and') {
-            next = {
-                kind: 'group', op: 'and',
-                children: [...current.children, stub],
-            }
-        } else {
-            next = {
-                kind: 'group', op: 'and',
-                children: [current, stub],
-            }
-        }
-        commitDraft(next)
+    // "Edit in Code" from the Form or the Sentence: Code mode, with that
+    // condition selected. Leaving Code mode forgets it.
+    const [codeFocus, setCodeFocus] = useState<Predicate | null>(null)
+    if (mode !== 'code' && codeFocus) setCodeFocus(null)
+    const editInCode = useCallback((target?: Predicate) => {
+        setCodeFocus(target ?? null)
         setMode('code')
-    }, [commitDraft, setMode])
+    }, [setMode])
     // ─── Run mode (auto vs manual) + dispatch ──────────────────────
     // Auto: dispatch a debounced run on every complete draft change
     //       (snappy, original behaviour — the default).
@@ -570,8 +543,6 @@ export const QueryCard: FC<QueryCardProps> = ({
                                     samples={paletteSamples}
                                     onAdd={handleAddFromPalette}
                                     onAddMany={handleAddManyFromPalette}
-                                    onOpenAdvanced={onOpenAdvanced}
-                                    onOpenCode={handleOpenCode}
                                     disabled={isRunning}
                                 />
                             }
@@ -650,9 +621,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                 discoveredLayers={discoveredLayers}
                                 isRunning={isRunning}
                                 onSubmit={dispatchRun}
-                                onOpenAdvanced={onOpenAdvanced}
-                                onOpenCode={handleOpenCode}
-                                onEditInCode={() => setMode('code')}
+                                onEditInCode={editInCode}
                             />
                         </RelationProvider>
                     ) : (
@@ -676,8 +645,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                     discoveryError={discovery.error}
                                     freshKind={freshRowKind}
                                     onSubmit={dispatchRun}
-                                    onOpenAdvanced={onOpenAdvanced}
-                                    onOpenCode={handleOpenCode}
+                                    onEditInCode={editInCode}
                                     enableRowSelection
                                 />
                             </RelationProvider>
@@ -695,6 +663,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                         onCommit={commitDraft}
                         vocabulary={vocabulary}
                         onOpenCypher={() => setMode('cypher')}
+                        focus={codeFocus}
                     />
                 ) : (
                     <CypherView viewId={viewId} />

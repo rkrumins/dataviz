@@ -22,7 +22,7 @@
  * UnifiedPicker (used for multi-value editors — tags, types, property
  * values) is invoked with ``portal={true}`` for the same reason.
  */
-import { ChevronDown, ExternalLink, KeyRound, Type, X } from 'lucide-react'
+import { ChevronDown, Code2, KeyRound, Type, X } from 'lucide-react'
 import { type FC, type ReactNode, memo, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
@@ -45,6 +45,7 @@ import type {
     TextMatchMode,
     TextPredicate,
     TextTarget,
+    WithinHopsPredicate,
 } from '@/types/search'
 
 import { useEntityTypes } from '@/store/schema'
@@ -73,6 +74,7 @@ import { NodeRefList } from './NodeRefPicker'
 import { OperatorMenu } from './OperatorMenu'
 import { PathEditor } from './PathEditor'
 import { RelationshipEditor } from './RelationshipEditor'
+import { WithinHopsEditor } from './WithinHopsEditor'
 import { axisMeta } from './relations'
 import { shapeLabel } from './vocabulary/edgeWords'
 import { RowCard } from './builder-atoms/RowCard'
@@ -115,8 +117,9 @@ export interface ConditionRowProps {
     autoFocus?: boolean
     onChange: (next: Predicate) => void
     onRemove: () => void
-    /** Omitted where there is no Advanced drawer (the rule editor). */
-    onOpenAdvanced?: () => void
+    /** Edit a condition the Form can't show in Code mode, with it
+     *  selected. Omitted where there is no Code mode (the rule editor). */
+    onEditInCode?: (target: Predicate) => void
     /** Pressing Enter inside a scalar value field fires this. The
      *  panel wires it to the same dispatch the Run button uses. */
     onSubmit?: () => void
@@ -146,7 +149,7 @@ const FOLDABLE = new Set<string>([
 
 const ConditionRowImpl: FC<ConditionRowProps> = ({
     value, discovery, knownEntityTypes, activeEntityTypes, discoveredLayers,
-    isRunning, autoFocus, onChange, onRemove, onOpenAdvanced, onSubmit,
+    isRunning, autoFocus, onChange, onRemove, onEditInCode, onSubmit,
     onWrap, onDuplicate, parentPath, index,
 }) => {
     const meta = getKindMeta(value)
@@ -155,7 +158,7 @@ const ConditionRowImpl: FC<ConditionRowProps> = ({
         value, onChange, discovery, knownEntityTypes,
         activeEntityTypes, discoveredLayers, isRunning,
         autoFocus: autoFocus ?? false, onSubmit,
-        onOpenAdvanced,
+        onEditInCode,
     }
     const editor = renderEditor(ctx)
 
@@ -319,7 +322,7 @@ interface EditorCtx {
     discoveredLayers: LayerOption[]
     isRunning: boolean
     autoFocus: boolean
-    onOpenAdvanced?: () => void
+    onEditInCode?: (target: Predicate) => void
     /** Fires when the user presses Enter inside a scalar editor —
      *  signals "run this query now." Optional; rows that don't have
      *  an Enter-able input ignore it. */
@@ -411,17 +414,20 @@ function renderEditor(ctx: EditorCtx): ReactNode {
             // The header label + description already says everything.
             return null
         case 'withinHops':
-            // No visual editor — Code-only. Saved queries that still
-            // contain it render this banner; editing happens via the JSON
-            // view in the Advanced drawer.
-            return <CodeOnlyHint onOpen={ctx.onOpenAdvanced} />
+            return (
+                <WithinHopsEditor value={value as WithinHopsPredicate} onChange={ctx.onChange}
+                                  discovery={ctx.discovery} knownEntityTypes={ctx.knownEntityTypes}
+                                  discoveredLayers={ctx.discoveredLayers} isRunning={ctx.isRunning}
+                                  autoFocus={ctx.autoFocus} />
+            )
         case 'group': {
             const g = value as GroupPredicate
+            const { onEditInCode } = ctx
             return (
                 <GroupRowHint
                     op={g.op ?? 'and'}
                     count={g.children.length}
-                    onOpen={ctx.onOpenAdvanced}
+                    onOpen={onEditInCode && (() => onEditInCode(g))}
                 />
             )
         }
@@ -1041,34 +1047,6 @@ function CheckToggle({
 }
 
 
-function CodeOnlyHint({ onOpen }: { onOpen?: () => void }) {
-    return (
-        <div className={cn(
-            'rounded-lg border border-glass-border/60 bg-canvas-base/30',
-            'px-3 py-2.5 flex items-center justify-between gap-3',
-        )}>
-            <span className="text-[11.5px] text-ink-muted">
-                {onOpen
-                    ? 'This filter lives in Code mode — open the JSON view to edit it.'
-                    : "This filter is edited as JSON in Advanced Search — it can't be changed here."}
-            </span>
-            {onOpen && <button
-                type="button"
-                onClick={onOpen}
-                className={cn(
-                    'inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md shrink-0',
-                    'text-[11px] font-medium text-accent-lineage',
-                    'bg-accent-lineage/10 hover:bg-accent-lineage/20 transition-colors',
-                )}
-            >
-                <ExternalLink className="w-3 h-3" />
-                Open in Code
-            </button>}
-        </div>
-    )
-}
-
-
 function GroupRowHint({
     op, count, onOpen,
 }: { op: string; count: number; onOpen?: () => void }) {
@@ -1090,8 +1068,8 @@ function GroupRowHint({
                     'bg-accent-lineage/10 hover:bg-accent-lineage/20 transition-colors',
                 )}
             >
-                <ExternalLink className="w-3 h-3" />
-                Edit in Advanced
+                <Code2 className="w-3 h-3" />
+                Edit in Code
             </button>}
         </div>
     )
@@ -1275,7 +1253,7 @@ function getKindMeta(p: Predicate): KindMeta {
         }
         case 'withinHops': return {
             icon: '⇿', label: 'Within N hops',
-            description: 'N-hop neighbourhood of an anchor URN.',
+            description: 'Everything a few edges from the entities you name, through the edges you choose.',
         }
         case 'path': return {
             icon: '⤇', label: 'Paths',
@@ -1307,7 +1285,7 @@ function getKindMeta(p: Predicate): KindMeta {
         }
         case 'group': return {
             icon: '⊕', label: 'Composite group',
-            description: 'OR / NOT composition — edit in Advanced builder.',
+            description: 'OR / NOT composition — edit it in Code.',
         }
         default: return { icon: '·', label: String(p.kind) }
     }
@@ -1355,7 +1333,7 @@ function isIncomplete(p: Predicate): boolean {
         case 'property':     return !p.key.trim() || (p.valueKey != null ? !p.valueKey.trim()
             : valueProblem(p.op ?? 'eq', p.valueType ?? 'auto', p.value) !== null)
         case 'descendantOf': return !p.urns?.length && !p.refs?.length
-        case 'withinHops':   return !p.urns?.length && !p.refs?.length
+        case 'withinHops':   return (!p.urns?.length && !p.refs?.length) || p.edgeTypes?.length === 0
         case 'path':
             return !(p.sourceUrns?.length || p.sourceRefs?.length || p.sourceWhere)
                 || !(p.targetUrns?.length || p.targetRefs?.length || p.targetWhere)

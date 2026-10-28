@@ -131,11 +131,19 @@ describe('SentenceBuilder', () => {
         expect(await steps()).toEqual(['1 step', 'Up to 2', 'Up to 3'])
     })
 
-    it('hands a condition no builder edits over to Code', async () => {
-        const { onEditInCode } = setup({ kind: 'degree', direction: 'out', op: 'gt', value: 3 } as Predicate)
+    it('hands a condition no builder edits over to Code, that condition selected', async () => {
+        const degree = { kind: 'degree', direction: 'out', op: 'gt', value: 3 } as Predicate
+        const { onEditInCode } = setup(degree)
         fireEvent.click(screen.getAllByRole('button', { name: /more than 3 outgoing lineage edges/ })[0])
         await userEvent.click(await screen.findByRole('button', { name: 'Edit in Code' }))
-        expect(onEditInCode).toHaveBeenCalled()
+        expect(onEditInCode).toHaveBeenCalledWith(degree)
+    })
+
+    it('edits "within N hops" in its clause, as the Form does', async () => {
+        setup({ kind: 'withinHops', urns: [], refs: [{ path: ['Sales'] }], hops: 2, direction: 'out' } as Predicate)
+        fireEvent.click(screen.getAllByRole('button', { name: /hops/ })[0])
+        expect(await screen.findByLabelText('Most hops')).toHaveValue(2)
+        expect(screen.queryByText('This condition is written in Code.')).not.toBeInTheDocument()
     })
 
     it('says the counts are off where the numbers would be, and turns them back on', async () => {

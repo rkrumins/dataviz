@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { parsePredicate, stringifyPredicate } from '../predicateDsl'
+import { parsePredicate, spanOf, stringifyPredicate } from '../predicateDsl'
 import {
     appendCondition,
     duplicateConditionAt,
@@ -1041,6 +1041,52 @@ describe('predicateDsl — what an editor reads off a parse', () => {
         ]))
         // Those read before an error are kept.
         expect(parsePredicate('tag:PII AND (').spans).toEqual([{ from: 0, to: 7 }])
+    })
+
+    it('finds where a condition of the query is written, by the condition itself', () => {
+        const pii: Predicate = { kind: 'tag', op: 'hasAny', values: ['PII'] }
+        const typeX: Predicate = { kind: 'entityType', op: 'in', values: ['x'] }
+        const either: Predicate = { kind: 'group', op: 'or', children: [pii, typeX] }
+        const gdpr: Predicate = { kind: 'tag', op: 'hasAny', values: ['GDPR'] }
+        const notGdpr: Predicate = { kind: 'group', op: 'not', children: [gdpr] }
+        const query: Predicate = { kind: 'group', op: 'and', children: [
+            { kind: 'text', value: 'orders' }, either, notGdpr] }
+        const text = stringifyPredicate(query)
+        const at = (p: Predicate, target: Predicate) => {
+            const span = spanOf(p, target)
+            return span && stringifyPredicate(p).slice(span.from, span.to)
+        }
+        expect(text).toBe('orders AND (tag:PII OR type:x) AND NOT tag:GDPR')
+        expect(at(query, query)).toBe(text)
+        expect(at(query, either)).toBe('(tag:PII OR type:x)')
+        expect(at(query, typeX)).toBe('type:x')
+        expect(at(query, notGdpr)).toBe('NOT tag:GDPR')
+        expect(at(query, gdpr)).toBe('tag:GDPR')
+
+        // Groups inside groups, a NOT around one, an OR at the top.
+        const c: Predicate = { kind: 'text', value: 'c' }
+        const d: Predicate = { kind: 'text', value: 'd' }
+        const cd: Predicate = { kind: 'group', op: 'or', children: [c, d] }
+        const notCd: Predicate = { kind: 'group', op: 'not', children: [cd] }
+        const nested: Predicate = { kind: 'group', op: 'or', children: [{ kind: 'text', value: 'a' }, {
+            kind: 'group', op: 'and', children: [{ kind: 'text', value: 'b' }, notCd] }] }
+        expect(stringifyPredicate(nested)).toBe('a OR (b AND NOT (c OR d))')
+        expect(at(nested, notCd)).toBe('NOT (c OR d)')
+        expect(at(nested, cd)).toBe('(c OR d)')
+        expect(at(nested, d)).toBe('d')
+
+        // An empty group writes nothing, and takes no place.
+        const b: Predicate = { kind: 'text', value: 'b' }
+        const gap: Predicate = { kind: 'group', op: 'and', children: [
+            { kind: 'text', value: 'a' }, { kind: 'group', op: 'and', children: [] }, b] }
+        expect(at(gap, b)).toBe('b')
+
+        // Only that very condition: an equal one elsewhere, or one inside a
+        // relationship's condition, isn't found.
+        expect(spanOf(query, { ...pii })).toBeNull()
+        const related: Predicate = { kind: 'related', axis: 'upstream', where: pii }
+        expect(spanOf({ kind: 'group', op: 'and', children: [related, typeX] }, pii)).toBeNull()
+        expect(spanOf(null, pii)).toBeNull()
     })
 
     it('reads a comma list inside prefix:value as one condition', () => {

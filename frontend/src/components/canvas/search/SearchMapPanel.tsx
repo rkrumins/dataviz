@@ -628,10 +628,6 @@ function PanelInner({
             isRunning={view.kind === 'running'}
             runState={runState}
             onRun={handleRun}
-            onOpenAdvanced={() => {
-                setStudioOpen(false)
-                openAdvanced('options')
-            }}
             onPickRecipe={handlePickRecipe}
         />
     )
