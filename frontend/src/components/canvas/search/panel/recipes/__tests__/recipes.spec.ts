@@ -64,6 +64,11 @@ describe('recipesFor', () => {
         expect(titles({ types: ['chart'], tags: [], keys: [], layers: [] })['all-of-type']).toBe('All charts')
     })
 
+    it('offers the documentation checks whatever properties discovery lists: a description is every entity\'s own', () => {
+        const ids = Object.keys(titles({ types: ['dataset', 'schemaField'], tags: [], keys: ['freshnessHours'], layers: [] }))
+        expect(ids).toEqual(expect.arrayContaining(['undocumented', 'undocumented-fields']))
+    })
+
     it('builds each from the view\'s words', () => {
         const by = Object.fromEntries(recipesFor(FULL, typeName).map((r) => [r.id, r.predicate]))
         expect(by['feeds-consumers']).toEqual({ kind: 'group', op: 'and', children: [

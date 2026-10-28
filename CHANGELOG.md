@@ -31,8 +31,10 @@ limitations** — a changelog that only lists good news is not worth reading.
 - **The search box offers broader searches when nothing matches** — **Contains**, **Look in
   everything**, **Whole view** — and says what it looked for. It offered only narrower ones.
 - **Recipes.** The empty card starts with one recipe per intent instead of the first five, so
-  the quality checks show too. A recipe that finds nothing in this View says **none in this
-  view**.
+  the quality checks show too. The documentation checks never showed: they waited for a
+  `description` property, which discovery doesn't list (it is every entity's own field). They
+  now show wherever their type does. A recipe that finds nothing in this View says **none in
+  this view**.
 - **Wording.** The relationship card reads **Related to…**, not "Connection", which is the
   edges search. "Orphan" reads **no lineage**. "a “owner” property" reads "an “owner”
   property". A finished search's time reads *8.6 s* or *1:23*, not *87146 ms*.

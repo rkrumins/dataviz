@@ -63,7 +63,6 @@ interface Roles {
     sensitive: string[]
     deprecated?: string
     ownerKey?: string
-    described: boolean
     view: RecipeView
 }
 
@@ -176,9 +175,11 @@ const RECIPES: readonly RecipeDef[] = [
             predicate: and(typeIs(r.data), { kind: 'tag', op: 'notHas', values: r.sensitive }),
         } : null),
     },
+    // A description is every entity's own field — discovery lists a type's
+    // properties, not it — so these are offered wherever the type is.
     {
         id: 'undocumented', intent: 'documentation', icon: 'FileQuestion',
-        make: (r, name) => (r.data && r.described ? {
+        make: (r, name) => (r.data ? {
             title: `${cap(name(r.data, true))} without a description`,
             description: 'Nothing says what they hold or how to use them.',
             predicate: and(typeIs(r.data), lacks('description')),
@@ -186,7 +187,7 @@ const RECIPES: readonly RecipeDef[] = [
     },
     {
         id: 'undocumented-fields', intent: 'documentation', icon: 'Columns3',
-        make: (r, name) => (r.field && r.described ? {
+        make: (r, name) => (r.field ? {
             title: `${cap(name(r.field, true))} without a description`,
             description: 'Fields no one has explained yet.',
             predicate: and(typeIs(r.field), lacks('description')),
@@ -344,7 +345,6 @@ function rolesOf(view: RecipeView): Roles {
         sensitive: view.tags.filter((t) => SENSITIVE.test(t)),
         deprecated: view.tags.find((t) => /deprecat/i.test(t)),
         ownerKey: view.keys.includes('owner') ? 'owner' : view.keys.find((k) => /owner/i.test(k)),
-        described: view.keys.includes('description'),
         view,
     }
 }
