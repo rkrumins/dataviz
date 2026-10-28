@@ -147,5 +147,6 @@ describe('SearchMapPanel — Connections', () => {
         fireEvent.change(ask, { target: { value: 'connections from orders to revenue' } })
         fireEvent.keyDown(ask, { key: 'Enter' })
         expect(draft()).toMatchObject({ kind: 'edges', sourceWhere: { kind: 'text', value: 'orders' } })
+        expect(useSearchStore.getState().draftSource).toBe('ask')
     })
 })

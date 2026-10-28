@@ -315,7 +315,7 @@ export function useViewSearchSessionController(
     const clearQuery = useCallback(() => teardown(true), [teardown])
 
     const dispatch = useCallback((runnable: { predicate: Predicate; hash: string }) => {
-        useSearchStore.getState().commitDraft(runnable.predicate)
+        useSearchStore.getState().commitDraft(runnable.predicate, 'header')
         void advancedRef.current.runPredicate(runnable.predicate, SEARCH_OPTIONS)
     }, [])
 

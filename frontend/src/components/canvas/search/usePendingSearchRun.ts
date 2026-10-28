@@ -26,7 +26,7 @@
  */
 import { useEffect } from 'react'
 
-import { useSearchStore } from '@/store/searchStore'
+import { type DraftSource, useSearchStore } from '@/store/searchStore'
 import type { Predicate, SearchQuery } from '@/types/search'
 
 
@@ -47,15 +47,16 @@ function isPathQuery(p: Predicate): boolean {
 
 export function usePendingSearchRun(
     runPredicate: (predicate: Predicate, options?: SearchQuery['options']) => Promise<void>,
-    commitDraft: (predicate: Predicate) => void,
+    commitDraft: (predicate: Predicate, source?: DraftSource) => void,
 ): void {
     const pendingRunPredicate = useSearchStore((s) => s.pendingRunPredicate)
     useEffect(() => {
         if (!pendingRunPredicate) return
         const t = setTimeout(() => {
+            const source = useSearchStore.getState().pendingRunSource ?? undefined
             const p = useSearchStore.getState().consumePendingRun()
             if (!p) return
-            commitDraft(p)
+            commitDraft(p, source)
             // Routes come back as routes: the run picks paths for a path.
             void runPredicate(p, isPathQuery(p) ? undefined : BRIDGE_RUN_OPTIONS)
         }, 0)

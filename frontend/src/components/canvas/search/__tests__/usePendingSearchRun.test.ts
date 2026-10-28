@@ -20,7 +20,7 @@ import type { Predicate } from '@/types/search'
 const P: Predicate = { kind: 'hasProperty', key: 'transformLogic', negate: false }
 
 beforeEach(() => {
-    useSearchStore.setState({ pendingRunPredicate: null, draftPredicate: null })
+    useSearchStore.setState({ pendingRunPredicate: null, pendingRunSource: null, draftPredicate: null })
     vi.useFakeTimers()
 })
 
@@ -33,7 +33,7 @@ describe('usePendingSearchRun', () => {
     it('defers past the mount probe, then runs once and re-seeds the draft', () => {
         const runPredicate = vi.fn().mockResolvedValue(undefined)
         const commitDraft = vi.fn()
-        useSearchStore.setState({ pendingRunPredicate: P })
+        useSearchStore.setState({ pendingRunPredicate: P, pendingRunSource: 'property-manager' })
 
         renderHook(() => usePendingSearchRun(runPredicate, commitDraft), { wrapper: StrictMode })
 
@@ -54,8 +54,8 @@ describe('usePendingSearchRun', () => {
             results: 'hits', pageSize: 5000, includeAncestorPath: true,
         })
         // Re-seeds the builder (clear() may have wiped the seeded draft
-        // between the probe's two mounts).
-        expect(commitDraft).toHaveBeenCalledWith(P)
+        // between the probe's two mounts) — still saying where it came from.
+        expect(commitDraft).toHaveBeenCalledWith(P, 'property-manager')
         // Flag consumed exactly once.
         expect(useSearchStore.getState().pendingRunPredicate).toBeNull()
     })

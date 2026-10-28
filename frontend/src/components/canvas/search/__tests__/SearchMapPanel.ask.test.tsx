@@ -61,6 +61,7 @@ describe('SearchMapPanel — asking over an answer', () => {
         const tagged = { kind: 'tag', op: 'hasAny', values: ['PII'] }
         expect(useSearchStore.getState().draftPredicate).toMatchObject({ kind: 'group', op: 'and',
             children: [tagged, { kind: 'text', value: 'orders' }] })
+        expect(useSearchStore.getState().draftSource).toBe('ask')
         expect(advanced.runPredicate).toHaveBeenCalledTimes(1)
     })
 

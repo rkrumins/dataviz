@@ -15,14 +15,16 @@ import { renderHook, act, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { recordEvent } from '@/services/telemetryService'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
-import { useSearchStore } from '@/store/searchStore'
+import { type DraftSource, useSearchStore } from '@/store/searchStore'
 import type {
     Predicate,
     SearchAggregateBucket,
     SearchResultPage,
 } from '@/types/search'
 
+import { EDITOR_MODE_KEY } from '@/components/canvas/search/panel/builderMode'
 import { SEARCH_OPTIONS } from '@/components/canvas/search/searchOptions'
 import { buildSearchRequest } from '@/components/canvas/search/searchRequest'
 
@@ -888,6 +890,119 @@ describe('useAdvancedSearch — Try again', () => {
         expect(first.scope.visibleUrns).toEqual(['A'])
         expect(again.scope.visibleUrns).toEqual(['A', 'B'])
         expect(result.current.view.kind).toBe('results')
+    })
+})
+
+
+/** What a search tells the product's telemetry when it ends: where it came
+ *  from and how it ended — never what it asked. */
+describe('useAdvancedSearch — how a search is measured', () => {
+    const recorded = () => vi.mocked(recordEvent).mock.calls
+
+    beforeEach(() => {
+        vi.mocked(recordEvent).mockClear()
+        localStorage.removeItem(EDITOR_MODE_KEY)
+        useSearchStore.getState().setStudioOpen(false)
+    })
+
+    const running = (over: Partial<SearchResultPage> = {}) => page({
+        status: 'running', sessionId: 's-1', progress: { scanned: 40, total: 100, matched: 1 }, ...over,
+    })
+
+    /** The draft, put in its shape by ``source``, run the way a caller runs it. */
+    async function search(source?: DraftSource) {
+        useSearchStore.getState().commitDraft(PREDICATE, source)
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        return result
+    }
+
+    it('says where the search came from and that it completed', async () => {
+        searchAdvanced.mockResolvedValue(page({ hits: [HIT] }))
+        await search('ask')
+        expect(recorded()).toEqual([['graph.search', expect.objectContaining({
+            matches: 1, source: 'ask', outcome: 'complete' })]])
+    })
+
+    it('reads an edit in a builder as the editor it was made in, and notes Search Studio', async () => {
+        searchAdvanced.mockResolvedValue(page({ hits: [] }))
+        localStorage.setItem(EDITOR_MODE_KEY, 'code')
+        useSearchStore.getState().setStudioOpen(true)
+        await search()
+        expect(recorded()).toEqual([['graph.search_miss', expect.objectContaining({
+            matches: 0, source: 'code', outcome: 'complete', studio: true })]])
+    })
+
+    it('says "at least" when part of the view was left out', async () => {
+        searchAdvanced.mockResolvedValue(page({ hits: [HIT], countStatus: 'lowerBound' }))
+        await search('recipe')
+        expect(recorded()[0][1]).toMatchObject({ source: 'recipe', outcome: 'atLeast' })
+    })
+
+    it('reports a stopped search with what it had found, and again, resumed, when it ends', async () => {
+        searchAdvanced
+            .mockResolvedValueOnce(running({ hits: [HIT] }))
+            .mockImplementationOnce(() => new Promise<SearchResultPage>(() => {}))
+        useSearchStore.getState().commitDraft(PREDICATE, 'header')
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            void result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        await waitFor(() => expect(searchAdvanced).toHaveBeenCalledTimes(2))
+        act(() => { result.current.stop() })
+        expect(recorded()).toEqual([['graph.search', expect.objectContaining({
+            matches: 1, source: 'header', outcome: 'stopped' })]])
+        expect(recorded()[0][1]).not.toHaveProperty('resumed')
+
+        searchAdvanced.mockResolvedValueOnce(page({ hits: [HIT], status: 'complete', sessionId: 's-1' }))
+        await act(async () => { await result.current.resume() })
+        expect(recorded()[1]).toEqual(['graph.search', expect.objectContaining({
+            source: 'header', outcome: 'complete', resumed: true })])
+    })
+
+    it('reports a search the graph stayed out of reach for as interrupted', async () => {
+        vi.useFakeTimers()
+        try {
+            searchAdvanced
+                .mockResolvedValueOnce(running({ hits: [HIT] }))
+                .mockRejectedValue(Object.assign(new Error('API Error 503: {}'),
+                    { status: 503, code: 'PROVIDER_FAILING_OVER' }))
+            useSearchStore.getState().commitDraft(PREDICATE, 'right-click')
+            const { result } = renderHook(() => useAdvancedSearch('view-1'))
+            let run!: Promise<void>
+            act(() => { run = result.current.runPredicate(PREDICATE, SEARCH_OPTIONS) })
+            await act(async () => { await vi.advanceTimersByTimeAsync(210_000); await run })
+            expect(recorded()).toEqual([['graph.search', expect.objectContaining({
+                matches: 1, source: 'right-click', outcome: 'interrupted' })]])
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('reports a failure by its code, never its message', async () => {
+        searchAdvanced.mockRejectedValueOnce(Object.assign(
+            new Error('API Error 400: {"detail":{"code":"BAD_REQUEST","reason":"No entity named Payroll"}}'),
+            { status: 400, code: 'BAD_REQUEST' }))
+        await search('library')
+        expect(recorded()).toEqual([['graph.search_miss', expect.objectContaining({
+            matches: 0, source: 'library', outcome: 'failed', reason: 'BAD_REQUEST' })]])
+        expect(JSON.stringify(recorded())).not.toContain('Payroll')
+    })
+
+    it('reports Try again as where the search first came from', async () => {
+        searchAdvanced
+            .mockRejectedValueOnce(Object.assign(new Error('API Error 500: {}'), { status: 500 }))
+            .mockResolvedValueOnce(page({ hits: [HIT] }))
+        const result = await search('results')
+        // An edit since — the retry asks the failed search again, all the same.
+        useSearchStore.getState().commitDraft(null)
+        await act(async () => { await result.current.run() })
+        expect(recorded().map(([, payload]) => payload)).toEqual([
+            expect.objectContaining({ source: 'results', outcome: 'failed', reason: '500' }),
+            expect.objectContaining({ source: 'results', outcome: 'complete' }),
+        ])
     })
 })
 

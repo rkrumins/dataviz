@@ -66,6 +66,7 @@ import {
     useDraftPredicate,
     useRecentQueries,
     useSearchStore,
+    type DraftSource,
     type RecentQueryEntry,
 } from '@/store/searchStore'
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
@@ -322,12 +323,16 @@ function PanelInner({
     }, [runPredicate])
     // A change made from the results — a fix for an empty answer, a type
     // to narrow to: the query changes and runs at once, whether or not
-    // the builder is open to run it.
-    const handleRefine = useCallback((next: Predicate) => {
-        useSearchStore.getState().commitDraft(next)
+    // the builder is open to run it. A recipe or the library loads one
+    // the same way, saying so.
+    const handleRefine = useCallback((next: Predicate, source?: DraftSource) => {
+        useSearchStore.getState().commitDraft(next, source)
         const runnable = buildRunnablePredicate(next)
         if (runnable) handleRun(runnable.predicate, SEARCH_OPTIONS)
     }, [handleRun])
+    const refineFromResults = useCallback((next: Predicate) => {
+        handleRefine(next, 'results')
+    }, [handleRefine])
 
     // Hydrate per-view canvas-filter-mode preference on mount /
     // viewId change. The store keeps a single ``canvasFilterMode``
@@ -403,10 +408,10 @@ function PanelInner({
     const handlePickRecipe = useCallback((recipe: Recipe) => {
         setLibraryOpen(false)
         if (!recipe.blank) {
-            handleRefine(recipe.predicate)
+            handleRefine(recipe.predicate, 'recipe')
             return
         }
-        commitDraft(recipe.predicate)
+        commitDraft(recipe.predicate, 'recipe')
         viewSession?.refine()
         if (editorMode !== 'form') {
             setEditorMode('sentence')
@@ -418,12 +423,12 @@ function PanelInner({
     // builder may be folded away, with nothing on screen to run it.
     // A Connections search kept in an AND group of its own loads as itself.
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
-        handleRefine(asDraft(entry.predicate))
+        handleRefine(asDraft(entry.predicate), 'library')
         setLibraryOpen(false)
     }, [handleRefine])
 
     const handleLoadSaved = useCallback((query: SavedViewQuery) => {
-        handleRefine(asDraft(query.predicate))
+        handleRefine(asDraft(query.predicate), 'library')
         setLibraryOpen(false)
     }, [handleRefine])
 
@@ -473,7 +478,7 @@ function PanelInner({
             // editor only lists top-level containers, and a result
             // group is usually deeper than that.
             uiScope: 'any',
-        }))
+        }), 'results')
     }, [commitDraft])
 
     const frameTargetUrns = useMemo<string[]>(() => {
@@ -692,7 +697,7 @@ function PanelInner({
             onExportAll={canExport ? () => setExportOpen(true) : undefined}
             onRetry={() => { void run() }}
             draft={draftPredicate}
-            onRefine={handleRefine}
+            onRefine={refineFromResults}
         />
     )
     // A table only for rows: not routes, not nothing. A Connections search's
@@ -848,7 +853,7 @@ function PanelInner({
                                     hits={tableHits}
                                     query={view.query.predicate}
                                     draft={draftPredicate}
-                                    onRefine={handleRefine}
+                                    onRefine={refineFromResults}
                                     onReveal={revealNode}
                                     onOpen={onOpenNode}
                                     onLookInside={(a) => handleScopeToGroup({ ancestorUrn: a.urn,

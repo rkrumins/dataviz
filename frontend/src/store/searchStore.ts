@@ -52,6 +52,16 @@ export const DEFAULT_DRAFT_OPTIONS: DraftOptions = {
 
 
 /**
+ * What put the draft in its shape when it wasn't the editor it is built in:
+ * a question asked, a recipe, the library, a change made from the results,
+ * the canvas's right-click or Property Manager, the header box. A search
+ * reports it as where it came from (``graph.search``'s ``source``).
+ */
+export type DraftSource =
+    | 'ask' | 'recipe' | 'library' | 'results' | 'right-click' | 'property-manager' | 'header'
+
+
+/**
  * One entry in the per-view "Recent queries" list. Auto-saved on every
  * successful dispatch. Loadable by click from the empty hero and the
  * LibraryPopover's "Mine" tab.
@@ -139,6 +149,9 @@ interface SearchStoreState {
      * builder, blank textarea in the JSON editor".
      */
     draftPredicate: Predicate | null
+    /** What last put the draft in its shape, when not its editor; an edit
+     *  in a builder, an undo or a redo clears it. */
+    draftSource: DraftSource | null
     /**
      * Monotonic counter incremented whenever ``draftPredicate`` is
      * REPLACED (e.g. by a JSON-editor commit or a loaded query). The
@@ -208,6 +221,8 @@ interface SearchStoreState {
      * without owning the run pipeline. Cleared on consume.
      */
     pendingRunPredicate: Predicate | null
+    /** Where ``pendingRunPredicate`` came from. */
+    pendingRunSource: DraftSource | null
     /** What "How it matches" left: the routes it runs, and the query whose
      *  results it came from — the way back to them. */
     routesFrom: { routes: Predicate; from: Predicate } | null
@@ -396,8 +411,9 @@ interface SearchStoreActions {
      *  onto the undo stack and clears the redo stack. Use for
      *  user-committed structural changes: chip add/remove, clear,
      *  paste-DSL commit, example seed, recent-query load,
-     *  quick-search submit. */
-    commitDraft: (predicate: Predicate | null) => void
+     *  quick-search submit. ``source`` says what made the change when it
+     *  wasn't the builder itself. */
+    commitDraft: (predicate: Predicate | null, source?: DraftSource) => void
     /** Pop from ``historyPast``, push current to ``historyFuture``,
      *  set draft = popped. No-op when past is empty. */
     undo: () => void
@@ -430,7 +446,7 @@ interface SearchStoreActions {
     /** Load a predicate into the builder AND request the panel run it —
      *  the "open in Advanced Search + run" bridge used by the Property
      *  Manager. The caller also opens the panel. */
-    requestSearchRun: (predicate: Predicate) => void
+    requestSearchRun: (predicate: Predicate, source: DraftSource) => void
     /** "How it matches": run ``routes`` and keep ``from``, the query whose
      *  results they explain, to go back to. */
     showRoutes: (routes: Predicate, from: Predicate) => void
@@ -670,6 +686,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     matchUrnSet: EMPTY_SET,
     queryHash: null,
     draftPredicate: null,
+    draftSource: null,
     draftRevision: 0,
     draftOptions: null,
     ancestorMatchCounts: EMPTY_MAP,
@@ -678,6 +695,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     historyFuture: EMPTY_HISTORY,
     recentQueries: loadRecentFromStorage(),
     pendingRunPredicate: null,
+    pendingRunSource: null,
     routesFrom: null,
     // Default to 'view' — searches the full descendant set of the
     // view's top-level containers, including subtrees that haven't
@@ -775,6 +793,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     seedDraftPredicate: (predicate) => {
         set((s) => ({
             draftPredicate: predicate,
+            draftSource: null,
             draftRevision: s.draftRevision + 1,
             // Reset row-selection: indices into the old draft are no
             // longer valid against the new one.
@@ -783,14 +802,15 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         }))
     },
 
-    commitDraft: (predicate) => {
+    commitDraft: (predicate, source) => {
         set((s) => {
             const prev = s.draftPredicate
             // Hash-dedupe: a commit with the same shape as the current
             // draft is a no-op (avoids history bloat from redundant
-            // calls like re-clicking the same example).
+            // calls like re-clicking the same example) — though what
+            // asked for it again is now where it came from.
             if (JSON.stringify(prev) === JSON.stringify(predicate)) {
-                return {}
+                return source === undefined ? {} : { draftSource: source }
             }
             const past = [...s.historyPast, prev]
             // Cap at HISTORY_CAP; drop oldest when over.
@@ -799,6 +819,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
                 : past
             return {
                 draftPredicate: predicate,
+                draftSource: source ?? null,
                 draftRevision: s.draftRevision + 1,
                 historyPast: cappedPast,
                 historyFuture: EMPTY_HISTORY,
@@ -817,6 +838,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             const future = [...s.historyFuture, s.draftPredicate]
             return {
                 draftPredicate: restored,
+                draftSource: null,
                 draftRevision: s.draftRevision + 1,
                 historyPast: past,
                 historyFuture: future,
@@ -835,6 +857,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
                 : past
             return {
                 draftPredicate: restored,
+                draftSource: null,
                 draftRevision: s.draftRevision + 1,
                 historyPast: cappedPast,
                 historyFuture: future,
@@ -921,15 +944,15 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         })
     },
 
-    requestSearchRun: (predicate) => {
+    requestSearchRun: (predicate, source) => {
         // Load into the builder (history-aware, so the user sees + can
         // edit/undo it), then flag the panel to run it.
-        get().commitDraft(predicate)
-        set({ pendingRunPredicate: predicate })
+        get().commitDraft(predicate, source)
+        set({ pendingRunPredicate: predicate, pendingRunSource: source })
     },
 
     showRoutes: (routes, from) => {
-        get().requestSearchRun(routes)
+        get().requestSearchRun(routes, 'results')
         set({ routesFrom: { routes, from } })
     },
 
@@ -959,7 +982,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
 
     consumePendingRun: () => {
         const current = get().pendingRunPredicate
-        if (current !== null) set({ pendingRunPredicate: null })
+        if (current !== null) set({ pendingRunPredicate: null, pendingRunSource: null })
         return current
     },
 
@@ -1007,6 +1030,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             focusedMatchIndex: null,
             queryHash: null,
             draftPredicate: null,
+            draftSource: null,
             draftRevision: s.draftRevision + 1,
             draftOptions: null,
             ancestorMatchCounts: EMPTY_MAP,

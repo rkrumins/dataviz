@@ -256,7 +256,7 @@ export const QueryCard: FC<QueryCardProps> = ({
     // A question applied is a change of shape, and runs at once: Auto runs
     // the committed draft itself, Manual is told to.
     const handleAsk = useCallback((result: Predicate) => {
-        commitDraft(result)
+        commitDraft(result, 'ask')
         if (runMode !== 'manual') return
         const next = buildRunnablePredicate(result)
         if (next) onRun(next.predicate, SEARCH_OPTIONS)

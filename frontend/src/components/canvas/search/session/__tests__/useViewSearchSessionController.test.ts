@@ -245,6 +245,13 @@ describe('useViewSearchSessionController — debounced dispatch', () => {
 
 
 describe('useViewSearchSessionController — runNow', () => {
+    it('says the header box put the query in its shape', () => {
+        const { result } = renderSession()
+        act(() => { result.current.setQuick({ text: 'cust' }) })
+        act(() => { result.current.runNow() })
+        expect(useSearchStore.getState().draftSource).toBe('header')
+    })
+
     it('runs immediately and the debounce behind it does not repeat the query', () => {
         const { result, rerender } = renderSession()
 

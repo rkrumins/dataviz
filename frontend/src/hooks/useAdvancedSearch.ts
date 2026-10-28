@@ -41,6 +41,7 @@ import {
     useSearchStore,
     type AncestorCountInfo,
     type AncestorPathInfo,
+    type DraftSource,
     type MatchedEdge,
 } from '@/store/searchStore'
 import type {
@@ -54,9 +55,11 @@ import type {
     SearchScope,
 } from '@/types/search'
 
+import { currentEditorMode, type EditorMode } from '@/components/canvas/search/panel/builderMode'
 import { queryLabel } from '@/components/canvas/search/panel/findMode'
 import { readableSearchError } from '@/components/canvas/search/panel/errorPaths'
 import { buildSearchRequest } from '@/components/canvas/search/searchRequest'
+import { isApiStatusError, isClientTimeout, isNetworkError } from '@/services/graphRequestFailure'
 import { pause, rideOut, waitsOut } from '@/services/rideOut'
 import { recordEvent } from '@/services/telemetryService'
 
@@ -393,11 +396,20 @@ export type PanelView =
         query: SearchQuery; message: string;
         elapsedMs: number }
 
+/** Where a search came from, as its telemetry says: what put the query in
+ *  its shape, or else the editor it was built in. */
+type SearchSource = DraftSource | EditorMode
+
 /** What following one run's answers needs to know about it. */
 interface FollowedRun {
     query: SearchQuery
     startedAt: number
     runKey: string | null
+    source: SearchSource
+    /** Search Studio was open when it ran. */
+    studio: boolean
+    /** Followed again after a Stop or an interruption. */
+    resumed: boolean
 }
 
 /** Why a running search is no longer being followed: the user stopped it,
@@ -462,6 +474,45 @@ export interface UseAdvancedSearchResult {
 }
 
 
+/** How a search ended, as its telemetry says. */
+type Outcome = 'complete' | 'atLeast' | 'stopped' | 'interrupted' | 'failed'
+
+/**
+ * One event for each search that ends — complete, at least N, stopped,
+ * interrupted or failed — with where it came from.
+ *
+ * A search that finds nothing (a failed one too: the person asked and got
+ * nothing) is its own event type, mirroring the `docs.search_miss`
+ * precedent: the zero-result queries are the interesting ones — they say
+ * what people expected the graph to contain and it didn't. The predicate
+ * is deliberately NOT sent; it can carry node names, and this store holds
+ * no PII beyond the actor id. Nor is a failure's message, which can quote
+ * the query: its code is. The shape of the query is enough to spot a
+ * pattern. A Connections search counts its edges; one followed again after
+ * a Stop reports again, marked ``resumed``.
+ */
+function measure(run: FollowedRun, outcome: Outcome, result: SearchResultPage | null, reason?: string): void {
+    const matches = result ? result.edges?.length ?? collectMatchUrns(result).length : 0
+    recordEvent(matches > 0 ? 'graph.search' : 'graph.search_miss', {
+        matches,
+        source: run.source,
+        outcome,
+        ...(reason ? { reason } : {}),
+        ...(run.query.predicate.kind === 'edges' ? { connections: true } : {}),
+        ...(run.studio ? { studio: true } : {}),
+        ...(run.resumed ? { resumed: true } : {}),
+        elapsedMs: Math.round(performance.now() - run.startedAt),
+    })
+}
+
+/** Why a search failed, as its telemetry may say it: the server's code, or
+ *  its HTTP status — never its message. */
+function failureReason(e: unknown): string {
+    if (isApiStatusError(e)) return e.code ?? String(e.status)
+    return isClientTimeout(e) ? 'timeout' : isNetworkError(e) ? 'network' : 'error'
+}
+
+
 // ---------------------------------------------------------------------------
 // Hook
 // ---------------------------------------------------------------------------
@@ -485,6 +536,8 @@ export function useAdvancedSearch(
     const [view, setView] = useState<PanelView>({ kind: 'idle' })
     const [runState, setRunState] = useState<RunState | null>(null)
     const abortRef = useRef<AbortController | null>(null)
+    // The run the view shows: Stop, Resume and Try again report as it.
+    const lastRun = useRef<FollowedRun | null>(null)
 
     // Read through a ref: the unmount effect runs once, so capturing the
     // option in its closure would pin whatever value the first render
@@ -634,19 +687,7 @@ export function useAdvancedSearch(
                 displayName: b.ancestorDisplayName,
             })))
         }
-        // A search that finds nothing is its own event type, mirroring the
-        // `docs.search_miss` precedent: the zero-result queries are the
-        // interesting ones — they say what people expected the graph to
-        // contain and it didn't. The predicate is deliberately NOT sent;
-        // it can carry node names, and this store holds no PII beyond the
-        // actor id. The shape of the query is enough to spot a pattern.
-        // A Connections search counts its edges.
-        const matches = result.edges?.length ?? collectMatchUrns(result).length
-        recordEvent(matches > 0 ? 'graph.search' : 'graph.search_miss', {
-            matches,
-            ...(result.edges ? { connections: true } : {}),
-            elapsedMs: Math.round(performance.now() - startedAt),
-        })
+        measure(run, result.countStatus === 'lowerBound' ? 'atLeast' : 'complete', result)
         // Publish the match URN set so the ContextView canvas
         // (W3 — useSearchHighlight + SearchPinOverlay +
         // ChevronMatchBadge) can react. JSON.stringify is
@@ -682,6 +723,7 @@ export function useAdvancedSearch(
         // canvas doesn't keep highlighting stale matches — but keep the
         // query itself, so the user can fix it.
         useSearchStore.getState().clearSearchResults()
+        measure(run, 'failed', null, failureReason(e))
     }, [])
 
     // Every answer of a running search is shown as it lands — the hits are
@@ -715,6 +757,7 @@ export function useAdvancedSearch(
             if ('interrupted' in next) {
                 show(result, { kind: 'interrupted', reason: next.interrupted })
                 if (run.runKey) setRunState({ hash: run.runKey, status: 'done' })
+                measure(run, 'interrupted', result)
                 return
             }
             idle = sameProgress(result, next.page) ? idle + 1 : 0
@@ -727,11 +770,17 @@ export function useAdvancedSearch(
         predicate: Predicate,
         options: SearchQuery['options'],
         runKey: string | null,
+        origin: Pick<FollowedRun, 'source' | 'studio'>,
     ) => {
         // ALWAYS stamp the viewId — the backend's ViewScopeResolver
         // requires it on every request. Scope and the root wrap are
         // ``searchRequest``'s, the same the Cypher tab shows.
         const query = buildSearchRequest(predicate, options, viewId)
+        const run: FollowedRun = {
+            query, startedAt: performance.now(), runKey,
+            source: origin.source, studio: origin.studio, resumed: false,
+        }
+        lastRun.current = run
         if (!(provider instanceof RemoteGraphProvider)) {
             setView({
                 kind: 'error', query,
@@ -747,10 +796,8 @@ export function useAdvancedSearch(
         const controller = new AbortController()
         abortRef.current = controller
 
-        const startedAt = performance.now()
-        setView({ kind: 'running', query, startedAt })
+        setView({ kind: 'running', query, startedAt: run.startedAt })
         if (runKey) setRunState({ hash: runKey, status: 'running' })
-        const run: FollowedRun = { query, startedAt, runKey }
 
         try {
             const first = await provider.searchAdvanced(
@@ -772,18 +819,22 @@ export function useAdvancedSearch(
         abortRef.current?.abort()
         setView({ ...view, halted: { kind: 'stopped' } })
         setRunState((state) => state && { ...state, status: 'done' })
+        if (lastRun.current) measure(lastRun.current, 'stopped', view.result)
     }, [view])
 
     // Follow a stopped or interrupted search again, from its session.
     const resume = useCallback(async () => {
-        if (view.kind !== 'results' || !view.halted
+        if (view.kind !== 'results' || !view.halted || !lastRun.current
             || !(provider instanceof RemoteGraphProvider)) return
         abortRef.current?.abort()
         const controller = new AbortController()
         abortRef.current = controller
         const run: FollowedRun = {
+            ...lastRun.current,
             query: view.query, startedAt: view.startedAt ?? performance.now(), runKey: null,
+            resumed: true,
         }
+        lastRun.current = run
         setView({ ...view, halted: undefined })
         try {
             await follow(run, view.result, controller)
@@ -796,8 +847,10 @@ export function useAdvancedSearch(
     // The query as it was sent: stamped again, it asks in the view's scope
     // as it is now.
     const run = useCallback(async () => {
-        if (view.kind === 'idle' || view.kind === 'running') return
-        await runQuery(view.query.predicate, view.query.options, null)
+        const last = lastRun.current
+        if (view.kind === 'idle' || view.kind === 'running' || !last) return
+        await runQuery(view.query.predicate, view.query.options, null,
+            { source: last.source, studio: last.studio })
     }, [view, runQuery])
 
     const runPredicate = useCallback(async (
@@ -833,7 +886,12 @@ export function useAdvancedSearch(
         // computes, so the editor can tell "these results are for the
         // draft I'm looking at" — hash the predicate as handed in,
         // before ``requestPredicate``'s defensive AND-wrap.
-        await runQuery(predicate, options, JSON.stringify(predicate))
+        // Every caller has just committed this as the draft, so what put
+        // the draft in its shape is where the search came from.
+        const { draftSource, studioOpen } = useSearchStore.getState()
+        await runQuery(predicate, options, JSON.stringify(predicate), {
+            source: draftSource ?? currentEditorMode(), studio: studioOpen,
+        })
     }, [runQuery])
 
     // ---------------------------------------------------------------
