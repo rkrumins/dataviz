@@ -429,6 +429,10 @@ export function NodeIdentityField({
     const normalized = normalizeIdentity(value)
     const overridden = isIdentityOverridden(value)
     const normalizedName = normalizeName(nameValue)
+    // What the editor's saves write (`node_identity.bind_node_write`): never a field the platform
+    // owns, and only the name when both settings name one property.
+    const nameWritten = !RESERVED_PROPERTY_KEYS.has(normalizedName)
+    const identityWritten = overridden && normalized !== normalizedName && !RESERVED_PROPERTY_KEYS.has(normalized)
     // Real graph properties that aren't already offered as a static preset.
     const detected = suggestions.filter(s => !PRESETS.includes(s.toLowerCase()))
 
@@ -504,6 +508,12 @@ export function NodeIdentityField({
                             A read-only source or a dedicated projection is never written to at all — it will read
                             correctly, but won't gain rollup edges.
                         </p>
+                        {identityWritten && (
+                            <p>
+                                The editor keys the entities it creates the same way: each new one gets its URN
+                                as its <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">{normalized}</code> too.
+                            </p>
+                        )}
                     </div>
 
                     {/* Presets + free-form input */}
@@ -570,6 +580,7 @@ export function NodeIdentityField({
                                 <p className="text-[11px] text-ink-muted mb-2 leading-relaxed">
                                     The label the platform shows for a node comes from <code className="px-1 rounded bg-black/10 dark:bg-white/10 font-mono text-[10px]">displayName</code>.
                                     If your graph stores its human-readable name under a different property, map it here so nodes don't render blank.
+                                    {nameWritten && <> The editor keeps it in step: a new entity's name is written to it, and a rename carries it along while the two agree.</>}
                                 </p>
                                 <div className="flex items-center gap-1.5 mb-2 flex-wrap">
                                     {NAME_PRESETS.map(preset =>

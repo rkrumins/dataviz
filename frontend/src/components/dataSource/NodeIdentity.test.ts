@@ -1,10 +1,12 @@
 import { readFileSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+import { createElement } from 'react'
+import { render, screen } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
 import {
     normalizeIdentity, isIdentityOverridden, identityCoalesceExpr,
     normalizeName, isNameOverridden, nameCoalesceExpr, isInherited, boundFieldIds,
-    boundName, nameOnSave, identitySourcePhrase, type NamedShape,
+    boundName, nameOnSave, identitySourcePhrase, NodeIdentityField, type NamedShape,
 } from './NodeIdentity'
 
 describe('normalizeIdentity', () => {
@@ -190,5 +192,34 @@ describe('identitySourcePhrase', () => {
         expect(identitySourcePhrase('global')).toBe('platform default')
         expect(identitySourcePhrase('default')).toBe('built-in default')
         expect(identitySourcePhrase(undefined)).toBe('')
+    })
+})
+
+describe('NodeIdentityField — what the setting makes the editor write', () => {
+    const field = (value: string, nameValue: string) => render(createElement(NodeIdentityField, {
+        value, onChange: () => {}, nameValue, onNameChange: () => {}, defaultOpen: true,
+    }))
+    const identityLine = () => screen.queryByText(/each new one gets its URN/)
+    const nameLine = () => screen.queryByText(/The editor keeps it in step/)
+
+    it('says a new entity gets its URN as a mapped identifier, and its name is kept in step', () => {
+        field('id', 'title')
+        expect(identityLine()).toHaveTextContent('each new one gets its URN as its id too.')
+        expect(nameLine()).toBeInTheDocument()
+    })
+    it('promises nothing the server does not write', () => {
+        field('urn', 'name')          // a urn identity needs no copy
+        expect(identityLine()).toBeNull()
+        expect(nameLine()).toBeInTheDocument()
+    })
+    it('an identifier that is also the name property is written as the name', () => {
+        field('title', 'title')
+        expect(identityLine()).toBeNull()
+        expect(nameLine()).toBeInTheDocument()
+    })
+    it('a field the platform owns is never written', () => {
+        field('qualifiedName', 'description')
+        expect(identityLine()).toBeNull()
+        expect(nameLine()).toBeNull()
     })
 })

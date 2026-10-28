@@ -19,6 +19,10 @@ limitations** — a changelog that only lists good news is not worth reading.
   platform default or the built-in default.
 - **The Name input says what saving does to the name property** before you save: it changes too,
   it stays because it is kept apart from the name, or an empty one gets filled in.
+- **The mapping setting says what the editor writes.** Wherever the identity and display-name
+  properties are set (a data source, a provider, a workspace or the platform), the setting says
+  that a new entity gets its URN as the identity property, and that the name property is kept in
+  step with the name.
 
 ### Fixed
 
@@ -54,7 +58,7 @@ limitations** — a changelog that only lists good news is not worth reading.
   something else before then. To keep the two apart, change the name property after saving.
 - A mapping onto a field the platform owns (`qualifiedName`, `description`, …) is not kept in step.
 - Changing a mapping doesn't rewrite existing entities. Each catches up on its next save.
-- `POST /graph/save` writes nodes exactly as it is sent them, without these properties.
+- `POST /graph/save` writes nodes exactly as they are sent, without these properties.
 - The identity property holds a urn string, so a source with numeric ids ends up with mixed types.
 - A save answers with at most 500 entities. Past that, the canvas shows the new properties of the
   rest once each is opened again.
