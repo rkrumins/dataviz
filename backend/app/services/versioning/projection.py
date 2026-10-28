@@ -34,6 +34,9 @@ from . import config, db
 from .falkor_indexes import ensure_urn_indexes
 from .merkle import content_hash
 from .reconcile import (
+    SPELLING,
+    spelled_label,
+    spelled_type,
     falkor_counts, pg_live_counts_projectable, reconcile_interrupted, rollup_health,
 )
 from .projection_reconcile import (
@@ -546,12 +549,14 @@ class FalkorProjector:
         lock_s = await lock_scope.__aenter__()
         lock_arg = func.hashtext(f"gvproj:{graph_id}")
         acquired = False
+        spelling = SPELLING.set(None)       # the pass sets the graph's own; it ends with the pass
         try:
             acquired = bool(await lock_s.scalar(select(func.pg_try_advisory_lock(lock_arg))))
             if not acquired:
                 return {"noop": True, "skipped": "in-flight"}
             return await self._project_graph_locked(graph_id)
         finally:
+            SPELLING.reset(spelling)
             try:
                 if acquired:
                     await lock_s.execute(select(func.pg_advisory_unlock(lock_arg)))
@@ -643,6 +648,9 @@ class FalkorProjector:
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
             provider_id = ps.falkor_provider    # pinned instance; None → env default
             owned = bool(ps.owns_falkor_graph)  # how the verify counts it (falkor_counts)
+            # Every label and type the pass writes or matches, in the graph's own spelling (reset
+            # by ``project_graph``).
+            SPELLING.set(None if owned else ps.physical_types)
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
             if name == self.default_graph_name(graph_id):
@@ -1305,8 +1313,7 @@ class FalkorProjector:
             new_type = (p or {}).get("entityType")
             if old and old.get("entityType") != new_type:
                 structural = True
-                retypes.append((urn, _sanitize_label(old.get("entityType") or "Entity"),
-                                _sanitize_label(new_type or "Entity")))
+                retypes.append((urn, spelled_label(old.get("entityType")), spelled_label(new_type)))
         return structural, retypes
 
     async def _compute_rollup_deltas(self, s, graph, main_id, from_seq, to_seq):
@@ -1643,10 +1650,7 @@ class FalkorProjector:
             dw = int(v["dw"] if (regime == "cube" or "dwc" not in v) else v["dwc"])
             if dw == 0:
                 continue
-            key = (
-                _sanitize_label(str(v.get("slb") or "Entity")),
-                _sanitize_label(str(v.get("tlb") or "Entity")),
-            )
+            key = (spelled_label(v.get("slb")), spelled_label(v.get("tlb")))
             items_by_labels.setdefault(key, []).append(
                 {"s": s_, "t": t_, "dw": dw, "et": sorted(v["types"]),
                  "key": f"{s_}|{t_}", "seq": seq,
@@ -1898,7 +1902,7 @@ class FalkorProjector:
             etype = etype or "Entity"
             urn_of[eid], label_of[eid] = urn, etype
             types_by_urn[urn] = etype
-            label = _sanitize_label(etype)
+            label = spelled_label(etype)
             nodes[(label, urn)] = ExpectedNode(
                 entity_id=eid, ref=("node", gid, vid),
                 fp=_node_fingerprint(label, chash, lm.get(etype)))
@@ -1909,8 +1913,8 @@ class FalkorProjector:
                 continue                                 # the platform's, never the log's
             su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
             tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
-            rel = _sanitize_label(etype or "REL")
-            edges[(_sanitize_label(slb or "Entity"), su, rel, _sanitize_label(tlb or "Entity"), tu)] = \
+            rel = spelled_type(etype)
+            edges[(spelled_label(slb), su, rel, spelled_label(tlb), tu)] = \
                 ExpectedEdge(entity_id=eid, ref=("edge", gid, vid), fp=_edge_fingerprint(rel, chash))
         del heads
         return nodes, edges, types_by_urn
@@ -2278,7 +2282,7 @@ class FalkorProjector:
                 for eid, urn, payload in rows:      # ascending commit_seq → last non-null wins
                     latest[eid] = (urn, str((payload or {}).get("entityType") or "Entity"))
                 for e, (u, lbl) in latest.items():
-                    pairs_by_label.setdefault(_sanitize_label(lbl), []).append(
+                    pairs_by_label.setdefault(spelled_label(lbl), []).append(
                         {"urn": u, "eid": e})
             # Tombstoned edges: their delete rows carry no payload — fold the last
             # non-delete row per entity so the delete runs typed + endpoint-anchored;
@@ -2400,7 +2404,7 @@ class FalkorProjector:
                 )
         by_label: Dict[str, list] = {}
         for up in node_upserts:
-            by_label.setdefault(_sanitize_label(up[2].get("entityType") or "Entity"), []).append(up)
+            by_label.setdefault(spelled_label(up[2].get("entityType")), []).append(up)
         keep = _projector_owned_property_names()
         for label, ups in by_label.items():
             for batch in _batches(ups, self._batch):
@@ -2424,11 +2428,7 @@ class FalkorProjector:
         by_rel: Dict[Tuple[str, str, str], list] = {}
         for up in edge_upserts:
             _eid, _su, _tu, p, slb, tlb = up
-            key = (
-                _sanitize_label(p.get("edgeType") or "REL"),
-                _sanitize_label(slb or "Entity"),
-                _sanitize_label(tlb or "Entity"),
-            )
+            key = (spelled_type(p.get("edgeType")), spelled_label(slb), spelled_label(tlb))
             by_rel.setdefault(key, []).append(up)
         for (rel, sl, tl), ups in by_rel.items():
             for batch in _batches(ups, self._batch):
@@ -2445,7 +2445,7 @@ class FalkorProjector:
 
         ndel_by: Dict[str, list] = {}
         for urn, label in node_deletes:
-            ndel_by.setdefault(_sanitize_label(label or "Entity"), []).append(urn)
+            ndel_by.setdefault(spelled_label(label), []).append(urn)
         for label, urns in ndel_by.items():
             for chunk in _batches(urns, self._batch):
                 await _q(client, _delete_nodes_cypher(label), params={"urns": list(chunk)})
@@ -2465,7 +2465,7 @@ class FalkorProjector:
         set: every other statement would fail the same way. ``drop_graph`` forgets a graph's
         entries, since GRAPH.DELETE takes its indexes."""
         name = str(getattr(client, "name", "") or "")
-        want = [lbl for lbl in dict.fromkeys(_sanitize_label(lbl or "Entity") for lbl in labels)
+        want = [lbl for lbl in dict.fromkeys(spelled_label(lbl) for lbl in labels)
                 if (provider_id, name, lbl) not in _URN_INDEXED]
         for lbl in want:
             try:
@@ -2543,11 +2543,8 @@ class FalkorProjector:
         fallback: list = []
         for e in edge_deletes:
             if isinstance(e, dict):
-                key = (
-                    _sanitize_label(e.get("rel") or "REL"),
-                    _sanitize_label(e.get("slb") or "Entity"),
-                    _sanitize_label(e.get("tlb") or "Entity"),
-                )
+                key = (spelled_type(e.get("rel")), spelled_label(e.get("slb")),
+                       spelled_label(e.get("tlb")))
                 del_by.setdefault(key, []).append(
                     {"eid": e["eid"], "src": e["src"], "tgt": e["tgt"]}
                 )

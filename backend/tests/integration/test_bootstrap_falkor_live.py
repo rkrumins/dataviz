@@ -13,11 +13,15 @@ FalkorDB can answer is pinned here:
   holds: one node per urn, one relationship per stored edge. Its counts match, and the verify
   after the next publish is clean.
 * L3 — the rollups computed over the deleted copies are handed to the rebuild, and only then.
+* L4 — a graph that spells its types its own way (``:table``, ``:flows_to``) against an ontology
+  that declares ``Table`` and ``FLOWS_TO`` keeps its spelling: history holds the declared one, and
+  every publish after the enable lands on the graph's own labels and goes out fresh.
 
 Needs Postgres (``GRAPHVER_E2E=1``) and FalkorDB:
   GRAPHVER_E2E=1 RUN_FALKOR_LIVE=1 FALKORDB_HOST=localhost FALKORDB_PORT=6379 \\
     python -m pytest -q tests/integration/test_bootstrap_falkor_live.py
 """
+import json
 import os
 
 import pytest
@@ -33,9 +37,14 @@ from backend.app.services.versioning.bootstrap_worker import (
     decide_duplicates,
 )
 from backend.app.services.versioning.job_lease import Lease
-from backend.app.services.versioning.models import BranchORM, JobORM
+from backend.app.services.versioning.models import BranchORM, GraphORM, JobORM, ProjectionStateORM
+from backend.app.services.versioning.ontology import EdgeRule, EntityRule, OntologyRules
 from backend.app.services.versioning.projection import FalkorProjector
-from backend.app.services.versioning.reconcile import falkor_counts, pg_live_counts_projectable
+from backend.app.services.versioning.reconcile import (
+    ProjectionReconciler,
+    falkor_counts,
+    pg_live_counts_projectable,
+)
 from backend.app.services.versioning.service import GraphVersioningService
 from sqlalchemy import func, select
 
@@ -306,6 +315,92 @@ async def test_the_rollup_rebuild_is_queued_only_after_a_collapse(graph, falkor)
     assert (await runner.run_job(await _take(job_id)))["status"] == "completed"
     assert hooked == [gid], "copies were deleted: their rollups must be rebuilt"
     assert await _rows(dupes, "MATCH ()-[r:AGGREGATED]->() RETURN count(r)") == [[0]]
+
+
+# ── L4: a graph that spells its types its own way keeps that spelling ────────
+
+async def _fresh(gid) -> bool:
+    async with db.graphver_session() as s:
+        ps, g = await s.get(ProjectionStateORM, gid), await s.get(GraphORM, gid)
+        return ps.projected_commit_seq == g.main_head_commit_seq
+
+
+async def test_a_graph_keeps_its_own_spelling_of_its_types(graph, monkeypatch):
+    """An update lands on the node that is there, not on a second ``:Table`` copy; a delete finds
+    it; a new relationship is a ``flows_to``; an edge's new property lands on it. Every publish is
+    verified and goes out fresh, and the sync check finds nothing out of place."""
+    name, client = graph
+    for urn in ("urn:t1", "urn:t2", "urn:t3"):
+        await client.query("CREATE (:table {urn: $u, displayName: $u})", {"u": urn})
+    await client.query("CREATE INDEX FOR (n:table) ON (n.urn)")
+    await client.query("MATCH (a:table {urn: 'urn:t1'}), (b:table {urn: 'urn:t2'}) "
+                       "CREATE (a)-[:flows_to {id: 'f1', properties: $p}]->(b)",
+                       {"p": json.dumps({"w": 1})})
+    rules = OntologyRules(entity_types={"Table": EntityRule()}, edge_types={"FLOWS_TO": EdgeRule()},
+                          edge_type_canonical={"FLOWS_TO": "FLOWS_TO"})
+
+    async def declared(_job_id):
+        return rules
+
+    monkeypatch.setattr(bw, "_ontology_rules", declared)
+    _ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+    async with db.graphver_session() as s:
+        assert (await s.get(ProjectionStateORM, gid)).physical_types == {
+            "nodes": {"Table": "table"}, "edges": {"FLOWS_TO": "flows_to"}}
+
+    svc, projector = GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+    for message, op in (
+            ("rename t1", {"op": "update", "entity_kind": "node", "entity_id": "urn:t1",
+                           "payload": {"urn": "urn:t1", "entityType": "Table",
+                                       "displayName": "t1 renamed"}}),
+            ("delete t3", {"op": "delete", "entity_kind": "node", "entity_id": "urn:t3",
+                           "payload": None}),
+            ("t2 flows to t1", {"op": "create", "entity_kind": "edge", "entity_id": "f2",
+                                "payload": {"sourceEntityId": "urn:t2", "targetEntityId": "urn:t1",
+                                            "edgeType": "FLOWS_TO"}}),
+            ("weigh f1", {"op": "update", "entity_kind": "edge", "entity_id": "f1",
+                          "payload": {"properties": {"w": 2}}})):
+        await svc.apply_ops(graph_id=gid, actor="bob", message=message, ops=[op])
+        res = await projector.project_graph(gid)
+        assert res.get("verify_error") is None, (message, res)
+        assert await _fresh(gid), (message, res)
+
+    assert await _rows(client, "MATCH (n:Table) RETURN count(n)") == [[0]]
+    assert await _rows(client, "MATCH ()-[r:FLOWS_TO]->() RETURN count(r)") == [[0]]
+    assert await _rows(client, "MATCH (n:table) RETURN n.urn, n.displayName ORDER BY n.urn") == [
+        ["urn:t1", "t1 renamed"], ["urn:t2", "urn:t2"]]
+    rels = await _rows(client, "MATCH (a)-[r:flows_to]->(b) "
+                               "RETURN a.urn, r.id, b.urn, r.properties ORDER BY r.id")
+    assert [r[:3] for r in rels] == [["urn:t1", "f1", "urn:t2"], ["urn:t2", "f2", "urn:t1"]], rels
+    assert json.loads(rels[0][3]) == {"w": 2}
+    report = await ProjectionReconciler(db.graphver_session, lambda _n, _p=None: client).reconcile(
+        gid, deep=True)
+    assert report.in_sync and not report.mismatched and not report.edge_mismatched, report
+
+
+async def test_a_type_the_graph_spells_two_ways_stops_the_enable(graph, monkeypatch):
+    """``table`` and ``TABLE`` are both the declared ``Table``: history can keep one spelling, and
+    the projector would reach only the nodes under it. The checks stop the enable and say why;
+    nothing becomes visible."""
+    name, client = graph
+    await client.query("CREATE (:table {urn: 'urn:a'}), (:TABLE {urn: 'urn:b'})")
+    rules = OntologyRules(entity_types={"Table": EntityRule()})
+
+    async def declared(_job_id):
+        return rules
+
+    monkeypatch.setattr(bw, "_ontology_rules", declared)
+    ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "failed" and "spelled more than one way" in out["error"], out
+    status = await bootstrap_status(data_source_id=ds)
+    failed = [c for c in status["report"]["checks"] if not c["ok"]]
+    assert [(c["key"], c["detail"]) for c in failed] == [
+        ("one_spelling_per_type", "Table is spelled TABLE and table")], failed
+    async with db.graphver_session() as s:
+        assert (await s.get(GraphORM, gid)).main_head_commit_seq <= 1, "nothing became visible"
 
 
 # ── a graph server that cuts replies short ───────────────────────────────────

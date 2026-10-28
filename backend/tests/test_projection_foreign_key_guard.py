@@ -59,6 +59,7 @@ class _PS:
         self.falkor_graph_name = "customer_graph"
         self.falkor_provider = None
         self.owns_falkor_graph = owns
+        self.physical_types = None
         self.last_projected_at = None
         self.progress_done = None
         self.progress_total = None

@@ -13,6 +13,7 @@ import asyncio
 from types import SimpleNamespace
 
 from backend.app.services.versioning.projection import FalkorProjector
+from backend.app.services.versioning.reconcile import SPELLING
 
 
 def _run(coro):
@@ -131,6 +132,31 @@ def test_apply_rollups_queries_are_label_anchored():
         assert ":Table" in c and ":Dataset" in c, c
     for cypher, _params, timeout in client.calls:
         assert timeout is not None, f"rollup query without timeout: {cypher[:80]}"
+
+
+def test_a_pass_writes_and_matches_the_graph_own_spelling_of_its_types():
+    """A customer graph spells ``Table`` as ``table`` and ``FLOWS`` as ``flows``
+    (``projection_state.physical_types``): every label and type a pass writes or matches is the
+    graph's own, and one the graph never had is written as declared."""
+    client = _CaptureClient()
+    p = _projector()
+    token = SPELLING.set({"nodes": {"Table": "table"}, "edges": {"FLOWS": "flows"}})
+    try:
+        _run(p._apply(client, [_NODE_A, _NODE_B], [_EDGE], [("urn:x", "Table")],
+                      [{"eid": "E1", "src": "urn:a", "tgt": "urn:b",
+                        "rel": "FLOWS", "slb": "Table", "tlb": "Dataset"}]))
+        _run(p._apply_rollups(client, {("urn:a", "urn:b"): {
+            "dw": 1, "types": {"FLOWS"}, "sl": 2, "tl": 2, "dg": "d",
+            "slb": "Table", "tlb": "Dataset"}}, 1, 2))
+    finally:
+        SPELLING.reset(token)
+    written = " ".join(client.cyphers())
+    assert "MERGE (n:table {urn: item.urn})" in written
+    assert "MATCH (a:table {urn: item.src})" in written and "MERGE (a)-[r:flows]->(b)" in written
+    assert "MATCH (n:table {urn: u}) DETACH DELETE n" in written
+    assert "[r:flows {id: item.eid}]" in written
+    assert ":Dataset" in written
+    assert ":Table" not in written and ":FLOWS" not in written, written
 
 
 def _node_items(client):

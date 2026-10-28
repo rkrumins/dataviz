@@ -11,6 +11,17 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ## [Unreleased] — Versioning: enabling version control on a graph that already exists
 
+### Fixed
+
+- **A graph that spells its types its own way keeps that spelling.** When a graph's labels differ
+  from the ontology's spelling only in case (`:table` for a declared `Table`, `:flows_to` for
+  `FLOWS_TO`), enabling version control now records the graph's own spelling, and every publish
+  writes and matches it. Before, the first publish after enabling added a second `:Table` copy of
+  each node it changed, its check then found "extra entities", and the projection stayed behind
+  from then on, so views read from Postgres. Version history keeps the ontology's spelling. A graph
+  that spells one type two ways (`table` and `TABLE`) now stops the enable with a message saying so:
+  give each type one spelling in the graph, then start over.
+
 ### Upgrading
 
 - Run `20261028_1000_gv_ps_unowned` after `20261018_1200_gv_lifecycle`; it is the new head. It

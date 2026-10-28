@@ -21,9 +21,12 @@ from backend.app.services.versioning.bootstrap_worker import (
     _merge_scan_summary,
     _next_phase,
     _percent,
+    _physical_types,
+    _spelled_two_ways,
     _tally_matches,
     _vid,
 )
+from backend.app.services.versioning.ontology import EdgeRule, EntityRule, OntologyRules
 
 
 # ── deterministic version ids (crash-replay safety) ──────────────────────────
@@ -137,6 +140,7 @@ def test_tally_match_tolerates_merged_duplicate_connections_only_when_allowed():
     ("nodes_seen", "changed while we were copying"),
     ("no_duplicate_items", "share an identifier"),
     ("no_dropped_connections", "point at items that don't exist"),
+    ("one_spelling_per_type", "spelled more than one way"),
 ])
 def test_failed_checks_explain_themselves_in_plain_language(key, expected):
     msg = _explain_failed_checks([{"key": key, "ok": False, "blocking": True, "detail": ""}])
@@ -268,3 +272,46 @@ def test_edges_to_rows_drops_dangling_and_dedups_same_triple():
     assert rejects["danglingEdges"] == 1
     assert dupes == 1
     assert [d["entity_id"] for d in dicts] == ["c2"]
+
+
+# ── the graph's own spelling of its types (projection_state.physical_types) ───
+
+_RULES = OntologyRules(entity_types={"Table": EntityRule(), "Column": EntityRule()},
+                       edge_types={"FLOWS_TO": EdgeRule()}, edge_type_canonical={"FLOWS_TO": "FLOWS_TO"})
+_CTX = types.SimpleNamespace(commit_id="cmt_1", commit_seq=1, main_id="main_1", actor="alice")
+
+
+def test_a_window_records_how_the_graph_spells_each_type():
+    """History stores the declared spelling; the window remembers the graph's own, every one."""
+    nodes = BootstrapRunner._nodes_to_rows(
+        object(), [(0, ["table"], {"urn": "urn:a"}), (1, ["Table"], {"urn": "urn:b"}),
+                   (2, ["Column"], {"urn": "urn:c"})], _CTX, "g1", _RULES, set())
+    assert [d["entity_type"] for d in nodes.dicts] == ["Table", "Table", "Column"]
+    assert nodes.spellings == {"Table": {"table", "Table"}, "Column": {"Column"}}
+    edges = BootstrapRunner._edges_to_rows(
+        object(), [(0, 1, "urn:a", "urn:b", "flows_to", {"id": "f1"})], _CTX, "g1", _RULES,
+        {"urn:a", "urn:b"})
+    assert edges.dicts[0]["edge_type"] == "FLOWS_TO"
+    assert edges.spellings == {"FLOWS_TO": {"flows_to"}}
+
+
+def test_scan_summary_gathers_every_spelling_of_a_type_across_windows():
+    s = _merge_scan_summary({}, "nodes", scanned=1, written=1, tallies={}, rejects={}, sample=None,
+                            dupes=0, spellings={"Table": {"table"}})
+    s = _merge_scan_summary(s, "nodes", scanned=2, written=2, tallies={}, rejects={}, sample=None,
+                            dupes=0, spellings={"Table": {"TABLE", "table"}, "Column": {"Column"}})
+    s = _merge_scan_summary(s, "edges", scanned=1, written=1, tallies={}, rejects={}, sample=None,
+                            dupes=0, spellings={"FLOWS_TO": {"flows_to"}})
+    assert s["physicalTypes"] == {"nodes": {"Table": ["TABLE", "table"], "Column": ["Column"]},
+                                  "edges": {"FLOWS_TO": ["flows_to"]}}
+    assert _spelled_two_ways(s) == [("Table", ["TABLE", "table"])]
+
+
+def test_the_projector_gets_each_type_the_graph_spells_one_other_way():
+    summary = {"physicalTypes": {"nodes": {"Table": ["table"], "Column": ["Column"]},
+                                 "edges": {"FLOWS_TO": ["flows_to"]}}}
+    assert _physical_types(summary) == {"nodes": {"Table": "table"},
+                                        "edges": {"FLOWS_TO": "flows_to"}}
+    assert _spelled_two_ways(summary) == []
+    assert _physical_types({"physicalTypes": {"nodes": {"Column": ["Column"]}}}) is None
+    assert _physical_types({}) is None, "a job that started before the tally: as declared"

@@ -71,6 +71,16 @@ through the projector automatically.
   `PROJECTION_FALKOR_WRITE_TIMEOUT_S` (default 60, clamped under the fleet's `TIMEOUT_MAX`) /
   `PROJECTION_FALKOR_READ_TIMEOUT_S` (default 30), plus a client-side hang net. Without an explicit
   budget the FalkorDB fleet's `TIMEOUT_DEFAULT 30000` killed un-budgeted seed batches mid-load.
+- **A graph enabled in place keeps its own spelling of its types.** History stores each type as the
+  ontology declares it (`Table`, `FLOWS_TO`); the graph may say `table` and `flows_to`. Enabling
+  version control records the graph's spelling of every type it spells differently
+  (`projection_state.physical_types`, `{"nodes": {declared: physical}, "edges": {...}}`), and every
+  label and relationship type a pass writes or matches goes through it (`reconcile.spelled_label` /
+  `spelled_type`, set per pass), as does Check sync. So an edit updates the node that is there
+  rather than adding a `:Table` copy beside it. A type the graph never had is written as declared.
+  A graph that spells one type two ways (`table` and `TABLE`) stops the enable at its checks
+  (`one_spelling_per_type`). Keys the platform owns, and graphs enabled before 2026-10-28, are
+  written with the declared spelling.
 
 > **Limitation (phantom keys).** A node with no `urn` in its payload is keyed as `gv:<entity_id>` and
 > logs a WARN (`_node_urn`, `projection.py:93-106`; `_urn_for`, `:701-718`). This is a deliberate

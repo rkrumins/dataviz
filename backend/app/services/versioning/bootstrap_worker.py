@@ -81,7 +81,7 @@ import json
 import logging
 import random
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import blake2b
 from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
@@ -474,6 +474,8 @@ class _Window:
     meta: Dict[str, Tuple[str, int]]             # nodes: entity id → (source label, internal id)
     self_loops: int = 0                          # edges: between two copies of one urn
     dupes: int = 0                               # edges: same id twice in the window
+    # The graph's own spellings of each declared type (``projection_state.physical_types``).
+    spellings: Dict[str, Set[str]] = field(default_factory=dict)
 
 
 class BootstrapRunner:
@@ -954,7 +956,8 @@ class BootstrapRunner:
             summary = _merge_scan_summary(
                 summary, kind, scanned=len(rows), written=len(landed), tallies=win.scanned,
                 rejects=win.rejects, sample=sample, dupes=win.dupes, written_tallies=written,
-                collapsed=win.collapsed, self_loops=win.self_loops, rekeyed=rekeyed)
+                collapsed=win.collapsed, self_loops=win.self_loops, rekeyed=rekeyed,
+                spellings=win.spellings)
             done, total = (int(summary["written"]["nodes"]) + int(summary["written"]["edges"]),
                            job.total)
             # The next window's width: the one that worked — and, for edges in a sparse band,
@@ -1081,6 +1084,12 @@ class BootstrapRunner:
             graph_id, ctx.commit_id, ctx, sampled, await self._rules(lease, ctx))
         check("sample_matches", not mismatched,
               f"{matched} of {len(sampled)} re-checked items match exactly")
+        # 8. One spelling per type. History keeps the declared spelling; the projector writes the
+        #    graph's own back into it (projection_state.physical_types), so there must be one.
+        spelled = _spelled_two_ways(summary)
+        check("one_spelling_per_type", not spelled,
+              "; ".join(f"{t} is spelled {' and '.join(v)}" for t, v in spelled[:5])
+              if spelled else "each type is spelled one way in the graph")
 
         blocking = [c for c in checks if c["blocking"] and not c["ok"]]
         report = {
@@ -1233,6 +1242,10 @@ class BootstrapRunner:
                 ps.status = "idle"
                 ps.last_projected_at = _now()
                 ps.epoch = ProjectionStateORM.epoch + 1      # fenced by the lease, with the flip
+                if not ps.owns_falkor_graph:
+                    # The graph's own spelling of the types it spells differently: the projector
+                    # writes and matches with it from the first publish on.
+                    ps.physical_types = _physical_types(summary)
         logger.info("bootstrap %s: head flipped to seq %s (projection fast-forwarded)",
                     lease.job_id, commit.commit_seq)
         # On the decision, not on the tally of deletes: a window replayed after a crash between
@@ -1566,6 +1579,8 @@ class BootstrapRunner:
             payload = _sanitize_node_properties({k: v for k, v in row.items() if k != "kind"})
             et = str(payload.get("entityType") or "unknown")
             _bump(win.scanned, et)
+            if label:
+                win.spellings.setdefault(et, set()).add(label)
             # A copy the decision collapsed is skipped — but only if it is STILL that copy: the
             # same internal id, urn AND label. FalkorDB re-uses a deleted node's id, so a copy
             # deleted while the job waited may have handed its id to a different node, which
@@ -1629,6 +1644,7 @@ class BootstrapRunner:
             payload["edgeType"] = et
             ch = content_hash(payload)
             _bump(win.scanned, et)
+            win.spellings.setdefault(et, set()).add(str(rel))
             win.dicts.append(dict(
                 graph_id=graph_id, id=_vid("evb", ctx.commit_id, eid), entity_id=eid,
                 commit_id=ctx.commit_id, commit_seq=ctx.commit_seq, branch_id=ctx.main_id,
@@ -2228,6 +2244,11 @@ def _explain_failed_checks(failed: List[dict]) -> str:
     makes the re-read sample disagree too) — saying "the graph changed" there would send
     the user chasing the wrong thing."""
     keys = {c["key"] for c in failed}
+    if "one_spelling_per_type" in keys:
+        return ("Some types are spelled more than one way in the graph (Table as table and TABLE, "
+                "say). Version history keeps one spelling for each type, so later changes would "
+                "reach only one of them. Give each type one spelling in the graph, then start "
+                "over.")
     if "no_duplicate_items" in keys:
         return ("Some items in the source graph share an identifier that the check before "
                 "copying did not see — the source changed while it was copied. Start over to "
@@ -2285,11 +2306,13 @@ def _add_reject_sample(rejects: dict, item: dict) -> None:
 def _merge_scan_summary(summary: dict, kind: str, *, scanned: int, written: int,
                         tallies: dict, rejects: dict, sample, dupes: int,
                         written_tallies: Optional[dict] = None, collapsed: Optional[dict] = None,
-                        self_loops: int = 0, rekeyed: int = 0) -> dict:
+                        self_loops: int = 0, rekeyed: int = 0,
+                        spellings: Optional[Dict[str, Set[str]]] = None) -> dict:
     """Add one window's tallies to the job's. ``tallies`` / ``written_tallies`` are per label
     (nodes) or per type (edges): what was scanned, and what landed; ``collapsed`` the copies a
     duplicate decision skipped, per label; ``self_loops`` the edges between two copies of one urn;
-    ``rekeyed`` the edges whose id clashed with a node's."""
+    ``rekeyed`` the edges whose id clashed with a node's; ``spellings`` how the graph spells each
+    declared type (``physicalTypes``: every spelling seen, per declared type)."""
     sc = dict(summary.get("scanned") or {"nodes": 0, "edges": 0, "byLabel": {}, "byType": {}})
     wr = dict(summary.get("written") or {"nodes": 0, "edges": 0})
     rj = dict(summary.get("rejected") or {"duplicateUrns": 0, "danglingEdges": 0, "samples": []})
@@ -2314,7 +2337,33 @@ def _merge_scan_summary(summary: dict, kind: str, *, scanned: int, written: int,
     summary["rekeyedEdges"] = int(summary.get("rekeyedEdges", 0)) + int(rekeyed or 0)
     if sample is not None:
         summary["sample"] = sample
+    if spellings:
+        spelled = dict(summary.get("physicalTypes") or {})
+        seen = {t: set(v) for t, v in (spelled.get(kind) or {}).items()}
+        for t, v in spellings.items():
+            seen.setdefault(t, set()).update(v)
+        spelled[kind] = {t: sorted(v) for t, v in seen.items()}
+        summary["physicalTypes"] = spelled
     return summary
+
+
+def _spelled_two_ways(summary: dict) -> List[Tuple[str, List[str]]]:
+    """Each declared type the graph spells more than one way, with its spellings: nodes, then
+    edges."""
+    seen = summary.get("physicalTypes") or {}
+    return [(t, list(v)) for kind in ("nodes", "edges")
+            for t, v in sorted((seen.get(kind) or {}).items()) if len(v) > 1]
+
+
+def _physical_types(summary: dict) -> Optional[dict]:
+    """``projection_state.physical_types``: the graph's own spelling of each declared type it spells
+    another way, which the projector writes and matches in it. None when it spells every type as
+    declared, or the job's scan predates the tally. (A type spelled two ways never gets here:
+    validation refuses it.)"""
+    seen = summary.get("physicalTypes") or {}
+    out = {kind: {t: v[0] for t, v in (seen.get(kind) or {}).items() if len(v) == 1 and v[0] != t}
+           for kind in ("nodes", "edges")}
+    return out if out["nodes"] or out["edges"] else None
 
 
 def _add_tally(into: Optional[dict], more: Optional[dict]) -> dict:

@@ -323,7 +323,7 @@ def test_an_explicit_rebuild_that_finds_a_pass_in_flight_nudges(monkeypatch):
 
 def test_the_bootstrap_head_flip_bumps_the_epoch_in_the_fenced_transaction():
     ps = SimpleNamespace(projected_commit_seq=1, target_commit_seq=1, status="idle",
-                         last_projected_at=None, epoch=0)
+                         last_projected_at=None, epoch=0, owns_falkor_graph=False)
     rows = {JobORM: SimpleNamespace(summary={}), GraphORM: SimpleNamespace(),
             BranchORM: SimpleNamespace(), ProjectionStateORM: ps}
     sessions = []
