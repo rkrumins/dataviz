@@ -2,8 +2,8 @@
  * A Connections search in the panel: Find switches between entities and
  * the connections between them, as one undo step each way, and says what
  * the switch left out; the answer is the edges, counted as connections; a
- * display rule can't be made of it, and with the builder folded away
- * there's no Ask bar to add an entity condition to it.
+ * display rule can't be made of it; and a question asked beside it takes
+ * its place — a connection is the whole query, never added to.
  */
 import { fireEvent, render, screen } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -123,12 +123,29 @@ describe('SearchMapPanel — Connections', () => {
         expect(rule).toHaveAttribute('title', NO_RULE_FOR_CONNECTIONS)
     })
 
-    it('states the connections with the builder folded, offering no Ask bar to add to them', () => {
+    it('states the connections with the builder folded, and a question there takes their place', () => {
         useSearchStore.getState().commitDraft(EDGES)
-        renderPanel({ view: CONNECTIONS, refineOpen: false })
+        const advanced = renderPanel({ view: CONNECTIONS, refineOpen: false })
 
-        expect(screen.queryByRole('textbox', { name: 'Ask about this view' })).not.toBeInTheDocument()
         expect(screen.getByText((_, el) => el?.tagName === 'P' && /^Connections from/.test(el.textContent ?? '')))
             .toBeInTheDocument()
+        const ask = screen.getByRole('textbox', { name: 'Ask about this view' })
+        fireEvent.change(ask, { target: { value: 'and tagged PII' } })
+        expect(screen.getByText('Reads as')).toBeInTheDocument()
+        fireEvent.keyDown(ask, { key: 'Enter' })
+        expect(draft()).toEqual(PII)
+        expect(advanced.runPredicate).toHaveBeenCalledTimes(1)
+    })
+
+    it('asks in the card in Connections, in the Form and in the Sentence', () => {
+        useSearchStore.getState().commitDraft(EDGES)
+        renderPanel()
+        expect(screen.getByRole('textbox', { name: 'Ask about this view' })).toBeInTheDocument()
+
+        fireEvent.click(screen.getByRole('radio', { name: 'Sentence' }))
+        const ask = screen.getByRole('textbox', { name: 'Ask about this view' })
+        fireEvent.change(ask, { target: { value: 'connections from orders to revenue' } })
+        fireEvent.keyDown(ask, { key: 'Enter' })
+        expect(draft()).toMatchObject({ kind: 'edges', sourceWhere: { kind: 'text', value: 'orders' } })
     })
 })

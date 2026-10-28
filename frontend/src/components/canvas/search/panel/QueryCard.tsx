@@ -419,9 +419,9 @@ export const QueryCard: FC<QueryCardProps> = ({
     // on "add a filter" (the omnibox), which stays beneath the rows after,
     // with the Ask bar a step below as the other way in. Sentence leads
     // with the Ask bar.
-    const askBar = (variant: 'hero' | 'compact') => (
+    const askBar = (variant: 'hero' | 'compact', examples = variant === 'hero') => (
         <AskBar viewId={viewId} vocabulary={askVocabulary} draft={draftPredicate} onAsk={handleAsk}
-                presentTypes={presentEntityTypes} variant={variant} disabled={isRunning} />
+                presentTypes={presentEntityTypes} variant={variant} examples={examples} disabled={isRunning} />
     )
 
     const omnibox = (
@@ -536,7 +536,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                             }
                             byFilters={mode === 'form'}
                             entry={mode === 'form' ? omnibox : askBar('hero')}
-                            orAsk={mode === 'form' ? askBar('compact') : null}
+                            orAsk={mode === 'form' ? askBar('compact', true) : null}
                             palette={
                                 <AddFilterPalette
                                     counts={paletteCounts}
@@ -561,6 +561,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                         />
                     ) : connections && mode === 'sentence' ? (
                         <RelationProvider viewId={viewId} edges={edgeDiscovery}>
+                            {askBar('compact')}
                             <ConnectionSentence
                                 viewId={viewId}
                                 value={connections}
@@ -600,6 +601,7 @@ export const QueryCard: FC<QueryCardProps> = ({
                                 isRunning={isRunning}
                                 onSubmit={dispatchRun}
                             />
+                            {askBar('compact')}
                         </RelationProvider>
                     ) : mode === 'sentence' ? (
                         <RelationProvider viewId={viewId} edges={edgeDiscovery}>

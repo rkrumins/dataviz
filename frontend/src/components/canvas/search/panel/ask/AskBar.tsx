@@ -41,7 +41,8 @@ import { useAskPreview, type NameLookup, type NameMatch } from './useAskPreview'
 export interface AskBarProps {
     viewId: string | null
     vocabulary: AskVocabulary
-    /** The query a question starting with "and" adds to. */
+    /** The query a question starting with "and" adds to — unless it is a
+     *  connection, which is the whole query: a question takes its place. */
     draft: Predicate | null
     /** Apply the query a question leaves. */
     onAsk: (result: Predicate) => void
@@ -49,12 +50,15 @@ export interface AskBarProps {
     presentTypes: readonly string[]
     /** ``hero``: the empty card's front door, examples beneath. */
     variant?: 'hero' | 'compact'
+    /** Example questions beneath it, to try: the empty card's always has
+     *  them, whichever way in it leads with. */
+    examples?: boolean
     disabled?: boolean
 }
 
 
 export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant = 'compact',
-    disabled = false }: AskBarProps) {
+    examples: showExamples = variant === 'hero', disabled = false }: AskBarProps) {
     const [question, setQuestion] = useState('')
     const [picks, setPicks] = useState<AskPicks>({})
     const [recall, setRecall] = useState<number | null>(null)
@@ -70,8 +74,10 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
         if (askFocus && useSearchStore.getState().consumeAskFocus()) inputRef.current?.focus()
     }, [askFocus])
 
-    const preview = useAskPreview(viewId, question, vocabulary, picks, draft)
+    const addTo = draft?.kind === 'edges' ? null : draft
+    const preview = useAskPreview(viewId, question, vocabulary, picks, addTo)
     const { interpretation, result } = preview
+    const adding = interpretation.mode === 'add' && addTo !== null
     const examples = useMemo(() => askExamples(presentTypes, vocabulary.tags, typeName, persona),
         [presentTypes, vocabulary.tags, typeName, persona])
 
@@ -130,7 +136,7 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                     autoFocus={hero}
                     aria-label="Ask about this view"
                     placeholder={hero ? 'Ask in plain words…'
-                        : !draft ? 'Or ask in plain words…'
+                        : !addTo ? 'Or ask in plain words…'
                             : 'Ask to change the query — start with “and” to add to it'}
                     className={cn('min-w-0 flex-1 bg-transparent text-ink outline-none placeholder:text-ink-muted/80',
                         hero ? 'text-base' : 'text-sm')}
@@ -147,7 +153,7 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                                     'bg-accent-lineage text-white hover:bg-accent-lineage/90 disabled:opacity-40',
                                     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                                 )}>
-                            {interpretation.mode === 'add' ? 'Add' : 'Apply'}
+                            {adding ? 'Add' : 'Apply'}
                             <CornerDownLeft className="h-3 w-3" aria-hidden />
                         </button>
                     </>
@@ -159,7 +165,7 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                     <div className="flex items-start gap-3">
                         <div className="min-w-0 flex-1">
                             <div className="text-2xs font-semibold uppercase tracking-wider text-ink-muted">
-                                {interpretation.mode === 'add' ? 'The query becomes' : 'Reads as'}
+                                {adding ? 'The query becomes' : 'Reads as'}
                             </div>
                             <div className="text-sm">
                                 {result
@@ -200,7 +206,7 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                         <p key={note} className="text-xs text-amber-700 dark:text-amber-300">{note}</p>
                     ))}
                 </div>
-            ) : hero && (
+            ) : showExamples && (
                 <div className="flex flex-wrap items-center gap-1.5 text-xs">
                     <span className="text-ink-muted">Try</span>
                     {examples.map((q) => (

@@ -787,9 +787,7 @@ function PanelInner({
                                 {/* With the builder folded away this is the
                                     only statement of what was asked — and
                                     a new question is still one line away. */}
-                                {!refineOpen && draftPredicate?.kind !== 'edges' && (
-                                    <ResultsAskBar viewId={viewId} onRun={handleRun} />
-                                )}
+                                {!refineOpen && <ResultsAskBar viewId={viewId} onRun={handleRun} />}
                                 {!sentenceShowing && <QuerySentence draftPredicate={draftPredicate} />}
                                 {matchBar}
                                 {resultsPane}

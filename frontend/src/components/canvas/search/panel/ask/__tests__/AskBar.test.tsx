@@ -24,7 +24,7 @@ const vocabulary = buildAskVocabulary({
     tagValues: ['PII', 'Finance'], propertyKeys: ['owner'], valueSamples: [], layers: [],
 })
 
-function setup(draft: Predicate | null = null, variant: 'hero' | 'compact' = 'compact') {
+function setup(draft: Predicate | null = null, variant: 'hero' | 'compact' = 'compact', examples?: boolean) {
     const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
     const searchCounts = vi.fn(async (body: SearchCountsRequest) => ({
         counts: Object.fromEntries(body.items.map((i) => [i.id, { count: 12, status: 'complete' }])),
@@ -45,7 +45,7 @@ function setup(draft: Predicate | null = null, variant: 'hero' | 'compact' = 'co
     )
     const onAsk = vi.fn()
     render(<AskBar viewId="view-a" vocabulary={vocabulary} draft={draft} onAsk={onAsk}
-                   presentTypes={['dataset', 'dashboard']} variant={variant} />, { wrapper })
+                   presentTypes={['dataset', 'dashboard']} variant={variant} examples={examples} />, { wrapper })
     const input = screen.getByRole('textbox', { name: 'Ask about this view' })
     const ask = (q: string) => fireEvent.change(input, { target: { value: q } })
     return { input, ask, onAsk, searchCounts, resolveSearchRefs }
@@ -99,6 +99,17 @@ describe('AskBar', () => {
             draft, { kind: 'tag', op: 'hasAny', values: ['PII'] }] })
     })
 
+    it('asks beside a connection without adding to it: a connection is the whole query', () => {
+        const edges: Predicate = { kind: 'edges', sourceWhere: { kind: 'entityType', op: 'in', values: ['dataset'] } }
+        const { ask, input, onAsk } = setup(edges)
+        expect(input).toHaveAttribute('placeholder', 'Or ask in plain words…')
+        ask('and tagged PII')
+        expect(screen.getByText('Reads as')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /Apply/ })).toBeInTheDocument()
+        fireEvent.keyDown(input, { key: 'Enter' })
+        expect(onAsk).toHaveBeenCalledWith({ kind: 'tag', op: 'hasAny', values: ['PII'] })
+    })
+
     it('reads a word the other way when its other reading is picked', () => {
         const { ask, input, onAsk } = setup()
         ask('finance dashboards')
@@ -147,6 +158,12 @@ describe('AskBar', () => {
         fireEvent.click(screen.getByRole('button', { name: 'datasets tagged PII' }))
         expect(input).toHaveValue('datasets tagged PII')
         expect(screen.getByText('Reads as')).toBeInTheDocument()
+    })
+
+    it('offers questions to try beneath a compact bar when the card asks for them', () => {
+        setup(null, 'compact', true)
+        expect(screen.getByText('Try')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'datasets tagged PII' })).toBeInTheDocument()
     })
 
     it('brings back earlier questions, and Esc clears', () => {
