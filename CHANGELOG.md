@@ -9,6 +9,19 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Versioning: enabling version control on a graph that already exists
+
+### Upgrading
+
+- Run `20261028_1000_gv_ps_unowned` after `20261018_1200_gv_lifecycle`; it is the new head. It
+  adds two nullable JSONB columns to `graphver.projection_state`: `physical_types`, a customer
+  graph's own spelling of its types, and `external_drift`, what was written to it outside history.
+  No rewrite; it waits at most 5 s for the table's lock. With a separate `GRAPHVER_DB_URL`, the
+  versioning worker adds them when it starts, so start the workers on this release before the API
+  pods, as for Stage 2. Downgrading drops both and logs how many graphs had each.
+
+---
+
 ## [Unreleased] — Versioning Stage 2: people stop overwriting each other
 
 ### Added

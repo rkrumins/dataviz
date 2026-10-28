@@ -93,6 +93,8 @@ _ON_LIVE_TABLES = {
     "20261018_1100_gv_ps_retired.py": ("upgrade", "downgrade"),
     # graphver.graphs, which every main commit writes.
     "20261018_1200_gv_lifecycle.py": ("upgrade", "downgrade"),
+    # graphver.projection_state again: a customer graph's spelling and its outside changes.
+    "20261028_1000_gv_ps_unowned.py": ("upgrade", "downgrade"),
 }
 
 
