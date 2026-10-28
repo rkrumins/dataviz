@@ -499,6 +499,7 @@ class GraphVersioningService:
         tenant_id: Optional[str] = None,
         falkor_graph_name: Optional[str] = None,
         falkor_provider: Optional[str] = None,
+        provider_aliases: Sequence[str] = (),
         ontology_spec: Optional[Mapping] = None,
         ontology_enforcement: Optional[str] = None,
         session=None,
@@ -506,11 +507,15 @@ class GraphVersioningService:
         """Create a blank versioned graph: graph row + ``main`` branch + empty
         genesis commit + projection state.  Returns ids and the genesis seq.
 
+        ``provider_aliases``: the providers on ``falkor_provider``'s server, through any of which
+        another graph may already hold ``falkor_graph_name`` (:meth:`_claim_projection_key`).
+
         Pass ``session`` to compose with a following ingest in one transaction (the
         atomic bootstrap), so a seed failure also rolls back the graph creation."""
         async with self._session_scope(session) as s:
             if falkor_graph_name:
                 await self._claim_projection_key(s, falkor_graph_name, falkor_provider,
+                                                 provider_aliases=provider_aliases,
                                                  data_source_id=data_source_id)
             graph = GraphORM(
                 data_source_id=data_source_id,
@@ -671,19 +676,27 @@ class GraphVersioningService:
             raise GraphNotWritable(row.lifecycle_state)
 
     async def _claim_projection_key(self, s, name: str, provider: Optional[str], *,
+                                    provider_aliases: Sequence[str] = (),
                                     exclude_graph_id: Optional[str] = None,
                                     data_source_id: Optional[str] = None) -> None:
         """Take FalkorDB graph ``name`` on ``provider`` as one versioned graph's projection target.
 
         Two versioned graphs projecting into one key would each reconcile the other's entities
-        away. A tombstoned holder that does not own the key lets go of it (its pin is cleared, as
+        away. A key is one physical graph however it is reached: ``provider_aliases`` are the
+        providers on ``provider``'s server (``managed_sources.same_server_providers``, asked of
+        the management database by the caller), and a holder through any of them holds this
+        key. A tombstoned holder that does not own the key lets go of it (its pin is cleared, as
         the ``20261017_1500_gv_ps_keys`` migration does); any other holder refuses the claim
-        (:class:`ConcurrencyError`). ``uq_ps_key`` settles two claims racing past this check.
+        (:class:`ConcurrencyError`). Claims of one name take its advisory lock, held to the end of
+        ``s``'s transaction, so two racing past this check serialize: ``uq_ps_key`` compares
+        provider ids, and is left unbuilt while pins conflict.
 
         A holder that is ``data_source_id``'s own graph is not a rival: the caller lost a
         concurrent create for that data source, and ``uq_graphs_data_source`` refuses it."""
         default = config.DEFAULT_FALKOR_PROVIDER
-        key = [func.coalesce(ProjectionStateORM.falkor_provider, default) == (provider or default),
+        await s.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"gvkey:{name}"))))
+        key = [func.coalesce(ProjectionStateORM.falkor_provider, default).in_(
+                   [provider or default, *provider_aliases]),
                ProjectionStateORM.falkor_graph_name == name]
         if exclude_graph_id is not None:
             key.append(ProjectionStateORM.graph_id != exclude_graph_id)
@@ -3055,7 +3068,7 @@ class GraphVersioningService:
             }
 
     async def ensure_projection_target(
-        self, *, graph_id: str, falkor_graph_name: str,
+        self, *, graph_id: str, falkor_graph_name: str, provider_aliases: Sequence[str] = (),
     ) -> Optional[str]:
         """Pin an UNPINNED graph's FalkorDB projection to ``falkor_graph_name`` (the data source's
         real graph — the one the canvas reads). Self-healing: graphs auto-created before the name was
@@ -3069,7 +3082,9 @@ class GraphVersioningService:
         ``None``. A fork is left untouched — it legitimately owns its ``__fork_`` graph.
 
         Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
-        unfinished, and when another versioned graph already projects into ``falkor_graph_name``."""
+        unfinished, and when another versioned graph already projects into ``falkor_graph_name``
+        through the graph's provider or one of ``provider_aliases``, the providers on its server
+        (:meth:`_claim_projection_key`)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or graph.fork_parent_graph_id is not None:
@@ -3083,6 +3098,7 @@ class GraphVersioningService:
             if ps.falkor_graph_name not in (None, f"gv_{graph_id}"):
                 return None
             await self._claim_projection_key(s, falkor_graph_name, ps.falkor_provider,
+                                             provider_aliases=provider_aliases,
                                              exclude_graph_id=graph_id)
             old = ps.falkor_graph_name
             ps.falkor_graph_name = falkor_graph_name

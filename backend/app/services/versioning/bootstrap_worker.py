@@ -84,7 +84,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from hashlib import blake2b
-from typing import Any, AsyncIterator, Dict, List, Optional, Set, Tuple
+from typing import Any, AsyncIterator, Dict, List, Optional, Sequence, Set, Tuple
 
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
@@ -1781,6 +1781,7 @@ class BootstrapRunner:
 async def create_bootstrap_job(
     *, data_source_id: str, workspace_id: str, actor: str,
     falkor_graph_name: Optional[str] = None, falkor_provider: Optional[str] = None,
+    provider_aliases: Sequence[str] = (),
     kind: str = "manual", base_ontology_id: Optional[str] = None,
     ontology_enforcement: Optional[str] = None, origin: str = "graph",
     payload_uri: Optional[str] = None, upload_id: Optional[str] = None,
@@ -1812,10 +1813,12 @@ async def create_bootstrap_job(
     ``uploadId``) and ``coverage`` how much of its types the ontology declares. Asking again for
     the same upload returns its job; a data source with any other job is
     :class:`BootstrapConflict` ``ds_has_other_job``. A FalkorDB graph another versioned graph
-    already projects into is :class:`BootstrapConflict` ``graph_key_in_use``.
+    already projects into — through ``falkor_provider`` or one of ``provider_aliases``, the other
+    providers on its server — is :class:`BootstrapConflict` ``graph_key_in_use``.
     """
     args = dict(data_source_id=data_source_id, workspace_id=workspace_id, actor=actor,
-                falkor_graph_name=falkor_graph_name, falkor_provider=falkor_provider, kind=kind,
+                falkor_graph_name=falkor_graph_name, falkor_provider=falkor_provider,
+                provider_aliases=provider_aliases, kind=kind,
                 base_ontology_id=base_ontology_id, ontology_enforcement=ontology_enforcement,
                 origin=origin, payload_uri=payload_uri, upload_id=upload_id, package=package,
                 coverage=coverage)
@@ -1829,6 +1832,7 @@ async def create_bootstrap_job(
 
 async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: str,
                              falkor_graph_name: Optional[str], falkor_provider: Optional[str],
+                             provider_aliases: Sequence[str],
                              kind: str, base_ontology_id: Optional[str],
                              ontology_enforcement: Optional[str], origin: str,
                              payload_uri: Optional[str], upload_id: Optional[str],
@@ -1875,7 +1879,8 @@ async def _enqueue_bootstrap(*, data_source_id: str, workspace_id: str, actor: s
                 res = await GraphVersioningService().create_graph(
                     data_source_id=data_source_id, workspace_id=workspace_id, kind=kind,
                     actor=actor, falkor_graph_name=falkor_graph_name,
-                    falkor_provider=falkor_provider, base_ontology_id=base_ontology_id,
+                    falkor_provider=falkor_provider, provider_aliases=provider_aliases,
+                    base_ontology_id=base_ontology_id,
                     ontology_enforcement=ontology_enforcement, session=s)
             except ConcurrencyError as exc:
                 # Another versioned graph already projects into this FalkorDB graph.

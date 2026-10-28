@@ -1,10 +1,12 @@
 """Data sources the platform provisions itself, and who reads one physical graph key.
 
 A FalkorDB graph is addressed by (provider, graph name), and nothing stops two data sources — in
-one workspace or in two — from reading the same key, or a catalog entry from publishing it. Any
-action that CHANGES a key in place therefore has to ask who else reads it first: collapsing a
-bootstrap's duplicate nodes deletes them from the source graph for every reader, and a purge must
-not drop a key someone else still uses (:func:`graph_key_bindings`).
+one workspace or in two — from reading the same key, or a catalog entry from publishing it. Nor
+does a provider id name a server: two provider rows, or a row and the env's ``'default'``, can
+reach the same one (:func:`same_server_providers`). Any action that CHANGES a key in place
+therefore has to ask who else reads it first: collapsing a bootstrap's duplicate nodes deletes
+them from the source graph for every reader, and a purge must not drop a key someone else still
+uses (:func:`graph_key_bindings`).
 
 A MANAGED data source is one whose graph the platform itself writes: a blank model
 (``POST /versioning/blank-graphs``) or a new source seeded from a view package
@@ -18,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
 
@@ -31,10 +34,39 @@ if TYPE_CHECKING:  # pragma: no cover — annotation only
 logger = logging.getLogger(__name__)
 
 
+async def same_server_providers(session: AsyncSession, provider_id: Optional[str]) -> List[str]:
+    """``provider_id`` (``None`` or ``'default'``: the env instance) and every other id that
+    reaches the same FalkorDB server — each FalkorDB provider row, and ``'default'``, whose host
+    and port resolve (``resolve_falkordb_target``) to the same target. ``'default'`` is the env's
+    ``FALKORDB_HOST`` / ``FALKORDB_PORT``. Provider rows are not unique by server, so a key's
+    provider id alone does not say which physical graph it is: who claims or reads a key asks
+    under every one of these. ``provider_id`` comes first; an id no FalkorDB row has stands
+    alone."""
+    from backend.app.db.models import ProviderORM
+    from backend.app.providers.falkordb_provider import resolve_falkordb_target
+    from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER as default
+
+    def server(host, port):
+        return resolve_falkordb_target(host, int(port or 6379))
+
+    rows = (await session.execute(
+        select(ProviderORM.id, ProviderORM.host, ProviderORM.port)
+        .where(ProviderORM.provider_type == "falkordb").order_by(ProviderORM.id))).all()
+    servers = {pid: server(host, port) for pid, host, port in rows}
+    servers[default] = server(os.getenv("FALKORDB_HOST", "localhost"),
+                              os.getenv("FALKORDB_PORT", "6379"))
+    own = provider_id or default
+    if own not in servers:
+        return [own]
+    return [own] + [pid for pid, target in servers.items()
+                    if pid != own and target == servers[own]]
+
+
 async def graph_key_bindings(session: AsyncSession, provider_id: Optional[str], graph_name: str,
                              exclude_ds: Optional[str] = None) -> List[Dict[str, Optional[str]]]:
     """Every live binding of the key ``(provider_id, graph_name)``: data sources reading it (by
-    ``graph_name``, or as their dedicated projection key) and catalog entries publishing it.
+    ``graph_name``, or as their dedicated projection key) and catalog entries publishing it —
+    through ``provider_id`` or any other provider on its server (:func:`same_server_providers`).
 
     EXACT match, unlike the blank-graph name check (:func:`_taken_graph_names`): that one asks
     "could a new name collide?" and so matches loosely; this one asks "who reads THIS key?", and a
@@ -45,9 +77,10 @@ async def graph_key_bindings(session: AsyncSession, provider_id: Optional[str], 
     ``{kind: 'catalogItem', catalogItemId, name}``."""
     from backend.app.db.models import CatalogItemORM, WorkspaceDataSourceORM
 
+    providers = await same_server_providers(session, provider_id)
     ds = WorkspaceDataSourceORM
     stmt = select(ds.id, ds.workspace_id, ds.label, ds.graph_name).where(
-        ds.provider_id == provider_id, ds.deleted_at.is_(None),
+        ds.provider_id.in_(providers), ds.deleted_at.is_(None),
         (ds.graph_name == graph_name) | (ds.dedicated_graph_name == graph_name),
     ).order_by(ds.id)
     if exclude_ds is not None:
@@ -57,7 +90,7 @@ async def graph_key_bindings(session: AsyncSession, provider_id: Optional[str], 
          "name": label or name}
         for ds_id, ws_id, label, name in (await session.execute(stmt)).all()]
     cats = (await session.execute(select(CatalogItemORM.id, CatalogItemORM.name).where(
-        CatalogItemORM.provider_id == provider_id,
+        CatalogItemORM.provider_id.in_(providers),
         CatalogItemORM.source_identifier == graph_name,
     ).order_by(CatalogItemORM.id))).all()
     out.extend({"kind": "catalogItem", "catalogItemId": cat_id, "name": name}

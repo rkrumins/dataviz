@@ -80,6 +80,31 @@ async def test_enabling_again_reports_a_failed_job_with_what_can_be_done(
                            "failure": failure}
 
 
+async def test_enabling_claims_the_key_under_every_provider_of_its_server(
+    test_client: AsyncClient, db_session, monkeypatch,
+):
+    """Provider rows are not unique by server: a versioned graph pinned to this graph name through
+    another row for the same host and port holds the same key, so the claim looks under it too."""
+    db_session.add_all([
+        _models.ProviderORM(id=f"prov_{n}", name=n, provider_type="falkordb",
+                            host="falkor.example", port=port)
+        for n, port in (("boot_a", 6379), ("boot_b", 6379), ("boot_c", 6380))])
+    db_session.add(_models.WorkspaceDataSourceORM(
+        id="ds_boot_aliased", workspace_id=WS, label="Aliased", graph_name="my_graph",
+        provider_id="prov_boot_a"))
+    await db_session.commit()
+    seen = {}
+
+    async def create(**kw):
+        seen.update(kw)
+        return {"graph_id": "g1", "job_id": "j1", "status": "pending"}
+    monkeypatch.setattr(bootstrap_worker, "create_bootstrap_job", create)
+    resp = await test_client.post(f"/api/v1/{WS}/graph/bootstrap?dataSourceId=ds_boot_aliased")
+    assert resp.status_code == 202, resp.text
+    assert (seen["falkor_graph_name"], seen["falkor_provider"]) == ("my_graph", "prov_boot_a")
+    assert seen["provider_aliases"] == ["prov_boot_a", "prov_boot_b"]
+
+
 async def test_abandon_reports_the_purge_it_queued(
     test_client: AsyncClient, _data_source, monkeypatch,
 ):

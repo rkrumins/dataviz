@@ -203,7 +203,10 @@ async def nudge_stats_after_projection(data_source_id: str) -> None:
 async def repair_projection_target(svc: GraphVersioningService, graph_id: str) -> Optional[str]:
     """Ensure ``graph_id`` projects into its data source's real FalkorDB graph, not an orphan
     ``gv_<id>`` that nothing reads. Returns a now-orphaned ``gv_*`` name safe to drop (else
-    ``None``). Never raises — projection must proceed regardless of whether the repair succeeded."""
+    ``None``). Never raises — projection must proceed regardless of whether the repair succeeded.
+    A key another versioned graph holds through any provider on the data source's server
+    (``managed_sources.same_server_providers``) is not taken."""
+    from backend.app.services.managed_sources import same_server_providers
     try:
         meta = await svc.get_graph(graph_id)
         ds_id = meta.get("data_source_id") if meta else None
@@ -211,9 +214,11 @@ async def repair_projection_target(svc: GraphVersioningService, graph_id: str) -
             return None
         async with get_async_session() as s:
             ds_row = await data_source_repo.get_data_source_orm(s, str(ds_id))
-        if ds_row is None or not ds_row.graph_name:
-            return None
-        old = await svc.ensure_projection_target(graph_id=graph_id, falkor_graph_name=ds_row.graph_name)
+            if ds_row is None or not ds_row.graph_name:
+                return None
+            aliases = await same_server_providers(s, ds_row.provider_id)
+        old = await svc.ensure_projection_target(
+            graph_id=graph_id, falkor_graph_name=ds_row.graph_name, provider_aliases=aliases)
         # Only the synthetic orphan is safe to drop — never a real ds.graph_name or a fork's graph.
         if old and old != ds_row.graph_name and old.startswith("gv_"):
             return old

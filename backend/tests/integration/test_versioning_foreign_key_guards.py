@@ -8,6 +8,9 @@
   first commit's window, never a full replay over the data source's graph.
 * One key, one versioned graph (``uq_ps_key``): a second claim is refused; a tombstoned holder
   that does not own the key lets go of it.
+* A key is one physical graph however it is reached: two provider rows for one server, or the env
+  instance as ``'default'`` and as a provider row, hold one key — a second claim through either
+  is refused, also when the two race, and "who else reads it" counts both.
 * Nothing projects into a graph whose version control is still being enabled, or into a
   tombstoned graph's retained pin; a full replay that would delete most of a key the platform
   does not own is refused, and the watermark is held back.
@@ -265,6 +268,88 @@ async def _run_parking_and_claim() -> None:
 
 def test_a_key_the_platform_does_not_own_is_parked_and_claimed_once():
     asyncio.run(_run_parking_and_claim())
+
+
+async def _run_one_key_per_server() -> None:
+    from backend.app.db.engine import close_db, get_async_session
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
+    from backend.app.services.managed_sources import graph_key_bindings, same_server_providers
+    from backend.app.services.projection_target import repair_projection_target
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    tag = os.urandom(3).hex()
+    host = f"falkor-{tag}.test"
+    servers = {"a": (host, 6379), "b": (host, 6379), "elsewhere": (host, 6380),
+               "env": (os.getenv("FALKORDB_HOST", "localhost"),
+                       int(os.getenv("FALKORDB_PORT", "6379")))}
+    ids = {via: f"prov_{via}_{tag}" for via in servers}
+    ws, reader, shared = f"ws_fk_{tag}", f"ds_fk_{tag}", _name()
+    async with get_async_session() as ms:
+        ms.add(WorkspaceORM(id=ws, name=ws))
+        ms.add_all([ProviderORM(id=ids[via], name=ids[via], provider_type="falkordb",
+                                host=h, port=p) for via, (h, p) in servers.items()])
+        await ms.flush()
+        ms.add(WorkspaceDataSourceORM(id=reader, workspace_id=ws, provider_id=ids["b"],
+                                      graph_name=shared))
+        await ms.commit()
+        aliases = {via: await same_server_providers(ms, ids[via]) for via in servers}
+        aliases["default"] = await same_server_providers(ms, None)
+        # Who else reads a key: a data source reaching it through another row for its server.
+        assert [b["dataSourceId"] for b in await graph_key_bindings(ms, ids["a"], shared)] \
+            == [reader]
+        assert await graph_key_bindings(ms, ids["elsewhere"], shared) == []
+
+    async def claim(key, via, session=None):
+        return (await svc.create_graph(data_source_id=_ds(), workspace_id="ws1", actor="a",
+                                       falkor_graph_name=key, falkor_provider=ids.get(via),
+                                       provider_aliases=aliases[via], session=session))["graph_id"]
+
+    # Two provider rows for one server: one key, one versioned graph. Another server's key of
+    # the same name is another key.
+    key = _name()
+    await claim(key, "a")
+    with pytest.raises(ConcurrencyError):
+        await claim(key, "b")
+    assert await claim(key, "elsewhere")
+
+    # The env instance, as 'default' and as a provider row of its own, either way round.
+    for first, second in (("default", "env"), ("env", "default")):
+        key = _name()
+        await claim(key, first)
+        with pytest.raises(ConcurrencyError):
+            await claim(key, second)
+
+    # Two claims racing for one name serialize on it — where uq_ps_key, keyed by provider id,
+    # cannot see them: the second waits for the first's transaction, then finds its pin.
+    key = _name()
+    async with db.graphver_session() as s:
+        await claim(key, "a", session=s)
+        racer = asyncio.ensure_future(claim(key, "b"))
+        await asyncio.sleep(0.5)
+        assert not racer.done()
+    with pytest.raises(ConcurrencyError):
+        await racer
+
+    # Enabling version control, and the repair that pins an unpinned graph to its data source's
+    # graph, ask the same.
+    await claim(shared, "a")
+    with pytest.raises(BootstrapConflict) as caught:
+        await create_bootstrap_job(data_source_id=_ds(), workspace_id="ws1", actor="a",
+                                   falkor_graph_name=shared, falkor_provider=ids["b"],
+                                   provider_aliases=aliases["b"])
+    assert caught.value.detail["type"] == "graph_key_in_use"
+    unpinned = (await svc.create_graph(data_source_id=reader, workspace_id=ws, actor="a",
+                                       falkor_provider=ids["b"]))["graph_id"]
+    await repair_projection_target(svc, unpinned)
+    async with db.graphver_session() as s:
+        assert (await s.get(ProjectionStateORM, unpinned)).falkor_graph_name is None
+    await db.dispose_engine()
+    await close_db()
+
+
+def test_one_key_per_server_whichever_provider_reaches_it():
+    asyncio.run(_run_one_key_per_server())
 
 
 async def _run_bootstrap_fence() -> None:

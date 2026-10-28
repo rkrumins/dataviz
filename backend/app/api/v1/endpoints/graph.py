@@ -270,11 +270,11 @@ async def bootstrap_versioned_graph_endpoint(
     from backend.app.services.versioning.bootstrap_worker import (
         BootstrapConflict, create_bootstrap_job)
     actor = user.id if user else "system"
-    provider_id, graph_name = await _pin_projection_target(session, dataSourceId, ws_id)
+    provider_id, graph_name, aliases = await _pin_projection_target(session, dataSourceId, ws_id)
     try:
         res = await create_bootstrap_job(
             data_source_id=dataSourceId, workspace_id=ws_id, actor=actor,
-            falkor_graph_name=graph_name, falkor_provider=provider_id)
+            falkor_graph_name=graph_name, falkor_provider=provider_id, provider_aliases=aliases)
     except BootstrapConflict as exc:
         raise HTTPException(status_code=409, detail=exc.detail)
     except ValueError as exc:
@@ -514,10 +514,14 @@ async def _pin_projection_target(session: AsyncSession, data_source_id: str, ws_
     """The data source's REAL FalkorDB graph + provider — the graph the canvas already
     reads. The versioned graph is pinned to it (the same target
     ``projection_target.repair_projection_target`` self-heals to) so the import's
-    projection is a fast-forward, not a drop-and-reseed of data we just copied."""
+    projection is a fast-forward, not a drop-and-reseed of data we just copied. Also every
+    provider on that provider's server (``managed_sources.same_server_providers``): another
+    versioned graph pinned to the key through any of them already holds it."""
+    from backend.app.services.managed_sources import same_server_providers
     ds = await _data_source_in_workspace(session, data_source_id, ws_id)
     await _assert_copyable(session, getattr(ds, "provider_id", None))
-    return getattr(ds, "provider_id", None), getattr(ds, "graph_name", None)
+    return (getattr(ds, "provider_id", None), getattr(ds, "graph_name", None),
+            await same_server_providers(session, getattr(ds, "provider_id", None)))
 
 
 async def _assert_copyable(session: AsyncSession, provider_id: Optional[str]) -> None:
