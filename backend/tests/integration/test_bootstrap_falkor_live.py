@@ -550,11 +550,7 @@ async def test_bring_into_history_takes_in_what_the_graph_holds_and_nothing_else
     assert (await projector.project_graph(gid)).get("verify_error") is None
     assert await _drift(gid) == {"nodes": 1, "edges": 2, "via": "verify"}
 
-    provider = FalkorDBProvider(host=os.getenv("FALKORDB_HOST", "localhost"),
-                                port=int(os.getenv("FALKORDB_PORT", "6379")), graph_name=name)
-    provider.set_containment_edge_types([])
-    res = await svc.resync_from_provider(graph_id=gid, provider=provider, actor="bob",
-                                         ontology_rules=rules, holds_main=True)
+    res = await svc.bring_into_history(graph_id=gid, client=client, rules=rules, actor="bob")
     changed = []
     async with db.graphver_session() as s:
         for m in (models.NodeVersionORM, models.EdgeVersionORM):
@@ -573,12 +569,10 @@ async def test_bring_into_history_takes_in_what_the_graph_holds_and_nothing_else
         ["X"], ["f1"], ["f9"], ["urn:b"]], "the graph's own ids, and no copies"
 
 
-async def test_bring_into_history_over_http_reads_the_graph_and_clears_the_flag(graph,
-                                                                               monkeypatch):
-    """``POST /graph/resync`` as the UI sends it, with the real provider manager: it reads the
-    data source's graph through the projection's pin — not whatever serves reads — brings the
-    ETL's writes into history, clears the flag at once, and queues the summaries' rebuild. A
-    loader's change notification flags what no count shows, until it is brought in too."""
+async def _enabled_over_http(name, client, relationships):
+    """A data source on the env FalkorDB reading graph ``name``, with an ontology declaring
+    ``Table`` and ``relationships``, enabled for version control. Returns the workspace, data
+    source and graph, and a function that posts ``POST /graph/resync`` for it as the UI does."""
     from httpx import ASGITransport, AsyncClient
 
     from backend.app.db.engine import PoolRole, get_session_factory
@@ -586,15 +580,8 @@ async def test_bring_into_history_over_http_reads_the_graph_and_clears_the_flag(
         OntologyORM, ProviderORM, WorkspaceDataSourceORM, WorkspaceORM,
     )
     from backend.app.providers.manager import provider_manager
-    from backend.app.services import projection_target, versioned_sources
     from backend.tests.integration.test_api_graph_draft_journey import _build_app
 
-    name, client = graph
-    for urn in ("urn:a", "urn:b"):
-        await client.query("CREATE (:Table {urn: $u, displayName: $u})", {"u": urn})
-    await client.query("CREATE INDEX FOR (n:Table) ON (n.urn)")
-    await client.query("MATCH (a:Table {urn: 'urn:a'}), (b:Table {urn: 'urn:b'}) "
-                       "CREATE (a)-[:FLOWS {id: 'f1'}]->(b)")
     tag = os.urandom(3).hex()
     ws, prov, ds, ont = f"ws_bih_{tag}", f"prov_bih_{tag}", f"ds_bih_{tag}", f"bp_bih_{tag}"
     async with get_session_factory(PoolRole.WEB)() as s:
@@ -606,8 +593,7 @@ async def test_bring_into_history_over_http_reads_the_graph_and_clears_the_flag(
                    # system default is seeded at start-up, which this process never ran).
                    OntologyORM(id=ont, name=ont, is_published=True,
                                entity_type_definitions=json.dumps({"Table": {"name": "Table"}}),
-                               relationship_type_definitions=json.dumps(
-                                   {"FLOWS": {"name": "FLOWS", "is_lineage": True}}))])
+                               relationship_type_definitions=json.dumps(relationships))])
         await s.flush()
         s.add(WorkspaceDataSourceORM(id=ds, workspace_id=ws, provider_id=prov, graph_name=name,
                                      ontology_id=ont))
@@ -615,9 +601,37 @@ async def test_bring_into_history_over_http_reads_the_graph_and_clears_the_flag(
     await models.create_schema_and_partitions()
     job = await create_bootstrap_job(data_source_id=ds, workspace_id=ws, actor="alice",
                                      falkor_graph_name=name, falkor_provider=prov)
-    gid = job["graph_id"]
     out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job["job_id"]))
     assert out["status"] == "completed", out
+    app, _G = _build_app()
+
+    async def bring_in():
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app),
+                                   base_url="http://test") as c:
+                return await c.post(f"/api/v1/{ws}/graph/resync", params={"dataSourceId": ds})
+        finally:
+            await provider_manager.evict_data_source(prov, name)
+
+    return ws, ds, job["graph_id"], bring_in
+
+
+async def test_bring_into_history_over_http_reads_the_graph_and_clears_the_flag(graph,
+                                                                               monkeypatch):
+    """``POST /graph/resync`` as the UI sends it, with the real provider manager: it reads the
+    data source's graph through the projection's pin — not whatever serves reads — brings the
+    ETL's writes into history, clears the flag at once, and queues the summaries' rebuild. A
+    loader's change notification flags what no count shows, until it is brought in too."""
+    from backend.app.services import projection_target, versioned_sources
+
+    name, client = graph
+    for urn in ("urn:a", "urn:b"):
+        await client.query("CREATE (:Table {urn: $u, displayName: $u})", {"u": urn})
+    await client.query("CREATE INDEX FOR (n:Table) ON (n.urn)")
+    await client.query("MATCH (a:Table {urn: 'urn:a'}), (b:Table {urn: 'urn:b'}) "
+                       "CREATE (a)-[:FLOWS {id: 'f1'}]->(b)")
+    _ws, ds, gid, bring_in = await _enabled_over_http(
+        name, client, {"FLOWS": {"name": "FLOWS", "is_lineage": True}})
 
     await client.query("CREATE (:Table {urn: 'urn:etl', displayName: 'from the etl'})")
     await client.query("MATCH (e:Table {urn: 'urn:etl'}), (a:Table {urn: 'urn:a'}) "
@@ -635,16 +649,6 @@ async def test_bring_into_history_over_http_reads_the_graph_and_clears_the_flag(
         queued.append(ds_id)
 
     monkeypatch.setattr(projection_target, "_queue_on_control_plane", queue)
-    app, _G = _build_app()
-
-    async def bring_in():
-        try:
-            async with AsyncClient(transport=ASGITransport(app=app),
-                                   base_url="http://test") as c:
-                return await c.post(f"/api/v1/{ws}/graph/resync", params={"dataSourceId": ds})
-        finally:
-            await provider_manager.evict_data_source(prov, name)
-
     r = await bring_in()
     assert r.status_code == 200, r.text
     assert r.json()["applied"] == 2, r.json()
@@ -666,6 +670,61 @@ async def test_bring_into_history_over_http_reads_the_graph_and_clears_the_flag(
     assert (await svc.entity_value(graph_id=gid, entity_id="urn:b"))["properties"] == {
         "owner": "etl-team"}
     assert await _drift(gid) is None
+
+
+async def test_bring_into_history_reads_what_the_enable_reads_and_deletes_nothing(graph,
+                                                                                 monkeypatch):
+    """Over HTTP, on a graph larger than one page of the old reader, where other writers left
+    what the enable never copies: a node with no identifier (on the first page: it takes a
+    deleted node's id), a relationship to it, a rollup, the summaries' own node, and a
+    container whose child count a reader would work out. The graph also lacks a node history
+    holds. Only the other writers' real changes come in — a node, a relationship, a property —
+    and nothing is deleted from history, whatever the graph lacks."""
+    from backend.app.services import projection_target
+
+    name, client = graph
+    monkeypatch.setattr(config, "BOOTSTRAP_SCAN_WIDTH", 1000)
+    await client.query("UNWIND range(0, 2099) AS i "
+                       "CREATE (:Table {urn: 'urn:n' + toString(i), displayName: toString(i)})")
+    await client.query("CREATE INDEX FOR (n:Table) ON (n.urn)")
+    await client.query("MATCH (a:Table {urn: 'urn:n1'}), (b:Table {urn: 'urn:n2'}) "
+                       "CREATE (a)-[:CONTAINS {id: 'c1'}]->(b), (a)-[:FLOWS {id: 'f1'}]->(b)")
+    _ws, _ds, gid, bring_in = await _enabled_over_http(name, client, {
+        "FLOWS": {"name": "FLOWS", "is_lineage": True},
+        "CONTAINS": {"name": "CONTAINS", "is_containment": True}})
+
+    await client.query("MATCH (n:Table {urn: 'urn:n5'}) DETACH DELETE n")
+    await client.query("CREATE (:Table {displayName: 'no identifier'})")
+    freed = await _rows(client, "MATCH (n:Table) WHERE n.urn IS NULL RETURN ID(n)")
+    assert freed and freed[0][0] < 2000, freed
+    await client.query("MATCH (a:Table {urn: 'urn:n1'}), (b:Table) WHERE b.urn IS NULL "
+                       "CREATE (a)-[:FLOWS]->(b)")
+    await client.query("CREATE (:_AggMeta {id: 'singleton', urn: 'singleton'})")
+    await client.query("MATCH (a:Table {urn: 'urn:n3'}), (b:Table {urn: 'urn:n4'}) "
+                       "CREATE (a)-[:AGGREGATED {weight: 3}]->(b)")
+    await client.query("CREATE (:Table {urn: 'urn:etl', displayName: 'from the etl'})")
+    await client.query("MATCH (e:Table {urn: 'urn:etl'}), (a:Table {urn: 'urn:n1'}) "
+                       "CREATE (e)-[:FLOWS {id: 'f9'}]->(a)")
+    await client.query("MATCH (n:Table {urn: 'urn:n2'}) SET n.owner = 'etl-team'")
+
+    async def queue(_ds_id, _key, _mode):
+        pass
+
+    monkeypatch.setattr(projection_target, "_queue_on_control_plane", queue)
+    r = await bring_in()
+    assert r.status_code == 200, r.text
+    changed = []
+    async with db.graphver_session() as s:
+        for m in (models.NodeVersionORM, models.EdgeVersionORM):
+            changed += [(m.__name__[:4], op, eid) for eid, op in (await s.execute(
+                select(m.entity_id, m.op).where(m.graph_id == gid,
+                                                m.commit_seq == r.json()["commit_seq"]))).all()]
+    assert sorted(changed) == [("Edge", "create", "f9"), ("Node", "create", "urn:etl"),
+                               ("Node", "update", "urn:n2")], sorted(changed)
+    svc = GraphVersioningService()
+    assert (await svc.entity_value(graph_id=gid, entity_id="urn:n5")) is not None
+    res = await FalkorProjector(lambda _n, _p=None: client).project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
 
 
 # ── L4: a graph that spells its types its own way keeps that spelling ────────

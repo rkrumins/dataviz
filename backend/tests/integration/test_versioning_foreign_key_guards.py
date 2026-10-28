@@ -14,6 +14,8 @@
 * Nothing projects into a graph whose version control is still being enabled, or into a
   tombstoned graph's retained pin; a full replay over a key the platform does not own deletes
   nothing history doesn't hold: it publishes, and flags what it kept (``external_drift``).
+* A loader's change notification flags a customer's graph only: nothing else writes to a key the
+  platform minted, so there is nothing there to bring into history.
 
 FalkorDB is the in-memory ``FakeFalkor`` of ``test_versioning_projection``. Skipped unless
 ``GRAPHVER_E2E=1``.
@@ -437,3 +439,28 @@ async def _run_tombstoned_and_foreign() -> None:
 
 def test_no_reseed_of_a_tombstoned_pin_and_nothing_deleted_from_a_foreign_key():
     asyncio.run(_run_tombstoned_and_foreign())
+
+
+async def _run_notification_flags() -> None:
+    from backend.app.services import versioned_sources
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    graphs = {}
+    for owns in (False, True):
+        ds = _ds()
+        graphs[owns] = ds, (await svc.create_graph(
+            data_source_id=ds, workspace_id="ws1", actor="a", falkor_graph_name=_name(),
+            owns_falkor_graph=owns))["graph_id"]
+    for ds, _gid in graphs.values():
+        await versioned_sources.flag_external_changes(ds)
+    async with db.graphver_session() as s:
+        flags = {owns: (await s.get(ProjectionStateORM, gid)).external_drift
+                 for owns, (_ds_id, gid) in graphs.items()}
+    assert (flags[False] or {}).get("via") == "notification", flags
+    assert flags[True] is None, "a key the platform minted was flagged"
+    await db.dispose_engine()
+
+
+def test_a_notification_flags_the_customers_graph_and_never_a_platform_copy():
+    asyncio.run(_run_notification_flags())

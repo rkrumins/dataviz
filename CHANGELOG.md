@@ -49,18 +49,22 @@ jobs around such a graph.
   history doesn't hold, goes out, and records how much (`externalDrift` on the watermark). Rebuild
   and the automatic heal no longer delete what history doesn't hold: they used to delete up to half
   of the graph, and every duplicate copy. An edit no longer strips a property history never held.
-  In a graph the platform created, a held-back publish now says to bring the changes into history
-  or Rebuild.
+  In a graph the platform created, a held-back publish now says Rebuild replaces it with what
+  history holds.
 - **Bringing changes into history reads the graph.** `POST /graph/resync` read whatever served
   views at the time, which for a projection behind main is Postgres itself, so it brought nothing
   in. On a graph the projector writes, a read also came back with the graph's own spelling of each
   type and the empty fields the projector fills in, so every node it had written read as changed. It
-  now reads the data source's FalkorDB graph through the projection's pin, stamps `urn` first as the
-  enable does, and reads its rows as history holds them. Only what was written outside history
-  comes in, as one commit. Then the `externalDrift` flag clears, and the lineage summaries are
-  rebuilt. It answers 409 `not_ready` while the graph is evicted, being rebuilt or moved. The
-  `curation_at_risk` refusal no longer applies once the projection has caught up with main, since
-  the graph then holds every edit people made.
+  now reads the data source's FalkorDB graph through the projection's pin, only while it holds main,
+  stamps `urn` first as the enable does, and reads it whole as the enable reads it. Only what was
+  written outside history comes in, as one commit, and **nothing is deleted from history**. Then the
+  `externalDrift` flag clears, and the lineage summaries are rebuilt. Before, it also read a graph
+  being moved, or one a failed rebuild had left partly written, and took what was missing for
+  deleted; and its reader stopped at the first page a node without a `urn` shortened, failed with
+  500 on a relationship to such a node, and brought in the summaries' own rollups and nodes. It
+  answers 409 `not_ready` while the projection is behind main, evicted, being rebuilt or moved, and
+  409 `platform_copy` on a graph the platform created, which nothing else writes to. A loader's
+  change notification flags only a customer's own graph.
 - **The Versioning tab says what the graph holds that history doesn't.** Its fast read layer card
   has a **Not in history** row: how many items and connections, or that a writer reported a change.
   People who can publish get **Bring into history** beside it. On a customer's graph, the Rebuild
@@ -106,8 +110,10 @@ jobs around such a graph.
   pods, as for Stage 2. Downgrading drops both and logs how many graphs had each.
 - **What API callers see change.**
   - `POST /graphs` answers 409 `graph_key_in_use` where it answered `integrity`.
-  - `POST /graph/resync` reads the data source's own graph, and answers 409 `not_ready` while that
-    graph is evicted, being rebuilt or moved.
+  - `POST /graph/resync` reads the data source's own graph, and answers 409 `not_ready` while the
+    projection is behind main, evicted, being rebuilt or moved, 409 `platform_copy` on a graph the
+    platform created, and 503 `graph_unavailable` without a graph server. It deletes nothing from
+    history and no longer takes `force` or `allowMassDelete`.
   - A change signal on a versioned source (`/refresh` at `auto`, `/source-changed`) returns no
     `jobId`: it queues no rebuild.
   - The watermark gains `externalDrift`.

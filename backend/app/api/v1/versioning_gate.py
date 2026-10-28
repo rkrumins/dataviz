@@ -17,7 +17,9 @@ Two flavours:
   draft (409 branch_closed) the caller can edit (403); main is never written (409).
 
 ``sync_override_gate`` is unrelated to the flag: it lets only a workspace admin pass the
-sync safety overrides (``force``, ``allowMassDelete``) on both sync routes. Nor is
+sync safety overrides (``force``, ``allowMassDelete``) on ``POST /graphs/{id}/sync``. Bringing
+a graph's outside changes into history (``/graph/resync``) needs neither: it holds main and
+deletes nothing. Nor is
 ``require_publish_for_main``: a versioned graph's main is written directly only by a person with
 publish, or with an API key whose owner has it.
 

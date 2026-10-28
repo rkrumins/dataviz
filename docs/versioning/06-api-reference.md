@@ -565,21 +565,25 @@ ontology, and fails closed for blank models (**422 `ontology_required`**, **503
   windows, can resume after a crash, and finishes only after an integrity report proves the copy —
   see the [End-to-End Testing Guide](/docs/versioning-e2e).
 - `POST /resync?dataSourceId=…&strategy=merge|external_wins` (`_MANAGE` + `workspace:datasource:publish` + **Version control**)
-  brings what the data source's FalkorDB graph holds into history (**Bring into history**) with the
-  service's 3-way merge; **404** when the data source isn't versioned. It reads the graph itself,
-  through the projection's pin, not whatever serves reads (a main the projection lags reads
-  Postgres), and answers **409 `not_ready`** `{status}` while that graph is evicted, being rebuilt
-  or moved. It stamps `urn` first, as the enable does, then reads the rows as history holds them:
-  the data source's spelling of each type, without the empty fields a read fills in that the item
-  never held, and with a connection whose id is also an item's keyed `edge:<id>`. On success it
-  clears the watermark's `externalDrift` and queues a rebuild of the lineage summaries. It refuses
-  above `GRAPHVER_RESYNC_MAX_ENTITIES` (250,000) with **422 `graph_too_large_to_sync`**, and with
-  **409 `curation_at_risk`** or **409 `mass_delete_blocked`** as `POST …/sync` does
-  ([§2.9](#29-bulk-ingest--authoritative-sync)), before it reads the graph when it can.
-  `curation_at_risk` applies only while the projection is behind main: once it has caught up, the
-  graph holds every edit people made. A workspace admin may pass `force=true` or
-  `allowMassDelete=true` (anyone else gets **403 `needs_admin`**; an API key can't call this route); the
-  activity record lists the overrides used. See
+  brings what the data source's own FalkorDB graph holds that history doesn't into history
+  (**Bring into history**) as one `sync` commit, with the service's 3-way merge; **404** when the
+  data source isn't versioned. It reads the key the projection publishes into, through the
+  projection's pin, not whatever serves reads, and only while that key holds main: **409
+  `not_ready`** `{status}` while the projection is behind main, evicted, being rebuilt or moved
+  (`reseeding`), since what it hasn't written would read as the graph's own change. A key the
+  platform minted (a blank graph's, a fork's) is **409 `platform_copy`**: nothing else writes
+  there, and Rebuild rewrites it from history. **503 `graph_unavailable`** when the graph server
+  can't be reached or cuts replies short (`RESULTSET_SIZE`). It stamps `urn` first, as the enable
+  does, then reads the graph whole as the enable reads it: id windows over nodes with a urn and
+  nothing derived, relationships between two of them, no rollups, no child counts. Each type is
+  spelled as history spells it; an empty field a read fills in that the item never held is left
+  out, and a connection whose id is also an item's is keyed `edge:<id>`. An identifier several
+  nodes share with different contents is left out and listed in `duplicates`. **Nothing is
+  deleted from history**, whatever the graph lacks. On success it clears the watermark's
+  `externalDrift` and queues a rebuild of the lineage summaries. It refuses above
+  `GRAPHVER_RESYNC_MAX_ENTITIES` (250,000) with **422 `graph_too_large_to_sync`** before it reads
+  the graph. Neither sync check applies, and it takes no override of one: the key holds every edit
+  people made, and nothing is deleted. An API key can't call this route. See
   [10 · Authoritative Sources](/docs/versioning-authoritative-sources) and
   [Re-sync at Any Scale](/docs/versioning-resync-at-any-scale).
 

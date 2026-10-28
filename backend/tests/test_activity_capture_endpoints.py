@@ -334,7 +334,7 @@ async def test_a_resync_is_recorded_once(test_client, db_session, estate, versio
     async def _resolve(self, **k):
         return {"graph_id": "vg_1"}
 
-    async def _resync(self, **k):
+    async def _bring_in(self, **k):
         return {"commit_id": "c_1", "commit_seq": 7}
 
     async def _watermark(self, _gid):
@@ -346,7 +346,7 @@ async def test_a_resync_is_recorded_once(test_client, db_session, estate, versio
     from backend.tests.test_sync_stopgap_guards import read_the_graph
 
     monkeypatch.setattr(GraphVersioningService, "resolve_graph", _resolve)
-    monkeypatch.setattr(GraphVersioningService, "resync_from_provider", _resync)
+    monkeypatch.setattr(GraphVersioningService, "bring_into_history", _bring_in)
     monkeypatch.setattr(GraphVersioningService, "projection_watermark", _watermark)
     monkeypatch.setattr(GraphVersioningService, "clear_external_changes", _cleared)
     read_the_graph(monkeypatch)

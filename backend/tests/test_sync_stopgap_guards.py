@@ -209,36 +209,14 @@ async def test_a_refused_sync_is_409(test_client, app, exc, kind):
         assert (detail["deletes"], detail["live"], detail["limit"]) == (900, 1_000, 500)
 
 
-async def _seed_source(db_session):
-    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
-
-    # The data-plane gate checks that dataSourceId belongs to the path workspace first.
-    db_session.add(WorkspaceORM(id=WS, name="Sync guard WS"))
-    db_session.add(ProviderORM(id="prov_sg", name="P", provider_type="falkordb"))
-    db_session.add(WorkspaceDataSourceORM(
-        id="ds_x", workspace_id=WS, provider_id="prov_sg", graph_name="g_x"))
-    await db_session.commit()
-
-
-@pytest.mark.parametrize("flag", ["force", "allowMassDelete"])
-async def test_resync_route_override_requires_workspace_admin(
-        test_client, app, db_session, monkeypatch, flag):
-    """The refusal comes before the route builds a provider or resolves the graph."""
-    await _seed_source(db_session)
-
-    async def _resolve(*_a, **_kw):
-        raise AssertionError("the route resolved the graph before checking the override")
-    monkeypatch.setattr(GraphVersioningService, "resolve_graph", _resolve)
-    _install(app, _Versioning(), _MANAGER)
-    _needs_admin(await test_client.post(f"/api/v1/{WS}/graph/resync?dataSourceId=ds_x&{flag}=true"))
-
-
 def read_the_graph(monkeypatch):
-    """The resync route reads the graph's own key, which it finds fresh and served, and stamps
-    urns first; summaries are rebuilt after. Returns the request to call the route with."""
+    """The resync route reads the graph's own key, which it finds fresh, through the projection's
+    pin, and stamps urns first; summaries are rebuilt after. Returns the request to call the
+    route with."""
     from types import SimpleNamespace
 
     from backend.app.api.v1.endpoints import graph as graph_ep
+    from backend.app.api.v1.endpoints import versioning as versioning_ep
     from backend.app.services import node_identity, projection_target
     from backend.app.services.context_engine import ContextEngine
 
@@ -251,6 +229,8 @@ def read_the_graph(monkeypatch):
     monkeypatch.setattr(ContextEngine, "for_the_graph", classmethod(_for_the_graph))
     monkeypatch.setattr(node_identity, "stamp_identity_for_enable", _none)
     monkeypatch.setattr(graph_ep, "_resolve_ontology_rules", _none)
+    monkeypatch.setattr(versioning_ep, "get_falkor_read_factory",
+                        lambda: lambda _name, _provider=None: "the graph")
     monkeypatch.setattr(projection_target, "make_rollup_rebuild_hook", lambda _get: _none)
     return SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
 
@@ -266,17 +246,19 @@ class _ReadsTheGraph:
         return None
 
 
-async def test_resync_records_the_overrides_it_used(monkeypatch):
-    from backend.app.api.v1 import versioning_gate
+async def test_bringing_changes_into_history_has_no_check_to_override(monkeypatch):
+    """The resync route reads a key that holds main, so no edit of people's can read back as an
+    old value, and it deletes nothing: neither sync check can refuse it, and it takes no
+    override of one. What it records is the commit."""
     from backend.app.api.v1.endpoints import graph as graph_ep
     from backend.app.services.versioning import service as svc_mod
 
     seen = {}
 
     class _Svc(_ReadsTheGraph):
-        async def resync_from_provider(self, **kw):
+        async def bring_into_history(self, **kw):
             seen.update(kw)
-            return {"commit_id": "c1", "overrides": ["curation_at_risk"]}
+            return {"commit_id": "c1"}
 
     async def _record(_session, action, _ds, details):
         seen["record"] = (action, details)
@@ -284,10 +266,7 @@ async def test_resync_records_the_overrides_it_used(monkeypatch):
     monkeypatch.setattr(graph_ep, "_record_versioning", _record)
     await graph_ep.resync_versioned_graph_endpoint(
         read_the_graph(monkeypatch), ws_id="ws1", dataSourceId="ds1", strategy="merge",
-        _gate=None, _perm=None, user=None,
-        overrides=versioning_gate.SyncOverrides(force=True, allow_mass_delete=False),
-        session=None)
-    assert (seen["allow_curation_risk"], seen["allow_mass_delete"]) == (True, False)
+        _gate=None, _perm=None, user=None, session=None)
+    assert not {k for k in seen if k.startswith("allow_")}, seen
     assert seen["record"] == ("workspace.versioning.resynced",
-                              {"strategy": "merge", "commitId": "c1",
-                               "overrides": ["curation_at_risk"]})
+                              {"strategy": "merge", "commitId": "c1"})

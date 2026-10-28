@@ -1022,8 +1022,9 @@ export interface ResyncResult {
 }
 
 /** Bring what the data source's graph holds and history doesn't into history, as one commit on main
- *  read from the graph itself (`POST /graph/resync`), and clear its {@link ExternalDrift} flag. 409
- *  while the graph is being rebuilt or moved, or while people's edits are at risk. */
+ *  read from the graph itself (`POST /graph/resync`), and clear its {@link ExternalDrift} flag.
+ *  Nothing is deleted from history. 409 while the graph doesn't hold all of main yet (catching up,
+ *  being rebuilt or moved), and on a copy the platform owns, which nothing else writes to. */
 export function bringIntoHistory(wsId: string, dataSourceId: string, opts?: ActivityOpts): Promise<ResyncResult> {
   return vfetch<ResyncResult>(
     `/api/v1/${wsId}/graph/resync?dataSourceId=${encodeURIComponent(dataSourceId)}`,

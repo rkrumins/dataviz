@@ -1560,6 +1560,66 @@ class BootstrapRunner:
                 logger.warning("bootstrap scan window shrank to %d (lo=%d): %s",
                                width, lo, type(exc).__name__)
 
+    async def read_graph(self, client, rules) -> Tuple[List[dict], Dict[str, Set[str]], Set[str]]:
+        """Read a graph whole, as the enable reads it, into the rows a sync takes
+        (``GraphVersioningService.bring_into_history``): the same node-id windows and statements
+        (nodes with a urn, nothing derived; relationships between two of them, rollups left out),
+        the same readers, and the ontology's spelling of each type (``rules``). The provider's
+        paged reader is not that: a page a node with no urn shortened read as the last one, and
+        it read relationships to such nodes, the rollups, and child counts no history holds.
+
+        Returns the rows; each declared type's spellings in the graph, as the enable's
+        ``physicalTypes``; and the identifiers several nodes share with different contents, left
+        out of the rows, since no one copy is the graph's. A server that cuts replies short is
+        refused first (:class:`BootstrapFailure`)."""
+        from backend.app.providers.falkordb_provider import _edge_from_row, _node_from_props
+        from backend.app.providers.versioned_bootstrap import canonicalize_rows
+
+        await self._require_whole_replies(client)
+        max_id = await self._max_id(client)
+        full = min(config.BOOTSTRAP_SCAN_WIDTH, _PROPS_ROWS_CAP)
+        nodes: Dict[str, dict] = {}
+        edges: Dict[str, dict] = {}
+        spellings: Dict[str, Set[str]] = {}
+        clashes: Set[str] = set()
+        lo, width = 0, full
+        while max_id is not None and lo <= max_id:
+            found, width = await self._scan(client, "nodes", lo, width)
+            lo += width
+            for _fid, labels, props in found:
+                label = _label_of(labels)
+                node = _node_from_props(_readable(dict(props or {})), label)
+                if node is None or not node.urn:
+                    continue
+                row = {"kind": "node", "id": node.urn,
+                       **node.model_dump(by_alias=True, exclude_none=True)}
+                canonicalize_rows([row], rules)
+                row["entityType"] = row.get("entityType") or label or "unknown"
+                if label:
+                    spellings.setdefault(row["entityType"], set()).add(label)
+                if nodes.setdefault(node.urn, row) != row:
+                    clashes.add(node.urn)
+        lo = 0
+        while max_id is not None and lo <= max_id:
+            width, _held = await self._fit_edge_window(client, lo, full)
+            found, width = await self._scan(client, "edges", lo, width)
+            lo += width
+            for src_id, tgt_id, src_urn, tgt_urn, rel, props in found:
+                if src_urn == tgt_urn and src_id != tgt_id:
+                    continue                       # two copies of one urn joined: not lineage
+                edge = _edge_from_row(src_urn, tgt_urn, str(rel), dict(props or {}))
+                row = {"kind": "edge", "id": edge.id, "edgeType": edge.edge_type,
+                       "source": src_urn, "target": tgt_urn}
+                if edge.confidence is not None:
+                    row["confidence"] = edge.confidence
+                if edge.properties:
+                    row["properties"] = dict(edge.properties)
+                canonicalize_rows([row], rules)
+                spellings.setdefault(row["edgeType"], set()).add(str(rel))
+                edges.setdefault(edge.id, row)
+        rows = [r for urn, r in nodes.items() if urn not in clashes]
+        return rows + list(edges.values()), spellings, clashes
+
     async def _known_nodes(self, graph_id: str, commit_id: str, urns) -> set:
         """Which endpoint urns already exist as imported nodes (node phase precedes the
         edge phase, so this is authoritative) — replaces the old in-memory urn→id map,

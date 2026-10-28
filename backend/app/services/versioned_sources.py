@@ -144,8 +144,9 @@ async def flag_external_changes(data_source_id: str) -> None:
     """Something said it wrote to the data source's graph (a loader's or a connector's change
     notification): flag its versioned graph's projection, ``external_drift`` with ``via:
     notification``, until those changes are brought into history. The projector keeps such a
-    flag — a property edit moves no count it could see — and the counts it last took stay.
-    Never raises."""
+    flag — a property edit moves no count it could see — and the counts it last took stay. Only a
+    customer's own graph is flagged: nothing else writes to a key the platform minted (a blank
+    graph's, a fork's), so there is nothing there to bring in. Never raises."""
     try:
         from sqlalchemy import func, select, update
 
@@ -156,9 +157,10 @@ async def flag_external_changes(data_source_id: str) -> None:
         async with get_session_factory()() as session:
             await session.execute(
                 update(ProjectionStateORM)
-                .where(ProjectionStateORM.graph_id.in_(
-                    select(GraphORM.id).where(GraphORM.data_source_id == data_source_id,
-                                              GraphORM.deleted_at.is_(None))))
+                .where(ProjectionStateORM.owns_falkor_graph.is_(False),
+                       ProjectionStateORM.graph_id.in_(select(GraphORM.id).where(
+                           GraphORM.data_source_id == data_source_id,
+                           GraphORM.deleted_at.is_(None))))
                 .values(external_drift=func.jsonb_build_object(
                     "at", _now(), "nodes", drift["nodes"], "edges", drift["edges"],
                     "via", "notification"))

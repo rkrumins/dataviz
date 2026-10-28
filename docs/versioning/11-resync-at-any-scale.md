@@ -21,8 +21,8 @@
 
 ## The problem, measured
 
-`POST /{ws}/graph/resync` → `resync_from_provider` → `sync_ingest`, run against a real
-478,430-entity graph:
+A re-sync (`resync_from_provider` → `sync_ingest`, then what `POST /{ws}/graph/resync` ran), run
+against a real 478,430-entity graph:
 
 | | |
 |---|---|
@@ -127,7 +127,7 @@ Result: **O(seen + touched + page)** instead of O(graph).
 
 Bounded memory is necessary and not sufficient: even at O(window), a 7.7M re-sync is ~20
 minutes of work, and it currently runs **inline in the HTTP request**
-(`endpoints/graph.py` awaits `resync_from_provider`). The end state is a **`resync` job on the
+(`endpoints/graph.py` awaits `bring_into_history`). The end state is a **`resync` job on the
 existing phased worker** — the machinery landed with the bootstrap and is a direct fit:
 
 - `JobORM` as the durable queue, `job_type='resync'` (widen `ck_jobs_type` — **widen-only**,

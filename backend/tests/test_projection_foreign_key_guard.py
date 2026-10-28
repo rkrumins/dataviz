@@ -324,7 +324,8 @@ def test_a_key_the_platform_minted_holding_more_is_held_back_and_says_what_to_do
     _stub_sweep(monkeypatch, proj)
     r = asyncio.run(proj.project_graph("g1"))
     assert r["projected"] == 0 and ps.projected_commit_seq == 0, r
-    assert "Bring them into history, or Rebuild" in r["verify_error"], r
+    assert "Rebuild replaces it with what history holds" in r["verify_error"], r
+    assert "Bring" not in r["verify_error"], "nothing but the projector writes a minted key"
     assert "enablement" not in r["verify_error"], "re-enabling answers 'already enabled'"
 
 

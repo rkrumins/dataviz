@@ -6219,7 +6219,6 @@ class GraphVersioningService:
         strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None, batch: int = 2000,
         allow_curation_risk: bool = False, allow_mass_delete: bool = False,
-        ontology_rules=None, holds_main: bool = False,
     ) -> Dict[str, object]:
         """Re-synchronize a versioned graph from its provider's CURRENT state, on demand —
         runnable at any time for any versioned graph (requirement: on-demand sync). Pages
@@ -6228,12 +6227,7 @@ class GraphVersioningService:
         clobbering user edits (a field both sides changed conflicts unless
         ``strategy='external_wins'``). The projector then refreshes FalkorDB. The
         ``collect_provider_rows`` output shape (kind/urn/entityType for nodes;
-        edgeType/source/target for edges) is exactly what ``sync_ingest`` consumes.
-
-        The rows are spelled as history spells them first (``ontology_rules``, as the enable
-        does). ``holds_main``: the provider reads the graph's own key, published up to main's
-        head, so every edit people made is in what it reads, and none can read back as the
-        source's old value — ``curation_at_risk`` does not apply."""
+        edgeType/source/target for edges) is exactly what ``sync_ingest`` consumes."""
         # Refuse BEFORE paging the provider. `collect_provider_rows` is the first of the six
         # whole-graph allocations, and by the time it has finished the process may already be
         # dead — so the check that saves us has to come before it, not inside sync_ingest's
@@ -6244,23 +6238,44 @@ class GraphVersioningService:
             await self._assert_writable(s, graph_id)
         # A sync refused for curation at risk is refused whatever the provider holds, so ask
         # first. sync_ingest asks again under the lock.
-        if not (allow_curation_risk or holds_main):
+        if not allow_curation_risk:
             async with self._session() as s:
                 main_id = await self._main_branch_id(s, graph_id)
                 human = await self._human_commit_in_sync_base(
                     s, graph_id, main_id, await self._last_sync_seq(s, graph_id, main_id))
             if human is not None:
                 raise _curation_at_risk(human)
-        from backend.app.providers.versioned_bootstrap import canonicalize_rows, collect_provider_rows
+        from backend.app.providers.versioned_bootstrap import collect_provider_rows
         rows = await collect_provider_rows(provider, batch=batch)
-        canonicalize_rows(rows, ontology_rules)
-        await self._as_history_holds(graph_id, rows)
         return await self.sync_ingest(
             graph_id=graph_id, rows=rows, actor=actor, source=source,
             strategy=strategy, resolutions=resolutions,
             containment_edge_types=containment_edge_types, message="resync from provider",
-            allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete,
-            holds_main=holds_main)
+            allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete)
+
+    async def bring_into_history(self, *, graph_id: str, client, rules, actor: str,
+                                 strategy: str = "merge") -> Dict[str, object]:
+        """Take what a customer's FalkorDB graph holds that history doesn't into ``main``, as
+        one ``sync`` commit. ``client`` is the key the projection publishes into, read whole as
+        the enable reads it (``BootstrapRunner.read_graph``, each type spelled by ``rules``). The
+        caller has seen that key hold main — a fresh watermark, on a key the platform doesn't
+        own — so every edit people made is in it and none reads back as an old value
+        (``curation_at_risk`` does not apply). A field both people and the graph changed
+        conflicts unless ``strategy='external_wins'``.
+
+        Nothing is deleted from history: a node the graph lacks may be one a read missed, and a
+        publish writes history back into the key. Identifiers several nodes in the graph share
+        with different contents are left out (``duplicates``)."""
+        await self._assert_syncable(graph_id)       # before the read, as for any re-sync
+        async with self._session() as s:
+            await self._assert_writable(s, graph_id)
+        from .bootstrap_worker import BootstrapRunner
+        rows, _spellings, clashes = await BootstrapRunner(None).read_graph(client, rules)
+        await self._as_history_holds(graph_id, rows)
+        result = await self.sync_ingest(
+            graph_id=graph_id, rows=rows, actor=actor, source="provider", strategy=strategy,
+            message="bring into history", holds_main=True, deletes=False)
+        return {**result, "duplicates": sorted(clashes)[:200]}
 
     async def _as_history_holds(self, graph_id: str, rows: List[dict]) -> None:
         """Make a FalkorDB graph's rows say what history would, so a sync of them holds only
@@ -6395,7 +6410,7 @@ class GraphVersioningService:
         strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         allow_curation_risk: bool = False, allow_mass_delete: bool = False,
-        holds_main: bool = False,
+        holds_main: bool = False, deletes: bool = True,
     ) -> Dict[str, object]:
         """Re-sync an authoritative/external snapshot into ``main`` as a single ``sync``
         commit **without clobbering user edits** (plan §D5). 3-way merge: base = the
@@ -6417,8 +6432,9 @@ class GraphVersioningService:
         :class:`MassDeleteBlocked` when the sync would delete more than
         max(``SYNC_DELETE_MAX_ABS``, ``SYNC_DELETE_MAX_FRACTION`` x live) entities
         (``allow_mass_delete``). ``holds_main``: the snapshot is the graph's own published key
-        (:meth:`resync_from_provider`), which nothing people did is missing from, so
-        :class:`CurationAtRisk` does not apply."""
+        (:meth:`bring_into_history`), which nothing people did is missing from, so
+        :class:`CurationAtRisk` does not apply. ``deletes=False``: the snapshot may be partial,
+        so an entity it doesn't mention is left as it is."""
         await self._assert_syncable(graph_id)
         rows = list(rows)        # every attempt reads it; a spent iterator would delete everything
         return await self._retry_seq(
@@ -6428,7 +6444,7 @@ class GraphVersioningService:
                 idempotency_key=idempotency_key, message=message, strategy=strategy,
                 resolutions=resolutions, containment_edge_types=containment_edge_types,
                 allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete,
-                holds_main=holds_main))
+                holds_main=holds_main, deletes=deletes))
 
     async def _sync_ingest_once(
         self, *, graph_id: str, rows, actor: str, source: str,
@@ -6436,6 +6452,7 @@ class GraphVersioningService:
         resolutions: Optional[Mapping[str, Optional[dict]]],
         containment_edge_types: Optional[Sequence[str]],
         allow_curation_risk: bool, allow_mass_delete: bool, holds_main: bool = False,
+        deletes: bool = True,
     ) -> Dict[str, object]:
         """One attempt at :meth:`sync_ingest`, under the graph lock: the idempotent replay, the
         last sync and main's head are all read with main held still."""
@@ -6484,7 +6501,8 @@ class GraphVersioningService:
             # see an absence by looking at what is there. So the external id SET is kept (strings
             # only) and the live head is streamed against it.
             theirs, seen, rejected = await self._external_state_bounded(s, graph_id, main_id, rows)
-            deletions = await self._live_ids_absent_from(s, graph_id, main_id, seen)
+            deletions = (await self._live_ids_absent_from(s, graph_id, main_id, seen)
+                         if deletes else set())
             changed = set(theirs) | deletions | set(resolutions or {})
             base = await self._values_at(s, graph_id, main_id, changed, last_seq)
             ours = await self._values_at(s, graph_id, main_id, changed, graph.main_head_commit_seq)

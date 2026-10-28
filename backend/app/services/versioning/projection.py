@@ -2239,8 +2239,7 @@ class FalkorProjector:
         if owned and (f_n > pg_n or f_e > pg_e):
             msg = (f"FalkorDB holds entities version history does not "
                    f"(PG n={pg_n},e={pg_e}; Falkor n={f_n},e={f_e}): something wrote to this graph "
-                   f"outside version control. Bring them into history, or Rebuild to replace the "
-                   f"graph with what history holds")
+                   f"outside version control. Rebuild replaces it with what history holds")
             logger.error("%s for %s", msg, graph_id)
             return msg, False
         if from_seq > 0:                                 # missing committed data → reconcile once
