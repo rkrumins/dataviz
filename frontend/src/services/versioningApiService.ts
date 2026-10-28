@@ -203,8 +203,8 @@ export interface DriftMismatch {
 
 /**
  * Drift report: the fast read layer compared against the source of truth. `inSync` ⇒ they match.
- * `skippedReason` (set) ⇒ the check couldn't run (no target / a refresh in flight) and the counts
- * are meaningless. Sample lists are bounded; `truncated` ⇒ more drift exists than is listed.
+ * `skippedReason` (set) ⇒ the check couldn't run (`no projection target`, `projection in flight`,
+ * or why the graph stops it, such as a type it spells two ways) and the counts are meaningless. Sample lists are bounded; `truncated` ⇒ more drift exists than is listed.
  */
 export interface DriftReport {
   graphId: string
@@ -1024,7 +1024,8 @@ export interface ResyncResult {
 /** Bring what the data source's graph holds and history doesn't into history, as one commit on main
  *  read from the graph itself (`POST /graph/resync`), and clear its {@link ExternalDrift} flag.
  *  Nothing is deleted from history. 409 while the graph doesn't hold all of main yet (catching up,
- *  being rebuilt or moved), and on a copy the platform owns, which nothing else writes to. */
+ *  being rebuilt or moved), on a copy the platform owns, which nothing else writes to, and when the
+ *  graph spells a type two ways. */
 export function bringIntoHistory(wsId: string, dataSourceId: string, opts?: ActivityOpts): Promise<ResyncResult> {
   return vfetch<ResyncResult>(
     `/api/v1/${wsId}/graph/resync?dataSourceId=${encodeURIComponent(dataSourceId)}`,

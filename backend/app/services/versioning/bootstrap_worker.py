@@ -1560,7 +1560,8 @@ class BootstrapRunner:
                 logger.warning("bootstrap scan window shrank to %d (lo=%d): %s",
                                width, lo, type(exc).__name__)
 
-    async def read_graph(self, client, rules) -> Tuple[List[dict], Dict[str, Set[str]], Set[str]]:
+    async def read_graph(self, client, rules) -> Tuple[List[dict], Dict[str, Dict[str, Set[str]]],
+                                                      Set[str]]:
         """Read a graph whole, as the enable reads it, into the rows a sync takes
         (``GraphVersioningService.bring_into_history``): the same node-id windows and statements
         (nodes with a urn, nothing derived; relationships between two of them, rollups left out),
@@ -1568,10 +1569,10 @@ class BootstrapRunner:
         paged reader is not that: a page a node with no urn shortened read as the last one, and
         it read relationships to such nodes, the rollups, and child counts no history holds.
 
-        Returns the rows; each declared type's spellings in the graph, as the enable's
-        ``physicalTypes``; and the identifiers several nodes share with different contents, left
-        out of the rows, since no one copy is the graph's. A server that cuts replies short is
-        refused first (:class:`BootstrapFailure`)."""
+        Returns the rows; each declared type's spellings in the graph (``{"nodes": {type:
+        {labels}}, "edges": {...}}``, as the enable's ``physicalTypes``); and the identifiers
+        several nodes share with different contents, left out of the rows, since no one copy is
+        the graph's. A server that cuts replies short is refused first (:class:`BootstrapFailure`)."""
         from backend.app.providers.falkordb_provider import _edge_from_row, _node_from_props
         from backend.app.providers.versioned_bootstrap import canonicalize_rows
 
@@ -1580,7 +1581,7 @@ class BootstrapRunner:
         full = min(config.BOOTSTRAP_SCAN_WIDTH, _PROPS_ROWS_CAP)
         nodes: Dict[str, dict] = {}
         edges: Dict[str, dict] = {}
-        spellings: Dict[str, Set[str]] = {}
+        spellings: Dict[str, Dict[str, Set[str]]] = {"nodes": {}, "edges": {}}
         clashes: Set[str] = set()
         lo, width = 0, full
         while max_id is not None and lo <= max_id:
@@ -1596,7 +1597,7 @@ class BootstrapRunner:
                 canonicalize_rows([row], rules)
                 row["entityType"] = row.get("entityType") or label or "unknown"
                 if label:
-                    spellings.setdefault(row["entityType"], set()).add(label)
+                    spellings["nodes"].setdefault(row["entityType"], set()).add(label)
                 if nodes.setdefault(node.urn, row) != row:
                     clashes.add(node.urn)
         lo = 0
@@ -1615,7 +1616,7 @@ class BootstrapRunner:
                 if edge.properties:
                     row["properties"] = dict(edge.properties)
                 canonicalize_rows([row], rules)
-                spellings.setdefault(row["edgeType"], set()).add(str(rel))
+                spellings["edges"].setdefault(row["edgeType"], set()).add(str(rel))
                 edges.setdefault(edge.id, row)
         rows = [r for urn, r in nodes.items() if urn not in clashes]
         return rows + list(edges.values()), spellings, clashes
@@ -2451,14 +2452,16 @@ def _spelled_two_ways(summary: dict) -> List[Tuple[str, List[str]]]:
 
 
 def _physical_types(summary: dict) -> Optional[dict]:
-    """``projection_state.physical_types``: the graph's own spelling of each declared type it spells
-    another way, which the projector writes and matches in it. None when it spells every type as
-    declared, or the job's scan predates the tally. (A type spelled two ways never gets here:
-    validation refuses it.)"""
-    seen = summary.get("physicalTypes") or {}
-    out = {kind: {t: v[0] for t, v in (seen.get(kind) or {}).items() if len(v) == 1 and v[0] != t}
-           for kind in ("nodes", "edges")}
-    return out if out["nodes"] or out["edges"] else None
+    """``projection_state.physical_types``: the graph's own spelling of each declared type, which
+    the projector writes and matches in it — also a type spelled as declared, so a spelling
+    another writer adds later doesn't make the projector unsure which is the graph's. None when
+    the job's scan predates the tally: the projector then reads it from the graph. (A type
+    spelled two ways never gets here: validation refuses it.)"""
+    seen = summary.get("physicalTypes")
+    if seen is None:
+        return None
+    return {kind: {t: v[0] for t, v in (seen.get(kind) or {}).items() if len(v) == 1}
+            for kind in ("nodes", "edges")}
 
 
 def _add_tally(into: Optional[dict], more: Optional[dict]) -> dict:

@@ -576,8 +576,10 @@ ontology, and fails closed for blank models (**422 `ontology_required`**, **503
   can't be reached or cuts replies short (`RESULTSET_SIZE`). It stamps `urn` first, as the enable
   does, then reads the graph whole as the enable reads it: id windows over nodes with a urn and
   nothing derived, relationships between two of them, no rollups, no child counts. Each type is
-  spelled as history spells it; an empty field a read fills in that the item never held is left
-  out, and a connection whose id is also an item's is keyed `edge:<id>`. An identifier several
+  spelled as history spells it (a type history holds, in history's casing); an empty field a read
+  fills in that the item never held is left out, and a connection whose id is also an item's is
+  keyed `edge:<id>`. A type the graph spells two ways is **409 `spelled_two_ways`** `{spelled}`;
+  otherwise the graph's spelling of each type it read is recorded for the projector. An identifier several
   nodes share with different contents is left out and listed in `duplicates`. **Nothing is
   deleted from history**, whatever the graph lacks. On success it clears the watermark's
   `externalDrift` and queues a rebuild of the lineage summaries. It refuses above

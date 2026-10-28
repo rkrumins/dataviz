@@ -307,14 +307,18 @@ def test_scan_summary_gathers_every_spelling_of_a_type_across_windows():
     assert _spelled_two_ways(s) == [("Table", ["TABLE", "table"])]
 
 
-def test_the_projector_gets_each_type_the_graph_spells_one_other_way():
+def test_the_projector_gets_the_graphs_spelling_of_every_type():
+    """Every type, also one spelled as declared: a spelling another writer adds later must not
+    make the projector unsure which is the graph's own. Unrecorded (NULL) only when the scan
+    tallied nothing, and the projector then reads it from the graph."""
     summary = {"physicalTypes": {"nodes": {"Table": ["table"], "Column": ["Column"]},
                                  "edges": {"FLOWS_TO": ["flows_to"]}}}
-    assert _physical_types(summary) == {"nodes": {"Table": "table"},
+    assert _physical_types(summary) == {"nodes": {"Table": "table", "Column": "Column"},
                                         "edges": {"FLOWS_TO": "flows_to"}}
     assert _spelled_two_ways(summary) == []
-    assert _physical_types({"physicalTypes": {"nodes": {"Column": ["Column"]}}}) is None
-    assert _physical_types({}) is None, "a job that started before the tally: as declared"
+    assert _physical_types({"physicalTypes": {"nodes": {"Column": ["Column"]}}}) == {
+        "nodes": {"Column": "Column"}, "edges": {}}
+    assert _physical_types({}) is None, "a job that started before the tally: read from the graph"
 
 
 # ── stamping urns before the copy (node_identity.stamp_identity_for_enable) ──

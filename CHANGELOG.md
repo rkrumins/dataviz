@@ -25,7 +25,14 @@ jobs around such a graph.
   each node it changed, its check then found "extra entities", and the projection stayed behind
   from then on, so views read from Postgres. Version history keeps the ontology's spelling. A graph
   that spells one type two ways (`table` and `TABLE`) now stops the enable with a message saying so:
-  give each type one spelling in the graph, then start over.
+  give each type one spelling in the graph, then start over. A graph enabled before this release has
+  no recorded spelling: its next publish reads it from the graph and records it. If earlier
+  publishes left `:Table` copies beside the graph's `:table` nodes, the projection is held back with
+  a message naming both spellings, and nothing is written until one is left; before, such a graph's
+  copies would now have been published, and the heal relabelled every `:table` node `:Table`.
+  Bringing changes into history records the spelling of the types it brings in, refuses a type the
+  graph spells two ways (409 `spelled_two_ways`), and keeps history's casing of a type the ontology
+  has since re-cased.
 - **A graph that names its items by another property is copied whole.** On a data source whose
   identity property isn't `urn` (an `id`, say), enabling version control copied nothing and still
   finished green: the copy read `urn` alone, and the screen said the items "don't appear anywhere

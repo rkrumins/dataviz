@@ -47,6 +47,7 @@ def _bounded_query(client, cypher: str, params=None):
     return _q(client, cypher, params=params, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
 
 from . import config
+from .errors import AmbiguousSpelling
 from .models import (
     BranchORM,
     EdgeVersionORM,
@@ -67,24 +68,80 @@ from backend.app.providers.falkordb_provider import _sanitize_label
 
 logger = logging.getLogger(__name__)
 
-# A customer graph's own spelling of declared types (``projection_state.physical_types``:
-# ``{"nodes": {declared: physical}, "edges": {...}}``) while a projection pass or a sync check works
-# on its key. The projector writes and matches, and the check compares, the labels and types
-# ``spelled_label`` / ``spelled_type`` give, so a ``:table`` graph keeps ``:table``. Unset (a key
-# the platform owns, or a graph whose types are spelled as declared): the declared spelling.
+# A customer graph's own spelling of its types (:func:`spelling` of ``projection_state.
+# physical_types``, or of what :func:`graph_spelling` read from the graph when nothing recorded
+# it) while a projection pass or a sync check works on its key. The projector writes and matches,
+# and the check compares, the labels and types ``spelled_label`` / ``spelled_type`` give, so a
+# ``:table`` graph keeps ``:table``. Unset (a key the platform owns): the declared spelling.
 SPELLING: ContextVar[Optional[dict]] = ContextVar("gv_projection_spelling", default=None)
+
+
+def spelling(types: Optional[dict], ambiguous: Optional[dict] = None) -> dict:
+    """What :data:`SPELLING` holds: ``types`` (``{"nodes": {type: label}, "edges": {...}}``)
+    keyed without case, since history spells a type the ontology's way and the ontology may
+    change its casing; and ``ambiguous``, the types the graph spells more than one way
+    (``{"nodes": {TYPE: [labels]}, ...}``), which are never written (:class:`AmbiguousSpelling`)."""
+    out = {kind: {spelling_key(t): s for t, s in ((types or {}).get(kind) or {}).items()}
+           for kind in ("nodes", "edges")}
+    out["ambiguous"] = ambiguous or {}
+    return out
+
+
+def spelling_key(t: str) -> str:
+    """A type as a spelling is recorded under: any casing of it is the same type."""
+    return _sanitize_label(t).upper()
+
+
+def _spelled(kind: str, t: str) -> str:
+    sp = SPELLING.get()
+    if not sp:
+        return _sanitize_label(t)
+    key = spelling_key(t)
+    found = (sp.get(kind) or {}).get(key)
+    if found is None and key in ((sp.get("ambiguous") or {}).get(kind) or {}):
+        raise AmbiguousSpelling({t: sp["ambiguous"][kind][key]})
+    return _sanitize_label(found or t)
 
 
 def spelled_label(entity_type: Optional[str]) -> str:
     """The node label the projector writes for ``entity_type``."""
-    t = entity_type or "Entity"
-    return _sanitize_label(((SPELLING.get() or {}).get("nodes") or {}).get(t, t))
+    return _spelled("nodes", entity_type or "Entity")
 
 
 def spelled_type(edge_type: Optional[str]) -> str:
     """The relationship type the projector writes for ``edge_type``."""
-    t = edge_type or "REL"
-    return _sanitize_label(((SPELLING.get() or {}).get("edges") or {}).get(t, t))
+    return _spelled("edges", edge_type or "REL")
+
+
+def _rows(res) -> list:
+    return list(getattr(res, "result_set", None) or [])
+
+
+async def graph_spelling(client) -> Tuple[dict, dict]:
+    """A customer's graph's own spelling of its types, read from the graph, for one whose enable
+    recorded none (it predates the record): each label and relationship type, keyed without
+    case. Labels outlive their nodes, so of several spellings of one type only those still
+    holding something count; if more than one does, the type is ambiguous. Derived labels and
+    the rollups are left out. Returns ``(types, ambiguous)`` for :func:`spelling`."""
+    types: Dict[str, dict] = {"nodes": {}, "edges": {}}
+    ambiguous: Dict[str, dict] = {"nodes": {}, "edges": {}}
+    for kind, call, probe in (
+            ("nodes", "CALL db.labels()", "MATCH (n:`{}`) RETURN 1 LIMIT 1"),
+            ("edges", "CALL db.relationshipTypes()", "MATCH ()-[r:`{}`]->() RETURN 1 LIMIT 1")):
+        groups: Dict[str, List[str]] = {}
+        for row in _rows(await _bounded_query(client, call)):
+            name = str(row[0])
+            if name not in config.DERIVED_LABELS and name != "AGGREGATED":
+                groups.setdefault(spelling_key(name), []).append(name)
+        for key, names in groups.items():
+            if len(names) > 1:
+                names = [n for n in names if _rows(await _bounded_query(
+                    client, probe.format(n.replace("`", "``"))))]
+            if len(names) == 1:
+                types[kind][key] = names[0]
+            elif names:
+                ambiguous[kind][key] = sorted(names)
+    return types, ambiguous
 
 
 # --------------------------------------------------------------------------- #
@@ -393,7 +450,7 @@ class ProjectionReconciler:
             name = ps.falkor_graph_name if ps is not None else None
             provider_id = ps.falkor_provider if ps is not None else None
             owned = bool(ps.owns_falkor_graph) if ps is not None else True
-            spelling = ps.physical_types if ps is not None and not owned else None
+            recorded = ps.physical_types if ps is not None else None
             # Collapse-modeled counts (node count + DISTINCT-triple edge count) so the report is
             # apples-to-apples with FalkorDB (which collapses parallel edges) — a parallel-edge graph
             # is NOT reported as a false shortfall / out-of-sync.
@@ -435,7 +492,14 @@ class ProjectionReconciler:
             client = await client
         falkor_nodes, falkor_edges = await falkor_counts(client, owned=owned)
 
-        token = SPELLING.set(spelling)
+        # A customer's graph is compared in its own spelling: recorded, or read from it.
+        if owned:
+            spelled = None
+        elif recorded is not None:
+            spelled = spelling(recorded)
+        else:
+            spelled = spelling(*await graph_spelling(client))
+        token = SPELLING.set(spelled)
         try:
             missing_nodes, extra_nodes, mismatched, trunc_n = await self._diff_nodes(
                 client, graph_id, main_id, sample_limit, deep)
@@ -447,6 +511,9 @@ class ProjectionReconciler:
             # ATTRIBUTE drift on matched ids.
             _me, _xe, edge_mismatched, trunc_e = await self._diff_edges(
                 client, graph_id, main_id, sample_limit, deep)
+        except AmbiguousSpelling as exc:          # which spelling is the graph's own is unknown
+            return _report(falkor_nodes=falkor_nodes, falkor_edges=falkor_edges,
+                           skipped_reason=str(exc))
         finally:
             SPELLING.reset(token)
         truncated = trunc_n or trunc_e

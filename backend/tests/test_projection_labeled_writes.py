@@ -12,8 +12,17 @@ un-budgeted writes at 30s — mid-seed).
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
+from backend.app.services.versioning.errors import AmbiguousSpelling
 from backend.app.services.versioning.projection import FalkorProjector
-from backend.app.services.versioning.reconcile import SPELLING
+from backend.app.services.versioning.reconcile import (
+    SPELLING,
+    graph_spelling,
+    spelled_label,
+    spelled_type,
+    spelling,
+)
 
 
 def _run(coro):
@@ -140,7 +149,7 @@ def test_a_pass_writes_and_matches_the_graph_own_spelling_of_its_types():
     graph's own, and one the graph never had is written as declared."""
     client = _CaptureClient()
     p = _projector()
-    token = SPELLING.set({"nodes": {"Table": "table"}, "edges": {"FLOWS": "flows"}})
+    token = SPELLING.set(spelling({"nodes": {"Table": "table"}, "edges": {"FLOWS": "flows"}}))
     try:
         _run(p._apply(client, [_NODE_A, _NODE_B], [_EDGE], [("urn:x", "Table")],
                       [{"eid": "E1", "src": "urn:a", "tgt": "urn:b",
@@ -310,3 +319,51 @@ def test_a_customer_key_keeps_the_properties_history_never_held():
 def test_an_edge_whose_endpoint_is_not_there_is_counted_as_not_landed():
     assert _run(_projector()._apply(_HeldClient(landed=0), [], [_EDGE], [], [])) == 1
     assert _run(_projector()._apply(_HeldClient(landed=1), [], [_EDGE], [], [])) == 0
+
+
+def test_a_spelling_is_found_whatever_case_the_type_is_asked_in():
+    """History spells a type the ontology's way, and the ontology may change its casing after
+    the enable: the graph's spelling is found either way, so nothing is relabelled for it."""
+    token = SPELLING.set(spelling({"nodes": {"Table": "table"}, "edges": {"FLOWS_TO": "flows_to"}}))
+    try:
+        assert [spelled_label(t) for t in ("Table", "TABLE", "table")] == ["table"] * 3
+        assert [spelled_type(t) for t in ("FLOWS_TO", "Flows_To")] == ["flows_to"] * 2
+        assert spelled_label("Column") == "Column", "a type the graph never had: as declared"
+    finally:
+        SPELLING.reset(token)
+
+
+def test_a_type_the_graph_spells_two_ways_is_never_written():
+    """Nothing recorded which of two spellings holding nodes is the graph's own: writing either
+    could copy every node of the other, so neither is written, and the refusal names both."""
+    token = SPELLING.set(spelling({"nodes": {"COLUMN": "column"}},
+                                  {"nodes": {"TABLE": ["Table", "table"]}, "edges": {}}))
+    try:
+        with pytest.raises(AmbiguousSpelling) as refused:
+            spelled_label("Table")
+        assert refused.value.detail["type"] == "spelled_two_ways"
+        assert "Table as Table and table" in str(refused.value), str(refused.value)
+        assert spelled_label("Column") == "column"
+    finally:
+        SPELLING.reset(token)
+
+
+def test_a_graph_that_recorded_no_spelling_says_it_itself():
+    """``graph_spelling``: each label and relationship type, keyed without case. Of several
+    spellings of one, only those still holding something count (a label outlives its nodes),
+    and two that do are ambiguous. Derived labels and the rollups are left out."""
+    class _Graph:
+        async def query(self, cypher, params=None, timeout=None):
+            rows = {"CALL db.labels()": [["table"], ["Table"], ["Column"], ["column"],
+                                         ["_AggMeta"], ["Domain"]],
+                    "CALL db.relationshipTypes()": [["flows_to"], ["FLOWS_TO"],
+                                                    ["AGGREGATED"]]}.get(cypher)
+            if rows is None:                 # a probe: does this spelling still hold anything
+                held = ("`table`", "`Table`", "`Column`", "`flows_to`")
+                rows = [[1]] if any(h in cypher for h in held) else []
+            return SimpleNamespace(result_set=rows)
+
+    types, ambiguous = _run(graph_spelling(_Graph()))
+    assert types == {"nodes": {"COLUMN": "Column", "DOMAIN": "Domain"},
+                     "edges": {"FLOWS_TO": "flows_to"}}, types
+    assert ambiguous == {"nodes": {"TABLE": ["Table", "table"]}, "edges": {}}, ambiguous

@@ -31,12 +31,15 @@ from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tup
 from sqlalchemy import case, func, literal, null, or_, select, update
 
 from . import config, db
+from .errors import AmbiguousSpelling
 from .falkor_indexes import ensure_urn_indexes
 from .merkle import content_hash
 from .reconcile import (
     SPELLING,
+    graph_spelling,
     spelled_label,
     spelled_type,
+    spelling,
     falkor_counts, pg_live_counts_projectable, reconcile_interrupted, rollup_health,
 )
 from .projection_reconcile import (
@@ -672,8 +675,9 @@ class FalkorProjector:
             # What this pass may find in a customer's key that history doesn't hold, as last counted.
             drift = None if owned else ps.external_drift
             # Every label and type the pass writes or matches, in the graph's own spelling (reset
-            # by ``project_graph``).
-            SPELLING.set(None if owned else ps.physical_types)
+            # by ``project_graph``); a customer's graph that recorded none is read for it below.
+            SPELLING.set(None if owned else spelling(ps.physical_types))
+            unspelled = not owned and ps.physical_types is None
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
             if name == self.default_graph_name(graph_id):
@@ -706,6 +710,12 @@ class FalkorProjector:
         changes, structural, retypes, rollup_pairs = ([], [], [], []), False, [], None
         superseded = False
         try:
+            # Inside the try: the factory does a real Postgres provider lookup + FalkorDB handle
+            # build (a genuine suspension point), so a cancellation here must ALSO reset the
+            # already-claimed "projecting" row rather than strand it.
+            client = await self._graph_client(name, provider_id)
+            if unspelled:
+                await self._learn_spelling(client, graph_id)
             async with self._session() as s:
                 graph = await s.get(GraphORM, graph_id)
                 main_id = await self._svc._main_branch_id(s, graph_id)
@@ -736,10 +746,6 @@ class FalkorProjector:
                                          graph_id)
                         rollup_pairs = "stale"
 
-            # Inside the try: the factory does a real Postgres provider lookup + FalkorDB handle
-            # build (a genuine suspension point), so a cancellation here must ALSO reset the
-            # already-claimed "projecting" row rather than strand it.
-            client = await self._graph_client(name, provider_id)
             # Ontology entity-type→level map so projected nodes carry n.level (parity with
             # save_custom_graph). Best-effort: {} when unavailable, leaving level unset.
             level_map = await self._resolve_level_map(graph_id)
@@ -833,9 +839,13 @@ class FalkorProjector:
             # BEFORE that commit never reaches this handler and correctly leaves the prior status
             # untouched. CancelledError is re-raised below per the asyncio contract — never swallowed.
             cancelled = isinstance(exc, asyncio.CancelledError)
+            # Not a fault of the pass: the graph spells a type two ways, until someone fixes it.
+            ambiguous = isinstance(exc, AmbiguousSpelling)
             if cancelled:
                 logger.warning("projection for %s cancelled; resetting status so it is not stranded",
                                graph_id)
+            elif ambiguous:
+                logger.warning("projection for %s held back: %s", graph_id, exc)
             else:
                 logger.exception("projection apply failed for %s: %s", graph_id, exc)
 
@@ -857,6 +867,9 @@ class FalkorProjector:
             except Exception:                          # pragma: no cover - infra
                 logger.warning("could not reset projection status for %s after failure/cancel",
                                graph_id, exc_info=True)
+            if ambiguous:
+                return {"projected": from_seq, "applied": 0, "noop": False,
+                        "verify_error": str(exc)}
             raise
 
         if orphan:                                     # the old gv_* graph is now unread — reclaim its RAM
@@ -1339,6 +1352,22 @@ class FalkorProjector:
                 structural = True
                 retypes.append((urn, spelled_label(old.get("entityType")), spelled_label(new_type)))
         return structural, retypes
+
+    async def _learn_spelling(self, client, graph_id: str) -> None:
+        """A customer's graph whose enable recorded no spelling (it predates the record) says it
+        itself (:func:`graph_spelling`). Recorded once nothing in it is ambiguous, so a spelling
+        another writer adds later doesn't change what the projector writes."""
+        types, ambiguous = await graph_spelling(client)
+        SPELLING.set(spelling(types, ambiguous))
+        if not (ambiguous["nodes"] or ambiguous["edges"]):
+            async with self._session() as s:
+                await s.execute(update(ProjectionStateORM)
+                                .where(ProjectionStateORM.graph_id == graph_id,
+                                       # SQL NULL, or a JSON null an enable wrote for "none"
+                                       func.coalesce(func.jsonb_typeof(
+                                           ProjectionStateORM.physical_types), "null") == "null")
+                                .values(physical_types=types)
+                                .execution_options(synchronize_session=False))
 
     async def _properties_before(self, s, graph, main_id, seq: int,
                                  node_upserts) -> Dict[str, Set[str]]:

@@ -383,7 +383,10 @@ export function DataHealthTab({ wsId, graphId, dataSourceId, canManage }: {
                 <span>
                   {report.skippedReason === 'projection in flight'
                     ? 'A refresh is in progress — try again in a moment.'
-                    : 'This data source has no fast read layer yet.'}
+                    : report.skippedReason === 'no projection target'
+                      ? 'This data source has no fast read layer yet.'
+                      // The graph's to fix (a type it spells two ways), in its own words.
+                      : report.skippedReason}
                 </span>
               </div>
             ) : report.inSync && report.rollups?.status && report.rollups.status !== 'ok'

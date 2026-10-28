@@ -588,6 +588,7 @@ async def resync_versioned_graph_endpoint(
     from backend.app.services.node_identity import stamp_identity_for_enable
     from backend.app.services.projection_target import make_rollup_rebuild_hook
     from backend.app.services.versioning.bootstrap_worker import BootstrapFailure
+    from backend.app.services.versioning.errors import AmbiguousSpelling
     from backend.app.services.versioning.service import GraphVersioningService
     actor = user.id if user else "system"
     svc = GraphVersioningService()
@@ -631,6 +632,8 @@ async def resync_versioned_graph_endpoint(
     except BootstrapFailure as exc:                 # a server that cuts replies short
         raise HTTPException(status_code=503, detail={"type": "graph_unavailable",
                                                      "message": str(exc)})
+    except AmbiguousSpelling as exc:                # a type the graph spells two ways
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     await svc.clear_external_changes(gid)
     if (result or {}).get("commit_id"):
         # The publish that follows moves the lineage summaries by relationships that were

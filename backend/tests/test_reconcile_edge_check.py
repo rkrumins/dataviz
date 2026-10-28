@@ -11,6 +11,7 @@ from backend.app.services.versioning.reconcile import (
     _edge_field_mismatches,
     _field_mismatches,
     _parse_props,
+    spelling,
 )
 
 
@@ -78,7 +79,7 @@ def test_a_graph_that_spells_its_types_its_own_way_is_compared_in_that_spelling(
     """``projection_state.physical_types``: the projector wrote ``:table`` and ``:flows_to`` for the
     declared ``Table`` and ``FLOWS_TO``, so the check compares against those, not the declared."""
     node = {"entityId": "N1", "displayName": "n", "entityType": "Table"}
-    token = SPELLING.set({"nodes": {"Table": "table"}, "edges": {"FLOWS_TO": "flows_to"}})
+    token = SPELLING.set(spelling({"nodes": {"Table": "table"}, "edges": {"FLOWS_TO": "flows_to"}}))
     try:
         assert _field_mismatches(node, "N1", "n", ["table"]) == []
         assert _edge_field_mismatches(_pg(), "flows_to", 0.9, '{"sql": "s"}') == []

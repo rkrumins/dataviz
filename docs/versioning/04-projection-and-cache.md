@@ -80,14 +80,26 @@ through the projector automatically.
   providers' `update_edge` / `delete_edge` and for `/graph/changes`.
 - **A graph enabled in place keeps its own spelling of its types.** History stores each type as the
   ontology declares it (`Table`, `FLOWS_TO`); the graph may say `table` and `flows_to`. Enabling
-  version control records the graph's spelling of every type it spells differently
-  (`projection_state.physical_types`, `{"nodes": {declared: physical}, "edges": {...}}`), and every
+  version control records the graph's spelling of every type
+  (`projection_state.physical_types`, `{"nodes": {type: label}, "edges": {...}}`), and every
   label and relationship type a pass writes or matches goes through it (`reconcile.spelled_label` /
-  `spelled_type`, set per pass), as does Check sync. So an edit updates the node that is there
-  rather than adding a `:Table` copy beside it. A type the graph never had is written as declared.
-  A graph that spells one type two ways (`table` and `TABLE`) stops the enable at its checks
-  (`one_spelling_per_type`). Keys the platform owns, and graphs enabled before 2026-10-28, are
-  written with the declared spelling.
+  `spelled_type`, set per pass), as does Check sync. Types are matched without case, so a type the
+  ontology has since re-cased is still found. So an edit updates the node that is there rather than
+  adding a `:Table` copy beside it. A type the graph never had is written as declared. A graph that
+  spells one type two ways (`table` and `TABLE`) stops the enable at its checks
+  (`one_spelling_per_type`). Keys the platform owns are written with the declared spelling.
+  - **A graph enabled before 2026-10-28** has no recorded spelling. Its next pass reads it from the
+    graph (`reconcile.graph_spelling`: its labels and relationship types; of several spellings of
+    one type, only those still holding something count, since a label outlives its nodes) and
+    records it once nothing is ambiguous. A type two spellings of which still hold nodes — such as
+    the `:Table` copies earlier passes wrote into a `:table` graph — is never written: the pass is
+    held back with `last_error` naming both spellings (`AmbiguousSpelling`, logged without a trace),
+    Check sync answers with the same reason, and nothing in the graph is written, copied or
+    relabelled until one spelling is left.
+  - **Bringing changes into history** records the spelling of each type it reads, over what was
+    recorded, so a type another writer introduced is written back as that writer spells it. A type
+    the graph spells two ways is refused (**409 `spelled_two_ways`**). A type history already holds
+    keeps history's casing, so a re-cased ontology doesn't retype every item.
 
 > **Limitation (phantom keys).** A node with no `urn` in its payload is keyed as `gv:<entity_id>` and
 > logs a WARN (`_node_urn`, `projection.py:93-106`; `_urn_for`, `:701-718`). This is a deliberate

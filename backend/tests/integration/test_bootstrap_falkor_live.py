@@ -27,7 +27,10 @@ FalkorDB can answer is pinned here:
   rebuild.
 * L4 — a graph that spells its types its own way (``:table``, ``:flows_to``) against an ontology
   that declares ``Table`` and ``FLOWS_TO`` keeps its spelling: history holds the declared one, and
-  every publish after the enable lands on the graph's own labels and goes out fresh.
+  every publish after the enable lands on the graph's own labels and goes out fresh. A graph
+  whose spelling was never recorded is read for it; one that spells a type two ways is held back
+  and left untouched. Types brought into history keep the graph's spelling, and a type spelled
+  two ways is refused.
 
 Needs Postgres (``GRAPHVER_E2E=1``) and FalkorDB:
   GRAPHVER_E2E=1 RUN_FALKOR_LIVE=1 FALKORDB_HOST=localhost FALKORDB_PORT=6379 \\
@@ -805,6 +808,158 @@ async def test_a_type_the_graph_spells_two_ways_stops_the_enable(graph, monkeypa
         ("one_spelling_per_type", "Table is spelled TABLE and table")], failed
     async with db.graphver_session() as s:
         assert (await s.get(GraphORM, gid)).main_head_commit_seq <= 1, "nothing became visible"
+
+
+async def _enabled_spelled(name, client, monkeypatch):
+    """A ``:table`` / ``:flows_to`` graph (t1, t2, t3; t1 flows to t2) against an ontology that
+    declares ``Table`` and ``FLOWS_TO``, enabled. Returns the graph, the service, a projector."""
+    for urn in ("urn:t1", "urn:t2", "urn:t3"):
+        await client.query("CREATE (:table {urn: $u, displayName: $u})", {"u": urn})
+    await client.query("CREATE INDEX FOR (n:table) ON (n.urn)")
+    await client.query("MATCH (a:table {urn: 'urn:t1'}), (b:table {urn: 'urn:t2'}) "
+                       "CREATE (a)-[:flows_to {id: 'f1'}]->(b)")
+    rules = OntologyRules(entity_types={"Table": EntityRule()}, edge_types={"FLOWS_TO": EdgeRule()},
+                          edge_type_canonical={"FLOWS_TO": "FLOWS_TO"})
+
+    async def declared(_job_id):
+        return rules
+
+    monkeypatch.setattr(bw, "_ontology_rules", declared)
+    _ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+    return gid, GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+
+
+async def _unrecorded(gid):
+    """As a graph enabled before the enable recorded its spelling: the column the migration
+    added, NULL."""
+    from sqlalchemy import null, update
+
+    async with db.graphver_session() as s:
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                        .values(physical_types=null()))
+
+
+async def test_a_graph_whose_spelling_was_never_recorded_is_read_for_it(graph, monkeypatch):
+    """A graph enabled before the enable recorded its spelling has none. Its passes MERGEd
+    ``:Table`` copies, and a relationship whose endpoints the window didn't write was lost and
+    healed by relabelling every ``:table`` node ``:Table``. The pass reads the graph's own
+    spelling instead: nothing is copied or relabelled, and the spelling it read is recorded. The
+    sync check reads it the same way, and finds the graph in sync."""
+    name, client = graph
+    gid, svc, projector = await _enabled_spelled(name, client, monkeypatch)
+    await _unrecorded(gid)
+    report = await ProjectionReconciler(db.graphver_session, lambda _n, _p=None: client).reconcile(
+        gid, deep=True)
+    assert report.in_sync and not report.mismatched, report
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename t1; t3 flows to t2", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "urn:t1",
+         "payload": {"urn": "urn:t1", "entityType": "Table", "displayName": "t1 renamed"}},
+        {"op": "create", "entity_kind": "edge", "entity_id": "f2",
+         "payload": {"sourceEntityId": "urn:t3", "targetEntityId": "urn:t2",
+                     "edgeType": "FLOWS_TO"}}])
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    assert await _rows(client, "MATCH (n:Table) RETURN count(n)") == [[0]]
+    assert await _rows(client, "MATCH (n:table) RETURN n.urn, n.displayName ORDER BY n.urn") == [
+        ["urn:t1", "t1 renamed"], ["urn:t2", "urn:t2"], ["urn:t3", "urn:t3"]]
+    assert await _rows(client, "MATCH (a)-[r:flows_to]->(b) RETURN a.urn, r.id, b.urn "
+                               "ORDER BY r.id") == [["urn:t1", "f1", "urn:t2"],
+                                                    ["urn:t3", "f2", "urn:t2"]]
+    async with db.graphver_session() as s:
+        assert (await s.get(ProjectionStateORM, gid)).physical_types == {
+            "nodes": {"TABLE": "table"}, "edges": {"FLOWS_TO": "flows_to"}}
+
+
+async def test_a_graph_that_spells_a_type_two_ways_holds_its_projection_back(graph,
+                                                                             monkeypatch):
+    """Passes from before this release left ``:Table`` copies in a ``:table`` graph. Both
+    spellings hold nodes, and nothing recorded which is the graph's own: the projection is held
+    back, naming both, and nothing in the graph is written, copied or relabelled. The sync check
+    says the same instead of comparing."""
+    name, client = graph
+    gid, svc, projector = await _enabled_spelled(name, client, monkeypatch)
+    await _unrecorded(gid)
+    await client.query("MATCH (n:table {urn: 'urn:t2'}) "
+                       "CREATE (:Table {urn: n.urn, displayName: n.displayName})")
+    held = ("MATCH (n) WHERE n.urn IS NOT NULL "
+            "RETURN labels(n), n.urn, n.displayName ORDER BY n.urn, labels(n)")
+    before = await _rows(client, held)
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename t1", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "urn:t1",
+         "payload": {"urn": "urn:t1", "entityType": "Table", "displayName": "t1 renamed"}}])
+    res = await projector.project_graph(gid)
+    assert "Table as Table and table" in (res.get("verify_error") or ""), res
+    assert not await _fresh(gid)
+    assert await _rows(client, held) == before
+    async with db.graphver_session() as s:
+        ps = await s.get(ProjectionStateORM, gid)
+        assert ps.physical_types is None and "Table as Table and table" in ps.last_error
+    report = await ProjectionReconciler(db.graphver_session, lambda _n, _p=None: client).reconcile(
+        gid, deep=True)
+    assert "Table as Table and table" in (report.skipped_reason or ""), report
+
+
+async def test_types_brought_into_history_keep_the_graphs_spelling(graph, monkeypatch):
+    """The ETL adds a ``:column`` node and a ``:contains`` relationship, declared ``Column`` and
+    ``CONTAINS``. Brought into history, they are written back as the graph spells them — no
+    ``:Column`` copy, and no flag raised again by one — and their spelling is recorded. The
+    ontology has also changed its casing since the enable (``TABLE``, ``Flows_To``): the types
+    history already holds come in as no change, not as a retype of every item."""
+    name, client = graph
+    gid, svc, projector = await _enabled_spelled(name, client, monkeypatch)
+    await client.query("CREATE (:column {urn: 'urn:c1', displayName: 'c1'})")
+    await client.query("MATCH (t:table {urn: 'urn:t1'}), (c:column {urn: 'urn:c1'}) "
+                       "CREATE (t)-[:contains {id: 'k1'}]->(c)")
+    rules = OntologyRules(entity_types={"TABLE": EntityRule(), "Column": EntityRule()},
+                          edge_types={"FLOWS_TO": EdgeRule(), "CONTAINS": EdgeRule()},
+                          edge_type_canonical={"FLOWS_TO": "Flows_To", "CONTAINS": "CONTAINS"})
+    res = await svc.bring_into_history(graph_id=gid, client=client, rules=rules, actor="bob")
+    changed = []
+    async with db.graphver_session() as s:
+        for m in (models.NodeVersionORM, models.EdgeVersionORM):
+            changed += [(m.__name__[:4], op, eid) for eid, op in (await s.execute(
+                select(m.entity_id, m.op).where(m.graph_id == gid,
+                                                m.commit_seq == res["commit_seq"]))).all()]
+    assert sorted(changed) == [("Edge", "create", "k1"), ("Node", "create", "urn:c1")], changed
+    assert (await svc.entity_value(graph_id=gid, entity_id="urn:c1"))["entityType"] == "Column"
+    assert (await svc.entity_value(graph_id=gid, entity_id="k1"))["edgeType"] == "CONTAINS"
+
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    assert await _drift(gid) is None
+    assert await _rows(client, "MATCH (n) WHERE n:Column OR n:TABLE OR n:Table "
+                               "RETURN count(n)") == [[0]]
+    assert await _rows(client, "MATCH ()-[r]->() WHERE type(r) IN ['CONTAINS', 'FLOWS_TO', "
+                               "'Flows_To'] RETURN count(r)") == [[0]]
+    assert await _rows(client, "MATCH (:table)-[r:contains]->(c:column) RETURN r.id, c.urn") == [
+        ["k1", "urn:c1"]]
+
+
+async def test_bring_into_history_refuses_a_type_the_graph_spells_two_ways(graph, monkeypatch):
+    """People added a ``Dashboard``, which the projector wrote as declared; then the ETL wrote a
+    ``:dashboard`` node. Brought in, it would be written back as a ``:Dashboard`` copy, so it is
+    refused, naming both spellings, and history is unchanged."""
+    from backend.app.services.versioning.errors import AmbiguousSpelling
+
+    name, client = graph
+    gid, svc, projector = await _enabled_spelled(name, client, monkeypatch)
+    await svc.apply_ops(graph_id=gid, actor="bob", message="add d1", ops=[
+        {"op": "create", "entity_kind": "node", "entity_id": "urn:d1",
+         "payload": {"urn": "urn:d1", "entityType": "Dashboard", "displayName": "d1"}}])
+    assert (await projector.project_graph(gid)).get("verify_error") is None
+    await client.query("CREATE (:dashboard {urn: 'urn:d2', displayName: 'd2'})")
+    async with db.graphver_session() as s:
+        head = (await s.get(GraphORM, gid)).main_head_commit_seq
+    rules = OntologyRules(entity_types={"Table": EntityRule(), "Dashboard": EntityRule()},
+                          edge_types={"FLOWS_TO": EdgeRule()},
+                          edge_type_canonical={"FLOWS_TO": "FLOWS_TO"})
+    with pytest.raises(AmbiguousSpelling) as refused:
+        await svc.bring_into_history(graph_id=gid, client=client, rules=rules, actor="bob")
+    assert "Dashboard as Dashboard and dashboard" in str(refused.value), str(refused.value)
+    async with db.graphver_session() as s:
+        assert (await s.get(GraphORM, gid)).main_head_commit_seq == head
 
 
 # ── a graph server that cuts replies short ───────────────────────────────────

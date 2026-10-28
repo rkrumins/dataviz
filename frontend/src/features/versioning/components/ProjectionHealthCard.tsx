@@ -190,10 +190,13 @@ function ProjectionActions({ wsId, graphId, owned, bringIn }: {
     reconcile.mutate({ deep: false }, {
       onSuccess: (r) => setVerdict(
         r.skippedReason ? {
-          ok: true,
+          // Anything else is the graph's to fix (a type it spells two ways), in its own words.
+          ok: r.skippedReason === 'projection in flight' || r.skippedReason === 'no projection target',
           text: r.skippedReason === 'projection in flight'
             ? 'A refresh is in progress — check again in a moment.'
-            : 'This graph has no fast read layer yet.',
+            : r.skippedReason === 'no projection target'
+              ? 'This graph has no fast read layer yet.'
+              : r.skippedReason,
         }
         : r.inSync ? { ok: true, text: `In sync — ${plural(r.pgNodes, 'item', 'items')} and ${plural(r.pgEdges, 'connection', 'connections')} checked.` }
         : { ok: false, text: 'Out of date — rebuild to repair it.' }),

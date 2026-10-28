@@ -30,7 +30,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import (Any, Awaitable, Callable, Collection, Dict, List, Mapping, NamedTuple, Optional,
-                    Sequence, Tuple)
+                    Sequence, Set, Tuple)
 
 from sqlalchemy import (Boolean, Text, TextClause, any_, bindparam, insert, select, func, delete, null,
                         literal, text, update, or_, tuple_, and_, case)
@@ -44,7 +44,8 @@ from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_state
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
-from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, DraftNotReadable,
+from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionExhausted,
+                     CurationAtRisk, DraftNotReadable,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
                      MainWriteForbidden, MassDeleteBlocked, NotAFork, NotDraftOwner, PersonRequired,
@@ -318,6 +319,11 @@ _SYNC_BYTES_PER_ENTITY = 4_600
 _FILLED_IN = {"displayName": "", "qualifiedName": "", "description": "", "tags": [],
               "layerAssignment": "", "childCount": 0, "sourceSystem": "", "lastSyncedAt": "",
               "properties": {}}
+
+
+def _same_type(held: Optional[str], read: Optional[str]) -> bool:
+    """One type in two casings: types are matched without case (``canonicalize_payload_types``)."""
+    return bool(held and read) and str(held).upper() == str(read).upper()
 
 
 class GraphTooLargeToSync(RuntimeError):
@@ -6265,24 +6271,53 @@ class GraphVersioningService:
 
         Nothing is deleted from history: a node the graph lacks may be one a read missed, and a
         publish writes history back into the key. Identifiers several nodes in the graph share
-        with different contents are left out (``duplicates``)."""
+        with different contents are left out (``duplicates``).
+
+        The projector writes each type back in the graph's spelling of it, as read here and
+        recorded (``physical_types``). A type the graph spells more than one way is refused
+        (:class:`AmbiguousSpelling`): brought in, what one spelling holds would be written back
+        as a copy under the other."""
         await self._assert_syncable(graph_id)       # before the read, as for any re-sync
         async with self._session() as s:
             await self._assert_writable(s, graph_id)
         from .bootstrap_worker import BootstrapRunner
-        rows, _spellings, clashes = await BootstrapRunner(None).read_graph(client, rules)
+        rows, spelled, clashes = await BootstrapRunner(None).read_graph(client, rules)
+        twice = {t: s for kind in ("nodes", "edges") for t, s in spelled[kind].items() if len(s) > 1}
+        if twice:
+            raise AmbiguousSpelling(twice)
+        await self._record_spelling(graph_id, spelled)
         await self._as_history_holds(graph_id, rows)
         result = await self.sync_ingest(
             graph_id=graph_id, rows=rows, actor=actor, source="provider", strategy=strategy,
             message="bring into history", holds_main=True, deletes=False)
         return {**result, "duplicates": sorted(clashes)[:200]}
 
+    async def _record_spelling(self, graph_id: str, spelled: Mapping[str, Mapping[str, Set[str]]]
+                               ) -> None:
+        """Record, over what was recorded, a customer's graph's spelling of each type a read of
+        it found spelled one way (``projection_state.physical_types``): the graph's own word is
+        what the projector writes. A key the platform owns is spelled as declared."""
+        from .reconcile import spelling_key
+        async with self._session() as s:
+            ps = await s.get(ProjectionStateORM, graph_id, with_for_update=True)
+            if ps is None or ps.owns_falkor_graph:
+                return
+            types = {}
+            for kind in ("nodes", "edges"):
+                seen = {t: next(iter(v)) for t, v in (spelled.get(kind) or {}).items() if len(v) == 1}
+                keys = {spelling_key(t) for t in seen}
+                types[kind] = {t: v for t, v in ((ps.physical_types or {}).get(kind) or {}).items()
+                               if spelling_key(t) not in keys}
+                types[kind].update(seen)
+            ps.physical_types = types
+
     async def _as_history_holds(self, graph_id: str, rows: List[dict]) -> None:
         """Make a FalkorDB graph's rows say what history would, so a sync of them holds only
         real changes. A field filled in empty (:data:`_FILLED_IN`) that the node's head doesn't
-        hold is dropped, and an edge whose id is also a node's is ``edge:<id>``, as the enable
-        keys it (``bootstrap_worker._rekey``) — else it would take the node's place in the
-        merge. One indexed lookup per chunk."""
+        hold is dropped; an edge whose id is also a node's is ``edge:<id>``, as the enable keys
+        it (``bootstrap_worker._rekey``) — else it would take the node's place in the merge; and
+        a type history holds the item as, in another casing (the ontology changed its own since),
+        is history's. One indexed lookup per chunk."""
         async with self._session() as s:
             main_id = await self._main_branch_id(s, graph_id)
             nodes = [r for r in rows if r.get("kind") == "node" and r.get("urn")]
@@ -6299,6 +6334,8 @@ class GraphVersioningService:
                     for k, empty in (_FILLED_IN.items() if head is not None else ()):
                         if k in r and k not in head and r[k] == empty:
                             del r[k]
+                    if head is not None and _same_type(head.get("entityType"), r.get("entityType")):
+                        r["entityType"] = head["entityType"]
             named = {r["id"] for r in nodes if r.get("id")}       # a new node's id is its urn
             edges = [r for r in rows if r.get("kind") == "edge" and r.get("id")]
             for chunk in _chunks([r["id"] for r in edges if r["id"] not in named], 10000):
@@ -6309,6 +6346,18 @@ class GraphVersioningService:
             for r in edges:
                 if r["id"] in named:
                     r["id"] = f"edge:{r['id']}"
+            for chunk in _chunks([r["id"] for r in edges], 10000):
+                typed = dict((await s.execute(
+                    select(EntityHeadORM.entity_id, EdgeVersionORM.edge_type)
+                    .join(EdgeVersionORM, (EdgeVersionORM.graph_id == EntityHeadORM.graph_id)
+                          & (EdgeVersionORM.id == EntityHeadORM.head_version_id))
+                    .where(EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                           EntityHeadORM.entity_kind == "edge",
+                           EntityHeadORM.is_tombstone.is_(False),
+                           EntityHeadORM.entity_id.in_(chunk)))).all())
+                for r in edges:
+                    if _same_type(typed.get(r["id"]), r.get("edgeType")):
+                        r["edgeType"] = typed[r["id"]]
 
     async def _assert_syncable(self, graph_id: str) -> None:
         """Refuse a sync the machine cannot survive, with the number that proves it.

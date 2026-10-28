@@ -177,6 +177,16 @@ describe('ProjectionHealthCard', () => {
     expect(screen.getByText(/In sync — 40 items and 12 connections checked/)).toBeInTheDocument()
   })
 
+  it('says why the check could not compare, when the graph is what stops it', () => {
+    const why = 'The graph spells a type history holds as one more than one way (Table as Table and table).'
+    reconcileMutate.mockImplementation((_v: unknown, opts: { onSuccess: (r: DriftReport) => void }) =>
+      opts.onSuccess(report({ inSync: false, skippedReason: why })))
+    renderCard(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Check sync' }))
+    expect(screen.getByText(why)).toBeInTheDocument()
+    expect(screen.queryByText(/no fast read layer yet/i)).not.toBeInTheDocument()
+  })
+
   it('lets a manager rebuild a platform copy after confirming', () => {
     rebuildMutate.mockImplementation((_v: unknown, opts: { onSuccess: (r: unknown) => void }) =>
       opts.onSuccess({ started: true, alreadyRunning: false, watermark: WM }))
