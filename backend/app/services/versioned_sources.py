@@ -45,13 +45,13 @@ import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, FrozenSet, Optional
+from typing import Dict, FrozenSet, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-# A source becomes versioned at bootstrap and stays versioned. Ten minutes of
-# staleness costs at most one sweep evaluating a brand-new versioned source as
-# if it were externally mastered.
+# A source becomes versioned at bootstrap and stays versioned. The reconcile
+# sweep does not wait this out: it reads its set every tick, so a source whose
+# enable has just finished is guarded at once.
 CACHE_TTL_SECS = 600
 
 # After a refresh fails, the previous answer is served for this long before the
@@ -60,10 +60,10 @@ CACHE_TTL_SECS = 600
 # the store stayed down each one waited out a fresh connection attempt.
 FAILURE_BACKOFF_SECS = 30
 
-# Keyed by ``include_trashed``: the two sets are cached apart.
-_cache: Dict[bool, FrozenSet[str]] = {}
-_cache_at: Dict[bool, float] = {}
-_refresh_failed_at: Dict[bool, float] = {}
+# Keyed by ``(include_trashed, finished_only)``: the sets are cached apart.
+_cache: Dict[Tuple[bool, bool], FrozenSet[str]] = {}
+_cache_at: Dict[Tuple[bool, bool], float] = {}
+_refresh_failed_at: Dict[Tuple[bool, bool], float] = {}
 
 
 class VersionedLookupUnavailable(RuntimeError):
@@ -78,20 +78,25 @@ class VersionedLookupUnavailable(RuntimeError):
 
 async def versioned_data_source_ids(
     *, ttl_secs: int = CACHE_TTL_SECS, include_trashed: bool = False,
+    finished_only: bool = False,
 ) -> FrozenSet[str]:
     """Every data source with a live versioned graph, or, with
     ``include_trashed``, with any versioned graph, trashed ones included.
+    ``finished_only`` leaves out a graph whose "enable version control" job has
+    not completed (pending, paused for a decision, running or failed): until it
+    does, the data source's own FalkorDB graph is still the source of truth.
 
     Serves the cache while it is fresh, and keeps serving it if a refresh
     fails — a blip must not flip the fleet's classification. Raises
     :class:`VersionedLookupUnavailable` only on a cold failure, i.e. when there
     is no previous answer to stand on.
     """
+    key = (include_trashed, finished_only)
     now = time.monotonic()
-    cached = _cache.get(include_trashed)
-    if cached is not None and (now - _cache_at[include_trashed]) < ttl_secs:
+    cached = _cache.get(key)
+    if cached is not None and (now - _cache_at[key]) < ttl_secs:
         return cached
-    failed_at = _refresh_failed_at.get(include_trashed)
+    failed_at = _refresh_failed_at.get(key)
     if (
         cached is not None and failed_at is not None
         and (now - failed_at) < FAILURE_BACKOFF_SECS
@@ -102,11 +107,15 @@ async def versioned_data_source_ids(
         from sqlalchemy import select
 
         from backend.app.services.versioning.db import get_session_factory
-        from backend.app.services.versioning.models import GraphORM
+        from backend.app.services.versioning.models import GraphORM, JobORM
+        from backend.app.services.versioning.service import bootstrap_unfinished
 
         stmt = select(GraphORM.data_source_id)
         if not include_trashed:
             stmt = stmt.where(GraphORM.deleted_at.is_(None))
+        if finished_only:
+            stmt = stmt.where(~select(JobORM.id).where(*bootstrap_unfinished(GraphORM.id))
+                              .correlate(GraphORM).exists())
         async with get_session_factory()() as session:
             rows = await session.execute(stmt)
         found = frozenset(r[0] for r in rows.all() if r[0])
@@ -117,7 +126,7 @@ async def versioned_data_source_ids(
             # Serve the previous answer. The set changes only when a source is
             # versioned or unversioned, so a stale read is very nearly always
             # still correct.
-            _refresh_failed_at[include_trashed] = now
+            _refresh_failed_at[key] = now
             logger.warning(
                 "versioned data-source lookup failed, reusing the cached set "
                 "(%d entries): %s", len(cached), exc,
@@ -125,8 +134,8 @@ async def versioned_data_source_ids(
             return cached
         raise VersionedLookupUnavailable(str(exc)) from exc
 
-    _cache[include_trashed], _cache_at[include_trashed] = found, now
-    _refresh_failed_at.pop(include_trashed, None)
+    _cache[key], _cache_at[key] = found, now
+    _refresh_failed_at.pop(key, None)
     return found
 
 

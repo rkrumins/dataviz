@@ -4042,13 +4042,14 @@ def _rebuild_cooldown_until(
 
 
 async def _platform_mastered_ids() -> frozenset:
-    """Live versioned-graph set. Empty on a cold lookup failure so a
-    freshness read never 500s because graphver is down."""
+    """Live versioned-graph set, graphs whose enable has not finished left out
+    (as the reconcile sweep leaves them out). Empty on a cold lookup failure so
+    a freshness read never 500s because graphver is down."""
     try:
         from backend.app.services.versioned_sources import (
             versioned_data_source_ids,
         )
-        return await versioned_data_source_ids()
+        return await versioned_data_source_ids(finished_only=True)
     except Exception as exc:
         logger.warning("versioned-source lookup failed for freshness: %s", exc)
         return frozenset()

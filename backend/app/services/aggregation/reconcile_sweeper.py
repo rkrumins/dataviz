@@ -428,8 +428,16 @@ class ReconciliationSweeper:
         # assuming everything is versioned silently stops reconciling the
         # fleet. The next tick is 60s away against an hourly check interval, so
         # waiting costs nothing.
+        #
+        # Only sources whose enable has finished: until then the FalkorDB graph
+        # is still the source of truth, so a pending, paused or failed enable
+        # is reconciled like any other source. Read every tick, not from the
+        # ten-minute cache: once an enable finishes, that graph is a versioned
+        # graph's projection and must be guarded from the next tick on.
         try:
-            versioned = await versioned_data_source_ids()
+            versioned = await versioned_data_source_ids(
+                finished_only=True, ttl_secs=0,
+            )
         except VersionedLookupUnavailable as exc:
             logger.warning(
                 "reconcile sweep deferred: cannot determine which data "

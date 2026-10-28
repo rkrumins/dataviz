@@ -17,6 +17,7 @@ The regressions locked down here are the expensive ones:
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -34,6 +35,7 @@ from backend.app.db.models import (
     WorkspaceDataSourceORM,
     WorkspaceORM,
 )
+from backend.app.services import versioned_sources
 from backend.app.services.aggregation.fingerprint import (
     raw_fingerprint_from_counts,
 )
@@ -46,6 +48,9 @@ from backend.app.services.aggregation.reconcile_sweeper import (
     ReconciliationSweeper,
 )
 from backend.app.services.aggregation.schemas import SourceChangedResponse
+
+# The real lookup, kept before ``_versioned`` below stubs it for every test.
+_REAL_VERSIONED_IDS = versioned_sources.versioned_data_source_ids
 
 
 def _iso(dt: datetime) -> str:
@@ -559,6 +564,75 @@ async def test_versioned_source_still_advances_its_baseline(
     state = await _state(session_factory)
     assert state.raw_fingerprint != "fp_stale"
     assert state.raw_edge_count == 900
+
+
+@pytest.mark.asyncio
+async def test_a_source_whose_enable_has_not_finished_is_reconciled_like_any_other(
+    session_factory, monkeypatch,
+):
+    """A ``graphs`` row exists from the moment "enable version control" is queued, but until the
+    enable completes the FalkorDB graph is still the source of truth. Guarding it as versioned
+    stamped it managed and adopted every change, so while an enable sat paused or failed its
+    source's changes were never acted on. Only a source whose enable finished is guarded."""
+    await _seed(session_factory, ds_id="ds_enabling", raw_fingerprint="fp_old")
+    await _seed(session_factory, ds_id="ds_enabled", raw_fingerprint="fp_old")
+
+    async def _versioned_ids(*, finished_only=False, **_kw):
+        return frozenset({"ds_enabled"} if finished_only else {"ds_enabled", "ds_enabling"})
+
+    monkeypatch.setattr(
+        "backend.app.services.versioned_sources.versioned_data_source_ids",
+        _versioned_ids,
+    )
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert [ds_id for ds_id, _kw in svc.signals] == ["ds_enabling"]
+    assert result.by_reason == {"raw_drift": 1}
+    assert result.by_skip == {"platform_mastered": 1}
+    assert (await _state(session_factory, "ds_enabling")).drift_state == "drifting"
+    assert (await _state(session_factory, "ds_enabled")).drift_state == "managed"
+
+
+@pytest.mark.asyncio
+async def test_an_enable_that_just_finished_is_guarded_at_once(
+    session_factory, monkeypatch,
+):
+    """The moment an enable finishes, the data source's FalkorDB graph is the projection of a
+    versioned graph, which the sweep must never rebuild. A finished set read while the enable was
+    still running (by an earlier tick, or a freshness read in this process) must not be served for
+    the rest of its ten minutes."""
+    finished: set = set()
+
+    class _Store:
+        """The graphver store, answering with the sources whose enable has finished."""
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_exc):
+            return False
+
+        async def execute(self, _stmt):
+            return SimpleNamespace(all=lambda: [(ds_id,) for ds_id in finished])
+
+    monkeypatch.setattr(versioned_sources, "versioned_data_source_ids", _REAL_VERSIONED_IDS)
+    monkeypatch.setattr("backend.app.services.versioning.db.get_session_factory",
+                        lambda: _Store)
+    versioned_sources.reset_cache()
+    try:
+        await _seed(session_factory, edge_counts={"FLOWS_TO": 200})
+        assert await versioned_sources.versioned_data_source_ids(
+            finished_only=True) == frozenset()
+        finished.add("ds_1")                                    # the enable completes
+
+        svc = _FakeService()
+        result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+    finally:
+        versioned_sources.reset_cache()
+
+    assert svc.signals == [] and svc.triggers == []
+    assert result.by_skip == {"platform_mastered": 1}
 
 
 @pytest.mark.asyncio

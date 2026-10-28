@@ -95,6 +95,24 @@ async def test_abandon_reports_the_purge_it_queued(
     assert seen["actor"] != "system", "the purge records who abandoned the job"
 
 
+async def test_abandon_drops_the_cached_versioned_set(
+    test_client: AsyncClient, _data_source, monkeypatch,
+):
+    """The abandoned graph is soft-deleted at once, so the data source reads as un-versioned; the
+    versioned set, cached for ten minutes, must not keep saying otherwise."""
+    from backend.app.services import versioned_sources
+
+    async def abandon(**_kw):
+        return {"jobId": "j1", "status": "cancelled", "purgeJobId": "p1"}
+
+    resets = []
+    monkeypatch.setattr(bootstrap_worker, "abandon_bootstrap", abandon)
+    monkeypatch.setattr(versioned_sources, "reset_cache", lambda: resets.append(1))
+    resp = await test_client.post(f"/api/v1/{WS}/graph/bootstrap/abandon?dataSourceId={DS}")
+    assert resp.status_code == 200, resp.text
+    assert resets == [1]
+
+
 # ── duplicate identifiers: the list, the decision, and who else reads the graph ──
 
 @pytest.fixture()

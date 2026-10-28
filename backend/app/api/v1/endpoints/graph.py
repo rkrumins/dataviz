@@ -450,6 +450,7 @@ async def bootstrap_abandon_endpoint(
 
     A data source being seeded from a view package was made for that seed and never went live: it
     goes too (``{origin: 'package', dataSourceRemoved: true}``)."""
+    from backend.app.services import versioned_sources
     from backend.app.services.managed_sources import drop_managed_data_source
     from backend.app.services.versioning.bootstrap_worker import abandon_bootstrap
     from backend.app.services.versioning.service import ConcurrencyError
@@ -461,6 +462,8 @@ async def bootstrap_abandon_endpoint(
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    # The graph is soft-deleted now; this process stops counting it as versioned at once.
+    versioned_sources.reset_cache()
     # Before a package's data source goes below: the record names it, and the
     # drop's commit carries the record with it.
     await _record_versioning(session, "workspace.versioning.abandoned", dataSourceId)
