@@ -11,6 +11,15 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ## [Unreleased] — New and renamed entities are named and keyed the way their source does it
 
+### Added
+
+- **An entity's details say how its data source identifies and names entities.** The
+  Identifier section shows the identifier property and the name property, the entity's value for
+  each, and where each setting comes from: this data source, the provider, the workspace, the
+  platform default or the built-in default.
+- **The Name input says what saving does to the name property** before you save: it changes too,
+  it stays because it is kept apart from the name, or an empty one gets filled in.
+
 ### Fixed
 
 - **New entities get their name property.** An entity created in a versioned graph stored its name
