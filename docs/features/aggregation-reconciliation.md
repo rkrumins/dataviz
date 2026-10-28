@@ -411,7 +411,13 @@ minutes, serves the last good answer through a blip, and on a cold failure
 wrong, and an hourly check loses nothing by waiting.
 
 The baseline is still adopted on every pass, so a source later taken back out of
-versioning does not read as drifted on its first sweep afterwards.
+versioning does not read as drifted on its first sweep afterwards. A baseline
+that moved gets the source's read caches refreshed. Each publish refreshes them
+itself (`projection_target.after_projection`), but a change made outside
+version control (an ETL that kept writing to the graph) has nothing else to do
+that. The refresh goes through `signal_source_changed`, whose path for a
+versioned source clears the caches and the stale marker and queues no rebuild,
+so it is not an action and never moves the breaker.
 
 > **Known gap — no shared lock with the projector.** The projector holds a
 > Postgres session advisory lock `hashtext("gvproj:{graph_id}")`; the

@@ -56,6 +56,16 @@ limitations** — a changelog that only lists good news is not worth reading.
   rebuilt. It answers 409 `not_ready` while the graph is evicted, being rebuilt or moved. The
   `curation_at_risk` refusal no longer applies once the projection has caught up with main, since
   the graph then holds every edit people made.
+- **Changes made outside version control refresh what views read.** The reconciliation sweep
+  marked a versioned source "managed" and took on its new counts without acting, so an ETL's writes
+  to the graph showed only once each cached read expired, after up to an hour (seven days for some
+  content caches). The sweep now refreshes a versioned source's read caches when its counts move. A
+  change signal on a versioned source (`/refresh` at `auto`, `/source-changed`) used to mark it
+  stale and queue an aggregation rebuild, although the projection maintains its rollups and the
+  docs said such a signal had no effect. It now refreshes the caches, clears the stale marker and
+  queues nothing. When a loader or connector says it wrote (origin `script` or `connector`), the
+  graph is flagged as holding changes not in history, even for a property edit, which no count
+  shows.
 
 ### Upgrading
 

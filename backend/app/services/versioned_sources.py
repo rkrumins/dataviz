@@ -139,6 +139,36 @@ async def versioned_data_source_ids(
     return found
 
 
+async def flag_external_changes(data_source_id: str) -> None:
+    """Something said it wrote to the data source's graph (a loader's or a connector's change
+    notification): flag its versioned graph's projection, ``external_drift`` with ``via:
+    notification``, until those changes are brought into history. The projector keeps such a
+    flag — a property edit moves no count it could see — and the counts it last took stay.
+    Never raises."""
+    try:
+        from sqlalchemy import func, select, update
+
+        from backend.app.services.versioning.db import get_session_factory
+        from backend.app.services.versioning.models import GraphORM, ProjectionStateORM, _now
+
+        drift = ProjectionStateORM.external_drift
+        async with get_session_factory()() as session:
+            await session.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id.in_(
+                    select(GraphORM.id).where(GraphORM.data_source_id == data_source_id,
+                                              GraphORM.deleted_at.is_(None))))
+                .values(external_drift=func.jsonb_build_object(
+                    "at", _now(), "nodes", drift["nodes"], "edges", drift["edges"],
+                    "via", "notification"))
+                .execution_options(synchronize_session=False))
+            await session.commit()
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("changes outside history to ds=%s not flagged: %s", data_source_id, exc)
+
+
 def reset_cache() -> None:
     """Drop the cached sets — used by tests, and after a deliberate
     bootstrap/unversion when the TTL is too long to wait out."""

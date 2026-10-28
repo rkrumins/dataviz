@@ -577,7 +577,8 @@ async def test_bring_into_history_over_http_reads_the_graph_and_clears_the_flag(
                                                                                monkeypatch):
     """``POST /graph/resync`` as the UI sends it, with the real provider manager: it reads the
     data source's graph through the projection's pin — not whatever serves reads — brings the
-    ETL's writes into history, clears the flag at once, and queues the summaries' rebuild."""
+    ETL's writes into history, clears the flag at once, and queues the summaries' rebuild. A
+    loader's change notification flags what no count shows, until it is brought in too."""
     from httpx import ASGITransport, AsyncClient
 
     from backend.app.db.engine import PoolRole, get_session_factory
@@ -585,7 +586,7 @@ async def test_bring_into_history_over_http_reads_the_graph_and_clears_the_flag(
         OntologyORM, ProviderORM, WorkspaceDataSourceORM, WorkspaceORM,
     )
     from backend.app.providers.manager import provider_manager
-    from backend.app.services import projection_target
+    from backend.app.services import projection_target, versioned_sources
     from backend.tests.integration.test_api_graph_draft_journey import _build_app
 
     name, client = graph
@@ -635,15 +636,35 @@ async def test_bring_into_history_over_http_reads_the_graph_and_clears_the_flag(
 
     monkeypatch.setattr(projection_target, "_queue_on_control_plane", queue)
     app, _G = _build_app()
-    try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-            r = await c.post(f"/api/v1/{ws}/graph/resync", params={"dataSourceId": ds})
-    finally:
-        await provider_manager.evict_data_source(prov, name)
+
+    async def bring_in():
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app),
+                                   base_url="http://test") as c:
+                return await c.post(f"/api/v1/{ws}/graph/resync", params={"dataSourceId": ds})
+        finally:
+            await provider_manager.evict_data_source(prov, name)
+
+    r = await bring_in()
     assert r.status_code == 200, r.text
     assert r.json()["applied"] == 2, r.json()
     assert await _drift(gid) is None and queued == [ds]
     assert (await projector.project_graph(gid)).get("verify_error") is None and await _fresh(gid)
+    assert await _drift(gid) is None
+
+    # A property edit moves no count. A loader that says it wrote flags it, and the publishes in
+    # between keep that flag until the change is brought into history.
+    await client.query("MATCH (n:Table {urn: 'urn:b'}) SET n.owner = 'etl-team'")
+    await versioned_sources.flag_external_changes(ds)
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename b", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "urn:b",
+         "payload": {"urn": "urn:b", "entityType": "Table", "displayName": "b renamed"}}])
+    assert (await projector.project_graph(gid)).get("verify_error") is None
+    assert await _drift(gid) == {"nodes": None, "edges": None, "via": "notification"}
+    r = await bring_in()
+    assert r.status_code == 200 and r.json()["applied"] == 1, r.text
+    assert (await svc.entity_value(graph_id=gid, entity_id="urn:b"))["properties"] == {
+        "owner": "etl-team"}
     assert await _drift(gid) is None
 
 

@@ -230,7 +230,15 @@ and actor, and the resulting job carries a trigger you can filter on.
 - **A source whose rebuilds repeatedly fail stops being retried** once it trips
   the breaker (3 consecutive actions), and is surfaced as "Needs a person"
   rather than being retried forever.
-- **Version-controlled sources ignore all of this.** For them Postgres is the
-  source of truth and the graph is a rebuildable read cache, so the overlay is
-  maintained incrementally on commit. They report as `managed` and the sweep
-  never acts on them. Signalling one has no effect.
+- **A version-controlled source never gets a rebuild from any of this.** For
+  it Postgres is the source of truth and the graph is a read cache that its
+  projection writes, so the overlay is kept up to date on every publish. It
+  reports as `managed`, and the sweep never queues a rebuild for it. A change
+  still refreshes what serves its reads: the sweep refreshes them when the
+  graph's counts move, and so does a signal (`/refresh` at `auto`, or
+  `/source-changed`), which clears the stale marker instead of setting it. What
+  you wrote is not in its version history until someone brings it in (**Bring
+  into history**). The next publish counts what you added and flags it. A
+  refresh with origin `script` or `connector` flags it straight away, including
+  a property edit, which changes no count. The explicit `rollups` and `full`
+  refresh scopes still queue a rebuild.

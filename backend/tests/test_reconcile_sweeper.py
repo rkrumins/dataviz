@@ -567,6 +567,46 @@ async def test_versioned_source_still_advances_its_baseline(
 
 
 @pytest.mark.asyncio
+async def test_a_versioned_graph_that_moved_has_its_read_caches_refreshed_never_rebuilt(
+    session_factory, _versioned,
+):
+    """Something else wrote to a versioned source's graph (an ETL). The projector refreshes a
+    versioned source's caches after each publish, and saw none of it, so views served the old
+    reads for as long as their caches lived. The sweep refreshes them through the signal, whose
+    versioned path rebuilds nothing: no action, and the breaker never moves."""
+    await _seed(session_factory, edge_counts={"FLOWS_TO": 900}, raw_fingerprint="fp_before")
+    _versioned.add("ds_1")
+
+    svc = _FakeService()
+    result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
+
+    assert [(ds_id, kw["origin"]) for ds_id, kw in svc.signals] == [
+        ("ds_1", "reconcile-sweep")]
+    assert svc.triggers == [] and result.actions == 0
+    state = await _state(session_factory)
+    assert state.drift_state == "managed" and not state.reconcile_consecutive_actions
+    assert state.raw_fingerprint != "fp_before"
+
+
+@pytest.mark.asyncio
+async def test_a_versioned_graph_seen_first_or_previewed_is_not_refreshed(
+    session_factory, _versioned,
+):
+    """Regression guard (passes before the change): with no baseline yet nothing is known to
+    have moved, and a preview acts on nothing."""
+    await _seed(session_factory, raw_fingerprint=None)
+    await _seed(session_factory, ds_id="ds_2", raw_fingerprint="fp_before")
+    _versioned.update({"ds_1", "ds_2"})
+
+    svc = _FakeService()
+    await ReconciliationSweeper(session_factory, lambda: svc).sweep(data_source_ids=["ds_1"])
+    await ReconciliationSweeper(session_factory, lambda: svc).sweep(
+        dry_run=True, data_source_ids=["ds_2"])
+
+    assert svc.signals == []
+
+
+@pytest.mark.asyncio
 async def test_a_source_whose_enable_has_not_finished_is_reconciled_like_any_other(
     session_factory, monkeypatch,
 ):
@@ -587,8 +627,10 @@ async def test_a_source_whose_enable_has_not_finished_is_reconciled_like_any_oth
     svc = _FakeService()
     result = await ReconciliationSweeper(session_factory, lambda: svc).sweep()
 
-    assert [ds_id for ds_id, _kw in svc.signals] == ["ds_enabling"]
-    assert result.by_reason == {"raw_drift": 1}
+    assert [(ds_id, kw["reason"]) for ds_id, kw in svc.signals] == [
+        ("ds_enabled", "external_load"),       # its read caches refreshed, nothing rebuilt
+        ("ds_enabling", "raw_drift")]
+    assert result.by_reason == {"raw_drift": 1} and result.actions == 1
     assert result.by_skip == {"platform_mastered": 1}
     assert (await _state(session_factory, "ds_enabling")).drift_state == "drifting"
     assert (await _state(session_factory, "ds_enabled")).drift_state == "managed"
