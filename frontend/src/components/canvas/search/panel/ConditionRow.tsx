@@ -26,7 +26,6 @@ import { ChevronDown, Code2, KeyRound, Type, X } from 'lucide-react'
 import { type FC, type ReactNode, memo, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Segmented, type SegmentedOption } from '@/components/ui/Segmented'
-import { formatUrnLabel } from '@/lib/urnLabels'
 import { cn } from '@/lib/utils'
 import type {
     DegreePredicate,
@@ -82,7 +81,7 @@ import { RowMenu } from './builder-atoms/RowMenu'
 import { RowSelectionCheckbox } from './builder-atoms/RowSelectionCheckbox'
 import type { OpTone } from './builder-atoms/tones'
 import type { LayerOption } from './layerOptions'
-import { useCanvasAnchorOptions, useTopLevelCanvasContainers } from './useCanvasViewRoots'
+import { useTopLevelCanvasContainers } from './useCanvasViewRoots'
 
 
 /** FE-only augmentation on DescendantOfPredicate so we can route to
@@ -727,53 +726,20 @@ function RootInViewEditor({
 
 
 /**
- * InsideSubtreeEditor — power-user entry: anchor to ANY canvas-loaded
- * node (Layer, Object, Container, deeper). Fed by
- * ``useCanvasAnchorOptions``. The BE Cypher has no label restriction
- * on the anchor, so this works for arbitrary sub-tree isolation.
- * Multi-select: pick one or more anchors → union of subtrees.
+ * InsideSubtreeEditor — anchor to any entity in the View (a layer, an
+ * object, a container, deeper), found by name as every name picker finds
+ * it — loaded on the canvas or not. The server's walk has no label
+ * restriction on the anchor, so this isolates any subtree; several anchors
+ * are the union of their subtrees.
  */
 function InsideSubtreeEditor({
-    value, onChange, autoFocus,
+    value, onChange, autoFocus, isRunning,
 }: Omit<EditorCtx, 'value'> & { value: DescendantOfPredicateWithScope }) {
-    const anchors = useCanvasAnchorOptions()
-    // The canvas only knows about nodes it has loaded, and an anchor
-    // picked out of search results usually isn't one of them — that's
-    // often the point of scoping to it. Fold any such URN in as its own
-    // option so the picker shows "GOLD", not a bare URN or a blank.
-    const options = useMemo(() => {
-        const known = new Set(anchors.map((r) => r.urn))
-        const extra = (value.urns ?? [])
-            .filter((urn) => urn && !known.has(urn))
-            .map((urn) => ({
-                value: urn,
-                label: formatUrnLabel(urn),
-                description: 'not loaded on this canvas',
-            }))
-        return [
-            ...anchors.map((r) => ({
-                value: r.urn,
-                label: r.displayName,
-                description: r.entityType,
-            })),
-            ...extra,
-        ]
-    }, [anchors, value.urns])
     return (
-        <Field label="Anchor nodes">
-            <UnifiedPicker
-                multiple
-                value={value.urns ?? []}
-                onChange={(next) => onChange({ ...value, urns: next })}
-                options={options}
-                placeholder="pick one or more anchors from this canvas…"
-                emptyHint={
-                    'No nodes loaded on the canvas yet. Open the view '
-                    + 'or wait for it to hydrate.'
-                }
-                autoFocus={autoFocus}
-                portal
-            />
+        <Field label="Anchor nodes" group>
+            <NodeRefList value={[...(value.urns ?? []).map((urn) => ({ urn })), ...(value.refs ?? [])]}
+                         autoFocus={autoFocus} disabled={isRunning}
+                         onChange={(refs) => onChange({ ...value, urns: [], refs: refs.length ? refs : undefined })} />
         </Field>
     )
 }
