@@ -260,7 +260,7 @@ function PanelInner({
     onClose, viewId, session, onClear, onRevealNode, onOpenNode, onFrameMatches,
 }: PanelInnerProps) {
     const {
-        view, runState, runPredicate, cancel,
+        view, runState, runPredicate, cancel, stop, resume, run,
         resetTemplate, loadMore, isLoadingMore, loadMoreError,
     } = session
     // The canvas's session, when there is one. `session` above is only
@@ -650,6 +650,13 @@ function PanelInner({
             progress={view.kind === 'results'
                 ? view.result.progress ?? null
                 : null}
+            startedAt={view.kind === 'results' ? view.startedAt ?? null : null}
+            halted={view.kind === 'results' ? view.halted ?? null : null}
+            onStop={stop}
+            onResume={() => { void resume() }}
+            countIsFloor={view.kind === 'results' && view.result.status === 'complete'
+                && view.result.countStatus === 'lowerBound'}
+            notes={view.kind === 'results' ? view.result.scopeDiagnostics?.notes ?? null : null}
             onFrame={canFrame
                 ? () => frameMatches?.(frameTargetUrns)
                 : undefined}
@@ -678,6 +685,8 @@ function PanelInner({
             onLoadAll={loadAll}
             isLoadingAll={isLoadingAll}
             onCancelLoadAll={cancelLoadAll}
+            onExportAll={canExport ? () => setExportOpen(true) : undefined}
+            onRetry={() => { void run() }}
             draft={draftPredicate}
             onRefine={handleRefine}
         />
