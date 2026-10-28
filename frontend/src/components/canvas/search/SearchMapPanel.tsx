@@ -26,8 +26,9 @@
  *
  * One Query card holds the entire active query. Rows compose with AND;
  * the Visual ↔ Code toggle switches between row-builder and DSL text.
- * Templates SEED the rows (no opaque "replace + run"). Advanced drawer
- * holds Options / JSON / Cypher only — composing happens in the card.
+ * A recipe fills the rows in — one with nothing left to fill in runs at
+ * once. Advanced drawer holds Options / JSON only — composing happens in
+ * the card.
  *
  * Canvas integration unchanged: every successful run publishes
  * matchUrnSet + ancestorMatchCounts + ancestorMatchTypeBreakdowns so
@@ -897,8 +898,8 @@ function PanelInner({
  * is a labeled chip so the user can identify it without hovering for
  * a tooltip:
  *
- *   - Library: opens the unified LibraryPopover (Mine / Shared /
- *     Templates tabs). Active state when open.
+ *   - Library: opens the unified LibraryPopover (Mine / This view /
+ *     Other views / Recipes tabs). Active state when open.
  *   - Options: opens the Advanced drawer on its Options tab. Shows a
  *     numeric badge when any option differs from default so a query
  *     that's been power-user-tuned is visually distinct.
