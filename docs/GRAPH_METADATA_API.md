@@ -131,8 +131,8 @@ The route sits under `/admin/` for historical reasons; it needs only read access
 | `accessLevel` | `read`, `write` or `admin`: how the graph may be written. In practice `write` for a model built from scratch in {brand}, `read` otherwise. |
 | `projectionMode` | Where its lineage summaries are kept: `in_source` (in the graph itself), `dedicated` (in a separate graph, named by `dedicatedGraphName`), or `null` to follow its provider. |
 | `dedicatedGraphName` | The separate graph's name when `projectionMode` is `dedicated`. |
-| `identityProperty`, `identityPropertySource` | The property that identifies a node (`urn` unless configured otherwise), and where that setting comes from: `data_source`, `provider`, `workspace`, `global` or `default`. |
-| `nameProperty`, `namePropertySource` | The property that holds a node's display name (`name` unless configured otherwise), and where that comes from. |
+| `identityProperty`, `identityPropertySource` | The property that identifies a node (`urn` unless configured otherwise), and where that setting comes from: `data_source`, `provider`, `workspace`, `global` or `default`. A node created in a versioned graph gets this property set to its urn. |
+| `nameProperty`, `namePropertySource` | The property that holds a node's display name (`name` unless configured otherwise), and where that comes from. A node created or renamed in a versioned graph keeps this property in step with its display name, while the two agree. |
 | `sourceMode`, `writeBackEnabled` | `managed` or `federated`, recorded by some setup paths; often `null`. **Don't use it to tell external from versioned** — use `versioning.enabled`. |
 | `extraConfig` | Per-source settings, with any secrets redacted. |
 | `aggregationStatus`, `lastAggregatedAt`, `aggregationEdgeCount`, `aggregationSchedule` | Not filled in by this route: they read `none`, `null`, `0` and `null`. Read a source's lineage-summary state from `GET /api/v1/admin/data-sources/{ds_id}/readiness`. |

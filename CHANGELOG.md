@@ -9,6 +9,49 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — New and renamed entities are named and keyed the way their source does it
+
+### Fixed
+
+- **New entities get their name property.** An entity created in a versioned graph stored its name
+  only as `displayName`, never under the property its source keeps names in. That property is
+  `name`, unless the data source, its provider, its workspace or the platform maps it to another,
+  such as `title`. This held however the entity was made: one at a time, a set in the Hierarchy
+  Builder or Build mode, a duplicate, through the API, or by import. The Properties panel showed
+  no `name`, and publishing wrote none to the graph. Each new entity now has it.
+- **New entities get their identity property.** In a graph keyed by something other than `urn`
+  (`id`, `identifier`, …), a new entity now carries that property too. It holds the entity's urn,
+  so the source's key and the platform's always agree. A duplicate no longer keeps its original's.
+- **A rename reaches the name property.** Renaming an entity changes its name property with it,
+  and changing the name property renames it, as long as the two agree. A name kept deliberately
+  apart from the display name is left alone, such as OpenMetadata's `customer_orders` beside
+  `Customer Orders`.
+- **Older entities catch up.** An entity saved before this change gets its missing name and
+  identity properties the next time it is saved, whatever that save changes. A property someone
+  deleted stays deleted.
+- The entity editors no longer offer the mapped name or identity property as a field of its own.
+  The Name input is the name property, and the platform assigns the identity property.
+
+### Changed
+
+- A rename shows as two changed fields in history and in the Changes tab: the display name and
+  the name property.
+- A draft rename now conflicts at publish with a re-sync of main that changed the same name
+  property. It used to merge without asking.
+
+### Known limitations
+
+- A new entity's name property is its display name when it is first saved, even if it was set to
+  something else before then. To keep the two apart, change the name property after saving.
+- A mapping onto a field the platform owns (`qualifiedName`, `description`, …) is not kept in step.
+- Changing a mapping doesn't rewrite existing entities. Each catches up on its next save.
+- `POST /graph/save` writes nodes exactly as it is sent them, without these properties.
+- The identity property holds a urn string, so a source with numeric ids ends up with mixed types.
+- A save answers with at most 500 entities. Past that, the canvas shows the new properties of the
+  rest once each is opened again.
+
+---
+
 ## [Unreleased] — No wrong answers: busy graphs, large exports, silent failures and Ask
 
 ### Fixed
