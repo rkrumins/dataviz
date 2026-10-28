@@ -42,7 +42,13 @@ from backend.app.providers.falkordb_deep_search import (
     _build_compiler_for_provider,
 )
 from backend.app.providers.falkordb_search.keys import SortKey, SortSpec
-from backend.app.providers.falkordb_search.plan import Context, Unit, make_plan, match_statement
+from backend.app.providers.falkordb_search.plan import (
+    Context,
+    Unit,
+    expand_unit,
+    make_plan,
+    match_statement,
+)
 from backend.app.providers.falkordb_search.session import (
     COMPLETE,
     FAILED,
@@ -343,6 +349,9 @@ class _CatalogWork:
         self.session, self.ctx, self.run, self.skip = session, ctx, run, skip
         self.stats = CatalogStats()
 
+    async def expand(self, unit: Unit, timeout_s: float) -> Optional[List[Unit]]:
+        return await expand_unit(unit, self.ctx, self.run, timeout_s)
+
     async def begin(self, store: SessionStore) -> None:
         # Read with the lease held: the catalog of the latest commit.
         self.stats = CatalogStats.from_json(await store.load_accumulator(self.session.sid))
@@ -447,7 +456,10 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
 
     query_id = f"catalog:{context.scope_hash}"
     sid = session_id_of(query_id, context.data_version, None)
-    session = await _find(store, session_id, query_id, None) or await store.load(sid)
+    session = await _find(store, session_id, query_id, None)
+    if session is not None and session.status == FAILED:
+        raise SearchFailed(f"catalog failed: {session.error}")
+    session = session or await store.load(sid)
     created = False
     if session is None or session.status == FAILED:
         query = SearchQuery(predicate=MatchAllPredicate(), scope=scope)

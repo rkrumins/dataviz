@@ -26,7 +26,7 @@ import type {
 import { SEARCH_OPTIONS } from '@/components/canvas/search/searchOptions'
 import { buildSearchRequest } from '@/components/canvas/search/searchRequest'
 
-import { PROGRESS_WAIT_MS, useAdvancedSearch } from '../useAdvancedSearch'
+import { PROGRESS_WAIT_MS, pollDelayMs, useAdvancedSearch } from '../useAdvancedSearch'
 
 vi.mock('@/providers/GraphProviderContext', () => ({
     useGraphProvider: () => provider,
@@ -649,25 +649,114 @@ describe('useAdvancedSearch — a search still scanning the view', () => {
         expect(view.kind === 'results' && view.query.options?.sessionId).toBeFalsy()
     })
 
-    it('stops at the last answer, marked unfinished, when follow-ups keep failing', async () => {
-        vi.useFakeTimers({ shouldAdvanceTime: true })
+    /** What the request layer throws for an HTTP error. */
+    const apiError = (status: number, code: string, retryAfterMs?: number) => Object.assign(
+        new Error(`API Error ${status}: ${JSON.stringify({ detail: { code, reason: 'the graph store isn’t answering' } })}`),
+        { status, code, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) },
+    )
+
+    it('rides out a graph that cannot answer, then pauses where it got to for Resume', async () => {
+        vi.useFakeTimers()
         try {
             searchAdvanced
                 .mockResolvedValueOnce(running({ hits: [HIT] }))
-                .mockRejectedValue(new Error('429'))
+                .mockRejectedValue(apiError(503, 'PROVIDER_FAILING_OVER', 3000))
+            const { result } = renderHook(() => useAdvancedSearch('view-1'))
+            let run!: Promise<void>
+            act(() => { run = result.current.runPredicate(PREDICATE, SEARCH_OPTIONS) })
+            await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+            // A minute in, it is still asking — not "ran out of time".
+            expect(result.current.view.kind === 'results' && result.current.view.halted).toBeFalsy()
+            const asked = searchAdvanced.mock.calls.length
+            expect(asked).toBeGreaterThan(4)
+            await act(async () => { await vi.advanceTimersByTimeAsync(150_000); await run })
+            const view = result.current.view
+            expect(view.kind === 'results' && view.halted?.kind).toBe('interrupted')
+            expect(view.kind === 'results' && view.result.hits?.length).toBe(1)
+            expect(view.kind === 'results' && view.result.deadlineExceeded).toBe(false)
+            expect(result.current.runState?.status).toBe('done')
+
+            // Resume picks the same session up — nothing is read twice.
+            searchAdvanced.mockReset()
+            searchAdvanced.mockResolvedValueOnce(page({
+                hits: [HIT], status: 'complete', totalCount: 1, sessionId: 's-1' }))
+            await act(async () => { await result.current.resume() })
+            expect(searchAdvanced.mock.calls[0][0].options.sessionId).toBe('s-1')
+            const done = result.current.view
+            expect(done.kind === 'results' && done.result.status).toBe('complete')
+            expect(done.kind === 'results' && done.halted).toBeFalsy()
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('ends at once, saying why, when the server could not finish the search', async () => {
+        searchAdvanced
+            .mockResolvedValueOnce(running({ hits: [HIT] }))
+            .mockRejectedValueOnce(apiError(500, 'SEARCH_FAILED'))
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        expect(searchAdvanced).toHaveBeenCalledTimes(2)
+        expect(result.current.view.kind).toBe('error')
+        expect(result.current.runState?.status).toBe('failed')
+    })
+
+    it('stops where it is, keeping what it found, and resumes the same session', async () => {
+        searchAdvanced
+            .mockResolvedValueOnce(running({ hits: [HIT] }))
+            .mockImplementationOnce(() => new Promise<SearchResultPage>(() => {}))
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            void result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        await waitFor(() => expect(searchAdvanced).toHaveBeenCalledTimes(2))
+        act(() => { result.current.stop() })
+        const stopped = result.current.view
+        expect(stopped.kind === 'results' && stopped.halted?.kind).toBe('stopped')
+        expect(stopped.kind === 'results' && stopped.result.hits?.length).toBe(1)
+        expect([...useSearchStore.getState().matchUrnSet]).toEqual(['hit-1'])
+
+        searchAdvanced.mockResolvedValueOnce(page({
+            hits: [HIT], status: 'complete', totalCount: 1, sessionId: 's-1' }))
+        await act(async () => { await result.current.resume() })
+        expect(searchAdvanced.mock.calls[2][0].options.sessionId).toBe('s-1')
+        const view = result.current.view
+        expect(view.kind === 'results' && view.result.status).toBe('complete')
+    })
+
+    it('rides out a later page the graph cannot answer just now', async () => {
+        vi.useFakeTimers()
+        try {
+            searchAdvanced
+                .mockResolvedValueOnce(page({ hits: [HIT], status: 'complete', totalCount: 2,
+                                              cursor: 'c-1', sessionId: 's-1' }))
+                .mockRejectedValueOnce(apiError(429, 'PROVIDER_BUSY', 1000))
+                .mockRejectedValueOnce(apiError(503, 'PROVIDER_UNAVAILABLE', 2000))
+                .mockResolvedValueOnce(page({
+                    hits: [{ ...HIT, node: { ...HIT.node, urn: 'hit-2' } }], status: 'complete' }))
             const { result } = renderHook(() => useAdvancedSearch('view-1'))
             await act(async () => {
                 await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
             })
+            let more!: Promise<void>
+            act(() => { more = result.current.loadMore() })
+            await act(async () => { await vi.advanceTimersByTimeAsync(20_000); await more })
             const view = result.current.view
-            expect(view.kind).toBe('results')
-            expect(view.kind === 'results' && view.result.deadlineExceeded).toBe(true)
-            expect(view.kind === 'results' && view.result.truncated).toBe(true)
-            expect(view.kind === 'results' && view.result.hits?.length).toBe(1)
-            expect(searchAdvanced).toHaveBeenCalledTimes(4)   // 1 + three attempts
+            expect(view.kind === 'results' && view.result.hits?.map((h) => h.node.urn))
+                .toEqual(['hit-1', 'hit-2'])
+            expect(result.current.loadMoreError).toBeNull()
         } finally {
             vi.useRealTimers()
         }
+    })
+
+    it('waits longer after each answer that brings nothing new, and a hidden tab waits most', () => {
+        expect([0, 1, 2, 3, 4, 5, 9].map((idle) => pollDelayMs(idle, false)))
+            .toEqual([0, 500, 1000, 2000, 4000, 5000, 5000])
+        expect(pollDelayMs(0, true)).toBe(5000)
+        expect(pollDelayMs(5, true)).toBe(5000)
     })
 
     it('stops continuing a search a newer run replaced', async () => {

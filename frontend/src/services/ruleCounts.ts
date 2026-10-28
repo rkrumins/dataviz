@@ -9,6 +9,7 @@
  * exact number.
  */
 import type { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { rideOut } from '@/services/rideOut'
 import type { Predicate, SearchScope } from '@/types/search'
 
 
@@ -21,6 +22,9 @@ export interface RuleCount {
     /** Why the rule could not be counted (``complete``: it reads 0), or
      *  why its count stopped short (``count`` is then a floor). */
     error?: string
+    /** Counted to the end, but a floor: part of the view couldn't be read
+     *  in time and was left out. */
+    lowerBound?: boolean
 }
 
 export interface RuleToCount {
@@ -31,11 +35,13 @@ export interface RuleToCount {
 /** The server takes at most this many rules per request. */
 const RULES_PER_REQUEST = 32
 
-/** How long each request lets the server count before answering. */
-const WAIT_MS = 1000
+/** How long the first request lets the server count before answering — a
+ *  first number soon — and each after it: as long as the server allows. */
+const FIRST_WAIT_MS = 1000
+const FOLLOW_WAIT_MS = 5000
 
-/** A backstop, not a budget: at ~1 s a request, ten minutes of counting. */
-const MAX_REQUESTS = 600
+/** A backstop, not a budget: half an hour of counting. */
+const BACKSTOP_MS = 30 * 60_000
 
 
 export interface CountRulesOptions {
@@ -99,12 +105,16 @@ async function countGroup(
     const sessions: Record<string, string> = {}
     const items = rules.map((r) => ({ id: r.id, predicate: asGroup(r.predicate) }))
     const scope = opts.scope ?? { viewId, scopeMode: 'view' }
-    for (let request = 0; request < (opts.maxRequests ?? MAX_REQUESTS); request++) {
-        const answer = await provider.searchCounts(
-            { scope, items, waitMs: WAIT_MS, sessions: { ...sessions },
+    const started = Date.now()
+    for (let request = 0; request < (opts.maxRequests ?? Infinity); request++) {
+        if (Date.now() - started > BACKSTOP_MS) throw new Error('still counting after 30 minutes')
+        // The graph busy or failing over: asked again, for minutes.
+        const answer = await rideOut(() => provider.searchCounts(
+            { scope, items, waitMs: request === 0 ? FIRST_WAIT_MS : FOLLOW_WAIT_MS,
+              sessions: { ...sessions },
               ...(opts.purpose ? { purpose: opts.purpose } : {}) },
             { signal: opts.signal },
-        )
+        ), opts.signal)
         let complete = true
         for (const rule of rules) {
             const c = answer.counts[rule.id]
@@ -117,14 +127,13 @@ async function countGroup(
                 complete: done,
                 percent: done ? 100 : percentOf(c.progress),
                 ...(c.error ? { error: c.error } : {}),
+                ...(c.lowerBound ? { lowerBound: true } : {}),
             })
         }
         opts.onUpdate?.(new Map(counts))
         if (complete) return
     }
     // A cap the caller asked for: what has been counted so far is the answer.
-    if (opts.maxRequests !== undefined) return
-    throw new Error(`still counting after ${MAX_REQUESTS} requests`)
 }
 
 

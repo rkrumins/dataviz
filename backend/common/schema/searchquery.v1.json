@@ -4421,6 +4421,12 @@
           "default": null,
           "title": "Error"
         },
+        "lowerBound": {
+          "default": false,
+          "description": "Complete, but a floor: part of the view couldn't be read in time and was left out, so there may be more matches.",
+          "title": "Lowerbound",
+          "type": "boolean"
+        },
         "progress": {
           "anyOf": [
             {

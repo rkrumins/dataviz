@@ -10,7 +10,7 @@ import { cn } from '@/lib/utils'
 import { readableSearchError } from './errorPaths'
 
 
-export function ErrorView({ message }: { message: string }) {
+export function ErrorView({ message, onRetry }: { message: string; onRetry?: () => void }) {
     return (
         <div className="p-4">
             <div className={cn(
@@ -33,8 +33,22 @@ export function ErrorView({ message }: { message: string }) {
                         <div className="mt-1.5 text-[12px] text-ink leading-relaxed whitespace-pre-wrap break-words">
                             {readableSearchError(message)}
                         </div>
-                        <div className="mt-2 text-[10.5px] text-ink-muted leading-snug">
-                            Refine the query above and click Run again.
+                        <div className="mt-2 flex items-center gap-2">
+                            {onRetry && (
+                                <button
+                                    type="button"
+                                    onClick={onRetry}
+                                    className={cn(
+                                        'shrink-0 rounded-lg px-2.5 py-1 text-[11.5px] font-semibold text-ink',
+                                        'border border-glass-border hover:bg-glass/40 transition-colors',
+                                    )}
+                                >
+                                    Try again
+                                </button>
+                            )}
+                            <span className="text-[10.5px] text-ink-muted leading-snug">
+                                {onRetry ? 'Or refine the query above.' : 'Refine the query above and click Run again.'}
+                            </span>
                         </div>
                     </div>
                 </div>

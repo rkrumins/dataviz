@@ -66,6 +66,14 @@ describe('DisplayRuleList count line', () => {
         expect(screen.getByText(/matches in this view/)).toBeInTheDocument()
     })
 
+    it('reads a count that left part of the view out as a floor', () => {
+        renderList(rule(), { count: 48_203, complete: true, percent: 100, lowerBound: true })
+        expect(screen.getByText('48,203')).toBeInTheDocument()
+        expect(screen.getByText(/At least/)).toHaveTextContent('At least 48,203 matches in this view')
+        expect(screen.getByText(/At least/)).toHaveAttribute(
+            'title', 'Part of the view couldn’t be checked in time and was left out')
+    })
+
     it('says "match" for exactly one', () => {
         renderList(rule(), { count: 1, complete: true, percent: 100 })
         expect(screen.getByText(/match in this view/)).toBeInTheDocument()

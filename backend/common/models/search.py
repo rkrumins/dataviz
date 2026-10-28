@@ -1739,6 +1739,10 @@ class SearchRuleCount(_Base):
     session_id: Optional[str] = Field(None, alias="sessionId")
     progress: Optional[SearchProgress] = None
     error: Optional[str] = None
+    lower_bound: bool = Field(
+        False, alias="lowerBound",
+        description="Complete, but a floor: part of the view couldn't be read in time and "
+                    "was left out, so there may be more matches.")
 
 
 class SearchCountsResult(_Base):

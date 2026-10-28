@@ -624,6 +624,10 @@ export type Waitms1 = number
  */
 export type Count6 = number
 export type Error = string | null
+/**
+ * Complete, but a floor: part of the view couldn't be read in time and was left out, so there may be more matches.
+ */
+export type Lowerbound = boolean
 export type Sessionid3 = string | null
 export type Status2 = 'running' | 'complete'
 export type Dataversion1 = string | null
@@ -1685,6 +1689,7 @@ export interface Counts1 {
 export interface SearchRuleCount {
     count: Count6
     error?: Error
+    lowerBound?: Lowerbound
     progress?: SearchProgress | null
     sessionId?: Sessionid3
     status: Status2
