@@ -7,11 +7,13 @@
  */
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
 import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useFeaturesStore } from '@/store/features'
 import { useSchemaStore } from '@/store/schema'
+import { useBranchStore } from '@/store/branchStore'
+import { useWorkspacesStore } from '@/store/workspaces'
 import { stagedChangesToOps } from '@/features/versioning/model/stagedChangesToOps'
 
 vi.mock('../../useDrawerHistoryScope', () => ({
@@ -123,5 +125,34 @@ describe('EntityDrawer — an edit in a draft', () => {
     const [op] = ops()
     expect(op.payload).toEqual({ properties: { retention: '30', businessLabel: 'Customer orders' } })
     expect(op.unsetProperties).toBeUndefined()
+  })
+})
+
+describe("EntityDrawer — the source's own name and identity properties", () => {
+  beforeEach(() => {
+    const schema = useSchemaStore.getState().schema!
+    useSchemaStore.setState({
+      schema: { ...schema, entityTypes: [{ ...schema.entityTypes[0], fields: [
+        { id: 'retention', name: 'Retention', type: 'text' },
+        { id: 'title', name: 'Title', type: 'text' },
+        { id: 'id', name: 'Native id', type: 'text' },
+      ] as never }] },
+    } as never)
+    useBranchStore.setState({ workspaceId: 'ws1', dataSourceId: 'ds1' } as never)
+    useWorkspacesStore.setState({
+      workspaces: [{ id: 'ws1', dataSources: [{ id: 'ds1', nameProperty: 'title', identityProperty: 'id' }] }],
+    } as never)
+  })
+  afterEach(() => {
+    useBranchStore.setState({ workspaceId: null, dataSourceId: null } as never)
+    useWorkspacesStore.setState({ workspaces: [] } as never)
+  })
+
+  it('are not offered as fields of their own: the server keeps them in step with the Name and the urn', async () => {
+    render(<EntityDrawer canEdit />)
+    await userEvent.click(screen.getByRole('tab', { name: /^Edit/ }))
+    expect(screen.getByLabelText('Retention')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Title')).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Native id')).not.toBeInTheDocument()
   })
 })

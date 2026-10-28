@@ -10,6 +10,7 @@ import { useActiveView } from '@/store/schema'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
 import { readSchemaField, withReserved, writeBusinessLabel, writeSchemaField } from '@/lib/nodeFields'
 import { cn } from '@/lib/utils'
+import { boundFieldIds, useEditingNodeIdentity } from '@/components/dataSource/NodeIdentity'
 import { IconButton } from '@/components/ui/Button'
 import { PropertyEditor } from '../PropertyEditor'
 import { PanelErrorBoundary } from '../PanelErrorBoundary'
@@ -58,7 +59,10 @@ export function EntityEditTab({ nodeId, form, entityType, urn, userProps, onEdit
   onCopyUrn: () => void
 }) {
   const set = (key: string, value: unknown) => onEdit((d) => ({ ...d, [key]: value }))
-  const schemaFields = (entityType?.fields ?? []).filter((f) => !FORM_FIELD_IDS.includes(f.id))
+  // The Name input is also the source's own name property, and the platform assigns its identity
+  // property: neither is offered as a schema field of its own.
+  const bound = boundFieldIds(useEditingNodeIdentity())
+  const schemaFields = (entityType?.fields ?? []).filter((f) => !FORM_FIELD_IDS.includes(f.id) && !bound.has(f.id))
 
   // Layer placement is VIEW config (referenceLayout.assignments), managed on the canvas — shown
   // here resolved and read-only.

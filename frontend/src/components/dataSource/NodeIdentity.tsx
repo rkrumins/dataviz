@@ -17,7 +17,11 @@
 import { useEffect, useRef, useState } from 'react'
 import { Fingerprint, KeyRound, ShieldAlert, ChevronDown, Sparkles } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { RESERVED_PROPERTY_KEYS } from '@/lib/nodeFields'
 import { providerService } from '@/services/providerService'
+import type { DataSourceResponse } from '@/services/workspaceService'
+import { useBranchStore } from '@/store/branchStore'
+import { useWorkspacesStore } from '@/store/workspaces'
 
 // ── helpers (the single normalization contract) ─────────────────────────────
 
@@ -49,6 +53,34 @@ export const isNameOverridden = (v: string | null | undefined): boolean =>
 export const nameCoalesceExpr = (v: string | null | undefined): string => {
     const n = normalizeName(v)
     return n === 'name' ? 'n.name' : `coalesce(n.displayName, n.${n})`
+}
+
+// ── the entity editors' Name input ───────────────────────────────────────────
+
+/** The schema fields the entity editors never offer as inputs of their own: `name` — the Name
+ *  input is that field — and the source's own name and identity properties. The server keeps those
+ *  two in step with the Name and the urn on every save (`node_identity.bind_node_write`), so an
+ *  input of their own would be overwritten when a new entity is created. A mapping onto a field the
+ *  platform owns is not bound, so it stays offered. */
+export function boundFieldIds(
+    mapping?: Pick<DataSourceResponse, 'nameProperty' | 'identityProperty'> | null,
+): Set<string> {
+    const ids = new Set(['name'])
+    const name = normalizeName(mapping?.nameProperty)
+    if (!RESERVED_PROPERTY_KEYS.has(name)) ids.add(name)
+    const identity = normalizeIdentity(mapping?.identityProperty)
+    if (isIdentityOverridden(identity) && !RESERVED_PROPERTY_KEYS.has(identity)) ids.add(identity)
+    return ids
+}
+
+/** The resolved mapping of the data source being edited: the branch store's editing scope, looked
+ *  up in the workspace list (resolved server-side across all four scopes). Null outside an editing
+ *  scope, or before the list has loaded. */
+export function useEditingNodeIdentity(): DataSourceResponse | null {
+    const wsId = useBranchStore((s) => s.workspaceId)
+    const dsId = useBranchStore((s) => s.dataSourceId)
+    return useWorkspacesStore((s) =>
+        s.workspaces.find((w) => w.id === wsId)?.dataSources?.find((d) => d.id === dsId) ?? null)
 }
 
 /** Where a resolved mapping came from — mirrors the backend's provenance

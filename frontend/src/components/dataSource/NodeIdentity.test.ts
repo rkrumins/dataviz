@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import {
     normalizeIdentity, isIdentityOverridden, identityCoalesceExpr,
-    normalizeName, isNameOverridden, nameCoalesceExpr, isInherited,
+    normalizeName, isNameOverridden, nameCoalesceExpr, isInherited, boundFieldIds,
 } from './NodeIdentity'
 
 describe('normalizeIdentity', () => {
@@ -105,5 +105,18 @@ describe('the inherited-value trap', () => {
         expect(isIdentityOverridden(inherited.identityProperty)).toBe(true)
         expect(isInherited(inherited.identityPropertySource)).toBe(true)
         expect(isInherited(local.identityPropertySource)).toBe(false)
+    })
+})
+
+describe('boundFieldIds', () => {
+    it('is the `name` field alone without a mapping, or with the default one', () => {
+        expect([...boundFieldIds(null)]).toEqual(['name'])
+        expect([...boundFieldIds({ nameProperty: 'name', identityProperty: 'urn' })]).toEqual(['name'])
+    })
+    it("adds the source's own name and identity properties — the Name input and the urn stand for them", () => {
+        expect(boundFieldIds({ nameProperty: 'title', identityProperty: 'id' })).toEqual(new Set(['name', 'title', 'id']))
+    })
+    it('leaves a field the platform owns offered: a mapping onto one is not bound', () => {
+        expect(boundFieldIds({ nameProperty: 'description', identityProperty: 'qualifiedName' })).toEqual(new Set(['name']))
     })
 })
