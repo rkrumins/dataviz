@@ -83,6 +83,7 @@ from backend.app.services.deep_search import (
     CompileError,
     SearchFailed,
     SearchRunContext,
+    SessionStoreUnavailable,
     get_deep_search_settings,
 )
 from backend.common.adapters.circuit import ProviderUnavailable, is_queue_full_reply
@@ -430,8 +431,38 @@ async def _advance(session: Session, created: bool, store: SessionStore, work,
         finally:
             # Given back even when the commit failed: held to its expiry, the
             # next request found the session busy and only waited on it.
-            await store.release(session.sid, token)
+            try:
+                await store.release(session.sid, token)
+            except SessionStoreUnavailable:
+                _release_later(store, session.sid, token, lease_ms / 1000.0)
+                raise
     return session
+
+
+#: How often a lease the cache couldn't take back is given back again.
+_RELEASE_RETRY_S = 2.0
+
+#: Those still being given back — held, so a pending one isn't collected.
+_RELEASING: set = set()
+
+
+def _release_later(store: SessionStore, sid: str, token: str, within_s: float) -> None:
+    """Give a lease back once the cache answers again. With the cache gone,
+    the commit and the release both fail, and the lease held the session to
+    its expiry: every request after the cache came back only waited on it.
+    Past ``within_s`` the lease has lapsed by itself; and a release names its
+    token, so it never gives back another request's."""
+    async def retry() -> None:
+        end = time.monotonic() + within_s
+        while time.monotonic() < end:
+            await asyncio.sleep(_RELEASE_RETRY_S)
+            with contextlib.suppress(SessionStoreUnavailable):
+                await store.release(sid, token)
+                return
+
+    task = asyncio.get_running_loop().create_task(retry())
+    _RELEASING.add(task)
+    task.add_done_callback(_RELEASING.discard)
 
 
 # ---------------------------------------------------------------------------

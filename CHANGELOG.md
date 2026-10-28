@@ -33,7 +33,8 @@ limitations** — a changelog that only lists good news is not worth reading.
   Redis. When that Redis didn't answer, the error counted against the graph's circuit breaker,
   which then refused every read on the data source. It now answers 503
   `SEARCH_STORE_UNAVAILABLE` with a `Retry-After`, the panel waits it out, and other reads carry
-  on. A search also lets go of its progress when saving it fails, so the next poll can go on.
+  on. A search also lets go of its progress when saving it fails, or, with the cache gone, as
+  soon as the cache answers again, so the next poll can go on.
 - **A route search that runs out of time** answers what it found, saying it ran out of time,
   instead of failing with a 504.
 - **The panel waits out an outage.** A search, **Load more**, display-rule checks and rule

@@ -5,7 +5,7 @@ A raw Redis error from it reached the provider's breaker as a graph-store
 outage — the same redis exception FalkorDB raises — and one cache blip
 refused every graph read on the source for the breaker's reset window. And a
 commit that failed kept the session's lease to its expiry, so every request
-after it only waited.
+after it only waited — and with the cache gone, giving it back fails too.
 """
 from __future__ import annotations
 
@@ -125,3 +125,62 @@ async def test_a_commit_that_fails_still_gives_the_lease_back():
         await engine_mod._advance(session, False, store, _Work(), time.monotonic() + 1,
                                   get_deep_search_settings())
     assert await store.lease("s1", 1000) is not None, "the next request may take it"
+
+
+async def test_a_lease_the_cache_could_not_take_back_is_given_back_when_it_answers(monkeypatch):
+    monkeypatch.setattr(engine_mod, "_RELEASE_RETRY_S", 0.01)
+    store = MemorySessionStore()
+    session = Session("s1", "q", "1", None, 0, [Unit("range", "A", size=1)], [], 1)
+    await store.save(session, None, 60)
+    gone = SessionStoreUnavailable("the cache keeping search sessions did not answer")
+
+    async def broken_save(*args, **kwargs):
+        raise gone
+
+    release, refused = store.release, []
+
+    async def release_once_back(sid, token):
+        if len(refused) < 2:            # the cache still away, twice
+            refused.append(token)
+            raise gone
+        await release(sid, token)
+
+    class _Work:
+        async def begin(self, store_):
+            pass
+
+        async def unit(self, unit, timeout_s):
+            return 1
+
+        def fold(self, unit, result):
+            pass
+
+        def commit(self):
+            return {}
+
+    store.save, store.release = broken_save, release_once_back
+    with pytest.raises(SessionStoreUnavailable):
+        await engine_mod._advance(session, False, store, _Work(), time.monotonic() + 1,
+                                  get_deep_search_settings())
+    assert await store.lease("s1", 1000) is None, "still held while the cache is away"
+    for _ in range(100):
+        if not engine_mod._RELEASING:
+            break
+        await asyncio.sleep(0.01)
+    assert len(refused) == 2
+    assert await store.lease("s1", 1000) is not None, "given back once the cache answered"
+
+
+async def test_a_late_give_back_never_takes_another_requests_lease(monkeypatch):
+    monkeypatch.setattr(engine_mod, "_RELEASE_RETRY_S", 0.01)
+    store = MemorySessionStore()
+    mine = await store.lease("s1", 1)          # lapses at once
+    await asyncio.sleep(0.01)
+    theirs = await store.lease("s1", 60_000)
+    assert theirs is not None
+    engine_mod._release_later(store, "s1", mine, 1.0)
+    for _ in range(100):
+        if not engine_mod._RELEASING:
+            break
+        await asyncio.sleep(0.01)
+    assert await store.lease("s1", 1000) is None, "the other request still holds it"
