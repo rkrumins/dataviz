@@ -607,8 +607,11 @@ brings the results back.
 Below the bar, matches are grouped (by layer in a Context View, by parent on
 the other canvases). A group's **Search inside this group** adds an *Inside
 Subtree* filter for it. **Load more** fetches the next thousand; **Load all**
-keeps going until every match is listed. A page that fails to load says why,
-and **Try again** asks for it once more — the matches already listed stay.
+keeps going until every match is listed, for up to 10,000 matches. Past that it
+offers **Export all *N*** instead, which writes every match to a file in one
+pass rather than scanning the View again for every thousand. A page waits out
+a graph store that can't answer just then. One that still fails says why, and
+**Try again** asks for it once more. The matches already listed stay.
 
 The answer refines the query, not just the list:
 
@@ -621,9 +624,25 @@ The answer refines the query, not just the list:
 
 Each of these changes the query itself, so **Undo** takes it back.
 
-On a very large View the first answer arrives quickly and keeps filling in —
-**scanning N%** shows how far it has got, and the count reads **N+** until it's
-exact. Nothing needs clicking.
+On a very large View the first answer arrives quickly and keeps filling in.
+The match bar reads ***N* found · scanning 45% · 1:23**: what it has found so
+far, how far through the View it is, and for how long. Nothing needs clicking.
+After 20 seconds with nothing new it adds **The graph is busy — still
+working.** **Stop** ends the scan where it is, and what it found stays.
+**Resume** picks it up again without reading anything twice.
+
+If the graph store restarts, fails over or stops answering during a search,
+the search waits it out for up to 3 minutes, asking again less often as it
+goes, then carries on where it was. Past that it reads **Paused: the graph
+didn't answer for a few minutes**, with what it found so far and **Resume**.
+A search the server couldn't finish says **Search failed**, with why, and
+**Try again** runs it again.
+
+The count is exact once the scan finishes, with one exception. If one entity
+and what's inside it, or one entity's edges, can't be read in the longest time
+a request allows, or reading it keeps cutting the connection to the graph
+store, the search leaves that part out rather than fail. The count then reads
+**at least *N***, and a note under the bar names what was left out.
 
 ### Exporting matches
 
@@ -1033,6 +1052,8 @@ LIMIT 200
 | Connections | Direct edges: one edge from a From match to a To match |
 | Connections lit on the canvas | The first 2,000 loaded; under **On Hover** or **Adaptive**, the 1,000 lines drawing the most |
 | A page of connections | 500 |
+| **Load all** | 10,000 matches; past that, **Export all** writes them to a file |
+| Waiting out a graph store that doesn't answer | 3 minutes, then **Paused** with **Resume** |
 
 **Future scope: multi-hop connections.** A Connections search finds direct
 edges. The edges of every route of up to *N* hops from a From match to a To
@@ -1064,6 +1085,9 @@ steps tests reach.
 | "*This view places … entities by hand…*", "*… too many for a layer filter to follow quickly*" | The layer filter follows the View's own placement, and this View's is too big to follow | Filter by type, tag or container instead |
 | "*This link can't follow lineage or relationships*" | You opened the View through a share link | Open it as a member of the workspace |
 | The count reads **N+** or the results say they stopped | The answer was still being counted when the time ran out | Run it again, or narrow it; **Load all** fetches every match |
+| **The graph is busy — still working.** | Nothing new has come back for 20 seconds | Wait, or **Stop** and narrow the query. What it found stays |
+| **Paused: the graph didn't answer for a few minutes** | The graph store was restarting, failing over or out of reach for longer than a search waits | **Resume** once it's back. The search carries on where it was |
+| The count reads **at least *N***, with "*… couldn't be checked in time, so it was left out*" | One entity and what's inside it, or one entity's edges, couldn't be read in the longest time a request allows, or kept cutting the connection to the graph store | Everything else is counted. Narrow the query to leave that entity out, or run it again when the graph is less busy |
 | **Save** offers only **Just me** | You can't edit this View | Ask someone who can, or share the search with them |
 | "*A query named … is already saved*" | Names are unique in a View (ignoring case) | Choose another name |
 | **Export** is missing | The **Export graph data** feature is off | Ask your administrator |

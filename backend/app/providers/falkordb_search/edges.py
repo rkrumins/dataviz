@@ -81,6 +81,8 @@ from backend.app.providers.falkordb_search.plan import (
     _label_stats,
     _labels_in_scope,
     _rel,
+    describe_unit,
+    expand_unit,
     make_plan,
     match_statement,
     within_hops,
@@ -615,9 +617,19 @@ class _EdgeWork:
     the session, with which end anchors (``_state``), so a unit is counted
     exactly once."""
 
+    #: A part that can't be read is left out and said so (``engine._leave_out``).
+    skips = True
+
     def __init__(self, session: Session, ectx: EdgeContext, run, state: Dict[str, Any]) -> None:
         self.session, self.ectx, self.run = session, ectx, run
         self.state = dict(state)
+
+    async def expand(self, unit: Unit, timeout_s: float) -> Optional[List[Unit]]:
+        return await expand_unit(unit, self.ectx.anchor, self.run, timeout_s)
+
+    async def describe(self, unit: Unit) -> Optional[str]:
+        what = await describe_unit(unit, self.run)
+        return f"the connections of {what}" if what else None
 
     async def begin(self, store: SessionStore) -> None:
         # Read with the lease held: the counts of the latest commit.
@@ -697,7 +709,8 @@ async def _answer(provider, session: Session, pos: int, page_size: int,
         cache_hit=cache_hit,
         session_id=session.sid,
         status="running" if running else "complete",
-        count_status=("exact" if total is not None and not running else "lowerBound"),
+        count_status=("exact" if total is not None and not running and not session.left_out
+                      else "lowerBound"),
         progress=SearchProgress(scanned=session.scanned,
                                 total=max(session.total, session.scanned),
                                 matched=session.count),

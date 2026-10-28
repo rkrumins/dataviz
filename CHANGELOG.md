@@ -69,6 +69,67 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Resilient searches: big subtrees, outages, Stop and Resume
+
+### Fixed
+
+- **Searches inside a very large container finish.** A part of a search that couldn't be
+  checked in time — everything under one entity, or a View's visible entities — failed the
+  search. The panel asked again, the server planned the search from the start, and it failed
+  the same way, again and again. Such a part is now split: an entity into itself and each of
+  its children, the visible entities into halves. A part that can't be split (one entity and
+  what's inside it, or one entity's edges) gets one last try at the longest time a request
+  allows, 94 s. If that fails too, it is left out rather than failing the search: the count
+  reads **at least *N***, and a note names what was left out. An export, and a View's property
+  catalog, never leave a part out; they fail instead, as before.
+- **A failed search isn't planned again on every poll.** The server forgot a failed search at
+  once, so the panel's next poll started it over. It is now kept for 2 minutes: a poll for it
+  gets the failure, and only a new run plans it again.
+- **Outages keep a search's progress.** A graph store failing over, loading, with its queue full,
+  or dropping the connection failed the whole search. Now the part being checked goes back in
+  the queue and the search carries on where it was. A part that cuts the connection 5 times is
+  left out, with a note, as above.
+- **The cache Redis no longer takes the graph down with it.** A search keeps its progress in
+  Redis. When that Redis didn't answer, the error counted against the graph's circuit breaker,
+  which then refused every read on the data source. It now answers 503
+  `SEARCH_STORE_UNAVAILABLE` with a `Retry-After`, the panel waits it out, and other reads carry
+  on. A search also lets go of its progress when saving it fails, or, with the cache gone, as
+  soon as the cache answers again, so the next poll can go on.
+- **A route search that runs out of time** answers what it found, saying it ran out of time,
+  instead of failing with a 504.
+- **The panel waits out an outage.** A search, **Load more**, display-rule checks and rule
+  counts gave up within seconds of a graph store that couldn't answer. They now ask again for up
+  to 3 minutes, less often as they go (at most 15 s apart, or as long as the server asks), so
+  "…retrying automatically" is now true. A search still unanswered then reads **Paused: the
+  graph didn't answer for a few minutes**, with what it found so far and **Resume**, which goes
+  on with the same scan. A search the server couldn't finish ends at once, with **Try again**.
+- **Rule counts on a large View finish.** They stopped after 600 requests, about 10 minutes. They
+  now go on for up to 30 minutes, letting the server count for its full 5 s per request after
+  the first.
+- **Load all doesn't start hundreds of scans.** Past the first thousand matches, every thousand
+  more is a new scan of the View, so **Load all** on 200,000 matches started 200 of them. It now
+  lists up to 10,000. Past that it offers **Export all *N***, which writes every match to a file
+  in one pass.
+
+### Added
+
+- **Stop, and a clock.** A long search reads ***N* found · scanning 45% · 1:23**; after 20 s with
+  nothing new it adds **The graph is busy — still working.** **Stop** ends it where it is and
+  keeps what it found; **Resume** carries on without reading anything twice.
+- **Try again** on a failed search's card runs it again as it is.
+- A poll that brings nothing new waits longer before the next, from 0.5 s up to 5 s, and a
+  background tab asks at most every 5 s.
+- API: a rule count carries `lowerBound` when part of the View was left out, and a search's
+  `countStatus` reads `lowerBound` then.
+
+### Known limitations
+
+- A stopped or paused search is held on the server for 15 minutes. **Resume** after that starts
+  the scan over; the answer is the same, it just takes as long as the first time.
+- A search only goes on while its tab is open.
+
+---
+
 ## [Unreleased] — No wrong answers: busy graphs, large exports, silent failures and Ask
 
 ### Fixed

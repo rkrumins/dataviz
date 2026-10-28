@@ -53,6 +53,8 @@ from backend.app.providers.falkordb_search.plan import (
     Unit,
     after_statement,
     count_statement,
+    describe_unit,
+    expand_unit,
     make_plan,
     page_statements,
     raw_probe_statement,
@@ -81,9 +83,10 @@ from backend.app.services.deep_search import (
     CompileError,
     SearchFailed,
     SearchRunContext,
+    SessionStoreUnavailable,
     get_deep_search_settings,
 )
-from backend.common.adapters.circuit import ProviderBusy
+from backend.common.adapters.circuit import ProviderUnavailable, is_queue_full_reply
 from backend.common.models.search import (
     ScopeDiagnostics,
     SearchAggregateBucket,
@@ -119,6 +122,17 @@ _PATHS_FLOOR_S = 1.5
 #: read — after a long scan the request's deadline is usually spent, and
 #: half a second turned a finished search into a 504.
 _HYDRATE_FLOOR_S = 5.0
+
+#: How often the graph store may drop its connection on one unit, while it
+#: answered others in between, before that unit is left out — rather than
+#: knocking the store over every time it comes round.
+_DROPS_MAX = 5
+
+#: How long a failed session is kept: a request naming it hears why it
+#: stopped. Deleted at once, the next poll found nothing, planned the search
+#: again from zero and failed the same way — for as long as the client kept
+#: asking. Only a fresh run (no ``sessionId``) plans it again.
+FAILED_TTL_S = 120
 
 #: Facets computed in this process, by session, while they run.
 _FACET_TASKS: Dict[str, "asyncio.Task[None]"] = {}
@@ -219,8 +233,10 @@ async def execute_count_session(
     if not advance:
         query_id = query_identity(query, context.scope_hash, 0)
         store = store_for(provider)
-        session = (await _find(store, query.options.session_id, query_id, None)
-                   or await store.load(session_id(query_id, context.data_version, None)))
+        session = await _find(store, query.options.session_id, query_id, None)
+        if session is not None and session.status == FAILED:
+            raise SearchFailed(f"count failed: {session.error}")
+        session = session or await store.load(session_id(query_id, context.data_version, None))
         if session is None or session.status == FAILED:
             return {"count": 0, "status": "running", "sessionId": None, "progress": None,
                     "dataVersion": context.data_version, "notes": []}
@@ -289,6 +305,7 @@ def _count_answer(session: Session) -> Dict[str, Any]:
                      "matched": session.count},
         "dataVersion": session.data_version,
         "notes": list(session.notes),
+        "lowerBound": bool(session.left_out),
     }
 
 
@@ -321,6 +338,9 @@ class _SearchWork:
     the session commits beside it (so a unit is tallied exactly when it is
     counted)."""
 
+    #: A part that can't be read is left out and said so (``_leave_out``).
+    skips = True
+
     def __init__(self, session: Session, ctx: Context, run) -> None:
         self.session, self.ctx, self.run = session, ctx, run
         self.tally: Dict[str, Tally] = {}
@@ -330,6 +350,12 @@ class _SearchWork:
 
     async def unit(self, unit: Unit, timeout_s: float):
         return await _run_unit(unit, self.session, self.ctx, self.run, timeout_s)
+
+    async def expand(self, unit: Unit, timeout_s: float) -> Optional[List[Unit]]:
+        return await expand_unit(unit, self.ctx, self.run, timeout_s)
+
+    async def describe(self, unit: Unit) -> Optional[str]:
+        return await describe_unit(unit, self.run)
 
     def fold(self, unit: Unit, result) -> None:
         count, rows, tallied = result
@@ -350,6 +376,12 @@ def unit_budget(settings, passes: int = 1) -> float:
     """How long one unit may run: ``passes`` statements' timeout (a unit that
     reads in several passes gets more), within what a request can hold."""
     return min(passes * settings.chunk_timeout_ms / 1000.0, _REQUEST_S - 2 * _GRACE_S)
+
+
+def _last_try_s() -> float:
+    """The longest one unit may run: the whole of a request, less the grace
+    at either end. A unit that can't be cut gets it once (``_recover``)."""
+    return _REQUEST_S - 2 * _GRACE_S
 
 
 def request_deadline(started: float, wait_s: float, unit_s: float) -> float:
@@ -374,27 +406,63 @@ async def _advance(session: Session, created: bool, store: SessionStore, work,
         return session
     budget_s = max(0.0, deadline - time.monotonic())
     # Held until the last unit this request starts has spent its budget, and
-    # the commit after it.
-    lease_ms = int((budget_s + unit_s + 2 * _GRACE_S) * 1000)
+    # the commit after it — a last try's, when one is waiting (``_hop``).
+    last_tries = any(u.last_try for u in session.pending)
+    lease_ms = int((budget_s + (_last_try_s() if last_tries else unit_s) + 2 * _GRACE_S) * 1000)
     token = await store.lease(session.sid, lease_ms)
     if token is None:
         return await wait_for_commit(store, session.sid, session, deadline) or session
     # The lease is ours: carry on from the latest commit, not from what was
     # read before taking it — another request may have committed and let go
-    # in between, and running its units again would count them twice.
+    # in between, and running its units again would count them twice. A
+    # search planned afresh replaces the failed session it shares an id with.
     latest = await store.load(session.sid)
-    if latest is not None:
+    if latest is not None and not (created and latest.status == FAILED):
         session.adopt(latest)
     await work.begin(store)
     try:
-        await _hop(session, work, deadline, settings, unit_s)
+        await _hop(session, work, deadline, settings, unit_s, last_tries=last_tries)
     finally:
-        if session.status == FAILED:
-            await store.delete(session.sid)
-        else:
-            await store.save(session, token, ttl_s, **work.commit())
-        await store.release(session.sid, token)
+        try:
+            if session.status == FAILED:
+                await store.save(session, token, FAILED_TTL_S)
+            else:
+                await store.save(session, token, ttl_s, **work.commit())
+        finally:
+            # Given back even when the commit failed: held to its expiry, the
+            # next request found the session busy and only waited on it.
+            try:
+                await store.release(session.sid, token)
+            except SessionStoreUnavailable:
+                _release_later(store, session.sid, token, lease_ms / 1000.0)
+                raise
     return session
+
+
+#: How often a lease the cache couldn't take back is given back again.
+_RELEASE_RETRY_S = 2.0
+
+#: Those still being given back — held, so a pending one isn't collected.
+_RELEASING: set = set()
+
+
+def _release_later(store: SessionStore, sid: str, token: str, within_s: float) -> None:
+    """Give a lease back once the cache answers again. With the cache gone,
+    the commit and the release both fail, and the lease held the session to
+    its expiry: every request after the cache came back only waited on it.
+    Past ``within_s`` the lease has lapsed by itself; and a release names its
+    token, so it never gives back another request's."""
+    async def retry() -> None:
+        end = time.monotonic() + within_s
+        while time.monotonic() < end:
+            await asyncio.sleep(_RELEASE_RETRY_S)
+            with contextlib.suppress(SessionStoreUnavailable):
+                await store.release(sid, token)
+                return
+
+    task = asyncio.get_running_loop().create_task(retry())
+    _RELEASING.add(task)
+    task.add_done_callback(_RELEASING.discard)
 
 
 # ---------------------------------------------------------------------------
@@ -447,13 +515,15 @@ def _read_cursor(raw: Optional[str], query_id: str) -> Optional[Dict[str, Any]]:
 async def _find(store: SessionStore, sid: Optional[str], query_id: str,
                 after: Optional[List[Any]]) -> Optional[Session]:
     """The session a client asked to continue — only if it answers this
-    very query (a sessionId is a hint, never an authority)."""
+    very query (a sessionId is a hint, never an authority). A failed one
+    too (``FAILED_TTL_S``): the client is told why it stopped, rather than
+    the search being planned again behind its back."""
     if not sid:
         return None
     session = await store.load(sid)
     if session is None or session.query_id != query_id or session.after != after:
         return None
-    return None if session.status == FAILED else session
+    return session
 
 
 def _containment(provider) -> Tuple[str, ...]:
@@ -467,7 +537,8 @@ def _containment(provider) -> Tuple[str, ...]:
 # The scan
 # ---------------------------------------------------------------------------
 
-async def _hop(session: Session, work, deadline: float, settings, unit_s: float) -> None:
+async def _hop(session: Session, work, deadline: float, settings, unit_s: float,
+               last_tries: bool = False) -> None:
     """Run pending units until ``deadline``, ``chunk_concurrency`` at a time,
     each by ``work``, folding each into the session as it lands.
 
@@ -475,30 +546,41 @@ async def _hop(session: Session, work, deadline: float, settings, unit_s: float)
     (``unit_s``) — never given up because the request's wait is over: put
     back whole, it would be started again by the next request, and the next,
     and a unit slower than a client's wait would never finish. Over budget it
-    is split, as a unit the graph timed out is."""
+    is split, as a unit the graph timed out is (``_recover``).
+
+    A graph that can't take a unit just now — busy, loading, failing over,
+    unreachable — gets it back and nothing new starts (``_hold``); when this
+    request moved nothing on, it answers with why, and the session keeps
+    what it has. A last try runs only first, and only when the lease was
+    taken for one (``last_tries``)."""
     timeout_s = settings.chunk_timeout_ms / 1000.0
+    longest = _last_try_s()
     in_flight: Dict["asyncio.Task[Any]", Unit] = {}
-    busy = False
+    held: Optional[BaseException] = None
+    moved = False
     first_wave = True
-    last_start = 0.0
+    ends = 0.0
     try:
         while session.status == RUNNING:
             # Past the deadline nothing new starts — except the request's
             # first wave, so a client polling with no wait still moves the
             # scan on. Only that first wave: a unit started later would run
             # past the lease, which covers one unit's budget past the deadline.
-            while (session.pending and not busy
+            while (session.pending and held is None
                    and len(in_flight) < settings.chunk_concurrency
                    and (first_wave or time.monotonic() < deadline)):
+                if session.pending[0].last_try and not (first_wave and last_tries):
+                    break
                 unit = session.pending.pop(0)
-                task = asyncio.ensure_future(
-                    asyncio.wait_for(work.unit(unit, timeout_s), unit_s))
+                budget = longest if unit.last_try else unit_s
+                task = asyncio.ensure_future(asyncio.wait_for(
+                    work.unit(unit, longest if unit.last_try else timeout_s), budget))
                 in_flight[task] = unit
-                last_start = time.monotonic()
+                ends = max(ends, time.monotonic() + budget)
             first_wave = False
             if not in_flight:
                 break
-            wait = max(0.0, max(deadline, last_start + unit_s) + _GRACE_S - time.monotonic())
+            wait = max(0.0, max(deadline, ends) + _GRACE_S - time.monotonic())
             done, _ = await asyncio.wait(in_flight, timeout=wait,
                                          return_when=asyncio.FIRST_COMPLETED)
             if not done:
@@ -507,33 +589,110 @@ async def _hop(session: Session, work, deadline: float, settings, unit_s: float)
                 unit = in_flight.pop(task)
                 try:
                     result = task.result()
-                except ProviderBusy:
-                    # The fleet is full: give the unit back and stop starting
-                    # new ones. The next request carries on.
-                    session.pending.insert(0, unit)
-                    busy = True
-                    continue
                 except Exception as exc:        # noqa: BLE001 — classified below
-                    if _is_pressure(exc):
-                        halves = unit.split()
-                        if halves:
-                            session.pending[0:0] = halves
-                            continue
+                    why = _held_up(exc)
+                    if why is not None:
+                        held = held or exc
+                        await _hold(session, work, unit, why)
+                        continue
+                    if _is_pressure(exc) and await _recover(session, work, unit, timeout_s):
+                        continue
                     logger.warning("search session %s: unit failed: %r", session.sid, exc)
                     session.status = FAILED
                     session.error = _describe(exc)
                     break
                 session.scanned += unit.size
                 work.fold(unit, result)
+                moved = True
         if session.status == RUNNING and not session.pending and not in_flight:
             session.status = COMPLETE
-        if busy and session.scanned == 0 and session.status == RUNNING:
-            raise ProviderBusy(provider_name="search", reason="graph reads are saturated",
-                               retry_after_seconds=1)
+        if held is not None and not moved and session.status == RUNNING:
+            raise held
     finally:
         for task, unit in in_flight.items():
             task.cancel()
             session.pending.insert(0, unit)
+
+
+def _held_up(exc: BaseException) -> Optional[str]:
+    """Why the graph could not take a unit just now: ``"busy"`` — full,
+    loading, failing over, or its breaker open — or ``"dropped"``, the
+    connection to it lost; None when the unit itself is the problem."""
+    from backend.app.services.versioning.job_lease import is_transient
+    if _is_pressure(exc):
+        return None
+    if isinstance(exc, ProviderUnavailable) or is_queue_full_reply(exc):
+        return "busy"
+    if is_transient(exc):
+        return "dropped"
+    return None
+
+
+async def _hold(session: Session, work, unit: Unit, why: str) -> None:
+    """Give back a unit the graph could not take: first in line when it is
+    busy; last when the connection dropped, so the units behind it run once
+    the store is back. A drop counts against the unit only when the store
+    answered meanwhile — other units landed since its last drop, or it
+    answers now — so an outage never leaves a unit out, but a unit that
+    keeps knocking the store over is (``_DROPS_MAX``)."""
+    if why == "busy":
+        session.pending.insert(0, unit)
+        return
+    answered = session.scanned > unit.drop_mark or await _answers(work)
+    drops = unit.drops + (1 if answered else 0)
+    if drops >= _DROPS_MAX and getattr(work, "skips", False):
+        await _leave_out(session, work, unit, "Checking {} kept cutting the connection to the "
+                                              "graph store, so it was left out")
+        return
+    session.pending.append(dataclasses.replace(unit, drops=drops, drop_mark=session.scanned))
+
+
+async def _answers(work) -> bool:
+    """Whether the graph store answers at all just now."""
+    try:
+        await work.run("RETURN 1", {}, 2.0)
+        return True
+    except Exception:                                   # noqa: BLE001 — not answering is the answer
+        return False
+
+
+async def _recover(session: Session, work, unit: Unit, timeout_s: float) -> bool:
+    """A unit that ran out of time or memory: retried as its halves; else
+    read one level down (``work.expand``); else given one last try at the
+    longest budget a request allows; else, when the work can do without it,
+    left out and said so. False: it can't go on without the unit."""
+    parts = unit.split()
+    if not parts and not unit.last_try and hasattr(work, "expand"):
+        try:
+            parts = await work.expand(unit, timeout_s)
+        except Exception as exc:                # noqa: BLE001 — the last try is next
+            logger.info("search session %s: a unit could not be read one level down: %r",
+                        session.sid, exc)
+    if parts:
+        session.pending[0:0] = parts
+        return True
+    if not unit.last_try:
+        session.pending.insert(0, dataclasses.replace(unit, last_try=True))
+        return True
+    if getattr(work, "skips", False):
+        await _leave_out(session, work, unit,
+                         "{} couldn’t be checked in time, so it was left out")
+        return True
+    return False
+
+
+async def _leave_out(session: Session, work, unit: Unit, why: str) -> None:
+    """Count a unit as read without its matches — the count is then a floor
+    — and say which part of the graph it was (the first few)."""
+    session.scanned += unit.size
+    session.left_out += 1
+    if session.left_out <= 3:
+        what = await work.describe(unit) if hasattr(work, "describe") else None
+        sentence = why.format(what or "part of the graph")
+        session.notes.append(sentence[:1].upper() + sentence[1:]
+                             + " — there may be more matches than shown.")
+    elif session.left_out == 4:
+        session.notes.append("Other parts of the graph were left out too.")
 
 
 async def unit_context(unit: Unit, ctx: Context, run, timeout_s: float) -> Context:
@@ -833,7 +992,8 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
         cache_hit=cache_hit,
         session_id=session.sid,
         status="running" if running else "complete",
-        count_status=("exact" if total is not None and not running else "lowerBound"),
+        count_status=("exact" if total is not None and not running and not session.left_out
+                      else "lowerBound"),
         progress=SearchProgress(scanned=session.scanned, total=max(session.total, session.scanned),
                                 matched=session.count),
         data_version=session.data_version,

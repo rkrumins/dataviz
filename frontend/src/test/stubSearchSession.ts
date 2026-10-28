@@ -34,6 +34,8 @@ export function stubAdvanced(
         runTemplate: vi.fn(async () => {}),
         runPredicate: vi.fn(async () => {}),
         cancel: vi.fn(),
+        stop: vi.fn(),
+        resume: vi.fn(async () => {}),
         loadMore: vi.fn(async () => {}),
         isLoadingMore: false,
         loadMoreError: null,

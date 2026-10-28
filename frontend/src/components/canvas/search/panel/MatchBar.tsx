@@ -29,9 +29,11 @@ import {
     Crosshair, EyeOff, FileDown, Filter, Maximize2, Sparkles, X,
 } from 'lucide-react'
 import {
-    type FC, type ReactNode, useLayoutEffect, useMemo, useRef, useState,
+    type FC, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState,
 } from 'react'
 import { createPortal } from 'react-dom'
+
+import type { Halted } from '@/hooks/useAdvancedSearch'
 
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { cn } from '@/lib/utils'
@@ -66,6 +68,17 @@ export interface MatchBarProps {
      *  matches shown are already the right ones, in their final order. */
     scanning?: boolean
     progress?: { scanned: number; total: number } | null
+    /** When the search started (``performance.now()``): a scan's clock. */
+    startedAt?: number | null
+    /** A scan no longer followed — stopped, or interrupted by a graph that
+     *  stayed out of reach — and the way to pick it up again. */
+    halted?: Halted | null
+    onStop?: () => void
+    onResume?: () => void
+    /** The search finished but left part of the graph out: ``count`` is a
+     *  floor, and ``notes`` say which parts. */
+    countIsFloor?: boolean
+    notes?: string[] | null
     /** Frame all matches on the canvas. Hidden when no matches or
      *  when running. */
     onFrame?: () => void
@@ -94,7 +107,8 @@ export type MatchUnit = 'match' | 'path' | 'connection'
 
 export const MatchBar: FC<MatchBarProps> = ({
     count, elapsedMs, isRunning, errorMessage, truncated, countIsExact,
-    deadlineExceeded, candidateCount, scanning, progress, onFrame,
+    deadlineExceeded, candidateCount, scanning, progress, startedAt, halted, onStop,
+    onResume, countIsFloor, notes, onFrame,
     onShowFocusedOnCanvas, onClear, onExport, unit = 'match', viewId,
 }) => {
     // What the stepper walks: the matches, or a Connections search's edges.
@@ -113,6 +127,12 @@ export const MatchBar: FC<MatchBarProps> = ({
     const showDeadlineExceeded = Boolean(
         deadlineExceeded && !isRunning && !isError,
     )
+
+    // A scan still being followed: its clock runs, and a long stretch with
+    // nothing new says the graph is busy rather than looking stuck.
+    const live = Boolean(scanning && !isRunning && !isError && !halted)
+    const seconds = useClock(startedAt, live)
+    const stalled = useStalled(progress, live)
 
     const hasMatches = stepCount > 0
     // 1-based display for humans; the stored index is 0-based.
@@ -137,10 +157,18 @@ export const MatchBar: FC<MatchBarProps> = ({
                 showPlus={showPlus}
                 scannedPercent={scanning && !isRunning && !isError
                     ? scannedPercent(progress) : null}
+                clock={live && seconds !== null ? formatClock(seconds) : null}
+                floor={Boolean(countIsFloor && !isRunning && !isError)}
                 onClear={onClear}
                 onExport={!isRunning && !isError && (count ?? 0) > 0 ? onExport : undefined}
+                onStop={live ? onStop : undefined}
                 unit={unit}
             />
+            {live && stalled && (
+                <p className="px-3 -mt-1 pb-1.5 text-[11px] text-ink-muted" aria-live="polite">
+                    The graph is busy — still working.
+                </p>
+            )}
             {scanning && !isRunning && !isError && (
                 <ProgressBar
                     value={scannedPercent(progress)}
@@ -162,6 +190,10 @@ export const MatchBar: FC<MatchBarProps> = ({
                     onFrame={onFrame}
                 />
             )}
+            {scanning && halted && !isRunning && !isError && (
+                <HaltedNote halted={halted} onResume={onResume} />
+            )}
+            {countIsFloor && !isRunning && !isError && <FloorNote notes={notes ?? []} unit={unit} />}
             {unit === 'connection' && hasMatches && !isRunning && !isError && <HiddenTypesNote viewId={viewId} />}
             {((showTruncation && unit === 'match') || showDeadlineExceeded) && (
                 <WarningBanner
@@ -227,9 +259,97 @@ function scannedPercent(progress: { scanned: number; total: number } | null | un
 }
 
 
+/** How long a scan may find nothing new before the bar says the graph is
+ *  busy — still working, not stuck. */
+const STALL_MS = 20_000
+
+/** Whole seconds since ``startedAt`` (``performance.now()``), ticking
+ *  while ``live``. */
+function useClock(startedAt: number | null | undefined, live: boolean): number | null {
+    const [now, setNow] = useState(() => performance.now())
+    useEffect(() => {
+        if (!live) return
+        const timer = setInterval(() => setNow(performance.now()), 1000)
+        return () => clearInterval(timer)
+    }, [live])
+    return startedAt == null ? null : Math.max(0, Math.floor((now - startedAt) / 1000))
+}
+
+/** Whether a live scan's progress has stood still for ``STALL_MS``. */
+function useStalled(progress: { scanned: number; total: number } | null | undefined,
+                    live: boolean): boolean {
+    const [stalled, setStalled] = useState(false)
+    const scanned = progress?.scanned
+    // Progress, or the scan starting or ending, starts the wait over — in
+    // the previous-render branch: the hooks lint forbids setState in an
+    // effect body.
+    const [since, setSince] = useState({ scanned, live })
+    if (since.scanned !== scanned || since.live !== live) {
+        setSince({ scanned, live })
+        setStalled(false)
+    }
+    useEffect(() => {
+        if (!live) return
+        const timer = setTimeout(() => setStalled(true), STALL_MS)
+        return () => clearTimeout(timer)
+    }, [scanned, live])
+    return stalled
+}
+
+/** "1:23" — minutes and seconds. */
+function formatClock(seconds: number): string {
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+
+/** A scan no longer followed: why, and Resume — its session kept what it
+ *  found, so nothing is read twice. */
+function HaltedNote({ halted, onResume }: { halted: Halted; onResume?: () => void }) {
+    return (
+        <div role="status" className={cn(
+            'flex items-start gap-2 mx-3 mb-2 px-3 py-2 rounded-lg',
+            'border border-amber-400/50 bg-amber-500/[0.10]',
+        )}>
+            <p className="flex-1 min-w-0 text-[11.5px] leading-snug text-ink"
+               title={halted.kind === 'interrupted' ? halted.reason : undefined}>
+                {halted.kind === 'stopped'
+                    ? 'Stopped. What it found so far is shown.'
+                    : 'Paused: the graph didn’t answer for a few minutes. What it found so far is shown.'}
+            </p>
+            {onResume && (
+                <button type="button" onClick={onResume} className={cn(
+                    'shrink-0 rounded-md px-2.5 py-1 text-[11.5px] font-semibold text-ink',
+                    'border border-glass-border hover:bg-glass/40 transition-colors',
+                )}>
+                    Resume
+                </button>
+            )}
+        </div>
+    )
+}
+
+
+/** A finished search that left part of the graph out — said, with the
+ *  server's notes naming which part. */
+function FloorNote({ notes, unit }: { notes: string[]; unit: MatchUnit }) {
+    const what = unit === 'connection' ? 'connections' : 'matches'
+    return (
+        <div role="status" className={cn(
+            'mx-3 mb-2 px-3 py-2 rounded-lg text-[11.5px] leading-snug text-ink',
+            'border border-amber-400/50 bg-amber-500/[0.10]',
+        )}>
+            <p className="font-medium">
+                Part of the graph couldn’t be checked, so there may be more {what} than shown.
+            </p>
+            {notes.map((note) => <p key={note} className="mt-1 text-ink-secondary">{note}</p>)}
+        </div>
+    )
+}
+
+
 function SummaryStrip({
     isRunning, isError, errorMessage, count, elapsedMs,
-    showPlus, scannedPercent: scanned, onClear, onExport, unit,
+    showPlus, scannedPercent: scanned, clock, floor, onClear, onExport, onStop, unit,
 }: {
     isRunning: boolean
     isError: boolean
@@ -239,8 +359,13 @@ function SummaryStrip({
     showPlus: boolean
     /** Set while the search is still scanning; its progress. */
     scannedPercent: number | null
+    /** A live scan's running time, "1:23". */
+    clock: string | null
+    /** The count is a floor: part of the graph was left out. */
+    floor: boolean
     onClear?: () => void
     onExport?: () => void
+    onStop?: () => void
     unit: MatchUnit
 }) {
     return (
@@ -256,9 +381,25 @@ function SummaryStrip({
                 elapsedMs={elapsedMs}
                 showPlus={showPlus}
                 scannedPercent={scanned}
+                clock={clock}
+                floor={floor}
                 unit={unit}
             />
             <div className="flex items-center gap-1 shrink-0">
+                {onStop && (
+                    <button
+                        type="button"
+                        onClick={onStop}
+                        title="Stop the search here — what it found stays, and you can resume it"
+                        className={cn(
+                            'inline-flex items-center px-2 h-7 rounded-md shrink-0',
+                            'text-[11px] font-medium text-ink-secondary transition-colors',
+                            'hover:text-ink hover:bg-glass/40',
+                        )}
+                    >
+                        Stop
+                    </button>
+                )}
                 {onExport && (
                     <button
                         type="button"
@@ -396,7 +537,8 @@ function ToolbarStrip({
 
 
 function CountReadout({
-    isRunning, isError, errorMessage, count, elapsedMs, showPlus, scannedPercent, unit,
+    isRunning, isError, errorMessage, count, elapsedMs, showPlus, scannedPercent, clock, floor,
+    unit,
 }: {
     isRunning: boolean
     isError: boolean
@@ -405,6 +547,8 @@ function CountReadout({
     elapsedMs: number | null
     showPlus: boolean
     scannedPercent: number | null
+    clock: string | null
+    floor: boolean
     unit: MatchUnit
 }) {
     return (
@@ -425,6 +569,11 @@ function CountReadout({
                     >
                         · scanning {scannedPercent}%
                     </span>
+                    {clock && (
+                        <span className="text-[10.5px] text-ink-muted tabular-nums leading-none">
+                            · {clock}
+                        </span>
+                    )}
                 </>
             ) : isError ? (
                 <span
@@ -438,6 +587,7 @@ function CountReadout({
                     {/* Hero count — the largest text in the results pane.
                         Tabular numerals keep the digits aligned when the
                         count updates between runs. */}
+                    {floor && <span className="text-[12px] text-ink-secondary leading-none">at least</span>}
                     <span className="text-[20px] font-display font-bold text-ink tabular-nums leading-none">
                         {count.toLocaleString()}{showPlus && '+'}
                     </span>

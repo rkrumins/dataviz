@@ -106,6 +106,11 @@ export interface ResultsPaneProps {
     isLoadingAll?: boolean
     /** Stop the loop where it is; the pages already loaded stay. */
     onCancelLoadAll?: () => void
+    /** Every match to a file, in one scan — what a match set too large to
+     *  list (``LOAD_ALL_MAX``) offers instead of loading it all. */
+    onExportAll?: () => void
+    /** Run the failed search again, the query as it is. */
+    onRetry?: () => void
     /** The builder's query, and how to change it from the results: an
      *  empty answer offers the fixes that would find something, the type
      *  chips narrow it, a breadcrumb looks inside its container. */
@@ -116,7 +121,7 @@ export interface ResultsPaneProps {
 
 export const ResultsPane: FC<ResultsPaneProps> = ({
     view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
-    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine,
+    onLoadAll, isLoadingAll, onCancelLoadAll, onExportAll, onRetry, draft, onRefine,
 }) => {
     // Ref to the scroll container. Threaded through to HitsByParent →
     // VirtualizedHitList so the virtualizer can measure the visible
@@ -149,6 +154,8 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
                     onLoadAll={onLoadAll}
                     isLoadingAll={isLoadingAll}
                     onCancelLoadAll={onCancelLoadAll}
+                    onExportAll={onExportAll}
+                    onRetry={onRetry}
                     draft={draft}
                     onRefine={onRefine}
                     scrollElementRef={scrollContainerRef}
@@ -161,13 +168,14 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
 
 function Dispatch({
     view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
-    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine, scrollElementRef,
+    onLoadAll, isLoadingAll, onCancelLoadAll, onExportAll, onRetry, draft, onRefine,
+    scrollElementRef,
 }: ResultsPaneProps & { scrollElementRef: RefObject<HTMLDivElement | null> }) {
     switch (view.kind) {
         case 'running':
             return <RunningSkeleton label="Searching…" />
         case 'error':
-            return <ErrorView message={view.message} />
+            return <ErrorView message={view.message} onRetry={onRetry} />
         case 'results':
             // A Connections search answers edges, not entities.
             if (view.result.edges) {
@@ -183,6 +191,7 @@ function Dispatch({
                         onLoadAll={onLoadAll}
                         isLoadingAll={isLoadingAll}
                         onCancelLoadAll={onCancelLoadAll}
+                        onExportAll={onExportAll}
                         draft={draft}
                         onRefine={onRefine}
                         scrollElementRef={scrollElementRef}
@@ -203,6 +212,7 @@ function Dispatch({
                         onLoadAll={onLoadAll}
                         isLoadingAll={isLoadingAll}
                         onCancelLoadAll={onCancelLoadAll}
+                        onExportAll={onExportAll}
                         draft={draft}
                         onRefine={onRefine}
                         scrollElementRef={scrollElementRef}
@@ -217,7 +227,7 @@ function Dispatch({
 
 function ResultsContent({
     view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
-    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine, scrollElementRef,
+    onLoadAll, isLoadingAll, onCancelLoadAll, onExportAll, draft, onRefine, scrollElementRef,
 }: {
     view: Extract<PanelView, { kind: 'results' }>
     viewId: string
@@ -230,6 +240,7 @@ function ResultsContent({
     onLoadAll?: ResultsPaneProps['onLoadAll']
     isLoadingAll?: ResultsPaneProps['isLoadingAll']
     onCancelLoadAll?: ResultsPaneProps['onCancelLoadAll']
+    onExportAll?: ResultsPaneProps['onExportAll']
     draft?: ResultsPaneProps['draft']
     onRefine?: ResultsPaneProps['onRefine']
     scrollElementRef: RefObject<HTMLDivElement | null>
@@ -534,6 +545,7 @@ function ResultsContent({
                                 onLoadAll={onLoadAll}
                                 isLoadingAll={isLoadingAll}
                                 onCancelLoadAll={onCancelLoadAll}
+                                onExportAll={onExportAll}
                             />
                         )}
                     </div>
@@ -548,7 +560,7 @@ function ResultsContent({
  *  type, and the next page — or, when it found none, why. */
 function ConnectionsContent({
     view, viewId, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
-    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine, scrollElementRef,
+    onLoadAll, isLoadingAll, onCancelLoadAll, onExportAll, draft, onRefine, scrollElementRef,
 }: Omit<ResultsPaneProps, 'onScopeToGroup' | 'view'> & {
     view: Extract<PanelView, { kind: 'results' }>
     scrollElementRef: RefObject<HTMLDivElement | null>
@@ -596,6 +608,7 @@ function ConnectionsContent({
                         onLoadAll={onLoadAll}
                         isLoadingAll={isLoadingAll}
                         onCancelLoadAll={onCancelLoadAll}
+                        onExportAll={onExportAll}
                     />
                 ) : null}
             />
@@ -604,9 +617,16 @@ function ConnectionsContent({
 }
 
 
+/** The most matches "Load all" lists. Past what a search's session holds
+ *  (a thousand rows), every thousand more is a scan of the whole view of
+ *  its own; more than this many is better as one export — a single scan. */
+export const LOAD_ALL_MAX = 10_000
+
+
 /** "Load more" and "Load all" under a page of results — hits or edges. */
 function LoadMoreFooter({
     loaded, total, onLoadMore, isLoadingMore, loadMoreError, onLoadAll, isLoadingAll, onCancelLoadAll,
+    onExportAll,
 }: {
     loaded: number
     total: number
@@ -616,7 +636,9 @@ function LoadMoreFooter({
     onLoadAll?: () => void
     isLoadingAll?: boolean
     onCancelLoadAll?: () => void
+    onExportAll?: () => void
 }) {
+    const listable = total <= LOAD_ALL_MAX
     return (
         <div className="mt-2 px-3 pb-2">
             {isLoadingAll ? (
@@ -667,7 +689,23 @@ function LoadMoreFooter({
                             ? 'Loading…'
                             : loadMoreError ? 'Try again' : `Load more (${loaded} so far)`}
                     </button>
-                    {onLoadAll && (
+                    {!listable && onExportAll && (
+                        <button
+                            type="button"
+                            onClick={onExportAll}
+                            title={`Too many to list here: every one of the ${total.toLocaleString()} `
+                                + 'to a file, in one pass'}
+                            className={cn(
+                                'rounded-lg px-3 py-2 shrink-0',
+                                'border border-glass-border',
+                                'text-[12px] font-medium text-ink-secondary',
+                                'hover:text-ink hover:bg-glass/40 transition-colors',
+                            )}
+                        >
+                            Export all {total.toLocaleString()}
+                        </button>
+                    )}
+                    {listable && onLoadAll && (
                         <button
                             type="button"
                             onClick={onLoadAll}

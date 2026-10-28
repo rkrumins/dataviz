@@ -2457,6 +2457,31 @@ async def _search_failed_handler(request, exc: _SearchFailed):
     )
 
 
+# The cache Redis keeping search sessions did not answer. Not the graph store:
+# registered as a breaker logical exception (a raw Redis error read as a graph
+# outage and refused every graph read on the source), and answered as a pause
+# the client waits out — the sessions' progress is kept when the cache is back.
+from backend.app.services.deep_search import SessionStoreUnavailable as _SessionStoreUnavailable  # noqa: E402
+
+
+@app.exception_handler(_SessionStoreUnavailable)
+async def _session_store_unavailable_handler(request, exc: _SessionStoreUnavailable):
+    logger.warning("Search sessions unavailable on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": "2"},
+        content={
+            "detail": {
+                "code": "SEARCH_STORE_UNAVAILABLE",
+                "reason": "searches can't keep their progress just now — the cache that "
+                          "holds it isn't answering",
+                "technical": str(exc),
+                "retryAfterSeconds": 2,
+            }
+        },
+    )
+
+
 # A write reached a feature an admin turned off (e.g. the versioned write-through
 # path when ``versioningEnabled`` is disabled) — same typed 403 shape as the
 # API-layer gate in ``versioning_gate.py`` so the frontend handles one contract.

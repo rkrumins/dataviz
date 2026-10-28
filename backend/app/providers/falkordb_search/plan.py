@@ -110,6 +110,16 @@ class Unit:
     elo: Optional[int] = None
     ehi: Optional[int] = None
     espan: int = 0
+    # visible: the URNs this unit reads (None: every one on the canvas,
+    # ``Context.visible``) — set once a unit is cut in halves.
+    urns: Optional[List[str]] = None
+    # A unit that can't be cut further gets one last try at the longest
+    # budget a request allows (``engine._hop``).
+    last_try: bool = False
+    # How often the graph store dropped the connection on this unit while it
+    # answered others — a unit that keeps knocking it over is left out.
+    drops: int = 0
+    drop_mark: int = -1                # the session's ``scanned`` at the last drop
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -160,6 +170,11 @@ class Unit:
             mid = len(self.roots) // 2
             return [replace(self, roots=self.roots[:mid], size=mid),
                     replace(self, roots=self.roots[mid:], size=len(self.roots) - mid)]
+        if self.kind == "visible" and self.urns and len(self.urns) > 1:
+            mid = len(self.urns) // 2
+            half = max(1, self.size // 2)
+            return [replace(self, urns=self.urns[:mid], size=half),
+                    replace(self, urns=self.urns[mid:], size=half)]
         return None
 
     def _split_band(self) -> Optional[List["Unit"]]:
@@ -734,6 +749,66 @@ async def _outermost(run: Run, ids: List[int], rel: str, max_depth: int) -> List
                   if not any(a in roots for a in (r[1] or []) if a is not None))
 
 
+async def expand_unit(unit: Unit, ctx: Context, run, timeout_s: float
+                      ) -> Optional[List[Unit]]:
+    """A unit ``split`` can't cut, read one level down instead — or None.
+
+    * A single root's subtree: the root itself, and its children walked
+      one level less deep. Containment is a tree (``_rooted_plan``), so the
+      two hold every node of the subtree once, and the children's walk
+      splits as any walk of many roots does.
+    * What is visible on the canvas, under one label: its URNs, halved.
+
+    ``run(cypher, params, timeout_s)`` executes one statement."""
+    if unit.kind == "visible" and unit.urns is None and len(ctx.visible or []) > 1:
+        return replace(unit, urns=list(ctx.visible or [])).split()
+    if unit.kind != "walk" or len(unit.roots or []) != 1 or not ctx.containment:
+        return None
+    depth = unit.depth if unit.depth is not None else ctx.max_depth
+    if depth < 1:
+        return None
+    root = unit.roots[0]
+    res = await run(f"MATCH (_w)-[:{_rel(ctx.containment)}]->(_c) WHERE ID(_w) = $_root "
+                    "RETURN collect(ID(_c))", {"_root": root}, timeout_s)
+    children = sorted(_collected(res))
+    if not children or len(children) > REACH_MAX:
+        return None
+    rest = max(1, unit.size - 1)
+    # One level down from the last: the children themselves (a walk's
+    # depth of 0 reads as the scope's in ``match_statement``).
+    below = (replace(unit, kind="ids", roots=children, depth=None, size=rest) if depth == 1
+             else replace(unit, roots=children, depth=depth - 1, size=rest))
+    return [replace(unit, kind="ids", roots=[root], depth=None, size=1), below]
+
+
+async def describe_unit(unit: Unit, run) -> Optional[str]:
+    """The one entity a unit that can't be cut reads, as a person names it
+    — "“orders” (dataset)" — or None for anything else, or when it can't be
+    read either. A walk is its root and what is inside it."""
+    if unit.kind == "visible" and unit.urns and len(unit.urns) == 1:
+        cypher = (f"MATCH (n:`{_sanitize_label(unit.label or '')}`) WHERE n.urn = $_u "
+                  "RETURN n.displayName, n.urn, labels(n)[0] LIMIT 1")
+        params: Dict[str, Any] = {"_u": unit.urns[0]}
+    elif unit.kind in ("walk", "ids") and len(unit.roots or []) == 1:
+        cypher = "MATCH (n) WHERE ID(n) = $_id RETURN n.displayName, n.urn, labels(n)[0]"
+        params = {"_id": unit.roots[0]}
+    elif unit.kind == "range" and unit.hi is not None and unit.hi - (unit.lo or 0) == 1:
+        cypher = (f"MATCH (n:`{_sanitize_label(unit.label or '')}`) WHERE ID(n) = $_id "
+                  "RETURN n.displayName, n.urn, labels(n)[0]")
+        params = {"_id": unit.lo or 0}
+    else:
+        return None
+    try:
+        rows = (await run(cypher, params, 5.0)).result_set or []
+    except Exception:                                   # noqa: BLE001 — named or not, it is left out
+        return None
+    if not rows or not (rows[0][0] or rows[0][1]):
+        return None
+    name, urn, label = rows[0]
+    named = f"“{name or urn}”" + (f" ({label})" if label else "")
+    return f"{named} and what’s inside it" if unit.kind == "walk" else named
+
+
 # ---------------------------------------------------------------------------
 # Statements
 # ---------------------------------------------------------------------------
@@ -759,7 +834,7 @@ def match_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
         conds: List[str] = []
         if unit.kind == "visible":
             conds.append("n.urn IN $_visible")
-            params["_visible"] = list(ctx.visible or [])
+            params["_visible"] = list(unit.urns if unit.urns is not None else ctx.visible or [])
         else:
             if unit.lo is not None:
                 conds.append("ID(n) >= $_lo")
