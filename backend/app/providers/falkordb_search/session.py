@@ -26,6 +26,7 @@ any one container's count is a lookup.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import logging
 import time
@@ -33,9 +34,10 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from redis.exceptions import WatchError
+from redis.exceptions import RedisError, WatchError
 
 from backend.app.providers.falkordb_search.plan import Plan, Unit
+from backend.app.services.deep_search import SessionStoreUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -197,8 +199,22 @@ class SessionStore:
         raise NotImplementedError
 
 
+def _cache_call(method):
+    """A store method whose Redis failing is the cache's, not the graph's
+    (``SessionStoreUnavailable``)."""
+    @functools.wraps(method)
+    async def call(self, *args, **kwargs):
+        try:
+            return await method(self, *args, **kwargs)
+        except (RedisError, OSError, asyncio.TimeoutError) as exc:
+            raise SessionStoreUnavailable(
+                f"the cache keeping search sessions did not answer: {exc!r}"[:300]) from exc
+    return call
+
+
 class RedisSessionStore(SessionStore):
-    """Sessions in the provider's cache Redis, under its namespace."""
+    """Sessions in the provider's cache Redis, under its namespace. A Redis
+    that fails raises ``SessionStoreUnavailable``."""
 
     def __init__(self, redis, namespace: str) -> None:
         self._redis = redis
@@ -219,10 +235,12 @@ class RedisSessionStore(SessionStore):
     def _acc_key(self, sid: str) -> str:
         return f"{self._ns}:dss:{sid}:acc"
 
+    @_cache_call
     async def load(self, sid: str) -> Optional[Session]:
         raw = await self._redis.get(self._key(sid))
         return Session.from_json(raw) if raw else None
 
+    @_cache_call
     async def save(self, session: Session, token: Optional[str], ttl_s: int,
                    tallies: Optional[Dict[str, Tally]] = None,
                    accumulator: Optional[str] = None) -> bool:
@@ -260,15 +278,19 @@ class RedisSessionStore(SessionStore):
                 return False
         return True
 
+    @_cache_call
     async def load_accumulator(self, sid: str) -> Optional[str]:
         return _text(await self._redis.get(self._acc_key(sid)))
 
+    @_cache_call
     async def point(self, name: str, sid: str, ttl_s: int) -> None:
         await self._redis.set(f"{self._ns}:dsp:{name}", sid, ex=ttl_s)
 
+    @_cache_call
     async def pointed(self, name: str) -> Optional[str]:
         return _text(await self._redis.get(f"{self._ns}:dsp:{name}"))
 
+    @_cache_call
     async def top_tallies(self, sid: str, n: int) -> List[Tuple[str, Tally]]:
         if n <= 0:
             return []
@@ -276,6 +298,7 @@ class RedisSessionStore(SessionStore):
         held = await self.read_tallies(sid, urns)
         return [(urn, held[urn]) for urn in urns if urn in held]
 
+    @_cache_call
     async def read_tallies(self, sid: str, urns: Iterable[str]) -> Dict[str, Tally]:
         urns = list(urns)
         if not urns:
@@ -283,28 +306,34 @@ class RedisSessionStore(SessionStore):
         raws = await self._redis.hmget(self._tally_key(sid), urns)
         return {urn: json.loads(raw) for urn, raw in zip(urns, raws) if raw}
 
+    @_cache_call
     async def lease(self, sid: str, ttl_ms: int) -> Optional[str]:
         token = uuid.uuid4().hex
         ok = await self._redis.set(self._lease_key(sid), token, nx=True, px=ttl_ms)
         return token if ok else None
 
+    @_cache_call
     async def release(self, sid: str, token: str) -> None:
         if await self._holder(sid) == token:
             await self._redis.delete(self._lease_key(sid))
 
+    @_cache_call
     async def delete(self, sid: str) -> None:
         await self._redis.delete(self._key(sid), self._lease_key(sid),
                                  f"{self._key(sid)}:facets", f"{self._key(sid)}:facets:claim",
                                  self._tally_key(sid), self._rank_key(sid), self._acc_key(sid))
 
+    @_cache_call
     async def claim_facets(self, sid: str, ttl_s: int) -> bool:
         return bool(await self._redis.set(f"{self._key(sid)}:facets:claim", "1",
                                           nx=True, ex=ttl_s))
 
+    @_cache_call
     async def save_facets(self, sid: str, facets: Any, ttl_s: int) -> None:
         await self._redis.set(f"{self._key(sid)}:facets",
                               json.dumps(facets, separators=(",", ":")), ex=ttl_s)
 
+    @_cache_call
     async def load_facets(self, sid: str) -> Optional[Any]:
         raw = await self._redis.get(f"{self._key(sid)}:facets")
         return json.loads(raw) if raw else None

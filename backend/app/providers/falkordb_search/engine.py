@@ -422,11 +422,15 @@ async def _advance(session: Session, created: bool, store: SessionStore, work,
     try:
         await _hop(session, work, deadline, settings, unit_s, last_tries=last_tries)
     finally:
-        if session.status == FAILED:
-            await store.save(session, token, FAILED_TTL_S)
-        else:
-            await store.save(session, token, ttl_s, **work.commit())
-        await store.release(session.sid, token)
+        try:
+            if session.status == FAILED:
+                await store.save(session, token, FAILED_TTL_S)
+            else:
+                await store.save(session, token, ttl_s, **work.commit())
+        finally:
+            # Given back even when the commit failed: held to its expiry, the
+            # next request found the session busy and only waited on it.
+            await store.release(session.sid, token)
     return session
 
 
