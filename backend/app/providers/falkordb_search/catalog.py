@@ -447,7 +447,10 @@ async def execute_catalog_session(provider, scope: SearchScope, *, context: Sear
 
     query_id = f"catalog:{context.scope_hash}"
     sid = session_id_of(query_id, context.data_version, None)
-    session = await _find(store, session_id, query_id, None) or await store.load(sid)
+    session = await _find(store, session_id, query_id, None)
+    if session is not None and session.status == FAILED:
+        raise SearchFailed(f"catalog failed: {session.error}")
+    session = session or await store.load(sid)
     created = False
     if session is None or session.status == FAILED:
         query = SearchQuery(predicate=MatchAllPredicate(), scope=scope)

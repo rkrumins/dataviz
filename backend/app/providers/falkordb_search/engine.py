@@ -120,6 +120,12 @@ _PATHS_FLOOR_S = 1.5
 #: half a second turned a finished search into a 504.
 _HYDRATE_FLOOR_S = 5.0
 
+#: How long a failed session is kept: a request naming it hears why it
+#: stopped. Deleted at once, the next poll found nothing, planned the search
+#: again from zero and failed the same way — for as long as the client kept
+#: asking. Only a fresh run (no ``sessionId``) plans it again.
+FAILED_TTL_S = 120
+
 #: Facets computed in this process, by session, while they run.
 _FACET_TASKS: Dict[str, "asyncio.Task[None]"] = {}
 
@@ -219,8 +225,10 @@ async def execute_count_session(
     if not advance:
         query_id = query_identity(query, context.scope_hash, 0)
         store = store_for(provider)
-        session = (await _find(store, query.options.session_id, query_id, None)
-                   or await store.load(session_id(query_id, context.data_version, None)))
+        session = await _find(store, query.options.session_id, query_id, None)
+        if session is not None and session.status == FAILED:
+            raise SearchFailed(f"count failed: {session.error}")
+        session = session or await store.load(session_id(query_id, context.data_version, None))
         if session is None or session.status == FAILED:
             return {"count": 0, "status": "running", "sessionId": None, "progress": None,
                     "dataVersion": context.data_version, "notes": []}
@@ -381,16 +389,17 @@ async def _advance(session: Session, created: bool, store: SessionStore, work,
         return await wait_for_commit(store, session.sid, session, deadline) or session
     # The lease is ours: carry on from the latest commit, not from what was
     # read before taking it — another request may have committed and let go
-    # in between, and running its units again would count them twice.
+    # in between, and running its units again would count them twice. A
+    # search planned afresh replaces the failed session it shares an id with.
     latest = await store.load(session.sid)
-    if latest is not None:
+    if latest is not None and not (created and latest.status == FAILED):
         session.adopt(latest)
     await work.begin(store)
     try:
         await _hop(session, work, deadline, settings, unit_s)
     finally:
         if session.status == FAILED:
-            await store.delete(session.sid)
+            await store.save(session, token, FAILED_TTL_S)
         else:
             await store.save(session, token, ttl_s, **work.commit())
         await store.release(session.sid, token)
@@ -447,13 +456,15 @@ def _read_cursor(raw: Optional[str], query_id: str) -> Optional[Dict[str, Any]]:
 async def _find(store: SessionStore, sid: Optional[str], query_id: str,
                 after: Optional[List[Any]]) -> Optional[Session]:
     """The session a client asked to continue — only if it answers this
-    very query (a sessionId is a hint, never an authority)."""
+    very query (a sessionId is a hint, never an authority). A failed one
+    too (``FAILED_TTL_S``): the client is told why it stopped, rather than
+    the search being planned again behind its back."""
     if not sid:
         return None
     session = await store.load(sid)
     if session is None or session.query_id != query_id or session.after != after:
         return None
-    return None if session.status == FAILED else session
+    return session
 
 
 def _containment(provider) -> Tuple[str, ...]:

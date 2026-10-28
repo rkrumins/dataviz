@@ -837,11 +837,57 @@ class TestSessions:
         with pytest.raises(ProviderBusy):
             await _search(_Provider())
 
-    async def test_a_failed_unit_fails_the_search_and_is_not_kept(self, scan, fresh_memory_store):
-        scan({"A": _rows("a", 2)}, fail={"A"})
-        with pytest.raises(RuntimeError, match="search failed: boom"):
+    async def test_a_failed_search_is_kept_briefly_so_a_poll_hears_why(self, scan,
+                                                                      fresh_memory_store):
+        """Deleted at once, a failed session left the next poll nothing to
+        find: it planned the search again from zero and failed the same way,
+        for as long as the client kept asking. Kept for a while, a poll
+        naming it is told why it stopped; only a fresh run plans it again."""
+        s = scan({"A": _rows("a", 2)}, fail={"A"})
+        with pytest.raises(SearchFailed, match="search failed: boom"):
             await _search(_Provider())
-        assert fresh_memory_store._sessions == {}
+        (sid,) = fresh_memory_store._sessions
+        kept = await fresh_memory_store.load(sid)
+        assert kept.status == "failed" and kept.error == "boom"
+        assert fresh_memory_store._sessions[sid][0] - time.monotonic() <= engine_mod.FAILED_TTL_S
+
+        with pytest.raises(SearchFailed, match="boom"):
+            await _search(_Provider(), session_id=sid)
+        assert len(s.runs) == 1, "a poll naming the failed session runs nothing"
+
+        with pytest.raises(SearchFailed):
+            await _search(_Provider())
+        assert len(s.runs) == 2, "a fresh run plans it again"
+
+    async def test_a_request_waiting_on_one_that_fails_hears_the_failure(self, scan):
+        """A request that finds the lease held waits for the holder's commit.
+        When the holder fails, the waiter answers with the failure — not
+        with the stale page it read, which sent its client back to a
+        session that was no longer there."""
+        scan({"A": _rows("a", 2)}, fail={"A"}, delay=0.1)
+        provider = _Provider()
+        outcomes = await asyncio.gather(_search(provider, wait_ms=2000),
+                                        _search(provider, wait_ms=2000),
+                                        return_exceptions=True)
+        assert all(isinstance(o, SearchFailed) for o in outcomes), outcomes
+
+    async def test_a_count_read_without_advancing_reports_a_failed_count(self, scan,
+                                                                        fresh_memory_store):
+        """The counts endpoint first reads where every rule's count has got
+        to. A count it names that failed says so; this data's own failed
+        count, unnamed, is a fresh start."""
+        scan({"A": _rows("a", 2)}, fail={"A"})
+        context = SearchRunContext(data_version="1", scope_hash="h")
+        with pytest.raises(SearchFailed):
+            await engine_mod.execute_count_session(_Provider(), _query(), context=context)
+        (sid,) = fresh_memory_store._sessions
+        named = _query(sessionId=sid)
+        with pytest.raises(SearchFailed, match="count failed: boom"):
+            await engine_mod.execute_count_session(_Provider(), named, context=context,
+                                                   advance=False)
+        fresh = await engine_mod.execute_count_session(_Provider(), _query(), context=context,
+                                                       advance=False)
+        assert (fresh["status"], fresh["count"], fresh["sessionId"]) == ("running", 0, None)
 
     async def test_identical_searches_share_one_session(self, scan):
         s = scan({"A": _rows("a", 3)})

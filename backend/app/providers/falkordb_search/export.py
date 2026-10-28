@@ -445,7 +445,10 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
         )
     query_id = _query_id(query, context.scope_hash, fmt, cols)
     sid = session_id_of(query_id, context.data_version, None)
-    session = await _find(store, session_id, query_id, None) or await store.load(sid)
+    session = await _find(store, session_id, query_id, None)
+    if session is not None and session.status == FAILED:
+        raise SearchFailed(f"export failed: {session.error}")
+    session = session or await store.load(sid)
     if session is not None and time.time() >= _keep_until(session):
         # Its first parts may be swept by now: export afresh.
         await store.delete(session.sid)
