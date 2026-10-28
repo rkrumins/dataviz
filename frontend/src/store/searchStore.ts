@@ -241,6 +241,9 @@ interface SearchStoreState {
      * without owning the run pipeline. Cleared on consume.
      */
     pendingRunPredicate: Predicate | null
+    /** What "How it matches" left: the routes it runs, and the query whose
+     *  results it came from — the way back to them. */
+    routesFrom: { routes: Predicate; from: Predicate } | null
 
     /**
      * Scope mode for the next search run.
@@ -467,6 +470,9 @@ interface SearchStoreActions {
      *  the "open in Advanced Search + run" bridge used by the Property
      *  Manager. The caller also opens the panel. */
     requestSearchRun: (predicate: Predicate) => void
+    /** "How it matches": run ``routes`` and keep ``from``, the query whose
+     *  results they explain, to go back to. */
+    showRoutes: (routes: Predicate, from: Predicate) => void
     setStudioOpen: (open: boolean) => void
     requestOpenBlank: () => void
     /** Atomic read-and-clear of the request to open what to fill in. */
@@ -714,6 +720,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     historyFuture: EMPTY_HISTORY,
     recentQueries: loadRecentFromStorage(),
     pendingRunPredicate: null,
+    routesFrom: null,
     // Default to 'view' — searches the full descendant set of the
     // view's top-level containers, including subtrees that haven't
     // been expanded yet. Matches the user's "search this view"
@@ -974,6 +981,11 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         set({ pendingRunPredicate: predicate })
     },
 
+    showRoutes: (routes, from) => {
+        get().requestSearchRun(routes)
+        set({ routesFrom: { routes, from } })
+    },
+
     setStudioOpen: (open) => {
         set({ studioOpen: open })
     },
@@ -1053,6 +1065,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             builderValidation: EMPTY_ISSUES,
             ancestorMatchCounts: EMPTY_MAP,
             ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
+            routesFrom: null,
             // A Clear the person asked for is one more undo step. Otherwise
             // wipe the in-memory undo stack — the panel is closing, it
             // would be confusing to "undo" into a query the user can't see

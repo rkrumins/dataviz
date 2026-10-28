@@ -8,7 +8,7 @@
  * scrollable body that paints aggregates / hits / paths / error AND
  * the focused-match auto-reveal effect.
  */
-import { Filter, X } from 'lucide-react'
+import { ArrowLeft, Filter, X } from 'lucide-react'
 import { type FC, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
 
 import { cn } from '@/lib/utils'
@@ -17,6 +17,7 @@ import {
     useAncestorMatchCounts,
     useDraftPredicate,
     useFocusedMatchUrn,
+    useSearchStore,
 } from '@/store/searchStore'
 import type {
     AncestorRef,
@@ -354,6 +355,10 @@ function ResultsContent({
     const hasAggregates = allBuckets.length > 0
     const hasHits = hits.length > 0
     const hasPaths = paths !== null
+    // The routes "How it matches" showed, still the query: the way back to
+    // the results they explain.
+    const routesFrom = useSearchStore((s) => s.routesFrom)
+    const backTo = routesFrom && draft === routesFrom.routes ? routesFrom.from : null
     const isEmpty = !hasAggregates && !hasHits && !hasPaths
 
     // Headline numbers. ``candidateCount`` is the backend's count over the FULL
@@ -434,6 +439,13 @@ function ResultsContent({
 
             {hasPaths && paths && (
                 <div className="p-4">
+                    {backTo && onRefine && (
+                        <button type="button" onClick={() => onRefine(backTo)}
+                                className="mb-3 inline-flex items-center gap-1.5 rounded-lg border border-glass-border bg-glass/50 px-2.5 py-1.5 text-[11px] font-medium text-ink-secondary transition-colors hover:bg-glass/70 hover:text-ink">
+                            <ArrowLeft className="h-3 w-3" />
+                            Back to results
+                        </button>
+                    )}
                     <PathResultPanel
                         paths={paths}
                         truncated={result.truncated}

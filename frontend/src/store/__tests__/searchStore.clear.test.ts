@@ -48,4 +48,11 @@ describe('searchStore — clear', () => {
         store().undo()
         expect(store().draftPredicate).toBeNull()
     })
+
+    it('forgets the way back from How it matches either way', () => {
+        store().showRoutes({ kind: 'path', sourceUrns: ['urn:a'], targetUrns: [] }, PII)
+        expect(store().routesFrom?.from).toBe(PII)
+        store().clear({ undoable: true })
+        expect(store().routesFrom).toBeNull()
+    })
 })
