@@ -285,11 +285,12 @@ async def test_an_export_holds_every_match_once_exactly(provider, objects, name,
 async def test_a_views_roots_bound_the_export_walked_or_clamped(provider, objects, monkeypatch,
                                                                 walk_max):
     """``300000``: the subtrees are walked, read 37 rows a page. ``0``:
-    never walk — the bands are read, each clamped to the roots."""
+    never walk — the bands are read, each clamped to the roots (a page at a
+    time too, of the same 37 rows)."""
     from backend.app.providers.falkordb_search import export as export_mod
     from backend.app.services.deep_search import get_deep_search_settings
     monkeypatch.setenv("DEEP_SEARCH_WALK_MAX", walk_max)
-    monkeypatch.setattr(export_mod, "_WALK_PAGE", 37)
+    monkeypatch.setattr(export_mod, "_PAGE", 37)
     get_deep_search_settings.cache_clear()
     statements = []
     ro_query = provider._ro_query
@@ -307,11 +308,11 @@ async def test_a_views_roots_bound_the_export_walked_or_clamped(provider, object
     want = _expected(predicate, _subtree(roots))
     assert len(want) > 37
     _check(answer, text, "ndjson", want)
-    pages = [c for c in statements if "$_after" in c]
+    walks = [c for c in statements if "$_after" in c and "(_w)" in c]
     if walk_max == "0":
-        assert not pages
+        assert not walks
     else:
-        assert len(pages) > 2
+        assert len(walks) > 2
 
 
 async def test_the_canvas_urns_bound_a_visible_export(provider, objects):

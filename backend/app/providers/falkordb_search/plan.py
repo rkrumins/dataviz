@@ -45,7 +45,9 @@ from typing import Any, Awaitable, Callable, Dict, FrozenSet, List, Optional, Se
 from backend.app.providers.falkordb_deep_search import (
     KEY_COMPARISON_NOTE,
     _build_within_hops_continuation,
+    _conjuncts,
     _placements_of,
+    _ref_urns,
     _scope_urn_sets_with_depths,
     _sanitize_label,
     _searchable_labels,
@@ -57,7 +59,12 @@ from backend.app.providers.falkordb_search.keys import SortSpec
 from backend.app.providers.falkordb_search.raw_properties import RawLeaf, probe_condition
 from backend.app.services.deep_search import CompileError
 from backend.app.services.native_query.parse_cost import grouped
+from backend.common.models.search import anchor_groups
 
+#: The most rows FalkorDB sends in one reply on its stock image
+#: (``RESULTSET_SIZE``): it cuts a reply there without saying so, so a
+#: statement that may return more is read in pages of this many.
+REPLY_ROWS_MAX = 10_000
 #: Root sets up to this size clamp range units with an ``IN`` list. The
 #: check costs (ancestor rows) × (roots): 50 roots cost 2× an unclamped
 #: chunk, 5,000 cost 30× (§7), so a larger set is walked in buckets.
@@ -95,6 +102,24 @@ class Unit:
     # ids: the hoisted lineage walk (its index) every one of them is known
     # to meet, so its continuation is left out.
     satisfies: Optional[int] = None
+    # A Connections search's unit (``edges``) reads its nodes' edges, in a
+    # band of edge IDs: from ``elo`` (None: the first) to ``ehi`` (None:
+    # open-ended, likely ``espan`` IDs past ``elo``). ``reverse``: the
+    # second pass of ``either`` — edges stored the other way round.
+    reverse: bool = False
+    elo: Optional[int] = None
+    ehi: Optional[int] = None
+    espan: int = 0
+    # visible: the URNs this unit reads (None: every one on the canvas,
+    # ``Context.visible``) — set once a unit is cut in halves.
+    urns: Optional[List[str]] = None
+    # A unit that can't be cut further gets one last try at the longest
+    # budget a request allows (``engine._hop``).
+    last_try: bool = False
+    # How often the graph store dropped the connection on this unit while it
+    # answered others — a unit that keeps knocking it over is left out.
+    drops: int = 0
+    drop_mark: int = -1                # the session's ``scanned`` at the last drop
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
@@ -107,7 +132,23 @@ class Unit:
 
     def split(self) -> Optional[List["Unit"]]:
         """Two halves of this unit, or None when it can't be cut further.
-        A chunk that runs out of time is retried as its halves."""
+        A chunk that runs out of time is retried as its halves.
+
+        A Connections unit is cut in its edges too, into quarters: a unit
+        far past its usual time likely holds a hub, whose edges halving the
+        nodes leaves whole in one half (a single node can't be halved)."""
+        halves = self._split_nodes()
+        if not self.banded:
+            return halves
+        quarters = [part for half in halves or [self] for part in half._split_band() or [half]]
+        return quarters if len(quarters) > 1 else None
+
+    @property
+    def banded(self) -> bool:
+        """A Connections unit, read in a band of edge IDs."""
+        return self.espan > 0 or self.elo is not None or self.ehi is not None
+
+    def _split_nodes(self) -> Optional[List["Unit"]]:
         if self.kind == "range":
             lo = self.lo or 0
             # An open-ended range is cut where its nodes likely end; its
@@ -117,20 +158,36 @@ class Unit:
                 return None
             mid = lo + (hi - lo) // 2
             half = max(1, self.size // 2)
-            return [Unit("range", self.label, self.lo, mid, None, self.exclude, half),
-                    Unit("range", self.label, mid, self.hi, None, self.exclude, half,
-                         0 if self.hi is not None else hi - mid)]
+            return [replace(self, hi=mid, size=half, span=0),
+                    replace(self, lo=mid, size=half,
+                            span=0 if self.hi is not None else hi - mid)]
         if self.kind == "walk" and self.roots and len(self.roots) > 1:
             mid = len(self.roots) // 2
             half = max(1, self.size // 2)
-            return [Unit("walk", roots=self.roots[:mid], size=half, depth=self.depth),
-                    Unit("walk", roots=self.roots[mid:], size=half, depth=self.depth)]
+            return [replace(self, roots=self.roots[:mid], size=half),
+                    replace(self, roots=self.roots[mid:], size=half)]
         if self.kind == "ids" and self.roots and len(self.roots) > 1:
             mid = len(self.roots) // 2
-            return [Unit("ids", roots=self.roots[:mid], size=mid, satisfies=self.satisfies),
-                    Unit("ids", roots=self.roots[mid:], size=len(self.roots) - mid,
-                         satisfies=self.satisfies)]
+            return [replace(self, roots=self.roots[:mid], size=mid),
+                    replace(self, roots=self.roots[mid:], size=len(self.roots) - mid)]
+        if self.kind == "visible" and self.urns and len(self.urns) > 1:
+            mid = len(self.urns) // 2
+            half = max(1, self.size // 2)
+            return [replace(self, urns=self.urns[:mid], size=half),
+                    replace(self, urns=self.urns[mid:], size=half)]
         return None
+
+    def _split_band(self) -> Optional[List["Unit"]]:
+        """Two halves of the edge-ID band, cut like an open-ended range."""
+        lo = self.elo or 0
+        hi = self.ehi if self.ehi is not None else lo + self.espan
+        if hi - lo < 2:
+            return None
+        mid = lo + (hi - lo) // 2
+        half = max(1, self.size // 2)
+        return [replace(self, ehi=mid, espan=0, size=half),
+                replace(self, elo=mid, size=half,
+                        espan=0 if self.ehi is not None else hi - mid)]
 
 
 @dataclass
@@ -213,6 +270,12 @@ async def make_plan(provider, query, compiler, *, run: Run, width: int,
     # Values kept raw (``raw_leaves`` collects them) aren't compared key to key.
     if compiler.compares_keys and compiler.raw_leaves is not None:
         notes.append(KEY_COMPARISON_NOTE)
+    # A traced relationship's walk is its whole test: only its plan reads it.
+    if compiler.hoisted_trace is None:
+        named = await named_plan(run, provider, query, compiler, labels, containment,
+                                 width=width, notes=notes)
+        if named is not None:
+            return named
     reach = await reach_plan(run, provider, query, compiler, labels, containment,
                              width=width, notes=notes)
     if reach is not None:
@@ -345,14 +408,21 @@ async def _resolve_clamps(run: Run, labels: Sequence[str], root_sets: List[List[
 
 
 async def _ids_of(run: Run, labels: Sequence[str], urns: Sequence[str]) -> List[int]:
+    """The node IDs of ``urns``. Half a reply's rows at a time: a node read
+    under two of the labels answers twice."""
     if not labels or not urns:
         return []
     union = " UNION ALL ".join(
         f"MATCH (r:`{_sanitize_label(lbl)}`) WHERE r.urn IN $_urns RETURN ID(r) AS id"
         for lbl in labels
     )
-    res = await run(union, {"_urns": list(urns)})
-    return sorted({int(r[0]) for r in (res.result_set or []) if r and r[0] is not None})
+    urns = list(urns)
+    step = REPLY_ROWS_MAX // 2
+    ids = set()
+    for i in range(0, len(urns), step):
+        res = await run(union, {"_urns": urns[i:i + step]})
+        ids.update(int(r[0]) for r in (res.result_set or []) if r and r[0] is not None)
+    return sorted(ids)
 
 
 async def _rooted_plan(run: Run, clamps: List[List[int]], depths: List[int], stats,
@@ -515,7 +585,8 @@ def _timed_out(exc: BaseException) -> bool:
 async def _anchor_ids(run: Run, labels: Sequence[str], entry: Dict[str, Any]
                       ) -> Optional[List[int]]:
     """The node IDs the walk starts from: the named entities, or what lies
-    their groups' levels below them. None past ``REACH_ANCHORS_MAX``."""
+    their groups' levels below them — above them, for a group ``up`` (their
+    parents, their ancestors). None past ``REACH_ANCHORS_MAX``."""
     groups = entry.get("groups") or [{"urns": entry["urns"], "lo": 0, "hi": 0}]
     rel = _rel(entry.get("containment") or ())
     ids: set = set()
@@ -524,9 +595,11 @@ async def _anchor_ids(run: Run, labels: Sequence[str], entry: Dict[str, Any]
         if roots and int(group["hi"]) == 0:
             ids.update(roots)
         elif roots:
+            levels = f"[:{rel}*{int(group['lo'])}..{int(group['hi'])}]"
+            step = f"(_a)-{levels}->(_w)" if group.get("up") else f"(_w)-{levels}->(_a)"
             res = await run(
                 "UNWIND $_ids AS _wi MATCH (_w) WHERE ID(_w) = _wi "
-                f"MATCH (_w)-[:{rel}*{int(group['lo'])}..{int(group['hi'])}]->(_a) "
+                f"MATCH {step} "
                 "WITH DISTINCT _a LIMIT $_lim RETURN collect(ID(_a))",
                 {"_ids": roots, "_lim": REACH_ANCHORS_MAX + 1},
             )
@@ -534,6 +607,49 @@ async def _anchor_ids(run: Run, labels: Sequence[str], entry: Dict[str, Any]
         if len(ids) > REACH_ANCHORS_MAX:
             return None
     return sorted(ids)
+
+
+def _walked(m) -> bool:
+    """A condition the scope's own walk already bounds: an "inside" in the
+    top-level AND, or a relative up the tree that is a named entity — what
+    the compiler hoists as roots (``_Compiler._anchorable``)."""
+    return m.kind == "descendantOf" or (
+        m.kind == "related" and m.axis in ("parent", "ancestor", "root")
+        and m.quantifier == "any" and m.count is None
+        and m.where is not None and m.where.kind == "is")
+
+
+async def named_plan(run: Run, provider, query, compiler, labels: Sequence[str],
+                     containment: Tuple[str, ...], *, width: int,
+                     notes: List[str]) -> Optional[Plan]:
+    """The entities a condition in the query's top-level AND names — an
+    ``is``, above one (its parent, its ancestors), or an OR of those and
+    "inside one" (``anchor_groups``) — as ``ids`` units: found from them,
+    by ID and up or down the tree, not in every label's bands. Each is still
+    tested by the whole query. None — read the scope as usual — when none
+    names entities the scope's own walk doesn't already bound (``_walked``),
+    or they're more than ``REACH_ANCHORS_MAX`` or a statement's time can
+    find."""
+    groups = next((g for m in _conjuncts(query.predicate) if not _walked(m)
+                   for g in [anchor_groups(m)] if g is not None), None)
+    if groups is None or (not containment and any(g.hi != 0 for g in groups)):
+        return None
+    depth = int(query.scope.max_depth or 12)
+    entry = {"groups": [{"urns": _ref_urns(g.refs, "a search's condition"), "lo": g.lo,
+                         "hi": depth if g.hi is None else g.hi,
+                         **({"up": True} if g.up else {})} for g in groups],
+             "containment": list(containment)}
+    try:
+        ids = await _anchor_ids(run, labels, entry)
+        if ids is None:
+            return None
+        ids = await _in_scope(run, provider, query, compiler, labels, containment, ids)
+    except Exception as exc:                                  # noqa: BLE001
+        if not _timed_out(exc):
+            raise
+        return None
+    return Plan([Unit("ids", roots=ids[i:i + width], size=len(ids[i:i + width]))
+                 for i in range(0, len(ids), max(1, width))], notes=notes)
 
 
 async def _reached_ids(run: Run, anchors: List[int], entry: Dict[str, Any],
@@ -633,6 +749,66 @@ async def _outermost(run: Run, ids: List[int], rel: str, max_depth: int) -> List
                   if not any(a in roots for a in (r[1] or []) if a is not None))
 
 
+async def expand_unit(unit: Unit, ctx: Context, run, timeout_s: float
+                      ) -> Optional[List[Unit]]:
+    """A unit ``split`` can't cut, read one level down instead — or None.
+
+    * A single root's subtree: the root itself, and its children walked
+      one level less deep. Containment is a tree (``_rooted_plan``), so the
+      two hold every node of the subtree once, and the children's walk
+      splits as any walk of many roots does.
+    * What is visible on the canvas, under one label: its URNs, halved.
+
+    ``run(cypher, params, timeout_s)`` executes one statement."""
+    if unit.kind == "visible" and unit.urns is None and len(ctx.visible or []) > 1:
+        return replace(unit, urns=list(ctx.visible or [])).split()
+    if unit.kind != "walk" or len(unit.roots or []) != 1 or not ctx.containment:
+        return None
+    depth = unit.depth if unit.depth is not None else ctx.max_depth
+    if depth < 1:
+        return None
+    root = unit.roots[0]
+    res = await run(f"MATCH (_w)-[:{_rel(ctx.containment)}]->(_c) WHERE ID(_w) = $_root "
+                    "RETURN collect(ID(_c))", {"_root": root}, timeout_s)
+    children = sorted(_collected(res))
+    if not children or len(children) > REACH_MAX:
+        return None
+    rest = max(1, unit.size - 1)
+    # One level down from the last: the children themselves (a walk's
+    # depth of 0 reads as the scope's in ``match_statement``).
+    below = (replace(unit, kind="ids", roots=children, depth=None, size=rest) if depth == 1
+             else replace(unit, roots=children, depth=depth - 1, size=rest))
+    return [replace(unit, kind="ids", roots=[root], depth=None, size=1), below]
+
+
+async def describe_unit(unit: Unit, run) -> Optional[str]:
+    """The one entity a unit that can't be cut reads, as a person names it
+    — "“orders” (dataset)" — or None for anything else, or when it can't be
+    read either. A walk is its root and what is inside it."""
+    if unit.kind == "visible" and unit.urns and len(unit.urns) == 1:
+        cypher = (f"MATCH (n:`{_sanitize_label(unit.label or '')}`) WHERE n.urn = $_u "
+                  "RETURN n.displayName, n.urn, labels(n)[0] LIMIT 1")
+        params: Dict[str, Any] = {"_u": unit.urns[0]}
+    elif unit.kind in ("walk", "ids") and len(unit.roots or []) == 1:
+        cypher = "MATCH (n) WHERE ID(n) = $_id RETURN n.displayName, n.urn, labels(n)[0]"
+        params = {"_id": unit.roots[0]}
+    elif unit.kind == "range" and unit.hi is not None and unit.hi - (unit.lo or 0) == 1:
+        cypher = (f"MATCH (n:`{_sanitize_label(unit.label or '')}`) WHERE ID(n) = $_id "
+                  "RETURN n.displayName, n.urn, labels(n)[0]")
+        params = {"_id": unit.lo or 0}
+    else:
+        return None
+    try:
+        rows = (await run(cypher, params, 5.0)).result_set or []
+    except Exception:                                   # noqa: BLE001 — named or not, it is left out
+        return None
+    if not rows or not (rows[0][0] or rows[0][1]):
+        return None
+    name, urn, label = rows[0]
+    named = f"“{name or urn}”" + (f" ({label})" if label else "")
+    return f"{named} and what’s inside it" if unit.kind == "walk" else named
+
+
 # ---------------------------------------------------------------------------
 # Statements
 # ---------------------------------------------------------------------------
@@ -658,7 +834,7 @@ def match_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
         conds: List[str] = []
         if unit.kind == "visible":
             conds.append("n.urn IN $_visible")
-            params["_visible"] = list(ctx.visible or [])
+            params["_visible"] = list(unit.urns if unit.urns is not None else ctx.visible or [])
         else:
             if unit.lo is not None:
                 conds.append("ID(n) >= $_lo")
@@ -720,29 +896,39 @@ def count_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
     return f"{head} RETURN count(n)", params
 
 
-def raw_probe_statement(unit: Unit, ctx: Context) -> Tuple[str, Dict[str, Any]]:
+def raw_probe_statement(unit: Unit, ctx: Context, after: int = -1
+                        ) -> Tuple[str, Dict[str, Any]]:
     """The ids and raw JSON of this unit's nodes that may keep one of the
     predicate's keys raw — the unit's nodes alone: the predicate, the scope's
-    clamps and hops belong to the statements that use the answer."""
+    clamps and hops belong to the statements that use the answer. A page of
+    ``REPLY_ROWS_MAX`` past node ``after``: a unit may hold more."""
     head, params = match_statement(
         unit, replace(ctx, where="", params={}, within_hops="", tail=()), [])
     cond, cond_params = probe_condition(ctx.raw_leaves)
-    params.update(cond_params)
-    return f"{head} WITH n WHERE {cond} RETURN ID(n), n.propertiesRaw", params
+    params.update(cond_params, _rawafter=after, _rawpage=REPLY_ROWS_MAX)
+    return (f"{head} WITH n WHERE ({cond}) AND ID(n) > $_rawafter "
+            "WITH n ORDER BY ID(n) LIMIT $_rawpage RETURN ID(n), n.propertiesRaw", params)
 
 
-def tally_statement(unit: Unit, ctx: Context, clamps: List[List[int]]
+def tally_statement(unit: Unit, ctx: Context, clamps: List[List[int]], after: int = -1
                     ) -> Tuple[str, Dict[str, Any]]:
     """Every containment ancestor of this unit's matches, with how many of
     them it holds per entity type — the canvas's "N matches inside" badges,
     one unit at a time instead of one statement over every match.
     ``count(DISTINCT n)``: a match reached down two paths counts once; the
-    units partition the scope, so the sums across units are exact."""
+    units partition the scope, so the sums across units are exact.
+
+    A page of ``REPLY_ROWS_MAX`` ancestors past ancestor ``after``, each with
+    its ``[entity type, count]`` pairs: a large unit's matches sit in more
+    containers than one reply holds."""
     head, params = match_statement(unit, ctx, clamps)
     rel = _rel(ctx.containment)
+    params.update(_tallyafter=after, _tallypage=REPLY_ROWS_MAX)
     return (f"{head} WITH n MATCH (_c)-[:{rel}*1..{int(ctx.max_depth)}]->(n) "
+            "WHERE ID(_c) > $_tallyafter "
             "WITH _c, labels(n)[0] AS _et, count(DISTINCT n) AS _k "
-            "RETURN _c.urn, _c.displayName, labels(_c)[0], _et, _k", params)
+            "WITH _c, collect([_et, _k]) AS _per ORDER BY ID(_c) LIMIT $_tallypage "
+            "RETURN ID(_c), _c.urn, _c.displayName, labels(_c)[0], _per", params)
 
 
 def after_statement(unit: Unit, ctx: Context, clamps: List[List[int]], k: int,

@@ -52,9 +52,10 @@ describe('RecipeGallery', () => {
         const starters = screen.getByRole('list', { name: 'Recipes to start from' })
         expect(within(starters).getAllByRole('button').map((b) => b.querySelector('.text-sm')?.textContent)).toEqual([
             'datasets that feed 3 or more others', 'datasets that feed dashboards', 'Everything tagged PII',
-            'datasets without a description', 'datasets without an owner',
+            'datasets without a description', 'datasets without an owner', 'datasets with no lineage at all',
+            'All datasets',
         ].map((t) => t.charAt(0).toUpperCase() + t.slice(1)))
-        expect(await within(starters).findAllByText('7')).toHaveLength(5)
+        expect(await within(starters).findAllByText('7')).toHaveLength(7)
 
         fireEvent.click(screen.getByRole('button', { name: `All ${RECIPES.length}` }))
         expect(screen.getAllByRole('region').map((r) => r.getAttribute('aria-label'))).toEqual([
@@ -67,11 +68,21 @@ describe('RecipeGallery', () => {
         expect(onPick).toHaveBeenCalledWith(expect.objectContaining({ id: 'by-name', blank: true }))
     })
 
-    it('says none when a recipe finds nothing here, and narrows to the words asked for', async () => {
+    it('says when a recipe finds nothing in this view, and narrows to the words asked for', async () => {
         render(<RecipeGallery viewId="view-1" recipes={RECIPES} variant="all" filter="owner" onPick={vi.fn()} />,
             { wrapper: withCounts(0) })
         expect(screen.getAllByRole('region').map((r) => r.getAttribute('aria-label'))).toEqual(['Ownership'])
-        expect(await screen.findAllByText('none')).toHaveLength(2)
+        expect(await screen.findAllByText('none in this view')).toHaveLength(2)
+    })
+
+    it('asks no count for a Connections recipe — the count request would refuse it, and every count with it', async () => {
+        const recipes = recipesFor({ types: ['dataset'], tags: [], keys: [],
+            layers: [{ value: 'raw', label: 'Raw' }, { value: 'gold', label: 'Gold' }] }, typeName)
+        const wrapper = withCounts(4)
+        render(<RecipeGallery viewId="view-1" recipes={recipes} variant="all" onPick={vi.fn()} />, { wrapper })
+        const flows = screen.getByRole('button', { name: /What flows from Raw to Gold/ })
+        expect((await screen.findAllByText('4')).length).toBeGreaterThan(0)
+        expect(within(flows).queryByText('4')).not.toBeInTheDocument()
     })
 })
 

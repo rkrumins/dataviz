@@ -23,7 +23,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/DECISIONS.md"
   },
   "changelog": {
-    "updated": "2026-10-26",
+    "updated": "2026-10-28",
     "path": "CHANGELOG.md"
   },
   "scaling-architecture": {
@@ -119,7 +119,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/features/view-portability.md"
   },
   "feature-search-and-rules-reference": {
-    "updated": "2026-10-26",
+    "updated": "2026-10-28",
     "path": "docs/features/search-and-rules-reference.md"
   },
   "top-level-nodes-performance": {
@@ -281,11 +281,11 @@ export const docMeta: Record<string, DocMeta> = {
 }
 export const guideMeta: Record<string, DocMeta> = {
   "welcome": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-27",
     "path": "docs/guide/WELCOME.md"
   },
   "key-concepts": {
-    "updated": "2026-10-19",
+    "updated": "2026-10-27",
     "path": "docs/guide/KEY_CONCEPTS.md"
   },
   "quick-start": {
@@ -305,8 +305,12 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/EXPLORING_GRAPH.md"
   },
   "advanced-search": {
-    "updated": "2026-10-26",
+    "updated": "2026-10-28",
     "path": "docs/guide/ADVANCED_SEARCH.md"
+  },
+  "finding-connections": {
+    "updated": "2026-10-28",
+    "path": "docs/guide/FINDING_CONNECTIONS.md"
   },
   "lineage-lens": {
     "updated": "2026-10-10",
@@ -329,7 +333,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/MANAGING_VIEWS.md"
   },
   "display-rules": {
-    "updated": "2026-10-26",
+    "updated": "2026-10-28",
     "path": "docs/guide/DISPLAY_RULES.md"
   },
   "semantic-layer": {
@@ -409,7 +413,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/WAYS_OF_WORKING.md"
   },
   "glossary": {
-    "updated": "2026-10-25",
+    "updated": "2026-10-27",
     "path": "docs/guide/GLOSSARY.md"
   },
   "troubleshooting": {

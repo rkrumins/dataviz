@@ -2,16 +2,16 @@ import { motion } from 'framer-motion'
 import { Briefcase, Code2 } from 'lucide-react'
 import { usePersonaStore } from '@/store/persona'
 import { cn } from '@/lib/utils'
+import { formatShortcut } from '@/lib/platform'
 
 /**
  * PersonaToggle - Switch between Business and Technical views
  *
  * Business: the name a person recognises — a curated `businessLabel` override
  * when one exists, otherwise the entity's display name.
- * Technical: the same name, with the entity's technical identity revealed under
- * it — the qualified name, or the URN when the qualified name is only the
- * display name again. Applies to context-view rows, graph node cards and the
- * entity drawer. `lib/entityDisplayName.ts` owns the rule; the tooltips below
+ * Technical: the same name, with the entity's identifier revealed under it — the
+ * identifier property its data source keys entities by (such as `id`), or its
+ * URN. Applies to context-view rows, graph node cards and the entity drawer. `lib/entityDisplayName.ts` owns the rule; the tooltips below
  * must keep naming what it actually does.
  */
 export function PersonaToggle() {
@@ -27,8 +27,8 @@ export function PersonaToggle() {
       )}
       title={
         mode === 'business'
-          ? 'Business view: names only. Switch to Technical to show each entity’s qualified name (or URN) under its name.'
-          : 'Technical view: each entity’s qualified name (or URN) is shown under its name. Switch to Business for names only.'
+          ? `Business view: names only. Switch to Technical (${formatShortcut('mod+/')}) to show each entity’s identifier under its name: its data source’s identifier property (such as id), or its URN.`
+          : `Technical view: each entity’s identifier is shown under its name: its data source’s identifier property (such as id), or its URN. Switch to Business (${formatShortcut('mod+/')}) for names only.`
       }
     >
       {/* Sliding Background */}
@@ -62,7 +62,7 @@ export function PersonaToggle() {
 
       {/* Technical Option */}
       <div
-        title="Technical — adds the qualified name (or the URN) under every name, on the canvas and in the entity drawer"
+        title="Technical — adds each entity’s identifier (its data source’s identifier property, or its URN) under its name, on the canvas and in the entity drawer"
         className={cn(
           "relative z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-md",
           "transition-colors duration-200",

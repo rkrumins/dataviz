@@ -48,6 +48,20 @@ describe('WhatThisMeansDisclosure', () => {
         expect(screen.getByText(/No filters yet/i)).toBeInTheDocument()
     })
 
+    it('sums up a Connections search by its ends', () => {
+        render(<WhatThisMeansDisclosure predicate={{ kind: 'edges', sourceWhere: twoFilterAnd }} />)
+        expect(screen.getByText('Connections from 2 conditions to any entity.')).toBeInTheDocument()
+    })
+
+    it('stays out of a Connections search’s ends, which its own disclosure reads', () => {
+        const { container } = render(
+            <RelationContext.Provider value={{ depth: 0, rule: false, end: true }}>
+                <WhatThisMeansDisclosure predicate={twoFilterAnd} />
+            </RelationContext.Provider>,
+        )
+        expect(container).toBeEmptyDOMElement()
+    })
+
     it('stays out of a nested condition, which the query’s own disclosure reads', () => {
         const { container } = render(
             <RelationContext.Provider value={{ depth: 1, rule: false, viewId: 'v1' }}>

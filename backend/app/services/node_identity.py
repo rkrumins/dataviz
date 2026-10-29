@@ -26,16 +26,19 @@ preference for sources it onboards. When both speak, the one describing the data
 wins.
 
 Every consumer resolves through here — the aggregation trigger that freezes the
-value onto a job row, the read path that injects it into a provider, and the
-API that reports it back with provenance — so the badge in the UI can never
-disagree with what the workers actually ran.
+value onto a job row, the read path that injects it into a provider, the API
+that reports it back with provenance, and the versioned write path that keeps a
+node's own name and identity properties in step (:func:`bind_node_write`) — so
+the badge in the UI can never disagree with what the workers actually ran.
 """
 from __future__ import annotations
 
 import json
 import logging
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
@@ -469,3 +472,153 @@ async def stamp_identity_for_enable(data_source_id: str) -> Optional[dict]:
     return {"property": identity.identity_property,
             "stamped": await provider.stamp_identity_urns(source_writable=True)}
 
+
+# ── write-side binding (canonical → source) ─────────────────────────────────
+#
+# Everything above maps a source's own properties ONTO the platform's: reads
+# coalesce ``urn``/``displayName`` from them, and the conformance stamp copies
+# them across. Nothing went the other way, so a node the platform wrote itself —
+# created or renamed in the editor, imported, staged through the API — carried
+# ``urn``/``displayName`` and never the ``name``/``title``/``id`` its source keys
+# and names nodes by. Publishing then projected exactly that onto the graph.
+
+def _blank(value: Any) -> bool:
+    """``None`` or a string of nothing but whitespace. A number is a value."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _bag(value: Any) -> Mapping:
+    """A node's ``properties``, or an empty bag when it has none."""
+    if isinstance(value, dict):          # the usual case, checked first: an import binds millions
+        return value
+    return value if isinstance(value, Mapping) else {}
+
+
+@lru_cache(maxsize=64)
+def _bound_properties(identity: ResolvedNodeIdentity) -> tuple:
+    """``(name property, identity property)`` as ``identity`` binds them, ``None``
+    for one it doesn't: a field the platform owns (``urn``, ``displayName``,
+    ``qualifiedName``, ``description``, …) lives at the top level with its own
+    input and is stripped out of ``properties``; an identity that is plain ``urn``
+    needs no copy; and one that IS the name property is left to the name."""
+    from backend.app.providers.falkordb_provider import _RESERVED_NODE_KEYS
+
+    name = identity.name_property
+    if not name or name in _RESERVED_NODE_KEYS:
+        name = None
+    ident = identity.identity_property
+    if (not identity.identity_is_mapped or ident == identity.name_property
+            or not ident or ident in _RESERVED_NODE_KEYS):
+        ident = None
+    return name, ident
+
+
+def bind_node_write(
+    prior: Optional[Mapping[str, Any]],
+    value: Mapping[str, Any],
+    identity: ResolvedNodeIdentity,
+    *,
+    minted: bool = False,
+) -> Mapping[str, Any]:
+    """``value`` — a node about to be written — with the source's own name and
+    identity properties kept in step with ``displayName`` and ``urn``.
+
+    ``prior`` is the node before this write (``None`` when it creates the node)
+    and ``value`` the whole node after it: a create's payload, or an update
+    already merged onto ``prior``. The rule reads only those two, never which
+    operation produced them, so a batch that creates a node and renames it
+    before its first save is judged on what it writes.
+
+    * **Created with a urn the server minted** (``minted``): nothing the payload
+      carries under those properties is the new node's own — a Duplicate copies
+      its original's bag — so the name property is set from ``displayName`` (or
+      ``displayName`` from it, when that is blank) and the identity property to
+      the urn, keeping ``urn`` and the source's key identical, as the stamp does.
+    * **Created with its own urn** (restored, imported, staged): each is filled
+      only where empty, in either direction.
+    * **Updated**: while the two agree (or either is empty), changing one carries
+      the other along; changing both, or either once they differ, is deliberate
+      and kept. A name property the node never had is filled; one this write
+      removed stays removed. The identity property is only ever filled, never
+      changed.
+
+    The identity property is left alone when it IS the name property (the name
+    wins), and neither is bound when it names a field the platform owns. Returns
+    ``value`` itself when nothing changes, so its content hash is untouched.
+    """
+    name_prop, ident_prop = _bound_properties(identity)
+    if name_prop is None and ident_prop is None:
+        return value
+
+    props = _bag(value.get("properties"))
+    before = _bag(prior.get("properties")) if prior is not None else {}
+    display = value.get("displayName")
+    sets: dict = {}
+    new_display: Any = None
+
+    if name_prop is not None:
+        name = props.get(name_prop)
+        if prior is None:
+            if not _blank(display) and (minted or _blank(name)):
+                if name != display:
+                    sets[name_prop] = display
+            elif _blank(display) and not _blank(name) and isinstance(name, str):
+                new_display = name
+        else:
+            was, was_display = before.get(name_prop), prior.get("displayName")
+            if _blank(name):
+                if _blank(was) and not _blank(display):
+                    sets[name_prop] = display
+            elif _blank(was) or _blank(was_display) or str(was) == str(was_display):
+                display_changed, name_changed = display != was_display, name != was
+                if display_changed and not name_changed and not _blank(display):
+                    if name != display:
+                        sets[name_prop] = display
+                elif name_changed and not display_changed and isinstance(name, str):
+                    if name != display:
+                        new_display = name
+
+    urn = value.get("urn")
+    if ident_prop is not None and not _blank(urn):
+        have = props.get(ident_prop)
+        if prior is None:
+            if (minted or _blank(have)) and have != urn:
+                sets[ident_prop] = urn
+        elif _blank(have) and _blank(before.get(ident_prop)):
+            sets[ident_prop] = urn
+
+    if not sets and new_display is None:
+        return value
+    out = dict(value)
+    if sets:
+        out["properties"] = {**props, **sets}
+    if new_display is not None:
+        out["displayName"] = new_display
+    return out
+
+
+def bind_node_writes(
+    values: Mapping[str, Optional[Mapping[str, Any]]],
+    priors: Mapping[str, Optional[Mapping[str, Any]]],
+    *,
+    kind_by_entity: Mapping[str, str],
+    identity: ResolvedNodeIdentity,
+    created: Iterable[str] = (),
+    minted: Iterable[str] = (),
+) -> dict:
+    """:func:`bind_node_write` over one write's entities: ``{entity_id: value}``
+    for each live NODE the rule changed. Edges and deletions are left out.
+
+    An entity in ``created`` was created — or created anew, over whatever it
+    replaced — by this write, so it is judged as a creation, not against its
+    prior; one in ``minted`` had its urn minted by this very write."""
+    created, minted = set(created), set(minted)
+    out: dict = {}
+    for eid, value in values.items():
+        if value is None or kind_by_entity.get(eid) != "node":
+            continue
+        prior = None if eid in created else priors.get(eid)
+        bound = bind_node_write(prior, value, identity, minted=eid in minted)
+        if bound is not value:
+            out[eid] = bound
+    return out

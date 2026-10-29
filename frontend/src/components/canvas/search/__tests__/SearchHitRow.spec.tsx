@@ -148,7 +148,7 @@ describe('SearchHitRow — how it matches', () => {
         where: { kind: 'entityType', op: 'in', values: ['dashboard'] } }
 
     it('runs the routes from the match to the relatives it was matched by', () => {
-        useSearchStore.setState({ pendingRunPredicate: null })
+        useSearchStore.setState({ pendingRunPredicate: null, draftPredicate: FEEDS_A_DASHBOARD })
         render(
             <ShownQueryContext.Provider value={FEEDS_A_DASHBOARD}>
                 <SearchHitRow hit={hitWith([])} index={0} />
@@ -161,6 +161,9 @@ describe('SearchHitRow — how it matches', () => {
         })
         // So the routes' sentence and chips name it, not its URN.
         expect(urnDisplayName('a')).toBe('orders')
+        // And the way back to these results.
+        expect(useSearchStore.getState().routesFrom).toEqual({
+            routes: useSearchStore.getState().pendingRunPredicate, from: FEEDS_A_DASHBOARD })
     })
 
     it('offers nothing for a query matched without lineage', () => {

@@ -64,7 +64,7 @@ function kindTitle(p: Predicate): string {
 
 const SHAPE_KINDS = new Set(['isRoot', 'isLeaf', 'isOrphan', 'hasIncoming', 'hasOutgoing'])
 /** Kinds no builder edits: their tokens hand over to Code. */
-const CODE_KINDS = new Set(['withinHops', 'degree'])
+const CODE_KINDS = new Set(['degree'])
 
 
 // ---------------------------------------------------------------------------
@@ -132,7 +132,7 @@ export const ClauseLine = memo(function ClauseLine({ line, count, openToken }: {
                     'group-hover/block:opacity-100 group-focus-within/block:opacity-100',
                 ))} style={{ paddingLeft: line.depth * 14 }}>
                     <AddClauseMenu joiner={line.joiner} relationDepth={line.relationDepth}
-                                   onAdd={(p) => ctx.add(line.into, p)} onOpenCode={ctx.onOpenCode}
+                                   onAdd={(p) => ctx.add(line.into, p)}
                                    disabled={ctx.isRunning} />
                 </div>
             )
@@ -140,7 +140,7 @@ export const ClauseLine = memo(function ClauseLine({ line, count, openToken }: {
             body = (
                 <>
                     <span className="text-ink-muted">nested deeper than a sentence shows —</span>
-                    <button type="button" onClick={ctx.editInCode}
+                    <button type="button" onClick={() => ctx.editInCode(line.predicate)}
                             className="inline-flex items-center gap-1 text-sm text-accent-lineage hover:underline">
                         <Code2 className="h-3.5 w-3.5" /> edit in Code
                     </button>
@@ -206,7 +206,7 @@ function ClauseTokens({ line, tokenState }: {
             ? (
                 <div className="flex flex-col items-start gap-2">
                     <p className="text-xs text-ink-muted">This condition is written in Code.</p>
-                    <button type="button" onClick={ctx.editInCode}
+                    <button type="button" onClick={() => ctx.editInCode(p)}
                             className="inline-flex items-center gap-1 text-sm text-accent-lineage hover:underline">
                         <Code2 className="h-3.5 w-3.5" /> Edit in Code
                     </button>
@@ -252,8 +252,9 @@ function RelationTokens({ line, tokenState }: {
     const relativeBlank = (relative.kind === 'names' && relative.refs.length === 0)
         || (relative.kind === 'types' && relative.types.length === 0)
 
-    // In the top-level AND: a listed clause, while the listed clauses all must hold.
-    const top = line.topIndex !== null && ctx.combine === 'and'
+    // In the top-level AND: a listed clause, while the listed clauses all must
+    // hold — unless the whole sentence isn't (a Connections search's end).
+    const top = relationCtx.top !== false && line.topIndex !== null && ctx.combine === 'and'
     const nested = useMemo(() => ({ ...relationCtx, depth: line.relationDepth, top }),
         [relationCtx, line.relationDepth, top])
     const relationEditor = (

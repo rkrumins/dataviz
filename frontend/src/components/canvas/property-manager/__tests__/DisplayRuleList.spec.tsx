@@ -66,6 +66,14 @@ describe('DisplayRuleList count line', () => {
         expect(screen.getByText(/matches in this view/)).toBeInTheDocument()
     })
 
+    it('reads a count that left part of the view out as a floor', () => {
+        renderList(rule(), { count: 48_203, complete: true, percent: 100, lowerBound: true })
+        expect(screen.getByText('48,203')).toBeInTheDocument()
+        expect(screen.getByText(/At least/)).toHaveTextContent('At least 48,203 matches in this view')
+        expect(screen.getByText(/At least/)).toHaveAttribute(
+            'title', 'Part of the view couldn’t be checked in time and was left out')
+    })
+
     it('says "match" for exactly one', () => {
         renderList(rule(), { count: 1, complete: true, percent: 100 })
         expect(screen.getByText(/match in this view/)).toBeInTheDocument()
@@ -100,5 +108,26 @@ describe('DisplayRuleList count line', () => {
         const { reveal } = renderList(rule({ enabled: false }))
         expect(screen.getByText('Disabled')).toBeInTheDocument()
         expect(reveal).toBeDisabled()
+    })
+})
+
+
+describe('DisplayRuleList when the rules could not be checked', () => {
+    beforeEach(() => useDisplayRuleMatchStore.getState().clear())
+
+    it('says so, with why, instead of showing no tags as if nothing matched', async () => {
+        useDisplayRuleMatchStore.getState().setMembershipError('The graph is busy.')
+        renderList(rule())
+        expect(screen.getByRole('alert')).toHaveTextContent(
+            'Couldn’t check the display rules, so some tags or counts may be missing. The graph is busy.')
+        const before = useDisplayRuleMatchStore.getState().retryToken
+        await userEvent.setup().click(screen.getByRole('button', { name: 'Retry' }))
+        expect(useDisplayRuleMatchStore.getState().retryToken).toBe(before + 1)
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    })
+
+    it('says nothing when they were checked', () => {
+        renderList(rule())
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     })
 })

@@ -201,7 +201,7 @@ export type SentenceLine =
      *  relationship's condition. */
     | (LineBase & { kind: 'add'; into: Path; joiner: 'and' | 'or' | 'that' })
     /** Nested past what the Sentence shows: edited in Code. */
-    | (LineBase & { kind: 'code'; path: Path })
+    | (LineBase & { kind: 'code'; path: Path; predicate: Predicate })
 
 export interface Sentence {
     lines: SentenceLine[]
@@ -333,11 +333,13 @@ export function withSubject(draft: Predicate | null, types: string[]): Predicate
 }
 
 
-export function buildSentence(draft: Predicate | null): Sentence {
+/** ``lead``: the subject line's first word — "Find", or a Connections
+ *  search's "From" and "To" for its ends. */
+export function buildSentence(draft: Predicate | null, lead = 'Find'): Sentence {
     const { subject, clauses, combine, into } = listedClauses(draft)
     const lines: SentenceLine[] = []
     lines.push({
-        kind: 'subject', key: 'subject', depth: 0, lead: 'Find', relationDepth: 0,
+        kind: 'subject', key: 'subject', depth: 0, lead, relationDepth: 0,
         topIndex: subject ? 0 : null, types: subject?.types ?? [], path: subject ? [{ child: 0 }] : null,
     })
 
@@ -346,7 +348,7 @@ export function buildSentence(draft: Predicate | null): Sentence {
         const key = pathKey(path)
         const base = { key, depth, lead, relationDepth, topIndex, ...(combines ? { combines } : {}) }
         if (relationDepth > RELATION_DEPTH_MAX) {
-            lines.push({ ...base, kind: 'code', path })
+            lines.push({ ...base, kind: 'code', path, predicate: p })
             return
         }
         if (p.kind === 'group' && !isOrInside(p)) {

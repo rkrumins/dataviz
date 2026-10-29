@@ -79,6 +79,8 @@ path:
    thing's connections.
 5. [Advanced Search](/guide/advanced-search) — find every match in a view and
    act on it.
+6. [Finding Connections](/guide/finding-connections) — find the lines between
+   things, and light them up on the canvas.
 
 Hit a locked door on the way? [Requesting Access](/guide/requesting-access)
 explains what the message means and how to ask.
@@ -152,6 +154,8 @@ The sidebar groups the guide into six sections, in this order.
   upstream and downstream.
 - [Advanced Search](/guide/advanced-search) — find every match in a view, act
   on it, and save searches you reuse.
+- [Finding Connections](/guide/finding-connections) — list every line from one
+  set of things to another, step by step.
 - [The Lineage Lens & Context View](/guide/lineage-lens) — focus on one thing's
   connections, and what sits just outside the view.
 - [Navigating Layers](/guide/navigating-layers) — move around a Context View's

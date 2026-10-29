@@ -51,41 +51,39 @@ const baseProps = {
 
 
 describe('AddFilterPalette', () => {
-    it('hides Code-only / Advanced entries when their callbacks are omitted', async () => {
+    it('offers every condition the Form builds, group authoring and edge counts included', async () => {
         const user = userEvent.setup()
         render(<AddFilterPalette {...baseProps} />)
 
         await user.click(screen.getByRole('button', { name: /add filter/i }))
 
-        // Code-only entries require onOpenCode → hidden here.
-        expect(screen.queryByText(/Within N hops of/i)).not.toBeInTheDocument()
-        // Emit entries (incl. group authoring and edge counts) always render.
+        expect(screen.getByText(/Within N hops of/i)).toBeInTheDocument()
         expect(screen.getByText(/Number of edges/i)).toBeInTheDocument()
         expect(screen.getByText(/AND group/i)).toBeInTheDocument()
         expect(screen.getByText(/Tag is/i)).toBeInTheDocument()
     })
 
-    it('shows the Code-only entries when onOpenCode is provided', async () => {
-        const user = userEvent.setup()
-        render(<AddFilterPalette {...baseProps} onOpenCode={vi.fn()} />)
-
-        await user.click(screen.getByRole('button', { name: /add filter/i }))
-
-        expect(screen.getByText(/Within N hops of/i)).toBeInTheDocument()
-        expect(screen.getByText(/Number of edges/i)).toBeInTheDocument()
-    })
-
-    it('builds an edge count in the Form, never handing it to Code', async () => {
+    it('builds an edge count in the Form', async () => {
         const user = userEvent.setup()
         const onAdd = vi.fn()
-        const onOpenCode = vi.fn()
-        render(<AddFilterPalette {...baseProps} onAdd={onAdd} onOpenCode={onOpenCode} />)
+        render(<AddFilterPalette {...baseProps} onAdd={onAdd} />)
 
         await user.click(screen.getByRole('button', { name: /add filter/i }))
         await user.click(screen.getByText(/Number of edges/i))
 
         expect(onAdd).toHaveBeenCalledWith({ kind: 'degree', direction: 'both', op: 'gt', value: 5, edgeClass: 'links' })
-        expect(onOpenCode).not.toHaveBeenCalled()
+    })
+
+    it('adds "within N hops" as a row to name its entities in, not an empty list of URNs in Code', async () => {
+        const user = userEvent.setup()
+        const onAdd = vi.fn()
+        render(<AddFilterPalette {...baseProps} onAdd={onAdd} />)
+
+        await user.click(screen.getByRole('button', { name: /add filter/i }))
+        await user.click(screen.getByText(/Within N hops of/i))
+
+        expect(onAdd).toHaveBeenCalledWith({
+            kind: 'withinHops', urns: [], hops: 2, direction: 'both', edgeClass: 'lineage' })
     })
 
     it('offers every link and every edge, connections and edge types', async () => {
@@ -175,18 +173,20 @@ describe('AddFilterPalette', () => {
             where: { kind: 'entityType', op: 'in', values: [] } })
     })
 
-    it('inside a relationship, offers no scope of the search, and no relationship past the deepest', async () => {
+    it('inside a relationship, offers no route, and no relationship past the deepest', async () => {
         const user = userEvent.setup()
         const at = (depth: number) => render(
             <RelationContext.Provider value={{ depth, rule: false }}>
-                <AddFilterPalette {...baseProps} onOpenCode={vi.fn()} />
+                <AddFilterPalette {...baseProps} />
             </RelationContext.Provider>,
         )
         const { unmount } = at(1)
         await user.click(screen.getByRole('button', { name: /add filter/i }))
-        expect(screen.queryByText(/Inside Subtree/i)).not.toBeInTheDocument()
-        expect(screen.queryByText(/Inside a container named/i)).not.toBeInTheDocument()
+        // "Inside a container" is the relative's own test there.
+        expect(screen.getByText(/Inside Subtree/i)).toBeInTheDocument()
+        expect(screen.getByText(/Inside a container named/i)).toBeInTheDocument()
         expect(screen.queryByText(/Paths from A to B/i)).not.toBeInTheDocument()
+        expect(screen.queryByText(/Within N hops of/i)).not.toBeInTheDocument()
         expect(screen.getByText('Is directly inside…')).toBeInTheDocument()
         expect(screen.getByText('Something inside it feeds…')).toBeInTheDocument()
         unmount()

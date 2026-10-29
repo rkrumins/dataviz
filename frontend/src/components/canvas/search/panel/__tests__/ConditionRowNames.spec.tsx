@@ -9,7 +9,7 @@ import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
-import type { SearchResolveResult } from '@/types/search'
+import type { Predicate, SearchResolveResult } from '@/types/search'
 
 import { ConditionRow } from '../ConditionRow'
 import { RelationContext } from '../relationContext'
@@ -43,7 +43,7 @@ describe('a row naming entities', () => {
                     value={{ kind: 'is', refs: [{ urn: 'urn:orders' }] }}
                     discovery={{ allKeys: [], keysByEntityType: {}, tagValues: [], getValueSamples: () => [] }}
                     knownEntityTypes={[]} activeEntityTypes={[]} discoveredLayers={[]} isRunning={false}
-                    onChange={onChange} onRemove={vi.fn()} onOpenAdvanced={vi.fn()}
+                    onChange={onChange} onRemove={vi.fn()} onEditInCode={vi.fn()}
                 />
             </RelationContext.Provider>,
         )
@@ -54,5 +54,23 @@ describe('a row naming entities', () => {
         fireEvent.click(screen.getByText('Entities'))
         expect(resolveSearchRefs).toHaveBeenCalledTimes(1)
         expect(onChange).not.toHaveBeenCalled()
+    })
+
+    it('names an Inside Subtree anchor anywhere in the View, not only what the canvas has loaded', async () => {
+        render(
+            <RelationContext.Provider value={{ depth: 0, rule: false, viewId: 'v1' }}>
+                <ConditionRow
+                    value={{ kind: 'descendantOf', urns: ['urn:orders'], uiScope: 'any' } as Predicate}
+                    discovery={{ allKeys: [], keysByEntityType: {}, tagValues: [], getValueSamples: () => [] }}
+                    knownEntityTypes={[]} activeEntityTypes={[]} discoveredLayers={[]} isRunning={false}
+                    onChange={vi.fn()} onRemove={vi.fn()}
+                />
+            </RelationContext.Provider>,
+        )
+        fireEvent.click(screen.getByRole('button', { name: 'Show all options' }))
+        expect(screen.getByRole('group', { name: 'Anchor nodes' })).toBeInTheDocument()
+        // Not on the canvas (nothing is, here), and still shown by its name.
+        expect(await screen.findByText('orders')).toBeInTheDocument()
+        expect(screen.queryByText(/No nodes loaded/)).not.toBeInTheDocument()
     })
 })

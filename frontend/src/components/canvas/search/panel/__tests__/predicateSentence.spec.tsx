@@ -304,9 +304,9 @@ describe('predicateSentence — every kind, word for word', () => {
             'Anything that is NOT tagged with #PII.'],
         ['a layer', { kind: 'layer', layerAssignment: 'gold' }, 'Anything where layer is gold.'],
         ['a property set', { kind: 'hasProperty', key: 'owner' } as Predicate,
-            'Anything that has a owner property.'],
+            'Anything that has an owner property.'],
         ['a property missing', { kind: 'hasProperty', key: 'owner', negate: true } as Predicate,
-            'Anything that does not have a owner property.'],
+            'Anything that does not have an owner property.'],
         ['no upstream', { kind: 'isRoot' }, 'Anything that has no upstream lineage.'],
         ['no downstream', { kind: 'isLeaf' }, 'Anything that has no downstream lineage.'],
         ['no lineage', { kind: 'isOrphan' }, 'Anything that has no lineage edges.'],
@@ -348,6 +348,15 @@ describe('predicateSentence — every kind, word for word', () => {
 
     it('reads a shape for several entities', () => {
         expect(plain({ kind: 'isLeaf' }, false)).toBe('Show me entities that have no downstream lineage.')
+    })
+
+    it('reads a Connections search as its two ends and the edges between them', () => {
+        const pii: Predicate = { kind: 'tag', op: 'hasAny', values: ['PII'] }
+        const dashboards: Predicate = { kind: 'entityType', op: 'in', values: ['dashboard'] }
+        expect(plain({ kind: 'edges', sourceWhere: pii }, false))
+            .toBe('Show me connections from anything that is tagged #PII to any entity, through any link.')
+        expect(plain({ kind: 'edges', targetWhere: dashboards, edgeTypes: ['PRODUCES'], direction: 'either' }))
+            .toBe('Connections from any entity to anything where type is dashboard, through Produces edges, either way.')
     })
 })
 

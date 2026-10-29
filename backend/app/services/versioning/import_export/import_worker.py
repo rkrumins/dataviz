@@ -264,11 +264,15 @@ def contract_import_root_assignments(
 
 
 class ImportWorker:
-    def __init__(self, versioning, store, scope=None, ontology=None, facts: bool = True) -> None:
+    def __init__(self, versioning, store, scope=None, ontology=None, facts: bool = True,
+                 node_identity=None) -> None:
         self._svc = versioning
         self._store = store
         self._scope = scope          # view scope for scoped replace ({assigned_urns, ...}) | None
         self._ontology = ontology    # {node_types, edge_types} for the per-row gate | None
+        # The data source's node-identity mapping (ResolvedNodeIdentity | None): each window's
+        # nodes get their own name / identity properties as they are written (apply_ops binds).
+        self._node_identity = node_identity
         # Raw facts for the post-commit layout write-back (view-scoped imports): the created NODE
         # entities ({eid, urn, layer_signal}) and the create-edge triples. Derived once the import
         # is built (_derive_facts); the ImportExportService hands them to the injected layout
@@ -508,7 +512,8 @@ class ImportWorker:
                 return
             try:
                 await self._svc.apply_ops(graph_id=graph_id, ops=ops, actor=actor,
-                                          branch_id=branch_id, message="import", on_commit=on_commit)
+                                          branch_id=branch_id, message="import", on_commit=on_commit,
+                                          node_identity=self._node_identity)
                 return
             except OntologyViolation as exc:
                 rest = _quarantine(ops, resolutions, exc.violations) if attempt < _QUARANTINE_ROUNDS else None

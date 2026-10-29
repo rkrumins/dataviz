@@ -20,8 +20,10 @@
  */
 import { useEffect, useMemo, useRef } from 'react'
 
+import { readableSearchError } from '@/components/canvas/search/panel/errorPaths'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { rideOut } from '@/services/rideOut'
 import { countRules } from '@/services/ruleCounts'
 import { useCanvasStore } from '@/store/canvas'
 import { useDisplayRules, useReferenceModelStore } from '@/store/referenceModelStore'
@@ -49,6 +51,9 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
     const retainRules = useDisplayRuleMatchStore((s) => s.retainRules)
     const applyMembership = useDisplayRuleMatchStore((s) => s.applyMembership)
     const setCounts = useDisplayRuleMatchStore((s) => s.setCounts)
+    const setMembershipError = useDisplayRuleMatchStore((s) => s.setMembershipError)
+    const setCountsError = useDisplayRuleMatchStore((s) => s.setCountsError)
+    const retryToken = useDisplayRuleMatchStore((s) => s.retryToken)
     const clear = useDisplayRuleMatchStore((s) => s.clear)
 
     // Keep the visual metadata snapshot in sync synchronously so chips
@@ -91,30 +96,33 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
                     for (let j = 0; j < askable.length; j += RULES_PER_REQUEST) {
                         const group = askable.slice(j, j + RULES_PER_REQUEST)
                         try {
-                            const answer = await provider.searchMembership({
+                            // The graph busy or failing over: asked again, for minutes.
+                            const answer = await rideOut(() => provider.searchMembership({
                                 scope: { viewId, scopeMode: 'view' },
                                 items: group.map(asItem),
                                 urns: batch,
-                            }, { signal: controller.signal })
+                            }, { signal: controller.signal }), controller.signal)
                             if (controller.signal.aborted) return
                             applyMembership(group.map((r) => r.id), batch, answer.matches)
                         } catch (err) {
                             if (controller.signal.aborted) return
-                            // Non-fatal: the batch keeps its previous chips and
-                            // is asked about again on the next change.
-                            console.warn('[displayRuleEngine] membership failed', err)
+                            // The batch keeps its previous chips and is asked
+                            // about again on the next change — or on Retry,
+                            // which the rule list offers with why it failed.
+                            setMembershipError(readable(err))
                             return
                         }
                     }
                     for (const urn of batch) done.add(urn)
                 }
+                setMembershipError(null)
             })()
         }, DEBOUNCE_MS)
         return () => {
             controller.abort()
             clearTimeout(timer)
         }
-    }, [viewId, provider, signature, askable, nodes, applyMembership])
+    }, [viewId, provider, signature, askable, nodes, applyMembership, setMembershipError, retryToken])
 
     // Counts: each rule's exact total in the view. A rule that can't be asked
     // about reads as one that can't be counted, and why.
@@ -135,9 +143,11 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
                 onUpdate: (counts) => {
                     if (!controller.signal.aborted) setCounts(new Map([...counts, ...refused]))
                 },
+            }).then(() => {
+                if (!controller.signal.aborted) setCountsError(null)
             }).catch((err) => {
                 if (controller.signal.aborted) return
-                console.warn('[displayRuleEngine] rule counts failed', err)
+                setCountsError(readable(err))
             })
         }, DEBOUNCE_MS)
         return () => {
@@ -145,7 +155,7 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
             clearTimeout(timer)
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [viewId, provider, signature, setCounts])
+    }, [viewId, provider, signature, setCounts, retryToken])
 
     // Wipe the store on unmount so a remount (view switch) starts clean.
     const clearRef = useRef(clear)
@@ -153,6 +163,11 @@ export function useDisplayRuleEngine(viewId: string | null | undefined): void {
         clearRef.current = clear
     }, [clear])
     useEffect(() => () => clearRef.current(), [])
+}
+
+
+function readable(err: unknown): string {
+    return readableSearchError(err instanceof Error ? err.message : String(err))
 }
 
 

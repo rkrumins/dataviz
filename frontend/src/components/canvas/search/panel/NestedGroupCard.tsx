@@ -13,7 +13,7 @@
  * place) and recurse into NestedGroupCard when they are groups.
  *
  * Depth cap at 3 levels — beyond that the card collapses to an
- * "Open Advanced" hand-off so the panel stays readable.
+ * "Edit in Code" hand-off so the panel stays readable.
  */
 import { AnimatePresence, motion } from 'framer-motion'
 import { Sparkles, X } from 'lucide-react'
@@ -60,8 +60,9 @@ export interface NestedGroupCardProps {
     onWrap?: (op: OpTone) => void
     /** Duplicate this whole group in the parent. */
     onDuplicate?: () => void
-    /** Omitted where there is no Advanced drawer (the rule editor). */
-    onOpenAdvanced?: () => void
+    /** Edit a group nested deeper than the Form shows in Code mode, with
+     *  it selected. Omitted where there is no Code mode (the rule editor). */
+    onEditInCode?: (target: Predicate) => void
     onSubmit?: () => void
     disabled?: boolean
     discovery: {
@@ -86,7 +87,7 @@ export interface NestedGroupCardProps {
 
 const NestedGroupCardImpl: FC<NestedGroupCardProps> = ({
     group, depth = 0,
-    onChange, onRemove, onWrap, onDuplicate, onOpenAdvanced, onSubmit, disabled,
+    onChange, onRemove, onWrap, onDuplicate, onEditInCode, onSubmit, disabled,
     discovery, knownEntityTypes, activeEntityTypes, discoveredLayers,
     parentPath, index,
 }) => {
@@ -104,14 +105,14 @@ const NestedGroupCardImpl: FC<NestedGroupCardProps> = ({
                 'flex items-center justify-between gap-2',
             )}>
                 <span className="text-[11.5px] text-ink-muted">
-                    Deeply nested group — keep editing in Advanced
+                    Nested deeper than the Form shows — edit it in Code
                 </span>
-                {onOpenAdvanced && <button
+                {onEditInCode && <button
                     type="button"
-                    onClick={onOpenAdvanced}
+                    onClick={() => onEditInCode(group)}
                     className="text-[11px] text-accent-lineage hover:text-accent-lineage/80 transition-colors"
                 >
-                    Open Advanced →
+                    Edit in Code →
                 </button>}
             </div>
         )
@@ -287,7 +288,7 @@ const NestedGroupCardImpl: FC<NestedGroupCardProps> = ({
                                                 onRemove={() => replaceChild(i, null)}
                                                 onWrap={(w) => wrapChildAt(i, w)}
                                                 onDuplicate={() => duplicateChildAt(i)}
-                                                onOpenAdvanced={onOpenAdvanced}
+                                                onEditInCode={onEditInCode}
                                                 onSubmit={onSubmit}
                                                 disabled={disabled}
                                                 discovery={discovery}
@@ -309,7 +310,7 @@ const NestedGroupCardImpl: FC<NestedGroupCardProps> = ({
                                                 onRemove={() => replaceChild(i, null)}
                                                 onWrap={(w) => wrapChildAt(i, w)}
                                                 onDuplicate={() => duplicateChildAt(i)}
-                                                onOpenAdvanced={onOpenAdvanced}
+                                                onEditInCode={onEditInCode}
                                                 onSubmit={onSubmit}
                                                 parentPath={childParentPath}
                                                 index={i}

@@ -9,7 +9,7 @@
  * fields beats teaching users what `direction=in, op=eq, value=0` means.
  *
  * Adding a leaf kind: append to LEAF_KINDS below + ensure
- * PredicateRow dispatches to an editor for it.
+ * ConditionRow has an editor for it.
  */
 import type { EdgeClass, Predicate } from '@/types/search'
 

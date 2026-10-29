@@ -13,9 +13,8 @@
  *     ancestors that contain matches (W3 — derived via
  *     useContainmentHierarchy.descendantHasMatch).
  *
- * The panel's internal UI state machine (idle → templateSelected →
- * running → results) stays in `useAdvancedSearch` — that's panel-
- * private. Only the cross-cutting "what URNs matched the last query?"
+ * The panel's internal UI state machine (idle → running → results)
+ * stays in `useAdvancedSearch` — that's panel-private. Only the cross-cutting "what URNs matched the last query?"
  * lives here.
  */
 import { useMemo } from 'react'
@@ -26,8 +25,7 @@ import type { AggregationSpec, AncestorRef, Predicate } from '@/types/search'
 
 /**
  * Options the builder passes into ``runPredicate`` (formerly hardcoded
- * inside ``useAdvancedSearch``). Templates set their own options via
- * ``SearchTemplate.build``; this is for the visual-builder / JSON-editor
+ * inside ``useAdvancedSearch``), for the visual-builder / JSON-editor
  * authoring flow.
  *
  * The defaults are exposed as ``DEFAULT_DRAFT_OPTIONS`` so the OptionsPanel
@@ -45,9 +43,7 @@ export const DEFAULT_DRAFT_OPTIONS: DraftOptions = {
     // No default aggregation — when a builder or free-form query
     // returns N matches, the user wants to SEE the N matches, not a
     // single "1 group · N items" bucket that hides every entity name
-    // until they drill in. Templates that genuinely want aggregation
-    // (e.g. "Overview by entity type") set their own ``options`` in
-    // ``SearchTemplate.build`` and bypass this default entirely.
+    // until they drill in.
     aggregations: [],
     pageSize: 50,
     candidateCap: 5000,
@@ -56,16 +52,13 @@ export const DEFAULT_DRAFT_OPTIONS: DraftOptions = {
 
 
 /**
- * One validation issue reported by the visual builder's reducer.
- * Mirrors ``ValidationIssue`` from ``useBuilderReducer`` — we re-export
- * the shape here so consumers outside the builder (the new QueryFooter)
- * can read it without depending on the reducer module.
+ * What put the draft in its shape when it wasn't the editor it is built in:
+ * a question asked, a recipe, the library, a change made from the results,
+ * the canvas's right-click or Property Manager, the header box. A search
+ * reports it as where it came from (``graph.search``'s ``source``).
  */
-export interface BuilderValidationIssue {
-    path: readonly number[]
-    message: string
-    severity: 'error' | 'warn'
-}
+export type DraftSource =
+    | 'ask' | 'recipe' | 'library' | 'results' | 'right-click' | 'property-manager' | 'header'
 
 
 /**
@@ -147,45 +140,32 @@ interface SearchStoreState {
     queryHash: string | null
     /**
      * The predicate currently being authored. Single source of truth
-     * shared across the visual builder, the JSON editor, and templates.
+     * shared across the builders and the JSON editor.
      *
-     * - Visual builder mirrors its reducer tree here on every change.
+     * - The builders write here as the query changes.
      * - JSON editor reads from here and writes back on valid edits.
-     * - Templates write here via ``seedDraftPredicate`` when the user
-     *   picks one or customises it.
      *
      * ``null`` means "no draft yet — show the empty-state hero in the
      * builder, blank textarea in the JSON editor".
      */
     draftPredicate: Predicate | null
+    /** What last put the draft in its shape, when not its editor; an edit
+     *  in a builder, an undo or a redo clears it. */
+    draftSource: DraftSource | null
     /**
      * Monotonic counter incremented whenever ``draftPredicate`` is
-     * REPLACED from outside the visual builder (e.g. by a template
-     * seed or a JSON-editor commit). The builder's effect uses this to
-     * decide whether to call ``loadSeed`` and reset its reducer tree.
-     * Changes that originate INSIDE the builder bump the value, but
-     * the builder's effect ignores its own writes by tracking the
-     * counter it last applied.
+     * REPLACED (e.g. by a JSON-editor commit or a loaded query). The
+     * JSON editor uses it to decide whether to reformat its buffer, and
+     * ignores its own writes by tracking the counter it last applied.
      */
     draftRevision: number
     /**
      * Per-request options (aggregation, page size, candidate cap,
      * include-ancestor-path) the visual builder / JSON editor flow uses
-     * when calling the backend. ``null`` means "use defaults".
-     *
-     * Templates supply their own options via ``SearchTemplate.build`` and
-     * therefore ignore this field — only ``runPredicate`` reads it.
+     * when calling the backend. ``null`` means "use defaults". Only
+     * ``runPredicate`` reads it.
      */
     draftOptions: DraftOptions | null
-    /**
-     * Validation issues emitted by the builder reducer on every change.
-     * Mirrored into the store so the QueryFooter (which is rendered by
-     * the panel shell, not the builder) can gate the Run button without
-     * re-deriving the issue set.
-     *
-     * Empty when there is no draft, or when the tree validates cleanly.
-     */
-    builderValidation: ReadonlyArray<BuilderValidationIssue>
     /**
      * For every node URN that's an ancestor of one or more matches,
      * the total number of matches sitting anywhere in its subtree.
@@ -241,6 +221,11 @@ interface SearchStoreState {
      * without owning the run pipeline. Cleared on consume.
      */
     pendingRunPredicate: Predicate | null
+    /** Where ``pendingRunPredicate`` came from. */
+    pendingRunSource: DraftSource | null
+    /** What "How it matches" left: the routes it runs, and the query whose
+     *  results it came from — the way back to them. */
+    routesFrom: { routes: Predicate; from: Predicate } | null
 
     /**
      * Scope mode for the next search run.
@@ -289,7 +274,26 @@ interface SearchStoreState {
     orderedMatchUrns: ReadonlyArray<string>
 
     /**
-     * Index into ``orderedMatchUrns`` of the match the user is currently
+     * A Connections search's edges, by key, in the order the results list
+     * them. When there are any, they — not ``orderedMatchUrns``, which then
+     * holds both ends of each edge for the canvas — are what the stepper
+     * walks and ``focusedMatchIndex`` points into. Empty for any other
+     * search.
+     */
+    orderedEdgeKeys: ReadonlyArray<string>
+
+    /**
+     * A Connections search's matched edges, for the canvas to light the
+     * lines that draw them: the first ``MATCHED_EDGES_CAP`` loaded, in list
+     * order. Empty for any other search.
+     */
+    matchedEdges: ReadonlyArray<MatchedEdge>
+    /** Every matched edge is loaded: no page of them remains. */
+    matchedEdgesComplete: boolean
+
+    /**
+     * Index into ``orderedMatchUrns`` (``orderedEdgeKeys`` for a
+     * Connections search) of the match the user is currently
      * focused on via the MatchBar stepper or keyboard (J/K/↑/↓). Drives:
      *   - ResultsPane auto-scrolls the focused row into view.
      *   - useRevealSearchHit auto-fires for the focused URN.
@@ -329,6 +333,25 @@ interface SearchStoreState {
 
 
 /**
+ * One edge a Connections search matched, as the canvas lights it: its ends,
+ * its type, and the containers each end sits in, parent first — where to
+ * file an end the canvas has not loaded.
+ */
+export interface MatchedEdge {
+    key: string
+    /** The edge's id, by the canvas's own rule for a raw edge's. */
+    id: string
+    source: string
+    target: string
+    edgeType: string
+    sourceChain: readonly string[]
+    targetChain: readonly string[]
+}
+
+/** The most matched edges the canvas lights: the first loaded. */
+export const MATCHED_EDGES_CAP = 2000
+
+/**
  * Per-hit input to the ancestor rollup derivation. The leaf entity type
  * is needed alongside the path so the breakdown map can tally matches
  * by what kind of node sits at the end of each path.
@@ -354,6 +377,13 @@ interface SearchStoreActions {
     setResult: (input: {
         viewId: string
         matchUrns: Iterable<string>
+        /** A Connections search's edge keys, in list order — what the
+         *  stepper walks. Left out for any other search. */
+        edgeKeys?: Iterable<string>
+        /** A Connections search's edges, in list order, for the canvas — and
+         *  whether they are all loaded. Left out for any other search. */
+        matchedEdges?: readonly MatchedEdge[]
+        matchedEdgesComplete?: boolean
         /** Per-hit ancestor info (path + the entityType of the hit at the
          *  end of that path). Used to derive both ``ancestorMatchCounts``
          *  and ``ancestorMatchTypeBreakdowns`` so the canvas can surface
@@ -370,8 +400,8 @@ interface SearchStoreActions {
         ancestorCounts?: Iterable<AncestorCountInfo>
         queryHash: string
     }) => void
-    /** Replace the draft with a value from outside the builder (template /
-     *  JSON editor / load-saved-query). Bumps ``draftRevision``.
+    /** Replace the draft with a value from outside the builder (JSON
+     *  editor / load-saved-query). Bumps ``draftRevision``.
      *
      *  Does NOT push to undo history — call ``commitDraft`` for that.
      *  This is the no-history mutation used by per-keystroke value
@@ -381,22 +411,17 @@ interface SearchStoreActions {
      *  onto the undo stack and clears the redo stack. Use for
      *  user-committed structural changes: chip add/remove, clear,
      *  paste-DSL commit, example seed, recent-query load,
-     *  quick-search submit. */
-    commitDraft: (predicate: Predicate | null) => void
+     *  quick-search submit. ``source`` says what made the change when it
+     *  wasn't the builder itself. */
+    commitDraft: (predicate: Predicate | null, source?: DraftSource) => void
     /** Pop from ``historyPast``, push current to ``historyFuture``,
      *  set draft = popped. No-op when past is empty. */
     undo: () => void
     /** Symmetric to ``undo``. No-op when future is empty. */
     redo: () => void
-    /** Mirror an internal builder-reducer state into the store. Does NOT
-     *  bump ``draftRevision`` since the change originated in the builder
-     *  itself — bumping would cause an infinite loadSeed loop. */
-    syncDraftFromBuilder: (predicate: Predicate | null) => void
     /** Update the per-request options the visual builder uses. Pass a
      *  partial to merge; pass ``null`` to reset to defaults. */
     setDraftOptions: (patch: Partial<DraftOptions> | null) => void
-    /** Mirror the current builder validation issues into the store. */
-    setBuilderValidation: (issues: ReadonlyArray<BuilderValidationIssue>) => void
     /** Auto-save a dispatched query to the per-view Recent list. Dedup
      *  by ``(viewId, JSON.stringify(predicate))`` — re-running the same
      *  query bumps the existing entry to the top rather than duplicating.
@@ -414,11 +439,17 @@ interface SearchStoreActions {
      *  the canvas spotlight to go away but the user must still be able
      *  to undo back to their previous draft. */
     clearSearchResults: () => void
-    clear: () => void
+    /** Drop the results, the highlights and the query. ``undoable`` — the
+     *  person's own Clear — keeps the query one Undo away; otherwise (the
+     *  panel closing, the View switching) the undo history goes too. */
+    clear: (options?: { undoable?: boolean }) => void
     /** Load a predicate into the builder AND request the panel run it —
      *  the "open in Advanced Search + run" bridge used by the Property
      *  Manager. The caller also opens the panel. */
-    requestSearchRun: (predicate: Predicate) => void
+    requestSearchRun: (predicate: Predicate, source: DraftSource) => void
+    /** "How it matches": run ``routes`` and keep ``from``, the query whose
+     *  results they explain, to go back to. */
+    showRoutes: (routes: Predicate, from: Predicate) => void
     setStudioOpen: (open: boolean) => void
     requestOpenBlank: () => void
     /** Atomic read-and-clear of the request to open what to fill in. */
@@ -544,8 +575,6 @@ function overlayServerAncestorCounts(
     }
 }
 
-const EMPTY_ISSUES: ReadonlyArray<BuilderValidationIssue> = Object.freeze([])
-
 /**
  * Maximum entries kept in the undo stack. Generous — the user typically
  * cares about the last few; this just bounds memory in pathological
@@ -570,6 +599,7 @@ const CANVAS_FILTER_STORAGE_KEY = 'synodic.advancedSearch.canvasFilterMode.v1'
 const EMPTY_HISTORY: ReadonlyArray<Predicate | null> = Object.freeze([])
 const EMPTY_RECENT: ReadonlyArray<RecentQueryEntry> = Object.freeze([])
 const EMPTY_ORDERED_URNS: ReadonlyArray<string> = Object.freeze([])
+const EMPTY_MATCHED_EDGES: ReadonlyArray<MatchedEdge> = Object.freeze([])
 
 
 /**
@@ -645,20 +675,28 @@ function saveCanvasFilterMap(map: CanvasFilterModeMap): void {
     }
 }
 
+/** What the stepper walks: a Connections search's edges, else the matches. */
+function steps(s: Pick<SearchStoreState, 'orderedMatchUrns' | 'orderedEdgeKeys'>): ReadonlyArray<string> {
+    return s.orderedEdgeKeys.length > 0 ? s.orderedEdgeKeys : s.orderedMatchUrns
+}
+
+
 export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set, get) => ({
     viewId: null,
     matchUrnSet: EMPTY_SET,
     queryHash: null,
     draftPredicate: null,
+    draftSource: null,
     draftRevision: 0,
     draftOptions: null,
-    builderValidation: EMPTY_ISSUES,
     ancestorMatchCounts: EMPTY_MAP,
     ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
     historyPast: EMPTY_HISTORY,
     historyFuture: EMPTY_HISTORY,
     recentQueries: loadRecentFromStorage(),
     pendingRunPredicate: null,
+    pendingRunSource: null,
+    routesFrom: null,
     // Default to 'view' — searches the full descendant set of the
     // view's top-level containers, including subtrees that haven't
     // been expanded yet. Matches the user's "search this view"
@@ -671,6 +709,9 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     selectionParent: null,
     selectedIndices: [],
     orderedMatchUrns: EMPTY_ORDERED_URNS,
+    orderedEdgeKeys: EMPTY_ORDERED_URNS,
+    matchedEdges: EMPTY_MATCHED_EDGES,
+    matchedEdgesComplete: true,
     focusedMatchIndex: null,
     // Initial mode is 'highlight'; per-view persisted overrides are
     // applied via the setCanvasFilterMode action on first read. We
@@ -682,7 +723,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     pendingOpenBlank: false,
     pendingAskFocus: false,
 
-    setResult: ({ viewId, matchUrns, ancestorPaths, ancestorCounts, queryHash }) => {
+    setResult: ({ viewId, matchUrns, edgeKeys, matchedEdges, matchedEdgesComplete, ancestorPaths, ancestorCounts, queryHash }) => {
         const next = new Set<string>()
         // Build the ordered list and the set in one pass so iteration
         // order from the caller (backend hit order) is preserved for
@@ -719,19 +760,26 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         // ordering a page arrives in can put new matches ahead of the
         // focused one, and an index alone would then point at a different
         // match — the very thing the old reset was guarding against.
+        //
+        // A Connections search steps through its edges, so its focus is
+        // carried by edge key the same way.
+        const edges = edgeKeys ? [...new Set(edgeKeys)] : []
         const prev = get()
-        const focusedUrn = prev.focusedMatchIndex !== null
-            ? prev.orderedMatchUrns[prev.focusedMatchIndex]
+        const focusedKey = prev.focusedMatchIndex !== null
+            ? steps(prev)[prev.focusedMatchIndex]
             : undefined
         const sameQuery = prev.queryHash === queryHash
-        const carriedFocus = sameQuery && focusedUrn !== undefined
-            ? ordered.indexOf(focusedUrn)
+        const carriedFocus = sameQuery && focusedKey !== undefined
+            ? (edges.length > 0 ? edges : ordered).indexOf(focusedKey)
             : -1
 
         set({
             viewId,
             matchUrnSet: next,
             orderedMatchUrns: ordered.length === 0 ? EMPTY_ORDERED_URNS : ordered,
+            orderedEdgeKeys: edges.length === 0 ? EMPTY_ORDERED_URNS : edges,
+            matchedEdges: matchedEdges?.length ? matchedEdges.slice(0, MATCHED_EDGES_CAP) : EMPTY_MATCHED_EDGES,
+            matchedEdgesComplete: matchedEdgesComplete ?? true,
             // A new query, or a focused match this result set no longer
             // holds, still resets: landing the user on a different match
             // than they expected is worse than landing them on none.
@@ -745,6 +793,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     seedDraftPredicate: (predicate) => {
         set((s) => ({
             draftPredicate: predicate,
+            draftSource: null,
             draftRevision: s.draftRevision + 1,
             // Reset row-selection: indices into the old draft are no
             // longer valid against the new one.
@@ -753,14 +802,15 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         }))
     },
 
-    commitDraft: (predicate) => {
+    commitDraft: (predicate, source) => {
         set((s) => {
             const prev = s.draftPredicate
             // Hash-dedupe: a commit with the same shape as the current
             // draft is a no-op (avoids history bloat from redundant
-            // calls like re-clicking the same example).
+            // calls like re-clicking the same example) — though what
+            // asked for it again is now where it came from.
             if (JSON.stringify(prev) === JSON.stringify(predicate)) {
-                return {}
+                return source === undefined ? {} : { draftSource: source }
             }
             const past = [...s.historyPast, prev]
             // Cap at HISTORY_CAP; drop oldest when over.
@@ -769,6 +819,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
                 : past
             return {
                 draftPredicate: predicate,
+                draftSource: source ?? null,
                 draftRevision: s.draftRevision + 1,
                 historyPast: cappedPast,
                 historyFuture: EMPTY_HISTORY,
@@ -787,6 +838,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             const future = [...s.historyFuture, s.draftPredicate]
             return {
                 draftPredicate: restored,
+                draftSource: null,
                 draftRevision: s.draftRevision + 1,
                 historyPast: past,
                 historyFuture: future,
@@ -805,18 +857,12 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
                 : past
             return {
                 draftPredicate: restored,
+                draftSource: null,
                 draftRevision: s.draftRevision + 1,
                 historyPast: cappedPast,
                 historyFuture: future,
             }
         })
-    },
-
-    syncDraftFromBuilder: (predicate) => {
-        // Internal mirror — do not bump revision. The builder is the
-        // ORIGIN of this change; bumping would loop us back into
-        // loadSeed in the builder's effect.
-        set({ draftPredicate: predicate })
     },
 
     setDraftOptions: (patch) => {
@@ -827,10 +873,6 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         set((s) => ({
             draftOptions: { ...(s.draftOptions ?? DEFAULT_DRAFT_OPTIONS), ...patch },
         }))
-    },
-
-    setBuilderValidation: (issues) => {
-        set({ builderValidation: issues.length === 0 ? EMPTY_ISSUES : issues })
     },
 
     addRecent: ({ viewId, predicate, label }) => {
@@ -892,6 +934,9 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
             viewId: null,
             matchUrnSet: EMPTY_SET,
             orderedMatchUrns: EMPTY_ORDERED_URNS,
+            orderedEdgeKeys: EMPTY_ORDERED_URNS,
+            matchedEdges: EMPTY_MATCHED_EDGES,
+            matchedEdgesComplete: true,
             focusedMatchIndex: null,
             queryHash: null,
             ancestorMatchCounts: EMPTY_MAP,
@@ -899,11 +944,16 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         })
     },
 
-    requestSearchRun: (predicate) => {
+    requestSearchRun: (predicate, source) => {
         // Load into the builder (history-aware, so the user sees + can
         // edit/undo it), then flag the panel to run it.
-        get().commitDraft(predicate)
-        set({ pendingRunPredicate: predicate })
+        get().commitDraft(predicate, source)
+        set({ pendingRunPredicate: predicate, pendingRunSource: source })
+    },
+
+    showRoutes: (routes, from) => {
+        get().requestSearchRun(routes, 'results')
+        set({ routesFrom: { routes, from } })
     },
 
     setStudioOpen: (open) => {
@@ -932,7 +982,7 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
 
     consumePendingRun: () => {
         const current = get().pendingRunPredicate
-        if (current !== null) set({ pendingRunPredicate: null })
+        if (current !== null) set({ pendingRunPredicate: null, pendingRunSource: null })
         return current
     },
 
@@ -969,32 +1019,43 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
         set({ selectionParent: null, selectedIndices: [] })
     },
 
-    clear: () => {
+    clear: (options) => {
         set((s) => ({
             viewId: null,
             matchUrnSet: EMPTY_SET,
             orderedMatchUrns: EMPTY_ORDERED_URNS,
+            orderedEdgeKeys: EMPTY_ORDERED_URNS,
+            matchedEdges: EMPTY_MATCHED_EDGES,
+            matchedEdgesComplete: true,
             focusedMatchIndex: null,
             queryHash: null,
             draftPredicate: null,
+            draftSource: null,
             draftRevision: s.draftRevision + 1,
             draftOptions: null,
-            builderValidation: EMPTY_ISSUES,
             ancestorMatchCounts: EMPTY_MAP,
             ancestorMatchTypeBreakdowns: EMPTY_BREAKDOWN_MAP,
-            // Wipe the in-memory undo stack — the panel is closing,
-            // it would be confusing to "undo" into a query the user
-            // can't see the chips for. Recent + Pinned persist
-            // separately via localStorage.
-            historyPast: EMPTY_HISTORY,
-            historyFuture: EMPTY_HISTORY,
+            routesFrom: null,
+            // A Clear the person asked for is one more undo step. Otherwise
+            // wipe the in-memory undo stack — the panel is closing, it
+            // would be confusing to "undo" into a query the user can't see
+            // the chips for. Recent + Pinned persist separately via
+            // localStorage.
+            ...(!options?.undoable
+                ? { historyPast: EMPTY_HISTORY, historyFuture: EMPTY_HISTORY }
+                : s.draftPredicate === null ? {} : {
+                    historyPast: [...s.historyPast, s.draftPredicate].slice(-HISTORY_CAP),
+                    historyFuture: EMPTY_HISTORY,
+                }),
         }))
     },
 
     stepFocus: (direction) => {
-        const { orderedMatchUrns, focusedMatchIndex } = get()
-        if (orderedMatchUrns.length === 0) return
-        const last = orderedMatchUrns.length - 1
+        const state = get()
+        const { focusedMatchIndex } = state
+        const stepped = steps(state)
+        if (stepped.length === 0) return
+        const last = stepped.length - 1
         let nextIndex: number
         if (focusedMatchIndex === null) {
             // First press always lands on index 0, regardless of
@@ -1009,16 +1070,16 @@ export const useSearchStore = create<SearchStoreState & SearchStoreActions>((set
     },
 
     setFocusedMatchIndex: (index) => {
-        const { orderedMatchUrns } = get()
+        const stepped = steps(get())
         if (index === null) {
             set({ focusedMatchIndex: null })
             return
         }
-        if (orderedMatchUrns.length === 0) {
+        if (stepped.length === 0) {
             set({ focusedMatchIndex: null })
             return
         }
-        const last = orderedMatchUrns.length - 1
+        const last = stepped.length - 1
         // Coerce to valid range — out-of-band callers (stale render,
         // race with a new query) should land on the nearest valid
         // index rather than crash a downstream reveal lookup.
@@ -1126,11 +1187,6 @@ export function useDraftOptions(): DraftOptions | null {
     return useSearchStore((s) => s.draftOptions)
 }
 
-/** Subscribe to the builder's validation issues. */
-export function useBuilderValidation(): ReadonlyArray<BuilderValidationIssue> {
-    return useSearchStore((s) => s.builderValidation)
-}
-
 /**
  * Subscribe to the roll-up match count for a single ancestor URN.
  * Returns 0 when the URN isn't a match-bearing ancestor; re-renders
@@ -1218,6 +1274,17 @@ export function useOrderedMatchUrns(): ReadonlyArray<string> {
     return useSearchStore((s) => s.orderedMatchUrns)
 }
 
+/** Subscribe to a Connections search's edge keys, in list order (empty for
+ *  any other search). */
+export function useOrderedEdgeKeys(): ReadonlyArray<string> {
+    return useSearchStore((s) => s.orderedEdgeKeys)
+}
+
+/** How many matches the stepper walks: edges for a Connections search. */
+export function useStepCount(): number {
+    return useSearchStore((s) => steps(s).length)
+}
+
 /** Subscribe to the focused-match index (or null when none). */
 export function useFocusedMatchIndex(): number | null {
     return useSearchStore((s) => s.focusedMatchIndex)
@@ -1231,8 +1298,18 @@ export function useFocusedMatchIndex(): number | null {
  */
 export function useFocusedMatchUrn(): string | null {
     return useSearchStore((s) =>
-        s.focusedMatchIndex !== null
+        s.focusedMatchIndex !== null && s.orderedEdgeKeys.length === 0
             ? s.orderedMatchUrns[s.focusedMatchIndex] ?? null
+            : null,
+    )
+}
+
+/** The key of the edge the stepper is on, for a Connections search; null
+ *  otherwise. */
+export function useFocusedEdgeKey(): string | null {
+    return useSearchStore((s) =>
+        s.focusedMatchIndex !== null
+            ? s.orderedEdgeKeys[s.focusedMatchIndex] ?? null
             : null,
     )
 }
@@ -1251,9 +1328,16 @@ export function useCanvasFilterMode(): CanvasFilterMode {
  */
 export function useIsFocusedMatch(urn: string | undefined): boolean {
     return useSearchStore((s) => {
-        if (!urn || s.focusedMatchIndex === null) return false
+        if (!urn || s.focusedMatchIndex === null || s.orderedEdgeKeys.length > 0) return false
         return s.orderedMatchUrns[s.focusedMatchIndex] === urn
     })
+}
+
+/** Whether one edge row is the one the stepper is on — per row, as
+ *  ``useIsFocusedMatch``. */
+export function useIsFocusedEdge(key: string): boolean {
+    return useSearchStore((s) =>
+        s.focusedMatchIndex !== null && s.orderedEdgeKeys[s.focusedMatchIndex] === key)
 }
 
 /**

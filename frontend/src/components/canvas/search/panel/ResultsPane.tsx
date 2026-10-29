@@ -8,7 +8,7 @@
  * scrollable body that paints aggregates / hits / paths / error AND
  * the focused-match auto-reveal effect.
  */
-import { Filter, X } from 'lucide-react'
+import { ArrowLeft, Filter, X } from 'lucide-react'
 import { type FC, type RefObject, useEffect, useMemo, useRef, useState } from 'react'
 
 import { cn } from '@/lib/utils'
@@ -17,9 +17,11 @@ import {
     useAncestorMatchCounts,
     useDraftPredicate,
     useFocusedMatchUrn,
+    useSearchStore,
 } from '@/store/searchStore'
 import type {
     AncestorRef,
+    EdgesPredicate,
     Predicate,
     SearchAggregateBucket,
     SearchHit,
@@ -34,6 +36,7 @@ import { ZeroResultsDiagnostic } from '../ZeroResultsDiagnostic'
 import { useViewSearchSessionOptional } from '../session/ViewSearchSessionContext'
 import { ShownQueryContext } from '../session/shownQueryContext'
 
+import { EdgeResultsList, NoConnections } from './EdgeResultsList'
 import { ErrorView } from './ErrorView'
 import { HitsByLayer, groupHitsByLayer } from './HitsByLayer'
 import { HitsByParent } from './HitsByParent'
@@ -87,13 +90,16 @@ export interface ResultsPaneProps {
         ancestorDisplayName: string
         ancestorEntityType: string
     }) => void
-    onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void
+    onReveal?: (urn: string, ancestorPath: AncestorRef[]) => void | Promise<unknown>
     onOpen?: (urn: string) => void
     /** W2.2 — Fetch the next page of hits using the current cursor.
      *  Only invoked when ``view.result.cursor`` is set. */
     onLoadMore?: () => void
     /** True while a ``loadMore`` request is in flight. */
     isLoadingMore?: boolean
+    /** Why the last page failed, when it did: the footer says so and
+     *  offers it again. */
+    loadMoreError?: string | null
     /** Page through the whole match set in one gesture — the panel loops
      *  ``onLoadMore`` until the cursor runs out. */
     onLoadAll?: () => void
@@ -101,6 +107,11 @@ export interface ResultsPaneProps {
     isLoadingAll?: boolean
     /** Stop the loop where it is; the pages already loaded stay. */
     onCancelLoadAll?: () => void
+    /** Every match to a file, in one scan — what a match set too large to
+     *  list (``LOAD_ALL_MAX``) offers instead of loading it all. */
+    onExportAll?: () => void
+    /** Run the failed search again, the query as it is. */
+    onRetry?: () => void
     /** The builder's query, and how to change it from the results: an
      *  empty answer offers the fixes that would find something, the type
      *  chips narrow it, a breadcrumb looks inside its container. */
@@ -110,17 +121,17 @@ export interface ResultsPaneProps {
 
 
 export const ResultsPane: FC<ResultsPaneProps> = ({
-    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
-    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine,
+    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
+    onLoadAll, isLoadingAll, onCancelLoadAll, onExportAll, onRetry, draft, onRefine,
 }) => {
     // Ref to the scroll container. Threaded through to HitsByParent →
     // VirtualizedHitList so the virtualizer can measure the visible
     // viewport when the hit page exceeds the virtualization threshold.
     const scrollContainerRef = useRef<HTMLDivElement>(null)
 
-    // The panel doesn't render ResultsPane for idle / templateSelected —
-    // the AskBar is the empty state. Defensive null kept for safety.
-    if (view.kind === 'idle' || view.kind === 'templateSelected') return null
+    // The panel doesn't render ResultsPane while idle — the AskBar is the
+    // empty state. Defensive null kept for safety.
+    if (view.kind === 'idle') return null
 
     return (
         <div className={cn(
@@ -140,9 +151,12 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
                     onOpen={onOpen}
                     onLoadMore={onLoadMore}
                     isLoadingMore={isLoadingMore}
+                    loadMoreError={loadMoreError}
                     onLoadAll={onLoadAll}
                     isLoadingAll={isLoadingAll}
                     onCancelLoadAll={onCancelLoadAll}
+                    onExportAll={onExportAll}
+                    onRetry={onRetry}
                     draft={draft}
                     onRefine={onRefine}
                     scrollElementRef={scrollContainerRef}
@@ -154,15 +168,37 @@ export const ResultsPane: FC<ResultsPaneProps> = ({
 
 
 function Dispatch({
-    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
-    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine, scrollElementRef,
+    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
+    onLoadAll, isLoadingAll, onCancelLoadAll, onExportAll, onRetry, draft, onRefine,
+    scrollElementRef,
 }: ResultsPaneProps & { scrollElementRef: RefObject<HTMLDivElement | null> }) {
     switch (view.kind) {
         case 'running':
             return <RunningSkeleton label="Searching…" />
         case 'error':
-            return <ErrorView message={view.message} />
+            return <ErrorView message={view.message} onRetry={onRetry} />
         case 'results':
+            // A Connections search answers edges, not entities.
+            if (view.result.edges) {
+                return (
+                    <ConnectionsContent
+                        view={view}
+                        viewId={viewId}
+                        onReveal={onReveal}
+                        onOpen={onOpen}
+                        onLoadMore={onLoadMore}
+                        isLoadingMore={isLoadingMore}
+                        loadMoreError={loadMoreError}
+                        onLoadAll={onLoadAll}
+                        isLoadingAll={isLoadingAll}
+                        onCancelLoadAll={onCancelLoadAll}
+                        onExportAll={onExportAll}
+                        draft={draft}
+                        onRefine={onRefine}
+                        scrollElementRef={scrollElementRef}
+                    />
+                )
+            }
             return (
                 <ShownQueryContext.Provider value={view.query.predicate}>
                     <ResultsContent
@@ -173,9 +209,11 @@ function Dispatch({
                         onOpen={onOpen}
                         onLoadMore={onLoadMore}
                         isLoadingMore={isLoadingMore}
+                        loadMoreError={loadMoreError}
                         onLoadAll={onLoadAll}
                         isLoadingAll={isLoadingAll}
                         onCancelLoadAll={onCancelLoadAll}
+                        onExportAll={onExportAll}
                         draft={draft}
                         onRefine={onRefine}
                         scrollElementRef={scrollElementRef}
@@ -189,8 +227,8 @@ function Dispatch({
 
 
 function ResultsContent({
-    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore,
-    onLoadAll, isLoadingAll, onCancelLoadAll, draft, onRefine, scrollElementRef,
+    view, viewId, onScopeToGroup, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
+    onLoadAll, isLoadingAll, onCancelLoadAll, onExportAll, draft, onRefine, scrollElementRef,
 }: {
     view: Extract<PanelView, { kind: 'results' }>
     viewId: string
@@ -199,9 +237,11 @@ function ResultsContent({
     onOpen?: ResultsPaneProps['onOpen']
     onLoadMore?: ResultsPaneProps['onLoadMore']
     isLoadingMore?: ResultsPaneProps['isLoadingMore']
+    loadMoreError?: ResultsPaneProps['loadMoreError']
     onLoadAll?: ResultsPaneProps['onLoadAll']
     isLoadingAll?: ResultsPaneProps['isLoadingAll']
     onCancelLoadAll?: ResultsPaneProps['onCancelLoadAll']
+    onExportAll?: ResultsPaneProps['onExportAll']
     draft?: ResultsPaneProps['draft']
     onRefine?: ResultsPaneProps['onRefine']
     scrollElementRef: RefObject<HTMLDivElement | null>
@@ -315,6 +355,10 @@ function ResultsContent({
     const hasAggregates = allBuckets.length > 0
     const hasHits = hits.length > 0
     const hasPaths = paths !== null
+    // The routes "How it matches" showed, still the query: the way back to
+    // the results they explain.
+    const routesFrom = useSearchStore((s) => s.routesFrom)
+    const backTo = routesFrom && draft === routesFrom.routes ? routesFrom.from : null
     const isEmpty = !hasAggregates && !hasHits && !hasPaths
 
     // Headline numbers. ``candidateCount`` is the backend's count over the FULL
@@ -395,6 +439,13 @@ function ResultsContent({
 
             {hasPaths && paths && (
                 <div className="p-4">
+                    {backTo && onRefine && (
+                        <button type="button" onClick={() => onRefine(backTo)}
+                                className="mb-3 inline-flex items-center gap-1.5 rounded-lg border border-glass-border bg-glass/50 px-2.5 py-1.5 text-[11px] font-medium text-ink-secondary transition-colors hover:bg-glass/70 hover:text-ink">
+                            <ArrowLeft className="h-3 w-3" />
+                            Back to results
+                        </button>
+                    )}
                     <PathResultPanel
                         paths={paths}
                         truncated={result.truncated}
@@ -497,72 +548,194 @@ function ResultsContent({
                             cursor set and appends the new hits onto this
                             list — same query, longer result. */}
                         {result.cursor && onLoadMore && (
-                            <div className="mt-2 px-3 pb-2">
-                                {isLoadingAll ? (
-                                    /* One page at a time, so the count moves
-                                       and the user can stop it. What is
-                                       already loaded stays either way. */
-                                    <div className="flex items-center gap-2">
-                                        <span className="flex-1 min-w-0 text-[11.5px] text-ink-muted tabular-nums">
-                                            Loading everything — {hits.length.toLocaleString()}
-                                            {' of '}{totalMatches.toLocaleString()}
-                                        </span>
-                                        <button
-                                            type="button"
-                                            onClick={onCancelLoadAll}
-                                            className={cn(
-                                                'rounded-lg px-3 py-1.5 shrink-0',
-                                                'border border-glass-border',
-                                                'text-[12px] font-medium text-ink',
-                                                'hover:bg-glass/40 transition-colors',
-                                            )}
-                                        >
-                                            Stop
-                                        </button>
-                                    </div>
-                                ) : (
-                                    <div className="flex items-center gap-2">
-                                        <button
-                                            type="button"
-                                            onClick={() => onLoadMore()}
-                                            disabled={isLoadingMore}
-                                            className={cn(
-                                                'flex-1 rounded-lg px-3 py-2',
-                                                'border border-glass-border',
-                                                'bg-canvas-base/40 hover:bg-canvas-base/60',
-                                                'text-[12px] font-medium text-ink',
-                                                'transition-colors',
-                                                'disabled:opacity-60 disabled:cursor-progress',
-                                                'flex items-center justify-center gap-2',
-                                            )}
-                                        >
-                                            {isLoadingMore
-                                                ? 'Loading…'
-                                                : `Load more (${hits.length} so far)`}
-                                        </button>
-                                        {onLoadAll && (
-                                            <button
-                                                type="button"
-                                                onClick={onLoadAll}
-                                                disabled={isLoadingMore}
-                                                title={`Keep paging until all ${totalMatches.toLocaleString()} are loaded`}
-                                                className={cn(
-                                                    'rounded-lg px-3 py-2 shrink-0',
-                                                    'border border-glass-border',
-                                                    'text-[12px] font-medium text-ink-secondary',
-                                                    'hover:text-ink hover:bg-glass/40 transition-colors',
-                                                    'disabled:opacity-60',
-                                                )}
-                                            >
-                                                Load all
-                                            </button>
-                                        )}
-                                    </div>
-                                )}
-                            </div>
+                            <LoadMoreFooter
+                                loaded={hits.length}
+                                total={totalMatches}
+                                onLoadMore={onLoadMore}
+                                isLoadingMore={isLoadingMore}
+                                loadMoreError={loadMoreError}
+                                onLoadAll={onLoadAll}
+                                isLoadingAll={isLoadingAll}
+                                onCancelLoadAll={onCancelLoadAll}
+                                onExportAll={onExportAll}
+                            />
                         )}
                     </div>
                 </section>
+            )}
+        </div>
+    )
+}
+
+
+/** A Connections search's answer: the edges, the exact count of each
+ *  type, and the next page — or, when it found none, why. */
+function ConnectionsContent({
+    view, viewId, onReveal, onOpen, onLoadMore, isLoadingMore, loadMoreError,
+    onLoadAll, isLoadingAll, onCancelLoadAll, onExportAll, draft, onRefine, scrollElementRef,
+}: Omit<ResultsPaneProps, 'onScopeToGroup' | 'view'> & {
+    view: Extract<PanelView, { kind: 'results' }>
+    scrollElementRef: RefObject<HTMLDivElement | null>
+}) {
+    const { result } = view
+    const edges = result.edges ?? []
+    const total = result.totalCount ?? edges.length
+    const scanning = result.status === 'running'
+    if (edges.length === 0 && !scanning) {
+        return (
+            <div className="p-4">
+                <NoConnections query={view.query.predicate as EdgesPredicate} viewId={viewId} onRefine={onRefine} />
+            </div>
+        )
+    }
+    return (
+        <div className="flex flex-col">
+            <div className="px-4 pt-4 pb-1">
+                <p className="text-[13px] font-medium text-ink/90">
+                    {total.toLocaleString()}
+                    {scanning ? ' found so far' : total === 1 ? ' connection' : ' connections'}
+                </p>
+                {edges.length < total && !scanning && (
+                    <p className="mt-1 text-[11px] leading-relaxed text-ink-muted/70">
+                        The list shows the first {edges.length.toLocaleString()}; the counts by edge type
+                        cover every one.
+                    </p>
+                )}
+            </div>
+            <EdgeResultsList
+                edges={edges}
+                typeCounts={result.edgeTypeCounts ?? {}}
+                draft={draft?.kind === 'edges' ? draft : null}
+                onRefine={onRefine}
+                onReveal={onReveal}
+                onOpen={onOpen}
+                scrollElementRef={scrollElementRef}
+                footer={result.cursor && onLoadMore ? (
+                    <LoadMoreFooter
+                        loaded={edges.length}
+                        total={total}
+                        onLoadMore={onLoadMore}
+                        isLoadingMore={isLoadingMore}
+                        loadMoreError={loadMoreError}
+                        onLoadAll={onLoadAll}
+                        isLoadingAll={isLoadingAll}
+                        onCancelLoadAll={onCancelLoadAll}
+                        onExportAll={onExportAll}
+                    />
+                ) : null}
+            />
+        </div>
+    )
+}
+
+
+/** The most matches "Load all" lists. Past what a search's session holds
+ *  (a thousand rows), every thousand more is a scan of the whole view of
+ *  its own; more than this many is better as one export — a single scan. */
+export const LOAD_ALL_MAX = 10_000
+
+
+/** "Load more" and "Load all" under a page of results — hits or edges. */
+function LoadMoreFooter({
+    loaded, total, onLoadMore, isLoadingMore, loadMoreError, onLoadAll, isLoadingAll, onCancelLoadAll,
+    onExportAll,
+}: {
+    loaded: number
+    total: number
+    onLoadMore: () => void
+    isLoadingMore?: boolean
+    loadMoreError?: string | null
+    onLoadAll?: () => void
+    isLoadingAll?: boolean
+    onCancelLoadAll?: () => void
+    onExportAll?: () => void
+}) {
+    const listable = total <= LOAD_ALL_MAX
+    return (
+        <div className="mt-2 px-3 pb-2">
+            {isLoadingAll ? (
+                /* One page at a time, so the count moves
+                   and the user can stop it. What is
+                   already loaded stays either way. */
+                <div className="flex items-center gap-2">
+                    <span className="flex-1 min-w-0 text-[11.5px] text-ink-muted tabular-nums">
+                        Loading everything — {loaded.toLocaleString()}
+                        {' of '}{total.toLocaleString()}
+                    </span>
+                    <button
+                        type="button"
+                        onClick={onCancelLoadAll}
+                        className={cn(
+                            'rounded-lg px-3 py-1.5 shrink-0',
+                            'border border-glass-border',
+                            'text-[12px] font-medium text-ink',
+                            'hover:bg-glass/40 transition-colors',
+                        )}
+                    >
+                        Stop
+                    </button>
+                </div>
+            ) : (
+                <>
+                {loadMoreError && !isLoadingMore && (
+                    <p role="alert" className="mb-1.5 text-[11.5px] leading-snug text-amber-700 dark:text-amber-300">
+                        Couldn’t load more. {loadMoreError}
+                    </p>
+                )}
+                <div className="flex items-center gap-2">
+                    <button
+                        type="button"
+                        onClick={() => onLoadMore()}
+                        disabled={isLoadingMore}
+                        className={cn(
+                            'flex-1 rounded-lg px-3 py-2',
+                            'border border-glass-border',
+                            'bg-canvas-base/40 hover:bg-canvas-base/60',
+                            'text-[12px] font-medium text-ink',
+                            'transition-colors',
+                            'disabled:opacity-60 disabled:cursor-progress',
+                            'flex items-center justify-center gap-2',
+                        )}
+                    >
+                        {isLoadingMore
+                            ? 'Loading…'
+                            : loadMoreError ? 'Try again' : `Load more (${loaded} so far)`}
+                    </button>
+                    {!listable && onExportAll && (
+                        <button
+                            type="button"
+                            onClick={onExportAll}
+                            title={`Too many to list here: every one of the ${total.toLocaleString()} `
+                                + 'to a file, in one pass'}
+                            className={cn(
+                                'rounded-lg px-3 py-2 shrink-0',
+                                'border border-glass-border',
+                                'text-[12px] font-medium text-ink-secondary',
+                                'hover:text-ink hover:bg-glass/40 transition-colors',
+                            )}
+                        >
+                            Export all {total.toLocaleString()}
+                        </button>
+                    )}
+                    {listable && onLoadAll && (
+                        <button
+                            type="button"
+                            onClick={onLoadAll}
+                            disabled={isLoadingMore}
+                            title={`Keep paging until all ${total.toLocaleString()} are loaded`}
+                            className={cn(
+                                'rounded-lg px-3 py-2 shrink-0',
+                                'border border-glass-border',
+                                'text-[12px] font-medium text-ink-secondary',
+                                'hover:text-ink hover:bg-glass/40 transition-colors',
+                                'disabled:opacity-60',
+                            )}
+                        >
+                            Load all
+                        </button>
+                    )}
+                </div>
+                </>
             )}
         </div>
     )

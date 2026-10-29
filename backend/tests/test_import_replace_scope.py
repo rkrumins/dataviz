@@ -34,7 +34,7 @@ def job(monkeypatch):
     workers = []
 
     class _Worker:
-        def __init__(self, _svc, _store, scope=None, ontology=None, facts=True):
+        def __init__(self, _svc, _store, scope=None, ontology=None, facts=True, node_identity=None):
             self.scope = scope
             self.created_node_facts = []
             workers.append(self)

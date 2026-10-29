@@ -26,8 +26,9 @@
  *
  * One Query card holds the entire active query. Rows compose with AND;
  * the Visual ↔ Code toggle switches between row-builder and DSL text.
- * Templates SEED the rows (no opaque "replace + run"). Advanced drawer
- * holds Options / JSON / Cypher only — composing happens in the card.
+ * A recipe fills the rows in — one with nothing left to fill in runs at
+ * once. Advanced drawer holds Options / JSON only — composing happens in
+ * the card.
  *
  * Canvas integration unchanged: every successful run publishes
  * matchUrnSet + ancestorMatchCounts + ancestorMatchTypeBreakdowns so
@@ -66,6 +67,7 @@ import {
     useDraftPredicate,
     useRecentQueries,
     useSearchStore,
+    type DraftSource,
     type RecentQueryEntry,
 } from '@/store/searchStore'
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
@@ -83,6 +85,9 @@ import { QuerySentence } from './panel/QuerySentence'
 import { useEditorMode } from './panel/builderMode'
 import { ResultsAskBar } from './panel/ask/ResultsAskBar'
 import { PANEL_MAX_WIDTH, PANEL_MIN_WIDTH, ResizeHandle, readPersistedWidth } from './panel/ResizeHandle'
+import { withEnd } from './panel/ConnectionBuilder'
+import { revealEdge } from './panel/EdgeResultsList'
+import { asDraft } from './panel/findMode'
 import { ResultsPane } from './panel/ResultsPane'
 import { SaveQueryDialog } from './panel/SaveQueryDialog'
 import { BulkGroupActionBar } from './panel/builder-atoms/BulkGroupActionBar'
@@ -97,6 +102,7 @@ import { usePendingSearchRun } from './usePendingSearchRun'
 import type { Recipe } from './panel/recipes/recipes'
 import { SearchCoachmark } from './panel/guidance/SearchCoachmark'
 import { ViewRecipes } from './panel/recipes/ViewRecipes'
+import { EdgeResultsTable } from './studio/EdgeResultsTable'
 import { ResultsTable } from './studio/ResultsTable'
 import { SchemaInspector } from './studio/SchemaInspector'
 import { SearchStudio } from './studio/SearchStudio'
@@ -131,7 +137,9 @@ export interface SearchMapPanelProps {
     onClose: () => void
     /** REQUIRED. The view this panel is bound to. */
     viewId: string
-    onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
+    /** Reveal an entity on the canvas — awaited where two are revealed in
+     *  turn (both ends of an edge). */
+    onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void | Promise<unknown>
     onOpenNode?: (urn: string) => void
     onFrameMatches?: (urns: string[]) => void
     /** The canvas's own search pipeline, when it has one. A canvas that
@@ -234,7 +242,7 @@ interface PanelInnerProps {
     session: UseAdvancedSearchResult
     /** The session's own teardown, when there is one. */
     onClear?: () => void
-    onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void
+    onRevealNode?: (urn: string, ancestorPath: AncestorRef[]) => void | Promise<unknown>
     onOpenNode?: (urn: string) => void
     onFrameMatches?: (urns: string[]) => void
 }
@@ -254,8 +262,8 @@ function PanelInner({
     onClose, viewId, session, onClear, onRevealNode, onOpenNode, onFrameMatches,
 }: PanelInnerProps) {
     const {
-        view, runState, runPredicate, cancel,
-        resetTemplate, loadMore, isLoadingMore,
+        view, runState, runPredicate, cancel, stop, resume, run,
+        resetTemplate, loadMore, isLoadingMore, loadMoreError,
     } = session
     // The canvas's session, when there is one. `session` above is only
     // its PIPELINE; everything the results-first layout needs beyond that
@@ -316,12 +324,16 @@ function PanelInner({
     }, [runPredicate])
     // A change made from the results — a fix for an empty answer, a type
     // to narrow to: the query changes and runs at once, whether or not
-    // the builder is open to run it.
-    const handleRefine = useCallback((next: Predicate) => {
-        useSearchStore.getState().commitDraft(next)
+    // the builder is open to run it. A recipe or the library loads one
+    // the same way, saying so.
+    const handleRefine = useCallback((next: Predicate, source?: DraftSource) => {
+        useSearchStore.getState().commitDraft(next, source)
         const runnable = buildRunnablePredicate(next)
         if (runnable) handleRun(runnable.predicate, SEARCH_OPTIONS)
     }, [handleRun])
+    const refineFromResults = useCallback((next: Predicate) => {
+        handleRefine(next, 'results')
+    }, [handleRefine])
 
     // Hydrate per-view canvas-filter-mode preference on mount /
     // viewId change. The store keeps a single ``canvasFilterMode``
@@ -378,14 +390,14 @@ function PanelInner({
         //                     ``showResultsSection`` gate keeps them
         //                     visible for any non-idle kind) so the X
         //                     button looked like it did nothing.
-        //   3. clearStore()   wipes the draft predicate / undo stack
-        //                     too so the QueryCard returns to its
-        //                     empty hero rather than redisplaying the
-        //                     same filter rows the cleared run came
-        //                     from.
+        //   3. clearStore()   wipes the draft predicate too so the
+        //                     QueryCard returns to its empty hero
+        //                     rather than redisplaying the same filter
+        //                     rows the cleared run came from — one Undo
+        //                     brings them back.
         cancel()
         resetTemplate()
-        clearStore()
+        clearStore({ undoable: true })
     }, [onClear, cancel, resetTemplate, clearStore])
 
     /**
@@ -397,10 +409,10 @@ function PanelInner({
     const handlePickRecipe = useCallback((recipe: Recipe) => {
         setLibraryOpen(false)
         if (!recipe.blank) {
-            handleRefine(recipe.predicate)
+            handleRefine(recipe.predicate, 'recipe')
             return
         }
-        commitDraft(recipe.predicate)
+        commitDraft(recipe.predicate, 'recipe')
         viewSession?.refine()
         if (editorMode !== 'form') {
             setEditorMode('sentence')
@@ -410,13 +422,14 @@ function PanelInner({
 
     // A query from the library runs as it loads, as a recipe does — the
     // builder may be folded away, with nothing on screen to run it.
+    // A Connections search kept in an AND group of its own loads as itself.
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
-        handleRefine(entry.predicate)
+        handleRefine(asDraft(entry.predicate), 'library')
         setLibraryOpen(false)
     }, [handleRefine])
 
     const handleLoadSaved = useCallback((query: SavedViewQuery) => {
-        handleRefine(query.predicate)
+        handleRefine(asDraft(query.predicate), 'library')
         setLibraryOpen(false)
     }, [handleRefine])
 
@@ -466,7 +479,7 @@ function PanelInner({
             // editor only lists top-level containers, and a result
             // group is usually deeper than that.
             uiScope: 'any',
-        }))
+        }), 'results')
     }, [commitDraft])
 
     const frameTargetUrns = useMemo<string[]>(() => {
@@ -516,7 +529,7 @@ function PanelInner({
     // Reveal and Frame go to the canvas, so Search Studio steps aside first.
     const revealNode = useMemo(() => onRevealNode && ((urn: string, path: AncestorRef[]) => {
         useSearchStore.getState().setStudioOpen(false)
-        onRevealNode(urn, path)
+        return onRevealNode(urn, path)
     }), [onRevealNode])
     const frameMatches = useMemo(() => onFrameMatches && ((urns: string[]) => {
         useSearchStore.getState().setStudioOpen(false)
@@ -525,8 +538,15 @@ function PanelInner({
 
     const revealFocusedOnCanvas = useCallback(() => {
         if (!onRevealNode) return
-        const { orderedMatchUrns, focusedMatchIndex } = useSearchStore.getState()
+        const { orderedMatchUrns, orderedEdgeKeys, focusedMatchIndex } = useSearchStore.getState()
         if (focusedMatchIndex === null) return
+        // A Connections search steps through edges: show both ends.
+        if (orderedEdgeKeys.length > 0) {
+            const key = orderedEdgeKeys[focusedMatchIndex]
+            const edge = view.kind === 'results' ? view.result.edges?.find((e) => e.key === key) : undefined
+            if (edge && revealNode) void revealEdge(edge, revealNode)
+            return
+        }
         const urn = orderedMatchUrns[focusedMatchIndex]
         if (!urn) return
         const hits = view.kind === 'results' ? (view.result.hits ?? []) : []
@@ -555,6 +575,8 @@ function PanelInner({
     }, [])
     const [studioHost, setStudioHost] = useState<Element | null>(null)
     const [studioView, setStudioView] = useState<'table' | 'cards'>('table')
+    // A Connections search takes what its inspector adds into its From end.
+    const connectionsDraft = draftPredicate?.kind === 'edges' ? draftPredicate : null
     useLayoutEffect(() => {
         if (studioOpen) setStudioHost(panelRef.current?.closest('[data-panel="search-map-panel"]')?.parentElement ?? null)
     }, [studioOpen])
@@ -571,6 +593,14 @@ function PanelInner({
             || target.tagName === 'TEXTAREA'
             || target.isContentEditable
         )) return
+        // ⌘Z / Ctrl+Z steps back through the changes to the query, with ⇧
+        // forward again — in Search Studio too, whose keys bubble up here.
+        if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
+            e.preventDefault()
+            if (e.shiftKey) useSearchStore.getState().redo()
+            else useSearchStore.getState().undo()
+            return
+        }
         // Search Studio and the popovers are portaled: their keys are theirs.
         if (!panelRef.current?.contains(target)) return
         switch (e.key) {
@@ -612,10 +642,6 @@ function PanelInner({
             isRunning={view.kind === 'running'}
             runState={runState}
             onRun={handleRun}
-            onOpenAdvanced={() => {
-                setStudioOpen(false)
-                openAdvanced('options')
-            }}
             onPickRecipe={handlePickRecipe}
         />
     )
@@ -634,6 +660,13 @@ function PanelInner({
             progress={view.kind === 'results'
                 ? view.result.progress ?? null
                 : null}
+            startedAt={view.kind === 'results' ? view.startedAt ?? null : null}
+            halted={view.kind === 'results' ? view.halted ?? null : null}
+            onStop={stop}
+            onResume={() => { void resume() }}
+            countIsFloor={view.kind === 'results' && view.result.status === 'complete'
+                && view.result.countStatus === 'lowerBound'}
+            notes={view.kind === 'results' ? view.result.scopeDiagnostics?.notes ?? null : null}
             onFrame={canFrame
                 ? () => frameMatches?.(frameTargetUrns)
                 : undefined}
@@ -644,7 +677,8 @@ function PanelInner({
                 ? handleClear
                 : undefined}
             onExport={canExport ? () => setExportOpen(true) : undefined}
-            unit={view.kind === 'results' && view.result.paths ? 'path' : 'match'}
+            unit={view.kind !== 'results' ? 'match'
+                : view.result.paths ? 'path' : view.result.edges ? 'connection' : 'match'}
             viewId={viewId}
         />
     )
@@ -657,15 +691,20 @@ function PanelInner({
             onOpen={onOpenNode}
             onLoadMore={loadMore}
             isLoadingMore={isLoadingMore}
+            loadMoreError={loadMoreError}
             onLoadAll={loadAll}
             isLoadingAll={isLoadingAll}
             onCancelLoadAll={cancelLoadAll}
+            onExportAll={canExport ? () => setExportOpen(true) : undefined}
+            onRetry={() => { void run() }}
             draft={draftPredicate}
-            onRefine={handleRefine}
+            onRefine={refineFromResults}
         />
     )
-    // A table only for rows: not routes, not nothing.
+    // A table only for rows: not routes, not nothing. A Connections search's
+    // rows are its edges.
     const tableHits = view.kind === 'results' && !view.result.paths ? view.result.hits ?? [] : []
+    const tableEdges = view.kind === 'results' ? view.result.edges ?? [] : []
 
     return (
         <div
@@ -787,7 +826,7 @@ function PanelInner({
                     results={(
                         <>
                             {showResultsSection && matchBar}
-                            {tableHits.length > 0 && (
+                            {(tableHits.length > 0 || tableEdges.length > 0) && (
                                 <Segmented size="sm" className="self-start" label="How to show the results"
                                            value={studioView} onChange={setStudioView}
                                            options={[{ value: 'table', label: 'Table' }, { value: 'cards', label: 'Cards' }]} />
@@ -799,12 +838,23 @@ function PanelInner({
                                     </p>
                                     <ViewRecipes viewId={viewId} onPick={handlePickRecipe} />
                                 </div>
+                            ) : tableEdges.length > 0 && studioView === 'table' && view.kind === 'results' ? (
+                                <EdgeResultsTable
+                                    edges={tableEdges}
+                                    onReveal={revealNode}
+                                    onOpen={onOpenNode}
+                                    onFrame={frameMatches}
+                                    canLoadMore={!!view.result.cursor}
+                                    isLoadingMore={isLoadingMore}
+                                    loadMoreError={loadMoreError}
+                                    onLoadMore={loadMore}
+                                />
                             ) : tableHits.length > 0 && studioView === 'table' && view.kind === 'results' ? (
                                 <ResultsTable
                                     hits={tableHits}
                                     query={view.query.predicate}
                                     draft={draftPredicate}
-                                    onRefine={handleRefine}
+                                    onRefine={refineFromResults}
                                     onReveal={revealNode}
                                     onOpen={onOpenNode}
                                     onLookInside={(a) => handleScopeToGroup({ ancestorUrn: a.urn,
@@ -812,6 +862,7 @@ function PanelInner({
                                     onFrame={frameMatches}
                                     canLoadMore={!!view.result.cursor}
                                     isLoadingMore={isLoadingMore}
+                                    loadMoreError={loadMoreError}
                                     onLoadMore={loadMore}
                                     viewId={viewId}
                                     total={view.result.totalCount ?? view.result.candidateCount ?? null}
@@ -822,7 +873,12 @@ function PanelInner({
                         </>
                     )}
                     inspector={(
-                        <SchemaInspector viewId={viewId} draft={draftPredicate} onRefine={handleRefine}
+                        <SchemaInspector viewId={viewId}
+                                         draft={connectionsDraft ? connectionsDraft.sourceWhere ?? null : draftPredicate}
+                                         onRefine={connectionsDraft
+                                             ? (w) => handleRefine(withEnd(connectionsDraft, 'sourceWhere', w))
+                                             : handleRefine}
+                                         into={connectionsDraft ? 'From' : undefined}
                                          mode={editorMode}
                                          initialTab={persona === 'technical' ? 'properties' : 'types'} />
                     )}
@@ -842,8 +898,8 @@ function PanelInner({
  * is a labeled chip so the user can identify it without hovering for
  * a tooltip:
  *
- *   - Library: opens the unified LibraryPopover (Mine / Shared /
- *     Templates tabs). Active state when open.
+ *   - Library: opens the unified LibraryPopover (Mine / This view /
+ *     Other views / Recipes tabs). Active state when open.
  *   - Options: opens the Advanced drawer on its Options tab. Shows a
  *     numeric badge when any option differs from default so a query
  *     that's been power-user-tuned is visually distinct.

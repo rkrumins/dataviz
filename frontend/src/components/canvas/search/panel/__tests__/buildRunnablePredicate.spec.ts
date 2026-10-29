@@ -101,3 +101,30 @@ describe('buildRunnablePredicate — relationships and names', () => {
         expect(buildRunnablePredicate({ kind: 'is', refs: [] })).toBeNull()
     })
 })
+
+
+describe('buildRunnablePredicate — a Connections search', () => {
+    const bob: Predicate = { kind: 'property', key: 'first_name', op: 'eq', value: 'bob' }
+
+    it('runs as it is once an end is finished', () => {
+        const draft: Predicate = { kind: 'edges', sourceWhere: bob }
+        expect(buildRunnablePredicate(draft)?.predicate).toEqual(draft)
+    })
+
+    it('waits while both ends are empty and no edge type is picked', () => {
+        expect(buildRunnablePredicate({ kind: 'edges' })).toBeNull()
+        expect(buildRunnablePredicate({ kind: 'edges', edgeTypes: [] })).toBeNull()
+    })
+
+    it('runs every edge of the types picked, with no ends', () => {
+        expect(buildRunnablePredicate({ kind: 'edges', edgeTypes: ['PRODUCES'] })).not.toBeNull()
+    })
+
+    it('waits while an end has an unfinished condition', () => {
+        const draft: Predicate = {
+            kind: 'edges', sourceWhere: bob,
+            targetWhere: { kind: 'group', op: 'and', children: [{ kind: 'tag', op: 'hasAny', values: [] }] },
+        }
+        expect(buildRunnablePredicate(draft)).toBeNull()
+    })
+})

@@ -1,0 +1,124 @@
+{
+  "about": "What a save stores for an entity's name property and display name. The server's rule is backend/app/services/node_identity.py::bind_node_write; the editor predicts it with boundName in frontend/src/components/dataSource/NodeIdentity.tsx to say what saving does before it happens. backend/tests/test_node_identity_write_binding.py and frontend/src/components/dataSource/NodeIdentity.test.ts both run these cases, so the two cannot drift. `prior` is the entity before the write (null: it is being created), `value` the entity the write sends, `minted` that the server mints its urn (an editor create), and `expect` the display name and the name property's value (null: absent) after the save.",
+  "cases": [
+    {
+      "name": "a new entity is named by its display name",
+      "mapping": {"nameProperty": "name"}, "minted": true,
+      "prior": null,
+      "value": {"displayName": "Orders"},
+      "expect": {"displayName": "Orders", "name": "Orders"}
+    },
+    {
+      "name": "a duplicate's copied name is derived again from its own",
+      "mapping": {"nameProperty": "title"}, "minted": true,
+      "prior": null,
+      "value": {"displayName": "Orders (Copy)", "properties": {"title": "Orders", "owner": "ana"}},
+      "expect": {"displayName": "Orders (Copy)", "name": "Orders (Copy)"}
+    },
+    {
+      "name": "a new entity with no display name takes the name property's",
+      "mapping": {"nameProperty": "title"}, "minted": true,
+      "prior": null,
+      "value": {"displayName": "", "properties": {"title": "Orders"}},
+      "expect": {"displayName": "Orders", "name": "Orders"}
+    },
+    {
+      "name": "an entity created with its own urn keeps the name it brings",
+      "mapping": {"nameProperty": "title"}, "minted": false,
+      "prior": null,
+      "value": {"displayName": "Orders", "properties": {"title": "ORD"}},
+      "expect": {"displayName": "Orders", "name": "ORD"}
+    },
+    {
+      "name": "an entity created with its own urn gets an empty name filled",
+      "mapping": {"nameProperty": "title"}, "minted": false,
+      "prior": null,
+      "value": {"displayName": "Orders"},
+      "expect": {"displayName": "Orders", "name": "Orders"}
+    },
+    {
+      "name": "a rename carries the name property while the two agree",
+      "mapping": {"nameProperty": "name"}, "minted": false,
+      "prior": {"displayName": "Orders", "properties": {"name": "Orders"}},
+      "value": {"displayName": "Sales", "properties": {"name": "Orders"}},
+      "expect": {"displayName": "Sales", "name": "Sales"}
+    },
+    {
+      "name": "a rename of an entity without a name property gives it one",
+      "mapping": {"nameProperty": "name"}, "minted": false,
+      "prior": {"displayName": "Orders"},
+      "value": {"displayName": "Sales"},
+      "expect": {"displayName": "Sales", "name": "Sales"}
+    },
+    {
+      "name": "a rename leaves a name kept apart from the display name",
+      "mapping": {"nameProperty": "name"}, "minted": false,
+      "prior": {"displayName": "Customer Orders", "properties": {"name": "customer_orders"}},
+      "value": {"displayName": "All orders", "properties": {"name": "customer_orders"}},
+      "expect": {"displayName": "All orders", "name": "customer_orders"}
+    },
+    {
+      "name": "editing both keeps both",
+      "mapping": {"nameProperty": "name"}, "minted": false,
+      "prior": {"displayName": "Orders", "properties": {"name": "Orders"}},
+      "value": {"displayName": "Customer Orders", "properties": {"name": "customer_orders"}},
+      "expect": {"displayName": "Customer Orders", "name": "customer_orders"}
+    },
+    {
+      "name": "editing the name property renames while the two agree",
+      "mapping": {"nameProperty": "title"}, "minted": false,
+      "prior": {"displayName": "Orders", "properties": {"title": "Orders"}},
+      "value": {"displayName": "Orders", "properties": {"title": "Sales"}},
+      "expect": {"displayName": "Sales", "name": "Sales"}
+    },
+    {
+      "name": "editing a name property kept apart leaves the display name",
+      "mapping": {"nameProperty": "title"}, "minted": false,
+      "prior": {"displayName": "Orders", "properties": {"title": "ord"}},
+      "value": {"displayName": "Orders", "properties": {"title": "ord_v2"}},
+      "expect": {"displayName": "Orders", "name": "ord_v2"}
+    },
+    {
+      "name": "a removed name property stays removed",
+      "mapping": {"nameProperty": "name"}, "minted": false,
+      "prior": {"displayName": "Orders", "properties": {"name": "Orders"}},
+      "value": {"displayName": "Orders"},
+      "expect": {"displayName": "Orders", "name": null}
+    },
+    {
+      "name": "a blank display name is never copied",
+      "mapping": {"nameProperty": "name"}, "minted": false,
+      "prior": {"displayName": "Orders", "properties": {"name": "Orders"}},
+      "value": {"displayName": "", "properties": {"name": "Orders"}},
+      "expect": {"displayName": "", "name": "Orders"}
+    },
+    {
+      "name": "any save fills a name property the entity never had",
+      "mapping": {"nameProperty": "name"}, "minted": false,
+      "prior": {"displayName": "Orders"},
+      "value": {"displayName": "Orders"},
+      "expect": {"displayName": "Orders", "name": "Orders"}
+    },
+    {
+      "name": "values agree as text",
+      "mapping": {"nameProperty": "name"}, "minted": false,
+      "prior": {"displayName": "5", "properties": {"name": 5}},
+      "value": {"displayName": "6", "properties": {"name": 5}},
+      "expect": {"displayName": "6", "name": "6"}
+    },
+    {
+      "name": "only text becomes a display name",
+      "mapping": {"nameProperty": "name"}, "minted": false,
+      "prior": {"displayName": "5", "properties": {"name": 5}},
+      "value": {"displayName": "5", "properties": {"name": 7}},
+      "expect": {"displayName": "5", "name": 7}
+    },
+    {
+      "name": "a field the platform owns is left alone",
+      "mapping": {"nameProperty": "description"}, "minted": true,
+      "prior": null,
+      "value": {"displayName": "Orders"},
+      "expect": {"displayName": "Orders", "name": null}
+    }
+  ]
+}

@@ -3,6 +3,8 @@
  * line: what a question will become before it is applied.
  *
  *   Find [Datasets] that [feed] [a Dashboard] within 1–3 hops that are tagged [#Finance]
+ *
+ * A connection reads as its own sentence: "Connections from … to …, through …".
  */
 import { Fragment, useMemo } from 'react'
 
@@ -10,6 +12,7 @@ import { useEntityVisual } from '@/hooks/useEntityVisual'
 import { cn } from '@/lib/utils'
 import type { Predicate } from '@/types/search'
 
+import { formatPredicateAsSentence } from '../predicateSentence'
 import { buildSentence, type SentenceLine } from '../sentence/clauseModel'
 import { TypeIcon } from '../sentence/editors'
 import { relationWords, toRuns } from '../sentence/lineWords'
@@ -40,6 +43,7 @@ const GROUP_WORDS = { and: 'all of', or: 'any of', not: 'none of' } as const
 export function ReadsAs({ predicate }: { predicate: Predicate }) {
     const sentence = useMemo(() => buildSentence(predicate), [predicate])
     const typeName = useTypeName()
+    if (predicate.kind === 'edges') return <>{formatPredicateAsSentence(predicate, { leadIn: 'Connections' })}</>
 
     const line = (l: SentenceLine) => {
         const lead = l.lead.replace(/^↳\s*/, '')

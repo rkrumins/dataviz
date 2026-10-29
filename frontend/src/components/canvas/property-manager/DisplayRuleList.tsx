@@ -12,13 +12,13 @@
  */
 import { motion } from 'framer-motion'
 import {
-    ArrowDown, ArrowUp, Crosshair, Pencil, Plus, Tags, Trash2,
+    AlertTriangle, ArrowDown, ArrowUp, Crosshair, Pencil, Plus, Tags, Trash2,
 } from 'lucide-react'
 
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
 import { cn } from '@/lib/utils'
 import type { DisplayRuleConfig } from '@/types/schema'
-import { useRuleCount } from '@/store/displayRuleMatchStore'
+import { useDisplayRuleMatchStore, useRuleCount } from '@/store/displayRuleMatchStore'
 
 
 export interface DisplayRuleListProps {
@@ -33,6 +33,30 @@ export interface DisplayRuleListProps {
     onReveal: (rule: DisplayRuleConfig) => void
     /** The caller can't change the view's rules: show them, don't offer edits. */
     readOnly?: boolean
+}
+
+
+/** Why the rules couldn't be checked, when they couldn't — the canvas would
+ *  otherwise just show no chips, as if nothing matched. */
+function CheckFailure() {
+    const error = useDisplayRuleMatchStore((s) => s.membershipError ?? s.countsError)
+    const retry = useDisplayRuleMatchStore((s) => s.retryChecks)
+    if (!error) return null
+    return (
+        <div role="alert" className="flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2">
+            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0 text-amber-600 dark:text-amber-400" />
+            <p className="flex-1 min-w-0 text-[11.5px] leading-snug text-ink">
+                Couldn’t check the display rules, so some tags or counts may be missing. {error}
+            </p>
+            <button
+                type="button"
+                onClick={retry}
+                className="shrink-0 rounded-lg px-2.5 py-1 text-[11.5px] font-semibold text-ink border border-glass-border hover:bg-glass/40 transition-colors"
+            >
+                Retry
+            </button>
+        </div>
+    )
 }
 
 
@@ -119,6 +143,8 @@ export function DisplayRuleList({
             </div>
             )}
 
+            <CheckFailure />
+
             <div className="flex flex-col gap-2">
                 {rules.map((rule, index) => (
                     <RuleCard
@@ -157,6 +183,13 @@ function RuleCountLine({ enabled, count }: {
         return <span title={count.error}>At least {n} · <span className="text-rose-400">count stopped</span></span>
     }
     if (!count.complete) return <>{n} so far · counting {count.percent}%</>
+    if (count.lowerBound) {
+        return (
+            <span title="Part of the view couldn’t be checked in time and was left out">
+                At least {n} {count.count === 1 ? 'match' : 'matches'} in this view
+            </span>
+        )
+    }
     return <>{n} {count.count === 1 ? 'match' : 'matches'} in this view</>
 }
 

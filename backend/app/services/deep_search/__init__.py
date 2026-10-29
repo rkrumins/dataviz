@@ -17,6 +17,7 @@ from backend.app.services.deep_search.contracts import (
     DeepSearchProvider,
     SearchFailed,
     SearchRunContext,
+    SessionStoreUnavailable,
 )
 from backend.app.services.deep_search.settings import (
     DeepSearchSettings,
@@ -29,5 +30,6 @@ __all__ = [
     "DeepSearchSettings",
     "SearchFailed",
     "SearchRunContext",
+    "SessionStoreUnavailable",
     "get_deep_search_settings",
 ]

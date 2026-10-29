@@ -5,11 +5,15 @@
  * decided by `lib/nodeFields`.
  */
 import { useId, useMemo, type ComponentType, type ReactNode } from 'react'
-import { AtSign, Briefcase, Copy, Database, FileText, Layers, Link, Type } from 'lucide-react'
+import { ArrowRight, AtSign, Briefcase, Check, Copy, Database, FileText, Layers, Link, Sparkles, Type, Unlink } from 'lucide-react'
 import { useActiveView } from '@/store/schema'
 import { normalizeReferenceLayout } from '@/utils/referenceLayout'
-import { readSchemaField, withReserved, writeBusinessLabel, writeSchemaField } from '@/lib/nodeFields'
+import { readSchemaField, toPayloadShape, withReserved, writeBusinessLabel, writeSchemaField } from '@/lib/nodeFields'
 import { cn } from '@/lib/utils'
+import type { DataSourceResponse } from '@/services/workspaceService'
+import {
+  Note, NodeIdentityFacts, boundFieldIds, nameOnSave, useCanvasNodeIdentity,
+} from '@/components/dataSource/NodeIdentity'
 import { IconButton } from '@/components/ui/Button'
 import { PropertyEditor } from '../PropertyEditor'
 import { PanelErrorBoundary } from '../PanelErrorBoundary'
@@ -47,9 +51,40 @@ function Field({ label, icon: Icon, hint, children }: {
 
 interface SchemaField { id: string; name: string; type?: string }
 
-export function EntityEditTab({ nodeId, form, entityType, urn, userProps, onEdit, onCopyUrn }: {
+/** What saving does to the data source's own name property, said under the Name input before it
+ *  happens — the server's rule, predicted by `nameOnSave`. */
+function nameHint(original: Data | null, form: Data, mapping: DataSourceResponse | null): ReactNode {
+  const effect = nameOnSave(original && toPayloadShape(original), toPayloadShape(form), mapping, original === null)
+  if (!effect) return null
+  const prop = <code className="font-mono text-ink-secondary">{effect.property}</code>
+  const quote = (v: unknown) => `“${String(v)}”`
+  switch (effect.kind) {
+    case 'follows':
+      if (effect.from != null && !(typeof effect.from === 'string' && !effect.from.trim())) {
+        return <Note tone="change" icon={ArrowRight}>{prop} changes to {quote(effect.to)} too.</Note>
+      }
+      return original === null ? <Note tone="good" icon={Check}>Also saved as {prop}.</Note>
+        : <Note tone="change" icon={Sparkles}>{prop} is empty — it gets {quote(effect.to)} when saved.</Note>
+    case 'renames':
+      return <Note tone="change" icon={ArrowRight}>Saving renames it to {quote(effect.to)} to match {prop}.</Note>
+    case 'same':
+      return <Note tone="good" icon={Check}>Also saved as {prop}.</Note>
+    case 'apart':
+      return (
+        <Note tone="apart" icon={Unlink}>
+          {effect.edited ? <>{prop} is saved as {quote(effect.value)}, apart from the name.</>
+            : effect.renamed ? <>{prop} stays {quote(effect.value)}: it is kept apart from the name.</>
+              : <>{prop} is {quote(effect.value)}, kept apart from the name.</>}
+        </Note>
+      )
+  }
+}
+
+export function EntityEditTab({ nodeId, form, original, entityType, urn, userProps, onEdit, onCopyUrn }: {
   nodeId: string
   form: Data
+  /** The entity as first read — what a save is judged against — or null for one not saved yet. */
+  original: Data | null
   entityType?: { fields?: SchemaField[] } | null
   urn: string
   /** The node's own properties (reserved names the reader mirrors in are left out). */
@@ -58,7 +93,11 @@ export function EntityEditTab({ nodeId, form, entityType, urn, userProps, onEdit
   onCopyUrn: () => void
 }) {
   const set = (key: string, value: unknown) => onEdit((d) => ({ ...d, [key]: value }))
-  const schemaFields = (entityType?.fields ?? []).filter((f) => !FORM_FIELD_IDS.includes(f.id))
+  // The Name input is also the source's own name property, and the platform assigns its identity
+  // property: neither is offered as a schema field of its own.
+  const identity = useCanvasNodeIdentity()
+  const bound = boundFieldIds(identity)
+  const schemaFields = (entityType?.fields ?? []).filter((f) => !FORM_FIELD_IDS.includes(f.id) && !bound.has(f.id))
 
   // Layer placement is VIEW config (referenceLayout.assignments), managed on the canvas — shown
   // here resolved and read-only.
@@ -74,7 +113,7 @@ export function EntityEditTab({ nodeId, form, entityType, urn, userProps, onEdit
   return (
     <div className="p-5 space-y-5">
       <div className="space-y-4">
-        <Field label="Name" icon={Type}>
+        <Field label="Name" icon={Type} hint={nameHint(original, form, identity)}>
           {(id) => <input id={id} type="text" className={INPUT} placeholder="Entity name…"
             value={text(form.label ?? form.name)} onChange={(e) => set('label', e.target.value)} />}
         </Field>
@@ -95,6 +134,8 @@ export function EntityEditTab({ nodeId, form, entityType, urn, userProps, onEdit
             </div>
           )}
         </Field>
+        {/* The entity as stored: what this edit will do to it is the Name's hint above. */}
+        <NodeIdentityFacts data={original ?? form} pending={original === null} />
       </div>
 
       <PlacementEditor nodeId={nodeId} />

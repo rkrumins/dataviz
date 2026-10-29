@@ -37,10 +37,10 @@ function renderBox(session: ViewSearchSession) {
 }
 
 /** A finished run. Only `result` is read by the status line and the
- *  list; the template/inputs/query half of the view belongs to the panel. */
+ *  list; the query half of the view belongs to the panel. */
 function resultsView(result: Record<string, unknown>): PanelView {
   return {
-    kind: 'results', template: {}, inputs: {}, query: {},
+    kind: 'results', query: {},
     result, elapsedMs: 12,
   } as unknown as PanelView
 }
@@ -230,6 +230,18 @@ describe('HeaderSearch — the status line', () => {
     renderBox(session)
 
     expect(screen.getByText(/50,000\+ matches/)).toBeInTheDocument()
+  })
+
+  it('counts a Connections search in connections, which no layer holds', () => {
+    const session = stubSession({
+      resolveLayer: vi.fn(() => 'gold'),
+      advanced: stubAdvanced({
+        view: resultsView({ totalCount: 8, truncated: false, hits: [], edges: [] }),
+      }),
+    })
+    renderBox(session)
+
+    expect(screen.getByText('8 connections')).toBeInTheDocument()
   })
 
   it('says what a scan still running has found so far, and how far it is', () => {
@@ -435,7 +447,7 @@ describe('HeaderSearch — a standing answer that is no longer the question', ()
       quick: { ...DEFAULT_QUICK, text: 'orders' },
       advanced: stubAdvanced({
         view: {
-          kind: 'error', template: {}, inputs: {}, query: {},
+          kind: 'error', query: {},
           message: 'Query deadline exceeded', elapsedMs: 9,
         } as unknown as PanelView,
       }),
@@ -541,7 +553,7 @@ describe('HeaderSearch — the keyboard', () => {
       quick: { ...DEFAULT_QUICK, text: 'orders' },
       advanced: stubAdvanced({
         view: {
-          kind: 'error', template: {}, inputs: {}, query: {},
+          kind: 'error', query: {},
           message: 'Query deadline exceeded', elapsedMs: 9,
         } as unknown as PanelView,
       }),
@@ -793,7 +805,7 @@ describe('HeaderSearch — prefetch', () => {
       quick: { ...DEFAULT_QUICK, text: 'orders' },
       advanced: stubAdvanced({
         view: {
-          kind: 'error', template: {}, inputs: {}, query: {},
+          kind: 'error', query: {},
           message: 'Query deadline exceeded', elapsedMs: 9,
         } as unknown as PanelView,
       }),

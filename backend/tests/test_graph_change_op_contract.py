@@ -72,6 +72,20 @@ def test_node_description_filed_under_properties_is_lifted():
     assert update["payload"] == {"qualifiedName": "q", "properties": {}}
 
 
+def test_a_node_whose_urn_the_server_mints_is_marked_minted():
+    """A brand-new node's own name / identity properties are derived, never copied — the service
+    can only tell which nodes are brand new by this mark."""
+    minted, given, edge = _resolve(
+        _op("create", "node", ref="t1", payload={"entityType": "Table"}),
+        _op("create", "node", ref="t2", payload={"entityType": "Table", "urn": "urn:x"}),
+        _op("create", "edge", ref="e1", payload={"edgeType": "E", "sourceEntityId": "t1",
+                                                 "targetEntityId": "urn:x"}))
+    assert minted["minted"] is True and minted["entity_id"] == minted["payload"]["urn"]
+    assert "minted" not in given and "minted" not in edge
+    [by_id] = _resolve(_op("create", "node", id="urn:y", payload={"entityType": "Table"}))
+    assert "minted" not in by_id
+
+
 def test_edge_payloads_are_never_lifted():
     [op] = _resolve(_op("update", "edge", id="e1", payload={"properties": {"description": "D"}}))
     assert op["payload"] == {"properties": {"description": "D"}}

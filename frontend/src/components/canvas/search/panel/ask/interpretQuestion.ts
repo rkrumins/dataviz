@@ -14,25 +14,53 @@
  * A relationship's relative is described by the words after its verb:
  * "that feed finance dashboards" is a dashboard tagged Finance.
  *
+ * A question that names its subject first asks what that entity feeds, or
+ * what feeds it — the answer's relationship runs the other way:
+ *
+ *   "what does orders feed"        → fedBy*..3(@orders OR ancestor(@orders))
+ *   "where does orders come from"  → feeds*..3(@orders OR ancestor(@orders))
+ *
+ * A named relative of a lineage relationship takes in what is inside it, as
+ * the canvas's right-click questions do (a dataset's lineage runs through its
+ * columns), and offers "just it" instead.
+ *
+ * A question about the edges themselves reads as a connection, each end
+ * read as a question of its own:
+ *
+ *   "connections from columns tagged PII to dashboards through produces, either way"
+ *     → from(type:schemaField AND tag:PII) linkedTo[PRODUCES](type:dashboard)
+ *
+ * So does what flows from one place to another — a name there is the place
+ * and what is inside it, a layer's word the layer — and the edges between
+ * two kinds of thing, either way; a route between two things reads as the
+ * routes themselves:
+ *
+ *   "what flows from bronze to gold"   → from(layer:bronze) to[lineage](layer:gold)
+ *   "how does orders reach revenue"    → the lineage routes from orders to revenue
+ *
  * Words it can't place are read as a name to search for, and said so; a
  * word with several readings (a tag, a container's name, a name) is read
- * one way and offers the others. Pure and synchronous: the same question
- * with the same picks always reads the same.
+ * one way and offers the others; what it leaves out — a property the view
+ * doesn't have, relationships nested too deep — it says (``notes``). A word
+ * a letter or two off one of the view's own is offered as that word
+ * ("Did you mean"). Pure and synchronous: the same question with the same
+ * picks always reads the same.
  */
-import type { NodeRef, Predicate, RelatedPredicate } from '@/types/search'
+import type { EdgeClass, EdgesPredicate, NodeRef, PathPredicate, Predicate, RelatedPredicate } from '@/types/search'
 
 import { axisMeta, maxHopsFor, RELATION_DEPTH_MAX, RELATION_MAX_HOPS, type RelationAxis } from '../relations'
 import { FILTER_CATEGORIES } from '../vocabulary/filterKinds'
 
-import { phraseKey, type AskMeaning, type AskVocabulary } from './askVocabulary'
+import { identifierWords, normalWord, phraseKey, type AskMeaning, type AskVocabulary } from './askVocabulary'
 
 
 // ---------------------------------------------------------------------------
 // What it returns
 // ---------------------------------------------------------------------------
 
-/** One way to read a word. */
-export type AskReading = 'type' | 'tag' | 'value' | 'layer' | 'inside' | 'name'
+/** One way to read a word. ``withInside`` / ``itself``: a named relative of a
+ *  lineage relationship, with or without what is inside it. */
+export type AskReading = 'type' | 'tag' | 'value' | 'layer' | 'inside' | 'name' | 'withInside' | 'itself'
 
 export interface AskAmbiguity {
     /** Stable while the word stays where it is: its offset and text. */
@@ -64,6 +92,17 @@ export interface Interpretation {
     /** Words read as a name to search for — said back, as a guess. */
     unrecognized: string[]
     names: AskName[]
+    /** What the question asked that the query leaves out, and why. */
+    notes: string[]
+    /** Words a letter or two off one of the view's own, and that word. */
+    suggestions?: AskSuggestion[]
+}
+
+/** "Did you mean …": a word as typed, and the view's word it is likely
+ *  to be. */
+export interface AskSuggestion {
+    text: string
+    suggestion: string
 }
 
 
@@ -84,6 +123,10 @@ type Unit =
     | { u: 'cmp'; op: CmpOp } | { u: 'is' } | { u: 'isNot' } | { u: 'between' }
     | { u: 'last' } | { u: 'unit'; iso: (n: number) => string } | { u: 'hop' } | { u: 'layerWord' }
     | { u: 'doc'; predicate: Predicate }
+
+/** The key of a comparison left out (the view has no such property): its
+ *  value is read, and dropped with it. */
+const LEFT_OUT = '\u0000'
 
 const HAS_DESCRIPTION: Predicate = { kind: 'hasProperty', key: 'description', negate: false }
 const NO_DESCRIPTION: Predicate = { kind: 'hasProperty', key: 'description', negate: true }
@@ -296,14 +339,402 @@ const READING_OF: Record<AskMeaning['kind'], AskReading | null> = {
 const READING_LABEL: Record<AskReading, string> = {
     type: 'a type', tag: 'a tag', value: 'a value', layer: 'a layer',
     inside: 'inside a container', name: 'a name',
+    withInside: 'it and what’s inside', itself: 'just it',
+}
+
+/** The property "owned by" and "unowned" mean in this view: ``owner``, else
+ *  the one named for owners — as the recipes find it. */
+function ownerKey(vocab: AskVocabulary): string | null {
+    return vocab.keys.includes('owner') ? 'owner' : vocab.keys.find((k) => /owner/i.test(k)) ?? null
+}
+
+/** A named relative: the entity — and, for a lineage relationship, what is
+ *  inside it too unless "just it" is picked. */
+function namedWhere(ref: NodeRef, lineage: boolean, picked: AskReading): Predicate {
+    const is = (): Predicate => ({ kind: 'is', refs: [ref] })
+    if (!lineage || picked === 'itself') return is()
+    return { kind: 'group', op: 'or', children: [is(), { kind: 'related', axis: 'ancestor', where: is() }] }
+}
+
+
+/** The view's word ``text`` is a letter or two off — one for a short word,
+ *  two for a longer one — among the meanings of ``kinds`` (any, when not
+ *  given); null when none is that close. */
+function didYouMean(text: string, vocab: AskVocabulary, kinds?: ReadonlyArray<AskMeaning['kind']>): string | null {
+    const words = text.trim().split(/\s+/)
+    const key = phraseKey(words)
+    const most = key.length <= 5 ? 1 : 2
+    let best: { key: string; d: number } | null = null
+    for (const [candidate, meanings] of vocab.phrases) {
+        if (candidate === key || Math.abs(candidate.length - key.length) > most) continue
+        if (kinds && !meanings.some((m) => kinds.includes(m.kind))) continue
+        const d = editDistance(key, candidate, most)
+        if (d <= most && (!best || d < best.d)) best = { key: candidate, d }
+    }
+    if (!best) return null
+    // A type in the question's own case and number: "dashbaords" → "dashboards".
+    let word = vocab.display?.get(best.key) ?? best.key
+    if (vocab.phrases.get(best.key)!.every((m) => m.kind === 'type')) word = word.toLowerCase()
+    const typed = words[words.length - 1]
+    const last = word.split(' ').pop()!
+    return normalWord(typed) !== typed.toLowerCase() && normalWord(last) === last.toLowerCase() ? `${word}s` : word
+}
+
+/** Letters to change, add or drop to turn ``a`` into ``b`` — given up as
+ *  ``most + 1`` once past ``most``. */
+function editDistance(a: string, b: string, most: number): number {
+    let prev = Array.from({ length: b.length + 1 }, (_, j) => j)
+    for (let i = 1; i <= a.length; i += 1) {
+        const row = [i]
+        for (let j = 1; j <= b.length; j += 1) {
+            row[j] = Math.min(prev[j] + 1, row[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1))
+        }
+        if (Math.min(...row) > most) return most + 1
+        prev = row
+    }
+    return prev[b.length]
+}
+
+
+// ---------------------------------------------------------------------------
+// Connections: "connections from A to B through T, either way"
+// ---------------------------------------------------------------------------
+
+/** What opens a question about the edges themselves: "connections from". */
+const CONNECTION_OPEN = /\b(?:edges?|connections?|links?|relationships?)\s+(?:that\s+)?(?:(?:go|goes|run|runs|lead|leads|point|points)\s+)?from\s+/i
+/** Either way, said at the end. */
+const EITHER_WAY = /\s*,?\s+(?:either\s+way|both\s+ways|in\s+either\s+direction|either\s+direction|in\s+both\s+directions|both\s+directions|in\s+any\s+direction)[\s?.!]*$/i
+/** What the edges are: "through PRODUCES", "via lineage". */
+const THROUGH = /\s+(?:through|via|over|of\s+types?)\s+/gi
+/** The classes "through …" may name, by their words. */
+const EDGE_CLASS_WORDS: Record<string, EdgeClass> = {
+    lineage: 'lineage', containment: 'containment', hierarchy: 'containment', 'the hierarchy': 'containment',
+    'any edge': 'any', 'any kind': 'any', 'any link': 'links', link: 'links',
+}
+
+/** ``text`` from ``from`` to ``to``, blank before it: an end read on its
+ *  own keeps the places of its words. */
+function masked(text: string, from: number, to: number): string {
+    return ' '.repeat(from) + text.slice(from, to)
+}
+
+/** "through PRODUCES and DEFINED_BY": edge types the view knows, or one
+ *  class — and the words that are neither. */
+function readThrough(words: string, vocab: AskVocabulary): { set: Pick<EdgesPredicate, 'edgeTypes' | 'edgeClass'>; unread: string[] } {
+    const types: string[] = []
+    const unread: string[] = []
+    let edgeClass: EdgeClass | undefined
+    const byPhrase = new Map((vocab.edgeTypes ?? []).map((t) => [phraseKey(identifierWords(t)), t]))
+    for (const raw of words.replace(/[?.!]+$/, '').split(/\s*(?:,|&|\band\b|\bor\b)\s*/i)) {
+        const phrase = raw.trim().replace(/^the\s+/i, '').replace(/\s+(?:edges?|links?|relationships?|connections?)$/i, '')
+        if (!phrase) continue
+        const type = byPhrase.get(phraseKey(phrase.split(/\s+/)))
+        const named = EDGE_CLASS_WORDS[phraseKey(phrase.split(/\s+/))]
+        if (type) types.push(type)
+        else if (named) edgeClass = named
+        else unread.push(raw.trim())
+    }
+    // Types named, the class doesn't count; any link is a connection's own.
+    return { set: types.length ? { edgeTypes: types } : edgeClass && edgeClass !== 'links' ? { edgeClass } : {}, unread }
+}
+
+/** A question about the edges themselves, read as a connection — or null
+ *  when it isn't one. Its ends are read as questions of their own; From
+ *  ends at the "to" that leaves the fewest words unread. */
+function readConnection(text: string, vocab: AskVocabulary, picks: AskPicks): Interpretation | null {
+    const open = CONNECTION_OPEN.exec(text)
+    if (!open) return null
+    // Only filler before it: "show me all the connections from …".
+    if (!classify(lex(text.slice(0, open.index)), vocab).every((t) => t.kind === 'grammar' && t.unit?.u === 'filler')) {
+        return null
+    }
+    const start = open.index + open[0].length
+    const either = EITHER_WAY.exec(text)
+    const eitherWay = either !== null && either.index >= start
+    const end = eitherWay ? either.index : text.length
+    let through: { from: number; to: number } | null = null
+    for (const m of text.slice(start, end).matchAll(THROUGH)) {
+        through = { from: start + (m.index ?? 0), to: start + (m.index ?? 0) + m[0].length }
+    }
+    const farEnd = through ? through.from : end
+    let best: { unread: number; from: Interpretation; to: Interpretation } | null = null
+    for (const m of text.slice(start, farEnd).matchAll(/\s+to\s+/gi)) {
+        const split = start + (m.index ?? 0)
+        const from = interpretQuestion(masked(text, start, split), vocab, picks)
+        const to = interpretQuestion(masked(text, split + m[0].length, farEnd), vocab, picks)
+        if (from.predicate?.kind === 'edges' || to.predicate?.kind === 'edges') continue
+        const unread = from.unrecognized.length + to.unrecognized.length
+        if (!best || unread < best.unread) best = { unread, from, to }
+    }
+    if (!best) return null
+    const { from, to } = best
+    const edgeSet = through ? readThrough(text.slice(through.to, end), vocab) : { set: {}, unread: [] }
+    const connection: EdgesPredicate = {
+        kind: 'edges',
+        ...(from.predicate ? { sourceWhere: from.predicate } : {}),
+        ...(to.predicate ? { targetWhere: to.predicate } : {}),
+        ...(eitherWay ? { direction: 'either' as const } : {}),
+        ...edgeSet.set,
+    }
+    return {
+        predicate: connection,
+        // A connection is the whole query: it never adds to one.
+        mode: 'replace',
+        ambiguities: [...from.ambiguities, ...to.ambiguities],
+        unrecognized: [...from.unrecognized, ...to.unrecognized, ...edgeSet.unread],
+        names: [...from.names, ...to.names.filter((n) => !from.names.some((f) => f.text === n.text))],
+        notes: [...from.notes, ...to.notes],
+        suggestions: [...from.suggestions ?? [], ...to.suggestions ?? []],
+    }
+}
+
+
+// ---------------------------------------------------------------------------
+// Areas and routes: "what flows from bronze to gold", "path from A to B"
+// ---------------------------------------------------------------------------
+
+/** What flows from one place to another: "what flows from bronze to gold". */
+const FLOWS_OPEN = /^\s*(?:(?:show|tell)\s+me\s+)?what\s+(?:data\s+)?(?:flows?|moves?|goes|runs?)\s+from\s+/i
+/** The edges between two kinds of thing, either way. */
+const BETWEEN_OPEN = /^\s*(?:(?:show|find|give)\s+me\s+)?(?:(?:all\s+)?the\s+|any\s+)?(?:edges?|connections?|links?|relationships?)\s+between\s+/i
+/** The routes themselves: "path from A to B", "routes between A and B". */
+const ROUTE_OPEN = /^\s*(?:(?:show|find|give)\s+me\s+)?(?:(?:all\s+)?the\s+|any\s+)?(?:paths?|routes?)\s+(from|between)\s+/i
+/** How one thing reaches another: "how does orders reach revenue". */
+const HOW_REACH = /^(\s*how\s+(?:does|do|did|can|could|would|is|are)\s+)(.+?)\s+(?:(reach(?:es)?|gets?\s+to|flows?\s+(?:to|into)|feeds?(?:\s+into)?|leads?\s+to)|(connects?\s+to|connected\s+(?:to|with)))\s+(.+?)\s*[?.!]*\s*$/i
+
+/** One end, read as a question of its own. Between places, a word that
+ *  names a layer is the layer, unless another reading is picked. */
+function readEnd(text: string, from: number, to: number, vocab: AskVocabulary, picks: AskPicks): Interpretation {
+    const read = interpretQuestion(masked(text, from, to), vocab, picks)
+    const layer = read.ambiguities.find((a) => a.picked !== 'layer' && picks.choices?.[a.id] === undefined
+        && a.choices.some((c) => c.id === 'layer'))
+    return layer
+        ? interpretQuestion(masked(text, from, to), vocab, { ...picks, choices: { ...picks.choices, [layer.id]: 'layer' } })
+        : read
+}
+
+/** The two ends of ``text`` from ``start`` to ``end``, split at the ``sep``
+ *  that leaves the fewest words unread — or null when no split reads. */
+function readEnds(text: string, start: number, end: number, sep: RegExp, vocab: AskVocabulary,
+    picks: AskPicks): { from: Interpretation; to: Interpretation; at: [number, number] } | null {
+    let best: { unread: number; from: Interpretation; to: Interpretation; at: [number, number] } | null = null
+    for (const m of text.slice(start, end).matchAll(sep)) {
+        const split = start + (m.index ?? 0)
+        const at: [number, number] = [start, split + m[0].length]
+        const from = readEnd(text, start, split, vocab, picks)
+        const to = readEnd(text, at[1], end, vocab, picks)
+        if (!from.predicate || !to.predicate || from.predicate.kind === 'edges' || to.predicate.kind === 'edges'
+            || from.mode === 'add' || to.mode === 'add') continue
+        const unread = from.unrecognized.length + to.unrecognized.length
+        if (!best || unread < best.unread) best = { unread, from, to, at }
+    }
+    return best
+}
+
+/** An end that reads as a name alone is the entity it names — looked up,
+ *  never searched for: a place with what is inside it ("just it" offered),
+ *  a route's end itself. Anything else is the condition it reads as. */
+function namedEnd(read: Interpretation, text: string, from: number, picks: AskPicks, place: boolean) {
+    const p = read.predicate
+    if (p?.kind !== 'text' || p.target !== 'name') return { ...read, where: p, ref: null as NodeRef | null }
+    const start = from + text.slice(from).search(/\S/)
+    const ref = picks.names?.[p.value] ?? { path: ['**', p.value] }
+    const names: AskName[] = [{ text: p.value, ref }]
+    if (!place) return { ...read, where: null, ref, names, ambiguities: [], unrecognized: [] }
+    const id = `${start}:${p.value}`
+    const choices: AskReading[] = ['withInside', 'itself']
+    const want = picks.choices?.[id] as AskReading | undefined
+    const picked = want && choices.includes(want) ? want : 'withInside'
+    return {
+        ...read, where: namedWhere(ref, true, picked), ref: null, names, unrecognized: [],
+        ambiguities: [{ id, text: p.value, choices: choices.map((c) => ({ id: c, label: READING_LABEL[c] })), picked }],
+    }
+}
+
+/** What both ends asked, said back once. */
+function both(from: Interpretation, to: Interpretation): Omit<Interpretation, 'predicate' | 'mode'> {
+    return {
+        ambiguities: [...from.ambiguities, ...to.ambiguities],
+        unrecognized: [...from.unrecognized, ...to.unrecognized],
+        names: [...from.names, ...to.names.filter((n) => !from.names.some((f) => f.text === n.text))],
+        notes: [...from.notes, ...to.notes],
+        suggestions: [...from.suggestions ?? [], ...to.suggestions ?? []],
+    }
+}
+
+/** What flows from one place to another, or the edges between two kinds of
+ *  thing, read as a connection — or null when it isn't one. */
+function readArea(text: string, vocab: AskVocabulary, picks: AskPicks): Interpretation | null {
+    const flows = FLOWS_OPEN.exec(text)
+    const between = flows ? null : BETWEEN_OPEN.exec(text)
+    const open = flows ?? between
+    if (!open) return null
+    const end = text.replace(/[\s?.!]+$/, '').length
+    const ends = readEnds(text, open[0].length, end, flows ? /\s+to\s+/gi : /\s+and\s+/gi, vocab, picks)
+    if (!ends) return null
+    const from = namedEnd(ends.from, text, ends.at[0], picks, true)
+    const to = namedEnd(ends.to, text, ends.at[1], picks, true)
+    const connection: EdgesPredicate = {
+        kind: 'edges',
+        ...(from.where ? { sourceWhere: from.where } : {}),
+        ...(to.where ? { targetWhere: to.where } : {}),
+        // What flows, flows along lineage; what lies between is either way.
+        ...(flows ? { edgeClass: 'lineage' as const } : { direction: 'either' as const }),
+    }
+    return { predicate: connection, mode: 'replace', ...both(from, to) }
+}
+
+/** The routes from one thing to another, read as a route search — or null
+ *  when it isn't one. Downstream when one reaches the other; either way
+ *  when they are only connected. */
+function readRoute(text: string, vocab: AskVocabulary, picks: AskPicks): Interpretation | null {
+    const open = ROUTE_OPEN.exec(text)
+    const how = open ? null : HOW_REACH.exec(text)
+    let ends: { from: Interpretation; to: Interpretation; at: [number, number] } | null
+    let either: boolean
+    if (open) {
+        const end = text.replace(/[\s?.!]+$/, '').length
+        either = open[1].toLowerCase() === 'between'
+        ends = readEnds(text, open[0].length, end, either ? /\s+and\s+/gi : /\s+to\s+/gi, vocab, picks)
+    } else if (how) {
+        const [, lead, subject, , connected, target] = how
+        either = !!connected
+        const toAt = text.lastIndexOf(target)
+        const from = readEnd(text, lead.length, lead.length + subject.length, vocab, picks)
+        const to = readEnd(text, toAt, toAt + target.length, vocab, picks)
+        ends = from.predicate && to.predicate && from.predicate.kind !== 'edges' && to.predicate.kind !== 'edges'
+            ? { from, to, at: [lead.length, toAt] } : null
+    } else return null
+    if (!ends) return null
+    const from = namedEnd(ends.from, text, ends.at[0], picks, false)
+    const to = namedEnd(ends.to, text, ends.at[1], picks, false)
+    const route: PathPredicate = {
+        kind: 'path', sourceUrns: [], targetUrns: [],
+        direction: either ? 'any' : 'outgoing', edgeClass: 'lineage',
+        // The server's reach: four hops, three when both ends are conditions.
+        maxHops: from.where && to.where ? 3 : 4,
+        ...(from.ref ? { sourceRefs: [from.ref] } : { sourceWhere: from.where! }),
+        ...(to.ref ? { targetRefs: [to.ref] } : { targetWhere: to.where! }),
+    }
+    return { predicate: route, mode: 'replace', ...both(from, to) }
+}
+
+
+// ---------------------------------------------------------------------------
+// Subject first: "what does orders feed", "where does orders come from"
+// ---------------------------------------------------------------------------
+
+/** What the subject does to the answer — feeds it, reads from it, holds it —
+ *  by the words for it. The answer's own relationship runs the other way. */
+const SUBJECT_VERB = [
+    'feeds?(?:\\s+into)?', 'flows?\\s+(?:into|to)', 'writes?\\s+to', 'loads?\\s+into', 'populates?',
+    'affects?', 'impacts?', 'breaks?', 'influences?', 'drives?', 'powers?', 'suppl(?:y|ies)',
+].join('|')
+const SUBJECT_SOURCE = [
+    'comes?\\s+from', 'gets?\\s+(?:its\\s+|their\\s+)?data(?:\\s+from)?', 'depends?\\s+on',
+    'rel(?:y|ies)\\s+on', 'uses?', 'reads?\\s+from', 'consumes?', 'draws?\\s+from', 'pulls?\\s+from',
+].join('|')
+const SUBJECT_HOLDS = 'contains?|holds?'
+/** "what does orders feed", "which dashboards does orders feed directly". */
+const SUBJECT_FIRST = new RegExp(
+    '^(\\s*(?:(?:show|tell)\\s+me\\s+)?(?:what|which|where)(?:\\s+([\\p{L}\\p{N}_-]+))?'
+    + '\\s+(?:does|do|did|would|will|could|can|might)\\s+)(.+?)\\s+'
+    + `(?:(${SUBJECT_VERB})|(${SUBJECT_SOURCE})|(${SUBJECT_HOLDS}))`
+    + '(\\s+(?:directly|within\\s+\\d+\\s+(?:hops?|steps?)))?\\s*[?.!]*\\s*$', 'iu')
+/** "impact of orders", "what is the impact of changing orders". */
+const IMPACT = /^(\s*(?:(?:show|tell)\s+me\s+)?(?:what\s+(?:is|would\s+be)\s+|what['’]s\s+)?(?:the\s+)?(?:impact|effect|blast\s+radius)\s+of\s+(?:changing\s+|a\s+change\s+to\s+|changes\s+to\s+)?)(.+?)\s*[?.!]*\s*$/iu
+/** "what breaks if orders changes", "what would break if I change orders". */
+const BREAKS = /^(\s*what\s+(?:(?:would|will|could|might|can)\s+)?(?:breaks?|fails?|be\s+affected|be\s+impacted)\s+if\s+(?:(?:i|we|you|someone)\s+(?:change|drop|remove|delete)s?\s+)?)(.+?)(?:\s+(?:changes|changed|is\s+changed|was\s+changed|were\s+changed|goes\s+down|went\s+down|fails|failed|breaks|broke|is\s+(?:removed|dropped|deleted)|was\s+(?:removed|dropped|deleted)|were\s+(?:removed|dropped|deleted)))?\s*[?.!]*\s*$/iu
+/** "what is orders linked to". */
+const LINKED = /^(\s*(?:what|which)(?:\s+([\p{L}\p{N}_-]+))?\s+(?:is|are)\s+)(.+?)\s+(?:linked|connected|related)\s+(?:to|with)\s*[?.!]*\s*$/iu
+
+type SubjectRole = 'feeds' | 'reads' | 'holds' | 'linked'
+
+/** The answer's relationship to a subject that ``role``s it. */
+const ANSWER_AXIS: Record<SubjectRole, RelationAxis> = {
+    feeds: 'upstream', reads: 'downstream', holds: 'ancestor', linked: 'neighbor',
+}
+
+/** A question whose subject comes first, read as what the subject feeds,
+ *  what feeds it, what it holds or what it is linked to — or null when it
+ *  isn't one. The subject is read as a question of its own. */
+function readSubjectFirst(text: string, vocab: AskVocabulary, picks: AskPicks): Interpretation | null {
+    let lead: string, subject: string, role: SubjectRole, kind: string | undefined, reach: string | undefined
+    const first = SUBJECT_FIRST.exec(text)
+    const impact = first ? null : IMPACT.exec(text) ?? BREAKS.exec(text)
+    const linked = first || impact ? null : LINKED.exec(text)
+    if (first) {
+        [, lead, kind, subject] = first
+        role = first[4] ? 'feeds' : first[5] ? 'reads' : 'holds'
+        reach = first[7]
+    } else if (impact) {
+        [, lead, subject] = impact
+        role = 'feeds'
+    } else if (linked) {
+        [, lead, kind, subject] = linked
+        role = 'linked'
+    } else return null
+    const from = lead.length
+    const to = from + subject.length
+    const read = interpretQuestion(masked(text, from, to), vocab, picks)
+    const p = read.predicate
+    if (!p || p.kind === 'edges' || read.mode === 'add') return null
+    const axis = ANSWER_AXIS[role]
+    const lineage = axisMeta(axis).lineage
+    let { ambiguities, unrecognized, names } = read
+    let where: Predicate = p
+    if (p.kind === 'text' && p.target === 'name') {
+        // A name alone is that entity: looked up, never searched for.
+        const start = from + subject.search(/\S/)
+        const id = `${start}:${p.value}`
+        const ref = picks.names?.[p.value] ?? { path: ['**', p.value] }
+        const choices: AskReading[] = ['withInside', 'itself']
+        const want = picks.choices?.[id] as AskReading | undefined
+        const picked = want && choices.includes(want) ? want : 'withInside'
+        where = namedWhere(ref, lineage, picked)
+        names = [{ text: p.value, ref }]
+        unrecognized = []
+        ambiguities = lineage
+            ? [{ id, text: p.value, choices: choices.map((c) => ({ id: c, label: READING_LABEL[c] })), picked }]
+            : []
+    }
+    const rel: RelatedPredicate = { kind: 'related', axis, where }
+    if (lineage) {
+        rel.maxHops = RELATION_MAX_HOPS
+        if (reach && /directly/i.test(reach)) delete rel.maxHops
+        else if (reach) {
+            const hops = Math.max(1, Math.min(maxHopsFor(rel, { topLevel: true, rule: false }),
+                Number(/\d+/.exec(reach)![0])))
+            if (hops > 1) rel.maxHops = hops
+            else delete rel.maxHops
+        }
+    }
+    // "which dashboards does orders feed": only those.
+    const type = kind ? vocab.phrases.get(phraseKey([kind]))?.find((m) => m.kind === 'type') : undefined
+    const predicate: Predicate = type?.kind === 'type'
+        ? { kind: 'group', op: 'and', children: [{ kind: 'entityType', op: 'in', values: [type.type] }, rel] }
+        : rel
+    return { predicate, mode: 'replace', ambiguities, unrecognized, names, notes: read.notes,
+        suggestions: read.suggestions }
 }
 
 
 export function interpretQuestion(text: string, vocab: AskVocabulary, picks: AskPicks = {}): Interpretation {
+    const connection = readConnection(text, vocab, picks)
+    if (connection) return connection
+    const area = readArea(text, vocab, picks) ?? readRoute(text, vocab, picks)
+    if (area) return area
+    const subjectFirst = readSubjectFirst(text, vocab, picks)
+    if (subjectFirst) return subjectFirst
     const toks = classify(lex(text), vocab)
     const ambiguities: AskAmbiguity[] = []
     const unrecognized: string[] = []
     const names: AskName[] = []
+    const notes: string[] = []
+    const suggestions: AskSuggestion[] = []
+    const owner = ownerKey(vocab)
+    /** Relationships nested deeper than a search reads: the rest is left out. */
+    let tooDeep = false
     const wantHops = new Map<RelatedPredicate, number>()
     let conditions = 0
 
@@ -388,8 +819,12 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
         frame.lastRel = f.rel
         lastAdded = 'cond'
     }
+    const leaveOutTheRest = () => {
+        tooDeep = true
+        notes.push(`Relationships nest at most ${RELATION_DEPTH_MAX} deep, so the rest of the question was left out.`)
+    }
     const openRelation = (axis: RelationAxis) => {
-        if (frame.depth + 1 > RELATION_DEPTH_MAX) return
+        if (frame.depth + 1 > RELATION_DEPTH_MAX) { leaveOutTheRest(); return }
         const rel: RelatedPredicate = { kind: 'related', axis }
         if (pend.not || pend.no) rel.quantifier = 'none'
         else if (pend.only) rel.quantifier = 'all'
@@ -402,15 +837,20 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
         frame = { parent: frame, rel, depth: frame.depth + 1, types: [], groups: [[]], lastRel: null }
         lastAdded = null
     }
-    /** "feeds CFO Revenue": the relative is named, and that's all it is. */
-    const nameTarget = (text: string) => {
-        if (frame.rel) frame.rel.where = { kind: 'is', refs: [nameRef(text)] }
+    /** "feeds CFO Revenue": the relative is named, and that's all it is —
+     *  with what is inside it, for a lineage relationship. */
+    const nameTarget = (t: { text: string; start: number }) => {
+        if (frame.rel) {
+            const lineage = axisMeta(frame.rel.axis).lineage
+            const picked = lineage ? ambiguity(t, ['withInside', 'itself'], 'withInside') : 'itself'
+            frame.rel.where = namedWhere(nameRef(t.text), lineage, picked)
+        }
         closeFrame()
     }
     const inside = (text: string, axis: 'ancestor' = 'ancestor') => {
         const negate = pend.not || pend.no
         clearPending()
-        if (frame.depth + 1 > RELATION_DEPTH_MAX) return
+        if (frame.depth + 1 > RELATION_DEPTH_MAX) { leaveOutTheRest(); return }
         const rel: RelatedPredicate = { kind: 'related', axis, where: { kind: 'is', refs: [nameRef(text)] } }
         if (negate) rel.quantifier = 'none'
         add(rel)
@@ -426,6 +866,7 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
     const property = (op: CmpOp | 'between' | 'withinLast', value: unknown) => {
         const key = pend.key!
         pend.key = null
+        if (key === LEFT_OUT) { clearPending(); return }
         add({ kind: 'property', key, op, value } as Predicate)
     }
     /** Consecutive words (and plain numbers) as one name. */
@@ -446,7 +887,7 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
         return sample?.kind === 'value' ? sample.value : t.text
     }
 
-    while (i < toks.length) {
+    while (i < toks.length && !tooDeep) {
         const t = toks[i]
         const u = unitOf(t)
 
@@ -492,7 +933,7 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
             i += 1
             if (pend.tagged) { addTag(t.text); continue }
             if (pend.named) { add(nameText(t.text)); continue }
-            if (emptyTarget(frame)) { nameTarget(t.text); continue }
+            if (emptyTarget(frame)) { nameTarget(t); continue }
             add(nameText(t.text))
             continue
         }
@@ -543,6 +984,18 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
             if (type?.kind === 'type') {
                 // "more than 2 dashboards downstream": the relationship comes after.
                 const after = unitOf(peek())
+                // "datasets with more than 100 columns": how many they hold.
+                if (!emptyTarget(frame) && frame.types.length && pend.cmp && pend.number !== null
+                    && after?.u !== 'rel') {
+                    const { cmp, number } = pend
+                    pend.cmp = null
+                    pend.number = null
+                    openRelation('descendant')
+                    if (frame.rel) {
+                        frame.rel.count = { op: cmp === 'contains' ? 'gte' : cmp, value: number } as never
+                        delete frame.rel.quantifier
+                    }
+                }
                 if (!emptyTarget(frame) && pend.cmp && pend.number !== null && after?.u === 'rel') {
                     const { cmp, number } = pend
                     i = toks.indexOf(peek()!) + 1
@@ -570,7 +1023,7 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
             const readings = meanings.map((m) => READING_OF[m.kind]).filter((r): r is AskReading => !!r)
             const fallback = readings[0] ?? 'name'
             if (emptyTarget(frame) && frame.rel && readings[0] !== 'tag' && !typeOf(peek())) {
-                nameTarget(t.text)
+                nameTarget(t)
                 continue
             }
             // Every reading it has, a container's name for a tag or a layer, and a name.
@@ -623,7 +1076,8 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
                 pend.named = true
                 break
             case 'ownedBy':
-                pend.key = 'owner'
+                if (!owner) notes.push(`This view has no owner property, so “${t.text}” was left out.`)
+                pend.key = owner ?? LEFT_OUT
                 pend.cmp = 'eq'
                 break
             case 'cmp':
@@ -666,7 +1120,12 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
                 add({ kind: 'related', axis: 'parent', quantifier: 'none' })
                 break
             case 'doc':
-                add(u.predicate)
+                if (u.predicate !== NO_OWNER) add(u.predicate)
+                else if (owner) add({ kind: 'hasProperty', key: owner, negate: true })
+                else {
+                    notes.push(`This view has no owner property, so “${t.text}” was left out.`)
+                    clearPending()
+                }
                 break
         }
         pend.tagged = pend.tagged && (u?.u === 'tagged' || u?.u === 'and' || u?.u === 'or')
@@ -676,7 +1135,7 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
 
     const predicate = build(root)
     if (predicate) clampHops(predicate)
-    return { predicate, mode, ambiguities, unrecognized, names }
+    return { predicate, mode, ambiguities, unrecognized, names, notes, suggestions }
 
 
     // -- the readers the loop hands off to --------------------------------
@@ -715,13 +1174,27 @@ export function interpretQuestion(text: string, vocab: AskVocabulary, picks: Ask
 
     /** Words read as a name: a relative named, or a name to search for. */
     function onName(phrase: { text: string; start: number }) {
-        if (pend.tagged) { addTag(phrase.text); return }
+        if (pend.tagged) {
+            const meant = didYouMean(phrase.text, vocab, ['tag'])
+            if (meant) suggestions.push({ text: phrase.text, suggestion: meant })
+            addTag(phrase.text)
+            return
+        }
         if (pend.named) { add(nameText(phrase.text)); return }
         // "feeds the CFO dashboard": a dashboard by that name, not one named so.
-        if (emptyTarget(frame) && !typeOf(peek())) { nameTarget(phrase.text); return }
+        if (emptyTarget(frame) && !typeOf(peek())) { nameTarget(phrase); return }
+        // "without a steward" in a view with no such property: not "whose
+        // name doesn't contain steward", which is nearly everything.
+        if (pend.no) {
+            notes.push(`This view has no property called “${phrase.text}”, so that condition was left out.`)
+            clearPending()
+            return
+        }
         const picked = ambiguity(phrase, ['name', 'inside'], 'name')
         if (picked === 'inside') { inside(phrase.text); return }
         unrecognized.push(phrase.text)
+        const meant = didYouMean(phrase.text, vocab)
+        if (meant) suggestions.push({ text: phrase.text, suggestion: meant })
         add(nameText(phrase.text))
     }
 

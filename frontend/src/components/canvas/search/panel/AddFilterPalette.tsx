@@ -59,14 +59,8 @@ import { RelationContext } from './relationContext'
 import {
     availableCategories as kindsAvailable,
     ICON_TONES,
-    type CodeKind,
     type FilterKind,
 } from './vocabulary/filterKinds'
-
-
-/** The condition kinds with no visual editor (kept exported here for the
- *  builders that name it by this module). */
-export type { CodeKind }
 
 
 export interface AddFilterPaletteProps {
@@ -99,12 +93,6 @@ export interface AddFilterPaletteProps {
      *  Manager rule editor, which has no Advanced drawer) to drop any
      *  ``action:'advanced'`` entries from the palette. */
     onOpenAdvanced?: () => void
-    /** Open the Code (JSON) editor with a stub of the named predicate
-     *  kind appended to the current draft. Used by the "Code-only"
-     *  Advanced entries (withinHops, degree) — visual editors for
-     *  these shapes don't exist; the user authors them in JSON instead.
-     *  Omit to drop those entries (no Code mode in the rule editor). */
-    onOpenCode?: (kind: CodeKind) => void
     disabled?: boolean
 }
 
@@ -124,13 +112,13 @@ type PaletteEntry = FilterKind & {
 
 
 const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
-    counts, samples, onAdd, onAddMany, onOpenAdvanced, onOpenCode, disabled,
+    counts, samples, onAdd, onAddMany, onOpenAdvanced, disabled,
 }) => {
     const [open, setOpen] = useState(false)
     const [query, setQuery] = useState('')
     // How many relationships this builder's conditions sit inside, and
     // whether it is a display rule's (a rule tests one entity: no routes).
-    const { depth: relationDepth, rule } = useContext(RelationContext)
+    const { depth: relationDepth, rule, end } = useContext(RelationContext)
     const wrapperRef = useRef<HTMLDivElement>(null)
     const buttonRef = useRef<HTMLButtonElement>(null)
     const popoverRef = useRef<HTMLDivElement>(null)
@@ -227,21 +215,20 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
 
     // The catalog (vocabulary/filterKinds) says what can be added and where;
     // the palette adds this view's counts and samples to it. Entries whose
-    // hand-off isn't wired here drop out: ``code`` entries need
-    // ``onOpenCode``, ``advanced`` ones ``onOpenAdvanced`` (the Property
-    // Manager's rule editor has neither, so group authoring there goes
-    // through the AND/OR/NOT-group entries).
+    // hand-off isn't wired here drop out: ``advanced`` ones need
+    // ``onOpenAdvanced`` (the Property Manager's rule editor has none, so
+    // group authoring there goes through the AND/OR/NOT-group entries).
     const availableCategories = useMemo<{
         label: string
         entries: PaletteEntry[]
     }[]>(() => kindsAvailable({
-        relationDepth, rule, canCode: !!onOpenCode, canAdvanced: !!onOpenAdvanced,
+        relationDepth, rule, end, canAdvanced: !!onOpenAdvanced,
     }).map((cat) => ({
         label: cat.label,
         entries: cat.entries.map((e): PaletteEntry => (e.countKey
             ? { ...e, count: counts[e.countKey], samples: samples?.[e.countKey] }
             : e)),
-    })), [counts, samples, onOpenCode, onOpenAdvanced, relationDepth, rule])
+    })), [counts, samples, onOpenAdvanced, relationDepth, rule, end])
 
     const filteredCategories = useMemo(() => {
         const q = query.trim().toLowerCase()
@@ -286,14 +273,12 @@ const AddFilterPaletteImpl: FC<AddFilterPaletteProps> = ({
     const handleEntry = useCallback((entry: PaletteEntry) => {
         if (entry.action === 'advanced') {
             onOpenAdvanced?.()
-        } else if (entry.action === 'code' && entry.codeKind) {
-            onOpenCode?.(entry.codeKind)
         } else if (entry.build) {
             onAdd(entry.build({ rule }))
         }
         setOpen(false)
         setQuery('')
-    }, [onAdd, onOpenAdvanced, onOpenCode])
+    }, [onAdd, onOpenAdvanced])
 
     const handlePasteDsl = useCallback(() => {
         if (!dslPreview) return

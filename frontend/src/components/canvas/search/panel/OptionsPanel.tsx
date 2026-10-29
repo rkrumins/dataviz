@@ -3,8 +3,7 @@
  * rather than burying them in a chevron-down disclosure.
  *
  * Reads ``searchStore.draftOptions`` (falling back to defaults when
- * null) and writes through ``setDraftOptions``. Templates supply their
- * own options via ``SearchTemplate.build`` and ignore this card.
+ * null) and writes through ``setDraftOptions``.
  *
  * Layout: a 2-row grid. Top row is the headline "Group by" control
  * since that's the option that most directly shapes the result

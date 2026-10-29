@@ -24,10 +24,11 @@ const vocabulary = buildAskVocabulary({
     tagValues: ['PII', 'Finance'], propertyKeys: ['owner'], valueSamples: [], layers: [],
 })
 
-function setup(draft: Predicate | null = null, variant: 'hero' | 'compact' = 'compact') {
+function setup(draft: Predicate | null = null, variant: 'hero' | 'compact' = 'compact', examples?: boolean,
+    countOf: (p: Predicate) => number = () => 12) {
     const provider = Object.create(RemoteGraphProvider.prototype) as RemoteGraphProvider
     const searchCounts = vi.fn(async (body: SearchCountsRequest) => ({
-        counts: Object.fromEntries(body.items.map((i) => [i.id, { count: 12, status: 'complete' }])),
+        counts: Object.fromEntries(body.items.map((i) => [i.id, { count: countOf(i.predicate), status: 'complete' }])),
     }))
     const resolveSearchRefs = vi.fn(async (body: SearchResolveRequest) => ({
         results: body.refs.map(() => ({ count: 2, matches: [
@@ -45,7 +46,7 @@ function setup(draft: Predicate | null = null, variant: 'hero' | 'compact' = 'co
     )
     const onAsk = vi.fn()
     render(<AskBar viewId="view-a" vocabulary={vocabulary} draft={draft} onAsk={onAsk}
-                   presentTypes={['dataset', 'dashboard']} variant={variant} />, { wrapper })
+                   presentTypes={['dataset', 'dashboard']} variant={variant} examples={examples} />, { wrapper })
     const input = screen.getByRole('textbox', { name: 'Ask about this view' })
     const ask = (q: string) => fireEvent.change(input, { target: { value: q } })
     return { input, ask, onAsk, searchCounts, resolveSearchRefs }
@@ -66,6 +67,16 @@ describe('AskBar', () => {
         expect(screen.getByText('feed')).toBeInTheDocument()
         expect(await screen.findByText('12')).toBeInTheDocument()
         expect(screen.getByText('12 matches', { selector: '[aria-live]' })).toBeInTheDocument()
+    })
+
+    it('reads a connection question back as a connection, and applies it as the whole query', () => {
+        const { ask, input, onAsk } = setup()
+        ask('connections from datasets to dashboards either way')
+        expect(screen.getByText(/^Connections/)).toHaveTextContent(
+            /Connections from anything .*dataset.* to anything .*dashboard.*, through any link, either way/)
+        expect(screen.queryByText(/anything that…/)).not.toBeInTheDocument()
+        fireEvent.keyDown(input, { key: 'Enter' })
+        expect(onAsk).toHaveBeenCalledWith(expect.objectContaining({ kind: 'edges', direction: 'either' }))
     })
 
     it('applies the question once on Enter, remembers it and clears', () => {
@@ -89,6 +100,17 @@ describe('AskBar', () => {
             draft, { kind: 'tag', op: 'hasAny', values: ['PII'] }] })
     })
 
+    it('asks beside a connection without adding to it: a connection is the whole query', () => {
+        const edges: Predicate = { kind: 'edges', sourceWhere: { kind: 'entityType', op: 'in', values: ['dataset'] } }
+        const { ask, input, onAsk } = setup(edges)
+        expect(input).toHaveAttribute('placeholder', 'Or ask in plain words…')
+        ask('and tagged PII')
+        expect(screen.getByText('Reads as')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: /Apply/ })).toBeInTheDocument()
+        fireEvent.keyDown(input, { key: 'Enter' })
+        expect(onAsk).toHaveBeenCalledWith({ kind: 'tag', op: 'hasAny', values: ['PII'] })
+    })
+
     it('reads a word the other way when its other reading is picked', () => {
         const { ask, input, onAsk } = setup()
         ask('finance dashboards')
@@ -109,12 +131,60 @@ describe('AskBar', () => {
         expect(within(list).getByText('in Tableau')).toBeInTheDocument()
     })
 
+    it('says what it left out, instead of reading it as something else', () => {
+        const { ask } = setup()
+        ask('datasets without a steward')
+        expect(screen.getByText('This view has no property called “steward”, so that condition was left out.'))
+            .toBeInTheDocument()
+        expect(screen.queryByText(/Searched for by name/)).not.toBeInTheDocument()
+    })
+
+    it('reads "what does X feed" as what X feeds, X looked up with what is inside it', async () => {
+        const { ask, input, onAsk, resolveSearchRefs } = setup()
+        ask('what does orders feed')
+        await screen.findByRole('button', { name: /names 2 entities/ })
+        expect(resolveSearchRefs).toHaveBeenCalledWith(
+            { scope: { viewId: 'view-a' }, refs: [{ path: ['**', 'orders'] }] }, expect.anything())
+        expect(screen.getByRole('button', { name: 'it and what’s inside' })).toHaveAttribute('aria-pressed', 'true')
+        fireEvent.click(screen.getByRole('button', { name: 'just it' }))
+        fireEvent.keyDown(input, { key: 'Enter' })
+        expect(onAsk).toHaveBeenCalledWith(expect.objectContaining({
+            kind: 'related', axis: 'upstream', where: { kind: 'is', refs: [{ path: ['**', 'orders'] }] },
+        }))
+    })
+
     it('offers questions to try in the view\'s own words, plainer for Business', () => {
         const { input } = setup(null, 'hero')
         expect(screen.getByRole('button', { name: 'datasets that feed dashboards' })).toBeInTheDocument()
         fireEvent.click(screen.getByRole('button', { name: 'datasets tagged PII' }))
         expect(input).toHaveValue('datasets tagged PII')
         expect(screen.getByText('Reads as')).toBeInTheDocument()
+    })
+
+    it('offers questions to try beneath a compact bar when the card asks for them', () => {
+        setup(null, 'compact', true)
+        expect(screen.getByText('Try')).toBeInTheDocument()
+        expect(screen.getByRole('button', { name: 'datasets tagged PII' })).toBeInTheDocument()
+    })
+
+    it('offers the view\'s word for one a letter or two off, and takes it', () => {
+        const { ask, input } = setup()
+        ask('dashbaords')
+        fireEvent.click(screen.getByRole('button', { name: '“dashboards”' }))
+        expect(input).toHaveValue('dashboards')
+        expect(screen.getByText('Find')).toBeInTheDocument()
+    })
+
+    it('offers the fixes that would find something when the reading finds nothing', async () => {
+        // Nothing is tagged PII.
+        const needsPII = (p: Predicate): boolean => p.kind === 'tag' ? p.values.includes('PII')
+            : p.kind === 'group' ? (p.op === 'or' ? p.children.every(needsPII) : p.children.some(needsPII)) : false
+        const { ask, onAsk } = setup(null, 'compact', undefined, (p) => (needsPII(p) ? 0 : 5))
+        ask('datasets tagged Finance and PII')
+        expect(await screen.findByText('no matches')).toBeInTheDocument()
+        fireEvent.click(await screen.findByRole('button', { name: /Without “are tagged #PII”/ }))
+        expect(onAsk).toHaveBeenCalledWith({ kind: 'group', op: 'and', children: [
+            { kind: 'entityType', op: 'in', values: ['dataset'] }, { kind: 'tag', op: 'hasAny', values: ['Finance'] }] })
     })
 
     it('brings back earlier questions, and Esc clears', () => {

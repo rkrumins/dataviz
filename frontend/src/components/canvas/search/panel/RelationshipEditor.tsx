@@ -290,7 +290,7 @@ export const RelationshipEditor: FC<RelationshipEditorProps> = ({
                         <StepsField lineage={meta.lineage} lo={lo}
                                     hi={meta.lineage || value.maxHops ? hi : null}
                                     cap={meta.lineage ? hopCap : TREE_DEPTH_MAX}
-                                    further={!ctx.rule}
+                                    further={!ctx.rule && !ctx.end}
                                     onChange={setHops} disabled={isRunning} />
                     )}
                     {meta.lineage && (

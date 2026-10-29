@@ -153,7 +153,8 @@ def get_import_export_service():
             versioning=_service, scope_resolver=_resolve_export_view_scope,
             ontology_resolver=_resolve_ontology_types,
             layout_writer=_write_view_import_assignments,
-            publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope)
+            publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope,
+            identity_resolver=_resolve_node_identity_for_import)
     return _ie_service
 
 
@@ -630,6 +631,23 @@ async def _rules_for_meta(session: AsyncSession, ws_id: str, meta: Optional[dict
     return await _live_ontology_rules(
         session, ws_id, meta.get("data_source_id"),
         fail_closed=(meta.get("kind") == "blank"))
+
+
+async def _node_identity_for_meta(session: AsyncSession, meta: Optional[dict]):
+    """The resolved node-identity mapping of a graph's data source (from its ``graph_in_workspace``
+    meta), for the writes that keep each node's own name and identity properties in step
+    (``node_identity.bind_node_write``). Best-effort: ``None`` — nothing bound, as before binding
+    existed — when it can't be read."""
+    ds_id = (meta or {}).get("data_source_id")
+    if not ds_id:
+        return None
+    try:
+        from backend.app.services.node_identity import load_node_identity
+        return await load_node_identity(session, ds_id)
+    except Exception:
+        # Says what failed, not which source: the id traces back to the request (log injection).
+        logger.exception("node-identity resolution failed: nothing is bound")
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -1686,11 +1704,12 @@ async def checkpoint(
 ):
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     rules = await _rules_for_meta(session, ws_id, _meta)
+    identity = await _node_identity_for_meta(session, _meta)
     with _domain_errors():
         commit_id = await svc.checkpoint(
             graph_id=graph_id, branch_id=branch_id, actor=user.id, message=body.message,
             resolutions=body.resolutions, containment_edge_types=cset,
-            ontology_rules=rules,
+            ontology_rules=rules, node_identity=identity,
         )
     return {"commit_id": commit_id, "staged_changes": commit_id is not None}
 
@@ -1764,11 +1783,12 @@ async def publish(
                                         branch_id=branch_id, actor=user.id, body=body)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     rules = await _rules_for_meta(session, ws_id, _meta)
+    identity = await _node_identity_for_meta(session, _meta)
     with _domain_errors():
         commit_id = await svc.publish(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
             message=body.message, resolutions=body.resolutions,
-            containment_edge_types=cset, ontology_rules=rules,
+            containment_edge_types=cset, ontology_rules=rules, node_identity=identity,
         )
     await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(graph_id, user.id)   # views' "data updated" freshness
@@ -1823,16 +1843,17 @@ async def _publish_from_job(job: dict) -> dict:
                 async with get_async_session() as session:
                     cset = await _live_containment_types(session, job["workspaceId"], (meta or {}).get("data_source_id"))
                     rules = await _rules_for_meta(session, job["workspaceId"], meta)
+                    identity = await _node_identity_for_meta(session, meta)
                 if job.get("mergeRequestId"):
                     commit_id = await svc.merge_mr(
                         mr_id=job["mergeRequestId"], actor=actor, message=job["message"],
                         resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
-                        queued=True)
+                        queued=True, node_identity=identity)
                 else:
                     commit_id = await svc.publish(
                         graph_id=graph_id, branch_id=branch_id, actor=actor, message=job["message"],
                         resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
-                        queued=True)
+                        queued=True, node_identity=identity)
         except HTTPException as exc:
             return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
     await _bump_main_cache(graph_id)
@@ -2748,6 +2769,19 @@ async def _resolve_ontology_types(workspace_id, data_source_id):
         return {"node_types": node_types, "edge_types": edge_types}
     except Exception:
         logger.exception("ontology type resolution failed for import (ds=%s)", data_source_id)
+        return None
+
+
+async def _resolve_node_identity_for_import(workspace_id, data_source_id):
+    """The data source's resolved node-identity mapping for an import's writes (see
+    :func:`_node_identity_for_meta`). Runs in the worker's background context, so it opens its own
+    session; ``None`` — nothing bound — when it can't be read."""
+    try:
+        from backend.app.db.engine import get_async_session
+        async with get_async_session() as session:
+            return await _node_identity_for_meta(session, {"data_source_id": data_source_id})
+    except Exception:
+        logger.exception("node-identity resolution failed for an import: nothing is bound")
         return None
 
 
@@ -4009,10 +4043,11 @@ async def merge_merge_request(
                                         body=body, merge_request_id=pr_id)
     cset = await _pr_containment_types(svc, session, ws_id, _pr)
     rules = await _pr_ontology_rules(svc, session, ws_id, _pr)
+    identity = await _node_identity_for_meta(session, await svc.get_graph(target))
     with _domain_errors():
         commit_id = await svc.merge_mr(
             mr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
-            containment_edge_types=cset, ontology_rules=rules,
+            containment_edge_types=cset, ontology_rules=rules, node_identity=identity,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # target advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness

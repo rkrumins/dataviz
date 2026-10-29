@@ -4081,6 +4081,19 @@ async def _resolve_ontology_rules(engine: ContextEngine, *, fail_closed: bool = 
         return None
 
 
+async def _node_identity_for_write(engine: ContextEngine):
+    """The data source's resolved node-identity mapping, so a save keeps each node's own name
+    and identity properties in step (``node_identity.bind_node_write``) — the engine resolved it
+    with the ontology. ``None`` when it can't be read: nothing is bound, as before binding
+    existed. Never the code defaults, which would write a ``name`` onto a source whose names
+    live elsewhere."""
+    identity = engine._node_identity or await engine._resolve_node_identity()
+    if identity is None:
+        # Says what failed, not which source: the id came in on the request (log injection).
+        logger.warning("node-identity mapping unavailable: this save binds no name or identity properties")
+    return identity
+
+
 class GraphChangeOp(BaseModel):
     """One typed change in a draft save. ``update`` payloads are *partial* — the
     server merges them onto the entity's current state, so the client never has to
@@ -4150,7 +4163,8 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn, *, by_ref: bool = False)
     create (a NODE's id IS its urn — minted via ``mint_urn`` when the collapsed save omits it, exactly
     like ``/nodes/create``; an edge gets a plain minted id) and builds the ``ref → id`` map; pass 2
     emits the ops, resolving temp refs in edge endpoints + update/delete target ids and stamping the
-    node urn into its payload. Returns ``(ops, assigned)`` — ``assigned`` (ref/id → real id) is echoed
+    node urn into its payload (a node whose urn it minted is marked ``minted``, for the service's
+    name / identity binding). Returns ``(ops, assigned)`` — ``assigned`` (ref/id → real id) is echoed
     to the client to reconcile its optimistic ids. apply_ops validates same-batch edges against these
     creates (proved in ``test_versioning_batch_create_edge``). With ``by_ref`` each minter is also
     given the op's client ref (``_replay_minters``)."""
@@ -4160,14 +4174,17 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn, *, by_ref: bool = False)
     endpoint_fields = ("sourceEntityId", "source_entity_id", "targetEntityId", "target_entity_id")
     assigned: dict = {}
     create_eid: dict = {}                      # op index → its assigned real id (reused in pass 2)
+    minted: set = set()                        # op indexes whose node urn was minted here
     for i, o in enumerate(request_ops):
         if o.op == "create":
             if o.kind == "edge":
                 eid = o.id or _mint(mint_id, "ent", o.ref)
             else:                              # a NODE's entity_id IS its urn (versioned-graph model);
                 pl = o.payload or {}           # mint one when the collapsed save omits it.
-                eid = pl.get("urn") or o.id or _mint(
-                    mint_urn, str(pl.get("entityType") or "entity"), o.ref)
+                eid = pl.get("urn") or o.id
+                if not eid:
+                    eid = _mint(mint_urn, str(pl.get("entityType") or "entity"), o.ref)
+                    minted.add(i)
             create_eid[i] = eid
             if o.ref:
                 assigned[o.ref] = eid
@@ -4214,7 +4231,10 @@ def _resolve_change_ops(request_ops, mint_id, mint_urn, *, by_ref: bool = False)
             else:                              # node — stamp the (minted-or-given) urn into the payload
                 payload = dict(lift_top_level_node_fields(payload))
                 payload["urn"] = eid
-            ops.append({"op": "create", "entity_kind": kind, "entity_id": eid, "payload": payload})
+            op = {"op": "create", "entity_kind": kind, "entity_id": eid, "payload": payload}
+            if i in minted:                    # a brand-new node: its own name / identity properties
+                op["minted"] = True            # are derived, never copied (``bind_node_write``)
+            ops.append(op)
         else:  # update — forward the partial patch + the OCC base_version; the service does the
                # authoritative field-level merge (patch onto current, or a 3-way conflict check).
                # `unsetProperties` becomes the service's one internal removal form here.
@@ -4284,6 +4304,7 @@ async def apply_graph_changes(
             containment_edge_types=await _resolve_containment_types(engine),
             ontology_rules=await _resolve_ontology_rules(
                 engine, fail_closed=(g.get("kind") == "blank")),
+            node_identity=await _node_identity_for_write(engine),
             # An edge copied in whose id was also an item's is ``edge:<id>`` in history, while
             # the graph the canvas reads still calls it ``<id>``: each edge update or delete goes
             # to the edge its id names, never to an item that shares it.

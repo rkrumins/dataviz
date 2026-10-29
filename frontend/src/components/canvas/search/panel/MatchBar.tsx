@@ -29,18 +29,21 @@ import {
     Crosshair, EyeOff, FileDown, Filter, Maximize2, Sparkles, X,
 } from 'lucide-react'
 import {
-    type FC, type ReactNode, useLayoutEffect, useMemo, useRef, useState,
+    type FC, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState,
 } from 'react'
 import { createPortal } from 'react-dom'
 
+import type { Halted } from '@/hooks/useAdvancedSearch'
+
 import { ProgressBar } from '@/components/ui/ProgressBar'
 import { cn } from '@/lib/utils'
+import { useConnectionVisibility, useConnectionVisibilityStore } from '@/store/connectionVisibility'
 import { usePersonaMode } from '@/store/persona'
 import {
     useCanvasFilterMode,
     useFocusedMatchIndex,
-    useOrderedMatchUrns,
     useSearchStore,
+    useStepCount,
     type CanvasFilterMode,
 } from '@/store/searchStore'
 
@@ -65,6 +68,17 @@ export interface MatchBarProps {
      *  matches shown are already the right ones, in their final order. */
     scanning?: boolean
     progress?: { scanned: number; total: number } | null
+    /** When the search started (``performance.now()``): a scan's clock. */
+    startedAt?: number | null
+    /** A scan no longer followed — stopped, or interrupted by a graph that
+     *  stayed out of reach — and the way to pick it up again. */
+    halted?: Halted | null
+    onStop?: () => void
+    onResume?: () => void
+    /** The search finished but left part of the graph out: ``count`` is a
+     *  floor, and ``notes`` say which parts. */
+    countIsFloor?: boolean
+    notes?: string[] | null
     /** Frame all matches on the canvas. Hidden when no matches or
      *  when running. */
     onFrame?: () => void
@@ -78,22 +92,27 @@ export interface MatchBarProps {
     onClear?: () => void
     /** Export every match to a file. Shown only when there are matches. */
     onExport?: () => void
-    /** What ``count`` counts: a search's matches, or a path search's
-     *  routes — which stop at the path limit, not the candidate cap, and
-     *  say so beside the paths themselves. */
-    unit?: 'match' | 'path'
+    /** What ``count`` counts: a search's matches, a path search's routes
+     *  — which stop at the path limit, not the candidate cap, and say so
+     *  beside the paths themselves — or a Connections search's edges. */
+    unit?: MatchUnit
     /** The view this panel is bound to — passed to setCanvasFilterMode
      *  so the choice persists for this view in localStorage. */
     viewId: string
 }
 
 
+export type MatchUnit = 'match' | 'path' | 'connection'
+
+
 export const MatchBar: FC<MatchBarProps> = ({
     count, elapsedMs, isRunning, errorMessage, truncated, countIsExact,
-    deadlineExceeded, candidateCount, scanning, progress, onFrame,
+    deadlineExceeded, candidateCount, scanning, progress, startedAt, halted, onStop,
+    onResume, countIsFloor, notes, onFrame,
     onShowFocusedOnCanvas, onClear, onExport, unit = 'match', viewId,
 }) => {
-    const orderedMatchUrns = useOrderedMatchUrns()
+    // What the stepper walks: the matches, or a Connections search's edges.
+    const stepCount = useStepCount()
     const focusedMatchIndex = useFocusedMatchIndex()
     const canvasFilterMode = useCanvasFilterMode()
     const stepFocus = useSearchStore((s) => s.stepFocus)
@@ -109,7 +128,13 @@ export const MatchBar: FC<MatchBarProps> = ({
         deadlineExceeded && !isRunning && !isError,
     )
 
-    const hasMatches = orderedMatchUrns.length > 0
+    // A scan still being followed: its clock runs, and a long stretch with
+    // nothing new says the graph is busy rather than looking stuck.
+    const live = Boolean(scanning && !isRunning && !isError && !halted)
+    const seconds = useClock(startedAt, live)
+    const stalled = useStalled(progress, live)
+
+    const hasMatches = stepCount > 0
     // 1-based display for humans; the stored index is 0-based.
     const displayPosition = useMemo(() => {
         if (!hasMatches) return null
@@ -132,10 +157,18 @@ export const MatchBar: FC<MatchBarProps> = ({
                 showPlus={showPlus}
                 scannedPercent={scanning && !isRunning && !isError
                     ? scannedPercent(progress) : null}
+                clock={live && seconds !== null ? formatClock(seconds) : null}
+                floor={Boolean(countIsFloor && !isRunning && !isError)}
                 onClear={onClear}
                 onExport={!isRunning && !isError && (count ?? 0) > 0 ? onExport : undefined}
+                onStop={live ? onStop : undefined}
                 unit={unit}
             />
+            {live && stalled && (
+                <p className="px-3 -mt-1 pb-1.5 text-[11px] text-ink-muted" aria-live="polite">
+                    The graph is busy — still working.
+                </p>
+            )}
             {scanning && !isRunning && !isError && (
                 <ProgressBar
                     value={scannedPercent(progress)}
@@ -147,7 +180,7 @@ export const MatchBar: FC<MatchBarProps> = ({
             {hasMatches && !isRunning && !isError && (
                 <ToolbarStrip
                     stepperPosition={displayPosition ?? 0}
-                    stepperTotal={orderedMatchUrns.length}
+                    stepperTotal={stepCount}
                     onStepPrev={() => stepFocus('prev')}
                     onStepNext={() => stepFocus('next')}
                     onShowFocused={onShowFocusedOnCanvas}
@@ -157,6 +190,11 @@ export const MatchBar: FC<MatchBarProps> = ({
                     onFrame={onFrame}
                 />
             )}
+            {scanning && halted && !isRunning && !isError && (
+                <HaltedNote halted={halted} onResume={onResume} />
+            )}
+            {countIsFloor && !isRunning && !isError && <FloorNote notes={notes ?? []} unit={unit} />}
+            {unit === 'connection' && hasMatches && !isRunning && !isError && <HiddenTypesNote viewId={viewId} />}
             {((showTruncation && unit === 'match') || showDeadlineExceeded) && (
                 <WarningBanner
                     truncated={showTruncation && unit === 'match'}
@@ -164,6 +202,45 @@ export const MatchBar: FC<MatchBarProps> = ({
                     candidateCount={candidateCount ?? null}
                 />
             )}
+        </div>
+    )
+}
+
+
+/** A Connections search's matches the canvas keeps hidden, their edge types
+ *  hidden there by the reader: how many, and a way to show them. */
+function HiddenTypesNote({ viewId }: { viewId: string }) {
+    const matched = useSearchStore((s) => s.matchedEdges)
+    const { hiddenTypes } = useConnectionVisibility(viewId)
+    const hidden = useMemo(() => {
+        if (hiddenTypes.size === 0) return null
+        const types = new Set<string>()
+        let count = 0
+        for (const m of matched) {
+            const type = m.edgeType.toUpperCase()
+            if (hiddenTypes.has(type)) { count++; types.add(type) }
+        }
+        return count > 0 ? { count, types } : null
+    }, [matched, hiddenTypes])
+    if (!hidden) return null
+    return (
+        <div className={cn(
+            'flex items-center gap-1.5 px-3 py-1.5 text-[11px] text-ink-secondary',
+            'border-t border-slate-200/70 dark:border-glass-border/40',
+        )}>
+            <EyeOff className="w-3 h-3 shrink-0 text-ink-muted" aria-hidden />
+            <span className="min-w-0 flex-1">
+                {hidden.count.toLocaleString()} of these {hidden.count === 1 ? 'connection is' : 'connections are'} of{' '}
+                {hidden.types.size === 1 ? 'a type' : 'types'} hidden on the canvas.
+            </span>
+            <button
+                type="button"
+                onClick={() => useConnectionVisibilityStore.getState().setHidden(
+                    viewId, [...hiddenTypes].filter((t) => !hidden.types.has(t)))}
+                className="shrink-0 rounded-md px-1.5 py-0.5 font-medium text-accent-lineage hover:bg-accent-lineage/10"
+            >
+                Show them
+            </button>
         </div>
     )
 }
@@ -182,9 +259,105 @@ function scannedPercent(progress: { scanned: number; total: number } | null | un
 }
 
 
+/** How long a scan may find nothing new before the bar says the graph is
+ *  busy — still working, not stuck. */
+const STALL_MS = 20_000
+
+/** Whole seconds since ``startedAt`` (``performance.now()``), ticking
+ *  while ``live``. */
+function useClock(startedAt: number | null | undefined, live: boolean): number | null {
+    const [now, setNow] = useState(() => performance.now())
+    useEffect(() => {
+        if (!live) return
+        const timer = setInterval(() => setNow(performance.now()), 1000)
+        return () => clearInterval(timer)
+    }, [live])
+    return startedAt == null ? null : Math.max(0, Math.floor((now - startedAt) / 1000))
+}
+
+/** Whether a live scan's progress has stood still for ``STALL_MS``. */
+function useStalled(progress: { scanned: number; total: number } | null | undefined,
+                    live: boolean): boolean {
+    const [stalled, setStalled] = useState(false)
+    const scanned = progress?.scanned
+    // Progress, or the scan starting or ending, starts the wait over — in
+    // the previous-render branch: the hooks lint forbids setState in an
+    // effect body.
+    const [since, setSince] = useState({ scanned, live })
+    if (since.scanned !== scanned || since.live !== live) {
+        setSince({ scanned, live })
+        setStalled(false)
+    }
+    useEffect(() => {
+        if (!live) return
+        const timer = setTimeout(() => setStalled(true), STALL_MS)
+        return () => clearTimeout(timer)
+    }, [scanned, live])
+    return stalled
+}
+
+/** "1:23" — minutes and seconds. */
+function formatClock(seconds: number): string {
+    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`
+}
+
+/** How long a finished search took, as people read it: "432 ms", "4.2 s",
+ *  and past a minute the clock a running one shows, "1:27". */
+function formatElapsed(ms: number): string {
+    if (ms < 1_000) return `${Math.round(ms)} ms`
+    if (ms < 60_000) return `${(ms / 1_000).toFixed(1)} s`
+    return formatClock(Math.round(ms / 1_000))
+}
+
+
+/** A scan no longer followed: why, and Resume — its session kept what it
+ *  found, so nothing is read twice. */
+function HaltedNote({ halted, onResume }: { halted: Halted; onResume?: () => void }) {
+    return (
+        <div role="status" className={cn(
+            'flex items-start gap-2 mx-3 mb-2 px-3 py-2 rounded-lg',
+            'border border-amber-400/50 bg-amber-500/[0.10]',
+        )}>
+            <p className="flex-1 min-w-0 text-[11.5px] leading-snug text-ink"
+               title={halted.kind === 'interrupted' ? halted.reason : undefined}>
+                {halted.kind === 'stopped'
+                    ? 'Stopped. What it found so far is shown.'
+                    : 'Paused: the graph didn’t answer for a few minutes. What it found so far is shown.'}
+            </p>
+            {onResume && (
+                <button type="button" onClick={onResume} className={cn(
+                    'shrink-0 rounded-md px-2.5 py-1 text-[11.5px] font-semibold text-ink',
+                    'border border-glass-border hover:bg-glass/40 transition-colors',
+                )}>
+                    Resume
+                </button>
+            )}
+        </div>
+    )
+}
+
+
+/** A finished search that left part of the graph out — said, with the
+ *  server's notes naming which part. */
+function FloorNote({ notes, unit }: { notes: string[]; unit: MatchUnit }) {
+    const what = unit === 'connection' ? 'connections' : 'matches'
+    return (
+        <div role="status" className={cn(
+            'mx-3 mb-2 px-3 py-2 rounded-lg text-[11.5px] leading-snug text-ink',
+            'border border-amber-400/50 bg-amber-500/[0.10]',
+        )}>
+            <p className="font-medium">
+                Part of the graph couldn’t be checked, so there may be more {what} than shown.
+            </p>
+            {notes.map((note) => <p key={note} className="mt-1 text-ink-secondary">{note}</p>)}
+        </div>
+    )
+}
+
+
 function SummaryStrip({
     isRunning, isError, errorMessage, count, elapsedMs,
-    showPlus, scannedPercent: scanned, onClear, onExport, unit,
+    showPlus, scannedPercent: scanned, clock, floor, onClear, onExport, onStop, unit,
 }: {
     isRunning: boolean
     isError: boolean
@@ -194,9 +367,14 @@ function SummaryStrip({
     showPlus: boolean
     /** Set while the search is still scanning; its progress. */
     scannedPercent: number | null
+    /** A live scan's running time, "1:23". */
+    clock: string | null
+    /** The count is a floor: part of the graph was left out. */
+    floor: boolean
     onClear?: () => void
     onExport?: () => void
-    unit: 'match' | 'path'
+    onStop?: () => void
+    unit: MatchUnit
 }) {
     return (
         <div className={cn(
@@ -211,14 +389,32 @@ function SummaryStrip({
                 elapsedMs={elapsedMs}
                 showPlus={showPlus}
                 scannedPercent={scanned}
+                clock={clock}
+                floor={floor}
                 unit={unit}
             />
             <div className="flex items-center gap-1 shrink-0">
+                {onStop && (
+                    <button
+                        type="button"
+                        onClick={onStop}
+                        title="Stop the search here — what it found stays, and you can resume it"
+                        className={cn(
+                            'inline-flex items-center px-2 h-7 rounded-md shrink-0',
+                            'text-[11px] font-medium text-ink-secondary transition-colors',
+                            'hover:text-ink hover:bg-glass/40',
+                        )}
+                    >
+                        Stop
+                    </button>
+                )}
                 {onExport && (
                     <button
                         type="button"
                         onClick={onExport}
-                        title="Export every match to a CSV or NDJSON file"
+                        title={unit === 'connection'
+                            ? 'Export every connection to a CSV or NDJSON file'
+                            : 'Export every match to a CSV or NDJSON file'}
                         className={cn(
                             'inline-flex items-center gap-1 px-2 h-7 rounded-md shrink-0',
                             'text-[11px] font-medium text-ink-secondary transition-colors',
@@ -349,7 +545,8 @@ function ToolbarStrip({
 
 
 function CountReadout({
-    isRunning, isError, errorMessage, count, elapsedMs, showPlus, scannedPercent, unit,
+    isRunning, isError, errorMessage, count, elapsedMs, showPlus, scannedPercent, clock, floor,
+    unit,
 }: {
     isRunning: boolean
     isError: boolean
@@ -358,7 +555,9 @@ function CountReadout({
     elapsedMs: number | null
     showPlus: boolean
     scannedPercent: number | null
-    unit: 'match' | 'path'
+    clock: string | null
+    floor: boolean
+    unit: MatchUnit
 }) {
     return (
         <div className="flex items-baseline gap-2 min-w-0 flex-1">
@@ -378,6 +577,11 @@ function CountReadout({
                     >
                         · scanning {scannedPercent}%
                     </span>
+                    {clock && (
+                        <span className="text-[10.5px] text-ink-muted tabular-nums leading-none">
+                            · {clock}
+                        </span>
+                    )}
                 </>
             ) : isError ? (
                 <span
@@ -391,17 +595,20 @@ function CountReadout({
                     {/* Hero count — the largest text in the results pane.
                         Tabular numerals keep the digits aligned when the
                         count updates between runs. */}
+                    {floor && <span className="text-[12px] text-ink-secondary leading-none">at least</span>}
                     <span className="text-[20px] font-display font-bold text-ink tabular-nums leading-none">
                         {count.toLocaleString()}{showPlus && '+'}
                     </span>
                     <span className="text-[12px] text-ink-secondary leading-none">
                         {unit === 'path'
                             ? (count === 1 ? 'path' : 'paths')
-                            : (count === 1 ? 'match' : 'matches')}
+                            : unit === 'connection'
+                                ? (count === 1 ? 'connection' : 'connections')
+                                : (count === 1 ? 'match' : 'matches')}
                     </span>
                     {elapsedMs !== null && (
                         <span className="text-[10.5px] text-ink-muted/70 tabular-nums leading-none">
-                            · {elapsedMs} ms
+                            · {formatElapsed(elapsedMs)}
                         </span>
                     )}
                 </>

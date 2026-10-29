@@ -574,6 +574,43 @@ How the deployed `FALKORDB_ARGS` values are derived:
   running unclamped. Setting the env is still worth doing so the window is known
   before the first node answers. Leave it unset on a standalone or sentinel
   deployment, where nothing is clamped because there is no detector to outlive.
+- **Advanced Search reads run on replicas, inside the same window.** Every read
+  a search makes — the scan, counts, display-rule checks, exports, the property
+  catalog, discovery, value pickers, name lookups and the Cypher console — goes
+  to an in-step replica: never the master's turn in the read rotation
+  (`FALKORDB_MASTER_READ_SHARE` does not apply), and never the master pin after a
+  write. One statement may run there for **two thirds of
+  `cluster-node-timeout`** (10 s at 15000). A search that needs longer runs as
+  many such statements: it keeps its progress through a failover and finishes.
+  When no replica can answer, the master takes the read under the write share,
+  two fifths (6 s).
+  - *Why.* A read holds its graph's read lock, and a write that arrives meanwhile
+    waits for it on the node's main thread: the node answers nothing, the
+    cluster bus included, until the read ends. Measured on a 3 masters × 2
+    replicas cluster (FalkorDB 4.18.11, a 15 s window): a 25 s read on a master,
+    with a write 2 s in, froze that master for 22.6 s; the cluster failed it
+    over, and the write it had acknowledged was lost. The same read on a replica
+    left the master taking the write in 0.01 s; the replica was flagged failed
+    at 20 s and recovered on its own when the read ended. Inside two thirds of
+    the window, a replica held up like that is never flagged.
+  - *Longer statements.* Raise `--cluster-node-timeout` and
+    `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` together: 30000 allows 20 s statements,
+    45000 allows 30 s. The cost is a slower failover when a master really dies;
+    search never runs on a master, so it never needs the window for itself.
+  - *Queries that run as one statement.* A Cypher query in the console and a
+    path search can't be split, so on a cluster they stop at the same limit
+    (10 s at 15000, 6 s on a master), whatever `NATIVE_QUERY_MAX_TIMEOUT_MS`
+    allows. A longer window is the only way to give them longer.
+  - *More concurrent searches.* Search capacity is the replicas' query threads,
+    so add replicas per shard (each adds `THREAD_COUNT` threads). Measured on a
+    ~5M-entity graph (1.5M nodes, 3.8M edges), one search over the whole data
+    source — text, tag, property or two conditions — took 2–4 s of replica CPU,
+    so each replica core finishes about one such search every 3 s; a graph lives
+    on one shard, so it is that shard's replicas that count. A replica kept
+    for search can be set to `cluster-replica-no-failover yes` so that its
+    pauses never touch failover. Size `repl-backlog-size` for the writes a
+    replica may queue during a long statement, so that it catches up with a
+    partial resync instead of a full one.
 - **`MAX_QUEUED_QUERIES`** bounds queue depth so stampedes fail fast with an error
   instead of building a doomed backlog behind a slow query.
 - **`QUERY_MEM_CAPACITY`** kills runaway queries at the configured byte ceiling

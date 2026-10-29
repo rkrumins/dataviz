@@ -633,6 +633,500 @@ grants can't be read.
 
 ---
 
+## [Unreleased] — New and renamed entities are named and keyed the way their source does it
+
+### Added
+
+- **An entity's details say how its data source identifies and names entities.** Under the
+  URN, one line names the two properties: "Identified by `id` · named by `title`". Expanding it
+  shows a card for each, and the drawer remembers that choice. A card shows the entity's value
+  (the identifier's can be copied) and a pill saying where the setting comes from: this data
+  source, the provider, the workspace, the platform default or the built-in default. Hovering the
+  pill walks the whole lookup. The name property's card also says whether a rename carries it
+  along (in step with the name) or leaves it (kept apart). With an edit not saved yet, the card
+  says what the save will store, such as a name property that becomes the new name.
+- **The Name input says what saving does to the name property** before you save: it changes too,
+  it stays because it is kept apart from the name, or an empty one gets filled in.
+- **The mapping setting says what the editor writes.** Wherever the identity and display-name
+  properties are set (a data source, a provider, a workspace or the platform), the setting says
+  that a new entity gets its URN as the identity property, and that the name property is kept in
+  step with the name.
+
+### Fixed
+
+- **New entities get their name property.** An entity created in a versioned graph stored its name
+  only as `displayName`, never under the property its source keeps names in. That property is
+  `name`, unless the data source, its provider, its workspace or the platform maps it to another,
+  such as `title`. This held however the entity was made: one at a time, a set in the Hierarchy
+  Builder or Build mode, a duplicate, through the API, or by import. The Properties panel showed
+  no `name`, and publishing wrote none to the graph. Each new entity now has it.
+- **New entities get their identity property.** In a graph keyed by something other than `urn`
+  (`id`, `identifier`, …), a new entity now carries that property too. It holds the entity's urn,
+  so the source's key and the platform's always agree. A duplicate no longer keeps its original's.
+- **A rename reaches the name property.** Renaming an entity changes its name property with it,
+  and changing the name property renames it, as long as the two agree. A name kept deliberately
+  apart from the display name is left alone, such as OpenMetadata's `customer_orders` beside
+  `Customer Orders`.
+- **Older entities catch up.** An entity saved before this change gets its missing name and
+  identity properties the next time it is saved, whatever that save changes. A property someone
+  deleted stays deleted.
+- The entity editors no longer offer the mapped name or identity property as a field of its own.
+  The Name input is the name property, and the platform assigns the identity property.
+- **The Technical view no longer shows an entity's URN twice.** An entity with no name of its own
+  showed its URN as its name and again underneath. It now shows it once.
+- **A lineage trace row shows its identifier before its details load.** In the Technical view, a
+  row whose details hadn't loaded yet showed nothing under its name. It now shows its URN.
+- **`⌘/` (`Ctrl-/`) switches between Business and Technical names.** The command palette showed
+  the shortcut, but nothing responded to it. It now works anywhere outside a text field. The
+  palette and the top bar's toggle show it as your platform writes it: `⌘/` on a Mac, `Ctrl+/`
+  elsewhere.
+
+### Changed
+
+- **The Technical view shows the same kind of identifier under every name.** On Context View rows,
+  Graph cards and the entity drawer, Technical mode now shows the property the data source
+  identifies entities by, such as `id`. That property is set on the data source, its provider or
+  its workspace. A source that uses the platform's own key shows the URN, as does an entity with
+  no value of its own. The view used to show the qualified name where a loader set one that
+  differed from the name, and the URN everywhere else, so one column mixed paths with URNs.
+  Hovering the line names the property, as in `id: ORD-000417`. The qualified name is still in
+  the entity's details. The line still appears only in the Technical view.
+- A rename shows as two changed fields in history and in the Changes tab: the display name and
+  the name property.
+- A draft rename now conflicts at publish with a re-sync of main that changed the same name
+  property. It used to merge without asking.
+
+### Known limitations
+
+- A new entity's name property is its display name when it is first saved, even if it was set to
+  something else before then. To keep the two apart, change the name property after saving.
+- A mapping onto a field the platform owns (`qualifiedName`, `description`, …) is not kept in step.
+- Changing a mapping doesn't rewrite existing entities. Each catches up on its next save.
+- `POST /graph/save` writes nodes exactly as they are sent, without these properties.
+- The identity property holds a urn string, so a source with numeric ids ends up with mixed types.
+- A save answers with at most 500 entities. Past that, the canvas shows the new properties of the
+  rest once each is opened again.
+
+---
+
+## [Unreleased] — Advanced Search reads on replicas, sized to the cluster
+
+### Fixed
+
+- **A search could take a master out of a Redis Cluster, and lose a write.** A read holds its
+  graph, and a write that arrives meanwhile waits for it while the node answers nothing — the
+  cluster's health checks included. Search statements could run for 45 s, and a third of them ran
+  on a master. On a 3 masters × 2 replicas cluster with a 15 s `cluster-node-timeout`, a 25 s read
+  on a master with a write 2 s in froze that master for 22.6 s: the cluster failed it over, and
+  the write it had acknowledged was lost. Every read Advanced Search makes — the scan, counts,
+  display-rule checks, exports, the property catalog, discovery, value pickers, name lookups and
+  the Cypher console — now runs on a replica, where the same read leaves the master taking the
+  write in 0.01 s. A search is no longer sent to the master for 10 s after a write either, which
+  sent it there exactly while writes were landing.
+- **A cluster could read as empty to a search.** A read that landed on a node without the graph
+  answered "empty key", which the label lookup took to mean an empty graph: the search completed
+  with 0 matches. It is now checked against the cluster first, and otherwise answered as busy and
+  retried.
+
+### Changed
+
+- **A search statement on a cluster runs for up to two thirds of `cluster-node-timeout`** —
+  10 s at the shipped 15 s — on a replica, whatever `DEEP_SEARCH_CHUNK_TIMEOUT_MS` says. Inside
+  that, a replica held up by a write is never flagged failed. A search that needs longer runs as
+  more statements and finishes as before. A part's last try is the same length (it was 94 s).
+  With no replica to answer, the master takes the read for two fifths of the window, as a write
+  does. On standalone and sentinel deployments the limits are unchanged; a sentinel deployment
+  with replicas sends search reads to them too.
+- **A query that runs as one statement stops at the same limit on a cluster.** A Cypher query in
+  the console and a path search ("how does A reach B") can't be split, so they stop at 10 s on
+  the shipped window (6 s on a master), whatever `NATIVE_QUERY_MAX_TIMEOUT_MS` (30 s) allows. A
+  longer window gives them longer: 45000 allows 30 s.
+
+### Upgrading
+
+- Nothing is required. To allow longer statements, raise `--cluster-node-timeout` and
+  `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` together (30000 → 20 s, 45000 → 30 s), at the cost of a
+  slower failover when a master really dies. More replicas per shard add search capacity. See
+  [FalkorDB deployment](docs/FALKORDB_DEPLOYMENT.md#sizing--protection-parameters).
+- `FALKORDB_MASTER_READ_SHARE` no longer applies to Advanced Search.
+
+### Known limitations
+
+- A part that can't be split and can't be read in the statement limit is left out sooner — at
+  10 s rather than 94 s on the shipped window — and the count reads **at least *N***. A longer
+  window gives it longer.
+- Canvas reads keep their routing and their budgets — up to 15 s expanding a container, 30 s
+  for the stats scans, 60 s for the top level — so on a cluster taking a steady stream of writes
+  they can still hold a master up the same way. In a load test on a ~5M-entity graph (20 canvas
+  users, a write a second, a core per node, no searches) canvas reads froze a master for 28–49 s
+  and it was failed over, with and without this change. Bounding canvas reads is a change of its
+  own.
+
+---
+
+## [Unreleased] — Every flow works: Edit in Code, Ask in every mode, undo, Back to results, recipes
+
+### Fixed
+
+- **The query card's header is there in every editor and every state.** An empty Form or
+  Sentence used to replace the whole card with a landing panel — no Form · Sentence · Code ·
+  Cypher switch, no Undo, no Run — so from an empty Form there was no way back to Sentence or
+  Code. The card now opens on the Form under one header: the four editors as tabs, with **New**,
+  **Save** and **Tag** beside them; below them **Entities** or **Connections**, Undo and Redo,
+  **Auto** (a switch: on, the query runs as you edit) and **Run**. Narrow, the editors not chosen
+  show their icons alone. An empty query starts with a filter, or a question in Sentence, under
+  that header.
+- **Edit in Code opens Code.** "Open in Code" on what the Form or the Sentence can't show — a
+  group nested too deep, a number of edges in the Sentence — opened the Advanced drawer's
+  Options, which can't edit the query. It now reads **Edit in Code** and opens Code mode with
+  that part selected.
+- **Within N hops is built in the Form and the Sentence.** Adding it inserted an empty list of
+  URNs to fill in as JSON. It now has an editor: the entities by name, the direction, how many
+  hops (up to 10), and which edges.
+- **Inside Subtree picks its container by name, from anywhere in the View**, not only from what
+  is loaded on the canvas.
+- **Ask is there in Connections**, and its **Try** questions show in the Form as well as the
+  Sentence. A question never adds to a connection; it replaces it.
+- **⌘Z / Ctrl+Z undoes in the panel**, as the guide said it did, and ⌘⇧Z / Ctrl+Shift+Z redoes —
+  except in a text field, which keeps its own. **Clear** is one more step: Undo brings the
+  query back.
+- **How it matches offers Back to results**, instead of needing Undo to get back.
+- **The search box offers broader searches when nothing matches** — **Contains**, **Look in
+  everything**, **Whole view** — and says what it looked for. It offered only narrower ones.
+- **Recipes.** The empty card starts with one recipe per intent instead of the first five, so
+  the quality checks show too. The documentation checks never showed: they waited for a
+  `description` property, which discovery doesn't list (it is every entity's own field). They
+  now show wherever their type does. A recipe that finds nothing in this View says **none in
+  this view**.
+- **Wording.** The relationship card reads **Related to…**, not "Connection", which is the
+  edges search. "Orphan" reads **no lineage**. "a “owner” property" reads "an “owner”
+  property". A finished search's time reads *8.6 s* or *1:23*, not *87146 ms*.
+
+### Added
+
+- **Ask reads more questions.**
+  - Routes: `path from orders to revenue`, `how does orders reach revenue`, `how is orders
+    connected to revenue`.
+  - What lies between two places: `what flows from bronze to gold`, `connections between
+    datasets and dashboards`. A word that names a layer reads as the layer, with chips for its
+    other readings.
+  - The words catalogs use — tables, columns, fields, reports, databases, pipelines, jobs — for
+    the View's own types, when the View has them and none of its own goes by the word.
+  - **Did you mean “datasets”?** for a misspelt type or tag.
+  - A reading that finds nothing offers the fixes an empty answer does.
+- **A Connections recipe**: *What flows from Bronze to Gold*, the lineage edges from the View's
+  first layer to its second.
+- **Telemetry: where a search came from and how it ended.** `graph.search` and
+  `graph.search_miss` carry `source` and `outcome`; still no query text.
+  - `source` is one of ask, recipe, library, results, right-click, property-manager or header,
+    or else the editor: form, sentence or code. `studio` is set when Search Studio was open.
+  - `outcome` is complete, atLeast, stopped, interrupted or failed. A failure's `reason` is
+    the server's code or HTTP status.
+  - Stopped, interrupted and failed searches are recorded now too, so **Searches that
+    matched** counts a failed search as one that found nothing. A search resumed after a Stop
+    reports again, marked `resumed`.
+
+### Removed
+
+- Code nothing in the app reached:
+  - the template runner (`searchTemplates.ts`, `TemplateForm`);
+  - `QueryChips` and `RunBar`;
+  - the first builder (`PredicateBuilder`, its rows, reducer and leaf editors).
+- `graph.search` events no longer carry `template`, which was always `__builder__`.
+
+### Known limitations
+
+- In the Sentence, **Number of edges…** still says **Edit in Code**; the Form edits it.
+- A search's `source` is what last put the query in its shape: a recipe whose blank is filled
+  in the Sentence reads as `sentence`.
+- **Searches that matched** counts events, so a search stopped and then resumed counts twice.
+
+---
+
+## [Unreleased] — Resilient searches: big subtrees, outages, Stop and Resume
+
+### Fixed
+
+- **Searches inside a very large container finish.** A part of a search that couldn't be
+  checked in time — everything under one entity, or a View's visible entities — failed the
+  search. The panel asked again, the server planned the search from the start, and it failed
+  the same way, again and again. Such a part is now split: an entity into itself and each of
+  its children, the visible entities into halves. A part that can't be split (one entity and
+  what's inside it, or one entity's edges) gets one last try at the longest time a request
+  allows, 94 s. If that fails too, it is left out rather than failing the search: the count
+  reads **at least *N***, and a note names what was left out. An export, and a View's property
+  catalog, never leave a part out; they fail instead, as before.
+- **A failed search isn't planned again on every poll.** The server forgot a failed search at
+  once, so the panel's next poll started it over. It is now kept for 2 minutes: a poll for it
+  gets the failure, and only a new run plans it again.
+- **Outages keep a search's progress.** A graph store failing over, loading, with its queue full,
+  or dropping the connection failed the whole search. Now the part being checked goes back in
+  the queue and the search carries on where it was. A part that cuts the connection 5 times is
+  left out, with a note, as above.
+- **The cache Redis no longer takes the graph down with it.** A search keeps its progress in
+  Redis. When that Redis didn't answer, the error counted against the graph's circuit breaker,
+  which then refused every read on the data source. It now answers 503
+  `SEARCH_STORE_UNAVAILABLE` with a `Retry-After`, the panel waits it out, and other reads carry
+  on. A search also lets go of its progress when saving it fails, or, with the cache gone, as
+  soon as the cache answers again, so the next poll can go on.
+- **A route search that runs out of time** answers what it found, saying it ran out of time,
+  instead of failing with a 504.
+- **The panel waits out an outage.** A search, **Load more**, display-rule checks and rule
+  counts gave up within seconds of a graph store that couldn't answer. They now ask again for up
+  to 3 minutes, less often as they go (at most 15 s apart, or as long as the server asks), so
+  "…retrying automatically" is now true. A search still unanswered then reads **Paused: the
+  graph didn't answer for a few minutes**, with what it found so far and **Resume**, which goes
+  on with the same scan. A search the server couldn't finish ends at once, with **Try again**.
+- **Rule counts on a large View finish.** They stopped after 600 requests, about 10 minutes. They
+  now go on for up to 30 minutes, letting the server count for its full 5 s per request after
+  the first.
+- **Load all doesn't start hundreds of scans.** Past the first thousand matches, every thousand
+  more is a new scan of the View, so **Load all** on 200,000 matches started 200 of them. It now
+  lists up to 10,000. Past that it offers **Export all *N***, which writes every match to a file
+  in one pass.
+
+### Added
+
+- **Stop, and a clock.** A long search reads ***N* found · scanning 45% · 1:23**; after 20 s with
+  nothing new it adds **The graph is busy — still working.** **Stop** ends it where it is and
+  keeps what it found; **Resume** carries on without reading anything twice.
+- **Try again** on a failed search's card runs it again as it is.
+- A poll that brings nothing new waits longer before the next, from 0.5 s up to 5 s, and a
+  background tab asks at most every 5 s.
+- API: a rule count carries `lowerBound` when part of the View was left out, and a search's
+  `countStatus` reads `lowerBound` then.
+
+### Known limitations
+
+- A stopped or paused search is held on the server for 15 minutes. **Resume** after that starts
+  the scan over; the answer is the same, it just takes as long as the first time.
+- A search only goes on while its tab is open.
+
+---
+
+## [Unreleased] — No wrong answers: busy graphs, large exports, silent failures and Ask
+
+### Fixed
+
+- **A busy graph no longer answers "0 matches".** When the graph was too busy to list its
+  entity types, a search, a count, a Connections search or a route search finished with nothing
+  found — and kept that answer for 15 minutes; name lookups remembered "not found", value
+  suggestions called their empty list complete, and display rules tagged nothing. Each now says
+  the graph is busy, and the panel asks again; what the graph store said itself (loading,
+  failing over, not answering) reaches the panel as it was.
+- **Large exports keep every row.** FalkorDB's stock image sends at most 10,000 rows in one
+  reply (`RESULTSET_SIZE`) and cuts the rest without saying so. An export lost the rows past
+  it; a search on a property kept raw (`propertiesRaw`) missed matches past it; and containers
+  lost their **N matches inside** badges when a large part of the View's matches sat in more
+  than 10,000 of them. Every such read now goes in pages of at most 10,000 rows. (Our own
+  compose files set no cap; a FalkorDB on its image's defaults has it.)
+- **Failures say so.**
+  - Display rules that couldn't be checked left the canvas without tags, as if nothing
+    matched. The rule list now says so, and why, with **Retry**; the browser also waits as long
+    as the server may take (150 s), instead of giving up at 45 s and asking again.
+  - A page of results after the first that failed to load only logged to the console. It now
+    says why, with **Try again**, and the Studio tables stop asking by themselves.
+  - Errors read the server's own reason — "the graph store node holding this graph is
+    restarting or failing over" — instead of "Too many requests" or a generic message, and an
+    export's failure no longer shows its raw reply.
+- **Ask reads common questions the right way round.**
+  - `what does orders feed`, `what does orders affect`, `impact of orders` and `what breaks if
+    orders changes` ask what *orders* feeds. `where does orders come from`, `what does orders
+    depend on` and `what does orders use` ask what feeds it. All of them read as "orders that
+    feed something" before. The subject is looked up by name, not searched for.
+  - A named relative of a lineage relationship — `datasets that feed "CFO Revenue"` — takes in
+    what is inside it, as the canvas's right-click questions do (a dataset's lineage runs
+    through its columns). **just it** reads the entity alone.
+  - `unowned` and `owned by` use the View's own owner property. In a View without one, Ask now
+    says so instead of matching everything.
+  - `without a steward`, in a View with no such property, is said back. It used to read as
+    "name doesn't contain steward", which is nearly everything.
+  - `datasets with more than 100 columns` keeps the count.
+  - Relationships nested more than 3 deep are said, not dropped.
+  - The Technical example question reads the way data flows.
+
+### Known limitations
+
+- Ask can't tell a container from an entity with nothing inside it before it looks the name up.
+  So **it and what's inside** is offered for every named lineage relative; for an entity with
+  nothing inside it, both readings find the same.
+- When the graph store doesn't answer, the rule list and **Load more** say so in the server's
+  words — "…is not answering; retrying automatically" — but they ask again only when **Retry**
+  or **Try again** is pressed. Making both ride out an outage on their own is the next change.
+
+---
+
+## [Unreleased] — "Inside" anywhere in a query, searches that start from a thing's ancestors, and layer names with spaces
+
+### Added
+
+- **"Inside a container" anywhere in a query.** Under an **OR** or a **NOT** group, or as a
+  relationship's condition, **Inside a container named…** (`inside @"…"` in Code mode) tests each
+  entity: the container itself, or anything up to 12 levels below it (fewer in a shallower View).
+  At the top of a query it still limits the whole search. So a thing's *family* — it, everything
+  inside it and every container above it — is one query: `inside @"X" OR descendant(@"X")`. It
+  works at either end of a Connections search, and in display rules. Inside a relationship's
+  condition, the Form's palette now offers **Inside a container named…**, **Inside Subtree** and
+  **Root in view is…**.
+- **Layer names with spaces in Code mode.** `layer:Reporting layer` and `layer = Reporting layer`
+  read as one name when the View has a layer called that, ignoring case and spacing; the
+  longest name the words spell wins, and the words after it are the rest of the query. Quoted,
+  `layer:"Reporting layer"` always reads whole. Suggestions offer the View's layers while a name
+  of several words is typed, with or without a quote, and write the picked name in quotes,
+  closing an open quote once. A type, tag or property name that needs quotes is written in them
+  when picked, as the first value after `type:`, `tag:`, `layer:` or `has:`.
+
+### Changed
+
+- **A search starts from the things it names.** A condition in the query's top-level AND that
+  names entities — `@"X"`, its parent (`child(@"X")`), its ancestors (`descendant(@"X")`), or an
+  OR of those with `inside @"X"` — is now where the search starts: those entities are found from
+  *X*, up or down the hierarchy, and only they are tested by the rest of the query. A
+  Connections end that names its entities this way is the end it starts from. On 2 million
+  entities and 6.85 million edges, against the previous version on the same machine, with every
+  count exact: the 100,000 connections out of a column's containers in 1.6 s rather than 15 s;
+  those from one container's family to another's in 0.55 s rather than 28 s; and those from a
+  layer into a container's family in 1 s rather than 110 s.
+- **An ANY query holding an "inside" row runs as written.** Before, the panel lifted an **Inside
+  a container named…** row out of an **ANY** (OR) query and used it to limit the whole search,
+  because the server couldn't read it there. It is now one of the alternatives, as the builder
+  shows it, and the **inside *X*** chip is shown only when it limits the whole search.
+- **Code mode writes a value with a quote in it in the other kind of quote** — `owner = 'say "hi"'`,
+  `tag:"O'Brien"` — and a value holding both kinds as JSON. Each reads back as it was.
+
+### Known limitations
+
+- **With both ends named, a Connections search starts from From.** A From whose things have
+  very many edges then costs more than starting from To would: 1.9 s rather than 0.5 s, measured
+  from a column's containers, one of them a dataset with 100,000 edges, into a container.
+- **Unquoted layer names need the View's layers.** Code mode reads `layer:Reporting layer` as
+  one name only where it knows the View's layers. The filter palette's typed-in query, which
+  doesn't, reads it as `layer:Reporting` and a name search for `layer`: quote the name there.
+
+---
+
+## [Unreleased] — Connections in the search panel, on the canvas, in Code mode and Ask
+
+### Added
+
+**Find: Entities · Connections.** The Advanced Search query card can find the edges themselves.
+Switch **Find** to **Connections** and the query becomes **From** → **Through** → **To**:
+- **From** and **To** are each an ordinary query, with its live count.
+- **Through** picks the edges: any link, lineage, containment, any edge or chosen edge types. It
+  sets the direction (From → To, or either way) and takes an edge filter.
+
+The results list every edge: source → type → target, each end with its parent, and type chips
+counted exactly. A row shows both ends on the canvas, opens either end, or copies the edge's id.
+The match bar counts connections, and `J` / `K` step through them. When nothing matches, the
+panel says how many entities meet each end and offers the fixes that fit. Connections also work in:
+- **Search Studio**, as a table;
+- **Export**, with fixed edge columns;
+- the **Library**, with a **Connections** badge;
+- the **Sentence** view, which reads them as "Connections from … to …".
+
+**Connections on the canvas.**
+- **Both ends light up**, with their containers, and so do the lines that draw the matched edges.
+  Each line has a badge saying how many matches it draws (**N+** while more pages remain), and the
+  other lines dim.
+- **Matches folded inside collapsed containers** light the line between the containers on screen,
+  even where no summary of their connections was built. Opening a container moves the light down
+  to the exact edges.
+- **On Hover and Adaptive** draw the lit lines too, up to 1,000, with a chip for the rest.
+- **Hidden kinds of flow:** a match of a kind hidden in the **Flows** panel stays hidden, and the
+  match bar offers **Show them**.
+- **The Graph canvas** lights its matched lines as well, alongside your own highlights.
+
+**Code mode.**
+- `from(type:dataJob) to[PRODUCES](type:dataset)` is a Connections search. `linkedTo(…)` makes it
+  either way, `.via(…)` adds an edge filter, and `from() to(layer:Gold)` starts from any entity.
+- Suggestions offer the edge types inside `to[` and where the edges go after `from(…)`.
+- **Suggestions cover everything Code mode reads.** After a property's name, every operator in
+  the Form's words (`IN (…)` *is one of*, `BETWEEN … AND …`, `WITHIN LAST …`, `IS SET`…); inside
+  `IN (`, the property's values, leaving out those listed; durations after `WITHIN LAST`; the
+  endings a comparison takes, where they change it; and the words that were missing:
+  `hasUpstream`, `hasDownstream`, `hasIncoming`, `hasOutgoing`, `qname:`, `description:`,
+  `ancestor*2(…)` and `.via(…)`. A test fails if an operator or a keyword the parser reads isn't
+  offered.
+- `⌘I` selects an end, then the whole connection.
+- **Examples** gain three Connections lines.
+
+**Ask** reads "connections from columns tagged PII to dashboards through produces, either way".
+Each end is read as a question of its own.
+
+**A guide page for everyone.** [Finding Connections](/guide/finding-connections) explains what a
+connection is and walks through a first search step by step, with pictures. It gives worked
+examples in the Form, Ask and Code, explains what the canvas shows, and says what to do when
+nothing matches. It covers everything coming into one thing, the hierarchy at either end (a
+parent, a grandparent, what a thing holds and how many), and how the canvas rolls the actual
+connections up between closed containers. The glossary gains *Connection*, *Edge type*,
+*Either way*, *From / To* and *Through*, and the guide's home page gains a card and a question
+for it.
+
+### Changed
+
+- **"Connection" means the edges search now.** Code mode's errors call a relationship a
+  relationship: "A relationship follows [lineage], [links] or edge types…", and ".via(…) follows
+  feeds, fedBy, linkedTo or a connection's to(…)".
+
+### Fixed
+
+- **Load more past an entity search's first page.** The next page dropped the facets the first
+  page asked for, so the server refused its cursor as issued for a different query.
+- **The canvas search box** counted a Connections answer as "8 matches · 0 layers". It now says
+  "8 connections".
+
+### Known limitations
+
+- **Connections are direct edges only.** Multi-hop connections are future scope: the edges of
+  every route of up to N hops between a From and a To match.
+- **The canvas lights the first 2,000 matched edges loaded.** The list, counts and export cover
+  every match.
+- **On a Graph view, the search panel squeezes the canvas to nothing.** This is an existing layout
+  fault, and closing the panel ends the search, so no search's highlight shows there yet.
+  Context Views show it in full.
+- **Unlit lines don't dim on the Graph canvas.** That holds for a search and for a click
+  highlight: its lineage lines ignore the opacity they're given. The lit lines still stand out.
+
+---
+
+## [Unreleased] — Connections: edges as search results (API)
+
+### Added
+
+**Connections: a search that returns edges.** A new predicate, `edges`, asks for edges instead of
+entities: every direct edge whose source meets one condition (`sourceWhere`, "From") and whose
+target meets another (`targetWhere`, "To"). It can go through named edge types or a class, and
+each edge can meet an edge filter. Edges are taken as stored, or `either` way, each edge once.
+"Every edge from a string column called bob to anything whose parent's family is smith" is one
+query. So is "from a table or any of its columns into the Sales layer". Each end takes any entity
+condition: properties, types, tags, names, "inside a container", layers, and relationships such as
+"its parent is…".
+- **Every match, counted exactly.** It runs on the uncapped engine and pages through every match
+  in a fixed order (source name, target name, type), with exact totals per edge type.
+- **What each edge carries:** its id, type and properties, and both ends, each with its parent and
+  containers.
+- **The other search endpoints:**
+  - **Counts** take a Connections search as an item.
+  - **Exports** write each edge with its ends and their parents.
+  - **Explain** shows the whole search as one statement, ready to edit and run in the Cypher tab.
+- **Scale:** on 2 million entities and 6.85 million edges, a selective search answers in about a
+  second, and one matching 127,000 edges finishes in 13 s, exactly.
+
+See [the developer reference](docs/features/search-and-rules-reference.md#connections-edges-as-results).
+The search panel, highlighting on the canvas, Code mode and Ask are in the block above.
+
+### Known limitations
+
+- **Connections are direct edges only.** Multi-hop connections are future scope: the edges of every
+  route of up to N hops between a From and a To match, with conditions on the entities between.
+  Until then, a path pattern lists routes, and a relationship tests reach.
+- **Both ends read native property values only**: a value kept as raw JSON doesn't match at either
+  end, as in a relationship's condition.
+- **A Connections search needs the uncapped engine.** It isn't a display rule, can't be used through
+  a share link, and has no facets or sort.
+
+---
+
 ## [Unreleased] — Search at any width, saved searches across Views, and Code mode that edits like an editor
 
 ### Added

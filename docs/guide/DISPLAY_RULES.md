@@ -107,12 +107,20 @@ The line under the chip says how many entities in the View match:
 | --- | --- |
 | **N matches in this view** | The exact count |
 | **N so far · counting P%** | Still counting a large View — it finishes on its own |
+| **At least N matches in this view** | Counted, except for one part of the View that couldn't be checked in time and was left out — hover for more |
 | **At least N · count stopped** | The count stopped part-way; hover for why |
 | **Can't be counted** | The criteria can't be run as a rule — hover for why, then edit it |
 | **Disabled** | The rule is off |
 
 Chips are worked out for the entities loaded on the canvas; the count covers
 the whole View.
+
+Checks and counts wait out a graph store that's busy, restarting or failing
+over, for up to 3 minutes. When the rules still can't be checked, the
+list says so above the cards, with why: **Couldn’t check the display rules, so
+some tags or counts may be missing.** The canvas would otherwise just show no
+chips, as if nothing matched. **Retry** checks them again; so does loading more
+of the canvas.
 
 ---
 
@@ -207,7 +215,7 @@ list. (Or on the **Properties** tab: `owner` → **Find missing this** → **Tag
 ]}
 ```
 
-**Orphan.** Indigo, **CircleDot**. **Add filter → Graph shape → No lineage
+**No lineage.** Indigo, **CircleDot**. **Add filter → Graph shape → No lineage
 edges**: nothing flows in or out.
 
 ```json
@@ -277,7 +285,7 @@ follows lineage one hop.
 | Rules per View | 200 |
 | Tag label | 120 characters, unique in the View |
 | Criteria | 64 filters, 6 levels of groups, 24 filters in one OR group |
-| Not allowed in a rule | *Within N hops*, *Path*, a lineage relationship of more than one hop, *Inside Subtree* inside an OR or NOT group |
+| Not allowed in a rule | *Within N hops*, *Path*, a lineage relationship of more than one hop, a Connections search |
 | Chips shown per entity | 3, then **+N** |
 | A library file | 200 rules and 500 saved searches |
 
@@ -289,7 +297,7 @@ follows lineage one hop.
 | --- | --- | --- |
 | "Couldn't save the rule — A rule named '…' already exists in this view." | Labels are unique in a View, ignoring case | Choose another label, or edit the existing rule |
 | "A rule can't use 'within hops' or a path…" | Those describe a route through the graph; a rule asks about one entity at a time | Use a lineage-shape filter (No upstream lineage…) or keep it as a saved search |
-| "…only allowed in the top-level AND group" | *Inside Subtree* sits inside an OR or NOT group | Move it to the top level |
+| "A display rule tags entities, and the Connections search … returns edges" | A Connections search finds edges; a rule colours entities | Make the rule from its **From** or **To** condition instead |
 | "…a rule follows lineage one hop…" | A **Fed by…** or **Feeds…** filter reaches further than one hop; a rule is asked of every entity on the canvas | Set it to one hop, or keep the search as a saved search |
 | A rule shows **Can't be counted** on a shared link | Rules that follow relationships aren't evaluated for a share link, which may only search inside its View | Open the View as a member of the workspace |
 | **Can't be counted** on a card | The rule arrived with a View file or a restored version and its criteria can't run as a rule | Hover for the reason, then **Edit rule** and save it again |

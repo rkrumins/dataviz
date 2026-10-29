@@ -132,7 +132,8 @@ jobs:
       # uncapped ORDER BY, row for row, under every scope shape — and a
       # property kept raw (propertiesRaw) must be searched as exactly as one
       # kept natively. An export of a search's matches must hold each one
-      # once, every value exactly as the graph keeps it. The Cypher shapes
+      # once, every value exactly as the graph keeps it — a unit holding more
+      # rows than FalkorDB sends in one reply included. The Cypher shapes
       # relationship predicates are built on must keep behaving as pinned,
       # no compiled shape that slices text may take the server down, and the
       # layer filter must find what the placement rule puts in each layer.
@@ -150,6 +151,7 @@ jobs:
             tests/integration/test_search_engine_live.py \
             tests/integration/test_raw_properties_live.py \
             tests/integration/test_search_export_live.py \
+            tests/integration/test_search_reply_cap_live.py \
             tests/integration/test_relational_shapes_live.py \
             tests/integration/test_search_refs_live.py \
             tests/integration/test_search_relations_live.py \
@@ -157,7 +159,8 @@ jobs:
             tests/integration/test_parse_cost_live.py \
             tests/integration/test_search_crash_guard_live.py \
             tests/integration/test_search_layers_live.py \
-            tests/integration/test_search_generic_ontology_live.py -q
+            tests/integration/test_search_generic_ontology_live.py \
+            tests/integration/test_search_edges_live.py -q
 
   versioning-e2e:
     # The versioned graph against real Postgres, FalkorDB and Redis.
@@ -253,7 +256,7 @@ jobs:
   full-suite:
     name: Full backend suite (informational)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4

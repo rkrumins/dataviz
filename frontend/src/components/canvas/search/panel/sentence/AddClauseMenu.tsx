@@ -6,27 +6,29 @@
 import * as Popover from '@radix-ui/react-popover'
 import { Command } from 'cmdk'
 import { Plus } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { useContext, useMemo, useState } from 'react'
 
 import { cn } from '@/lib/utils'
 import type { Predicate } from '@/types/search'
 
-import { availableCategories, ICON_TONES, type CodeKind } from '../vocabulary/filterKinds'
+import { RelationContext } from '../relationContext'
+import { availableCategories, ICON_TONES } from '../vocabulary/filterKinds'
 
 
 const JOINER_WORDS = { and: 'and…', or: 'or…', that: 'that…' } as const
 
-export function AddClauseMenu({ joiner, relationDepth, onAdd, onOpenCode, disabled }: {
+export function AddClauseMenu({ joiner, relationDepth, onAdd, disabled }: {
     joiner: 'and' | 'or' | 'that'
     relationDepth: number
     onAdd: (p: Predicate) => void
-    onOpenCode?: (kind: CodeKind) => void
     disabled?: boolean
 }) {
     const [open, setOpen] = useState(false)
+    // A Connections search's end holds no route.
+    const { end } = useContext(RelationContext)
     const categories = useMemo(() => availableCategories({
-        relationDepth, rule: false, canCode: !!onOpenCode, canAdvanced: false,
-    }), [relationDepth, onOpenCode])
+        relationDepth, rule: false, end, canAdvanced: false,
+    }), [relationDepth, end])
 
     return (
         <Popover.Root open={open} onOpenChange={setOpen}>
@@ -64,8 +66,7 @@ export function AddClauseMenu({ joiner, relationDepth, onAdd, onOpenCode, disabl
                                                 keywords={e.examples ? [...e.examples] : undefined}
                                                 onSelect={() => {
                                                     setOpen(false)
-                                                    if (e.action === 'code' && e.codeKind) onOpenCode?.(e.codeKind)
-                                                    else if (e.build) onAdd(e.build())
+                                                    if (e.build) onAdd(e.build())
                                                 }}
                                                 className="flex items-start gap-2.5 rounded-lg px-2 py-1.5 cursor-pointer data-[selected=true]:bg-accent-lineage/10">
                                                 <span className={cn('mt-0.5 inline-flex h-6 w-6 shrink-0 items-center justify-center rounded-md border', tone.container)}>

@@ -37,7 +37,7 @@ from backend.app.services.advanced_search_service import (
 )
 from backend.app.services.deep_search import CompileError, get_deep_search_settings
 from backend.app.services.view_scope import _collect_content_scope, _collect_reference_roots
-from backend.common.models.search import Predicate
+from backend.common.models.search import Predicate, unwrap_edges
 from backend.common.models.view_library import (
     LIBRARY_QUERIES_MAX,
     LIBRARY_RULES_MAX,
@@ -90,7 +90,9 @@ def _check_predicate(raw: Any, *, rule: bool) -> Any:
         raise LibraryError(422, f"invalid predicate{f' at {where}' if where else ''}: "
                                 f"{first.get('msg', 'not a predicate')}") from exc
     try:
-        leaves = _validate_predicate(model, path="$.predicate", rule=rule)
+        # A Connections search inside a group of its own is still one —
+        # stored as sent, it is checked as itself.
+        leaves = _validate_predicate(unwrap_edges(model), path="$.predicate", rule=rule)
     except SearchValidationError as exc:
         raise LibraryError(422, str(exc)) from exc
     max_leaves = get_deep_search_settings().max_leaf_count

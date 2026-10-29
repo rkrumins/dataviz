@@ -12,8 +12,8 @@ import type { Predicate, SearchQuery, SearchScope } from '@/types/search'
 
 /** The scope a search in ``viewId`` runs in, read now: how wide (the view,
  *  what's on the canvas, the whole data source) and, on the canvas, which
- *  entities. ``base`` — a template's own scope — is kept underneath. */
-export function currentScope(viewId: string, base?: Partial<SearchScope>): SearchScope {
+ *  entities. */
+export function currentScope(viewId: string): SearchScope {
     const scopeMode = useSearchStore.getState().scopeMode
     // Always attach the canvas's URNs in visible mode, so the server never
     // has to guess them.
@@ -28,7 +28,6 @@ export function currentScope(viewId: string, base?: Partial<SearchScope>): Searc
     // roots from ``scope.viewId`` and only ever intersects a client hint
     // with them.
     return {
-        ...(base ?? {}),
         viewId,
         scopeMode,
         ...(visibleUrns ? { visibleUrns } : {}),
@@ -38,11 +37,24 @@ export function currentScope(viewId: string, base?: Partial<SearchScope>): Searc
 
 /** ``predicate`` as a request carries it. The compiler mishandles a bare
  *  top-level leaf (text / isOrphan / isLeaf / …: zero results where the
- *  same leaf in a group finds them), so a leaf rides in a one-child AND. */
+ *  same leaf in a group finds them), so a leaf rides in a one-child AND.
+ *  A Connections search is the whole query, and goes as it is. */
 export function requestPredicate(predicate: Predicate): Predicate {
-    return predicate.kind === 'group'
+    return predicate.kind === 'group' || predicate.kind === 'edges'
         ? predicate
         : { kind: 'group', op: 'and', children: [predicate] }
+}
+
+
+/** ``options`` as a request for ``predicate`` carries them. A Connections
+ *  search answers edges, ordered as the server orders them, with no facets
+ *  — the server refuses a facet or a sort rather than answer without it;
+ *  the page size, cap and deadline asked for stay (the server holds a page
+ *  of edges to 500). Any other search's go as they are. */
+export function requestOptions(predicate: Predicate, options: SearchQuery['options']): SearchQuery['options'] {
+    if (predicate.kind !== 'edges') return options
+    const { aggregations: _facets, sort: _sort, sortProperty: _key, sortDir: _dir, ...rest } = options ?? {}
+    return { ...rest, results: 'edges' }
 }
 
 
@@ -51,5 +63,9 @@ export function requestPredicate(predicate: Predicate): Predicate {
 export function buildSearchRequest(
     predicate: Predicate, options: SearchQuery['options'], viewId: string,
 ): SearchQuery {
-    return { predicate: requestPredicate(predicate), scope: currentScope(viewId), options }
+    return {
+        predicate: requestPredicate(predicate),
+        scope: currentScope(viewId),
+        options: requestOptions(predicate, options),
+    }
 }

@@ -23,7 +23,11 @@ export function describeQueryPath(path: string): string {
     for (const [, name, index] of path.matchAll(SEGMENT)) {
         const n = index === undefined ? null : Number(index) + 1
         if (name === 'predicate') continue
-        if (name === 'children') parts.push(`${parts.length ? 'condition' : 'filter'} ${n}`)
+        // Only a Connections search has ends at the root: anything else is
+        // sent inside a group.
+        if (!parts.length && name === 'sourceWhere') parts.push('From')
+        else if (!parts.length && name === 'targetWhere') parts.push('To')
+        else if (name === 'children') parts.push(`${parts.length ? 'condition' : 'filter'} ${n}`)
         else if (name === 'items') parts.push(`rule ${n}`)
         else if (name === 'refs') parts.push(`name ${n}`)
         else if (name === 'sourceRefs') parts.push('where it starts', `name ${n}`)
@@ -82,10 +86,20 @@ function bodyText(body: string): string | null {
         return parts.length ? parts.join('; ') : null
     }
     if (detail && typeof detail === 'object') {
-        const message = (detail as { message?: unknown }).message
+        const { message, reason } = detail as { message?: unknown; reason?: unknown }
         if (typeof message === 'string' && message) return message
+        // The server's own words for an outage, a busy graph or a timeout —
+        // "the graph is busy and its entity types could not be read" — not a
+        // guess from the status code.
+        if (typeof reason === 'string' && reason) return asSentence(reason)
     }
     return null
+}
+
+function asSentence(text: string): string {
+    const t = text.trim()
+    const capital = t.charAt(0).toUpperCase() + t.slice(1)
+    return /[.!?…]$/.test(capital) ? capital : `${capital}.`
 }
 
 /** A search error as a person should read it: the server's own words

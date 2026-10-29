@@ -260,6 +260,8 @@ export interface SearchFixture {
     draft?: Predicate | null
     /** The editor the card opens in. */
     editorMode?: string
+    /** Opens in Search Studio. */
+    studio?: boolean
     note: string
 }
 
@@ -332,6 +334,35 @@ export const SEARCH_FIXTURES: Record<string, SearchFixture> = {
             { kind: 'related', axis: 'upstream', edgeTypes: ['PRODUCES'], where: type('dataJob') },
             feedsFinanceChart,
         ] },
+    },
+    connections: {
+        editorMode: 'form',
+        note: 'Find connections: every edge from a column to anything whose parent is tagged Finance.',
+        draft: {
+            kind: 'edges',
+            sourceWhere: type('schemaField'),
+            targetWhere: { kind: 'related', axis: 'parent', where: { kind: 'tag', op: 'hasAny', values: ['Finance'] } },
+        },
+    },
+    connectionsSentence: {
+        editorMode: 'sentence',
+        note: 'The same connections as sentences: From columns, To anything inside a Finance-tagged container.',
+        draft: {
+            kind: 'edges',
+            sourceWhere: type('schemaField'),
+            targetWhere: { kind: 'related', axis: 'parent', where: { kind: 'tag', op: 'hasAny', values: ['Finance'] } },
+        },
+    },
+    connectionsResults: {
+        editorMode: 'form',
+        note: 'Every link out of a dataset: the edge types counted, each row a source, its edge and its target.',
+        draft: { kind: 'edges', sourceWhere: type('dataset') },
+    },
+    connectionsStudio: {
+        editorMode: 'form',
+        studio: true,
+        note: 'The same links in Search Studio: a row an edge, each end with its parent, edge properties as columns.',
+        draft: { kind: 'edges', sourceWhere: type('dataset') },
     },
     compareKeys: {
         editorMode: 'form',

@@ -8,25 +8,27 @@
  * path names container `A` rolls up to 1; the bucket says 42.
  *
  * The same must hold after `loadMore`: page 2 carries no aggregates
- * (the hook drops them from the follow-up query), so the counts have to
- * be recomputed from the MERGED result, which retains page 1's.
+ * (the follow-up asks for rows only), so the counts have to be
+ * recomputed from the MERGED result, which retains page 1's.
  */
 import { renderHook, act, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { recordEvent } from '@/services/telemetryService'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
-import { useSearchStore } from '@/store/searchStore'
+import { type DraftSource, useSearchStore } from '@/store/searchStore'
 import type {
     Predicate,
     SearchAggregateBucket,
     SearchResultPage,
 } from '@/types/search'
 
+import { EDITOR_MODE_KEY } from '@/components/canvas/search/panel/builderMode'
 import { SEARCH_OPTIONS } from '@/components/canvas/search/searchOptions'
 import { buildSearchRequest } from '@/components/canvas/search/searchRequest'
 
-import { PROGRESS_WAIT_MS, useAdvancedSearch } from '../useAdvancedSearch'
+import { PROGRESS_WAIT_MS, pollDelayMs, useAdvancedSearch } from '../useAdvancedSearch'
 
 vi.mock('@/providers/GraphProviderContext', () => ({
     useGraphProvider: () => provider,
@@ -143,6 +145,37 @@ describe('useAdvancedSearch — exact ancestor counts from the aggregation', () 
         expect(searchAdvanced).toHaveBeenCalledTimes(2)
         expect(useSearchStore.getState().matchUrnSet.has('hit-2')).toBe(true)
         expect(useSearchStore.getState().ancestorMatchCounts.get('A')).toBe(42)
+    })
+
+    it('says why a later page failed, keeps the result, and clears once it loads', async () => {
+        searchAdvanced.mockResolvedValueOnce(page({ hits: [HIT], cursor: 'cursor-1' }))
+        searchAdvanced.mockRejectedValueOnce(new Error(
+            'API Error 503: {"detail":{"code":"PROVIDER_UNAVAILABLE",'
+            + '"reason":"the graph store for this provider is not answering; retrying automatically"}}'))
+        searchAdvanced.mockResolvedValueOnce(page({
+            hits: [{ ...HIT, node: { ...HIT.node, urn: 'hit-2' } }],
+        }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        expect(result.current.loadMoreError).toBeNull()
+        await act(async () => {
+            await result.current.loadMore()
+        })
+        expect(result.current.loadMoreError).toBe(
+            'The graph store for this provider is not answering; retrying automatically.')
+        const view = result.current.view
+        expect(view.kind === 'results' && view.result.hits?.map((h) => h.node.urn)).toEqual(['hit-1'])
+
+        await act(async () => {
+            await result.current.loadMore()
+        })
+        expect(result.current.loadMoreError).toBeNull()
+        const after = result.current.view
+        expect(after.kind === 'results' && after.result.hits?.map((h) => h.node.urn))
+            .toEqual(['hit-1', 'hit-2'])
     })
 
     it('falls back to the path rollup when the run asked for no aggregation', async () => {
@@ -319,6 +352,137 @@ describe('useAdvancedSearch — exact counts for every loaded container', () => 
 })
 
 
+describe('useAdvancedSearch — a later page', () => {
+    it('names the same facets, so the session honours its cursor', async () => {
+        searchAdvanced.mockResolvedValueOnce(page({
+            hits: [HIT], aggregates: [[BUCKET]], cursor: 'cursor-1',
+        }))
+        searchAdvanced.mockResolvedValueOnce(page({ hits: [] }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        await act(async () => {
+            await result.current.loadMore()
+        })
+
+        // The facets are part of what the session answers: a follow-up
+        // without them is "a different query", and its cursor is refused.
+        const next = searchAdvanced.mock.calls[1][0].options
+        expect(next.aggregations).toEqual(SEARCH_OPTIONS?.aggregations)
+        expect(next.cursor).toBe('cursor-1')
+        expect(next.results).toBe('hits')
+    })
+})
+
+
+describe('useAdvancedSearch — a Connections search', () => {
+    const CONNECTIONS: Predicate = {
+        kind: 'edges',
+        sourceWhere: { kind: 'property', key: 'first_name', op: 'eq', value: 'bob' },
+        edgeTypes: ['DERIVES'],
+    }
+
+    function end(urn: string, parent: string) {
+        return {
+            urn, displayName: urn, entityType: 'column',
+            parent: { urn: parent, displayName: parent, entityType: 'table' },
+            ancestorPath: [{ urn: parent, displayName: parent, entityType: 'table' }],
+        }
+    }
+
+    function edge(key: string, source: string, target: string) {
+        return {
+            key, id: key, edgeType: 'DERIVES', properties: {},
+            source: end(source, 'A'), target: end(target, 'B'),
+        }
+    }
+
+    it('asks for edges with no facets or sort, the predicate as it is', async () => {
+        searchAdvanced.mockResolvedValue(page({ edges: [], totalCount: 0 }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(CONNECTIONS, { ...SEARCH_OPTIONS, sort: 'displayName' })
+        })
+
+        const [query] = searchAdvanced.mock.calls[0]
+        expect(query.predicate).toEqual(CONNECTIONS)
+        expect(query.options.results).toBe('edges')
+        expect(query.options).not.toHaveProperty('aggregations')
+        expect(query.options).not.toHaveProperty('sort')
+        expect(query.options.pageSize).toBe(SEARCH_OPTIONS?.pageSize)
+    })
+
+    it('highlights both ends, counts each end once and steps through the edges', async () => {
+        searchAdvanced.mockResolvedValue(page({
+            edges: [edge('e1', 'bob', 'x'), edge('e2', 'bob', 'y')], totalCount: 2,
+        }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(CONNECTIONS, SEARCH_OPTIONS)
+        })
+
+        const s = useSearchStore.getState()
+        expect([...s.matchUrnSet].sort()).toEqual(['bob', 'x', 'y'])
+        expect(s.orderedEdgeKeys).toEqual(['e1', 'e2'])
+        // The edges themselves, for the canvas to light the lines that draw them.
+        expect(s.matchedEdges).toEqual([
+            { key: 'e1', id: 'e1', source: 'bob', target: 'x', edgeType: 'DERIVES', sourceChain: ['A'], targetChain: ['B'] },
+            { key: 'e2', id: 'e2', source: 'bob', target: 'y', edgeType: 'DERIVES', sourceChain: ['A'], targetChain: ['B'] },
+        ])
+        expect(s.matchedEdgesComplete).toBe(true)
+        // bob is the source of both edges, and counts once under A.
+        expect(s.ancestorMatchCounts.get('A')).toBe(1)
+        expect(s.ancestorMatchCounts.get('B')).toBe(2)
+    })
+
+    it("files each end under its containers, its parent first", async () => {
+        const deep = {
+            ...edge('e1', 'bob', 'x'),
+            source: { ...end('bob', 'T'), ancestorPath: [
+                { urn: 'DB', displayName: 'DB', entityType: 'database' },
+                { urn: 'T', displayName: 'T', entityType: 'table' },
+            ] },
+        }
+        searchAdvanced.mockResolvedValue(page({ edges: [deep], totalCount: 1 }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(CONNECTIONS, SEARCH_OPTIONS)
+        })
+
+        expect(useSearchStore.getState().matchedEdges[0].sourceChain).toEqual(['T', 'DB'])
+    })
+
+    it('appends a later page of edges, asking for edges again', async () => {
+        searchAdvanced.mockResolvedValueOnce(page({
+            edges: [edge('e1', 'bob', 'x')], totalCount: 2, cursor: 'cursor-1',
+        }))
+        searchAdvanced.mockResolvedValueOnce(page({ edges: [edge('e2', 'bob', 'y')], totalCount: 2 }))
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(CONNECTIONS, SEARCH_OPTIONS)
+        })
+        // A page of them remains.
+        expect(useSearchStore.getState().matchedEdgesComplete).toBe(false)
+        await act(async () => {
+            await result.current.loadMore()
+        })
+
+        expect(useSearchStore.getState().matchedEdges.map((e) => e.key)).toEqual(['e1', 'e2'])
+        expect(useSearchStore.getState().matchedEdgesComplete).toBe(true)
+        expect(searchAdvanced.mock.calls[1][0].options.results).toBe('edges')
+        const view = result.current.view
+        expect(view.kind === 'results' && view.result.edges?.map((e) => e.key)).toEqual(['e1', 'e2'])
+        expect(useSearchStore.getState().orderedEdgeKeys).toEqual(['e1', 'e2'])
+    })
+})
+
+
 describe('useAdvancedSearch — the shared search options reach the wire', () => {
     it('sends the shared shape verbatim, asking for progressive answers', async () => {
         searchAdvanced.mockResolvedValue(page({ hits: [], aggregates: [[]] }))
@@ -487,25 +651,114 @@ describe('useAdvancedSearch — a search still scanning the view', () => {
         expect(view.kind === 'results' && view.query.options?.sessionId).toBeFalsy()
     })
 
-    it('stops at the last answer, marked unfinished, when follow-ups keep failing', async () => {
-        vi.useFakeTimers({ shouldAdvanceTime: true })
+    /** What the request layer throws for an HTTP error. */
+    const apiError = (status: number, code: string, retryAfterMs?: number) => Object.assign(
+        new Error(`API Error ${status}: ${JSON.stringify({ detail: { code, reason: 'the graph store isn’t answering' } })}`),
+        { status, code, ...(retryAfterMs !== undefined ? { retryAfterMs } : {}) },
+    )
+
+    it('rides out a graph that cannot answer, then pauses where it got to for Resume', async () => {
+        vi.useFakeTimers()
         try {
             searchAdvanced
                 .mockResolvedValueOnce(running({ hits: [HIT] }))
-                .mockRejectedValue(new Error('429'))
+                .mockRejectedValue(apiError(503, 'PROVIDER_FAILING_OVER', 3000))
+            const { result } = renderHook(() => useAdvancedSearch('view-1'))
+            let run!: Promise<void>
+            act(() => { run = result.current.runPredicate(PREDICATE, SEARCH_OPTIONS) })
+            await act(async () => { await vi.advanceTimersByTimeAsync(60_000) })
+            // A minute in, it is still asking — not "ran out of time".
+            expect(result.current.view.kind === 'results' && result.current.view.halted).toBeFalsy()
+            const asked = searchAdvanced.mock.calls.length
+            expect(asked).toBeGreaterThan(4)
+            await act(async () => { await vi.advanceTimersByTimeAsync(150_000); await run })
+            const view = result.current.view
+            expect(view.kind === 'results' && view.halted?.kind).toBe('interrupted')
+            expect(view.kind === 'results' && view.result.hits?.length).toBe(1)
+            expect(view.kind === 'results' && view.result.deadlineExceeded).toBe(false)
+            expect(result.current.runState?.status).toBe('done')
+
+            // Resume picks the same session up — nothing is read twice.
+            searchAdvanced.mockReset()
+            searchAdvanced.mockResolvedValueOnce(page({
+                hits: [HIT], status: 'complete', totalCount: 1, sessionId: 's-1' }))
+            await act(async () => { await result.current.resume() })
+            expect(searchAdvanced.mock.calls[0][0].options.sessionId).toBe('s-1')
+            const done = result.current.view
+            expect(done.kind === 'results' && done.result.status).toBe('complete')
+            expect(done.kind === 'results' && done.halted).toBeFalsy()
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('ends at once, saying why, when the server could not finish the search', async () => {
+        searchAdvanced
+            .mockResolvedValueOnce(running({ hits: [HIT] }))
+            .mockRejectedValueOnce(apiError(500, 'SEARCH_FAILED'))
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        expect(searchAdvanced).toHaveBeenCalledTimes(2)
+        expect(result.current.view.kind).toBe('error')
+        expect(result.current.runState?.status).toBe('failed')
+    })
+
+    it('stops where it is, keeping what it found, and resumes the same session', async () => {
+        searchAdvanced
+            .mockResolvedValueOnce(running({ hits: [HIT] }))
+            .mockImplementationOnce(() => new Promise<SearchResultPage>(() => {}))
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            void result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        await waitFor(() => expect(searchAdvanced).toHaveBeenCalledTimes(2))
+        act(() => { result.current.stop() })
+        const stopped = result.current.view
+        expect(stopped.kind === 'results' && stopped.halted?.kind).toBe('stopped')
+        expect(stopped.kind === 'results' && stopped.result.hits?.length).toBe(1)
+        expect([...useSearchStore.getState().matchUrnSet]).toEqual(['hit-1'])
+
+        searchAdvanced.mockResolvedValueOnce(page({
+            hits: [HIT], status: 'complete', totalCount: 1, sessionId: 's-1' }))
+        await act(async () => { await result.current.resume() })
+        expect(searchAdvanced.mock.calls[2][0].options.sessionId).toBe('s-1')
+        const view = result.current.view
+        expect(view.kind === 'results' && view.result.status).toBe('complete')
+    })
+
+    it('rides out a later page the graph cannot answer just now', async () => {
+        vi.useFakeTimers()
+        try {
+            searchAdvanced
+                .mockResolvedValueOnce(page({ hits: [HIT], status: 'complete', totalCount: 2,
+                                              cursor: 'c-1', sessionId: 's-1' }))
+                .mockRejectedValueOnce(apiError(429, 'PROVIDER_BUSY', 1000))
+                .mockRejectedValueOnce(apiError(503, 'PROVIDER_UNAVAILABLE', 2000))
+                .mockResolvedValueOnce(page({
+                    hits: [{ ...HIT, node: { ...HIT.node, urn: 'hit-2' } }], status: 'complete' }))
             const { result } = renderHook(() => useAdvancedSearch('view-1'))
             await act(async () => {
                 await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
             })
+            let more!: Promise<void>
+            act(() => { more = result.current.loadMore() })
+            await act(async () => { await vi.advanceTimersByTimeAsync(20_000); await more })
             const view = result.current.view
-            expect(view.kind).toBe('results')
-            expect(view.kind === 'results' && view.result.deadlineExceeded).toBe(true)
-            expect(view.kind === 'results' && view.result.truncated).toBe(true)
-            expect(view.kind === 'results' && view.result.hits?.length).toBe(1)
-            expect(searchAdvanced).toHaveBeenCalledTimes(4)   // 1 + three attempts
+            expect(view.kind === 'results' && view.result.hits?.map((h) => h.node.urn))
+                .toEqual(['hit-1', 'hit-2'])
+            expect(result.current.loadMoreError).toBeNull()
         } finally {
             vi.useRealTimers()
         }
+    })
+
+    it('waits longer after each answer that brings nothing new, and a hidden tab waits most', () => {
+        expect([0, 1, 2, 3, 4, 5, 9].map((idle) => pollDelayMs(idle, false)))
+            .toEqual([0, 500, 1000, 2000, 4000, 5000, 5000])
+        expect(pollDelayMs(0, true)).toBe(5000)
+        expect(pollDelayMs(5, true)).toBe(5000)
     })
 
     it('stops continuing a search a newer run replaced', async () => {
@@ -605,6 +858,151 @@ describe('useAdvancedSearch — a failed or cancelled run keeps the query', () =
 
         expect(useSearchStore.getState().draftPredicate).toEqual(PREDICATE)
         expect(result.current.runState).toBeNull()
+    })
+})
+
+
+/** The error card's Try again: the same question, asked of the view as it
+ *  is now — not the canvas the failed run saw. */
+describe('useAdvancedSearch — Try again', () => {
+    it('asks the failed query again, in the scope as it is now', async () => {
+        useCanvasStore.setState({ nodes: [canvasNode('A')], edges: [] })
+        useSearchStore.getState().setScopeMode('visible')
+        searchAdvanced
+            .mockRejectedValueOnce(new Error('API Error 500: {"detail":"boom"}'))
+            .mockResolvedValueOnce(page({ hits: [HIT] }))
+        const leaf: Predicate = { kind: 'text', target: 'any', match: 'substring', value: 'cust' }
+
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(leaf, SEARCH_OPTIONS)
+        })
+        expect(result.current.view.kind).toBe('error')
+
+        useCanvasStore.setState({ nodes: [canvasNode('A'), canvasNode('B')], edges: [] })
+        await act(async () => {
+            await result.current.run()
+        })
+
+        const [first, again] = searchAdvanced.mock.calls.map((c) => c[0])
+        expect(again.predicate).toEqual(first.predicate)
+        expect(again.options).toEqual(first.options)
+        expect(first.scope.visibleUrns).toEqual(['A'])
+        expect(again.scope.visibleUrns).toEqual(['A', 'B'])
+        expect(result.current.view.kind).toBe('results')
+    })
+})
+
+
+/** What a search tells the product's telemetry when it ends: where it came
+ *  from and how it ended — never what it asked. */
+describe('useAdvancedSearch — how a search is measured', () => {
+    const recorded = () => vi.mocked(recordEvent).mock.calls
+
+    beforeEach(() => {
+        vi.mocked(recordEvent).mockClear()
+        localStorage.removeItem(EDITOR_MODE_KEY)
+        useSearchStore.getState().setStudioOpen(false)
+    })
+
+    const running = (over: Partial<SearchResultPage> = {}) => page({
+        status: 'running', sessionId: 's-1', progress: { scanned: 40, total: 100, matched: 1 }, ...over,
+    })
+
+    /** The draft, put in its shape by ``source``, run the way a caller runs it. */
+    async function search(source?: DraftSource) {
+        useSearchStore.getState().commitDraft(PREDICATE, source)
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            await result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        return result
+    }
+
+    it('says where the search came from and that it completed', async () => {
+        searchAdvanced.mockResolvedValue(page({ hits: [HIT] }))
+        await search('ask')
+        expect(recorded()).toEqual([['graph.search', expect.objectContaining({
+            matches: 1, source: 'ask', outcome: 'complete' })]])
+    })
+
+    it('reads an edit in a builder as the editor it was made in, and notes Search Studio', async () => {
+        searchAdvanced.mockResolvedValue(page({ hits: [] }))
+        localStorage.setItem(EDITOR_MODE_KEY, 'code')
+        useSearchStore.getState().setStudioOpen(true)
+        await search()
+        expect(recorded()).toEqual([['graph.search_miss', expect.objectContaining({
+            matches: 0, source: 'code', outcome: 'complete', studio: true })]])
+    })
+
+    it('says "at least" when part of the view was left out', async () => {
+        searchAdvanced.mockResolvedValue(page({ hits: [HIT], countStatus: 'lowerBound' }))
+        await search('recipe')
+        expect(recorded()[0][1]).toMatchObject({ source: 'recipe', outcome: 'atLeast' })
+    })
+
+    it('reports a stopped search with what it had found, and again, resumed, when it ends', async () => {
+        searchAdvanced
+            .mockResolvedValueOnce(running({ hits: [HIT] }))
+            .mockImplementationOnce(() => new Promise<SearchResultPage>(() => {}))
+        useSearchStore.getState().commitDraft(PREDICATE, 'header')
+        const { result } = renderHook(() => useAdvancedSearch('view-1'))
+        await act(async () => {
+            void result.current.runPredicate(PREDICATE, SEARCH_OPTIONS)
+        })
+        await waitFor(() => expect(searchAdvanced).toHaveBeenCalledTimes(2))
+        act(() => { result.current.stop() })
+        expect(recorded()).toEqual([['graph.search', expect.objectContaining({
+            matches: 1, source: 'header', outcome: 'stopped' })]])
+        expect(recorded()[0][1]).not.toHaveProperty('resumed')
+
+        searchAdvanced.mockResolvedValueOnce(page({ hits: [HIT], status: 'complete', sessionId: 's-1' }))
+        await act(async () => { await result.current.resume() })
+        expect(recorded()[1]).toEqual(['graph.search', expect.objectContaining({
+            source: 'header', outcome: 'complete', resumed: true })])
+    })
+
+    it('reports a search the graph stayed out of reach for as interrupted', async () => {
+        vi.useFakeTimers()
+        try {
+            searchAdvanced
+                .mockResolvedValueOnce(running({ hits: [HIT] }))
+                .mockRejectedValue(Object.assign(new Error('API Error 503: {}'),
+                    { status: 503, code: 'PROVIDER_FAILING_OVER' }))
+            useSearchStore.getState().commitDraft(PREDICATE, 'right-click')
+            const { result } = renderHook(() => useAdvancedSearch('view-1'))
+            let run!: Promise<void>
+            act(() => { run = result.current.runPredicate(PREDICATE, SEARCH_OPTIONS) })
+            await act(async () => { await vi.advanceTimersByTimeAsync(210_000); await run })
+            expect(recorded()).toEqual([['graph.search', expect.objectContaining({
+                matches: 1, source: 'right-click', outcome: 'interrupted' })]])
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('reports a failure by its code, never its message', async () => {
+        searchAdvanced.mockRejectedValueOnce(Object.assign(
+            new Error('API Error 400: {"detail":{"code":"BAD_REQUEST","reason":"No entity named Payroll"}}'),
+            { status: 400, code: 'BAD_REQUEST' }))
+        await search('library')
+        expect(recorded()).toEqual([['graph.search_miss', expect.objectContaining({
+            matches: 0, source: 'library', outcome: 'failed', reason: 'BAD_REQUEST' })]])
+        expect(JSON.stringify(recorded())).not.toContain('Payroll')
+    })
+
+    it('reports Try again as where the search first came from', async () => {
+        searchAdvanced
+            .mockRejectedValueOnce(Object.assign(new Error('API Error 500: {}'), { status: 500 }))
+            .mockResolvedValueOnce(page({ hits: [HIT] }))
+        const result = await search('results')
+        // An edit since — the retry asks the failed search again, all the same.
+        useSearchStore.getState().commitDraft(null)
+        await act(async () => { await result.current.run() })
+        expect(recorded().map(([, payload]) => payload)).toEqual([
+            expect.objectContaining({ source: 'results', outcome: 'failed', reason: '500' }),
+            expect.objectContaining({ source: 'results', outcome: 'complete' }),
+        ])
     })
 })
 

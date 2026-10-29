@@ -96,6 +96,15 @@
  *   no fedBy(type:topic)           → none does
  *   count(child(type:column)) > 100 → how many do (distinct entities)
  *
+ * Connections — the edges themselves, not entities; the whole query:
+ *   from(type:dataJob) to(type:dataset) → the edges from a job to a dataset,
+ *                                    any link, the way each edge points
+ *   from(…) to[PRODUCES](…)        → through these edge types; [lineage],
+ *                                    [links], [any] and [containment] too
+ *   from(…) linkedTo(…)            → either way
+ *   from(…) to(…).via(confidence >= 0.8) → every edge meets it
+ *   from() to(layer:Reporting)     → an empty end is any entity
+ *
  * Entities by name:
  *   @"Country/United Kingdom"      → is that entity (a path of names from
  *                                    a top-level entity; ** any depth;
@@ -134,6 +143,7 @@ import type {
     EdgeClass,
     EdgePredicateNode,
     EdgePropertyPredicate,
+    EdgesPredicate,
     NodeRef,
     RelatedPredicate,
 } from '@/types/search'
@@ -193,8 +203,20 @@ export interface DslSpan {
     to: number
 }
 
+/** What the text is read against. */
+export interface ParseOptions {
+    /** The View's layer names: one of several words reads whole unquoted —
+     *  ``layer:My Cool Layer`` — the longest that the words spell. */
+    layers?: readonly string[]
+}
 
-export function parsePredicate(input: string): ParseResult {
+/** A layer's name as layer names are compared: case and spacing aside. */
+export function layerKey(name: string): string {
+    return name.trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+
+export function parsePredicate(input: string, options: ParseOptions = {}): ParseResult {
     const tokens = lex(input)
     const recognized: string[] = []
     const fallbackText: string[] = []
@@ -215,7 +237,7 @@ export function parsePredicate(input: string): ParseResult {
             errorAt: { from: unclosed.from, to: unclosed.to },
         })
     }
-    const p = new Parser(tokens, recognized, fallbackText, input.length)
+    const p = new Parser(tokens, recognized, fallbackText, input.length, options.layers ?? [])
     spans = p.spans
     try {
         const pred = p.parseExpr()
@@ -228,6 +250,17 @@ export function parsePredicate(input: string): ParseResult {
                 errorAt: { from: extra.from, to: extra.to },
             })
         }
+        // A connection is the whole query: never inside NOT, AND, OR, a
+        // relationship or another connection's end.
+        const nested = nestedConnection(pred, true)
+        if (nested) {
+            const at = p.connections.get(nested)
+            return result({
+                predicate: null,
+                error: 'A connection is the whole query: from(…) to(…) can\'t be combined with other conditions',
+                ...(at ? { errorAt: { from: at.from, to: at.to } } : {}),
+            })
+        }
         return result({ predicate: simplify(pred) })
     } catch (err) {
         return result({
@@ -236,6 +269,28 @@ export function parsePredicate(input: string): ParseResult {
             ...(err instanceof DslError ? { errorAt: { from: err.from, to: err.to } } : {}),
         })
     }
+}
+
+
+/** The first connection in ``p`` that isn't the whole query — ``p`` itself
+ *  counts as the query when ``isQuery`` — or null. */
+function nestedConnection(p: Predicate, isQuery = false): Predicate | null {
+    if (p.kind === 'edges') {
+        if (!isQuery) return p
+        for (const end of [p.sourceWhere, p.targetWhere]) {
+            const found = end ? nestedConnection(end) : null
+            if (found) return found
+        }
+        return null
+    }
+    if (p.kind === 'group') {
+        for (const child of p.children) {
+            const found = nestedConnection(child)
+            if (found) return found
+        }
+    }
+    if (p.kind === 'related' && p.where) return nestedConnection(p.where)
+    return null
 }
 
 
@@ -286,6 +341,34 @@ function formatExpr(p: Predicate, isTopLevel: boolean): string {
     // would technically let us drop the parens — so the round-trip
     // mirrors what the user typed.
     return isTopLevel ? joined : `(${joined})`
+}
+
+
+/** Where ``target`` — a condition or group in ``p``, that very object — is
+ *  written in ``stringifyPredicate(p)``; null when ``p`` doesn't hold it
+ *  outside a condition of its own (a relationship's, a connection's end). */
+export function spanOf(p: Predicate | null, target: Predicate): DslSpan | null {
+    return p ? locate(p, target, /*isTopLevel*/ true, 0) : null
+}
+
+
+/** ``spanOf`` for ``p`` written from ``at``, as ``formatExpr`` writes it. */
+function locate(p: Predicate, target: Predicate, isTopLevel: boolean, at: number): DslSpan | null {
+    if (p === target) return { from: at, to: at + formatExpr(p, isTopLevel).length }
+    if (p.kind !== 'group') return null
+    if ((p.op ?? 'and') === 'not') {
+        return p.children[0] ? locate(p.children[0], target, false, at + 'NOT '.length) : null
+    }
+    const sep = p.op === 'or' ? ' OR ' : ' AND '
+    let pos = isTopLevel ? at : at + 1
+    for (const child of p.children) {
+        const text = formatExpr(child, false)
+        if (!text) continue
+        const found = locate(child, target, false, pos)
+        if (found) return found
+        pos += text.length + sep.length
+    }
+    return null
 }
 
 
@@ -369,6 +452,14 @@ function meaning(p: Predicate): string {
                 p.edge ? treeMeaning(fromEdge(p.edge)) : null,
                 p.where ? treeMeaning(p.where) : null])
         }
+        case 'edges':
+            // Any link is what a connection follows unless it says otherwise.
+            return stable(['edges', p.direction ?? 'outgoing',
+                p.edgeTypes?.length || p.edgeClass === 'links' ? null : (p.edgeClass ?? null),
+                p.edgeTypes ?? null,
+                p.edgePredicate ? treeMeaning(fromEdge(p.edgePredicate)) : null,
+                p.sourceWhere ? treeMeaning(p.sourceWhere) : null,
+                p.targetWhere ? treeMeaning(p.targetWhere) : null])
         case 'is':
             return stable(['is', p.refs.map((r) => [r.urn ?? null, r.path ?? null,
                 r.entityType ?? null, r.caseSensitive ?? true])])
@@ -415,6 +506,16 @@ function relationSpelling(p: RelatedPredicate): string {
     if (p.quantifier === 'none') return `no ${text}`
     if (p.quantifier === 'all') return `every ${text}`
     return text
+}
+
+
+/** ``from(…) to[…](…).via(…)`` — ``linkedTo`` when it's either way. */
+function connectionSpelling(p: EdgesPredicate): string {
+    const set = p.edgeTypes?.length ? `[${edgeTypeList(p.edgeTypes)}]`
+        : p.edgeClass && p.edgeClass !== 'links' ? `[${p.edgeClass}]` : ''
+    const end = (where: Predicate | null | undefined) => (where ? stringifyPredicate(where) : '')
+    const text = `from(${end(p.sourceWhere)}) ${p.direction === 'either' ? 'linkedTo' : 'to'}${set}(${end(p.targetWhere)})`
+    return p.edgePredicate ? `${text}.via(${stringifyPredicate(fromEdge(p.edgePredicate))})` : text
 }
 
 
@@ -479,8 +580,8 @@ function stable(v: unknown): string {
  *  several with one of those, ``tag IN ("PII data", GDPR)``. */
 function listedValues(field: 'type' | 'tag', values: string[]): string {
     if (!values.some(needsQuotes)) return `${field}:${values.join(',')}`
-    if (values.length === 1) return `${field}:"${values[0]}"`
-    return `${field} IN (${values.map((v) => (needsQuotes(v) ? `"${v}"` : v)).join(', ')})`
+    if (values.length === 1) return `${field}:${quote(values[0])}`
+    return `${field} IN (${values.map((v) => (needsQuotes(v) ? quote(v) : v)).join(', ')})`
 }
 
 
@@ -498,14 +599,14 @@ function spelling(c: Predicate): string | null {
             return listedValues('tag', c.values)
         }
         case 'layer':
-            return `layer:${needsQuotes(c.layerAssignment) ? `"${c.layerAssignment}"` : c.layerAssignment}`
+            return `layer:${needsQuotes(c.layerAssignment) ? quote(c.layerAssignment) : c.layerAssignment}`
         case 'hasProperty': {
             const name = c.keyMatch === 'prefix' ? `${c.key}*`
                 : c.keyMatch === 'contains' ? `*${c.key}*` : c.key
             return c.negate ? `not has:${name}` : `hasProperty:${name}`
         }
         case 'property': {
-            const key = needsQuotes(c.key) ? `"${c.key}"` : c.key
+            const key = needsQuotes(c.key) ? quote(c.key) : c.key
             if (c.valueKey != null) return `${key} ${PROP_OP_STR[c.op ?? 'eq']} {${c.valueKey}}${formatSuffixes(c)}`
             return `${key} ${formatComparison(c)}${formatSuffixes(c)}`
         }
@@ -515,6 +616,8 @@ function spelling(c: Predicate): string | null {
             return degreeSpelling(c)
         case 'related':
             return relationSpelling(c)
+        case 'edges':
+            return connectionSpelling(c)
         case 'is': {
             const [ref] = c.refs
             return c.refs.length === 1 && ref && !ref.entityType && ref.caseSensitive !== false
@@ -777,20 +880,24 @@ const TAIL_KEYWORDS = new Set([
 ])
 
 
-/** A word that opens a relationship, a count, an edge count or an edge
- *  filter when ``(`` follows it directly. A relationship's edges may come
- *  in brackets before or after its steps: ``outgoing[PRODUCES]*..3(``. */
-const CALL_WORD = /^((parent|child|ancestor|descendant|root|upstream|downstream|neighbor|feeds|fedby|linkedto|outgoing|incoming)(\[[^\]]*\])?(\*\d*(\.\.\d*)?)?(\[[^\]]*\])?|edges(\[[^\]]*\])?|count|\.via)$/i
+/** A word that opens a relationship, a count, an edge count, an edge
+ *  filter or a connection's end when ``(`` follows it directly. Edges may
+ *  come in brackets before or after the steps: ``outgoing[PRODUCES]*..3(``. */
+const CALL_WORD = /^((parent|child|ancestor|descendant|root|upstream|downstream|neighbor|feeds|fedby|linkedto|outgoing|incoming|to)(\[[^\]]*\])?(\*\d*(\.\.\d*)?)?(\[[^\]]*\])?|edges(\[[^\]]*\])?|count|from|\.via)$/i
 
 /** A word that takes edge types in brackets — the hierarchy's too, to be
  *  told it doesn't. Read with ``_`` and ``-`` left out. */
-const EDGE_WORD = /^((parent|child|ancestor|descendant|root|upstream|downstream|neighbor|feeds|fedby|linkedto|outgoing|incoming)(\*\d*(\.\.\d*)?)?|edges|noupstream(lineage)?|nodownstream(lineage)?|nolineage|orphans?|hasupstream|hasdownstream|noincoming|nooutgoing|nolinks|noedges|hasincoming|hasoutgoing)$/i
+const EDGE_WORD = /^((parent|child|ancestor|descendant|root|upstream|downstream|neighbor|feeds|fedby|linkedto|outgoing|incoming|to)(\*\d*(\.\.\d*)?)?|edges|noupstream(lineage)?|nodownstream(lineage)?|nolineage|orphans?|hasupstream|hasdownstream|noincoming|nooutgoing|nolinks|noedges|hasincoming|hasoutgoing)$/i
+
+/** A connection's far end, as typed: ``to`` or ``linkedTo``, [edges],
+ *  *steps (refused), [edges]. */
+const CONNECTION_END = /^(to|linkedto)(?:\[([^\]]*)\])?(\*[\d.]*)?(?:\[([^\]]*)\])?$/i
 
 /** A relationship's call, as typed: word, [edges], *steps, [edges]. */
 const RELATION_CALL = /^([a-z]+)(?:\[([^\]]*)\])?(?:(\*)(\d*)(\.\.)?(\d*))?(?:\[([^\]]*)\])?$/i
 
 /** A relationship word: the axis it follows, and whether over any link. */
-const RELATION_WORDS: Record<string, { axis: RelatedPredicate['axis']; links?: true }> = {
+export const RELATION_WORDS: Record<string, { axis: RelatedPredicate['axis']; links?: true }> = {
     parent: { axis: 'parent' }, child: { axis: 'child' }, ancestor: { axis: 'ancestor' },
     descendant: { axis: 'descendant' }, root: { axis: 'root' },
     upstream: { axis: 'upstream' }, downstream: { axis: 'downstream' }, neighbor: { axis: 'neighbor' },
@@ -820,7 +927,7 @@ function readEdgeSet(content: string, classes: readonly EdgeClass[]): { edgeClas
     const list = classes.map((c) => `[${c}]`).join(', ')
     if (names.length > 1) throw new Error(`Name edge types, or one of ${list} — not both`)
     if (!classes.includes(named[0] as EdgeClass)) {
-        throw new Error(`A connection follows ${list} or edge types, not [${named[0]}]`)
+        throw new Error(`A relationship follows ${list} or edge types, not [${named[0]}]`)
     }
     return { edgeClass: named[0] as EdgeClass }
 }
@@ -831,9 +938,11 @@ function edgeTypeList(types: readonly string[]): string {
     return types.map((t) => (SHAPE_CLASSES.includes(t.toLowerCase() as EdgeClass) ? `"${t}"` : t)).join(', ')
 }
 
-/** A call that opens a relationship — not count(, .via( or edges(. */
+/** A call that opens a relationship — not count(, .via(, edges( or a
+ *  connection's from( or to(. */
 function opensRelation(t: Token | null | undefined): t is Token {
-    return t?.kind === TokenKind.Call && t.text !== 'count' && t.text !== '.via' && !/^edges\b/.test(t.text)
+    return t?.kind === TokenKind.Call && t.text !== 'count' && t.text !== '.via' && t.text !== 'from'
+        && !/^(edges|to)\b/.test(t.text)
 }
 
 const DEGREE_DIRECTIONS: Record<string, NonNullable<DegreePredicate['direction']>> = {
@@ -878,13 +987,37 @@ class Parser {
     pos = 0
     /** Where each condition and group read so far sits. */
     readonly spans: DslSpan[] = []
+    /** Each connection read, by the ``from(`` it opened with. */
+    readonly connections = new Map<Predicate, Token>()
     constructor(
         readonly tokens: Token[],
         readonly recognized: string[],
         readonly fallbackText: string[],
         /** The input's length: where "it ended too soon" points. */
         readonly length: number,
+        /** The View's layer names (``ParseOptions``). */
+        readonly layers: readonly string[] = [],
     ) {}
+
+    /** The layer ``value`` names: the longest of the View's layer names that
+     *  it and the plain words after it spell, ignoring case and spacing —
+     *  those words read as part of it — else ``value`` as written. */
+    layerName(value: string): string {
+        if (!this.layers.length) return value
+        const named = new Map(this.layers.map((n) => [layerKey(n), n]))
+        let words = layerKey(value)
+        let found: { name: string; end: number } | null = null
+        for (let i = this.pos; i < this.tokens.length; i += 1) {
+            const t = this.tokens[i]
+            if (t.kind !== TokenKind.Word || t.text.includes(':')) break
+            words = `${words} ${layerKey(t.text)}`
+            if (named.has(words)) found = { name: named.get(words)!, end: i + 1 }
+            if (![...named.keys()].some((n) => n.startsWith(`${words} `))) break
+        }
+        if (!found) return value
+        for (; this.pos < found.end; this.pos += 1) this.tokens[this.pos].role = 'value'
+        return found.name
+    }
 
     peek(): Token | null {
         return this.tokens[this.pos] ?? null
@@ -1040,6 +1173,13 @@ class Parser {
                 t.role = 'keyword'
                 return this.parseRelation(next, word === 'no' ? 'none' : 'all')
             }
+            // `from (…)`: a connection typed with a space, not a name search.
+            if (next?.kind === TokenKind.LParen && (word === 'from' || word === 'to')) {
+                this.fail(`Write ${t.raw}( with no space: from(type:dataJob) to(type:dataset)`, t)
+            }
+            if (next?.kind === TokenKind.LParen && /^from\[/.test(word)) {
+                this.fail('Edge types go on to: from(…) to[PRODUCES](…)', t)
+            }
         }
 
         // 0) A condition written as its own JSON — read back as it is, or
@@ -1152,7 +1292,8 @@ class Parser {
                     this.recognized.push(`${t.text} ${opT.text} ${valT.raw}`)
                     // `layer = "X"` is a layer predicate
                     if (t.kind === TokenKind.Word && t.text.toLowerCase() === 'layer' && propOp === 'eq') {
-                        return { kind: 'layer', layerAssignment: rawValue }
+                        return { kind: 'layer', layerAssignment: valT.kind === TokenKind.Quoted
+                            ? rawValue : this.layerName(rawValue) }
                     }
                     return this.consumeSuffixes({
                         kind: 'property',
@@ -1176,6 +1317,8 @@ class Parser {
                 if (quoted) {
                     this.consume()
                     quoted.role = 'prefixed'
+                } else if (prefixed.kind === 'layer') {
+                    prefixed.layerAssignment = this.layerName(prefixed.layerAssignment)
                 }
                 this.recognized.push(quoted ? `${t.text}${quoted.raw}` : t.text)
                 return prefixed
@@ -1198,8 +1341,10 @@ class Parser {
     /** A relationship, or ``count(<relationship>) <op> <n>``; its ``(`` is
      *  already consumed. */
     parseCall(t: Token): Predicate {
-        if (t.text === '.via') this.fail('.via( follows a relationship: fedBy(…).via(…)', t)
+        if (t.text === '.via') this.fail('.via( follows a relationship or a connection: fedBy(…).via(…)', t)
         if (/^edges\b/.test(t.text)) return this.parseDegree(t)
+        if (t.text === 'from') return this.parseConnection(t)
+        if (/^to\b/.test(t.text)) this.fail('to( follows from(…): from(type:dataJob) to(type:dataset)', t)
         if (t.text !== 'count') return this.parseRelation(t)
         t.role = 'function'
         const inner = this.consume()
@@ -1243,6 +1388,66 @@ class Parser {
         valT.role = 'value'
         this.recognized.push(`${t.raw}${dirT.raw}) ${opT.text} ${value}`)
         return { kind: 'degree', direction, op, value, ...edges }
+    }
+
+    /** ``from(…) to[…](…).via(…)``: the edges from what meets the first to
+     *  what meets the second — ``linkedTo`` either way. ``from(`` is read. */
+    parseConnection(from: Token): Predicate {
+        from.role = 'function'
+        const start = this.pos - 1
+        const sourceWhere = this.readEnd('from(…')
+        this.noteSpan(start)
+        const to = this.peek()
+        if (to?.kind === TokenKind.Word && /^(to|linkedto)(\[[^\]]*\])?$/i.test(to.text)
+            && this.tokens[this.pos + 1]?.kind === TokenKind.LParen) {
+            this.fail(`Write ${to.raw}( with no space: from(…) ${to.raw}(…)`, to)
+        }
+        const m = to?.kind === TokenKind.Call ? CONNECTION_END.exec(to.raw.slice(0, -1)) : null
+        if (!to || !m) this.fail('Say where the edges go: from(…) to(…) — or linkedTo(…), either way', to)
+        const [, word, before, steps, after] = m
+        to.role = 'function'
+        if (steps) this.fail(`A connection is one edge: ${word}( takes no steps`, to)
+        if (before !== undefined && after !== undefined) this.fail(`Name its edges once: ${word}[…](…)`, to)
+        const bracket = before ?? after
+        const set = bracket === undefined ? {} : this.read(() => readEdgeSet(bracket, SHAPE_CLASSES), to)
+        const toStart = this.pos
+        this.consume()
+        const targetWhere = this.readEnd(`${to.raw}…`)
+        this.noteSpan(toStart)
+        const connection: EdgesPredicate = {
+            kind: 'edges',
+            ...(sourceWhere ? { sourceWhere } : {}),
+            ...(targetWhere ? { targetWhere } : {}),
+            ...(word.toLowerCase() === 'linkedto' ? { direction: 'either' as const } : {}),
+            // Any link is what a connection follows unless it says otherwise.
+            ...(set.edgeClass === 'links' ? {} : set),
+        }
+        const next = this.peek()
+        if (next?.kind === TokenKind.Call && next.text === '.via') {
+            this.consume()
+            next.role = 'function'
+            const condition = this.parseExpr()
+            try {
+                connection.edgePredicate = toEdge(condition)
+            } catch (err) {
+                this.fail(err instanceof Error ? err.message : String(err), next)
+            }
+            this.expectClose('.via(…')
+        }
+        this.connections.set(connection, from)
+        this.recognized.push(`${from.raw}…) ${to.raw}…)`)
+        return connection
+    }
+
+    /** An end's conditions and its ``)`` — none is any entity. */
+    readEnd(what: string): Predicate | undefined {
+        if (this.peek()?.kind === TokenKind.RParen) {
+            this.consume()
+            return undefined
+        }
+        const where = this.parseExpr()
+        this.expectClose(what)
+        return where
     }
 
     parseRelation(t: Token, quantifier?: 'none' | 'all'): Predicate {
@@ -1292,7 +1497,7 @@ class Parser {
         }
         const next = this.peek()
         if (next?.kind === TokenKind.Call && next.text === '.via') {
-            if (!meta.lineage) this.fail(`.via(…) follows a connection — feeds, fedBy, linkedTo — not ${name}(…)`, next)
+            if (!meta.lineage) this.fail(`.via(…) follows feeds, fedBy, linkedTo or a connection's to(…) — not ${name}(…)`, next)
             this.consume()
             next.role = 'function'
             const condition = this.parseExpr()
@@ -1540,7 +1745,7 @@ class Parser {
 
 /** A graph shape's words, read with ``_`` and ``-`` left out: the shape and
  *  the edges it counts unless brackets say otherwise. */
-const SHAPE_WORDS: Record<string, [ShapeKind, EdgeClass]> = {
+export const SHAPE_WORDS: Record<string, [ShapeKind, EdgeClass]> = {
     noupstream: ['isRoot', 'lineage'], noupstreamlineage: ['isRoot', 'lineage'],
     nodownstream: ['isLeaf', 'lineage'], nodownstreamlineage: ['isLeaf', 'lineage'],
     nolineage: ['isOrphan', 'lineage'], orphan: ['isOrphan', 'lineage'], orphans: ['isOrphan', 'lineage'],
@@ -1645,7 +1850,15 @@ function splitCsv(s: string): string[] {
 
 
 function needsQuotes(s: string): boolean {
-    return /\s|[",()!=<>]/.test(s) || s === ''
+    return /\s|["',()!=<>]/.test(s) || s === ''
+}
+
+
+/** ``s`` in quotes the language reads back as ``s``: double, or single when
+ *  it holds a double one. (One holding both can't be — its condition is
+ *  written as JSON, ``formatAtom``.) */
+function quote(s: string): string {
+    return s.includes('"') ? `'${s}'` : `"${s}"`
 }
 
 
@@ -1674,14 +1887,15 @@ function coerceScalar(value: string, wasQuoted: boolean): unknown {
 
 function formatScalar(v: unknown): string {
     if (v === null || v === undefined) return 'null'
-    if (typeof v === 'string') return needsQuotes(v) || readsAsNonText(v) ? `"${v}"` : v
+    if (typeof v === 'string') return needsQuotes(v) || readsAsNonText(v) ? quote(v) : v
     if (typeof v === 'boolean' || typeof v === 'number') return String(v)
     if (Array.isArray(v)) return `(${v.map(formatScalar).join(', ')})`
     return JSON.stringify(v)
 }
 
 
-const PROP_OP_STR: Record<PropertyOp, string> = {
+/** Each operator as Code mode writes it — what its completion offers. */
+export const PROP_OP_STR: Record<PropertyOp, string> = {
     eq: '=', neq: '!=',
     lt: '<', lte: '<=',
     gt: '>', gte: '>=',
@@ -1764,6 +1978,13 @@ const OP_MAP: Record<string, PropertyOp> = {
  */
 function simplify(p: Predicate): Predicate {
     if (p.kind === 'related' && p.where) return { ...p, where: simplify(p.where) }
+    if (p.kind === 'edges') {
+        return {
+            ...p,
+            ...(p.sourceWhere ? { sourceWhere: simplify(p.sourceWhere) } : {}),
+            ...(p.targetWhere ? { targetWhere: simplify(p.targetWhere) } : {}),
+        }
+    }
     if (p.kind !== 'group') return p
     const op = p.op ?? 'and'
     const children: Predicate[] = []

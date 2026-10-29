@@ -13,6 +13,10 @@ describe('errorPaths — a server message in the panel’s words', () => {
         ['$.children[0].edge.children[1]', 'filter 1 › its edge filter › condition 2'],
         ['$.children[0].children[3].edgePredicate', 'filter 1 › condition 4 › its edge filter'],
         ['$.items[1].predicate.children[0]', 'rule 2 › condition 1'],
+        // A Connections search is the whole query: its ends are at the root.
+        ['$.sourceWhere.children[1]', 'From › condition 2'],
+        ['$.targetWhere.where', 'To › its condition'],
+        ['$.edgePredicate', 'its edge filter'],
     ])('reads %s', (path, words) => {
         expect(describeQueryPath(path)).toBe(words)
     })
@@ -39,6 +43,21 @@ describe('readableSearchError — a failed request in plain words', () => {
         expect(readableSearchError(
             'API Error 403: {"detail":{"error":"missing_permission","message":"Missing permission: workspace:datasource:read"}}',
         )).toBe('Missing permission: workspace:datasource:read')
+    })
+
+    it('reads the server’s reason for a busy, failing-over or timed-out graph', () => {
+        expect(readableSearchError(
+            'API Error 429: {"detail":{"code":"PROVIDER_BUSY","providerName":"search",'
+            + '"reason":"the graph is busy and its entity types could not be read","retryAfterSeconds":2}}',
+        )).toBe('The graph is busy and its entity types could not be read.')
+        expect(readableSearchError(
+            'API Error 503: {"detail":{"code":"PROVIDER_FAILING_OVER","reason":"the graph store node '
+            + 'holding this graph is restarting or failing over — retrying automatically"}}',
+        )).toBe('The graph store node holding this graph is restarting or failing over — retrying automatically.')
+        expect(readableSearchError(
+            'API Error 504: {"detail":{"code":"REQUEST_TIMEOUT","reason":"Request timed out after 120s. '
+            + 'The graph service is still available — retry shortly."}}',
+        )).toBe('Request timed out after 120s. The graph service is still available — retry shortly.')
     })
 
     it('reads FastAPI validation entries as positions', () => {

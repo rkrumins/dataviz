@@ -97,8 +97,12 @@ def route(monkeypatch):
     async def no_rules(engine, *, fail_closed=False):
         return None
 
+    async def no_identity(engine):
+        return None
+
     monkeypatch.setattr(graph, "_resolve_containment_types", no_types)
     monkeypatch.setattr(graph, "_resolve_ontology_rules", no_rules)
+    monkeypatch.setattr(graph, "_node_identity_for_write", no_identity)
 
     async def call(key, actor="u1"):
         request = graph.GraphChangesRequest(ops=[graph.GraphChangeOp(

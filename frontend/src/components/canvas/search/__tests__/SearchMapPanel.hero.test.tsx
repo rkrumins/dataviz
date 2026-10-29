@@ -57,6 +57,17 @@ describe('SearchMapPanel — the empty hero offers every filter', () => {
         expect(screen.getByText('Graph shape')).toBeInTheDocument()
     })
 
+    it('offers questions to try under the Ask bar, in the Form too', () => {
+        localStorage.clear()
+        renderPanel(stubSession({ refineOpen: true }))
+
+        // The Form leads with the filters' search box; Ask follows it.
+        expect(screen.getByRole('textbox', { name: 'Ask about this view' })).toHaveAttribute(
+            'placeholder', 'Or ask in plain words…')
+        expect(screen.getByText('Try')).toBeInTheDocument()
+        expect(screen.getAllByRole('button', { name: /tagged|feed|with no/i }).length).toBeGreaterThan(0)
+    })
+
     it('starts the query with the filter picked', () => {
         renderPanel(stubSession({ refineOpen: true }))
 

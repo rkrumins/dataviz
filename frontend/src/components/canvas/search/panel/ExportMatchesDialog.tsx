@@ -11,6 +11,10 @@
  * — then watch the rows being written. The file downloads when it is ready,
  * and again from here for as long as the dialog is open.
  *
+ * A Connections search exports its edges instead: each edge's fixed columns
+ * — the edge, each end and each end's parent, its properties as JSON — and
+ * the edge properties chosen, from what discovery found on its edge types.
+ *
  * Portal-mounted (mirrors LibraryImportDialog) so the fixed overlay resolves
  * to the viewport, not to the search panel's framer-motion transform.
  */
@@ -29,6 +33,10 @@ import { httpStatusOf } from '@/services/graphRequestFailure'
 import { triggerBrowserDownload } from '@/services/importExportApiService'
 import { followExport } from '@/services/searchExport'
 import type { SearchExportResult, SearchQuery } from '@/types/search'
+
+import { useDiscovery } from '../builder/useDiscovery'
+import { readableSearchError } from './errorPaths'
+import { edgeTypeName } from './vocabulary/edgeWords'
 
 
 export interface ExportMatchesDialogProps {
@@ -51,6 +59,12 @@ const FORMATS: ReadonlyArray<{ value: Format; label: string; description: string
 /** Columns every row starts with. */
 const BASE_COLUMNS = ['URN', 'Name', 'Type', 'Qualified name']
 
+/** A Connections export's fixed columns, as the server writes them
+ *  (``SEARCH_EXPORT_EDGE_COLUMNS``): each end is its URN, name and type. */
+const EDGE_BASE_COLUMNS = ['Edge key', 'Edge ID', 'Edge type', 'Source', 'Source parent', 'Target',
+    'Target parent', 'Properties (JSON)']
+const EDGE_FIXED_COLUMNS = 14
+
 /** The most properties an export takes as columns (the server's limit). */
 const MAX_COLUMNS = 200
 
@@ -67,7 +81,11 @@ type Phase =
 
 export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: ExportMatchesDialogProps) {
     const provider = useGraphProvider()
-    const { catalog, reading, unavailable } = usePropertyCatalog(viewId)
+    // A Connections search exports edges: its columns are edge properties,
+    // which discovery knows; the view's property catalog isn't read.
+    const connections = query.predicate.kind === 'edges' ? query.predicate : null
+    const { catalog, reading, unavailable } = usePropertyCatalog(connections ? '' : viewId)
+    const edgeKeys = useEdgeKeys(connections ? viewId : null, connections?.edgeTypes ?? null)
     const [format, setFormat] = useState<Format>('csv')
     const [withDescription, setWithDescription] = useState(true)
     const [withTags, setWithTags] = useState(true)
@@ -80,21 +98,33 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: Expo
     // keeps a while, and the same export asked again picks it up.
     useEffect(() => () => running.current?.abort(), [])
 
-    const columns = useMemo(() => [
+    const columns = useMemo(() => (connections ? chosen : [
         ...(withDescription ? ['description'] : []),
         ...(withTags ? ['tags'] : []),
         ...chosen,
-    ], [withDescription, withTags, chosen])
+    ]), [connections, withDescription, withTags, chosen])
     const full = columns.length >= MAX_COLUMNS
+    const baseColumns = connections ? EDGE_BASE_COLUMNS : BASE_COLUMNS
+    const fixedColumns = connections ? EDGE_FIXED_COLUMNS : BASE_COLUMNS.length
+    const noun = connections ? ['connection', 'connections'] as const : ['match', 'matches'] as const
 
-    const listed = useMemo(
-        () => new Set((catalog?.properties ?? []).map((p) => p.key)), [catalog])
+    // What can become a column, with how widely it is set: a property and
+    // the entities carrying it, or an edge property and its edge types.
+    const choices = useMemo<Array<{ key: string; note: string; weight: number }>>(() => (connections
+        ? edgeKeys.map((k) => ({ key: k.key, note: onEdgeTypes(k.types), weight: k.types.length }))
+        : (catalog?.properties ?? []).map((p) => ({
+            key: p.key, weight: p.count,
+            note: catalog?.entities
+                ? `on ${p.count.toLocaleString()} of ${catalog.entities.toLocaleString()}`
+                : `on ${p.count.toLocaleString()}`,
+        }))), [connections, edgeKeys, catalog])
+    const listed = useMemo(() => new Set(choices.map((p) => p.key)), [choices])
     const properties = useMemo(() => {
         const needle = filter.trim().toLowerCase()
-        return (catalog?.properties ?? [])
+        return choices
             .filter((p) => !needle || p.key.toLowerCase().includes(needle))
-            .sort((a, b) => b.count - a.count || a.key.localeCompare(b.key))
-    }, [catalog, filter])
+            .sort((a, b) => b.weight - a.weight || a.key.localeCompare(b.key))
+    }, [choices, filter])
     // Chosen by name: not one the catalog lists (so shown whatever the filter).
     const byName = chosen.filter((k) => !listed.has(k))
     const typed = filter.trim()
@@ -167,10 +197,10 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: Expo
                     </div>
                     <div className="flex-1 min-w-0">
                         <h3 id="export-matches-title" className="text-[15px] font-display font-bold text-ink leading-tight">
-                            Export {matchCount != null ? plural(matchCount, 'match', 'matches') : 'every match'}
+                            Export {matchCount != null ? plural(matchCount, noun[0], noun[1]) : `every ${noun[0]}`}
                         </h3>
                         <p className="text-[11.5px] text-ink-muted mt-0.5">
-                            Every match in this view, each value exactly as stored.
+                            Every {noun[0]} in this view, each value exactly as stored.
                         </p>
                     </div>
                     <button
@@ -219,18 +249,27 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: Expo
                                     <span className={cn('text-[11px] tabular-nums', full ? 'text-amber-500' : 'text-ink-muted')}>
                                         {full
                                             ? `${MAX_COLUMNS} properties — the most an export takes`
-                                            : `${BASE_COLUMNS.length + columns.length} columns`}
+                                            : `${fixedColumns + columns.length} columns`}
                                     </span>
                                 </div>
                                 <div className="flex flex-wrap gap-1">
-                                    {BASE_COLUMNS.map((c) => (
+                                    {baseColumns.map((c) => (
                                         <span key={c} className="inline-flex items-center gap-1 px-2 h-6 rounded-md text-[11px] text-ink-secondary bg-black/[0.04] dark:bg-white/[0.05]">
                                             <Check className="w-3 h-3" /> {c}
                                         </span>
                                     ))}
-                                    <ColumnToggle label="Description" on={withDescription} onChange={setWithDescription} />
-                                    <ColumnToggle label="Tags" on={withTags} onChange={setWithTags} />
+                                    {!connections && (
+                                        <>
+                                            <ColumnToggle label="Description" on={withDescription} onChange={setWithDescription} />
+                                            <ColumnToggle label="Tags" on={withTags} onChange={setWithTags} />
+                                        </>
+                                    )}
                                 </div>
+                                {connections && (
+                                    <p className="text-[11px] text-ink-muted">
+                                        Each end is its URN, name and type. Add an edge property to give it a column of its own.
+                                    </p>
+                                )}
 
                                 <div className="relative">
                                     <SearchIcon className="w-3.5 h-3.5 absolute left-2.5 top-1/2 -translate-y-1/2 text-ink-muted" />
@@ -244,7 +283,8 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: Expo
                                                 setFilter('')
                                             }
                                         }}
-                                        placeholder={unavailable ? 'Type a property name' : 'Find a property, or type one'}
+                                        placeholder={connections ? 'Find an edge property, or type one'
+                                            : unavailable ? 'Type a property name' : 'Find a property, or type one'}
                                         aria-label="Find a property"
                                         className={cn(
                                             'w-full h-8 pl-8 pr-2 rounded-lg text-[12px] text-ink',
@@ -255,7 +295,7 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: Expo
                                     />
                                 </div>
 
-                                {reading != null && (
+                                {!connections && reading != null && (
                                     <p className="text-[11px] text-ink-muted">
                                         Reading the view's properties — {reading}%. The ones found so far are listed.
                                     </p>
@@ -280,9 +320,7 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: Expo
                                         <PropertyRow
                                             key={p.key}
                                             name={p.key}
-                                            note={catalog?.entities
-                                                ? `on ${p.count.toLocaleString()} of ${catalog.entities.toLocaleString()}`
-                                                : `on ${p.count.toLocaleString()}`}
+                                            note={p.note}
                                             on={chosen.includes(p.key)}
                                             disabled={full && !chosen.includes(p.key)}
                                             onToggle={() => toggle(p.key)}
@@ -295,9 +333,12 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: Expo
                                     )}
                                     {properties.length === 0 && !canAddTyped && chosen.length === 0 && (
                                         <p className="px-3 py-2 text-[11px] text-ink-muted">
-                                            {unavailable
-                                                ? "This view's properties can't be listed here — type a name to add it."
-                                                : reading != null ? 'Looking for properties…' : 'No properties match.'}
+                                            {connections
+                                                ? (choices.length ? 'No edge properties match.'
+                                                    : 'No edge properties found on these edges — type a name to add one.')
+                                                : unavailable
+                                                    ? "This view's properties can't be listed here — type a name to add it."
+                                                    : reading != null ? 'Looking for properties…' : 'No properties match.'}
                                         </p>
                                     )}
                                 </div>
@@ -307,7 +348,7 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: Expo
                             )}
                         </>
                     ) : phase.kind === 'exporting' ? (
-                        <Exporting answer={phase.answer} matchCount={matchCount} />
+                        <Exporting answer={phase.answer} matchCount={matchCount} noun={noun[1]} />
                     ) : (
                         <Ready answer={phase.answer} />
                     )}
@@ -350,7 +391,11 @@ export function ExportMatchesDialog({ viewId, query, matchCount, onClose }: Expo
 }
 
 
-function Exporting({ answer, matchCount }: { answer: SearchExportResult | null; matchCount: number | null }) {
+function Exporting({ answer, matchCount, noun }: {
+    answer: SearchExportResult | null
+    matchCount: number | null
+    noun: string
+}) {
     const progress = answer?.progress
     const percent = progress && progress.total > 0
         ? Math.min(99, Math.floor((progress.scanned / progress.total) * 100))
@@ -358,10 +403,10 @@ function Exporting({ answer, matchCount }: { answer: SearchExportResult | null; 
     return (
         <div className="flex flex-col gap-2.5 py-2" aria-live="polite">
             <div className="text-[13px] font-semibold text-ink tabular-nums">
-                Writing matches — {(answer?.rows ?? 0).toLocaleString()}
+                Writing {noun} — {(answer?.rows ?? 0).toLocaleString()}
                 {matchCount != null ? ` of ${matchCount.toLocaleString()}` : ''} so far
             </div>
-            <ProgressBar value={percent} label="Exporting the matches" />
+            <ProgressBar value={percent} label={`Exporting the ${noun}`} />
             <p className="text-[11px] text-ink-muted">
                 {answer ? `Read ${percent}% of the view. ` : 'Starting… '}
                 Stopping keeps what's written for a while: export again to carry on.
@@ -467,28 +512,40 @@ function FooterButton({ primary, onClick, children }: {
 }
 
 
+/** The edge types an edge property is set on, in a note short enough to
+ *  leave its name room: two named, then how many more. */
+function onEdgeTypes(types: string[]): string {
+    const named = types.slice(0, 2).map(edgeTypeName).join(', ')
+    return types.length > 2 ? `on ${named} and ${types.length - 2} more` : `on ${named}`
+}
+
+/** The edge properties discovery found on ``edgeTypes`` (all, when none are
+ *  named), each with the edge types carrying it. */
+function useEdgeKeys(viewId: string | null, edgeTypes: string[] | null): Array<{ key: string; types: string[] }> {
+    const { keysByEdgeType } = useDiscovery(viewId)
+    return useMemo(() => {
+        const only = edgeTypes?.length ? new Set(edgeTypes.map((t) => t.toUpperCase())) : null
+        const byKey = new Map<string, string[]>()
+        for (const [type, keys] of Object.entries(keysByEdgeType)) {
+            if (only && !only.has(type.toUpperCase())) continue
+            for (const key of keys) byKey.set(key, [...(byKey.get(key) ?? []), type])
+        }
+        return [...byKey].map(([key, types]) => ({ key, types }))
+    }, [keysByEdgeType, edgeTypes])
+}
+
+
 /** What a failed export tells the person who asked for it. */
 function failureMessage(e: unknown): string {
     const status = httpStatusOf(e)
     if (status === 403) return "You can't export matches from this view."
     if (status === 404) return 'This view is no longer available.'
     if (status === 501) return "This data source can't export search matches."
-    const detail = serverDetail(e)
-    if (status === 400 && detail) return detail
-    return `Couldn't export — ${detail ?? (e as Error)?.message ?? 'unknown error'}`
-}
-
-
-function serverDetail(e: unknown): string | null {
-    const message = (e as Error)?.message ?? ''
-    const body = message.replace(/^API Error \d+: /, '')
-    try {
-        const parsed = JSON.parse(body) as { detail?: unknown }
-        if (typeof parsed.detail === 'string') return parsed.detail
-    } catch {
-        // Not JSON: no detail to show.
-    }
-    return null
+    // The server's own words — its reason for a busy or failed graph too —
+    // never the raw ``API Error 500: {…}`` body.
+    const text = readableSearchError((e as Error)?.message ?? '')
+    if (status === 400) return text
+    return `Couldn't export — ${text || 'unknown error'}`
 }
 
 

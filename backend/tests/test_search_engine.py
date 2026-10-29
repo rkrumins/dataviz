@@ -429,10 +429,59 @@ class TestStatements:
         # After the scope clamp: only in-scope matches are tallied.
         assert cypher.index("ID(_r0) IN $_roots0") < cypher.index("(_c)")
         assert cypher.endswith(
-            "WITH n MATCH (_c)-[:CONTAINS*1..12]->(n) "
+            "WITH n MATCH (_c)-[:CONTAINS*1..12]->(n) WHERE ID(_c) > $_tallyafter "
             "WITH _c, labels(n)[0] AS _et, count(DISTINCT n) AS _k "
-            "RETURN _c.urn, _c.displayName, labels(_c)[0], _et, _k")
-        assert params == {"p0": 1, "_lo": 10, "_hi": 20, "_roots0": [3]}
+            "WITH _c, collect([_et, _k]) AS _per ORDER BY ID(_c) LIMIT $_tallypage "
+            "RETURN ID(_c), _c.urn, _c.displayName, labels(_c)[0], _per")
+        assert params == {"p0": 1, "_lo": 10, "_hi": 20, "_roots0": [3],
+                          "_tallyafter": -1, "_tallypage": 10_000}
+
+    async def test_a_tally_past_one_reply_is_read_a_page_at_a_time(self, monkeypatch):
+        """FalkorDB cuts a reply at 10,000 rows on its stock image: a unit
+        whose matches sit in more containers lost the rest of its badges."""
+        monkeypatch.setattr(engine_mod, "REPLY_ROWS_MAX", 2)
+        ancestors = [[i, f"urn:c{i}", f"c{i}", "Container", [["Dataset", i]]]
+                     for i in range(1, 6)]
+        asked = []
+
+        async def run(cypher, params, timeout_s):
+            asked.append(params["_tallyafter"])
+            page = [a for a in ancestors if a[0] > params["_tallyafter"]][:2]
+            return SimpleNamespace(result_set=page)
+
+        tallied = await engine_mod._tally(Unit("range", "A", 10, 20), self._ctx(), [], run, 1.0)
+        assert asked == [-1, 2, 4]
+        assert tallied == [[f"urn:c{i}", f"c{i}", "Container", "Dataset", i]
+                           for i in range(1, 6)]
+
+    async def test_a_raw_probe_past_one_reply_is_read_a_page_at_a_time(self, monkeypatch):
+        from backend.app.providers.falkordb_search.raw_properties import RawLeaf
+        monkeypatch.setattr(engine_mod, "REPLY_ROWS_MAX", 2)
+        leaf = RawLeaf(key="owner", key_match="exact", cmp=None, true_ids="_rt0",
+                       raw_ids="_rr0")
+        ctx = dataclasses.replace(self._ctx(), raw_leaves=(leaf,), raw_labels=frozenset({"A"}))
+        nodes = [[i, '{"owner": "x"}'] for i in range(1, 6)]
+        asked = []
+
+        async def run(cypher, params, timeout_s):
+            asked.append(params["_rawafter"])
+            return SimpleNamespace(result_set=[n for n in nodes if n[0] > params["_rawafter"]][:2])
+
+        out = await engine_mod.unit_context(Unit("range", "A", 10, 20), ctx, run, 1.0)
+        assert asked == [-1, 2, 4]
+        assert out.params["_rt0"] == [1, 2, 3, 4, 5]
+
+    async def test_urns_are_looked_up_half_a_reply_at_a_time(self, monkeypatch):
+        monkeypatch.setattr(plan_mod, "REPLY_ROWS_MAX", 4)
+        sent = []
+
+        async def run(cypher, params):
+            sent.append(list(params["_urns"]))
+            return SimpleNamespace(result_set=[[int(u[1:])] for u in params["_urns"]])
+
+        ids = await plan_mod._ids_of(run, ["A"], [f"u{i}" for i in range(5)])
+        assert sent == [["u0", "u1"], ["u2", "u3"], ["u4"]]
+        assert ids == [0, 1, 2, 3, 4]
 
     def test_a_later_page_filters_before_it_orders(self):
         cypher, params = after_statement(Unit("visible", "A"), self._ctx(visible=["u"]),
@@ -788,11 +837,57 @@ class TestSessions:
         with pytest.raises(ProviderBusy):
             await _search(_Provider())
 
-    async def test_a_failed_unit_fails_the_search_and_is_not_kept(self, scan, fresh_memory_store):
-        scan({"A": _rows("a", 2)}, fail={"A"})
-        with pytest.raises(RuntimeError, match="search failed: boom"):
+    async def test_a_failed_search_is_kept_briefly_so_a_poll_hears_why(self, scan,
+                                                                      fresh_memory_store):
+        """Deleted at once, a failed session left the next poll nothing to
+        find: it planned the search again from zero and failed the same way,
+        for as long as the client kept asking. Kept for a while, a poll
+        naming it is told why it stopped; only a fresh run plans it again."""
+        s = scan({"A": _rows("a", 2)}, fail={"A"})
+        with pytest.raises(SearchFailed, match="search failed: boom"):
             await _search(_Provider())
-        assert fresh_memory_store._sessions == {}
+        (sid,) = fresh_memory_store._sessions
+        kept = await fresh_memory_store.load(sid)
+        assert kept.status == "failed" and kept.error == "boom"
+        assert fresh_memory_store._sessions[sid][0] - time.monotonic() <= engine_mod.FAILED_TTL_S
+
+        with pytest.raises(SearchFailed, match="boom"):
+            await _search(_Provider(), session_id=sid)
+        assert len(s.runs) == 1, "a poll naming the failed session runs nothing"
+
+        with pytest.raises(SearchFailed):
+            await _search(_Provider())
+        assert len(s.runs) == 2, "a fresh run plans it again"
+
+    async def test_a_request_waiting_on_one_that_fails_hears_the_failure(self, scan):
+        """A request that finds the lease held waits for the holder's commit.
+        When the holder fails, the waiter answers with the failure — not
+        with the stale page it read, which sent its client back to a
+        session that was no longer there."""
+        scan({"A": _rows("a", 2)}, fail={"A"}, delay=0.1)
+        provider = _Provider()
+        outcomes = await asyncio.gather(_search(provider, wait_ms=2000),
+                                        _search(provider, wait_ms=2000),
+                                        return_exceptions=True)
+        assert all(isinstance(o, SearchFailed) for o in outcomes), outcomes
+
+    async def test_a_count_read_without_advancing_reports_a_failed_count(self, scan,
+                                                                        fresh_memory_store):
+        """The counts endpoint first reads where every rule's count has got
+        to. A count it names that failed says so; this data's own failed
+        count, unnamed, is a fresh start."""
+        scan({"A": _rows("a", 2)}, fail={"A"})
+        context = SearchRunContext(data_version="1", scope_hash="h")
+        with pytest.raises(SearchFailed):
+            await engine_mod.execute_count_session(_Provider(), _query(), context=context)
+        (sid,) = fresh_memory_store._sessions
+        named = _query(sessionId=sid)
+        with pytest.raises(SearchFailed, match="count failed: boom"):
+            await engine_mod.execute_count_session(_Provider(), named, context=context,
+                                                   advance=False)
+        fresh = await engine_mod.execute_count_session(_Provider(), _query(), context=context,
+                                                       advance=False)
+        assert (fresh["status"], fresh["count"], fresh["sessionId"]) == ("running", 0, None)
 
     async def test_identical_searches_share_one_session(self, scan):
         s = scan({"A": _rows("a", 3)})
@@ -978,24 +1073,6 @@ class TestUnitBudget:
         kept = await fresh_memory_store.load(page.session_id)
         assert (kept.status, kept.count) == ("complete", 16)
 
-    async def test_a_unit_over_its_budget_that_cannot_be_cut_fails_the_search(
-            self, scan, budget, monkeypatch):
-        """A subtree under one root can't be split: over its budget it fails
-        the search, rather than being started by every request forever."""
-        budget(ms=200)
-        scan({})
-
-        async def plan(provider, query, compiler, **kw):
-            return Plan([Unit("walk", roots=[7], size=3)])
-
-        async def run(unit, session, ctx, run_, timeout_s):
-            await asyncio.sleep(5)
-
-        monkeypatch.setattr(engine_mod, "make_plan", plan)
-        monkeypatch.setattr(engine_mod, "_run_unit", run)
-        with pytest.raises(SearchFailed):
-            await _search(_Provider(), wait_ms=0)
-
     async def test_a_long_wait_is_cut_to_leave_room_for_the_last_units_budget(
             self, scan, budget, monkeypatch):
         """However long a request asks to wait, it stops starting units in
@@ -1040,6 +1117,379 @@ class TestUnitBudget:
         await engine_mod._advance(session, False, store, _Work(), time.monotonic() + 2,
                                   settings, unit_s=30)
         assert leases and leases[0] >= (2 + 30) * 1000
+
+
+class _TreeProvider(_Provider):
+    """A provider over a small containment tree — ``children`` — answering
+    the statements the engine runs itself: whether anything is kept raw,
+    one root's children (``expand_unit``) and an entity's name
+    (``describe_unit``)."""
+
+    def __init__(self, children=None, label="dataset"):
+        super().__init__()
+        self.children = children or {}
+        self.label = label
+        self.answering = True        # whether the store's own probe gets an answer
+
+    async def _ro_query(self, cypher, params=None, *, timeout=None, op=None):
+        from redis.exceptions import ConnectionError as RedisConnectionError
+        params = params or {}
+        if cypher == "RETURN 1":
+            if not self.answering:
+                raise RedisConnectionError("Connection refused")
+            rows = [[1]]
+        elif "propertiesRaw" in cypher:
+            rows = []
+        elif "collect(ID(_c))" in cypher:
+            rows = [[list(self.children.get(params["_root"], []))]]
+        else:
+            nid = params["_id"]
+            rows = [[f"n{nid}", f"urn:n{nid}", self.label]]
+        return SimpleNamespace(result_set=rows)
+
+    def subtree(self, roots, depth):
+        """Every node within ``depth`` levels of ``roots``, roots included."""
+        found, frontier = set(roots), list(roots)
+        for _ in range(depth):
+            frontier = [c for n in frontier for c in self.children.get(n, [])]
+            found.update(frontier)
+        return sorted(found)
+
+
+def _node_rows(ids):
+    return [[f"n{i:02d}", f"urn:n{i:02d}"] for i in ids]
+
+
+class TestResilience:
+    """What a search does with a part of the graph it can't read at once:
+    cut it smaller, read it one level down, give it one last long try, and
+    only then leave it out — saying so, the count then a floor. And what it
+    does when the graph itself can't take a part just now: give it back,
+    keep what it has, and answer with why."""
+
+    @pytest.fixture
+    def budget(self, monkeypatch):
+        from backend.app.services.deep_search import get_deep_search_settings
+
+        def install(ms=200, request_s=0.6):
+            settings = dataclasses.replace(get_deep_search_settings(), chunk_timeout_ms=ms)
+            monkeypatch.setattr(engine_mod, "get_deep_search_settings", lambda: settings)
+            monkeypatch.setattr(engine_mod, "_GRACE_S", 0.05)
+            monkeypatch.setattr(engine_mod, "_REQUEST_S", request_s, raising=False)
+            return settings
+        return install
+
+    @staticmethod
+    async def _finish(provider, rounds=30, **kw):
+        page = await _search(provider, wait_ms=0, **kw)
+        for _ in range(rounds):
+            if page.status == "complete":
+                break
+            page = await _search(provider, wait_ms=0, session_id=page.session_id, **kw)
+        return page
+
+    async def test_a_single_roots_subtree_over_its_budget_is_read_one_level_down(
+            self, scan, budget, monkeypatch):
+        """One root's subtree can't be halved; read as the root and its
+        children's subtrees — and so on down — every node is counted once."""
+        budget()
+        scan({})
+        provider = _TreeProvider({7: [8, 9], 8: [10, 11], 9: [12]})
+        runs = []
+
+        async def plan(provider_, query, compiler, **kw):
+            return Plan([Unit("walk", roots=[7], size=6, depth=3)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            nodes = (provider.subtree(unit.roots, unit.depth) if unit.kind == "walk"
+                     else sorted(unit.roots))
+            runs.append((unit.kind, tuple(unit.roots), unit.depth))
+            if len(nodes) > 2:
+                await asyncio.sleep(5)          # too much: runs past its budget
+            rows = _node_rows(nodes)
+            return len(rows), rows[:session.k], []
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+        page = await self._finish(provider)
+        assert page.status == "complete" and page.count_status == "exact"
+        assert page.total_count == 6
+        assert [h.node.urn for h in page.hits] == [f"urn:n{i:02d}" for i in (7, 8, 9, 10, 11)]
+        assert ("ids", (7,), None) in runs and ("walk", (8, 9), 2) in runs
+        assert ("ids", (8,), None) in runs and ("walk", (10, 11), 1) in runs
+
+    async def test_the_last_level_reads_the_children_themselves(self, scan, budget, monkeypatch):
+        """A walk one level deep, read one level down, is its root and its
+        children — never a walk of depth 0, which reads as the scope's."""
+        budget()
+        scan({})
+        provider = _TreeProvider({7: [8, 9, 10]})
+        seen = []
+
+        async def plan(provider_, query, compiler, **kw):
+            return Plan([Unit("walk", roots=[7], size=4, depth=1)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            seen.append((unit.kind, tuple(unit.roots), unit.depth))
+            if unit.kind == "walk":
+                await asyncio.sleep(5)
+            rows = _node_rows(sorted(unit.roots))
+            return len(rows), rows[:session.k], []
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+        page = await self._finish(provider)
+        assert page.total_count == 4
+        assert ("ids", (8, 9, 10), None) in seen
+        assert not any(kind == "walk" and depth == 0 for kind, _, depth in seen)
+
+    async def test_what_is_visible_is_halved_when_it_runs_out_of_time(self, scan, budget,
+                                                                     monkeypatch):
+        budget()
+        scan({})
+        visible = [f"urn:v{i}" for i in range(8)]
+        slices = []
+
+        async def plan(provider_, query, compiler, **kw):
+            return Plan([Unit("visible", "dataset", size=8)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            urns = unit.urns if unit.urns is not None else ctx.visible
+            slices.append(len(urns))
+            if len(urns) > 2:
+                await asyncio.sleep(5)
+            rows = [[u.split(":")[1], u] for u in urns]
+            return len(rows), rows[:session.k], []
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+
+        async def ask(session_id=None):
+            options = {"results": "hits", "pageSize": 5, "waitMs": 0,
+                       **({"sessionId": session_id} if session_id else {})}
+            return await engine_mod.execute_session_search(
+                _Provider(), SearchQuery.model_validate({
+                    "predicate": {"kind": "property", "key": "owner", "op": "eq", "value": "x"},
+                    "scope": {"viewId": "v", "scopeMode": "visible", "visibleUrns": visible},
+                    "options": options}),
+                context=SearchRunContext(data_version="1", scope_hash="h"))
+
+        page = await ask()
+        for _ in range(20):
+            if page.status == "complete":
+                break
+            page = await ask(page.session_id)
+        assert page.status == "complete" and page.total_count == 8
+        assert slices[0] == 8 and slices.count(2) == 4
+
+    async def test_a_unit_that_cannot_be_cut_gets_one_last_long_try_then_is_left_out(
+            self, scan, budget, monkeypatch):
+        """A single entity that can't be read in a unit's budget is tried
+        once more at the longest a request allows; failing that, it is left
+        out — the search completes, its count a floor, and a note names it.
+        It never fails the search, nor runs again on every request."""
+        budget()
+        scan({})
+        timeouts = []
+
+        async def plan(provider_, query, compiler, **kw):
+            return Plan([Unit("ids", roots=[7], size=1), Unit("range", "B", size=3)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            if unit.kind == "ids":
+                timeouts.append(timeout_s)
+                await asyncio.sleep(5)
+            rows = _node_rows([1, 2, 3])
+            return 3, rows[:session.k], []
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+        page = await self._finish(_TreeProvider())
+        assert page.status == "complete" and page.total_count == 3
+        assert page.count_status == "lowerBound"
+        assert timeouts == [0.2, engine_mod._last_try_s()], "tried once, then once at length"
+        assert page.scope_diagnostics.notes == [
+            "“n7” (dataset) couldn’t be checked in time, so it was left out — there may be "
+            "more matches than shown."]
+
+    async def test_a_count_that_left_a_part_out_is_a_floor(self, scan, budget, monkeypatch):
+        budget()
+        scan({})
+
+        async def plan(provider_, query, compiler, **kw):
+            return Plan([Unit("ids", roots=[7], size=1), Unit("range", "B", size=3)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            if unit.kind == "ids":
+                await asyncio.sleep(5)
+            return 3, [], []
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+        context = SearchRunContext(data_version="1", scope_hash="h")
+        answer = await engine_mod.execute_count_session(_TreeProvider(), _query(waitMs=0),
+                                                        context=context)
+        for _ in range(10):
+            if answer["status"] == "complete":
+                break
+            answer = await engine_mod.execute_count_session(
+                _TreeProvider(), _query(waitMs=0, sessionId=answer["sessionId"]), context=context)
+        assert (answer["status"], answer["count"], answer["lowerBound"]) == ("complete", 3, True)
+
+    async def test_work_that_cannot_do_without_a_part_still_fails(self):
+        """An export or a catalog can't leave a part out: after its last
+        try, the unit fails it, as before."""
+        class _Export:
+            async def expand(self, unit, timeout_s):
+                return None
+
+        session = Session("s1", "q", "1", None, 0, [], [], 1)
+        unit = Unit("ids", roots=[7], size=1)
+        assert await engine_mod._recover(session, _Export(), unit, 1.0) is True
+        assert session.pending == [dataclasses.replace(unit, last_try=True)]
+        last_try = session.pending.pop()
+        assert await engine_mod._recover(session, _Export(), last_try, 1.0) is False
+        assert session.left_out == 0
+
+    async def test_a_graph_failing_over_keeps_the_session_and_answers_why(self, scan,
+                                                                         monkeypatch):
+        """A failover mid-scan used to fail the search and lose its progress.
+        The unit is given back, the request answers with the failover (the
+        client waits and asks again), and the next request carries on."""
+        from backend.common.adapters.circuit import ProviderFailingOver
+        scan({})
+        attempts = {"A": 0, "B": 0}
+
+        async def plan(provider_, query, compiler, **kw):
+            return Plan([Unit("range", "A", size=2), Unit("range", "B", size=2)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            attempts[unit.label] += 1
+            if unit.label == "A" and attempts["A"] == 1:
+                raise ProviderFailingOver(provider_name="p", reason="node rotating")
+            if unit.label == "B" and attempts["B"] == 1:
+                raise ProviderFailingOver(provider_name="p", reason="node rotating")
+            rows = _rows(unit.label.lower(), 2)
+            return 2, rows[:session.k], []
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+        provider = _Provider()
+        with pytest.raises(ProviderFailingOver):
+            await _search(provider, wait_ms=0)
+        page = await _search(provider, wait_ms=0)
+        assert page.status == "complete" and page.total_count == 4
+        assert attempts == {"A": 2, "B": 2}, "each unit counted once, after its retry"
+
+    async def test_a_busy_graph_answers_with_what_this_request_found(self, scan, monkeypatch):
+        """The graph refusing one unit while another lands: the request
+        answers with its progress, not a 429."""
+        scan({})
+        tried = []
+
+        async def plan(provider_, query, compiler, **kw):
+            return Plan([Unit("range", "A", size=2), Unit("range", "B", size=2)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            tried.append(unit.label)
+            if unit.label == "B" and tried.count("B") == 1:
+                raise ProviderBusy(provider_name="p", reason="full", retry_after_seconds=1)
+            rows = _rows(unit.label.lower(), 2)
+            return 2, rows[:session.k], []
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+        provider = _Provider()
+        first = await _search(provider, wait_ms=0)
+        assert first.status == "running" and first.progress.matched == 2
+        page = await _search(provider, wait_ms=0, session_id=first.session_id)
+        assert page.status == "complete" and page.total_count == 4
+
+    async def test_a_full_queue_gives_the_unit_back(self, scan, monkeypatch):
+        """FalkorDB's own queue-full reply is load, not a broken query."""
+        scan({})
+        tried = []
+
+        async def plan(provider_, query, compiler, **kw):
+            return Plan([Unit("range", "A", size=2)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            tried.append(unit.label)
+            if len(tried) == 1:
+                raise RuntimeError("Max pending queries exceeded")
+            return 2, _rows("a", 2)[:session.k], []
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+        provider = _Provider()
+        with pytest.raises(RuntimeError, match="Max pending"):
+            await _search(provider, wait_ms=0)
+        page = await _search(provider, wait_ms=0)
+        assert page.status == "complete" and page.total_count == 2
+
+    async def test_an_outage_never_leaves_a_unit_out(self, scan, monkeypatch):
+        """Every unit's connection dropping — the store down — gives each
+        back however often it happens: nothing is left out for an outage."""
+        from redis.exceptions import ConnectionError as RedisConnectionError
+        scan({})
+        down = {"yes": True}
+
+        async def plan(provider_, query, compiler, **kw):
+            return Plan([Unit("range", "A", size=2), Unit("range", "B", size=2)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            if down["yes"]:
+                raise RedisConnectionError("Connection reset by peer")
+            rows = _rows(unit.label.lower(), 2)
+            return 2, rows[:session.k], []
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+        provider = _TreeProvider()
+        provider.answering = False    # the store's own probe fails too
+        for _ in range(12):
+            with pytest.raises(RedisConnectionError):
+                await _search(provider, wait_ms=0)
+        down["yes"], provider.answering = False, True
+        page = await _search(provider, wait_ms=0)
+        assert page.status == "complete" and page.total_count == 4
+        assert page.count_status == "exact" and page.scope_diagnostics is None
+
+    async def test_a_unit_that_keeps_knocking_the_store_over_is_left_out(self, scan,
+                                                                        monkeypatch):
+        """A unit whose read drops the connection every time, while the
+        store answers the others between times, is left out after a few
+        rounds and named — instead of taking the store down for ever."""
+        from redis.exceptions import ConnectionError as RedisConnectionError
+        scan({})
+        culprit = []
+
+        async def plan(provider_, query, compiler, **kw):
+            return Plan([Unit("ids", roots=[7], size=1)]
+                        + [Unit("range", f"L{i:02d}", size=1) for i in range(12)])
+
+        async def run(unit, session, ctx, run_, timeout_s):
+            if unit.kind == "ids":
+                culprit.append(1)
+                raise RedisConnectionError("Connection reset by peer")
+            return 1, [[unit.label, f"urn:{unit.label}"]][:session.k], []
+
+        monkeypatch.setattr(engine_mod, "make_plan", plan)
+        monkeypatch.setattr(engine_mod, "_run_unit", run)
+        provider = _TreeProvider()
+        page = await _search(provider, wait_ms=0)
+        for _ in range(40):
+            if page.status == "complete":
+                break
+            try:
+                page = await _search(provider, wait_ms=0, session_id=page.session_id)
+            except RedisConnectionError:
+                continue
+        assert page.status == "complete" and page.total_count == 12
+        assert page.count_status == "lowerBound" and len(culprit) == engine_mod._DROPS_MAX
+        assert page.scope_diagnostics.notes == [
+            "Checking “n7” (dataset) kept cutting the connection to the graph store, so it "
+            "was left out — there may be more matches than shown."]
 
 
 class TestAncestorTally:
@@ -1204,3 +1654,23 @@ class TestServiceRouting:
         p.deep_search = legacy
         await self._svc(p)._run(_query(), self._scope(), None, SearchRunContext(admit=admit))
         assert held == ["in", "search", "out"]
+
+
+def test_a_statement_stays_inside_the_cluster_window(monkeypatch):
+    """45 s a statement by default. On a cluster with a 15 s
+    cluster-node-timeout a search read may hold a replica for 10 s, and a
+    last try is no longer than that."""
+    from backend.app.providers import falkordb_provider as fp
+
+    settings = SimpleNamespace(chunk_timeout_ms=45_000)
+    monkeypatch.setattr(fp, "_OBSERVED_NODE_TIMEOUT_S", None)
+    monkeypatch.setattr(fp, "_CLUSTER_NODE_TIMEOUT_S", 0.0)
+    monkeypatch.setenv("FALKORDB_MODE", "standalone")
+    assert engine_mod.statement_s(settings) == 45.0
+    assert engine_mod._last_try_s() == engine_mod._REQUEST_S - 2 * engine_mod._GRACE_S
+
+    monkeypatch.setattr(fp, "_OBSERVED_NODE_TIMEOUT_S", 15.0)
+    monkeypatch.setenv("FALKORDB_MODE", "cluster")
+    assert engine_mod.statement_s(settings) == pytest.approx(10.0)
+    assert engine_mod._last_try_s() == pytest.approx(10.0)
+    assert engine_mod.unit_budget(settings, passes=2) == pytest.approx(20.0)

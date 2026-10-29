@@ -25,6 +25,7 @@ screen.
 | **Break-glass account** | An account kept for when nobody else can sign in, such as during an identity-provider outage. It holds no API keys and can't manage a service account. | [Users & Access](/guide/users-access#system-accounts-break-glass) |
 | **Canvas** | The area where a view's graph is drawn and explored. | [Reading Lineage](/guide/reading-lineage) |
 | **Catalog item** | A graph found on a provider and registered so it can be added to a workspace as a data source. | [Admin Setup](/guide/admin-setup) |
+| **Connection** | One line between two entities — an edge. A **Connections** search (Advanced Search → **Find → Connections**) lists every connection from the entities you describe to the ones you describe next. | [Finding Connections](/guide/finding-connections) |
 | **Context View** | A canvas type that sorts entities into columns (layers) you define and draws the lineage between them — made for reading a pipeline. | [The Lineage Lens & Context View](/guide/lineage-lens) |
 | **Create View wizard** | The wizard that **New View** opens (titled **Create New View**): **Scope**, **Basics**, **Layout**, **Entities**, **Preview**. | [Creating Views](/guide/creating-views) |
 | **Data health** | A tab of a view's versioning panel, shown only to people who manage the data source. It checks the graph against its published versions and can rebuild it. | [Data Freshness & Ingestion](/guide/data-freshness) |
@@ -40,8 +41,10 @@ screen.
 | Term | What it means | Read more |
 |---|---|---|
 | **Edge** | A line between two nodes — a relationship. | [Reading Lineage](/guide/reading-lineage) |
+| **Edge type** | What an edge means, such as **Produces**, **Transforms** or **Tagged with**; the same as a relationship type. | [Finding Connections](/guide/finding-connections) |
 | **Edit mode** | Working in a draft: **Edit** in a Context View starts it. Also the name of the switch that allows editing at all. | [Editing in a Draft](/guide/editing-in-a-draft) |
 | **Editor** / **Viewer** (on a view) | The two roles you can give someone on one view in **Share**: editors can edit it, viewers can read it. | [Managing & Sharing Views](/guide/managing-views) |
+| **Either way** | In a Connections search or a relationship: count the lines in both directions, each once. | [Finding Connections](/guide/finding-connections) |
 | **Entity** / **entity type** | An item in the graph — a table, a column, a dashboard. Its entity type says what kind of thing it is. | [Key Concepts](/guide/key-concepts) |
 | **Entity drawer** | The panel on the right with an entity's details, opened with **View & Edit** on its right-click menu. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
 | **Exception** | Access granted in the app to a workspace whose identity provider decides who is in. It's granted by the workspace's admins only, for 90 days at most, is labelled **Exception** wherever access is listed, doesn't follow the person's groups, and ends on its own once their groups grant the same access. | [Workspace Admin](/guide/workspace-admin#when-the-identity-provider-decides) |
@@ -50,6 +53,7 @@ screen.
 | **Feature switch** | An on/off setting under **Administration → Features** that turns a capability on or off for everyone in the deployment (also called a feature flag). | [Feature Switches](/guide/feature-switches) |
 | **Find a workspace** | The **Workspaces** tab that lists your organization's workspaces, so you can see what each is for and ask to join one. An administrator switches it on. | [Requesting Access](/guide/requesting-access#find-a-workspace) |
 | **Freshness** | How current a data source's lineage summaries are. Administrators watch it under **Ingestion → Freshness**. | [Data Freshness & Ingestion](/guide/data-freshness) |
+| **From** / **To** (in a search) | The two halves of a Connections search: where its connections start, and where they end. | [Finding Connections](/guide/finding-connections) |
 | **Grace period** | How long a service account's keys keep working after its last manager goes — 14 days unless an administrator changed it — before they pause. | [Service Accounts](/guide/service-accounts#when-a-manager-leaves) |
 | **Granularity** | How fine the lineage you see is — column, table or whole system. There's no global switch: open or close containers, or use the Lineage Lens **Density** control. | [Reading Lineage](/guide/reading-lineage) |
 | **Graph** (canvas type) | A canvas type that shows entities and their relationships positioned freely, for exploring how things connect. | [Creating Views](/guide/creating-views) |
@@ -79,7 +83,7 @@ screen.
 | **Org Admin** | An organisation-wide role that manages every workspace and creates new ones, but doesn't manage user accounts or sign-in settings. | [Users & Access](/guide/users-access) |
 | **Org Auditor** | An organisation-wide role that can see every workspace and the activity log, but can't change anything. | [Users & Access](/guide/users-access) |
 | **Orphan** | An entity whose type normally sits inside another (a table in a schema) but which has no parent in the data. List them with **Display → Advanced → Orphaned entities…** in a Context View. | [Navigating Layers](/guide/navigating-layers) |
-| **Persona toggle** | The **Business** / **Technical** switch in the top bar. **Business** shows names only; **Technical** adds each entity's qualified name or URN under its name. | [Reading Lineage](/guide/reading-lineage) |
+| **Persona toggle** | The **Business** / **Technical** switch in the top bar. **Business** shows names only; **Technical** adds each entity's identifier under its name: its data source's identifier property, such as `id`, or its URN. | [Reading Lineage](/guide/reading-lineage) |
 | **Profiling** | A data source's counts and make-up over time, under **Ingestion → Profiling**. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Projection Mode** | Where a data source's rollups are written when its aggregation runs: **In-Source** (into the source graph) or **Dedicated Graph** (a separate graph, leaving the source untouched). | [Rollup Capacity & Large Graphs](/guide/rollup-capacity) |
 | **Provider** | A registered connection to a graph database, added with **Register Provider** under **Ingestion → Providers**. | [Admin Setup](/guide/admin-setup) |
@@ -106,6 +110,7 @@ screen.
 | **Steward** | A workspace role for the people who let others in: a **Member** who also adds people as viewers or members and answers their access requests. | [Workspace Admin](/guide/workspace-admin#giving-people-access-the-members-tab) |
 | **Sync chip** | The chip next to the data source's name in a view's header that says whether the view reads the latest data — for example **In sync · v12** or **1 version behind**. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Telemetry** | Product usage and content gaps, for administrators, under **Administration → Telemetry**. | [The Admin Console](/guide/governance-ops) |
+| **Through** (in a search) | Which kinds of line a Connections search counts — **Any link**, **Lineage**, **Containment**, **Any edge** or chosen edge types — and which way they point. | [Finding Connections](/guide/finding-connections) |
 | **Trace** | Following an entity's lineage across the graph: **Trace Lineage** on the canvas, or **Root Cause**, **Impact** or **Full Lineage** in the entity drawer. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
 | **Trace dock** | The panel along the bottom of a Context View while a trace is open, with its **Upstream depth** and **Downstream depth** sliders and **Share**. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
 | **Upstream** | Where a piece of data comes from — follow the arrows backwards. | [Reading Lineage](/guide/reading-lineage) |

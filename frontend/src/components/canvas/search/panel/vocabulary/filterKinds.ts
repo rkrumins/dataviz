@@ -47,9 +47,6 @@ import { newRelation, RELATION_DEPTH_MAX, RELATION_MAX_HOPS } from '../relations
 
 const DEFAULT_EDGE_CLASS: EdgeClass = 'lineage'
 
-/** The condition kinds with no visual editor: authored in Code. */
-export type CodeKind = 'withinHops'
-
 /** Where a condition is being added: a display rule follows lineage one
  *  step, a search up to three. */
 export interface BuildContext {
@@ -121,11 +118,9 @@ export interface FilterKind {
     /**
      *  - ``emit``: build a condition and add it to the query.
      *  - ``advanced``: open the Advanced drawer.
-     *  - ``code``: hand off to Code mode with a stub of ``codeKind``.
      */
-    action: 'emit' | 'advanced' | 'code'
+    action: 'emit' | 'advanced'
     build?: (where?: BuildContext) => Predicate
-    codeKind?: CodeKind
     /** The plain words people use for it — what the Ask bar reads as it. */
     examples?: readonly string[]
 }
@@ -486,11 +481,12 @@ export const FILTER_CATEGORIES: readonly FilterCategory[] = [
                 icon: Radar, tone: 'group',
                 label: 'Within N hops of…',
                 description:
-                    'N-hop neighbourhood of an anchor URN — Code only. '
-                    + 'Opens the JSON editor with a stub; fill in '
-                    + 'urns and hops.',
-                action: 'code',
-                codeKind: 'withinHops',
+                    'Everything a few edges from entities you name, '
+                    + 'through the edges you choose',
+                action: 'emit',
+                build: () => ({
+                    kind: 'withinHops', urns: [], hops: 2, direction: 'both', edgeClass: 'lineage',
+                } as Predicate),
             },
             {
                 id: 'all',
@@ -537,36 +533,36 @@ export function filterKindById(id: string): FilterKind | undefined {
 }
 
 
-/** Entries that scope the whole search, which a relationship's condition
- *  can't hold. */
-const SCOPE_ENTRIES = new Set(['root-in-view', 'inside-subtree', 'inside-named', 'path', 'within-hops'])
+/** Routes through the graph, which a relationship's condition can't hold —
+ *  "inside a container" it can: there it is the relative's own test. A
+ *  display rule tests one entity, so it holds no route either. */
+const ROUTE_ENTRIES = new Set(['path', 'within-hops'])
 
 export interface KindContext {
     /** How many relationships the conditions being added sit inside. */
     relationDepth: number
     /** A display rule's: it tests one entity, so it has no routes. */
     rule: boolean
-    /** Whether Code mode is there to hand off to. */
-    canCode: boolean
+    /** A Connections search's From or To: a connection is one edge, so it
+     *  has no routes either. */
+    end?: boolean
     /** Whether the Advanced drawer is there to hand off to. */
     canAdvanced: boolean
 }
 
 /** The categories, holding only what can be added where the conditions
- *  stand: a relationship's condition is about the relative (the scope of
- *  the search is the query's alone), and relationships nest only so deep.
- *  Categories left empty are dropped. */
-export function availableCategories({ relationDepth, rule, canCode, canAdvanced }: KindContext): FilterCategory[] {
+ *  stand: a relationship's condition is about the relative (it follows no
+ *  route), and relationships nest only so deep. Categories left empty are
+ *  dropped. */
+export function availableCategories({ relationDepth, rule, end, canAdvanced }: KindContext): FilterCategory[] {
     return FILTER_CATEGORIES
         .map((cat) => ({
             ...cat,
             entries: cat.entries.filter((e) => {
-                if (relationDepth > 0 && SCOPE_ENTRIES.has(e.id)) return false
-                if (rule && e.id === 'path') return false
+                if ((relationDepth > 0 || rule || end) && ROUTE_ENTRIES.has(e.id)) return false
                 if (relationDepth >= RELATION_DEPTH_MAX && e.id.startsWith('rel-')) return false
                 // Two relationships deep: one more level than a single one.
                 if (relationDepth >= RELATION_DEPTH_MAX - 1 && e.id === 'rel-inside-feeds') return false
-                if (e.action === 'code') return canCode
                 if (e.action === 'advanced') return canAdvanced
                 return true
             }),

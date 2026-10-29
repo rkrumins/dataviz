@@ -1436,20 +1436,38 @@ class TestCompilerGroups:
         assert where == f"(true AND {typed})"
         assert c.hoisted_root_urns == [["urn:domain:A", "urn:domain:B"]]
 
-    def test_descendant_of_inside_or_rejected(self):
-        c = _Compiler()
-        with pytest.raises(CompileError, match="top-level AND"):
-            c.compile(GroupPredicate(op="or", children=[
-                DescendantOfPredicate(urns=["urn:x"]),
-                TagPredicate(values=["PII"]),
-            ]))
+    def test_descendant_of_inside_or_is_each_entitys_own_test(self):
+        # Not a bound on the search, as in the top-level AND: each entity is
+        # the container or below it, as deep as the scope reaches — read
+        # from its ancestors, so in the projected tail.
+        c = _Compiler(containment_edge_types={"CONTAINS"})
+        where = c.compile(GroupPredicate(op="or", children=[
+            DescendantOfPredicate(urns=["urn:x"]),
+            TagPredicate(values=["PII"]),
+        ]), scope_depth=5)
+        assert where == "true"
+        assert c.hoisted_root_urns == []
+        [stage] = c.tail
+        assert "(n)<-[:CONTAINS*1..5]-(_xr" in stage and " OR (n.tags CONTAINS " in stage
+        urns = [k for k, v in c.params.items() if v == ["urn:x"]]
+        assert len(urns) == 1 and f"n.urn IN ${urns[0]}" in stage
 
-    def test_descendant_of_inside_nested_not_rejected(self):
-        c = _Compiler()
-        with pytest.raises(CompileError, match="top-level AND"):
-            c.compile(GroupPredicate(op="not", children=[
-                DescendantOfPredicate(urns=["urn:x"]),
-            ]))
+    def test_descendant_of_inside_nested_not_is_each_entitys_own_test(self):
+        c = _Compiler(containment_edge_types={"CONTAINS"})
+        where = c.compile(GroupPredicate(op="not", children=[
+            DescendantOfPredicate(urns=["urn:x"], maxDepth=3),
+        ]))
+        assert where == "true"
+        assert c.hoisted_root_urns == []
+        [stage] = c.tail
+        assert stage.startswith("NOT ") and "(n)<-[:CONTAINS*1..3]-(_xr" in stage
+
+    def test_descendant_of_in_the_top_level_and_still_bounds_the_search(self):
+        c = _Compiler(containment_edge_types={"CONTAINS"})
+        where = c.compile(GroupPredicate(op="and", children=[
+            DescendantOfPredicate(urns=["urn:x"]), TagPredicate(values=["PII"])]))
+        assert c.hoisted_root_urns == [["urn:x"]] and c.tail == []
+        assert "_xr" not in where
 
 
 # ---------------------------------------------------------------------------

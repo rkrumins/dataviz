@@ -59,6 +59,9 @@ both):
 | **Containment** | A parent holds a child: a schema contains tables, a table contains columns | Open a container to see what's inside it |
 | **Lineage** | Data flows from one entity to another: a table feeds a dashboard | Trace it upstream and downstream |
 
+To list the relationships themselves — every line from one set of entities to
+another — see [Finding Connections](/guide/finding-connections).
+
 ## Views and the Explorer
 
 A **view** is a saved, curated picture of part of one data source: which
@@ -203,13 +206,15 @@ The **Business** / **Technical** switch in the top bar changes how entities are
 named, everywhere at once:
 
 - **Business** — the name people use, and nothing else.
-- **Technical** — the same name, with each entity's qualified name (or its URN)
-  underneath, on the canvas and in the entity's details panel.
+- **Technical** — the same name, with each entity's identifier underneath (its
+  data source's identifier property, such as `id`, or its URN), on the canvas
+  and in the entity's details panel.
 
 It changes labels only: the graph, its lineage and your access stay the same.
 The words **Business View** or **Technical View** under the {brandShort} name at
 the top left show which one is on, and the `⌘K` / `Ctrl-K` palette can switch
-it too (**Switch to Technical View** / **Switch to Business View**).
+it too (**Switch to Technical View** / **Switch to Business View**). Or press
+`⌘/` / `Ctrl-/` anywhere outside a text field.
 
 ---
 

@@ -2307,14 +2307,23 @@ class ContextEngine:
                     properties={}
                 )
         
+        # The source's own name / identity properties, derived from the display name and the urn
+        # just minted (``node_identity.bind_node_write``) before the node fans out — a
+        # write-through records in versioning exactly the node it writes to the graph.
+        named = {"displayName": request.display_name, "properties": request.properties}
+        identity = self._node_identity or await self._resolve_node_identity()
+        if identity is not None:
+            from .node_identity import bind_node_write
+            named = bind_node_write(None, {**named, "urn": urn}, identity, minted=True)
+
         # Create the node
         new_node = GraphNode(
             urn=urn,
             entityType=request.entity_type,
-            displayName=request.display_name,
+            displayName=named["displayName"],
             qualifiedName=request.properties.get('qualifiedName', request.display_name),
             description=request.properties.get('description'),
-            properties=request.properties,
+            properties=named["properties"],
             tags=request.tags,
             layerAssignment=request.properties.get('layerAssignment'),
             childCount=0,

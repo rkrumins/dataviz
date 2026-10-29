@@ -35,11 +35,12 @@ export const AddRowButton: FC<AddRowButtonProps> = ({
 }) => {
     const [open, setOpen] = useState(false)
     const buttonRef = useRef<HTMLButtonElement>(null)
-    // Inside a relationship's condition: no scope of the search, and no
-    // relationship past the deepest the server takes.
+    // Inside a relationship's condition: no route ("inside a container" is
+    // the relative's own test there), and no relationship past the deepest
+    // the server takes.
     const depth = useContext(RelationContext).depth
     const allowed = (m: LeafKindMeta) => (!filter || filter(m))
-        && !(depth > 0 && m.category === 'scope')
+        && !(depth > 0 && m.category === 'scope' && m.kind !== 'descendantOf')
         && !(depth >= RELATION_DEPTH_MAX && m.kind === 'related')
 
     return (

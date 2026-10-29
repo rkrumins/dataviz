@@ -69,6 +69,17 @@ class SearchFailed(RuntimeError):
 register_logical_exception(SearchFailed)
 
 
+class SessionStoreUnavailable(RuntimeError):
+    """The cache Redis that keeps search sessions did not answer. Nothing
+    about the graph: a raw Redis error from it read as a graph-store outage
+    to the provider's breaker, and one cache blip refused every graph read on
+    the source. Registered like ``SearchFailed``, so a proxy re-raises it
+    untouched; the API answers it 503 with a Retry-After."""
+
+
+register_logical_exception(SessionStoreUnavailable)
+
+
 @dataclass(frozen=True)
 class SearchRunContext:
     """What the uncapped engine needs from the request around it.

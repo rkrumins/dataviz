@@ -280,8 +280,10 @@ export type ScopeCondition = Predicate & {
 }
 
 
-/** The draft's top-level scope row, or null when it isn't scoped. */
+/** The draft's top-level scope row, or null when it isn't scoped. Under
+ *  ANY an "inside" row is one of the alternatives, not a scope. */
 export function findScopeCondition(draft: Predicate | null): ScopeCondition | null {
+    if (rootGroupOp(draft) === 'or') return null
     const found = topLevelConditions(draft).find((c) => c.kind === 'descendantOf')
     return (found as ScopeCondition | undefined) ?? null
 }
@@ -291,14 +293,14 @@ export function findScopeCondition(draft: Predicate | null): ScopeCondition | nu
  * Set (or with ``null``, clear) the "search inside these containers"
  * scope on a draft.
  *
- * Two rules, both dictated by the Cypher compiler rather than by taste
+ * Two rules, what a scope means and how the Cypher compiler reads one
  * (``backend/app/providers/falkordb_deep_search.py``):
  *
- *   1. **Top-level AND only.** A DescendantOf inside an OR or a NOT is
- *      a hard CompileError (`_visit_predicate`, "DescendantOf is only
- *      allowed in the top-level AND group"), so an OR-rooted draft
- *      can't take the row as a sibling — the whole disjunction gets
- *      nested under a new AND root instead.
+ *   1. **Top-level AND only.** A scope bounds the whole query; a
+ *      DescendantOf inside an OR is one more alternative instead, so an
+ *      OR-rooted draft can't take the row as a sibling — the whole
+ *      disjunction, its "inside" alternatives too, gets nested under a
+ *      new AND root instead.
  *   2. **Replace, never accumulate.** Each URN set becomes its own
  *      `MATCH (root)-[:CONTAINS*0..D]->(n)` continuation and Cypher
  *      ANDs them, so a second row means "inside A *and* inside B" —
@@ -321,7 +323,9 @@ export function setScopeCondition(
     scope: ScopeCondition | null,
 ): Predicate | null {
     const root = ensureRootGroup(draft)
-    const rest = root.children.filter((c) => c.kind !== 'descendantOf')
+    // Under ANY an "inside" row is an alternative, never the scope.
+    const rest = root.op === 'or' ? root.children
+        : root.children.filter((c) => c.kind !== 'descendantOf')
 
     if (!scope) {
         return collapseRoot({ kind: 'group', op: root.op, children: rest })

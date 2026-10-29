@@ -13,6 +13,7 @@ import { PropertyEditor } from '../PropertyEditor'
 import { PanelErrorBoundary } from '../PanelErrorBoundary'
 import { LineageNeighbors } from '../LineageNeighbors'
 import { PlacementSummary } from './EntityPlacement'
+import { NodeIdentityFacts } from '@/components/dataSource/NodeIdentity'
 
 type Data = Record<string, unknown>
 
@@ -41,11 +42,14 @@ function DetailsList({ form }: { form: Data }) {
 }
 
 export function EntityViewTab({
-  nodeId, form, urn, childCount, tagColors, userProps, copiedUrn, onCopyUrn, canEdit, onStartEdit,
+  nodeId, form, original, urn, childCount, tagColors, userProps, copiedUrn, onCopyUrn, canEdit, onStartEdit,
   onFocusNode, onLocateMany, onRevealPath, history,
 }: {
   nodeId: string
   form: Data
+  /** The entity as stored, when `form` holds edits not saved yet — the details then say what saving
+   *  stores — or null for one not saved at all. Absent: `form` is what is stored. */
+  original?: Data | null
   urn: string
   childCount: number
   tagColors: { bg: string; text: string }
@@ -72,6 +76,7 @@ export function EntityViewTab({
           <IconButton icon={copiedUrn ? Check : Copy} label={copiedUrn ? 'Copied' : 'Copy URN'} size="sm" onClick={onCopyUrn}
             className={copiedUrn ? 'text-emerald-600 dark:text-emerald-400' : undefined} />
         </div>
+        <NodeIdentityFacts data={original ?? form} pending={original === null} edited={original ? form : undefined} />
       </Section>
 
       <DetailsList form={form} />

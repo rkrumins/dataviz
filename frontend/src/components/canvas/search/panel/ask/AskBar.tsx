@@ -10,9 +10,11 @@
  *
  * What it reads is shown before anything changes, in the Sentence's own
  * words, with roughly how many it matches; a word with other readings
- * offers them, and names are looked up in the view. Enter applies it —
- * replacing the query, or adding to it when the question starts with
- * "and". ↑ / ↓ bring back earlier questions; Esc clears.
+ * offers them, and names are looked up in the view; a word a letter or
+ * two off one of the view's offers that word, and a reading that finds
+ * nothing offers the fixes that would. Enter applies it — replacing the
+ * query, or adding to it when the question starts with "and". ↑ / ↓ bring
+ * back earlier questions; Esc clears.
  */
 import * as Popover from '@radix-ui/react-popover'
 import { CheckCircle2, ChevronDown, CornerDownLeft, Loader2, Sparkles, X } from 'lucide-react'
@@ -26,8 +28,11 @@ import { usePersonaMode } from '@/store/persona'
 import { useSearchStore } from '@/store/searchStore'
 import type { NodeRef, Predicate } from '@/types/search'
 
+import { useClauseCounts } from '../counts/useClauseCounts'
 import type { CountState } from '../counts/useCounts'
 import { namedEntityOf, namePathFor } from '../entityNames'
+import { FixChips } from '../rescue/RescueFixes'
+import { useRescue } from '../rescue/useRescue'
 import { useTypeName } from '../sentence/useTypeName'
 
 import { askExamples } from './askExamples'
@@ -41,7 +46,8 @@ import { useAskPreview, type NameLookup, type NameMatch } from './useAskPreview'
 export interface AskBarProps {
     viewId: string | null
     vocabulary: AskVocabulary
-    /** The query a question starting with "and" adds to. */
+    /** The query a question starting with "and" adds to — unless it is a
+     *  connection, which is the whole query: a question takes its place. */
     draft: Predicate | null
     /** Apply the query a question leaves. */
     onAsk: (result: Predicate) => void
@@ -49,12 +55,15 @@ export interface AskBarProps {
     presentTypes: readonly string[]
     /** ``hero``: the empty card's front door, examples beneath. */
     variant?: 'hero' | 'compact'
+    /** Example questions beneath it, to try: the empty card's always has
+     *  them, whichever way in it leads with. */
+    examples?: boolean
     disabled?: boolean
 }
 
 
 export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant = 'compact',
-    disabled = false }: AskBarProps) {
+    examples: showExamples = variant === 'hero', disabled = false }: AskBarProps) {
     const [question, setQuestion] = useState('')
     const [picks, setPicks] = useState<AskPicks>({})
     const [recall, setRecall] = useState<number | null>(null)
@@ -70,8 +79,10 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
         if (askFocus && useSearchStore.getState().consumeAskFocus()) inputRef.current?.focus()
     }, [askFocus])
 
-    const preview = useAskPreview(viewId, question, vocabulary, picks, draft)
+    const addTo = draft?.kind === 'edges' ? null : draft
+    const preview = useAskPreview(viewId, question, vocabulary, picks, addTo)
     const { interpretation, result } = preview
+    const adding = interpretation.mode === 'add' && addTo !== null
     const examples = useMemo(() => askExamples(presentTypes, vocabulary.tags, typeName, persona),
         [presentTypes, vocabulary.tags, typeName, persona])
 
@@ -130,7 +141,7 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                     autoFocus={hero}
                     aria-label="Ask about this view"
                     placeholder={hero ? 'Ask in plain words…'
-                        : !draft ? 'Or ask in plain words…'
+                        : !addTo ? 'Or ask in plain words…'
                             : 'Ask to change the query — start with “and” to add to it'}
                     className={cn('min-w-0 flex-1 bg-transparent text-ink outline-none placeholder:text-ink-muted/80',
                         hero ? 'text-base' : 'text-sm')}
@@ -147,7 +158,7 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                                     'bg-accent-lineage text-white hover:bg-accent-lineage/90 disabled:opacity-40',
                                     'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
                                 )}>
-                            {interpretation.mode === 'add' ? 'Add' : 'Apply'}
+                            {adding ? 'Add' : 'Apply'}
                             <CornerDownLeft className="h-3 w-3" aria-hidden />
                         </button>
                     </>
@@ -159,7 +170,7 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                     <div className="flex items-start gap-3">
                         <div className="min-w-0 flex-1">
                             <div className="text-2xs font-semibold uppercase tracking-wider text-ink-muted">
-                                {interpretation.mode === 'add' ? 'The query becomes' : 'Reads as'}
+                                {adding ? 'The query becomes' : 'Reads as'}
                             </div>
                             <div className="text-sm">
                                 {result
@@ -196,8 +207,28 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                             Searched for by name: {interpretation.unrecognized.map((w) => `“${w}”`).join(', ')}
                         </p>
                     )}
+                    {interpretation.suggestions?.map((s) => (
+                        <p key={s.text} className="text-xs text-ink-muted">
+                            Did you mean{' '}
+                            <button type="button" onClick={() => { setQuestion(corrected(question, s.text, s.suggestion)); setPicks({}) }}
+                                    className="font-medium text-accent-lineage hover:underline focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
+                                “{s.suggestion}”
+                            </button>?
+                        </p>
+                    ))}
+                    {result && viewId && preview.countStatus === 'done' && preview.count?.complete
+                        && preview.count.count === 0 && (
+                        <AskRescue viewId={viewId} query={result} onApply={(p) => {
+                            remember(question.trim())
+                            onAsk(p)
+                            clear()
+                        }} />
+                    )}
+                    {interpretation.notes.map((note) => (
+                        <p key={note} className="text-xs text-amber-700 dark:text-amber-300">{note}</p>
+                    ))}
                 </div>
-            ) : hero && (
+            ) : showExamples && (
                 <div className="flex flex-wrap items-center gap-1.5 text-xs">
                     <span className="text-ink-muted">Try</span>
                     {examples.map((q) => (
@@ -210,6 +241,30 @@ export function AskBar({ viewId, vocabulary, draft, onAsk, presentTypes, variant
                 </div>
             )}
             <div aria-live="polite" className="sr-only">{live}</div>
+        </div>
+    )
+}
+
+
+/** ``question`` with ``text`` — however it was spaced — put as ``word``. */
+function corrected(question: string, text: string, word: string): string {
+    const escaped = text.split(/\s+/).map((w) => w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('\\s+')
+    return question.replace(new RegExp(escaped, 'i'), word)
+}
+
+
+/** A reading that finds nothing: where its matches run out, and the fixes
+ *  that would find something — each applied as the question would be. */
+function AskRescue({ viewId, query, onApply }: { viewId: string; query: Predicate; onApply: (p: Predicate) => void }) {
+    const counts = useClauseCounts(viewId, query)
+    const rescue = useRescue(viewId, query, counts)
+    if (rescue.clause === null) return null
+    return (
+        <div className="flex flex-wrap items-center gap-1.5 text-xs">
+            <span className="text-ink-muted">
+                Nothing matches{rescue.line ? <> past “{rescue.line}”</> : null} — try
+            </span>
+            <FixChips fixes={rescue.fixes} onApply={onApply} line={rescue.line} counting={rescue.status === 'counting'} />
         </div>
     )
 }

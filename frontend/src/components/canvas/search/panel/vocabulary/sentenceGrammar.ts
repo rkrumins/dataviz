@@ -69,7 +69,7 @@ const MANY = { has: 'have', is: 'are', does: 'do', lies: 'lie' }
  *  dataset") and follow "where". */
 const VERB_CLAUSES = new Set<string>([
     'tag', 'hasProperty', 'isRoot', 'isLeaf', 'isOrphan', 'hasIncoming', 'hasOutgoing',
-    'descendantOf', 'withinHops', 'path', 'is', 'related', 'degree',
+    'descendantOf', 'withinHops', 'path', 'is', 'related', 'degree', 'edges',
 ])
 
 /** The word joining a condition to what it describes. A group of verb
@@ -139,7 +139,9 @@ export function leafSegments(p: Predicate, many = false): Segment[] {
                 const how = p.keyMatch === 'prefix' ? 'starts with' : 'contains'
                 return [txt(`${has} a property whose name ${how}`, 'phrase'), txt(' '), val(p.key, true, 'key')]
             }
-            return [txt(`${has} a`, 'phrase'), txt(' '), val(p.key, true, 'key'), txt(' property')]
+            // "an “owner” property", not "a".
+            return [txt(`${has} ${/^[aeiou]/i.test(p.key) ? 'an' : 'a'}`, 'phrase'), txt(' '), val(p.key, true, 'key'),
+                txt(' property')]
         }
         case 'property':
             return propertySegments(p)
@@ -175,6 +177,17 @@ export function leafSegments(p: Predicate, many = false): Segment[] {
                 ...end('source', p.sourceUrns, p.sourceRefs, p.sourceWhere), txt(' to '),
                 ...end('target', p.targetUrns, p.targetRefs, p.targetWhere),
                 txt(' '), txt(`(up to ${p.maxHops ?? 4} hops)`, 'hops')]
+        }
+        case 'edges': {
+            // A Connections search, after "connections": its ends, then the
+            // edges between — any link unless it says.
+            const end = (where: Predicate | null | undefined, slot: Slot): Segment[] => (where
+                ? [txt('anything '), { t: 'cond', predicate: where, many: false, lead: 'connector' }]
+                : [txt('any entity', slot)])
+            return [txt('from '), ...end(p.sourceWhere, 'source'), txt(' to '), ...end(p.targetWhere, 'target'),
+                txt(', through '), txt(edgeSetPhrase({ edgeClass: p.edgeClass ?? 'links', edgeTypes: p.edgeTypes }), 'edge'),
+                ...(p.direction === 'either' ? [txt(', either way')] : []),
+                ...(p.edgePredicate ? [txt(', each edge where '), ...edgeSegments(p.edgePredicate)] : [])]
         }
         case 'is': {
             const names = named([], p.refs)
