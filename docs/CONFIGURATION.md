@@ -212,7 +212,7 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | Variable | Default | Description | Read in |
 |---|---|---|---|
 | `AGGREGATION_IDENTITY_STAMP_PACING_RATIO` | `0.5` | The conformance stamp copies a source's own identity property onto `urn` for any node missing one. | `backend/app/providers/falkordb_provider.py` |
-| `DEEP_SEARCH_CHUNK_TIMEOUT_MS` | `45000` | advanced search: one scan unit's budget (a range unit over it is split); on a Redis Cluster at most two thirds of `cluster-node-timeout` | `backend/app/services/deep_search/settings.py` |
+| `DEEP_SEARCH_CHUNK_TIMEOUT_MS` | `45000` | advanced search: one scan unit's budget (a range unit over it is split); on a Redis Cluster at most two thirds of cluster-node-timeout | `backend/app/services/deep_search/settings.py` |
 | `FALKORDB_ADDRESS_REMAP` | — | Cross-cluster address remap: Redis announces the addresses IT knows (the cluster slot map, MOVED redirects, sentinel discover-master) — pod IPs a client in ANOTHER GKE cluster cannot dial. | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py` |
 | `FALKORDB_BULK_CREATE_TIMEOUT_S` | `60.0` / — *(differs by call site)* | per write/delete batch budget, seconds [writeTimeoutS] | `backend/app/providers/falkordb_materialize.py`, `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_CLUSTER_NODES` | — | cluster seed nodes | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py` |
