@@ -2,6 +2,7 @@ import { motion } from 'framer-motion'
 import { Briefcase, Code2 } from 'lucide-react'
 import { usePersonaStore } from '@/store/persona'
 import { cn } from '@/lib/utils'
+import { formatShortcut } from '@/lib/platform'
 
 /**
  * PersonaToggle - Switch between Business and Technical views
@@ -26,8 +27,8 @@ export function PersonaToggle() {
       )}
       title={
         mode === 'business'
-          ? 'Business view: names only. Switch to Technical to show each entity’s identifier under its name: its data source’s identifier property (such as id), or its URN.'
-          : 'Technical view: each entity’s identifier is shown under its name: its data source’s identifier property (such as id), or its URN. Switch to Business for names only.'
+          ? `Business view: names only. Switch to Technical (${formatShortcut('mod+/')}) to show each entity’s identifier under its name: its data source’s identifier property (such as id), or its URN.`
+          : `Technical view: each entity’s identifier is shown under its name: its data source’s identifier property (such as id), or its URN. Switch to Business (${formatShortcut('mod+/')}) for names only.`
       }
     >
       {/* Sliding Background */}

@@ -213,7 +213,8 @@ named, everywhere at once:
 It changes labels only: the graph, its lineage and your access stay the same.
 The words **Business View** or **Technical View** under the {brandShort} name at
 the top left show which one is on, and the `⌘K` / `Ctrl-K` palette can switch
-it too (**Switch to Technical View** / **Switch to Business View**).
+it too (**Switch to Technical View** / **Switch to Business View**). Or press
+`⌘/` / `Ctrl-/` anywhere outside a text field.
 
 ---
 

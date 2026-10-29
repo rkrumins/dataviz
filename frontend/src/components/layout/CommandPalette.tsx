@@ -35,6 +35,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { wsGradient } from '@/lib/viewUtils'
 import { timeAgo } from '@/lib/timeAgo'
 import { cn } from '@/lib/utils'
+import { formatShortcut } from '@/lib/platform'
 
 interface CommandPaletteProps {
   open: boolean
@@ -397,7 +398,7 @@ function CommandPaletteDialog({ onClose }: { onClose: () => void }) {
                   description={mode === 'business'
                     ? 'Show each entity’s identifier (its data source’s identifier property, or its URN) under its name'
                     : 'Show names only, without technical identifiers'}
-                  shortcut="⌘/"
+                  shortcut="mod+/"
                   onSelect={() => handleAction('toggle-persona')}
                 />
                 {templatesOn && (
@@ -543,6 +544,7 @@ interface CommandItemProps {
   icon: React.ComponentType<{ className?: string }>
   label: string
   description?: string
+  /** `"mod+/"`-style: one key cap per key, written the way this platform writes it (⌘ / Ctrl). */
   shortcut?: string
   onSelect: () => void
 }
@@ -571,8 +573,8 @@ function CommandItem({ icon: Icon, label, description, shortcut, onSelect }: Com
       </div>
       {shortcut && (
         <div className="flex items-center gap-1">
-          {shortcut.split('').map((key, i) => (
-            <kbd key={i} className="kbd">{key}</kbd>
+          {shortcut.split('+').map((key, i) => (
+            <kbd key={i} className="kbd">{formatShortcut(key)}</kbd>
           ))}
         </div>
       )}

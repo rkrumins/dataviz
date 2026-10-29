@@ -158,6 +158,13 @@ describe('CommandPalette — closed', () => {
 })
 
 describe('CommandPalette — open', () => {
+  it('writes the Business/Technical shortcut the way this platform does, one cap per key', () => {
+    renderPalette(true)
+    const item = screen.getByText(/^Switch to (Technical|Business) View$/).closest('[cmdk-item]') as HTMLElement
+    // jsdom is not an Apple platform: Ctrl, not ⌘ — and never a cap per letter of "Ctrl".
+    expect([...item.querySelectorAll('kbd')].map((k) => k.textContent)).toEqual(['Ctrl', '/'])
+  })
+
   it('searches app-wide', () => {
     renderPalette(true)
     expect(globalSearch).toHaveBeenCalledWith(expect.any(String), { appWide: true })

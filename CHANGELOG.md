@@ -52,6 +52,10 @@ limitations** — a changelog that only lists good news is not worth reading.
   showed its URN as its name and again underneath. It now shows it once.
 - **A lineage trace row shows its identifier before its details load.** In the Technical view, a
   row whose details hadn't loaded yet showed nothing under its name. It now shows its URN.
+- **`⌘/` (`Ctrl-/`) switches between Business and Technical names.** The command palette showed
+  the shortcut, but nothing responded to it. It now works anywhere outside a text field. The
+  palette and the top bar's toggle show it as your platform writes it: `⌘/` on a Mac, `Ctrl+/`
+  elsewhere.
 
 ### Changed
 
