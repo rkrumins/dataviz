@@ -8,6 +8,7 @@ import base64
 import hashlib
 import json
 import contextvars
+import functools
 import logging
 import math
 import os
@@ -525,7 +526,8 @@ _MASTER_READ_SHARE = int(os.getenv("FALKORDB_MASTER_READ_SHARE", "1"))
 
 #: Set to "master" for work that must see its own writes — the aggregation
 #: pipeline sets it for the whole run, so RECONCILE never reads a replica
-#: that has not applied the APPLY chunk before it.
+#: that has not applied the APPLY chunk before it. "replica" for Advanced
+#: Search, whose reads stay off the masters (``search_reads_on_replicas``).
 _read_consistency: contextvars.ContextVar[str] = contextvars.ContextVar(
     "falkordb_read_consistency", default="auto",
 )
@@ -588,6 +590,34 @@ def read_from_master_only():
 
     return _pin()
 
+
+def search_reads_on_replicas():
+    """Context manager: every read in this task goes to a replica, as
+    Advanced Search's do — never the master's turn in the rotation, and never
+    pinned to it after a write (a search asks for no read-your-own-writes; a
+    replica is milliseconds behind). With no replica to answer, the master
+    does, inside ``cluster_write_ceiling_s``. See ``_read_query``."""
+    from contextlib import contextmanager
+
+    @contextmanager
+    def _pin():
+        token = _read_consistency.set("replica")
+        try:
+            yield
+        finally:
+            _read_consistency.reset(token)
+
+    return _pin()
+
+
+def _search_reads(method):
+    """A provider method whose reads are Advanced Search's: on replicas."""
+    @functools.wraps(method)
+    async def run(*args, **kwargs):
+        with search_reads_on_replicas():
+            return await method(*args, **kwargs)
+    return run
+
 #: What the DEPLOYED cluster's own failover costs, in seconds. Set it from
 #: the store's ``cluster-node-timeout`` (the production overlay ships
 #: 15000 ms): a cluster cannot even BEGIN an election until that has passed,
@@ -615,14 +645,15 @@ _FAILOVER_RETRY_AFTER_S = max(3, math.ceil(_CLUSTER_NODE_TIMEOUT_S))
 #: unblock from blocking operation, instance state changed". No pod
 #: restarted; the topology moved under the run.
 #:
-#: READS are clamped by the same number, for a reason that is NOT the write
-#: lock they do not take. ``-UNBLOCKED`` reaches whichever client is blocked
-#: when the role changes, so every second a long read is in flight is a
-#: second in which a demotion caused by anything else surfaces as this run's
-#: failure. A long read also holds a module thread on a node whose main
-#: thread has to keep answering the cluster bus. The ladders already narrow
-#: on a timeout, so the clamp engages behaviour the pipeline has rather than
-#: introducing a new failure.
+#: A READ races the election too. It holds the graph's read lock for as long
+#: as it runs, and a write that arrives meanwhile waits for it on the node's
+#: main thread — so the node stops answering everyone, the cluster bus
+#: included, until the read ends. Measured on a 3 masters x 2 replicas
+#: cluster (FalkorDB 4.18.11, a 15 s window): a 25 s read on a master with a
+#: write 2 s in froze that master for 22.6 s; the cluster failed it over,
+#: and the write it had acknowledged was lost. So a search read that has to
+#: land on a master gets this same share (``_read_query``); search reads
+#: otherwise run on replicas, under ``_CLUSTER_REPLICA_READ_SHARE``.
 #:
 #: So a query must END — abort, roll back, and let the node answer the
 #: cluster bus again — with the window still open. Two fifths leaves the
@@ -630,6 +661,20 @@ _FAILOVER_RETRY_AFTER_S = max(3, math.ceil(_CLUSTER_NODE_TIMEOUT_S))
 #: a master. The point is not the exact fraction; it is that the budget is
 #: DERIVED from the failure detector instead of set beside it.
 _CLUSTER_WRITE_SHARE = 0.4
+
+#: What share of the window one SEARCH read may spend on a REPLICA.
+#:
+#: A replica applies the master's writes the same way, so a long read
+#: freezes the replica it runs on — but only that replica: the master goes
+#: on taking writes, and the replica answers again when the read ends.
+#: Inside two thirds of the window it is never flagged failed, with the last
+#: third left to apply the write that waited and answer the pings behind it.
+#: Measured on the same cluster: a 25 s read on a replica with a write 2 s
+#: in left the master taking the write in 0.01 s, and flagged the replica
+#: failed at 20 s until the read ended. 10 s on the shipped 15 s window; a
+#: longer ``cluster-node-timeout`` allows longer statements, at the cost of
+#: a slower failover when a master really dies.
+_CLUSTER_REPLICA_READ_SHARE = 2 / 3
 
 
 #: Redis ships ``cluster-node-timeout`` at 15000 ms and this deployment runs
@@ -676,28 +721,15 @@ def _in_cluster_mode() -> bool:
     return (os.getenv("FALKORDB_MODE") or "").strip().lower() == "cluster"
 
 
-def cluster_write_ceiling_s() -> Optional[float]:
-    """The longest one WRITE may be allowed to run on THIS deployment, or
-    ``None`` when there is no failure detector to lose a race against.
-
-    WRITES ONLY, and the asymmetry is the point. A write holds the graph's
-    write lock and blocks its client for the duration, so one that
-    approaches the window races the election: the replica is promoted, this
-    master is demoted part-way through the batch, and every blocked client
-    gets ``-UNBLOCKED``. A READ takes no lock and cannot cause that at all —
-    FalkorDB runs GRAPH.* on a module thread pool while the main thread goes
-    on answering the cluster bus — so it is only ever a VICTIM of a demotion
-    something else caused. Bounding reads by this number bought that much
-    less exposure and cost far more: it cut ``get_children`` from the 15s it
-    is deliberately given to 6s, and turned wide-container canvas reads into
-    errors on exactly the graphs the wider budget exists for. Reads are
-    bounded by their own per-call budgets under the ASGI tier instead.
+def _cluster_window_s() -> Optional[float]:
+    """The cluster's failure-detector window (``cluster-node-timeout``) in
+    seconds, or ``None`` when there is no cluster to outlive.
 
     Three sources, most authoritative first: what a node REPORTED about
     itself, the ``FALKORDB_CLUSTER_NODE_TIMEOUT_MS`` env mirror, and — when
     we know we are clustered but neither has answered — an assumed window,
     announced once. ``None`` is returned only for a standalone or sentinel
-    deployment, where the budget genuinely has no cluster to outlive."""
+    deployment, where a budget genuinely has no cluster to outlive."""
     global _ASSUMED_WINDOW_WARNED
     window = _OBSERVED_NODE_TIMEOUT_S
     if window is None and _CLUSTER_NODE_TIMEOUT_S > 0:
@@ -711,12 +743,40 @@ def cluster_write_ceiling_s() -> Optional[float]:
             logger.warning(
                 "FALKORDB_MODE=cluster but no cluster-node-timeout is known "
                 "(FALKORDB_CLUSTER_NODE_TIMEOUT_MS unset and no node has "
-                "answered CONFIG GET yet) — assuming %.0fs and clamping every "
-                "WRITE budget to %.1fs. Set the env to the shards' own "
-                "--cluster-node-timeout so this is measured, not assumed.",
+                "answered CONFIG GET yet) — assuming %.0fs: writes are clamped "
+                "to %.1fs and search reads to %.1fs on a replica. Set the env "
+                "to the shards' own --cluster-node-timeout so this is measured, "
+                "not assumed.",
                 window, window * _CLUSTER_WRITE_SHARE,
+                window * _CLUSTER_REPLICA_READ_SHARE,
             )
-    return max(2.0, window * _CLUSTER_WRITE_SHARE)
+    return window
+
+
+def cluster_write_ceiling_s() -> Optional[float]:
+    """The longest one statement may run on a MASTER of this deployment —
+    every write, and a search read that has to land on one — or ``None``
+    when there is no failure detector to lose a race against.
+
+    A write holds the graph's write lock and blocks its client for the
+    duration, so one that approaches the window races the election: the
+    replica is promoted, this master is demoted part-way through the batch,
+    and every blocked client gets ``-UNBLOCKED``. A long read on a master
+    starts the same race the moment a write queues behind it
+    (``_CLUSTER_WRITE_SHARE``), which is why search reads run on replicas
+    and only fall back here. Other reads keep their own per-call budgets
+    under the ASGI tier: cutting ``get_children`` from its deliberate 15 s to
+    6 s turned wide-container canvas reads into errors."""
+    window = _cluster_window_s()
+    return None if window is None else max(2.0, window * _CLUSTER_WRITE_SHARE)
+
+
+def search_replica_ceiling_s() -> Optional[float]:
+    """The longest one Advanced Search read may run on a replica —
+    ``_CLUSTER_REPLICA_READ_SHARE`` of the window, 10 s at 15 s — or
+    ``None`` with no cluster window to stay inside (standalone, sentinel)."""
+    window = _cluster_window_s()
+    return None if window is None else max(2.0, window * _CLUSTER_REPLICA_READ_SHARE)
 
 
 def clamp_write_budget(seconds: float) -> float:
@@ -3714,7 +3774,8 @@ class FalkorDBProvider(GraphDataProvider):
         """
         if not self._replica_reads_enabled():
             return None
-        if _read_consistency.get() == "master":
+        consistency = _read_consistency.get()
+        if consistency == "master":
             return None
         master, candidates = await self._replica_candidates(graph_key)
         replicas = [n for n in candidates if self._replica_usable(n)]
@@ -3729,7 +3790,9 @@ class FalkorDBProvider(GraphDataProvider):
         # for its whole run, above.
         # The local pin is the fast path; the fleet stamp catches the eleven
         # read-backs in twelve that land on a pod which did not take the write.
-        if not self._master_is_silent(graph_key) and (
+        # A search asks to read no write of its own, and pinning it would send
+        # its reads to the master exactly while writes are landing there.
+        if consistency != "replica" and not self._master_is_silent(graph_key) and (
             self._in_settle_window(graph_key)
             or await self._fleet_wrote_recently(graph_key)
         ):
@@ -3743,7 +3806,7 @@ class FalkorDBProvider(GraphDataProvider):
         # available without more hardware: `replicas: 3` cannot schedule on
         # the six-node pool the overlay's own README mandates.
         rotation: List[Any] = list(vouched)
-        if include_master and _MASTER_READ_SHARE > 0:
+        if include_master and _MASTER_READ_SHARE > 0 and consistency != "replica":
             rotation.extend([None] * _MASTER_READ_SHARE)
         self._replica_turn = (getattr(self, "_replica_turn", -1) + 1) % len(rotation)
         return rotation[self._replica_turn]
@@ -4793,27 +4856,25 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def _read_query(self, graph_of, graph_key: str, cypher: str, params, t: float,
                           op: Optional[str], *, kind: str):
-        # DELIBERATELY NOT clamped by the cluster window, unlike the write
-        # boundary. A read does not CAUSE a failover: FalkorDB dispatches
-        # GRAPH.* to a module thread pool and the main thread goes on
-        # answering the cluster bus, so a long read cannot make the other
-        # masters vote this one out. It can only be CAUGHT by a demotion
-        # something else caused, which is a far weaker reason — and the
-        # price of pre-empting it was failing reads whose budgets were
-        # chosen on purpose and are larger than the window's share:
-        # get_children at 15s (wide containers legitimately exceed the
-        # generic 5s default), get_stats' two full scans at 30s, and each
-        # rung of the aggregated ladder under its own 0.8-of-tier budget.
-        # Clamping those to 6s turned working canvas reads into errors on
-        # exactly the graphs the budgets were widened for.
+        # A SEARCH read (``search_reads_on_replicas``) stays off the masters
+        # and inside the window. A long read holds the graph's read lock, and
+        # a write that queues behind it freezes the node for as long as the
+        # read has left — a master long enough to be failed over
+        # (``_CLUSTER_WRITE_SHARE``). On a replica a search read gets
+        # ``search_replica_ceiling_s``; when no replica can answer, the
+        # master does, under ``cluster_write_ceiling_s``.
         #
-        # What bounds a read is what already bounded it: the per-call budget
-        # its caller chose, under the ASGI tier above it, under the server's
-        # own TIMEOUT_MAX. See ``cluster_write_ceiling_s`` for the writes,
-        # where the lock makes the window binding.
+        # Other reads are bounded as before: by the per-call budget their
+        # caller chose, under the ASGI tier above it, under the server's own
+        # TIMEOUT_MAX. get_children at 15s (wide containers legitimately
+        # exceed the generic 5s default), get_stats' two full scans at 30s
+        # and each rung of the aggregated ladder under its own 0.8-of-tier
+        # budget were chosen on purpose; clamping those to the window's share
+        # turned working canvas reads into errors.
         """One read: on a replica when the router allows it, otherwise on the
         master — and on the master once more if the replica let us down."""
         _refuse_slow_parse(cypher)
+        search = _read_consistency.get() == "replica"
         replica = None
         try:
             # The master is a candidate here, not only a fallback: on one
@@ -4823,19 +4884,28 @@ class FalkorDBProvider(GraphDataProvider):
         except Exception:                                 # noqa: BLE001 — routing never fails a read
             replica = None
 
+        def _budget(node) -> float:
+            """``t`` — for a search read, never past what the node it lands
+            on may spend: a replica's share of the window, or a master's."""
+            if not search:
+                return t
+            ceiling = search_replica_ceiling_s() if node is not None else cluster_write_ceiling_s()
+            return t if ceiling is None else min(t, ceiling)
+
         async def _call_on(node):
             graph = graph_of()
             target = self._pinned_to(graph, node) if node is not None else graph
+            budget = _budget(node)
             return await asyncio.wait_for(
-                target.ro_query(cypher, params=params or {}, timeout=self._db_timeout_ms(t)),
-                timeout=t,
+                target.ro_query(cypher, params=params or {}, timeout=self._db_timeout_ms(budget)),
+                timeout=budget,
             )
 
         if replica is not None:
             try:
                 result = await self._guarded_timed(
-                    lambda: _call_on(replica), kind=kind, cypher=cypher, op=op, budget=t,
-                    pinned=True,
+                    lambda: _call_on(replica), kind=kind, cypher=cypher, op=op,
+                    budget=_budget(replica), pinned=True,
                 )
                 self._replica_reads += 1
                 return result
@@ -4859,7 +4929,7 @@ class FalkorDBProvider(GraphDataProvider):
                     raise
                 self._replica_fallbacks += 1
         result = await self._guarded_timed(
-            lambda: _call_on(None), kind=kind, cypher=cypher, op=op, budget=t,
+            lambda: _call_on(None), kind=kind, cypher=cypher, op=op, budget=_budget(None),
         )
         self._master_reads += 1
         return result
@@ -6632,6 +6702,7 @@ class FalkorDBProvider(GraphDataProvider):
         q = NodeQuery(search_query=query, limit=limit, offset=offset)
         return await self.get_nodes(q)
 
+    @_search_reads
     async def deep_search(self, query, *, deadline_ms=None):
         """Advanced server-side search. See ``backend/common/models/search.py``.
 
@@ -6649,6 +6720,7 @@ class FalkorDBProvider(GraphDataProvider):
     #: uncapped engine (``deep_search_session``).
     supports_search_sessions = True
 
+    @_search_reads
     async def deep_search_session(self, query, *, context):
         """The uncapped engine: run this request's share of a search
         session and return its page. See ``falkordb_search/engine.py``."""
@@ -6656,6 +6728,7 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         return await execute_session_search(self, query, context=context)
 
+    @_search_reads
     async def deep_search_count(self, query, *, context, advance=True):
         """A rule's exact total, in as many requests as the scan takes.
         See ``falkordb_search/engine.py``."""
@@ -6663,6 +6736,7 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         return await execute_count_session(self, query, context=context, advance=advance)
 
+    @_search_reads
     async def deep_search_membership(self, scope, items, urns, *, context):
         """Which of ``urns`` match which rule, inside ``scope``. See
         ``falkordb_search/membership.py``."""
@@ -6679,6 +6753,7 @@ class FalkorDBProvider(GraphDataProvider):
         return await evaluate_membership(self, scope, items, urns, run=run, timeout_s=5.0,
                                          data_version=context.data_version)
 
+    @_search_reads
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
                                   refresh=False):
         """Every property in ``scope``, exactly, in as many requests as the
@@ -6688,6 +6763,7 @@ class FalkorDBProvider(GraphDataProvider):
         return await execute_catalog_session(self, scope, context=context, wait_ms=wait_ms,
                                              session_id=session_id, refresh=refresh)
 
+    @_search_reads
     async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
                                  session_id=None):
         """Every match of ``query``, written to a file, in as many requests
@@ -6703,6 +6779,7 @@ class FalkorDBProvider(GraphDataProvider):
         from .falkordb_search.export import open_export
         return await open_export(self, session_id, scope_hash=context.scope_hash)
 
+    @_search_reads
     async def deep_search_ancestor_counts(self, session_id, urns, *, context):
         """How many of a search's matches each container holds, from the
         session's tally. See ``falkordb_search/engine.py``."""
@@ -6710,6 +6787,7 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         return await read_ancestor_counts(self, session_id, urns, scope_hash=context.scope_hash)
 
+    @_search_reads
     async def deep_search_resolve_refs(self, scope, refs, *, context, confined=False,
                                        with_paths=False):
         """Which entities each name reference names, in ``scope``. See
@@ -6734,6 +6812,7 @@ class FalkorDBProvider(GraphDataProvider):
         await self._ensure_connected()
         return explain_deep_search(self, query)
 
+    @_search_reads
     async def deep_search_discover(self, *, sample_per_label: int = 200):
         """Schema discovery. Mirrors ``deep_search`` (lazy import)."""
         from .falkordb_deep_search import discover_native_property_keys
@@ -6742,6 +6821,7 @@ class FalkorDBProvider(GraphDataProvider):
             self, sample_per_label=sample_per_label,
         )
 
+    @_search_reads
     async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
         """A property's most common values. Mirrors ``deep_search``."""
         from .falkordb_deep_search import suggest_property_values

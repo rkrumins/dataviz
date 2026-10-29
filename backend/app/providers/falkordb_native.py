@@ -6,15 +6,17 @@ everything else the provider does.
   sentinel failover). A slow native query never holds a socket the canvas
   needs, and the reply cap below applies to nothing else.
 * **A replica first.** One in step with its master, as the provider's own
-  read router judges it; otherwise the master.
+  read router judges it for Advanced Search (``search_reads_on_replicas``);
+  otherwise the master.
 * **A cap on the reply.** The pool's parser — hiredis, as everywhere else —
   counts what it reads off the socket for each reply and stops past
   ``max_reply_bytes``; redis-py then drops the connection. A ``RETURN
   collect(n)`` over millions of nodes costs this process at most the cap.
 * **No retry, and no second run elsewhere.** A replica that fails is benched
   as the provider benches one; the person is told to try again.
-* **The server's own timeout**, capped at its ``TIMEOUT_MAX``, with a client
-  deadline a little past it for a node that doesn't answer at all.
+* **The server's own timeout**, capped at its ``TIMEOUT_MAX`` — and on a
+  cluster at what the node it runs on may spend, as a search read is — with
+  a client deadline a little past it for a node that doesn't answer at all.
 """
 from __future__ import annotations
 
@@ -90,6 +92,9 @@ async def run_native(
         _is_query_memory_error,
         _is_query_timeout_error,
         _replica_at_fault,
+        cluster_write_ceiling_s,
+        search_reads_on_replicas,
+        search_replica_ceiling_s,
     )
     from backend.app.services.native_query.cells import to_cell
     from backend.app.services.native_query.settings import get_native_query_settings
@@ -99,7 +104,8 @@ async def run_native(
     if pools is None:
         pools = provider._native_pools = NativePools()
     try:
-        replica = await provider._replica_for(provider._graph_name)
+        with search_reads_on_replicas():
+            replica = await provider._replica_for(provider._graph_name)
     except Exception:                                     # noqa: BLE001 — the master serves
         replica = None
     endpoint = None
@@ -107,6 +113,9 @@ async def run_native(
         endpoint = (str(replica.host), int(replica.port), provider._conn_cfg.mode == "cluster")
     cap_ms = provider._server_timeout_cap_ms()
     server_ms = min(timeout_ms, cap_ms) if cap_ms > 0 else timeout_ms
+    ceiling = search_replica_ceiling_s() if replica is not None else cluster_write_ceiling_s()
+    if ceiling is not None:
+        server_ms = min(server_ms, int(ceiling * 1000))
     # Past the longest query allowed, so the socket never gives up first.
     socket_timeout = get_native_query_settings().max_timeout_ms / 1000 + CLIENT_GRACE_S + 5
     graph = await pools.graph(provider, endpoint, max_reply_bytes=max_reply_bytes,
