@@ -4,7 +4,7 @@ A shared draft field-merges concurrent edits from different collaborators:
 disjoint fields union, a same-field clash raises MergeConflict (settled via
 `resolutions`). A single actor's sequential edits keep last-writer-wins, and a
 private draft is written only by its owner. A member removed with an edit staged has
-it withdrawn, never folded.
+it saved first, under their own name.
 """
 import asyncio
 import os
@@ -105,7 +105,7 @@ async def _run() -> None:
     assert (await _x(svc, gid, d))["x"] == 33
     assert await svc.publish(graph_id=gid, branch_id=d, actor="alice", message="ship")  # owner/maintainer
 
-    # ── a member removed with an edit staged: they go, and so does the edit ─
+    # ── a member removed with an edit staged: it is saved first, under their name ─
     u = await svc.open_draft(graph_id=gid, owner="alice", shared=True)
     await svc.add_branch_member(graph_id=gid, branch_id=u, subject_type="user",
                                 subject_id="bob", role="editor", actor="alice")
@@ -113,8 +113,10 @@ async def _run() -> None:
     await svc.remove_branch_member(graph_id=gid, branch_id=u, subject_type="user", subject_id="bob",
                                    actor="alice")
     assert await svc.list_branch_members(graph_id=gid, branch_id=u) == []
+    assert (await _x(svc, gid, u))["x"] == 9                                 # his, saved
     await svc.apply_ops(graph_id=gid, branch_id=u, actor="alice", ops=[_upd("E", "alice", x=5, y=2)])
-    assert await svc.checkpoint(graph_id=gid, branch_id=u, actor="alice") is None   # not a silent x=9
+    assert [cm["actor"] for cm in (await svc.commit_log(graph_id=gid, branch_id=u))[:2]] == ["alice", "bob"]
+    assert await svc.checkpoint(graph_id=gid, branch_id=u, actor="alice") is None   # nothing left staged
     assert (await _x(svc, gid, u))["x"] == 5
     async with db.graphver_session() as s:
         assert await svc._pending_count(s, gid, u) == 0

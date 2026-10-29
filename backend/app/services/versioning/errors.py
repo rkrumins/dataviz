@@ -348,9 +348,24 @@ class VersionConflict(_HttpMapped, RuntimeError):
                           "currentVersion": current})
 
 
+class StagedChangesUnsaved(_HttpMapped, RuntimeError):
+    """A draft's level or members could not change: what ``actors`` staged, who would lose it, could
+    not be committed first (it clashes with what is already in the draft). Nothing about the draft's
+    access changed; what the others staged was saved."""
+
+    status_code = 409
+
+    def __init__(self, actors):
+        self.actors = list(actors)
+        super().__init__(
+            "Unsaved edits of " + ", ".join(self.actors) + " clash with the draft and could not be "
+            "saved first. They can save them (settling the clash), or discard them, then try again.",
+            {"type": "staged_changes_unsaved", "actors": self.actors})
+
+
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
                LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
-               AmbiguousSpelling, NotAnEdge)
+               AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved)

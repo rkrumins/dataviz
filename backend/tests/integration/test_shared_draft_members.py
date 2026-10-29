@@ -11,8 +11,9 @@ Groups are looked up by the service itself, only when a group row could decide t
 that lookup fails the answer is 503 ``groups_unavailable``, never a refusal, while the owner and a
 direct member write on without it. A member only through a group finds the draft in the branch list.
 
-An edit staged by someone who may no longer write the draft (removed, un-shared, out of the group)
-is withdrawn at the owner's next checkpoint: never committed, never published.
+A member removed, or made a viewer, has what they staged saved first, under their own name. An edit
+staged by someone who stopped writing the draft without a change to it (they left the group) is
+withdrawn at the next checkpoint: never committed, never published.
 
 A draft is shared by adding members: removing the last one leaves it no longer shared, and member
 rows left on a draft that isn't shared grant nothing, not even reading it (404), nor once it is
@@ -331,18 +332,21 @@ async def _revoked_staging_is_withdrawn(c, V, ds, gid, shared_draft, monkeypatch
     for who in ("bob", "erin", "alice"):
         r = await c.post(f"{B}/changes", json=_stage(who), headers=_as(who))
         assert r.status_code == 200, r.text
-    # Bob is removed and Erin leaves grp_eng before either commits: what they staged is not Alice's to save.
+    # Bob is removed: what he staged is saved first, under his name. Erin leaves grp_eng outside the
+    # draft, so nothing saves hers first: it is not Alice's to save, and her checkpoint withdraws it.
     r = await c.delete(f"{B}/members/user/bob", headers=_as("alice"))
     assert r.status_code == 200, r.text
+    log = (await c.get(f"{V1}/graphs/{gid}/commits", params={"branchId": d}, headers=_as("alice"))).json()
+    assert log["commits"][0]["actor"] == "bob", log
     monkeypatch.setitem(_GROUPS, "erin", ())
     r = await c.post(f"{B}/commit", json={}, headers=_as("alice"))
     assert r.status_code == 200 and r.json()["stagedChanges"] is True, r.text
     st = (await c.get(f"{B}/state", headers=_as("alice"))).json()["nodes"]
-    assert "urn:t:alice" in st and not {"urn:t:bob", "urn:t:erin"} & set(st), st
+    assert {"urn:t:alice", "urn:t:bob"} <= set(st) and "urn:t:erin" not in st, st
     r = await c.post(f"{B}/commit", json={}, headers=_as("alice"))     # nothing of theirs is left staged
     assert r.status_code == 200 and r.json()["stagedChanges"] is False, r.text
 
-    # Bob removed with his edit staged: Alice's publish leaves it out of main.
+    # Bob removed with his edit staged: it was saved under his name, so Alice's publish carries it.
     p = await shared_draft(bob="editor")
     P = f"{V1}/graphs/{gid}/branches/{p}"
     r = await c.post(f"{P}/changes", json=_stage("bob"), headers=_as("bob"))
@@ -354,7 +358,7 @@ async def _revoked_staging_is_withdrawn(c, V, ds, gid, shared_draft, monkeypatch
     main = next(b["branchId"] for b in (await c.get(f"{V1}/graphs/{gid}/branches", headers=_as("alice"))).json()
                 if b["kind"] == "main")
     st = (await c.get(f"{V1}/graphs/{gid}/branches/{main}/state", headers=_as("alice"))).json()["nodes"]
-    assert "urn:t:bob" not in st, st
+    assert "urn:t:bob" in st, st
 
 
 def _add(c, branch_url, who, subject, role, kind="user"):

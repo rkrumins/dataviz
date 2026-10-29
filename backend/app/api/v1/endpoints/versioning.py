@@ -1732,6 +1732,7 @@ async def add_branch_member(
             subject_id=body.subject_id, role=body.role, actor=user.id,
             check_eligible=lambda: _assert_member_eligible(
                 session, ws_id, body.subject_type, body.subject_id, body.role),
+            **await _settle_as_checkpoint(session, ws_id, _meta),
         )
 
 
@@ -1741,13 +1742,77 @@ async def remove_branch_member(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    """Remove a member: whoever loses write access with them has what they staged committed
+    first, under their own name (409 ``staged_changes_unsaved`` when it clashes with the draft)."""
     with _domain_errors():
         await svc.remove_branch_member(
             graph_id=graph_id, branch_id=branch_id, subject_type=subject_type,
-            subject_id=subject_id, actor=user.id,
+            subject_id=subject_id, actor=user.id, **await _settle_as_checkpoint(session, ws_id, _meta),
         )
     return {"removed": True}
+
+
+async def _settle_as_checkpoint(session: AsyncSession, ws_id: str, meta: dict) -> dict:
+    """What a checkpoint is checked against (containment, ontology rules, node identity), for the
+    commits that save someone's staged edits before they lose write access."""
+    return {"containment_edge_types": await _live_containment_types(session, ws_id, meta.get("data_source_id")),
+            "ontology_rules": await _rules_for_meta(session, ws_id, meta),
+            "node_identity": await _node_identity_for_meta(session, meta)}
+
+
+class DraftLevelRequest(_ApiModel):
+    visibility: Literal["public", "private"]
+
+
+class DraftLevelImpactResponse(_ApiModel):
+    visibility: str
+    # Who the change takes write access from, with edits staged: committed under their names first.
+    saved: List[Dict[str, Any]]
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/visibility", response_model=BranchResponse)
+async def set_draft_visibility(
+    ws_id: str, graph_id: str, branch_id: str, body: DraftLevelRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Make a draft public or private (its owner or a maintainer), within its data source's policy
+    (409 ``private_drafts_disabled`` / ``public_drafts_disabled``). Made private, the writers it
+    loses have what they staged committed first, under their own names; edits that clash with the
+    draft leave it as it was (409 ``staged_changes_unsaved``, naming whose)."""
+    await draft_level(session, _meta.get("data_source_id"), body.visibility)
+    with _domain_errors():
+        before = (await svc.get_branch(graph_id=graph_id, branch_id=branch_id, viewer=viewer))["visibility"]
+        branch = await svc.set_visibility(
+            graph_id=graph_id, branch_id=branch_id, visibility=body.visibility, actor=user.id,
+            **await _settle_as_checkpoint(session, ws_id, _meta))
+    if branch["visibility"] != before:
+        from backend.app.api.v1.endpoints.graph import _record_versioning
+        await _record_versioning(session, "workspace.versioning.draft_visibility_changed",
+                                 _meta.get("data_source_id"), {"graphId": graph_id, "branchId": branch_id,
+                                                               "from": before, "to": branch["visibility"]})
+    await _attach_user_names(session, [branch])
+    return branch
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}/visibility-impact", response_model=DraftLevelImpactResponse)
+async def draft_visibility_impact(
+    ws_id: str, graph_id: str, branch_id: str,
+    visibility: Literal["public", "private"] = Query(...),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+):
+    """What making the draft ``visibility`` would do, for its owner or a maintainer to see first:
+    whose staged edits are committed under their names before it changes, and how many."""
+    with _domain_errors():
+        return await svc.visibility_impact(graph_id=graph_id, branch_id=branch_id,
+                                           visibility=visibility, actor=user.id)
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/changes", response_model=StageResponse)

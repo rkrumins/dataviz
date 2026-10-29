@@ -45,7 +45,7 @@ from backend.common.property_patch import apply_patch, compose_patches, strip_de
 from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
 from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionExhausted,
-                     CurationAtRisk, DraftNotReadable,
+                     CurationAtRisk, DraftNotReadable, StagedChangesUnsaved,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
                      MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
@@ -787,18 +787,20 @@ class GraphVersioningService:
         self, *, graph_id: str, branch_id: str, subject_type: str, subject_id: str,
         role: str, actor: str, actor_groups: Sequence[str] = (),
         check_eligible: Optional[Callable[[], Awaitable[None]]] = None,
+        **checkpoint_kwargs,
     ) -> dict:
         """Grant a user/group a role on a draft (maintainer/owner only). Adding a
         member marks the draft shared; re-adding an existing subject updates role.
         ``check_eligible`` (raising :class:`IneligibleMember`) runs only once the actor
-        is authorized, under the draft's lock."""
+        is authorized, under the draft's lock. A role lowered so that someone no longer writes
+        the draft has what they staged committed first (:meth:`_settled_change`)."""
         if role not in ROLE_RANK:
             raise ValueError(f"unknown role {role!r}")
         if subject_type not in ("user", "group"):
             raise ValueError(f"unknown subject_type {subject_type!r}")
-        async with self._session() as s:
-            branch = await self._lock_branch(s, graph_id, branch_id)
-            await self._require_manage(s, branch, actor, actor_groups)
+        async with self._settled_change(graph_id, branch_id, actor, actor_groups, checkpoint_kwargs,
+                                        role=(subject_type, subject_id, role),
+                                        message=f"Saved before {subject_id}'s role changed") as (s, branch):
             if subject_type == "user" and subject_id == branch.owner:
                 raise IneligibleMember(subject_id, "owner")
             if check_eligible:
@@ -820,11 +822,13 @@ class GraphVersioningService:
 
     async def remove_branch_member(
         self, *, graph_id: str, branch_id: str, subject_type: str, subject_id: str,
-        actor: str, actor_groups: Sequence[str] = (),
+        actor: str, actor_groups: Sequence[str] = (), **checkpoint_kwargs,
     ) -> None:
-        async with self._session() as s:
-            branch = await self._lock_branch(s, graph_id, branch_id)
-            await self._require_manage(s, branch, actor, actor_groups)
+        """Remove a member (maintainer/owner only). Whoever no longer writes the draft without
+        that row has what they staged committed first (:meth:`_settled_change`)."""
+        async with self._settled_change(graph_id, branch_id, actor, actor_groups, checkpoint_kwargs,
+                                        without=(subject_type, subject_id),
+                                        message=f"Saved before {subject_id} was removed") as (s, branch):
             await s.execute(delete(BranchMemberORM).where(
                 BranchMemberORM.branch_id == branch_id,
                 BranchMemberORM.subject_type == subject_type,
@@ -845,6 +849,122 @@ class GraphVersioningService:
             ).order_by(BranchMemberORM.created_at))).scalars().all()
             return [{"subjectType": r.subject_type, "subjectId": r.subject_id, "role": r.role}
                     for r in rows]
+
+    async def set_visibility(self, *, graph_id: str, branch_id: str, visibility: str, actor: str,
+                             actor_groups: Sequence[str] = (), **checkpoint_kwargs) -> dict:
+        """Make a draft public or private (its owner or a maintainer). Made private, the writers it
+        loses — not its owner or its editor and maintainer members — have what they staged
+        committed first, each under their own name in the order they staged it; edits that clash
+        with the draft leave it as it was (:class:`StagedChangesUnsaved`). Its members stay."""
+        if visibility not in ("public", "private"):
+            raise ValueError(f"unknown draft level {visibility!r}")
+        async with self._session() as s:                 # refused before anyone's edits are saved
+            branch = await self._get_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise MainWriteForbidden()
+            self._require_open(branch)
+        async with self._settled_change(graph_id, branch_id, actor, actor_groups, checkpoint_kwargs,
+                                        visibility=visibility,
+                                        message="Saved before the draft was made private") as (s, branch):
+            self._require_open(branch)
+            if branch.visibility != visibility:
+                branch.visibility = visibility
+                branch.updated_at = _now()
+            return self._branch_meta(branch)
+
+    async def visibility_impact(self, *, graph_id: str, branch_id: str, visibility: str, actor: str,
+                                actor_groups: Sequence[str] = ()) -> dict:
+        """What making the draft ``visibility`` would do, for its owner or a maintainer to see
+        first: who it takes write access from has edits staged, and how many — committed under
+        their names before it changes."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            await self._require_manage(s, branch, actor, actor_groups)
+            saved = [{"actor": who, "changes": n} for who, n in await self._stagers(s, graph_id, branch_id)
+                     if await self._still_writes(s, branch, who)
+                     and not await self._still_writes(s, branch, who, visibility=visibility)]
+            return {"visibility": visibility, "saved": saved}
+
+    @contextlib.asynccontextmanager
+    async def _settled_change(self, graph_id: str, branch_id: str, actor: str, actor_groups,
+                              checkpoint_kwargs: dict, *, message: str,
+                              visibility: Optional[str] = None,
+                              without: Optional[Tuple[str, str]] = None,
+                              role: Optional[Tuple[str, str, str]] = None):
+        """A change to who writes a draft (its level, ``visibility``; a member row removed,
+        ``without``; or a member's ``role`` changed), made once nobody it takes write access from
+        has anything staged. Under the draft's lock, with the actor authorized: those writers'
+        staged edits are committed first, each under their own name in the order they staged
+        (outside the lock, which a checkpoint takes), and the check repeats. Yields ``(session,
+        branch)`` with the lock held and nobody left to settle. Edits that clash with the draft
+        are :class:`StagedChangesUnsaved`; people staging through three rounds, :class:`LockBusy`."""
+        for _round in range(3):
+            async with self._session() as s:
+                branch = await self._lock_branch(s, graph_id, branch_id)
+                await self._require_manage(s, branch, actor, actor_groups)
+                losing = [who for who, _n in await self._stagers(s, graph_id, branch_id)
+                          if await self._still_writes(s, branch, who)
+                          and not await self._still_writes(s, branch, who, visibility=visibility,
+                                                           without=without, role=role)]
+                if not losing:
+                    yield s, branch
+                    return
+            unsaved = await self._save_staged(graph_id=graph_id, branch_id=branch_id, actors=losing,
+                                              message=message, **checkpoint_kwargs)
+            if unsaved:
+                raise StagedChangesUnsaved(unsaved)
+        raise LockBusy("people kept saving edits to this draft; try again")
+
+    async def _still_writes(self, s, branch: BranchORM, who: str, *, visibility: Optional[str] = None,
+                            without: Optional[Tuple[str, str]] = None,
+                            role: Optional[Tuple[str, str, str]] = None) -> bool:
+        """Whether ``who`` writes the draft at level ``visibility`` (its own when None), without the
+        member row ``without`` (subject type, id), or with ``role`` (subject type, id, role) on an
+        existing row: its owner always; on a public draft anyone who changes its data source; else
+        an editor or maintainer member, directly or through a team."""
+        if who == branch.owner:
+            return True
+        if (visibility or branch.visibility) == "public":
+            return True
+        if not branch.is_shared:
+            return False
+        writers = set()
+        for r in (await s.execute(select(BranchMemberORM).where(
+                BranchMemberORM.branch_id == branch.id))).scalars().all():
+            key = (r.subject_type, r.subject_id)
+            if key == without:
+                continue
+            if ROLE_RANK[role[2] if role and key == role[:2] else r.role] >= ROLE_RANK["editor"]:
+                writers.add(key)
+        if ("user", who) in writers:
+            return True
+        teams = {sid for kind, sid in writers if kind == "group"}
+        return bool(teams and teams & set(await _load_actor_groups(who)))
+
+    @staticmethod
+    async def _stagers(s, graph_id: str, branch_id: str) -> List[Tuple[str, int]]:
+        """Who has edits staged on the draft, and how many, in the order they first staged."""
+        rows = (await s.execute(
+            select(WorkingChangeORM.actor, func.count(), func.min(WorkingChangeORM.seq))
+            .where(WorkingChangeORM.graph_id == graph_id, WorkingChangeORM.branch_id == branch_id,
+                   WorkingChangeORM.committed_into_commit_id.is_(None))
+            .group_by(WorkingChangeORM.actor)
+            .order_by(func.min(WorkingChangeORM.seq))
+        )).all()
+        return [(who, int(n)) for who, n, _first in rows]
+
+    async def _save_staged(self, *, graph_id: str, branch_id: str, actors: Sequence[str], message: str,
+                           **checkpoint_kwargs) -> List[str]:
+        """Commit each of ``actors``' staged edits under their own name, in turn. Returns the ones
+        whose edits clash with the draft (or break its ontology), left staged."""
+        unsaved = []
+        for who in actors:
+            try:
+                await self.checkpoint(graph_id=graph_id, branch_id=branch_id, actor=who, message=message,
+                                      only_actor=who, **checkpoint_kwargs)
+            except (MergeConflict, OntologyViolation):
+                unsaved.append(who)
+        return unsaved
 
     async def my_branch_role(self, *, graph_id: str, branch_id: str, actor: str) -> Optional[str]:
         """*actor*'s role on the draft: ``'owner'``, a member role, or ``None``."""
@@ -972,6 +1092,7 @@ class GraphVersioningService:
         ontology_rules: Optional[OntologyRules] = None,
         publishing_ok: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
+        only_actor: Optional[str] = None,
     ) -> Optional[str]:
         """Fold uncommitted working changes into a draft commit, retrying on a
         ``commit_seq`` collision so two collaborators checkpointing the SAME shared
@@ -979,7 +1100,8 @@ class GraphVersioningService:
 
         ``node_identity`` (the data source's resolved mapping) keeps each node's own
         name and identity properties in step with what the checkpoint writes —
-        ``node_identity.bind_node_write``; ``None`` binds nothing."""
+        ``node_identity.bind_node_write``; ``None`` binds nothing. ``only_actor`` folds that
+        person's staged changes alone (a level or member change saving them first)."""
         return await self._retry_seq(
             f"checkpoint {branch_id}",
             lambda: self._checkpoint_once(
@@ -987,7 +1109,7 @@ class GraphVersioningService:
                 resolutions=resolutions, actor_groups=actor_groups,
                 containment_edge_types=containment_edge_types,
                 ontology_rules=ontology_rules, publishing_ok=publishing_ok,
-                node_identity=node_identity),
+                node_identity=node_identity, only_actor=only_actor),
         )
 
     async def _checkpoint_once(
@@ -1003,6 +1125,7 @@ class GraphVersioningService:
         ontology_rules: Optional[OntologyRules] = None,
         publishing_ok: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
+        only_actor: Optional[str] = None,
     ) -> Optional[str]:
         """Fold uncommitted working changes into version rows under a new draft
         commit.  Returns the commit id, or ``None`` if nothing was staged.
@@ -1026,6 +1149,7 @@ class GraphVersioningService:
                         WorkingChangeORM.graph_id == graph_id,
                         WorkingChangeORM.branch_id == branch_id,
                         WorkingChangeORM.committed_into_commit_id.is_(None),
+                        *((WorkingChangeORM.actor == only_actor,) if only_actor is not None else ()),
                     )
                     .order_by(WorkingChangeORM.seq)
                 )
