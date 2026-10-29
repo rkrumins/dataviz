@@ -221,6 +221,9 @@ async def _write_marker(client, seq: int, epoch: int) -> Optional[str]:
 
 #: Reads a key's pass marker (:func:`read_projection_marker`).
 _MARKER_READ = "MATCH (m:_GVProjMeta) RETURN m.seq"
+#: Whether a summaries build stamped the key: the aggregation run's singleton, which readers need
+#: before they serve the ``:AGGREGATED`` layer as built.
+_SUMMARIES_BUILT = "MATCH (m:_AggMeta {id: 'singleton'}) RETURN count(m)"
 
 
 async def read_projection_marker(client) -> Tuple[Optional[bool], Optional[int]]:
@@ -510,6 +513,8 @@ class FalkorProjector:
         # and merged main never surfaces. Injected (not imported) so this package stays decoupled from
         # the management DB. None ⇒ no repair (the app path repairs explicitly before projecting).
         self._target_resolver = target_resolver
+        # graph_id → the watermark liveness last read the key's summaries stamp at: once per commit.
+        self._summaries_checked: Dict[str, int] = {}
 
     @staticmethod
     def default_graph_name(graph_id: str) -> str:
@@ -954,12 +959,13 @@ class FalkorProjector:
         instead of reads being served from it. Graphs at genesis, tombstoned or still being
         enabled for version control are not checked; a key that cannot be read is left alone.
         Each reset is fenced like a pass: it lands only while the row's epoch and watermark are
-        still the ones read. Returns the resets."""
+        still the ones read. A key that holds what it should is also checked for a summaries
+        build (:meth:`_ask_for_first_summaries`). Returns the resets."""
         async with self._session() as s:
             rows = (await s.execute(
                 select(ProjectionStateORM.graph_id, ProjectionStateORM.falkor_graph_name,
                        ProjectionStateORM.falkor_provider, ProjectionStateORM.projected_commit_seq,
-                       ProjectionStateORM.epoch)
+                       ProjectionStateORM.epoch, GraphORM.fork_parent_graph_id)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(
                     ProjectionStateORM.status == "idle",
@@ -976,18 +982,21 @@ class FalkorProjector:
             )).all()
         sem = asyncio.Semaphore(config.PROJECTION_CONCURRENCY)
 
-        async def _one(gid, name, provider_id, projected, epoch) -> Optional[Dict[str, object]]:
+        async def _one(gid, name, provider_id, projected, epoch,
+                       fork_of) -> Optional[Dict[str, object]]:
             async with sem:
                 try:
-                    exists, seq = await read_projection_marker(
-                        await self._graph_client(name, provider_id))
+                    client = await self._graph_client(name, provider_id)
+                    exists, seq = await read_projection_marker(client)
                 except Exception as exc:
                     logger.warning("liveness: cannot read the projection of %s (%s): %s",
                                    gid, name, exc)
                     return None
+                to_seq = liveness_reset_to(exists, seq, projected) if exists is not None else None
+                if exists and to_seq is None and fork_of is None:
+                    await self._ask_for_first_summaries(gid, client, projected)
             if exists is None:
                 return None
-            to_seq = liveness_reset_to(exists, seq, projected)
             if to_seq is None:
                 return None
             reason = ("liveness: projection key missing" if not exists
@@ -1014,6 +1023,39 @@ class FalkorProjector:
 
         done = await asyncio.gather(*[_one(*r) for r in rows])
         return [d for d in done if d is not None]
+
+    async def _ask_for_first_summaries(self, graph_id: str, client, projected: int) -> None:
+        """Hand the summaries of a key no summaries build ever stamped to the batch job
+        (``on_rollups_stale``). Readers serve the ``:AGGREGATED`` layer only once a build has
+        stamped it, so until then every canvas says its connections between collapsed items
+        haven't been summarised; and this projector only moves summaries by delta, which never
+        builds them, so nothing else ever would — a graph enabled before any build, a blank model
+        made where the web tier hands summaries to the control plane, a hand-off that failed.
+        Not for a source whose summaries live in a dedicated key (this key never holds the stamp:
+        publishes hand those over) or whose ontology has no lineage (readers need none). Once per
+        commit: a key read at this watermark is not read again until a later commit lands. Never
+        raises."""
+        if self._on_rollups_stale is None or self._edge_types_resolver is None:
+            return
+        if self._summaries_checked.get(graph_id) == projected:
+            return
+        try:
+            res = await _q(client, _SUMMARIES_BUILT, read_only=True, timeout_ms=5000)
+        except Exception as exc:
+            logger.warning("liveness: cannot read whether %s was summarised: %s", graph_id, exc)
+            return
+        self._summaries_checked[graph_id] = projected
+        rows = getattr(res, "result_set", None) or []
+        if rows and rows[0] and int(rows[0][0] or 0) > 0:
+            return
+        try:
+            sets = await self._edge_types_resolver(self._svc, graph_id)
+            if sets and sets[1] and "dedicated" not in sets[3:]:
+                logger.info("liveness: %s has no summaries build — asking for its first", graph_id)
+                await self._on_rollups_stale(graph_id)
+        except Exception as exc:                          # pragma: no cover - app-layer hooks
+            logger.warning("liveness: the first summaries build of %s was not asked for: %s",
+                           graph_id, exc)
 
     async def run_publish_hooks(self, graph_id: str, *, full_seed: bool = False,
                                 rollups_stale: bool = False) -> None:

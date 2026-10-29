@@ -333,11 +333,19 @@ rollups are fresh without waiting for a full aggregation job.
 ```mermaid
 flowchart LR
     P["project_graph"] -->|"full seed<br/>OR rollup_pairs == 'stale'<br/>OR heal reseeded"| H["on_rollups_stale(graph_id)"]
+    L["check_liveness"] -->|"no build has stamped the key"| H
     H --> MK["make_rollup_rebuild_hook<br/>(projection_target.py:62)"]
     MK -->|"dedicated mode → mark stale"| TRIG
     MK -->|"in_source mode"| TRIG["AggregationService.trigger<br/>idempotency: gv-rollup-rebuild:&lt;graph_id&gt;"]
     TRIG --> AW["AggregationWorker MERGEs :AGGREGATED"]
 ```
+
+**A key no build has stamped.** Readers serve the `:AGGREGATED` layer as built only once an
+aggregation run has stamped the key (`_AggMeta`); until then every canvas says its connections
+between collapsed items haven't been summarised. Deltas never write that stamp, so the liveness check
+asks for the first build (`_ask_for_first_summaries`): for an idle graph whose key holds what it
+should but carries no stamp, once per commit. A fork, a source whose summaries live in a dedicated
+key, and an ontology with no lineage are left out.
 
 The hook fires after the watermark is durable (`projection.py:376-382`) so the rebuild sees the
 projected raw edges. `make_rollup_rebuild_hook` (`projection_target.py:62-98`) resolves the data
