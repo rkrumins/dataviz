@@ -85,6 +85,61 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Advanced Search reads on replicas, sized to the cluster
+
+### Fixed
+
+- **A search could take a master out of a Redis Cluster, and lose a write.** A read holds its
+  graph, and a write that arrives meanwhile waits for it while the node answers nothing — the
+  cluster's health checks included. Search statements could run for 45 s, and a third of them ran
+  on a master. On a 3 masters × 2 replicas cluster with a 15 s `cluster-node-timeout`, a 25 s read
+  on a master with a write 2 s in froze that master for 22.6 s: the cluster failed it over, and
+  the write it had acknowledged was lost. Every read Advanced Search makes — the scan, counts,
+  display-rule checks, exports, the property catalog, discovery, value pickers, name lookups and
+  the Cypher console — now runs on a replica, where the same read leaves the master taking the
+  write in 0.01 s. A search is no longer sent to the master for 10 s after a write either, which
+  sent it there exactly while writes were landing.
+- **A cluster could read as empty to a search.** A read that landed on a node without the graph
+  answered "empty key", which the label lookup took to mean an empty graph: the search completed
+  with 0 matches. It is now checked against the cluster first, and otherwise answered as busy and
+  retried.
+
+### Changed
+
+- **A search statement on a cluster runs for up to two thirds of `cluster-node-timeout`** —
+  10 s at the shipped 15 s — on a replica, whatever `DEEP_SEARCH_CHUNK_TIMEOUT_MS` says. Inside
+  that, a replica held up by a write is never flagged failed. A search that needs longer runs as
+  more statements and finishes as before. A part's last try is the same length (it was 94 s).
+  With no replica to answer, the master takes the read for two fifths of the window, as a write
+  does. On standalone and sentinel deployments the limits are unchanged; a sentinel deployment
+  with replicas sends search reads to them too.
+- **A query that runs as one statement stops at the same limit on a cluster.** A Cypher query in
+  the console and a path search ("how does A reach B") can't be split, so they stop at 10 s on
+  the shipped window (6 s on a master), whatever `NATIVE_QUERY_MAX_TIMEOUT_MS` (30 s) allows. A
+  longer window gives them longer: 45000 allows 30 s.
+
+### Upgrading
+
+- Nothing is required. To allow longer statements, raise `--cluster-node-timeout` and
+  `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` together (30000 → 20 s, 45000 → 30 s), at the cost of a
+  slower failover when a master really dies. More replicas per shard add search capacity. See
+  [FalkorDB deployment](docs/FALKORDB_DEPLOYMENT.md#sizing--protection-parameters).
+- `FALKORDB_MASTER_READ_SHARE` no longer applies to Advanced Search.
+
+### Known limitations
+
+- A part that can't be split and can't be read in the statement limit is left out sooner — at
+  10 s rather than 94 s on the shipped window — and the count reads **at least *N***. A longer
+  window gives it longer.
+- Canvas reads keep their routing and their budgets — up to 15 s expanding a container, 30 s
+  for the stats scans, 60 s for the top level — so on a cluster taking a steady stream of writes
+  they can still hold a master up the same way. In a load test on a ~5M-entity graph (20 canvas
+  users, a write a second, a core per node, no searches) canvas reads froze a master for 28–49 s
+  and it was failed over, with and without this change. Bounding canvas reads is a change of its
+  own.
+
+---
+
 ## [Unreleased] — Every flow works: Edit in Code, Ask in every mode, undo, Back to results, recipes
 
 ### Fixed

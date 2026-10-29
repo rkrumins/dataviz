@@ -2575,7 +2575,9 @@ async def _searchable_labels(provider, *, timeout_s: float) -> List[str]:
             raise
         raise _labels_unread() from exc
     except Exception as exc:
-        if "empty key" in str(exc).lower():
+        # On a cluster "empty key" also comes back from a read that landed on
+        # a node without the graph — "no labels" then made it read as empty.
+        if "empty key" in str(exc).lower() and await provider._is_verified_missing_graph(exc):
             return []
         logger.warning("search: CALL db.labels() failed: %s", exc)
         raise _labels_unread() from exc

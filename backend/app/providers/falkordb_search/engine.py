@@ -45,6 +45,7 @@ from backend.app.providers.falkordb_deep_search import (
     encode_cursor,
     refuse_trace,
 )
+from backend.app.providers.falkordb_provider import search_replica_ceiling_s
 from backend.app.providers.falkordb_search.keys import build_sort_spec
 from backend.app.providers.falkordb_search.keys import SortKey, SortSpec
 from backend.app.providers.falkordb_search.plan import (
@@ -287,7 +288,7 @@ async def _compiler_for(provider, run, context: SearchRunContext, settings):
     kept in ``propertiesRaw`` too, when the graph keeps any — and the labels
     whose nodes do."""
     compiler = _build_compiler_for_provider(provider)
-    timeout_s = max(1.0, settings.chunk_timeout_ms / 1000.0)
+    timeout_s = max(1.0, statement_s(settings))
     raw_labels = await graph_raw_labels(provider, lambda c, p: run(c, p, timeout_s),
                                         context.data_version)
     if raw_labels:
@@ -324,7 +325,7 @@ async def _session_for(provider, query, compiler, store, run, query_id: str, k: 
         return session, False
     plan = await make_plan(
         provider, query, compiler,
-        run=lambda c, p: run(c, p, max(1.0, settings.chunk_timeout_ms / 1000.0)),
+        run=lambda c, p: run(c, p, max(1.0, statement_s(settings))),
         width=settings.chunk_width, walk_max=settings.walk_max,
         timeout_s=max(0.5, deadline - time.monotonic()),
     )
@@ -372,16 +373,28 @@ class _SearchWork:
         return {"tallies": self.tally or None}
 
 
+def statement_s(settings) -> float:
+    """How long one statement may run: the chunk timeout — on a cluster,
+    never past what one search read may hold a replica
+    (``search_replica_ceiling_s``)."""
+    ceiling = search_replica_ceiling_s()
+    configured = settings.chunk_timeout_ms / 1000.0
+    return configured if ceiling is None else min(configured, ceiling)
+
+
 def unit_budget(settings, passes: int = 1) -> float:
     """How long one unit may run: ``passes`` statements' timeout (a unit that
     reads in several passes gets more), within what a request can hold."""
-    return min(passes * settings.chunk_timeout_ms / 1000.0, _REQUEST_S - 2 * _GRACE_S)
+    return min(passes * statement_s(settings), _REQUEST_S - 2 * _GRACE_S)
 
 
 def _last_try_s() -> float:
     """The longest one unit may run: the whole of a request, less the grace
-    at either end. A unit that can't be cut gets it once (``_recover``)."""
-    return _REQUEST_S - 2 * _GRACE_S
+    at either end — on a cluster, what one search read may hold a replica.
+    A unit that can't be cut gets it once (``_recover``)."""
+    ceiling = search_replica_ceiling_s()
+    longest = _REQUEST_S - 2 * _GRACE_S
+    return longest if ceiling is None else min(longest, ceiling)
 
 
 def request_deadline(started: float, wait_s: float, unit_s: float) -> float:
@@ -553,7 +566,7 @@ async def _hop(session: Session, work, deadline: float, settings, unit_s: float,
     request moved nothing on, it answers with why, and the session keeps
     what it has. A last try runs only first, and only when the lease was
     taken for one (``last_tries``)."""
-    timeout_s = settings.chunk_timeout_ms / 1000.0
+    timeout_s = statement_s(settings)
     longest = _last_try_s()
     in_flight: Dict["asyncio.Task[Any]", Unit] = {}
     held: Optional[BaseException] = None
@@ -659,8 +672,9 @@ async def _answers(work) -> bool:
 async def _recover(session: Session, work, unit: Unit, timeout_s: float) -> bool:
     """A unit that ran out of time or memory: retried as its halves; else
     read one level down (``work.expand``); else given one last try at the
-    longest budget a request allows; else, when the work can do without it,
-    left out and said so. False: it can't go on without the unit."""
+    longest budget a unit may have (``_last_try_s``); else, when the work can
+    do without it, left out and said so. False: it can't go on without the
+    unit."""
     parts = unit.split()
     if not parts and not unit.last_try and hasattr(work, "expand"):
         try:

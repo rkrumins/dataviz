@@ -1654,3 +1654,23 @@ class TestServiceRouting:
         p.deep_search = legacy
         await self._svc(p)._run(_query(), self._scope(), None, SearchRunContext(admit=admit))
         assert held == ["in", "search", "out"]
+
+
+def test_a_statement_stays_inside_the_cluster_window(monkeypatch):
+    """45 s a statement by default. On a cluster with a 15 s
+    cluster-node-timeout a search read may hold a replica for 10 s, and a
+    last try is no longer than that."""
+    from backend.app.providers import falkordb_provider as fp
+
+    settings = SimpleNamespace(chunk_timeout_ms=45_000)
+    monkeypatch.setattr(fp, "_OBSERVED_NODE_TIMEOUT_S", None)
+    monkeypatch.setattr(fp, "_CLUSTER_NODE_TIMEOUT_S", 0.0)
+    monkeypatch.setenv("FALKORDB_MODE", "standalone")
+    assert engine_mod.statement_s(settings) == 45.0
+    assert engine_mod._last_try_s() == engine_mod._REQUEST_S - 2 * engine_mod._GRACE_S
+
+    monkeypatch.setattr(fp, "_OBSERVED_NODE_TIMEOUT_S", 15.0)
+    monkeypatch.setenv("FALKORDB_MODE", "cluster")
+    assert engine_mod.statement_s(settings) == pytest.approx(10.0)
+    assert engine_mod._last_try_s() == pytest.approx(10.0)
+    assert engine_mod.unit_budget(settings, passes=2) == pytest.approx(20.0)

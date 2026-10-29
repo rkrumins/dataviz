@@ -157,7 +157,7 @@ settings object. Defaults:
 | `DEEP_SEARCH_CANDIDATE_CAP` | `10000` | Default per-query candidate cap. |
 | `DEEP_SEARCH_CANDIDATE_CAP_MAX` | `100000` | Hard ceiling on the candidate cap. |
 | `DEEP_SEARCH_SOFT_DEADLINE_MS` | `60000` | Not read: the default soft deadline is `options.softDeadlineMs` (`60000`), set per request. |
-| `DEEP_SEARCH_CHUNK_TIMEOUT_MS` | `45000` | Budget for one scan unit of the uncapped engine. A range unit that runs out is split and retried; a single-root walk unit cannot be, so the search fails. |
+| `DEEP_SEARCH_CHUNK_TIMEOUT_MS` | `45000` | Budget for one scan unit of the uncapped engine — on a Redis Cluster at most two thirds of `cluster-node-timeout` (see Timeouts). A unit that runs out is split and retried. |
 | `DEEP_SEARCH_DISCOVER_SAMPLES` | `200` | Nodes sampled per label in discovery. |
 | `DEEP_SEARCH_SCOPE_ROOT_URNS_CAP` | `5000` | Max root URNs accepted on `scope.rootUrns`. |
 | `DEEP_SEARCH_SEARCHABLE_TEXT_CAP` | `8192` | Byte cap on stored searchable text. |
@@ -177,6 +177,13 @@ next request continues from. A unit is still cut at 94 s (the request cap minus
 grace); a `DEEP_SEARCH_CHUNK_TIMEOUT_MS` above that only lets the abandoned
 server-side statement run on, holding a FalkorDB thread, so keep it at or below
 94 000.
+
+**On a Redis Cluster** every search read runs on a replica, and one statement may
+hold it for two thirds of `cluster-node-timeout` — 10 s at 15000 — whatever
+`DEEP_SEARCH_CHUNK_TIMEOUT_MS` says; a unit's last try is that long too. With no
+replica to answer, the master takes the read for two fifths of the window. A
+longer window allows longer statements. See "Advanced Search reads run on
+replicas" in [`FALKORDB_DEPLOYMENT.md`](../FALKORDB_DEPLOYMENT.md).
 
 ## How it appears in the product
 
