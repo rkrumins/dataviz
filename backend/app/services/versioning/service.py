@@ -29,8 +29,8 @@ import random
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import (Any, Awaitable, Callable, Collection, Dict, List, Mapping, NamedTuple, Optional,
-                    Sequence, Set, Tuple)
+from typing import (Any, Awaitable, Callable, Collection, Dict, Iterable, List, Mapping, NamedTuple,
+                    Optional, Sequence, Set, Tuple)
 
 from sqlalchemy import (Boolean, Text, TextClause, any_, bindparam, insert, select, func, delete, null,
                         literal, text, update, or_, tuple_, and_, case)
@@ -419,6 +419,10 @@ _TERMINAL_PR_STATUS = ("merged", "closed")
 # Commit kinds a machine writes; every other kind on main is a person's work. The same split
 # lifecycle.py uses. The sync curation guard reads it (see _human_commit_in_sync_base).
 _MACHINE_COMMIT_KINDS = ("genesis", "import", "sync")
+
+# How many of others' newest commits a freshness poll reads for "saved since": a client that sends an
+# old head costs no more than one that keeps up (branch_freshness).
+_SAVED_SINCE_SCAN = 200
 
 # An "enable version control" job in one of these states means its graph isn't a graph yet: the
 # head is parked at genesis and the import is half-written. A failed job counts — it must be
@@ -5682,6 +5686,7 @@ class GraphVersioningService:
             groups = await self._viewer_groups(s, viewer, graph_id=graph_id)
             meta["my_role"] = (await self._my_roles(s, [branch], viewer.actor, groups)).get(branch.id)
             meta["access"] = self._access(branch, meta["my_role"], viewer)
+            meta["contributors"] = await self._contributors(s, graph_id, branch_id)
             return meta
 
     @staticmethod
@@ -5830,13 +5835,22 @@ class GraphVersioningService:
             "created_by": b.created_by, "created_at": b.created_at, "updated_at": b.updated_at,
         }
 
-    async def branch_freshness(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
+    async def branch_freshness(self, *, graph_id: str, branch_id: str,
+                               since_seq: Optional[int] = None,
+                               viewer: Optional["Viewer"] = None) -> Dict[str, object]:
         """O(1) collaboration signal: has ``main`` advanced under this draft since it branched?
         Compares the draft's branch point (``base_commit_seq``) to the graph's CURRENT main head
         (which bumps in the same transaction as any publish/merge, so this is live). Deliberately
         cheap — just two PK reads and an int compare — so a client can poll it frequently while
         editing; the expensive 3-way merge / conflict detection runs only when the user actually
-        pulls or publishes. ``main`` (and a fork's own main) is never behind itself."""
+        pulls or publishes. ``main`` (and a fork's own main) is never behind itself.
+
+        Also the branch's own head (``head_commit_seq``, its latest commit's seq on it) and level.
+        With ``since_seq`` (the head a client last saw), what others committed to it since:
+        ``saved_since`` {commits, changes, by (most commits first, then the latest), capped} —
+        ``viewer``'s own commits aside, and of others' only the newest ``_SAVED_SINCE_SCAN``. With
+        ``viewer``, what they may do with it (``access``), so a write lost to a change of level
+        shows on the next poll."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             branch = await s.get(BranchORM, branch_id)
@@ -5845,13 +5859,52 @@ class GraphVersioningService:
             main_head = graph.main_head_commit_seq or 0
             base = branch.base_commit_seq or 0
             behind_by = 0 if branch.kind == "main" else max(0, main_head - base)
-            return {
+            out = {
                 "behind": behind_by > 0,
                 "behind_by": behind_by,
                 "main_head_commit_seq": main_head,
                 "base_commit_seq": base,
                 "status": branch.status,      # a closed draft says so without listing every draft
+                "head_commit_seq": int(await s.scalar(
+                    select(func.coalesce(func.max(CommitORM.commit_seq), 0)).where(
+                        CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id))),
+                "visibility": branch.visibility,
+                "saved_since": None,
+                "access": None,
             }
+            if since_seq is not None:
+                others = [CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id,
+                          CommitORM.commit_seq > since_seq]
+                if viewer is not None:
+                    others.append(CommitORM.actor != viewer.actor)
+                rows = (await s.execute(
+                    select(CommitORM.actor, CommitORM.stats, CommitORM.commit_seq).where(*others)
+                    .order_by(CommitORM.commit_seq.desc()).limit(_SAVED_SINCE_SCAN + 1))).all()
+                capped = len(rows) > _SAVED_SINCE_SCAN
+                rows = rows[:_SAVED_SINCE_SCAN]
+                out["saved_since"] = {
+                    "commits": len(rows),
+                    "changes": sum(sum((stats or {}).get(op, 0) for op in ("create", "update", "delete"))
+                                   for _actor, stats, _seq in rows),
+                    "by": _most_commits_first((actor, seq) for actor, _stats, seq in rows if actor),
+                    "capped": capped,
+                }
+            if viewer is not None:
+                groups = await self._viewer_groups(s, viewer, graph_id=graph_id)
+                role = (await self._my_roles(s, [branch], viewer.actor, groups)).get(branch.id)
+                out["access"] = self._access(branch, role, viewer)
+            return out
+
+    async def _contributors(self, s, graph_id: str, branch_id: str, limit: int = 50) -> List[str]:
+        """Who committed to a branch, most commits first, then the latest: ``limit`` of them."""
+        rows = (await s.execute(
+            select(CommitORM.actor, func.count(), func.max(CommitORM.commit_seq))
+            .where(CommitORM.graph_id == graph_id, CommitORM.branch_id == branch_id,
+                   CommitORM.actor.isnot(None))
+            .group_by(CommitORM.actor)
+            .order_by(func.count().desc(), func.max(CommitORM.commit_seq).desc())
+            .limit(limit))).all()
+        return [actor for actor, _n, _latest in rows]
 
     async def _pr_meta(self, s, pr: MergeRequestORM) -> dict:
         # A draft MR is "behind" when its base lags the target graph's main head; the FE gates
@@ -8942,6 +8995,16 @@ def _rows_per_insert(dicts: List[dict]) -> int:
     Bounded by ``INGEST_BATCH_SIZE`` so it never exceeds the configured batch size."""
     ncols = len(dicts[0]) if dicts else 1
     return max(1, min(config.INGEST_BATCH_SIZE, _PG_MAX_BIND_PARAMS // ncols))
+
+
+def _most_commits_first(commits: Iterable[Tuple[str, int]]) -> List[str]:
+    """The actors of ``(actor, commit_seq)`` pairs, most commits first, then the latest."""
+    count: Dict[str, int] = {}
+    latest: Dict[str, int] = {}
+    for actor, seq in commits:
+        count[actor] = count.get(actor, 0) + 1
+        latest[actor] = max(latest.get(actor, 0), seq)
+    return sorted(count, key=lambda a: (-count[a], -latest[a]))
 
 
 def _delta_stats(deltas: List[Delta]) -> dict:

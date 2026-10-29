@@ -889,6 +889,8 @@ class BranchResponse(_ApiModel):
     # What the caller may do with it (the list and the branch read set it): {canRead, canWrite,
     # canManage}. A client renders this rather than working it out.
     access: Optional[Dict[str, bool]] = None
+    # The branch read only: who committed to it, most commits first, then the latest (50 at most).
+    contributors: Optional[List[str]] = None
 
 
 class OpenDraftResponse(_ApiModel):
@@ -976,13 +978,28 @@ class WatermarkModel(_ApiModel):
     external_drift: Optional[Dict[str, Any]] = Field(default=None, alias="externalDrift")
 
 
+class SavedSinceModel(_ApiModel):
+    """What others committed to a draft since the head a client last saw."""
+    commits: int
+    changes: int
+    by: List[str]                      # most commits first, then the latest
+    capped: bool                       # more than the newest ones read: at least this many
+
+
 class BranchFreshnessModel(_ApiModel):
-    """Live collaboration signal: has main advanced under this draft (must it pull before publishing)?"""
+    """Live collaboration signal: has main advanced under this draft (must it pull before publishing)?
+    And who else is saving into it."""
     behind: bool
     behind_by: int = Field(alias="behindBy")
     main_head_commit_seq: int = Field(alias="mainHeadCommitSeq")
     base_commit_seq: int = Field(alias="baseCommitSeq")
     status: str
+    # The branch's own latest commit: sent back as ``sinceSeq`` on the next poll.
+    head_commit_seq: int = Field(default=0, alias="headCommitSeq")
+    visibility: Optional[str] = None
+    access: Optional[Dict[str, bool]] = None
+    saved_since: Optional[SavedSinceModel] = Field(default=None, alias="savedSince")
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
 class RebuildResponse(_ApiModel):
@@ -2193,19 +2210,32 @@ async def get_watermark(
 @router.get("/graphs/{graph_id}/branches/{branch_id}/freshness", response_model=BranchFreshnessModel)
 async def get_branch_freshness(
     ws_id: str, graph_id: str, branch_id: str,
+    since_seq: Optional[int] = Query(None, alias="sinceSeq", ge=0,
+                                     description="the headCommitSeq of the last poll"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Live "is this draft behind main?" signal — O(1), safe to poll frequently while editing so a
-    branch owner learns RIGHT AWAY (not at merge) that a teammate published and they must pull."""
+    branch owner learns RIGHT AWAY (not at merge) that a teammate published and they must pull.
+    Also the draft's own head, level and what the caller may do with it; with ``sinceSeq``, what
+    others committed to it since, and who (``savedSince``). A draft the caller may no longer read
+    is a 404."""
     await _assert_draft_visible(svc, graph_id, branch_id, viewer)
     with _domain_errors():
-        f = await svc.branch_freshness(graph_id=graph_id, branch_id=branch_id)
+        f = await svc.branch_freshness(graph_id=graph_id, branch_id=branch_id, since_seq=since_seq,
+                                       viewer=viewer)
+    names = {}
+    if f["saved_since"] and f["saved_since"]["by"]:
+        resolved = await resolve_user_ids(session, set(f["saved_since"]["by"]))
+        names = {uid: disp for uid, (disp, _email) in resolved.items() if disp}
     return BranchFreshnessModel(behind=f["behind"], behind_by=f["behind_by"],
                                 main_head_commit_seq=f["main_head_commit_seq"],
-                                base_commit_seq=f["base_commit_seq"], status=f["status"])
+                                base_commit_seq=f["base_commit_seq"], status=f["status"],
+                                head_commit_seq=f["head_commit_seq"], visibility=f["visibility"],
+                                access=f["access"], saved_since=f["saved_since"], user_names=names)
 
 
 async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:

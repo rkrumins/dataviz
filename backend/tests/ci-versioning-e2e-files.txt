@@ -18,6 +18,7 @@ tests/integration/test_bootstrap_falkor_live.py
 tests/integration/test_bootstrap_job.py
 tests/integration/test_children_paging_exact_live.py
 tests/integration/test_children_sibling_lineage_live.py
+tests/integration/test_draft_awareness.py
 tests/integration/test_draft_levels.py
 tests/integration/test_draft_narrowing.py
 tests/integration/test_draft_overlay_delta.py
