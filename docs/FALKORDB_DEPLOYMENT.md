@@ -611,6 +611,63 @@ How the deployed `FALKORDB_ARGS` values are derived:
     pauses never touch failover. Size `repl-backlog-size` for the writes a
     replica may queue during a long statement, so that it catches up with a
     partial resync instead of a full one.
+- **Canvas reads run on replicas too, and no read runs on a master past the
+  write share.** On a cluster every read goes to an in-step replica. A master
+  answers the read-back of a person's own edit (for
+  `FALKORDB_REPLICA_READ_SETTLE_S`, 10 s, after it, on every pod), reads that
+  no replica in step can take, and the aggregation pipeline's own reads. Any
+  read that lands on a master — but the pipeline's — stops at the write share,
+  two fifths of `cluster-node-timeout` (6 s), and runs again on a replica with
+  the budget its caller chose (30 s for `get_children` and the stats scans).
+  The pipeline's writes no longer pin anyone's reads to the master; a
+  person's edit still does. A read sent to a replica that no longer serves
+  the graph (mid-failover, or moved to another shard) is never re-sent to the
+  master by the Redis client's `MOVED` handling; the replica is benched and
+  the master takes the read within its share.
+  - *Why.* A write holds its node's global lock while it waits for the
+    graph's write lock, and FalkorDB's graph lock favours readers:
+    `graphcontext.c` guards its writer preference with
+    `#ifdef PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`, which glibc
+    declares as an enum, so the shipped module never sets it (4.18.11, and
+    the current source). A write therefore waits for every read of that
+    graph the node has queued, not only the ones running, and the node
+    answers nothing until they drain. Capping each read does not bound
+    that; keeping reads off the node that takes the writes does. On one
+    replica per shard the master took every second canvas read before this.
+    Measured on one replica per shard, one core and `THREAD_COUNT` 4 per
+    node, a ~5M-entity graph and a write every half second:
+    - *Load test.* 20 canvas users, two opening a ~10 s view, with the web
+      tier's admission of 6 reads at a time. Before this change, the master
+      was failed over three times in three minutes, went silent for up to
+      28 s, and took 12 writes. After it, the master took 202 writes. In
+      that run and two more (aggregation-style writes with edits, and a
+      lighter load), it was never failed over and never went silent for
+      more than 8.2 s; before, every run failed it over.
+    - *Raw clients.* A dozen clients read one graph on its master, every
+      read stopped at 5.5 s. The master still went silent for 8–15 s at a
+      time; with heavier reads it went silent for 32 s and was failed over.
+      With no writes it never paused.
+
+    The admission is what keeps each node's queue short; past it, the
+    stalls grow.
+  - *Capacity.* On one replica per shard the replica now serves every canvas
+    read, half the capacity the rotation gave. Add replicas per shard for
+    more (each adds `THREAD_COUNT` threads). `FALKORDB_MASTER_READ_SHARE=1`
+    gives the master its turn back, every read there capped, at the risk
+    above.
+  - *Replicas.* A replica applies each write on its main thread and waits
+    for its own queued reads the same way, so a replica busy with reads
+    stalls under a steady write stream. It is flagged, never failed over, and
+    reads fall back to the master while it is out.
+  - *Slow views.* A read that needs longer than the master's share (a view
+    that takes 10–15 s to open) finishes on a replica. While the replica is
+    stalled it can only land on the master, which stops it at 6 s, and the
+    canvas retries it. In the lighter load above (6 canvas users, two
+    opening a ~10 s view), 5 of 14 such opens finished. Before this change
+    10 of 11 did, by holding the master until it was failed over. Under the
+    heavier load, none finished. Where such views are common while writes
+    stream in, a second replica per shard gives reads somewhere to go
+    while a long read stalls one.
 - **`MAX_QUEUED_QUERIES`** bounds queue depth so stampedes fail fast with an error
   instead of building a doomed backlog behind a slow query.
 - **`QUERY_MEM_CAPACITY`** kills runaway queries at the configured byte ceiling

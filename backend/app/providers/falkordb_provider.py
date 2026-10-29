@@ -515,14 +515,20 @@ def _vouch_is_current(vouched_at: Optional[float], now: float) -> bool:
 #: The master's share of a shard's reads, in round-robin slots against one
 #: slot per in-step replica. 0 keeps every read off the master.
 #:
-#: The master was never a candidate, so on this deployment's shape — one
-#: replica per shard — 100% of reads landed on the single node that is also
-#: applying the write stream, while the master's six query threads and 150
-#: queue slots sat idle. One slot each is a straight doubling of read
-#: capacity per source at no infrastructure cost, and it is the only
-#: doubling available: a third replica cannot be scheduled on the six-node
-#: pool the deployment mandates.
-_MASTER_READ_SHARE = int(os.getenv("FALKORDB_MASTER_READ_SHARE", "1"))
+#: Unset: none on a cluster, one on standalone and sentinel. A write holds
+#: its node's global lock while it waits for the graph's write lock, and
+#: FalkorDB's graph lock favours readers (4.18 guards its writer preference
+#: with an ``#ifdef`` on what glibc declares as an enum, so it is compiled
+#: out): the write waits for every read of that graph the node has queued,
+#: not only the ones running, and the node answers nothing until they drain.
+#: Measured on this deployment's shape, one replica per shard, under a write
+#: every half second: with the master taking one slot in two it was failed
+#: over twice in three minutes, and still went silent for 18 s with every
+#: read there capped at 6 s. So a cluster's replicas carry its reads, and its
+#: masters keep to writes, read-backs of their own writes, and fallbacks — at
+#: half the read capacity of one replica per shard, which is the trade.
+_MASTER_READ_SHARE_SET = os.getenv("FALKORDB_MASTER_READ_SHARE")
+_MASTER_READ_SHARE: Optional[int] = int(_MASTER_READ_SHARE_SET) if _MASTER_READ_SHARE_SET else None
 
 #: Set to "master" for work that must see its own writes — the aggregation
 #: pipeline sets it for the whole run, so RECONCILE never reads a replica
@@ -651,9 +657,10 @@ _FAILOVER_RETRY_AFTER_S = max(3, math.ceil(_CLUSTER_NODE_TIMEOUT_S))
 #: included, until the read ends. Measured on a 3 masters x 2 replicas
 #: cluster (FalkorDB 4.18.11, a 15 s window): a 25 s read on a master with a
 #: write 2 s in froze that master for 22.6 s; the cluster failed it over,
-#: and the write it had acknowledged was lost. So a search read that has to
-#: land on a master gets this same share (``_read_query``); search reads
-#: otherwise run on replicas, under ``_CLUSTER_REPLICA_READ_SHARE``.
+#: and the write it had acknowledged was lost. So every read that lands on
+#: a master gets this same share but the pipeline's own, and one stopped
+#: there runs again on a replica (``_read_query``); search reads otherwise
+#: run on replicas, under ``_CLUSTER_REPLICA_READ_SHARE``.
 #:
 #: So a query must END — abort, roll back, and let the node answer the
 #: cluster bus again — with the window still open. Two fifths leaves the
@@ -755,18 +762,18 @@ def _cluster_window_s() -> Optional[float]:
 
 def cluster_write_ceiling_s() -> Optional[float]:
     """The longest one statement may run on a MASTER of this deployment —
-    every write, and a search read that has to land on one — or ``None``
-    when there is no failure detector to lose a race against.
+    every write, and every read but the pipeline's own — or ``None`` when
+    there is no failure detector to lose a race against.
 
     A write holds the graph's write lock and blocks its client for the
     duration, so one that approaches the window races the election: the
     replica is promoted, this master is demoted part-way through the batch,
     and every blocked client gets ``-UNBLOCKED``. A long read on a master
     starts the same race the moment a write queues behind it
-    (``_CLUSTER_WRITE_SHARE``), which is why search reads run on replicas
-    and only fall back here. Other reads keep their own per-call budgets
-    under the ASGI tier: cutting ``get_children`` from its deliberate 15 s to
-    6 s turned wide-container canvas reads into errors."""
+    (``_CLUSTER_WRITE_SHARE``). A read stopped here runs again on a replica
+    with its own budget (``_read_query``): cutting ``get_children`` to 6 s
+    with nowhere else to run is what turned wide-container canvas reads into
+    errors once."""
     window = _cluster_window_s()
     return None if window is None else max(2.0, window * _CLUSTER_WRITE_SHARE)
 
@@ -3677,6 +3684,7 @@ class FalkorDBProvider(GraphDataProvider):
     _replica_reads: int = 0
     _master_reads: int = 0
     _replica_fallbacks: int = 0
+    _capped_on_master: int = 0
 
     def _replica_reads_enabled(self) -> bool:
         """Whether this provider may route a read off the master.
@@ -3700,7 +3708,14 @@ class FalkorDBProvider(GraphDataProvider):
         …and, when the fleet stamp is wired, so does every OTHER process's —
         the read-back rarely lands on the pod that took the write. Stamped
         without awaiting: a write must not pay a coordination round trip, and
-        the local pin already covers this process from here."""
+        the local pin already covers this process from here.
+
+        Not for a run that reads from the master throughout
+        (``read_from_master_only`` — the aggregation pipeline): it sees its own
+        writes without a pin, and pinning every reader of the graph for each
+        of its batches sent the whole canvas to the one node taking them."""
+        if _read_consistency.get() == "master":
+            return
         key = graph_key or self._graph_name
         if not hasattr(self, "_wrote_at"):
             self._wrote_at = {}
@@ -3759,10 +3774,11 @@ class FalkorDBProvider(GraphDataProvider):
         master.
 
         ``include_master`` puts the master into the rotation alongside the
-        in-step replicas, ``_MASTER_READ_SHARE`` slots to their one each —
-        None then means "the master, by its turn" rather than "no replica
-        qualified", and the caller treats both the same way. Callers asking
-        only "is there a usable replica?" leave it off.
+        in-step replicas, ``_MASTER_READ_SHARE`` slots to their one each (by
+        default none on a cluster) — None then means "the master, by its
+        turn" rather than "no replica qualified", and the caller treats both
+        the same way. Callers asking only "is there a usable replica?" leave
+        it off.
 
         Never raises, and never blocks longer than one sample deadline
         (``_REPLICA_SAMPLE_TIMEOUT_S``) on a store that is unwell:
@@ -3800,14 +3816,15 @@ class FalkorDBProvider(GraphDataProvider):
         if not vouched:
             return None
         # Round-robin so one replica does not take every read of a shard —
-        # and, when the caller allows it, so the master's idle query threads
-        # take their share instead of only writes. On the shipped overlay
-        # (one replica per shard) that is the only doubling of read capacity
-        # available without more hardware: `replicas: 3` cannot schedule on
-        # the six-node pool the overlay's own README mandates.
+        # and, when the caller allows it and the master takes a share, so its
+        # query threads take that share too (on a cluster only if the
+        # operator sets one: see ``_MASTER_READ_SHARE``).
         rotation: List[Any] = list(vouched)
-        if include_master and _MASTER_READ_SHARE > 0 and consistency != "replica":
-            rotation.extend([None] * _MASTER_READ_SHARE)
+        share = _MASTER_READ_SHARE
+        if share is None:
+            share = 0 if getattr(self._conn_cfg, "mode", None) == "cluster" else 1
+        if include_master and share > 0 and consistency != "replica":
+            rotation.extend([None] * share)
         self._replica_turn = (getattr(self, "_replica_turn", -1) + 1) % len(rotation)
         return rotation[self._replica_turn]
 
@@ -4104,13 +4121,15 @@ class FalkorDBProvider(GraphDataProvider):
             return node.db.select_graph(graph.name)
 
         pinned = copy.copy(graph)
-        base = graph.client.execute_command
-
-        def _send(*args, **kwargs):
-            kwargs.setdefault("target_nodes", node)
-            return base(*args, **kwargs)
-
-        pinned.execute_command = _send
+        # Sent by the node itself, not by the cluster client with
+        # ``target_nodes``: the client FOLLOWS a ``MOVED`` to the slot's
+        # master — from a replica that has stopped serving the slot, moved to
+        # another shard or mid-failover — and re-sends the read there with
+        # the server timeout it was given for a replica, so a read the router
+        # kept off the master ran on it uncapped (see ``_read_query``). The
+        # node hands the ``MOVED`` back instead, ``_replica_at_fault`` benches
+        # it, and the master answers inside its share of the window.
+        pinned.execute_command = node.execute_command
         return pinned
 
     def read_routing_counters(self) -> Dict[str, int]:
@@ -4119,6 +4138,7 @@ class FalkorDBProvider(GraphDataProvider):
             "replicaReads": self._replica_reads,
             "masterReads": self._master_reads,
             "replicaFallbacks": self._replica_fallbacks,
+            "cappedOnMaster": self._capped_on_master,
         }
 
     async def _run_guarded(
@@ -4277,7 +4297,9 @@ class FalkorDBProvider(GraphDataProvider):
                     # request sitting through the escalated schedule first.
                     tier_gone = sentinel and _is_sentinel_discovery_error(exc)
                     # Cluster slot moved → rebuild the single-node client, retry.
-                    if cluster and _is_cluster_routing_error(exc):
+                    # Not for a pinned read: its replica has moved on, and the
+                    # router benches it and asks the master (``_read_query``).
+                    if cluster and not pinned and _is_cluster_routing_error(exc):
                         if attempt >= max_retries:
                             raise
                         gen = self._conn_generation
@@ -4856,40 +4878,43 @@ class FalkorDBProvider(GraphDataProvider):
 
     async def _read_query(self, graph_of, graph_key: str, cypher: str, params, t: float,
                           op: Optional[str], *, kind: str):
-        # A SEARCH read (``search_reads_on_replicas``) stays off the masters
-        # and inside the window. A long read holds the graph's read lock, and
-        # a write that queues behind it freezes the node for as long as the
-        # read has left — a master long enough to be failed over
-        # (``_CLUSTER_WRITE_SHARE``). On a replica a search read gets
-        # ``search_replica_ceiling_s``; when no replica can answer, the
-        # master does, under ``cluster_write_ceiling_s``.
+        # No read runs on a cluster's MASTER past the window's write share
+        # (``cluster_write_ceiling_s``, 6 s at 15 s) — but the pipeline's
+        # own, which must read what it has just written there
+        # (``read_from_master_only``). A long read holds the graph's read
+        # lock, and a write that queues behind it freezes the node until that
+        # read, and every read queued after it, has ended
+        # (``_MASTER_READ_SHARE``): measured, a 25 s read froze a master for
+        # 22.6 s, the cluster failed it over, and a write it had acknowledged
+        # was lost; canvas reads alone did the same under a steady stream of
+        # writes. A read the master stops there runs again on a replica with
+        # its whole budget — get_children at 30s, get_stats' full scans and
+        # each rung of the aggregated ladder still finish, where a long read
+        # belongs.
         #
-        # Other reads are bounded as before: by the per-call budget their
-        # caller chose, under the ASGI tier above it, under the server's own
-        # TIMEOUT_MAX. get_children at 15s (wide containers legitimately
-        # exceed the generic 5s default), get_stats' two full scans at 30s
-        # and each rung of the aggregated ladder under its own 0.8-of-tier
-        # budget were chosen on purpose; clamping those to the window's share
-        # turned working canvas reads into errors.
+        # A SEARCH read (``search_reads_on_replicas``) never takes the
+        # master's turn, and gets ``search_replica_ceiling_s`` on a replica.
         """One read: on a replica when the router allows it, otherwise on the
-        master — and on the master once more if the replica let us down."""
+        master — and on the master once more if the replica let us down, or
+        on a replica if the master stopped it at its share of the window."""
         _refuse_slow_parse(cypher)
-        search = _read_consistency.get() == "replica"
+        consistency = _read_consistency.get()
+        search = consistency == "replica"
         replica = None
         try:
-            # The master is a candidate here, not only a fallback: on one
-            # replica per shard it was answering none of the reads and all of
-            # the writes, with six query threads idle.
+            # The master is a candidate here, not only a fallback, while it
+            # takes a share (``_MASTER_READ_SHARE``).
             replica = await self._replica_for(graph_key, include_master=True)
         except Exception:                                 # noqa: BLE001 — routing never fails a read
             replica = None
 
         def _budget(node) -> float:
-            """``t`` — for a search read, never past what the node it lands
-            on may spend: a replica's share of the window, or a master's."""
-            if not search:
-                return t
-            ceiling = search_replica_ceiling_s() if node is not None else cluster_write_ceiling_s()
+            """``t`` — never past what the node it lands on may spend: a
+            master's share of the window, or a replica's for a search read."""
+            if node is None:
+                ceiling = cluster_write_ceiling_s() if consistency != "master" else None
+            else:
+                ceiling = search_replica_ceiling_s() if search else None
             return t if ceiling is None else min(t, ceiling)
 
         async def _call_on(node):
@@ -4928,11 +4953,48 @@ class FalkorDBProvider(GraphDataProvider):
                 if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
                     raise
                 self._replica_fallbacks += 1
-        result = await self._guarded_timed(
-            lambda: _call_on(None), kind=kind, cypher=cypher, op=op, budget=_budget(None),
-        )
+        try:
+            result = await self._guarded_timed(
+                lambda: _call_on(None), kind=kind, cypher=cypher, op=op, budget=_budget(None),
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:                          # noqa: BLE001 — a replica may finish it
+            # Stopped at the master's share of the window rather than at its
+            # own budget: it runs again where it may spend that budget.
+            if _budget(None) >= t or not (
+                _is_query_timeout_error(exc) or isinstance(exc, (asyncio.TimeoutError, TimeoutError))
+            ):
+                raise
+            spare = await self._replica_off_master(graph_key)
+            if spare is None:
+                raise
+            try:
+                result = await self._guarded_timed(
+                    lambda: _call_on(spare), kind=kind, cypher=cypher, op=op,
+                    budget=_budget(spare), pinned=True,
+                )
+            except Exception as again:                    # noqa: BLE001 — benched like any replica
+                if _replica_at_fault(again):
+                    self._penalise_replica(spare, again)
+                raise
+            self._capped_on_master += 1
+            self._replica_reads += 1
+            return result
         self._master_reads += 1
         return result
+
+    async def _replica_off_master(self, graph_key: str):
+        """An in-step replica for a read the master stopped at its share of
+        the window — whatever its turn or the settle window would choose.
+        The read is past the settle window's few milliseconds of lag by then."""
+        token = _read_consistency.set("replica")
+        try:
+            return await self._replica_for(graph_key)
+        except Exception:                                 # noqa: BLE001 — routing never fails a read
+            return None
+        finally:
+            _read_consistency.reset(token)
 
     async def _empty_key_is_genuine(self) -> bool:
         """Whether an "Invalid graph operation on empty key" really means the
@@ -8788,6 +8850,13 @@ class FalkorDBProvider(GraphDataProvider):
         # is already fast).
         per_label_cap = int(os.getenv("FALKORDB_URN_LABEL_WARMUP_PER_LABEL_CAP", "200000"))
         per_label_timeout = float(os.getenv("FALKORDB_URN_LABEL_WARMUP_TIMEOUT_S", "30"))
+        # These scans go to the master directly: on a cluster no longer than
+        # any read may run there (``cluster_write_ceiling_s``), and told so —
+        # without a TIMEOUT the server runs one on for its own default.
+        ceiling = cluster_write_ceiling_s()
+        if ceiling is not None:
+            per_label_timeout = min(per_label_timeout, ceiling)
+        server_ms = self._db_timeout_ms(per_label_timeout)
 
         # CONTAINER-FIRST (BFS-priority) warm: the canvas opens at the
         # roots and expands container-by-container, so the nodes every
@@ -8809,7 +8878,7 @@ class FalkorDBProvider(GraphDataProvider):
                 f"RETURN DISTINCT t.urn, labels(t)[0] LIMIT {per_label_cap}",
             ):
                 pr = await asyncio.wait_for(
-                    self._proj.ro_query(prio_cypher, {}),
+                    self._proj.ro_query(prio_cypher, {}, timeout=server_ms),
                     timeout=per_label_timeout,
                 )
                 for row in (pr.result_set or []):
@@ -8844,7 +8913,7 @@ class FalkorDBProvider(GraphDataProvider):
                     lr = await asyncio.wait_for(
                         self._proj.ro_query(
                             f"MATCH (n:{safe}) RETURN n.urn LIMIT {remaining}",
-                            {},
+                            {}, timeout=server_ms,
                         ),
                         timeout=per_label_timeout,
                     )

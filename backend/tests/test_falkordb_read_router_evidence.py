@@ -310,9 +310,11 @@ def test_one_node_that_ignores_its_deadline_cannot_stall_a_read(monkeypatch):
 # ── the master takes its share of the reads ──────────────────────────────
 
 
-def test_the_master_joins_the_rotation_for_a_read():
-    """On one replica per shard this is a straight doubling of read capacity
-    per source, and the only one available on the mandated node pool."""
+def test_the_master_joins_the_rotation_when_given_a_share(monkeypatch):
+    """Not by default on a cluster (``_MASTER_READ_SHARE``). An operator who
+    sets one gets the master's threads back as read capacity — on one replica
+    per shard, a doubling — and the cap on every read there."""
+    monkeypatch.setattr(fp, "_MASTER_READ_SHARE", 1)
     conn = _Conn(replicas=(R1,))
     p = _provider(conn)
     served = [_run(p._replica_for("g1", include_master=True)) for _ in range(4)]

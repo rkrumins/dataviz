@@ -132,6 +132,39 @@ async def test_cluster_routing_error_rebuilds_client_then_retries(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_a_pinned_reads_redirect_goes_back_to_the_router(monkeypatch):
+    """A MOVED from the replica a read was pinned to says that replica has
+    moved on, not that the client needs rebuilding: the router benches it
+    and asks the master (``_read_query``)."""
+    p = _provider()
+
+    class _Cfg:
+        mode = "cluster"
+
+    p._conn_cfg = _Cfg()
+    p._conn_generation = 0
+    rebuilds = {"n": 0}
+
+    async def fake_rebuild(gen):
+        rebuilds["n"] += 1
+
+    monkeypatch.setattr(p, "_rebuild_graph_client_for_failover", fake_rebuild)
+
+    class MovedError(Exception):
+        pass
+
+    calls = {"n": 0}
+
+    async def call():
+        calls["n"] += 1
+        raise MovedError("MOVED 1234 host:6379")
+
+    with pytest.raises(MovedError):
+        await p._run_guarded(call, read_only=True, pinned=True)
+    assert calls["n"] == 1 and rebuilds["n"] == 0
+
+
+@pytest.mark.asyncio
 async def test_null_handle_error_reconnects_then_retries(monkeypatch):
     """A graph handle nulled mid-flight (manager evicted+closed the instance
     during a job) surfaces as ``'NoneType' object has no attribute 'query'``.

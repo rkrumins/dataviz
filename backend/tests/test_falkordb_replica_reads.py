@@ -36,9 +36,16 @@ def _stale_sample() -> float:
 class _Node:
     def __init__(self, host, port=6379):
         self.host, self.port = host, port
+        self.conn = None
 
     def __repr__(self):
         return f"{self.host}:{self.port}"
+
+    def execute_command(self, *args, **kwargs):
+        """A command sent by the node itself, as a redis-py ClusterNode
+        sends a pinned read — recorded by the connection whose slot map
+        holds the node, as addressed to it."""
+        return self.conn.execute_command(*args, target_nodes=self, **kwargs)
 
 
 MASTER = _Node("10.0.0.1")
@@ -54,6 +61,8 @@ class _Conn:
             slots_cache={7: [MASTER, *replicas]},
             get_node_from_slot=lambda slot: MASTER,
         )
+        for node in (MASTER, *replicas):
+            node.conn = self
         self._info = info if info is not None else {
             "role": "master", "connected_slaves": 2, "master_repl_offset": 100,
             "slave0": {"ip": "10.0.1.1", "port": "6379", "state": "online", "offset": 100, "lag": 0},
@@ -503,6 +512,25 @@ def test_a_pinned_graph_addresses_one_node_and_shares_everything_else():
     assert conn.calls[-1][2] is None
 
 
+def test_a_pinned_read_does_not_follow_a_moved_to_the_master():
+    """Given ``target_nodes``, redis-py's cluster client follows a MOVED to the
+    slot's master and re-sends the read there, with the server timeout it was
+    given for a replica — on a live cluster the master ran it. The node sends
+    it itself, so the MOVED comes back to the router."""
+    from redis.exceptions import MovedError
+
+    class _MovedOn(_Node):
+        async def execute_command(self, *args, **kwargs):
+            raise MovedError("7 10.0.0.1:6379")
+
+    conn = _Conn()
+    p = _provider(conn)
+    pinned = p._pinned_to(p._graph, _MovedOn("10.0.3.1"))
+    with pytest.raises(MovedError):
+        _run(pinned.execute_command("GRAPH.RO_QUERY", "g1", "RETURN 1"))
+    assert conn.calls == []
+
+
 def test_the_cluster_client_does_the_readonly_handshake():
     """Without it a replica answers MOVED to every targeted read — the
     feature would silently fall back to the master on every request."""
@@ -531,8 +559,9 @@ def test_the_provider_setting_defaults_to_auto_and_only_never_pins():
 def test_the_counters_say_how_reads_were_served():
     p = _provider(_Conn())
     p._replica_reads, p._master_reads, p._replica_fallbacks = 7, 3, 1
+    p._capped_on_master = 2
     assert p.read_routing_counters() == {
-        "replicaReads": 7, "masterReads": 3, "replicaFallbacks": 1,
+        "replicaReads": 7, "masterReads": 3, "replicaFallbacks": 1, "cappedOnMaster": 2,
     }
 
 
@@ -1122,3 +1151,182 @@ def test_every_search_entry_point_reads_on_replicas(monkeypatch):
                  "deep_search_ancestor_counts", "deep_search_resolve_refs",
                  "deep_search_discover", "deep_search_values"):
         assert hasattr(getattr(FalkorDBProvider, name), "__wrapped__"), name
+
+
+# ── no long read on a cluster's master ───────────────────────────────────
+#
+# Canvas reads alone did to a master what a long search read did: 20 users
+# and a write a second on a ~5M-entity graph froze it for 28-49 s and the
+# cluster failed it over. A read there now gets the window's write share; one
+# that needs longer runs again on a replica with its whole budget.
+
+
+class _TimedOnMaster:
+    """``ro_query`` that records each server timeout, and answers "Query timed
+    out" when the read was addressed to the master (no ``target_nodes``)."""
+
+    def __init__(self, conn, monkeypatch):
+        self.asked = []
+        holder = self
+
+        async def ro_query(graph, cypher, params=None, timeout=None):
+            holder.asked.append(timeout)
+            await graph.execute_command("GRAPH.RO_QUERY", graph.name, cypher)
+            if conn.calls[-1][2] is None:
+                from redis.exceptions import ResponseError
+                raise ResponseError("Query timed out")
+            return types.SimpleNamespace(result_set=[["ok"]])
+
+        monkeypatch.setattr(_Graph, "ro_query", ro_query)
+
+
+def _router(conn, monkeypatch, *, seconds=15):
+    _window(monkeypatch, seconds)
+    p = _reading_provider(conn)
+    p._db_timeout_ms = lambda t: int(t * 1000)
+
+    async def _guarded(call, **kw):
+        return await call()
+
+    p._guarded_timed = _guarded
+    return p
+
+
+def test_with_two_replicas_in_step_the_master_takes_no_turn():
+    p = _provider(_Conn())
+    served = {_run(p._replica_for("g1", include_master=True)) for _ in range(6)}
+    assert served == {R1, R2}
+
+
+def test_with_one_replica_in_step_the_master_still_takes_no_turn():
+    """One replica per shard is this deployment's shape. A write waits for
+    every read of its graph the node has queued — FalkorDB's lock favours
+    readers — so the master's turn froze it under writes even with each of
+    its reads capped."""
+    p = _provider(_Conn(replicas=(R1,)))
+    served = [_run(p._replica_for("g1", include_master=True)) for _ in range(4)]
+    assert served == [R1] * 4
+
+
+def test_on_sentinel_the_master_keeps_its_turn(monkeypatch):
+    """No cluster window, no cap: sentinel keeps the rotation it had."""
+    p = _sentinel_provider(monkeypatch, replica_answers={
+        "127.0.0.1:6501": _replica_info(), "127.0.0.1:6502": _replica_info(),
+    })
+    served = [_run(p._replica_for("g1", include_master=True)) for _ in range(6)]
+    assert None in served
+
+
+def test_a_read_the_master_stops_runs_again_on_a_replica_with_its_whole_budget(monkeypatch):
+    """Pinned to the master by a write a moment ago: 6 s there, then the
+    replica gets the 30 s the caller chose."""
+    conn = _Conn()
+    timed = _TimedOnMaster(conn, monkeypatch)
+    p = _router(conn, monkeypatch)
+    p._note_local_write()
+    result = _run(p._ro_query("MATCH (n) RETURN n", timeout=30.0, op="children.page"))
+    assert result.result_set == [["ok"]]
+    assert timed.asked == [6_000, 30_000]
+    assert p.read_routing_counters()["cappedOnMaster"] == 1
+
+
+def test_a_replica_that_has_moved_on_is_benched_and_the_master_answers_in_its_share(monkeypatch):
+    """A replica answering MOVED no longer serves the graph. The read goes to
+    the master inside its share of the window — never with the budget it was
+    given for the replica — and the replica sits out its penalty."""
+    from redis.exceptions import MovedError
+
+    conn = _Conn()
+    asked = []
+
+    async def ro_query(graph, cypher, params=None, timeout=None):
+        asked.append(timeout)
+        await graph.execute_command("GRAPH.RO_QUERY", graph.name, cypher)
+        if conn.calls[-1][2] is not None:
+            raise MovedError("7 10.0.0.1:6379")
+        return types.SimpleNamespace(result_set=[["ok"]])
+
+    monkeypatch.setattr(_Graph, "ro_query", ro_query)
+    monkeypatch.setattr(fp, "_REPLICA_PENALTY_BOX", {})
+    p = _router(conn, monkeypatch)
+    result = _run(p._ro_query("MATCH (n) RETURN n", timeout=30.0, op="children.page"))
+    assert result.result_set == [["ok"]]
+    assert asked == [30_000, 6_000]
+    assert len(fp._REPLICA_PENALTY_BOX) == 1
+    counters = p.read_routing_counters()
+    assert counters["replicaFallbacks"] == 1 and counters["masterReads"] == 1
+
+
+def test_a_read_inside_its_own_budget_is_not_run_again(monkeypatch):
+    """A 5 s read that times out on the master timed out on its own budget,
+    not the master's share: a replica would fail it the same way."""
+    from redis.exceptions import ResponseError
+
+    conn = _Conn()
+    timed = _TimedOnMaster(conn, monkeypatch)
+    p = _router(conn, monkeypatch)
+    p._note_local_write()
+    with pytest.raises(ResponseError):
+        _run(p._ro_query("MATCH (n) RETURN n", timeout=5.0, op="nodes.query"))
+    assert timed.asked == [5_000]
+
+
+def test_with_no_replica_a_read_past_the_masters_share_fails(monkeypatch):
+    """Where it would otherwise run on, holding up every write behind it —
+    and with no replica to promote, a master frozen past the window takes
+    its slots offline for the whole cluster."""
+    from redis.exceptions import ResponseError
+
+    conn = _Conn(replicas=())
+    timed = _TimedOnMaster(conn, monkeypatch)
+    p = _router(conn, monkeypatch)
+    with pytest.raises(ResponseError):
+        _run(p._ro_query("MATCH (n) RETURN n", timeout=30.0, op="stats"))
+    assert timed.asked == [6_000]
+
+
+def test_the_pipelines_reads_keep_their_budget_on_the_master(monkeypatch):
+    """It reads what it has just written, so only the master will do, and its
+    scans need the budget on large graphs."""
+    from redis.exceptions import ResponseError
+
+    conn = _Conn()
+    timed = _TimedOnMaster(conn, monkeypatch)
+    p = _router(conn, monkeypatch)
+    with fp.read_from_master_only(), pytest.raises(ResponseError):
+        _run(p._ro_query("MATCH (n) RETURN n", timeout=30.0, op="extract"))
+    assert timed.asked == [30_000]
+
+
+def test_without_a_cluster_window_a_master_read_keeps_its_budget(monkeypatch):
+    from redis.exceptions import ResponseError
+
+    conn = _Conn(replicas=())
+    timed = _TimedOnMaster(conn, monkeypatch)
+    p = _router(conn, monkeypatch)
+    monkeypatch.setattr(fp, "_OBSERVED_NODE_TIMEOUT_S", None)
+    monkeypatch.setattr(fp, "_CLUSTER_NODE_TIMEOUT_S", 0.0)
+    monkeypatch.setenv("FALKORDB_MODE", "standalone")
+    with pytest.raises(ResponseError):
+        _run(p._ro_query("MATCH (n) RETURN n", timeout=30.0, op="stats"))
+    assert timed.asked == [30_000]
+
+
+def test_a_pipeline_write_pins_no_reader_but_an_edit_does(monkeypatch):
+    """The pipeline sees its own writes from the master already; pinning every
+    reader for each of its batches sent the whole canvas there."""
+    stamped = []
+    monkeypatch.setattr(fp, "_fleet_write_note", lambda key: stamped.append(key) or asyncio.sleep(0))
+    p = _provider(_Conn())
+
+    async def write(pinned):
+        if pinned:
+            with fp.read_from_master_only():
+                p._note_local_write()
+        else:
+            p._note_local_write()
+
+    _run(write(True))
+    assert not p._in_settle_window("g1") and stamped == []
+    _run(write(False))
+    assert p._in_settle_window("g1") and stamped == ["g1"]

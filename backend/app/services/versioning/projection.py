@@ -147,11 +147,13 @@ async def _q(client, cypher: str, params: Optional[dict] = None,
     # ``cluster-node-timeout`` costs the shard its master exactly as a 60s
     # rebuild batch does.
     #
-    # A READ is not, for the reason set out on ``cluster_write_ceiling_s``:
-    # it takes no write lock and cannot vote its own master out, so the
-    # ceiling protects nothing it could break, while cutting reconcile's
-    # counts and the bootstrap copy's scans to the window's share would fail
-    # them on the large graphs they exist to describe.
+    # A READ keeps its budget. The projector reads what it has just written,
+    # so it reads the master, and cutting reconcile's counts and the bootstrap
+    # copy's scans to the window's share would fail them on the large graphs
+    # they exist to describe — though a write that queues behind a long read
+    # freezes the master until that read, and every read queued after it,
+    # has ended (see ``_MASTER_READ_SHARE``), as the aggregation pipeline's
+    # scans do.
     from backend.app.providers.falkordb_provider import clamp_write_budget
 
     asked_s = timeout_ms / 1000.0
