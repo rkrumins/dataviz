@@ -97,8 +97,9 @@ async def test_a_long_search_read_ends_inside_the_window_and_the_master_keeps_wr
         wrote = time.monotonic()
         await provider._query("CREATE (:W {at: timestamp()})", timeout=5.0)
         wrote_in = time.monotonic() - wrote
-        with pytest.raises(Exception):        # the server stops it at the ceiling
-            await read
+        await asyncio.wait([read])
+        stopped = read.exception()            # the server stops it at the ceiling
+    assert "timed out" in str(stopped), f"the read ended with {stopped!r}"
     assert time.monotonic() - started < ceiling + 3
     assert wrote_in < 1.0, f"the master took {wrote_in:.1f}s to take a write"
     await asyncio.sleep(ceiling)              # what a flag would take to appear
