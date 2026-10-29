@@ -67,6 +67,7 @@ from .models import (
 # Strip reserved keys from incoming node `properties` so they don't pollute stored payloads (and
 # flood the projector with reserved-key-drop warnings). The provider owns the canonical key set.
 from backend.app.providers.falkordb_provider import _sanitize_node_properties
+from backend.app.services.node_identity import ResolvedNodeIdentity, bind_node_writes
 
 logger = logging.getLogger(__name__)
 
@@ -792,17 +793,22 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        node_identity: Optional[ResolvedNodeIdentity] = None,
     ) -> Optional[str]:
         """Fold uncommitted working changes into a draft commit, retrying on a
         ``commit_seq`` collision so two collaborators checkpointing the SAME shared
-        draft concurrently don't crash (one retries against the other's new head)."""
+        draft concurrently don't crash (one retries against the other's new head).
+
+        ``node_identity`` (the data source's resolved mapping) keeps each node's own
+        name and identity properties in step with what the checkpoint writes —
+        ``node_identity.bind_node_write``; ``None`` binds nothing."""
         return await self._retry_seq(
             f"checkpoint {branch_id}",
             lambda: self._checkpoint_once(
                 graph_id=graph_id, branch_id=branch_id, actor=actor, message=message,
                 resolutions=resolutions, actor_groups=actor_groups,
                 containment_edge_types=containment_edge_types,
-                ontology_rules=ontology_rules),
+                ontology_rules=ontology_rules, node_identity=node_identity),
         )
 
     async def _checkpoint_once(
@@ -816,6 +822,7 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        node_identity: Optional[ResolvedNodeIdentity] = None,
     ) -> Optional[str]:
         """Fold uncommitted working changes into version rows under a new draft
         commit.  Returns the commit id, or ``None`` if nothing was staged.
@@ -898,6 +905,13 @@ class GraphVersioningService:
                     base_state[e] = cur            # so net_delta sees a delete
                     head_state[e] = None           # tombstone the descendant / incident edge
                     kind_by_entity[e] = "edge" if _is_edge_payload(cur) else "node"
+            # Each node's own name / identity properties, kept in step with what the fold wrote
+            # (judged against the state the staged edits apply to, after the shared-draft merge,
+            # so a mirrored value never shows up as a clash of its own).
+            if node_identity is not None:
+                head_state.update(bind_node_writes(
+                    head_state, base_state, kind_by_entity=kind_by_entity, identity=node_identity,
+                    created={c.entity_id for c in changes if c.op == "create"}))
             # Canonicalize entity/edge-type casing to the ontology's declared spelling BEFORE
             # the squash, so the folded version rows (and their projection) carry canonical
             # casing regardless of what the client staged (a case variant never fails).
@@ -957,6 +971,7 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        node_identity: Optional[ResolvedNodeIdentity] = None,
     ) -> Optional[str]:
         """Fold any staged-but-uncommitted ``working_changes`` on a draft into a
         checkpoint commit. Publish/merge read the draft side from committed heads
@@ -978,7 +993,7 @@ class GraphVersioningService:
             graph_id=graph_id, branch_id=branch_id, actor=actor,
             message="auto-checkpoint pending changes before merge",
             actor_groups=actor_groups, containment_edge_types=containment_edge_types,
-            ontology_rules=ontology_rules,
+            ontology_rules=ontology_rules, node_identity=node_identity,
         )
 
     # ------------------------------------------------------------------ #
@@ -995,6 +1010,7 @@ class GraphVersioningService:
         actor_groups: Sequence[str] = (),
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        node_identity: Optional[ResolvedNodeIdentity] = None,
     ) -> str:
         """Squash an UP-TO-DATE draft into a single ``main`` commit (plan §8) — the
         ungated path (admin / no review). The reviewed path is :meth:`open_draft_mr`
@@ -1011,7 +1027,7 @@ class GraphVersioningService:
         # drops working changes that were staged but not checkpointed.
         await self._flush_pending_changes(
             graph_id=graph_id, branch_id=branch_id, actor=actor, actor_groups=actor_groups,
-            ontology_rules=ontology_rules,
+            ontology_rules=ontology_rules, node_identity=node_identity,
         )
 
         async def _once():
@@ -2361,6 +2377,7 @@ class GraphVersioningService:
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        node_identity: Optional[ResolvedNodeIdentity] = None,
     ) -> str:
         """Merge a merge request, dispatching on its kind: a fork PR delegates to
         :meth:`merge_pr`; a draft→main MR recomputes the 3-way merge at merge time
@@ -2383,7 +2400,7 @@ class GraphVersioningService:
         # so the merge never silently drops working changes that were never checkpointed.
         await self._flush_pending_changes(
             graph_id=flush_gid, branch_id=flush_bid, actor=flush_actor,
-            ontology_rules=ontology_rules,
+            ontology_rules=ontology_rules, node_identity=node_identity,
         )
 
         async def _once():
@@ -5781,6 +5798,7 @@ class GraphVersioningService:
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
+        node_identity: Optional[ResolvedNodeIdentity] = None,
     ) -> Optional[str]:
         """Apply create/update/delete ops as ONE audited commit (default on ``main``) —
         the 'versioned write' primitive behind provider write-through, so an ordinary
@@ -5803,11 +5821,16 @@ class GraphVersioningService:
         so what the caller records with it lands or rolls back WITH the batch: an import window's
         row resolutions and its job checkpoint. A retry re-runs it with the batch; anything it
         raises rolls the batch back and propagates.
+
+        ``node_identity``, the data source's resolved mapping, keeps each written node's own
+        name and identity properties in step with its ``displayName`` / ``urn``
+        (``node_identity.bind_node_write``); a node create op marked ``minted`` had its urn
+        minted for this write. ``None`` binds nothing.
         """
         result = await self.apply_ops_detailed(
             graph_id=graph_id, ops=ops, actor=actor, message=message, branch_id=branch_id,
             containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
-            on_commit=on_commit)
+            on_commit=on_commit, node_identity=node_identity)
         return result.commit_id
 
     async def apply_ops_detailed(
@@ -5816,6 +5839,7 @@ class GraphVersioningService:
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
+        node_identity: Optional[ResolvedNodeIdentity] = None,
     ) -> ApplyResult:
         """:meth:`apply_ops`, answering with every addressed entity's value after the batch."""
         return await self._retry_seq(
@@ -5823,7 +5847,8 @@ class GraphVersioningService:
             lambda: self._apply_ops_once(
                 graph_id=graph_id, ops=ops, actor=actor, message=message,
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
-                ontology_rules=ontology_rules, on_commit=on_commit),
+                ontology_rules=ontology_rules, on_commit=on_commit,
+                node_identity=node_identity),
         )
 
     async def _apply_ops_once(
@@ -5832,6 +5857,7 @@ class GraphVersioningService:
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
+        node_identity: Optional[ResolvedNodeIdentity] = None,
     ) -> ApplyResult:
         async with self._session() as s:
             await self._assert_not_bootstrapping(s, graph_id)
@@ -5902,6 +5928,15 @@ class GraphVersioningService:
                 raise MergeConflict(occ_conflicts, current={
                     c["entity_id"]: (c["entity_kind"], cur_vals.get(c["entity_id"]))
                     for c in occ_conflicts})
+
+            # Each node's own name / identity properties, kept in step with what this batch writes.
+            # Judged on the composed, merged values against their priors — after the OCC merge, so
+            # a mirrored value is never "ours" in it and a conflict only names fields the caller sent.
+            if node_identity is not None:
+                new_vals.update(bind_node_writes(
+                    new_vals, cur_vals, kind_by_entity=kind_by_entity, identity=node_identity,
+                    created={e for e in new_vals if e not in update_ids},
+                    minted={o["entity_id"] for o in ops if o.get("minted")}))
 
             # Cascade a node delete to its containment subtree (ontology-driven) AND every
             # live edge incident to any deleted node (source or target, ANY type) — so no

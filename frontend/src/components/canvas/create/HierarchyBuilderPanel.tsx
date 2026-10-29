@@ -35,6 +35,7 @@ import {
 } from '@/services/ontologyPreflightService'
 import { relationshipLabel } from '@/lib/relationshipLabel'
 import { useAppNotifications } from '@/components/ui/notifications'
+import { boundFieldIds, useCanvasNodeIdentity } from '@/components/dataSource/NodeIdentity'
 import { parseIndentedOutline, type ParsedOutlineRow, type OutlineParseContext } from './outlineParser'
 import { useCreateLinkStore } from '../edge-create/createLinkStore'
 import { useHierarchyBuilderStore } from './hierarchyBuilderStore'
@@ -877,9 +878,13 @@ function AddingRow({
 
 /** Committed-row details — seeded from the staged node, saved on blur/change. */
 function RowDetails({ type, node, onSave }: { type?: EntityTypeSchema; node?: LineageNode; onSave: (v: DetailsValue) => void }) {
+  const identity = useCanvasNodeIdentity()
   const customFields = useMemo(
-    () => (type ? type.fields.filter((f) => f.showInPanel && !['name', 'description', 'urn'].includes(f.id)) : []),
-    [type],
+    () => {
+      const bound = boundFieldIds(identity)
+      return type ? type.fields.filter((f) => f.showInPanel && !bound.has(f.id) && !['description', 'urn'].includes(f.id)) : []
+    },
+    [type, identity],
   )
   const initial = useMemo<DetailsValue>(() => {
     const props = (node?.data?.properties ?? {}) as Record<string, unknown>
@@ -911,11 +916,14 @@ function DetailsForm({
   onChange: (v: DetailsValue) => void
   commitOnBlur?: (v: DetailsValue) => void
 }) {
+  const identity = useCanvasNodeIdentity()
   const customFields = useMemo(
-    () =>
-      (type ? type.fields.filter((f) => f.showInPanel && !['name', 'description', 'urn'].includes(f.id)) : [])
-        .sort((a, b) => a.displayOrder - b.displayOrder),
-    [type],
+    () => {
+      const bound = boundFieldIds(identity)
+      return (type ? type.fields.filter((f) => f.showInPanel && !bound.has(f.id) && !['description', 'urn'].includes(f.id)) : [])
+        .sort((a, b) => a.displayOrder - b.displayOrder)
+    },
+    [type, identity],
   )
   const patch = (p: Partial<DetailsValue>) => onChange({ ...value, ...p })
 

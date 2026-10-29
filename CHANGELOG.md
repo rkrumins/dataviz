@@ -9,6 +9,82 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — New and renamed entities are named and keyed the way their source does it
+
+### Added
+
+- **An entity's details say how its data source identifies and names entities.** Under the
+  URN, one line names the two properties: "Identified by `id` · named by `title`". Expanding it
+  shows a card for each, and the drawer remembers that choice. A card shows the entity's value
+  (the identifier's can be copied) and a pill saying where the setting comes from: this data
+  source, the provider, the workspace, the platform default or the built-in default. Hovering the
+  pill walks the whole lookup. The name property's card also says whether a rename carries it
+  along (in step with the name) or leaves it (kept apart). With an edit not saved yet, the card
+  says what the save will store, such as a name property that becomes the new name.
+- **The Name input says what saving does to the name property** before you save: it changes too,
+  it stays because it is kept apart from the name, or an empty one gets filled in.
+- **The mapping setting says what the editor writes.** Wherever the identity and display-name
+  properties are set (a data source, a provider, a workspace or the platform), the setting says
+  that a new entity gets its URN as the identity property, and that the name property is kept in
+  step with the name.
+
+### Fixed
+
+- **New entities get their name property.** An entity created in a versioned graph stored its name
+  only as `displayName`, never under the property its source keeps names in. That property is
+  `name`, unless the data source, its provider, its workspace or the platform maps it to another,
+  such as `title`. This held however the entity was made: one at a time, a set in the Hierarchy
+  Builder or Build mode, a duplicate, through the API, or by import. The Properties panel showed
+  no `name`, and publishing wrote none to the graph. Each new entity now has it.
+- **New entities get their identity property.** In a graph keyed by something other than `urn`
+  (`id`, `identifier`, …), a new entity now carries that property too. It holds the entity's urn,
+  so the source's key and the platform's always agree. A duplicate no longer keeps its original's.
+- **A rename reaches the name property.** Renaming an entity changes its name property with it,
+  and changing the name property renames it, as long as the two agree. A name kept deliberately
+  apart from the display name is left alone, such as OpenMetadata's `customer_orders` beside
+  `Customer Orders`.
+- **Older entities catch up.** An entity saved before this change gets its missing name and
+  identity properties the next time it is saved, whatever that save changes. A property someone
+  deleted stays deleted.
+- The entity editors no longer offer the mapped name or identity property as a field of its own.
+  The Name input is the name property, and the platform assigns the identity property.
+- **The Technical view no longer shows an entity's URN twice.** An entity with no name of its own
+  showed its URN as its name and again underneath. It now shows it once.
+- **A lineage trace row shows its identifier before its details load.** In the Technical view, a
+  row whose details hadn't loaded yet showed nothing under its name. It now shows its URN.
+- **`⌘/` (`Ctrl-/`) switches between Business and Technical names.** The command palette showed
+  the shortcut, but nothing responded to it. It now works anywhere outside a text field. The
+  palette and the top bar's toggle show it as your platform writes it: `⌘/` on a Mac, `Ctrl+/`
+  elsewhere.
+
+### Changed
+
+- **The Technical view shows the same kind of identifier under every name.** On Context View rows,
+  Graph cards and the entity drawer, Technical mode now shows the property the data source
+  identifies entities by, such as `id`. That property is set on the data source, its provider or
+  its workspace. A source that uses the platform's own key shows the URN, as does an entity with
+  no value of its own. The view used to show the qualified name where a loader set one that
+  differed from the name, and the URN everywhere else, so one column mixed paths with URNs.
+  Hovering the line names the property, as in `id: ORD-000417`. The qualified name is still in
+  the entity's details. The line still appears only in the Technical view.
+- A rename shows as two changed fields in history and in the Changes tab: the display name and
+  the name property.
+- A draft rename now conflicts at publish with a re-sync of main that changed the same name
+  property. It used to merge without asking.
+
+### Known limitations
+
+- A new entity's name property is its display name when it is first saved, even if it was set to
+  something else before then. To keep the two apart, change the name property after saving.
+- A mapping onto a field the platform owns (`qualifiedName`, `description`, …) is not kept in step.
+- Changing a mapping doesn't rewrite existing entities. Each catches up on its next save.
+- `POST /graph/save` writes nodes exactly as they are sent, without these properties.
+- The identity property holds a urn string, so a source with numeric ids ends up with mixed types.
+- A save answers with at most 500 entities. Past that, the canvas shows the new properties of the
+  rest once each is opened again.
+
+---
+
 ## [Unreleased] — Advanced Search reads on replicas, sized to the cluster
 
 ### Fixed

@@ -58,6 +58,7 @@ class ImportExportService:
         ontology_resolver=None,
         layout_writer=None,
         publish_hook=None,
+        identity_resolver=None,
     ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
@@ -68,6 +69,10 @@ class ImportExportService:
         # Optional async ``(workspace_id, data_source_id) -> {node_types, edge_types} | None`` — the
         # live ontology types for the per-row import gate. Injected the same way.
         self._ontology_resolver = ontology_resolver
+        # Optional async ``(workspace_id, data_source_id) -> ResolvedNodeIdentity | None`` — the
+        # data source's node-identity mapping, so imported nodes get their own name and identity
+        # properties (``node_identity.bind_node_write``). Injected the same way.
+        self._identity_resolver = identity_resolver
         # Optional async ``(workspace_id, data_source_id, view_id, created_node_facts,
         # batch_edge_facts) -> {added: N}`` — writes canonical layer assignments for a view-scoped
         # import's newly-created top-level entities. Injected at the API layer (management-DB access).
@@ -271,8 +276,12 @@ class ImportExportService:
         ontology = None
         if self._ontology_resolver is not None:
             ontology = await self._ontology_resolver(ws, ds)
+        node_identity = None
+        if self._identity_resolver is not None:
+            node_identity = await self._identity_resolver(ws, ds)
         worker = ImportWorker(self._svc, self._store, scope=scope, ontology=ontology,
-                              facts=bool(view_id and self._layout_writer is not None))
+                              facts=bool(view_id and self._layout_writer is not None),
+                              node_identity=node_identity)
         # Called directly (tools, tests faking ImportWorker) there is no lease to pass on: the
         # worker takes the job itself.
         summary = await (worker.run(job_id, lease=lease) if lease is not None

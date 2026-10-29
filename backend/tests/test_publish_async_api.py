@@ -80,6 +80,24 @@ async def test_a_small_draft_publishes_inside_the_request(test_client, services)
     assert len(svc.published) == 1 and jobs.created == []
 
 
+async def test_a_publish_folds_staged_edits_with_the_sources_node_identity(test_client, services,
+                                                                          monkeypatch):
+    """Edits staged through the API are folded when the draft publishes: the route hands the
+    service its data source's mapping, so those nodes get their own name / identity properties."""
+    from backend.app.api.v1.endpoints import versioning as versioning_ep
+
+    svc, _jobs = services
+    mapping, asked = object(), []
+
+    async def identity(_session, meta):
+        asked.append(meta["data_source_id"])
+        return mapping
+    monkeypatch.setattr(versioning_ep, "_node_identity_for_meta", identity)
+    r = await test_client.post(f"{BASE}/graphs/g1/branches/br_small/publish", json={"message": "m"})
+    assert r.status_code == 200, r.text
+    assert svc.published[0]["node_identity"] is mapping and asked == ["ds1"]
+
+
 async def test_a_large_draft_publishes_as_a_job(test_client, services):
     svc, jobs = services
     assert CHANGES["br_big"] > config.SYNC_PUBLISH_MAX_CHANGES

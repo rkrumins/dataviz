@@ -124,6 +124,18 @@ async def test_a_publish_job_publishes_and_sets_off_what_a_publish_does(monkeypa
     assert lease.finished == ("completed", {"summary": {"commitId": "cmt_new"}})
 
 
+async def test_a_publish_job_folds_staged_edits_with_the_sources_node_identity(monkeypatch, set_off):
+    mapping = object()
+
+    async def identity(_session, meta):
+        assert meta["data_source_id"] == "ds1"
+        return mapping
+    monkeypatch.setattr(ep, "_node_identity_for_meta", identity)
+    svc = _Versioning(merged=[None], publish="cmt_new")
+    await _service(monkeypatch, svc).run_publish("vjob_1", _Lease())
+    assert svc.published[0]["node_identity"] is mapping
+
+
 async def test_a_job_whose_draft_already_merged_publishes_nothing_and_sets_off_the_rest(
         monkeypatch, set_off):
     """The worker died after its squash committed: the next attempt completes with that commit,

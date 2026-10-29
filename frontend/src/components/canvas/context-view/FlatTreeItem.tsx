@@ -16,7 +16,8 @@ import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useEntityChangeDecoration } from '@/features/versioning/canvas/useDiffDecoration'
 import { usePreferencesStore } from '@/store/preferences'
 import { usePersonaMode } from '@/store/persona'
-import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
+import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
+import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
 import { densityRowTokens } from './density'
 import { formatUnitCount, unitMeaning } from './connections/connectionUnits'
 import { portView, type NodePorts } from './lineagePorts'
@@ -298,16 +299,21 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
 
   // Business/Technical. `node.name` is the business-facing name the hierarchy
   // was built with; the persona mode is applied here, at render, so switching
-  // it never rebuilds the tree. Technical mode reveals the qualified name (or
-  // the URN) on a second line — and only when it says something the name on the
-  // row does not, so no row ever prints the same string twice. The row grows by
-  // one line when it does; LayerColumn measures every row via
-  // `virtualizer.measureElement`, so the taller rows reflow without scroll-jump.
+  // it never rebuilds the tree. Technical mode reveals the entity's identifier on
+  // a second line: its data source's identifier property, else its URN — the
+  // row's own for a trace card whose data hasn't loaded; a group has none. It is
+  // left out when it is the name on the row, so no row prints the same string
+  // twice. The row grows by one line when it does; LayerColumn measures every
+  // row via `virtualizer.measureElement`, so the taller rows reflow without
+  // scroll-jump.
   const personaMode = usePersonaMode()
   const displayName = resolveEntityName(node.data, personaMode, node.name)
+  const identityProperty = useCanvasIdentityProperty()
   const leftPort = portView('left', ports, lineageTotals, lineageUnknown, lineageOutside)
   const rightPort = portView('right', ports, lineageTotals, lineageUnknown, lineageOutside)
-  const technicalLine = technicalSubtitle(node.data, personaMode)
+  const technical = technicalIdentity(node.data, personaMode, {
+    identityProperty, urn: node.isLogical ? undefined : node.urn, name: displayName,
+  })
   const isRoot = depth === 0
   const sizing = densityRowTokens(density, isRoot)
   const minRowHeightPx = isRoot ? sizing.rootHeight : sizing.childHeight
@@ -806,7 +812,7 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           {lineEnd && <LineEndTag end={lineEnd} className="ml-1.5 align-[1px]" />}
         </span>
         {/* Technical identity (Business/Technical toggle) — one truncated line,
-            full value on hover.
+            the property and its full value on hover.
 
             TRUNCATED FROM THE HEAD, not the tail. Every URN from one source
             shares a long prefix (`urn:synodic:solidatus:node:OBJ-…`) and the
@@ -816,13 +822,13 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             `urn:synodic:solidatus:n…`. An RTL inline direction puts the
             ellipsis at the start and keeps the discriminating tail; the runs
             inside are still read left-to-right. */}
-        {technicalLine && (
+        {technical && (
           <span
             className="text-[10px] font-mono text-ink-muted/70 truncate mt-0.5"
             style={{ direction: 'rtl', textAlign: 'left' }}
-            title={technicalLine}
+            title={`${technical.property}: ${technical.value}`}
           >
-            {technicalLine}
+            {technical.value}
           </span>
         )}
         {/* Type badge — gated by usePreferencesStore.showCanvasTypeBadge so

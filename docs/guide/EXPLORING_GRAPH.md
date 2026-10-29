@@ -251,6 +251,7 @@ Context View features.
 | `⌘I` / `Ctrl-I` | Expand or compact the trace dock (during a trace) |
 | `Esc` | During a trace, close any open popover, then leave the trace |
 | `⌘0` / `Ctrl-0` | Fit every layer into the window width |
+| `⌘/` / `Ctrl-/` | Switch between **Business** and **Technical** names (anywhere in the app) |
 
 ## Where to next
 

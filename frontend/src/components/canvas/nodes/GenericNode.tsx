@@ -6,7 +6,8 @@ import { useSchemaStore } from '@/store/schema'
 import { useViewEntityType, useViewEntityVisual } from '@/hooks/useViewSchema'
 import { useCanvasStore } from '@/store/canvas'
 import { usePersonaMode } from '@/store/persona'
-import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
+import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
+import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
 import { cn } from '@/lib/utils'
 import { generateColorFromType, generateIconFallback } from '@/lib/type-visuals'
 import type { EntityInstance, EntityVisualConfig } from '@/types/schema'
@@ -113,6 +114,7 @@ export const GenericNode = memo(function GenericNode({
   // set, so the technical branch below could never run.
   const entityFields = (entityData.data || entityData) as Record<string, unknown>
   const persona = usePersonaMode()
+  const identityProperty = useCanvasIdentityProperty()
   const primaryLabel = resolveEntityName(entityFields, persona, entityData.id || 'Unknown')
 
   // Technical mode REVEALS the technical identity — it must not swallow the
@@ -126,7 +128,8 @@ export const GenericNode = memo(function GenericNode({
   const description = typeof entityFields['description'] === 'string'
     ? entityFields['description']
     : undefined
-  const technicalLine = technicalSubtitle(entityFields, persona)
+  const technical = technicalIdentity(entityFields, persona, { identityProperty, name: primaryLabel })
+  const technicalLine = technical?.value
   const showsBothLines = visual.size !== 'xs' && visual.size !== 'sm'
   const secondaryLabel: string | undefined = showsBothLines
     ? description
@@ -401,11 +404,11 @@ export const GenericNode = memo(function GenericNode({
                 Head-truncated for the same reason the context-view row is:
                 sibling URNs share a long prefix, so an end ellipsis would cut
                 the only part that differs. */}
-            {showsBothLines && technicalLine && (
+            {showsBothLines && technical && (
               <p
                 className="text-2xs font-mono text-ink-muted/70 truncate mt-0.5"
                 style={{ direction: 'rtl', textAlign: 'left' }}
-                title={technicalLine}
+                title={`${technical.property}: ${technical.value}`}
               >
                 {technicalLine}
               </p>

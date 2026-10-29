@@ -17,6 +17,7 @@
  */
 import { memo, useCallback, useId, useMemo, useState } from 'react'
 import { useCanvasStore, type LineageNode } from '@/store/canvas'
+import { useStagedChangesStore } from '@/store/stagedChangesStore'
 import { useSchemaStore } from '@/store/schema'
 import { usePersonaStore } from '@/store/persona'
 import { useFeature } from '@/store/features'
@@ -24,7 +25,8 @@ import { useEntityColorSet } from '@/hooks/useEntityVisual'
 import { useEntitySummary } from '@/features/versioning/hooks/useVersioning'
 import { useRestoreGhost } from '@/features/versioning/canvas/useRestoreGhost'
 import { NO_VERSION_CONTROL, useEntityEditing } from '@/features/versioning/hooks/useEntityEditing'
-import { resolveEntityName, technicalSubtitle } from '@/lib/entityDisplayName'
+import { resolveEntityName, technicalIdentity } from '@/lib/entityDisplayName'
+import { useCanvasIdentityProperty } from '@/components/dataSource/NodeIdentity'
 import { userProperties } from '@/lib/nodeFields'
 import { nodeIndexOf } from '@/lib/storeIndex'
 import type { RevealSearchHit } from '@/hooks/useRevealSearchHit'
@@ -105,6 +107,11 @@ function OpenEntityDrawer({
 
   // ── The edit ──
   const session = useEntityEditSession(node, summaryQ.data?.value)
+  // The entity as first read — what a save's patch is judged against, kept by a staged edit — or
+  // null for one not saved yet, whose name and identity properties the server derives afresh.
+  const stagedBefore = useStagedChangesStore((s) => s.changes.find(
+    (c) => (c.type === 'update_entity' || c.type === 'rename_entity') && c.targetId === node.id)?.before)
+  const original = unsavedCreate ? null : ((stagedBefore as Record<string, unknown> | undefined) ?? data)
   const { form, dirty, justStaged, edit, stage, discard } = session
   const isGhost = data.isGhost === true
   // An edit is kept only as a change in a draft (useEntityEditing). Where editing isn't offered at
@@ -126,7 +133,11 @@ function OpenEntityDrawer({
   const urn = (form.urn as string | undefined) || node.id
   const userProps = useMemo(() => userProperties(form.properties), [form.properties])
   const title = useMemo(() => resolveEntityName(node.data, personaMode, node.id), [node.data, personaMode, node.id])
-  const technicalLine = useMemo(() => technicalSubtitle(node.data, personaMode), [node.data, personaMode])
+  const identityProperty = useCanvasIdentityProperty()
+  const technicalLine = useMemo(
+    () => technicalIdentity(node.data, personaMode, { identityProperty, urn: node.id, name: title })?.value,
+    [node.data, personaMode, identityProperty, node.id, title],
+  )
   const externalUrl = useMemo(() => getExternalUrl?.(urn) ?? null, [getExternalUrl, urn])
 
   const [copiedUrn, setCopiedUrn] = useState(false)
@@ -192,6 +203,7 @@ function OpenEntityDrawer({
               <EntityViewTab
                 nodeId={node.id}
                 form={form}
+                original={unsavedCreate || stagedBefore !== undefined || dirty ? original : undefined}
                 urn={urn}
                 childCount={Number(form.childCount || form._collapsedChildCount || 0)}
                 tagColors={colors}
@@ -211,6 +223,7 @@ function OpenEntityDrawer({
                 <EntityEditTab
                   nodeId={node.id}
                   form={form}
+                  original={original}
                   entityType={entityType}
                   urn={urn}
                   userProps={userProps}

@@ -22,11 +22,13 @@ from types import SimpleNamespace
 
 import pytest
 
+from backend.app.services.node_identity import ResolvedNodeIdentity
 from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import db as ver_db
 from backend.app.services.versioning.import_export import (
     export_worker,
     import_worker,
+    service as service_mod,
     snapshot,
     stream,
 )
@@ -191,6 +193,53 @@ async def test_a_window_lands_its_ops_resolutions_and_checkpoint_in_one_transact
     assert _checkpoints(log) == [{
         "expect_cursor": "node:-1", "last_cursor": "node:2", "processed": 2, "progress": 50,
         "current_phase": "nodes", "summary": {**_NO_TALLIES, "takeovers": 1, "new": 1, "invalid": 1}}]
+
+
+async def test_a_window_is_written_with_the_sources_node_identity(monkeypatch):
+    """Imported nodes get their own name / identity properties: each window hands apply_ops the
+    data source's mapping, which binds them as they are written."""
+    log = []
+    monkeypatch.setattr(ver_db, "graphver_session", _sessions(log))
+    svc = _Versioning(log)
+    mapping = ResolvedNodeIdentity(identity_property="id", name_property="title")
+    worker = ImportWorker(svc, store=None, node_identity=mapping)
+    worker._lease = _Lease(log)
+    _at(worker, "node:-1", total=1)
+    _windowed(worker, {("node", -1): [{"kind": "node", "urn": "urn:a", "entityType": "T",
+                                       "_row_index": 0}]})
+
+    assert await worker._next_window("vjob_1", None, "g1", "br1", "usr_1") is True
+    assert svc.applied[0]["node_identity"] is mapping
+
+
+async def test_run_import_resolves_the_mapping_for_its_worker(monkeypatch):
+    seen = {}
+    mapping = ResolvedNodeIdentity(identity_property="id", name_property="title")
+
+    async def resolve(ws, ds):
+        seen["scope"] = (ws, ds)
+        return mapping
+
+    class _Worker:
+        def __init__(self, svc, store, scope=None, ontology=None, facts=True, node_identity=None):
+            seen["node_identity"] = node_identity
+
+        async def run(self, _job_id):
+            return dict(_NO_TALLIES)
+
+    row = SimpleNamespace(workspace_id="ws", data_source_id="ds", scope_view_id=None,
+                          reconcile_mode="upsert")
+    monkeypatch.setattr(ver_db, "graphver_session", _sessions([], row))
+    monkeypatch.setattr(service_mod, "ImportWorker", _Worker)
+    await ImportExportService(versioning=object(), store=object(),
+                              identity_resolver=resolve).run_import("vjob_1")
+    assert seen == {"scope": ("ws", "ds"), "node_identity": mapping}
+
+
+def test_the_service_factory_wires_the_identity_resolver():
+    from backend.app.api.v1.endpoints import versioning as versioning_ep
+    svc = versioning_ep.get_import_export_service()
+    assert svc._identity_resolver is versioning_ep._resolve_node_identity_for_import
 
 
 async def test_a_window_with_nothing_to_apply_still_commits_its_checkpoint(monkeypatch):
