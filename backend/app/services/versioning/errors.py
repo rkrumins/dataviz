@@ -79,15 +79,27 @@ class DraftRoleRequired(_HttpMapped, AccessDenied):
 
 
 class SelfReview(_HttpMapped, AccessDenied):
-    """PR_REVIEW (doc 13): a PR's author, or its source draft's owner, approved it. An
-    approval is someone else's review of the changes."""
+    """PR_REVIEW (doc 13): the person who opened a review approved it, where its data source's
+    policy says someone else approves (``drafts_policy``, self-approval off)."""
 
     status_code = 403
 
     def __init__(self, pr_id: str):
         self.pr_id = pr_id
-        super().__init__(f"the author or the draft's owner cannot approve pr {pr_id}",
+        super().__init__(f"whoever opened pr {pr_id} cannot approve it: someone else approves it",
                          {"type": "access_denied", "code": "self_review", "prId": pr_id})
+
+
+class SelfMerge(_HttpMapped, AccessDenied):
+    """The person who opened a review merged it, where its data source's policy says someone else
+    merges (``drafts_policy``, self-merge off)."""
+
+    status_code = 403
+
+    def __init__(self, pr_id: str):
+        self.pr_id = pr_id
+        super().__init__(f"whoever opened pr {pr_id} cannot merge it: someone else merges it",
+                         {"type": "access_denied", "code": "self_merge", "prId": pr_id})
 
 
 class PersonRequired(_HttpMapped, AccessDenied):
@@ -363,9 +375,22 @@ class StagedChangesUnsaved(_HttpMapped, RuntimeError):
             {"type": "staged_changes_unsaved", "actors": self.actors})
 
 
+class ReviewRequired(_HttpMapped, RuntimeError):
+    """A draft was published directly where its data source's policy says nobody merges their own
+    changes (``drafts_policy``, self-merge off): a direct publish is its publisher's own merge.
+    Open a review, and someone else merges it."""
+
+    status_code = 409
+
+    def __init__(self, branch_id: str):
+        self.branch_id = branch_id
+        super().__init__("this data source publishes drafts through a review that someone else "
+                         "merges: open a review instead", {"type": "review_required", "branchId": branch_id})
+
+
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
                LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
-               AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved)
+               AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired)

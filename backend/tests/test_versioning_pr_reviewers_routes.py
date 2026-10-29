@@ -1,8 +1,9 @@
 """Asking for reviewers: who can be asked, and asking after a PR is open.
 
 ``GET …/reviewers`` lists the workspace's members who could approve (approve needs manage), bound
-directly or through a group, and never the caller, who is the author of the PR they are raising,
-nor a service account, which never reviews.
+directly or through a group, never a service account, which never reviews, and the caller, who
+opens the review, only where they may approve it: the policy of ``dataSourceId``, else the
+workspace's (``drafts_policy``; by default they may).
 Both PR PATCH routes take ``reviewers`` and hand them to ``update_pr``; a PATCH that leaves them
 out leaves them alone.
 """
@@ -12,7 +13,7 @@ import pytest
 
 from backend.app.api.v1.endpoints.versioning import get_versioning_service
 from backend.app.db.models import (
-    GroupMemberORM, GroupORM, RoleBindingORM, UserORM, WorkspaceORM,
+    GroupMemberORM, GroupORM, ProviderORM, RoleBindingORM, UserORM, WorkspaceDataSourceORM, WorkspaceORM,
 )
 
 BASE = "/api/v1/ws1/versioning"
@@ -55,7 +56,7 @@ async def test_both_pr_patch_routes_take_reviewers(test_client, svc, route):
     assert [u["reviewers"] for u in svc.updates] == [["carol", "dave"], None]
 
 
-async def test_reviewer_candidates_are_the_members_who_can_approve(test_client, db_session, fake_user):
+async def _members(db_session, fake_user):
     db_session.add(WorkspaceORM(id="ws1", name="One"))
     for uid, first in (("u_carol", "Carol"), ("u_dave", "Dave"), ("u_vic", "Vic"), ("u_sus", "Sus"),
                        ("svc_0123456789ab", "Nightly sync")):
@@ -71,15 +72,42 @@ async def test_reviewer_candidates_are_the_members_who_can_approve(test_client, 
         ("user", "u_vic", "workspace_viewer"),          # read only: cannot approve
         ("user", "u_sus", "workspace_member"),          # suspended account
         ("user", "svc_0123456789ab", "workspace_member"),   # a service account never reviews
-        ("user", fake_user.id, "workspace_member"),     # the caller: the author
+        ("user", fake_user.id, "workspace_member"),     # the caller, who opens the review
     ):
         db_session.add(RoleBindingORM(subject_type=subject_type, subject_id=subject_id,
                                       role_name=role, scope_type="workspace", scope_id="ws1"))
     await db_session.commit()
 
+
+_CAROL = {"userId": "u_carol", "displayName": "Carol X", "email": "u_carol@example.com"}
+_DAVE = {"userId": "u_dave", "displayName": "Dave X", "email": "u_dave@example.com"}
+
+
+async def test_reviewer_candidates_are_the_members_who_can_approve(test_client, db_session, fake_user):
+    await _members(db_session, fake_user)
     r = await test_client.get(f"{BASE}/reviewers")
     assert r.status_code == 200, r.text
-    assert r.json() == [
-        {"userId": "u_carol", "displayName": "Carol X", "email": "u_carol@example.com"},
-        {"userId": "u_dave", "displayName": "Dave X", "email": "u_dave@example.com"},
-    ]
+    assert r.json() == [_CAROL, _DAVE, {"userId": fake_user.id, "displayName": "Test User",
+                                        "email": fake_user.email}]
+
+
+async def test_the_caller_is_a_candidate_only_where_they_may_approve_what_they_open(
+        test_client, db_session, fake_user):
+    await _members(db_session, fake_user)
+    ws = await db_session.get(WorkspaceORM, "ws1")
+    ws.review_self_approval = False
+    db_session.add_all([WorkspaceORM(id="ws2", name="Two"),
+                        ProviderORM(id="prov_1", name="Prod graph", provider_type="falkordb")])
+    await db_session.flush()
+    db_session.add(WorkspaceDataSourceORM(id="ds_open", workspace_id="ws1", provider_id="prov_1",
+                                          graph_name="g_open", label="Open", review_self_approval=True))
+    db_session.add(WorkspaceDataSourceORM(id="ds_else", workspace_id="ws2", provider_id="prov_1",
+                                          graph_name="g_else", label="Elsewhere"))
+    await db_session.commit()
+
+    r = await test_client.get(f"{BASE}/reviewers")
+    assert r.json() == [_CAROL, _DAVE], r.text                     # the workspace's: someone else
+    r = await test_client.get(f"{BASE}/reviewers", params={"dataSourceId": "ds_open"})
+    assert [p["userId"] for p in r.json()] == ["u_carol", "u_dave", fake_user.id], r.text
+    r = await test_client.get(f"{BASE}/reviewers", params={"dataSourceId": "ds_else"})
+    assert r.status_code == 404, r.text                            # another workspace's

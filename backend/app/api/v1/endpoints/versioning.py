@@ -68,7 +68,7 @@ from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
 from backend.app.services.versioning.errors import (HTTP_MAPPED, DraftNotReadable, IneligibleMember,
-                                                   ServiceAccountMember)
+                                                   ReviewRequired, SelfMerge, ServiceAccountMember)
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
@@ -1295,6 +1295,9 @@ class PrResponse(_ApiModel):
     closed_by: Optional[str] = Field(default=None, alias="closedBy")
     # id → display name for every actor id this item references (see _attach_user_names).
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+    # Single-PR reads only: whether the reader may approve it and merge it, and why not
+    # (``_viewer_can``). What it still waits for — approvals, a pull of latest — is above.
+    viewer_can: Optional[Dict[str, Any]] = Field(default=None, alias="viewerCan")
 
 
 # --------------------------------------------------------------------------- #
@@ -1614,18 +1617,30 @@ async def resolve_graph_open(
 # --------------------------------------------------------------------------- #
 # Draft editing                                                                #
 # --------------------------------------------------------------------------- #
+async def _drafts_policy_of(session: AsyncSession, data_source_id: Optional[str]):
+    """The drafts and reviews policy ``data_source_id`` works under (``drafts_policy``). A graph
+    whose data source row is gone follows the built-in policy."""
+    from backend.app.services import drafts_policy
+    if data_source_id:
+        try:
+            return await drafts_policy.load(session, data_source_id)
+        except LookupError:
+            pass
+    return drafts_policy.resolve()
+
+
+async def _pr_policy(svc: GraphVersioningService, session: AsyncSession, pr: dict):
+    """The policy of the data source a review merges into."""
+    target = await svc.get_graph(str(pr["target_graph_id"]))
+    return await _drafts_policy_of(session, (target or {}).get("data_source_id"))
+
+
 async def draft_level(session: AsyncSession, data_source_id: Optional[str],
                       asked: Optional[str] = None) -> str:
     """The level a new draft of ``data_source_id`` starts at: ``asked``, else its policy's default
     (``drafts_policy``). A level the policy rules out is a 409 ``private_drafts_disabled`` or
     ``public_drafts_disabled``. A graph whose data source row is gone follows the built-in policy."""
-    from backend.app.services import drafts_policy
-    policy = drafts_policy.resolve()
-    if data_source_id:
-        try:
-            policy = await drafts_policy.load(session, data_source_id)
-        except LookupError:
-            pass
+    policy = await _drafts_policy_of(session, data_source_id)
     level = asked or policy.default_visibility
     if not policy.allows(level):
         raise HTTPException(status_code=409, detail={
@@ -1916,9 +1931,13 @@ async def publish(
     ie=Depends(get_import_export_service),
 ):
     """Publish a draft. One that changes more than ``SYNC_PUBLISH_MAX_CHANGES`` entities is
-    published by a job instead: 202 with the job to poll (``GET …/publish-jobs/{jobId}``)."""
+    published by a job instead: 202 with the job to poll (``GET …/publish-jobs/{jobId}``). Where
+    the data source's policy says nobody merges their own changes, 409 ``review_required``."""
+    policy = await _drafts_policy_of(session, _meta.get("data_source_id"))
     if await svc.branch_change_count(graph_id=graph_id, branch_id=branch_id) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
         with _domain_errors():                   # queuing takes the draft: closed → 409, unknown → 404
+            if not policy.self_merge:            # refused now, rather than by the job
+                raise ReviewRequired(branch_id)
             return await _queue_publish(ie, workspace_id=ws_id, meta=_meta, graph_id=graph_id,
                                         branch_id=branch_id, actor=user.id, body=body)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
@@ -1929,6 +1948,7 @@ async def publish(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
             message=body.message, resolutions=body.resolutions,
             containment_edge_types=cset, ontology_rules=rules, node_identity=identity,
+            self_merge=policy.self_merge,
         )
     await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(graph_id, user.id)   # views' "data updated" freshness
@@ -1984,16 +2004,18 @@ async def _publish_from_job(job: dict) -> dict:
                     cset = await _live_containment_types(session, job["workspaceId"], (meta or {}).get("data_source_id"))
                     rules = await _rules_for_meta(session, job["workspaceId"], meta)
                     identity = await _node_identity_for_meta(session, meta)
+                    # As it is now: a rule tightened since the job was queued holds.
+                    policy = await _drafts_policy_of(session, (meta or {}).get("data_source_id"))
                 if job.get("mergeRequestId"):
                     commit_id = await svc.merge_mr(
                         mr_id=job["mergeRequestId"], actor=actor, message=job["message"],
                         resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
-                        queued=True, node_identity=identity)
+                        queued=True, node_identity=identity, self_merge=policy.self_merge)
                 else:
                     commit_id = await svc.publish(
                         graph_id=graph_id, branch_id=branch_id, actor=actor, message=job["message"],
                         resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
-                        queued=True, node_identity=identity)
+                        queued=True, node_identity=identity, self_merge=policy.self_merge)
         except HTTPException as exc:
             return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
     await _bump_main_cache(graph_id)
@@ -3785,11 +3807,14 @@ async def list_pull_requests(
 @router.get("/pulls/{pr_id}", response_model=PrResponse)
 async def get_pull_request(
     ws_id: str, pr_id: str,
-    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
     pr: dict = Depends(pr_in_workspace),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     await _attach_user_names(session, [pr])
+    pr["viewer_can"] = await _viewer_can(svc, session, pr, user.id, claims, ws_id)
     return pr
 
 
@@ -3878,6 +3903,40 @@ async def _not_their_own(session: AsyncSession, pr: dict, approver_id: str) -> N
             })
 
 
+def _first_refusal(*refusals) -> Optional[str]:
+    """The code of the first ``(applies, code)`` refusal that applies, in the order given."""
+    return next((code for applies, code in refusals if applies), None)
+
+
+async def _viewer_can(svc: GraphVersioningService, session: AsyncSession, pr: dict, viewer: str,
+                      claims: PermissionClaims, ws_id: str) -> dict:
+    """Whether ``viewer`` may approve a review and merge it, with the code a refusal would carry
+    (``None`` where they may), decided as the approve and merge routes decide: a settled review
+    takes neither; approving needs a person with manage; merging needs manage and publish; and
+    the data source's policy may leave both to someone other than whoever opened it."""
+    settled = pr.get("status") if pr.get("status") in ("merged", "closed") else None
+    policy = await _pr_policy(svc, session, pr)
+    opened = pr.get("actor") == viewer
+    manages = has_permission(claims, _MANAGE, workspace_id=ws_id)
+    approve = _first_refusal(
+        (settled is not None, settled),
+        (is_service_account(viewer), "person_required"),
+        (not manages, "manage_required"),
+        (opened and not policy.self_approval, "self_review"))
+    if approve is None:
+        try:
+            await _not_their_own(session, pr, viewer)
+        except HTTPException:
+            approve = "self_review"
+    merge = _first_refusal(
+        (settled is not None, settled),
+        (not manages, "manage_required"),
+        (not has_permission(claims, _PUBLISH, workspace_id=ws_id), "publish_required"),
+        (opened and not policy.self_merge, "self_merge"))
+    return {"approve": approve is None, "merge": merge is None,
+            "approveReason": approve, "mergeReason": merge}
+
+
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
 async def approve_pull_request(
     ws_id: str, pr_id: str,
@@ -3888,9 +3947,11 @@ async def approve_pull_request(
     session: AsyncSession = Depends(get_db_session),
 ):
     await _not_their_own(session, _pr, user.id)
+    policy = await _pr_policy(svc, session, _pr)
     with _domain_errors():
         return await svc.approve_pr(pr_id=pr_id, actor=user.id,
-                                    expected_head_commit_id=body.expected_head_commit_id if body else None)
+                                    expected_head_commit_id=body.expected_head_commit_id if body else None,
+                                    self_approval=policy.self_approval)
 
 
 @router.post("/pulls/{pr_id}/close", response_model=PrResponse)
@@ -3917,10 +3978,11 @@ async def merge_pull_request(
     target = await svc.get_graph(str(_pr["target_graph_id"]))     # judged by the TARGET's ontology
     cset = await _live_containment_types(session, ws_id, (target or {}).get("data_source_id"))
     rules = await _rules_for_meta(session, ws_id, target)
+    policy = await _drafts_policy_of(session, (target or {}).get("data_source_id"))
     with _domain_errors():
         commit_id = await svc.merge_pr(
             pr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
-            containment_edge_types=cset, ontology_rules=rules,
+            containment_edge_types=cset, ontology_rules=rules, self_merge=policy.self_merge,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # base advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
@@ -3934,14 +3996,18 @@ async def merge_pull_request(
 @router.get("/reviewers", response_model=List[ReviewerCandidate])
 async def list_reviewer_candidates(
     ws_id: str,
+    data_source_id: Optional[str] = Query(None, alias="dataSourceId"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Who the caller can ask to review: the workspace's active members, bound directly or
     through a group, whose role here grants manage (approve needs it; workspace admin implies
-    it). Never the caller: they are the PR's author, and an author cannot approve. Nor a service
-    account, which never reviews."""
+    it). The caller, who opens the review, too, unless the policy — of ``dataSourceId``, else the
+    workspace's — says someone else approves. Never a service account, which never reviews."""
     from backend.app.db.repositories import binding_repo, group_repo, permission_repo, user_repo
+    from backend.app.services import drafts_policy
+    ws = await _policy_workspace(session, ws_id)
+    ds = await _policy_source(session, ws_id, data_source_id) if data_source_id else None
     bindings = await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id)
     role_perms = await permission_repo.get_role_permissions_for_roles(
         session, sorted({b.role_name for b in bindings}))
@@ -3953,7 +4019,8 @@ async def list_reviewer_candidates(
             ids.add(b.subject_id)
         elif b.subject_type == "group":
             ids.update(m.user_id for m in await group_repo.list_group_members(session, b.subject_id))
-    ids.discard(user.id)
+    if not drafts_policy.resolve(ws, ds).self_approval:
+        ids.discard(user.id)
     idents = await user_repo.get_identities_by_ids(session, sorted(ids))
     people = [{"user_id": uid, "display_name": i["name"] or None, "email": i["email"]}
               for uid, i in idents.items()
@@ -4190,11 +4257,14 @@ async def list_data_source_pull_requests(
 @router.get("/merge-requests/{pr_id}", response_model=PrResponse)
 async def get_merge_request(
     ws_id: str, pr_id: str,
-    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
     pr: dict = Depends(pr_in_workspace),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     await _attach_user_names(session, [pr])
+    pr["viewer_can"] = await _viewer_can(svc, session, pr, user.id, claims, ws_id)
     return pr
 
 
@@ -4279,9 +4349,11 @@ async def approve_merge_request(
     session: AsyncSession = Depends(get_db_session),
 ):
     await _not_their_own(session, _pr, user.id)
+    policy = await _pr_policy(svc, session, _pr)
     with _domain_errors():
         return await svc.approve_pr(pr_id=pr_id, actor=user.id,
-                                    expected_head_commit_id=body.expected_head_commit_id if body else None)
+                                    expected_head_commit_id=body.expected_head_commit_id if body else None,
+                                    self_approval=policy.self_approval)
 
 
 @router.post("/merge-requests/{pr_id}/close", response_model=PrResponse)
@@ -4309,9 +4381,12 @@ async def merge_merge_request(
     """Merge a merge request. A draft that changes more than ``SYNC_PUBLISH_MAX_CHANGES``
     entities is merged by a job instead: 202 with the job to poll, as for publish."""
     target, source = str(_pr["target_graph_id"]), _pr.get("source_branch_id")
+    policy = await _pr_policy(svc, session, _pr)
     if source and await svc.branch_change_count(
             graph_id=target, branch_id=str(source)) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
         with _domain_errors():
+            if not policy.self_merge and user.id == _pr.get("actor"):   # refused now, not by the job
+                raise SelfMerge(pr_id)
             return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),
                                         graph_id=target, branch_id=str(source), actor=user.id,
                                         body=body, merge_request_id=pr_id)
@@ -4322,6 +4397,7 @@ async def merge_merge_request(
         commit_id = await svc.merge_mr(
             mr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
             containment_edge_types=cset, ontology_rules=rules, node_identity=identity,
+            self_merge=policy.self_merge,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # target advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness

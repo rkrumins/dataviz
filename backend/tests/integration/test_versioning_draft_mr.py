@@ -1,7 +1,7 @@
 """Draft -> main Merge Request + approval gate (unification Phase 3) — needs Postgres.
 
 A per-user draft is merged to main through a reviewed Merge Request: reviewers gate the
-squash, the author can't self-approve, the merge recomputes the 3-way at merge time
+squash, the author can't approve their own where the policy says so, the merge recomputes the 3-way at merge time
 (so a draft that went stale conflicts and is resolvable), and a no-reviewer MR merges
 freely. The same merge_mr entrypoint still drives legacy fork PRs (source_graph_id NULL).
 """
@@ -55,7 +55,7 @@ async def _run() -> None:
     gid, main = G["graph_id"], G["main_branch_id"]
     await _edit_publish(svc, gid, "alice", [_node("A", f=1)], "seed")           # main seq 2
 
-    # ══ A. reviewed MR: approval gate, author can't self-approve, then merge ══
+    # ══ A. reviewed MR: approval gate, self-approval off refuses the author, then merge ══
     d = await _draft(svc, gid, "alice", [_upd("A", f=2), _node("B")])
     mr = await svc.open_draft_mr(graph_id=gid, branch_id=d, actor="alice", reviewers=["carol"])
     meta = await svc.get_pr(mr)
@@ -66,8 +66,8 @@ async def _run() -> None:
     with pytest.raises(ApprovalRequired) as ei:                                 # unapproved → blocked
         await svc.merge_mr(mr_id=mr, actor="alice", message="merge")
     assert ei.value.pending == ["carol"]
-    with pytest.raises(AccessDenied):                                           # author can't self-approve
-        await svc.approve_pr(pr_id=mr, actor="alice")
+    with pytest.raises(AccessDenied):                                           # self-approval off
+        await svc.approve_pr(pr_id=mr, actor="alice", self_approval=False)
     assert (await svc.approve_pr(pr_id=mr, actor="carol"))["approval_status"] == "approved"
 
     head_before = (await svc.get_graph(gid))["main_head_commit_seq"]

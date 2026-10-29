@@ -12,7 +12,8 @@ integration/test_versioning_publish_job.py.
 
 A queued publish holds its draft ``publishing``. A refusal that fails the job hands the draft back
 at once (``release_publishing``); a job that lands, or is no longer this worker's, leaves it alone.
-A busy graph is such a refusal: no route resumes a publish job, so it is published again.
+A busy graph is such a refusal: no route resumes a publish job, so it is published again. The job
+reads its data source's policy as it is when it runs: one tightened since it was queued holds.
 """
 from __future__ import annotations
 
@@ -23,7 +24,9 @@ import pytest
 
 from backend.app.api.v1.endpoints import versioning as ep
 from backend.app.services.versioning import db as ver_db
-from backend.app.services.versioning.errors import BranchNotOpen, ContentionExhausted, GroupsUnavailable, LockBusy
+from backend.app.services import drafts_policy
+from backend.app.services.versioning.errors import (BranchNotOpen, ContentionExhausted, GroupsUnavailable, LockBusy,
+                                                   ReviewRequired)
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.job_lease import Superseded
 from backend.app.services.versioning.service import NotUpToDate
@@ -97,6 +100,11 @@ def set_off(monkeypatch):
     monkeypatch.setattr(ep, "_live_containment_types", nothing)
     monkeypatch.setattr(ep, "_rules_for_meta", nothing)
 
+    async def builtin_policy(_session, data_source_id):
+        assert data_source_id == "ds1"
+        return drafts_policy.resolve()
+    monkeypatch.setattr(ep, "_drafts_policy_of", builtin_policy)
+
     @contextlib.asynccontextmanager
     async def management_session():
         yield None
@@ -145,6 +153,19 @@ async def test_a_publish_job_folds_staged_edits_with_the_sources_node_identity(m
     svc = _Versioning(merged=[None], publish="cmt_new")
     await _service(monkeypatch, svc).run_publish("vjob_1", _Lease())
     assert svc.published[0]["node_identity"] is mapping
+
+
+async def test_a_publish_job_holds_to_the_policy_as_it_is_when_it_runs(monkeypatch, set_off):
+    """Queued while the opener could merge; since then, someone else must: the publish is refused,
+    as the route would refuse it now, and the draft is handed back."""
+    async def someone_else_merges(_session, _ds):
+        return drafts_policy.resolve(None, SimpleNamespace(review_self_merge=False))
+    monkeypatch.setattr(ep, "_drafts_policy_of", someone_else_merges)
+    svc = _Versioning(merged=[None, None], publish=ReviewRequired("br1"))
+    result = await _service(monkeypatch, svc).run_publish("vjob_1", _Lease())
+    assert svc.published[0]["self_merge"] is False
+    assert result["error"]["status"] == 409 and result["error"]["detail"]["type"] == "review_required"
+    assert svc.releases == [{"graph_id": "g1", "branch_id": "br1"}]
 
 
 async def test_a_job_whose_draft_already_merged_publishes_nothing_and_sets_off_the_rest(

@@ -34,6 +34,8 @@ from backend.app.services.versioning.errors import (
     ProjectionKeyInUse,
     ProjectionKeyInvalid,
     ProjectionNotAdopted,
+    ReviewRequired,
+    SelfMerge,
     SelfReview,
     VersionConflict,
 )
@@ -180,13 +182,28 @@ async def test_a_service_account_is_refused_before_anything_is_read():
                                     reviewers=["svc_0123456789ab"])
 
 
-def test_approving_your_own_draft_or_review_is_403_self_review():
+def test_approving_a_review_you_opened_where_someone_else_approves_is_403_self_review():
     exc = SelfReview("pr_1")
     assert isinstance(exc, AccessDenied) and isinstance(exc, HTTP_MAPPED)
     err = _raised(exc)
     assert err.status_code == 403
     assert {k: err.detail[k] for k in ("type", "code", "prId")} == {
         "type": "access_denied", "code": "self_review", "prId": "pr_1"}
+
+
+def test_merging_a_review_you_opened_where_someone_else_merges_is_403_self_merge():
+    exc = SelfMerge("pr_1")
+    assert isinstance(exc, AccessDenied) and isinstance(exc, HTTP_MAPPED)
+    err = _raised(exc)
+    assert err.status_code == 403
+    assert {k: err.detail[k] for k in ("type", "code", "prId")} == {
+        "type": "access_denied", "code": "self_merge", "prId": "pr_1"}
+
+
+def test_publishing_directly_where_someone_else_merges_is_409_review_required():
+    err = _raised(ReviewRequired("br_1"))
+    assert err.status_code == 409
+    assert {k: err.detail[k] for k in ("type", "branchId")} == {"type": "review_required", "branchId": "br_1"}
 
 
 def test_a_group_lookup_outage_is_503_with_retry_after():

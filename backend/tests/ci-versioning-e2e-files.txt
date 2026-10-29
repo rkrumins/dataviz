@@ -61,6 +61,7 @@ tests/integration/test_publish_narrow_squash.py
 tests/integration/test_repair_revert_commit.py
 tests/integration/test_resync_identity_invariant.py
 tests/integration/test_review_inbox_open_prs.py
+tests/integration/test_review_policy.py
 tests/integration/test_shared_draft_members.py
 tests/integration/test_stage2_collaboration_story.py
 tests/integration/test_sync_curation_guard.py

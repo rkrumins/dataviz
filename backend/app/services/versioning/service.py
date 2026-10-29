@@ -50,8 +50,8 @@ from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionE
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
                      MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
                      PersonRequired,
-                     ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted, SelfReview,
-                     VersionConflict)
+                     ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted, ReviewRequired,
+                     SelfMerge, SelfReview, VersionConflict)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -1334,10 +1334,13 @@ class GraphVersioningService:
         ontology_rules: Optional[OntologyRules] = None,
         queued: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
+        self_merge: bool = True,
     ) -> str:
         """Squash an UP-TO-DATE draft into a single ``main`` commit (plan §8) — the
         ungated path (admin / no review). The reviewed path is :meth:`open_draft_mr`
         + :meth:`merge_mr`, which share the squash body in :meth:`_apply_draft_squash`.
+        ``self_merge`` False: its data source's policy says nobody merges their own changes, and
+        a direct publish is its publisher's own merge (:class:`ReviewRequired`).
 
         Require-up-to-date gate: if ``main`` advanced under the draft this raises
         :class:`NotUpToDate` — the later arrival must :meth:`rebase_draft` (pull latest,
@@ -1348,6 +1351,9 @@ class GraphVersioningService:
 
         ``queued``: the draft's publish job runs this, and the job set the draft ``publishing``.
         """
+        if not self_merge:
+            raise ReviewRequired(branch_id)
+
         async def _once():
             # Fold any staged-but-uncommitted edits first, so a publish never silently
             # drops working changes that were staged but not checkpointed.
@@ -2517,9 +2523,12 @@ class GraphVersioningService:
 
     async def approve_pr(
         self, *, pr_id: str, actor: str, expected_head_commit_id: Optional[str] = None,
+        self_approval: bool = True,
     ) -> dict:
-        """Record ``actor``'s approval of a PR. Its author and its source draft's owner can't
-        approve it (:class:`SelfReview`); once every requested reviewer has approved,
+        """Record ``actor``'s approval of a PR. Whoever opened it approves it too, unless its data
+        source's policy says someone else does (``self_approval`` False: :class:`SelfReview`); its
+        draft's owner, when someone else opened it, approves either way. Once every requested
+        reviewer has approved,
         ``approval_status`` flips to ``approved`` (and an otherwise-mergeable PR to status
         ``approved``).
 
@@ -2539,9 +2548,9 @@ class GraphVersioningService:
                 raise ValueError(f"unknown pr {pr_id}")
             if pr.status in ("merged", "closed"):
                 raise ValueError(f"pr {pr_id} is {pr.status}")
-            src = await s.get(BranchORM, pr.source_branch_id)
-            if actor == pr.actor or (src is not None and actor == src.owner):
+            if not self_approval and actor == pr.actor:
                 raise SelfReview(pr_id)
+            src = await s.get(BranchORM, pr.source_branch_id)
             head = src.head_commit_id if src else None
             if expected_head_commit_id is not None and expected_head_commit_id != head:
                 raise HeadMoved(pr_id, head)
@@ -2657,6 +2666,7 @@ class GraphVersioningService:
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
+        self_merge: bool = True,
     ) -> str:
         """Squash-merge a fork PR into the parent's ``main`` — the same 3-way
         semantics as draft publish, across graphs (plan §8, §12.5).
@@ -2664,7 +2674,7 @@ class GraphVersioningService:
         Non-overlapping edits auto-merge; genuine conflicts raise
         :class:`MergeConflict` (resubmit with ``resolutions``).  Already-merged
         divergence nets to zero on any later PR, so the fork keeps its base and
-        can keep diverging."""
+        can keep diverging. ``self_merge`` as for :meth:`merge_mr`."""
         async def _once():
             async with self._session() as s:
                 pr = await s.get(MergeRequestORM, pr_id)
@@ -2672,6 +2682,8 @@ class GraphVersioningService:
                     raise ValueError(f"unknown pr {pr_id}")
                 if pr.status in ("merged", "closed"):
                     raise ValueError(f"pr {pr_id} is {pr.status}")
+                if not self_merge and actor == pr.actor:
+                    raise SelfMerge(pr_id)
                 fork = await s.get(GraphORM, pr.graph_id)
                 parent = await s.get(GraphORM, pr.target_graph_id)
                 if fork is None or parent is None or fork.deleted_at is not None:
@@ -2964,25 +2976,31 @@ class GraphVersioningService:
         ontology_rules: Optional[OntologyRules] = None,
         queued: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
+        self_merge: bool = True,
     ) -> str:
         """Merge a merge request, dispatching on its kind: a fork PR delegates to
         :meth:`merge_pr`; a draft→main MR recomputes the 3-way merge at merge time
         (main may have advanced under continued editing), enforces the
         reviewer-approval gate, then squashes via the shared :meth:`_apply_draft_squash`.
-        ``queued`` as for :meth:`publish`."""
+        ``queued`` as for :meth:`publish`. ``self_merge`` False: its data source's policy says
+        someone other than whoever opened it merges it (:class:`SelfMerge`)."""
         async with self._session() as s:
             pr = await s.get(MergeRequestORM, mr_id)
             if pr is None:
                 raise ValueError(f"unknown merge request {mr_id}")
             is_draft = self._is_draft_mr(pr)
+            opener = pr.actor
             flush_gid = pr.target_graph_id
             flush_bid = pr.source_branch_id
             draft_branch = await s.get(BranchORM, pr.source_branch_id)
             flush_actor = (draft_branch.owner if draft_branch else None) or actor
         if not is_draft:
             return await self.merge_pr(
-                pr_id=mr_id, actor=actor, message=message, resolutions=resolutions
+                pr_id=mr_id, actor=actor, message=message, resolutions=resolutions,
+                self_merge=self_merge,
             )
+        if not self_merge and actor == opener:
+            raise SelfMerge(mr_id)
         async def _once():
             # Fold the draft's staged-but-uncommitted edits first (attributed to its owner),
             # so the merge never silently drops working changes that were never checkpointed.
