@@ -44,7 +44,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.api.v1.endpoints.versioning import (
-    _domain_errors, export_scope_of, get_import_export_service, get_versioning_service,
+    _domain_errors, draft_level, export_scope_of, get_import_export_service, get_versioning_service,
 )
 from backend.app.api.v1.endpoints.large_json import json_response
 from backend.app.api.v1.endpoints.view_guards import editable_view, may_edit_view, readable_view
@@ -695,6 +695,7 @@ async def import_package_data(
                 workspace_id=body.workspaceId, data_source_id=body.dataSourceId, graph_id=graph["graph_id"],
                 actor=user.id, import_format="ndjson", source_uri=uploads.record_key(record),
                 reconcile_mode="upsert", idempotency_key=key, name=name, originating_view_id=body.viewId,
+                draft_visibility=await draft_level(session, body.dataSourceId),
             )
         except IntegrityError:              # the same target, asked for twice at once
             return _data_started(await ie.find_job(graph_id=graph["graph_id"], idempotency_key=key), body, name)
@@ -1391,6 +1392,7 @@ async def import_view_file(
             resolved = await svc.resolve_graph(
                 data_source_id=target.data_source_id, actor=actor, workspace_id=target.workspace_id,
                 open_draft_if_absent=True, originating_view_id=row.id,
+                draft_visibility=await draft_level(session, target.data_source_id),
             )
         draft = (resolved or {}).get("my_draft")
         if not draft:
@@ -1406,7 +1408,8 @@ async def import_view_file(
                                       actor=actor, view_id=row.id)
                 return target.branch_id
             return await svc.open_draft(graph_id=graph["graph_id"], owner=actor,
-                                        name=f"Import: {row.name}"[:200], originating_view_id=row.id)
+                                        name=f"Import: {row.name}"[:200], originating_view_id=row.id,
+                                        visibility=await draft_level(session, target.data_source_id))
 
     digest = await _compute_ontology_digest(session, target.workspace_id, target.data_source_id)
     try:

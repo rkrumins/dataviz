@@ -57,7 +57,8 @@ async def _run() -> None:
             gid = r.json()["graphId"]
             r = await c.post(f"{V1}/graphs/{gid}/bulk-ingest", content=_IMPORT_NDJSON, headers=alice)
             assert r.status_code == 200, r.text
-            d = (await c.post(f"{V1}/graphs/{gid}/branches", json={}, headers=alice)).json()["branchId"]
+            d = (await c.post(f"{V1}/graphs/{gid}/branches", json={"visibility": "private"},
+                              headers=alice)).json()["branchId"]
             qd = {"dataSourceId": ds, "branchId": d}
             save = {"ops": [{"op": "update", "kind": "node", "id": "urn:t:child",
                              "payload": {"displayName": "Child v2"}}]}

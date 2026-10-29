@@ -181,10 +181,15 @@ async def test_an_import_still_storing_its_file_is_answered_as_it_is(test_client
     assert not (await jobs.store.stat(uri)).exists, "nothing written into the file being stored"
 
 
+async def _no_row(*_args, **_kwargs):
+    return None                      # no data source row: its draft starts at the built-in level
+
+
 def _post_directly(jobs, key):
     return create_import("ws1", "g1", _CutOff(), format="ndjson", reconcile_mode="upsert",
                          branch_id=None, view_id=None, idempotency_key=key, user=SimpleNamespace(id=ME),
-                         claims=None, meta={"data_source_id": "ds1"}, ie=jobs, session=None)
+                         claims=None, meta={"data_source_id": "ds1"}, ie=jobs,
+                         session=SimpleNamespace(get=_no_row))
 
 
 async def test_a_keyed_upload_that_broke_off_is_taken_back_by_its_retry(test_client, jobs):

@@ -254,7 +254,8 @@ async def _a_taken_back_import_meets_the_drafts_access(svc, ie, root):
     with pytest.raises(ConnectionResetError):
         await _post(ie, gid, _CutOff(), draft, "nightly-1", "bob")
     job_id = await _the_job_on(draft)
-    await svc.update_branch(graph_id=gid, branch_id=draft, actor="alice", is_shared=False)
+    await svc.remove_branch_member(graph_id=gid, branch_id=draft, subject_type="user", subject_id="bob",
+                                   actor="alice")
 
     with pytest.raises(HTTPException) as exc:                # what a new import from bob gets:
         await _post(ie, gid, _Body(), draft, "nightly-1", "bob")  # a draft he can no longer read
@@ -367,10 +368,14 @@ async def _a_replayed_key_answers_with_its_import(svc, ie, root):
     ie = ImportExportService(versioning=svc, store=LocalFsObjectStore(root))
     user = type("U", (), {"id": "u"})()
 
+    async def no_source_row(*_args):
+        return None                  # the draft it opens starts at the built-in level
+
     def post(branch_id=None):
         return create_import("ws1", gid, _Body(), format="ndjson", reconcile_mode="upsert",
                              branch_id=branch_id, view_id=None, idempotency_key="k1", user=user,
-                             claims=None, meta={"data_source_id": gid}, ie=ie, session=None)
+                             claims=None, meta={"data_source_id": gid}, ie=ie,
+                             session=type("S", (), {"get": staticmethod(no_source_row)})())
     first = await post()
     same = (first["jobId"], first["branchId"], first["sourceUri"])
     again = await post()                                     # its answer was lost: sent again

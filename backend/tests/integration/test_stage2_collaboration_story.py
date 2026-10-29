@@ -79,7 +79,8 @@ async def _story(prov: str, key: str) -> None:
             # 2. Alice and Bob each open a private draft; Alice edits hers.
             drafts = {}
             for who in ("alice", "bob"):
-                r = await c.post(f"{V1}/graphs/{gid}/branches", json={}, headers=_as(who))
+                r = await c.post(f"{V1}/graphs/{gid}/branches", json={"visibility": "private"},
+                                 headers=_as(who))
                 assert r.status_code in (200, 201), r.text
                 drafts[who] = r.json()["branchId"]
             d = drafts["alice"]
@@ -106,12 +107,12 @@ async def _story(prov: str, key: str) -> None:
 
             # 4. Alice shares her draft with grp_eng as editors and with Pat, who will merge it, as a
             #    viewer: Carol edits it, Bob is no member.
-            r = await c.patch(B, json={"isShared": True}, headers=_as("alice"))
-            assert r.status_code == 200 and r.json()["isShared"] is True, r.text
             for subject, kind, role in (("grp_eng", "group", "editor"), ("pat", "user", "viewer")):
                 r = await c.post(f"{B}/members", headers=_as("alice"),
                                  json={"subjectType": kind, "subjectId": subject, "role": role})
                 assert r.status_code == 200, r.text
+            r = await c.get(B, headers=_as("alice"))
+            assert (r.json()["visibility"], r.json()["isShared"]) == ("private", True), r.text
             r = await c.post(f"{GP}/changes", params=qd, json=_save("urn:t:root", "Carol's root"),
                              headers=_as("carol"))
             assert r.status_code == 200, r.text

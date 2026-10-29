@@ -66,14 +66,16 @@ class _Versioning:
     def finish(self, branch_id: str, status: str) -> None:
         next(d for d in self.drafts if d["branch_id"] == branch_id)["status"] = status
 
-    async def open_draft(self, *, graph_id, owner, name=None, originating_view_id=None, shared=False):
+    async def open_draft(self, *, graph_id, owner, name=None, originating_view_id=None, shared=False,
+                         visibility="private"):
         branch_id = f"br_{len(self.drafts) + 1}"
         self.drafts.append({"branch_id": branch_id, "graph_id": graph_id, "owner": owner, "name": name,
-                            "originating_view_id": originating_view_id, "status": "open"})
+                            "originating_view_id": originating_view_id, "status": "open",
+                            "visibility": visibility})
         return branch_id
 
     async def resolve_graph(self, *, data_source_id, actor, workspace_id=None, open_draft_if_absent=True,
-                            originating_view_id=None):
+                            originating_view_id=None, draft_visibility="private"):
         graph = self.graphs.get(data_source_id)
         if graph is None:
             return None
@@ -82,7 +84,8 @@ class _Versioning:
         branch_id = mine[-1]["branch_id"] if mine else None
         if branch_id is None and open_draft_if_absent:
             branch_id = await self.open_draft(graph_id=graph["graph_id"], owner=actor,
-                                              originating_view_id=originating_view_id)
+                                              originating_view_id=originating_view_id,
+                                              visibility=draft_visibility)
         return {"graph_id": graph["graph_id"], "my_draft": {"branch_id": branch_id} if branch_id else None}
 
 

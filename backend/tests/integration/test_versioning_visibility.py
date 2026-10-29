@@ -110,8 +110,9 @@ async def _run() -> None:
     with pytest.raises(AccessDenied):
         await svc.commit_log(graph_id=gid, branch_id=for_team, viewer=bob)
 
-    # ── unshared, a draft is neither listed nor readable; going private removes its members ──
-    await svc.update_branch(graph_id=gid, branch_id=for_bob, actor="alice", is_shared=False)
+    # ── once its last member goes, a draft is neither listed nor readable to them ──
+    await svc.remove_branch_member(graph_id=gid, branch_id=for_bob, subject_type="user", subject_id="bob",
+                                   actor="alice")
     assert for_bob not in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=bob))[0]]
     with pytest.raises(AccessDenied):
         await svc.commit_log(graph_id=gid, branch_id=for_bob, viewer=bob)

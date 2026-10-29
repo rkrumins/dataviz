@@ -192,3 +192,36 @@ async def test_load_reads_the_source_and_its_workspace(db_session, estate):
     with pytest.raises(LookupError):
         await drafts_policy.load(db_session, "ds_missing")
     assert V.get_workspace_drafts_policy is not None
+
+
+#: Every call that can open a draft, and the keyword that carries the level it opens it at.
+_OPENS_A_DRAFT = {"open_draft": "visibility", "_add_draft": "visibility",
+                  "create_import_job": "draft_visibility", "resolve_graph": "draft_visibility"}
+
+
+def test_every_draft_the_app_opens_is_opened_at_its_policys_level():
+    """A caller that leaves the level out opens a private draft whatever the data source's policy
+    says: every one in the app passes it. ``resolve_graph`` opens one unless told not to."""
+    import ast
+    from pathlib import Path
+
+    app = Path(__file__).resolve().parents[1] / "app"
+    missing = []
+    for path in sorted(app.rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text(), str(path))):
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
+                continue                                # a bare name is a callback the route passes
+            name = node.func.attr
+            needed = _OPENS_A_DRAFT.get(name)
+            if needed is None:
+                continue
+            keywords = {k.arg: k.value for k in node.keywords}
+            if name == "resolve_graph":
+                if "data_source_id" not in keywords:            # a FalkorDB client's, not ours
+                    continue
+                flag = keywords.get("open_draft_if_absent")
+                if isinstance(flag, ast.Constant) and flag.value is False:
+                    continue
+            if needed not in keywords:
+                missing.append(f"{path.relative_to(app)}:{node.lineno} {name}")
+    assert missing == [], missing

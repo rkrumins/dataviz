@@ -81,6 +81,7 @@ GET /api/v1/{ws_id}/graph/vocab-alignment resource
 GET /api/v1/{ws_id}/versioning/data-sources/{data_source_id}/pull-requests resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id} resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id} resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/diff resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/diff-vs-main resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/branches/{branch_id}/diff-vs-main/children resource

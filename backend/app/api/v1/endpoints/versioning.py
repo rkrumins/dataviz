@@ -685,7 +685,11 @@ class CreateGraphRequest(_ApiModel):
 class OpenDraftRequest(_ApiModel):
     name: Optional[str] = None
     originating_view_id: Optional[str] = Field(default=None, alias="originatingViewId")
+    # Deprecated: a draft is shared by adding members. Kept so older clients still open one; it
+    # opens a private draft unless ``visibility`` says otherwise.
     shared: bool = False
+    # Omitted: the data source's policy decides (``drafts_policy``).
+    visibility: Optional[Literal["public", "private"]] = None
 
 
 class BranchMemberRequest(_ApiModel):
@@ -695,7 +699,9 @@ class BranchMemberRequest(_ApiModel):
 
 
 class UpdateBranchRequest(_ApiModel):
-    """Patch a draft's metadata. Omitted fields are left unchanged; ``""`` clears name/description."""
+    """Patch a draft's metadata. Omitted fields are left unchanged; ``""`` clears name/description.
+    ``isShared`` is refused (422): a draft is shared through its members, and its level changes
+    through its own route."""
     name: Optional[str] = None
     description: Optional[str] = None
     is_shared: Optional[bool] = Field(default=None, alias="isShared")
@@ -877,6 +883,11 @@ class BranchResponse(_ApiModel):
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
     # The caller's role on the draft (the list sets it): 'owner', a member role, or null.
     my_role: Optional[str] = Field(default=None, alias="myRole")
+    # public | private: who reads and writes it (``main`` is public).
+    visibility: str = "private"
+    # What the caller may do with it (the list and the branch read set it): {canRead, canWrite,
+    # canManage}. A client renders this rather than working it out.
+    access: Optional[Dict[str, bool]] = None
 
 
 class OpenDraftResponse(_ApiModel):
@@ -1504,6 +1515,8 @@ async def list_branches(
     branch_status: List[Literal["open", "publishing", "merged", "abandoned", "all"]] = Query(
         ["open", "publishing"], alias="status"),
     view_id: Optional[str] = Query(None, alias="viewId"),
+    scope: Literal["all", "mine", "shared", "public"] = Query("all"),
+    visibility: Optional[Literal["public", "private"]] = Query(None),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -1512,12 +1525,14 @@ async def list_branches(
 ):
     """Branches on the graph — graph-wide (every view) by default; ``viewId`` narrows to
     that view's own branches (the Data-Source rollup stays the default, unfiltered).
-    ``status`` (repeatable; default open + publishing) filters by status. ``main`` comes
+    ``status`` (repeatable; default open + publishing) filters by status. ``scope`` keeps the
+    caller's own drafts (``mine``), the drafts shared with them (``shared``) or the public ones
+    (``public``), and ``visibility`` one level; either leaves ``main`` out. ``main`` comes
     first, then drafts newest first; ``X-Next-Cursor`` is set when another page follows."""
     try:
         branches, next_cursor = await svc.list_branches(
             graph_id=graph_id, limit=limit, cursor=cursor, viewer=viewer,
-            originating_view_id=view_id, status=branch_status)
+            originating_view_id=view_id, status=branch_status, scope=scope, visibility=visibility)
     except ValueError:
         raise HTTPException(status_code=422, detail="malformed cursor")
     if next_cursor is not None:
@@ -1579,11 +1594,14 @@ async def resolve_graph_open(
     ws_id: str, body: ResolveRequest,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    """Resolve and ensure the caller has an open draft to edit on (opens one if none)."""
+    """Resolve and ensure the caller has an open draft to edit on (opens one if none, at the level
+    its data source's policy starts a draft at)."""
     res = await svc.resolve_graph(
         data_source_id=body.data_source_id, actor=user.id, workspace_id=ws_id,
         open_draft_if_absent=True, originating_view_id=body.originating_view_id,
+        draft_visibility=await draft_level(session, body.data_source_id),
     )
     if res is None:
         raise HTTPException(status_code=404, detail="no versioned graph for data source")
@@ -1596,20 +1614,63 @@ async def resolve_graph_open(
 # --------------------------------------------------------------------------- #
 # Draft editing                                                                #
 # --------------------------------------------------------------------------- #
+async def draft_level(session: AsyncSession, data_source_id: Optional[str],
+                      asked: Optional[str] = None) -> str:
+    """The level a new draft of ``data_source_id`` starts at: ``asked``, else its policy's default
+    (``drafts_policy``). A level the policy rules out is a 409 ``private_drafts_disabled`` or
+    ``public_drafts_disabled``. A graph whose data source row is gone follows the built-in policy."""
+    from backend.app.services import drafts_policy
+    policy = drafts_policy.resolve()
+    if data_source_id:
+        try:
+            policy = await drafts_policy.load(session, data_source_id)
+        except LookupError:
+            pass
+    level = asked or policy.default_visibility
+    if not policy.allows(level):
+        raise HTTPException(status_code=409, detail={
+            "type": f"{level}_drafts_disabled",
+            "message": f"This data source doesn't allow {level} drafts: start a "
+                       f"{policy.default_visibility} one."})
+    return level
+
+
 @router.post("/graphs/{graph_id}/branches", response_model=OpenDraftResponse, status_code=201)
 async def open_draft(
     ws_id: str, graph_id: str, body: OpenDraftRequest,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    """Open a draft at ``visibility``, else at the level its data source's policy starts one. The
+    deprecated ``shared`` asks for a private draft, as it always opened one only its people see."""
+    asked = body.visibility or ("private" if body.shared else None)
+    level = await draft_level(session, _meta.get("data_source_id"), asked)
     with _domain_errors():
         branch_id = await svc.open_draft(
             graph_id=graph_id, owner=user.id, name=body.name,
-            originating_view_id=body.originating_view_id, shared=body.shared,
+            originating_view_id=body.originating_view_id, visibility=level,
         )
     await _ensure_view_layout_overlay(body.originating_view_id, branch_id)
     return {"branch_id": branch_id}
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}", response_model=BranchResponse)
+async def get_branch(
+    ws_id: str, graph_id: str, branch_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One branch as the list shows it: its level, the caller's role on it and what they may do
+    with it. 404 for a draft the caller may not read, as for one that doesn't exist."""
+    with _domain_errors():
+        branch = await svc.get_branch(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+    await _attach_user_names(session, [branch])
+    return branch
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/members")
@@ -1917,11 +1978,17 @@ async def update_branch(
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """Edit a draft's name / description (owner or maintainer) or visibility (owner only)."""
+    """Edit a draft's name / description (owner or maintainer). ``isShared`` is 422: a draft is
+    shared by adding members, and its level changes through ``…/visibility``."""
+    if body.is_shared is not None:
+        raise HTTPException(status_code=422, detail={
+            "type": "is_shared_retired",
+            "message": "A draft is shared by adding members, and made public or private with "
+                       "POST …/visibility."})
     with _domain_errors():
         return await svc.update_branch(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
-            name=body.name, description=body.description, is_shared=body.is_shared,
+            name=body.name, description=body.description,
         )
 
 
@@ -2941,7 +3008,8 @@ async def create_import(
                     workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
                     actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
                     branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
-                    idempotency_key=key)
+                    idempotency_key=key, draft_visibility=(
+                        await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
             job = await _job_for_key(ie, graph_id, key, "ingest")
@@ -3098,7 +3166,8 @@ async def complete_import_upload(
             workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
             actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
             source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
-            scope_view_id=view_id)
+            scope_view_id=view_id, draft_visibility=(
+                await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
     try:
         await uploads.save(ie.store, {**record, "jobId": created["job_id"], "branchId": created["branch_id"]})
         status = await ie.start_import(created["job_id"])
