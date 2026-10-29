@@ -211,6 +211,33 @@ def _view_source_kinds_unknown():
 
 
 @pytest.fixture(autouse=True)
+def _no_graphs_pinned_to_providers(monkeypatch):
+    """No versioned graph is projected into any provider, so a provider delete, edit or impact
+    report does not reach for the ``graphver`` store (see above). A test about pinned graphs
+    patches ``versioned_sources.graphs_pinned_to`` itself (see
+    test_provider_versioned_graphs.py)."""
+    from backend.app.services import versioned_sources
+
+    async def _none(provider_id):
+        return []
+
+    monkeypatch.setattr(versioned_sources, "graphs_pinned_to", _none)
+
+
+@pytest.fixture(autouse=True)
+def _physical_key_is_the_data_source_key(monkeypatch):
+    """Every data source is read from its own key, so ``ProviderManager.get_provider`` does not
+    reach for the ``graphver`` store (see above). A routing test restores the real
+    ``versioned_sources.physical_key`` (see test_provider_manager_pin_routing.py)."""
+    from backend.app.services import versioned_sources
+
+    async def _identity(ds_id, provider_id, graph_name):
+        return provider_id, graph_name
+
+    monkeypatch.setattr(versioned_sources, "physical_key", _identity)
+
+
+@pytest.fixture(autouse=True)
 def _reset_replica_penalty_box():
     """Clear the process-global replica penalty box between tests.
 
@@ -270,6 +297,25 @@ def view_portability_enabled():
     feature_flags._cache = {**(feature_flags._cache or {}), "viewPortabilityEnabled": True}
     feature_flags._cache_ts = time.monotonic()
     yield
+
+
+class _AnyOpenDraft:
+    async def check_view_branch(self, **_):
+        return None
+
+
+@pytest.fixture()
+def any_open_draft():
+    """Every ``branchId`` a view route is given passes as an open draft the caller may edit.
+
+    For view tests that exercise overlays without a versioning store: the SQLite harness has
+    no graphver tables, and the view routes ask the versioning service about the branch."""
+    from backend.app.api.v1.endpoints.versioning import get_versioning_service
+    from backend.app.main import app
+
+    app.dependency_overrides[get_versioning_service] = lambda: _AnyOpenDraft()
+    yield
+    app.dependency_overrides.pop(get_versioning_service, None)
 
 
 @pytest.fixture()

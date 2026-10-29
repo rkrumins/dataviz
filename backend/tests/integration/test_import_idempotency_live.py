@@ -1,8 +1,9 @@
 """An import's idempotency key on a live Postgres.
 
 The jobs table holds one job per key on a graph, whatever its kind or state, so a second import
-with a taken key is refused (``IntegrityError``) — and the draft that call opened for it is
-abandoned, not left in its owner's list, empty. The job the key started is what ``find_job`` finds.
+with a taken key is refused (``IntegrityError``) — and leaves no draft: the draft is opened in the
+job's transaction, which the refused insert rolls back. The job the key started is what
+``find_job`` finds.
 """
 import asyncio
 import os
@@ -37,7 +38,8 @@ async def _run(root):
             BranchORM.graph_id == gid, BranchORM.kind != "main"))).all()
     assert dict(drafts)[first["branch_id"]] == "open"
     refused = [status for branch_id, status in drafts if branch_id != first["branch_id"]]
-    assert refused == ["abandoned"], "the refused call's draft is abandoned, not left open and empty"
+    assert refused == [], ("the refused call leaves no draft: it is opened in the job's transaction, "
+                           "which the refused insert rolls back")
 
     found = await ie.find_job(graph_id=gid, idempotency_key=key)
     assert found["jobId"] == first["job_id"] and found["jobType"] == "ingest"
@@ -50,7 +52,7 @@ async def _run(root):
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres")
-def test_a_taken_key_refuses_the_second_job_and_abandons_its_draft():
+def test_a_taken_key_refuses_the_second_job_and_leaves_no_draft():
     root = tempfile.mkdtemp()
     try:
         asyncio.run(_run(root))

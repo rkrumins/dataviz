@@ -460,7 +460,19 @@ class ProviderManager:
             if ds is None:
                 raise KeyError(f"No data source for workspace: {workspace_id}")
 
-        cache_key = (ds.provider_id, ds.graph_name or "")
+        # A versioned graph's reads and rollups go to the key it projects into, which a move
+        # leaves different from the data source's (doc 14 §6). The management DB is unchanged.
+        from ..services import versioned_sources
+        try:
+            provider_id, graph_name = await versioned_sources.physical_key(
+                ds.id, ds.provider_id, ds.graph_name)
+        except Exception as exc:
+            raise ProviderUnavailable(
+                provider_name=f"{ds.provider_id}:{ds.graph_name}",
+                reason="versioned projection pin could not be read",
+            ) from exc
+
+        cache_key = (provider_id, graph_name or "")
 
         # Fast path: already cached and healthy.
         #
@@ -528,14 +540,14 @@ class ProviderManager:
 
             logger.info(
                 "Instantiating provider for workspace=%s ds=%s provider=%s graph=%s",
-                workspace_id, ds.id, ds.provider_id, ds.graph_name,
+                workspace_id, ds.id, provider_id, graph_name,
             )
             ds_extra = json.loads(ds.extra_config) if getattr(ds, "extra_config", None) else None
             try:
                 from backend.app.config import resilience as _resilience
                 raw_provider = await asyncio.wait_for(
                     self._instantiate_from_provider(
-                        ds.provider_id, ds.graph_name, session,
+                        provider_id, graph_name, session,
                         ds_extra_config=ds_extra,
                     ),
                     timeout=_resilience.PROVIDER_INSTANTIATION_TIMEOUT_SECS,
@@ -568,7 +580,7 @@ class ProviderManager:
             # without re-deriving it — CircuitBreakerProxy passes plain
             # attributes through to the wrapped instance.
             raw_provider.manager_cache_key = cache_key
-            breaker_name = f"{ds.provider_id}:{ds.graph_name or ''}"
+            breaker_name = f"{provider_id}:{graph_name or ''}"
             self._providers[cache_key] = _wrap_in_breaker(raw_provider, breaker_name)
             self._last_used[cache_key] = time.monotonic()
             state_after, _ = await breaker._record_success()

@@ -88,10 +88,14 @@ describe('buildRowsStore', () => {
 // scope names exactly one new test file alongside buildRowsStore.ts +
 // hierarchyBuilderStore.ts — see task-4-brief.md STRICT SCOPE.
 describe('hierarchyBuilderStore surface/mode extension', () => {
+  // open() sets state once ensureDraftOpen has resolved.
+  const settle = () => new Promise((r) => setTimeout(r, 0))
+
   it('open() defaults surface to "rail"', async () => {
     const { useHierarchyBuilderStore } = await import('../../hierarchyBuilderStore')
     useHierarchyBuilderStore.getState().close()
     useHierarchyBuilderStore.getState().open()
+    await settle()
     expect(useHierarchyBuilderStore.getState().isOpen).toBe(true)
     expect(useHierarchyBuilderStore.getState().surface).toBe('rail')
   })
@@ -100,6 +104,7 @@ describe('hierarchyBuilderStore surface/mode extension', () => {
     const { useHierarchyBuilderStore } = await import('../../hierarchyBuilderStore')
     useHierarchyBuilderStore.getState().close()
     useHierarchyBuilderStore.getState().openBuild()
+    await settle()
     expect(useHierarchyBuilderStore.getState().isOpen).toBe(true)
     expect(useHierarchyBuilderStore.getState().surface).toBe('build')
   })
@@ -107,6 +112,7 @@ describe('hierarchyBuilderStore surface/mode extension', () => {
   it('close() resets surface back to "rail"', async () => {
     const { useHierarchyBuilderStore } = await import('../../hierarchyBuilderStore')
     useHierarchyBuilderStore.getState().openBuild()
+    await settle()
     expect(useHierarchyBuilderStore.getState().surface).toBe('build')
     useHierarchyBuilderStore.getState().close()
     expect(useHierarchyBuilderStore.getState().surface).toBe('rail')

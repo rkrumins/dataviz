@@ -55,10 +55,12 @@ allow it — otherwise ask a super admin or an org admin (**Administration → S
 1. **Name it** for what it does — "Metadata sync", say — with a line on what it is for.
 2. **Make you, or better your team, its manager.** Managers make, rotate and revoke its keys.
 3. **Ask each workspace it works in for a role**, from its page: Workspace viewer to read,
-   Workspace member or Data engineer to change data. Each workspace's admins and stewards answer,
-   or add it themselves. A service account never holds a role that administers a workspace or
-   lets people in. One that reads across the whole organization can instead be let read every
-   workspace, by an org admin or a super admin.
+   Workspace member or Data engineer to change data. A data source with version control takes
+   changes through drafts; to write its published version directly, the account needs Publisher
+   or Data engineer. Each workspace's admins and stewards answer, or add it themselves. A service
+   account never holds a role that administers a workspace or lets people in. One that reads
+   across the whole organization can instead be let read every workspace, by an org admin or a
+   super admin.
 
 It then appears under **Account → API keys → Service accounts you manage**. What it is and who
 answers for it: [Service Accounts](/guide/service-accounts).
@@ -179,6 +181,7 @@ Guide](/docs/api-guide#run-a-lineage-trace).
 | `2xx` | Done. | — |
 | `401` with `detail.error` | The key isn't accepted: mistyped, revoked, expired, paused, its owner inactive, or the wrong address. | Fix the key: [When a key is refused](/guide/api-keys#when-a-key-is-refused). |
 | `403` with `detail.error` | The key is accepted but may not do this: `api_key_not_allowed` (a route keys can't call), `api_key_read_only`, `api_key_out_of_scope`, `missing_permission`. | Widen the key, or the role it acts with, or use another route. |
+| `403` with `"type": "access_denied"` | Version control refuses it, and `detail.code` says why: `publish_required` (writing a published version directly without publish), `not_draft_owner` or `not_owner_or_member` (someone else's draft), `person_required` or `self_review` (a review). With no `code`, `detail.message` says why (cancelling an export someone else started). | Write to a draft instead, or ask its owner or a person with publish. |
 | `404` | Not there, or not yours to see. | — |
 | `409` | It clashes with the current state. | Read it again, then decide. |
 | `422` | The request is malformed. | Fix it; the answer says which field. |
@@ -228,7 +231,8 @@ def call(method, path, **kwargs):
 ## What a key can't call
 
 People and access, settings and switches, sharing, layout templates, saved filters, importing a
-view file, turning version control on, and creating a graph. For these a person signs in with a
+view file, turning version control on, creating or forking a graph, and publishing, merging,
+reverting, restoring or syncing one. For these a person signs in with a
 password ([With a password](/docs/api-guide#with-a-password)) or uses the app; a service account
 can't. Everything a key may call: [What a key can call](/guide/api-keys#what-a-key-can-call), and
 the API explorer marks each one ([Find the endpoint you need](/docs/api-guide#find-the-endpoint-you-need)).

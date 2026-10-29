@@ -11,7 +11,8 @@
  * contract: a draft must be active before any optimistic canvas mutation, and
  * switching branches reloads the canvas — opening a draft after the builder's
  * first stage would discard it. Centralizing the guard here means every
- * caller gets it for free instead of remembering to call it themselves.
+ * caller gets it for free instead of remembering to call it themselves. With
+ * no draft (editing paused, no :manage) it does not open, so nothing is staged on main.
  */
 import { create } from 'zustand'
 import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
@@ -82,18 +83,20 @@ export const useHierarchyBuilderStore = create<HierarchyBuilderState>((set, get)
   // The builder takes the right rail from the drawer — a drawer move, held while the drawer has
   // edits not staged yet.
   open: (opts) => useCanvasStore.getState().requestDrawerMove(() => {
-    void ensureDraftOpen()
-    set((s) => ({
-      isOpen: true,
-      parentUrn: opts?.parentUrn ?? null,
-      layerId: opts?.layerId ?? null,
-      initialTypeId: opts?.initialTypeId ?? null,
-      initialMode: opts?.mode ?? 'outline',
-      initialTemplate: opts?.template ?? null,
-      surface: opts?.surface ?? 'rail',
-      batchId: s.batchId + 1,
-      batchUrns: [],
-    }))
+    void ensureDraftOpen().then((draftId) => {
+      if (!draftId) return
+      set((s) => ({
+        isOpen: true,
+        parentUrn: opts?.parentUrn ?? null,
+        layerId: opts?.layerId ?? null,
+        initialTypeId: opts?.initialTypeId ?? null,
+        initialMode: opts?.mode ?? 'outline',
+        initialTemplate: opts?.template ?? null,
+        surface: opts?.surface ?? 'rail',
+        batchId: s.batchId + 1,
+        batchUrns: [],
+      }))
+    })
   }),
 
   openBuild: (opts) => get().open({ ...opts, surface: 'build' }),

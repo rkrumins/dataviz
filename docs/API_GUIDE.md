@@ -24,13 +24,14 @@ managers make its keys. It gets in one of three ways:
 | Acts as | You | The service account | The account that signed in |
 | Who makes it | You — people who sign in through an identity provider too — unless your administrator switched keys off. [Some accounts can't](/guide/api-keys#confirming-its-you) | The account's managers, or a super admin | — |
 | What it reaches | What you chose when you created it — some workspaces, views or data sources, read-only or read & write — and never more than you can | What its managers chose, and never more than the account's own workspace roles | Everything the account can |
-| What it can call | The data plane: views, graphs, drafts and publishing, data-source signals and jobs — some of them under `/admin/`, such as the workspace list | The same | Every route |
+| What it can call | The data plane: views, graphs, drafts and pull requests (not publishing or merging them), data-source signals and jobs — some of them under `/admin/`, such as the workspace list | The same | Every route |
 | Stops when | You leave, or stop signing in through your identity provider | The account is disabled, or has had no manager for longer than its grace period | The session ends |
 | What the script handles | One header | One header | Cookies, a CSRF header on writes, renewal when the access cookie expires |
 
 Use a key unless the route you need is one a key cannot call — people and access, sharing,
-settings and switches, layout templates, saved filters, or importing a view file. Each recipe
-below says when that is. Those routes need a person signed in with a password: a service account
+settings and switches, layout templates, saved filters, importing a view file, turning version
+control on, creating or forking a graph, or publishing, merging, reverting, restoring or syncing
+one ([every versioning route a key can't call](/docs/versioning-api-reference#api-keys)). Each recipe below says when that is. Those routes need a person signed in with a password: a service account
 has none. New to keys? The [Integration Quickstart](/docs/integration-quickstart) takes you from
 choosing one to handling every answer.
 
@@ -397,6 +398,11 @@ There is no single paging scheme; each route documents its own in the explorer.
   `{items, total, hasMore, nextOffset}`; the versioning lists answer a plain array — stop
   when a page comes back shorter than `limit`. `GET /api/v1/admin/workspaces` sends the total
   in `X-Total-Count` when you pass `limit`.
+- **One exception:** a graph's branches (`GET …/graphs/{graph_id}/branches`) page by cursor.
+  When another page follows, the `X-Next-Cursor` header carries the `cursor` to send for it; stop
+  when it is absent. Unless you pass `status` (`open`, `publishing`, `merged`, `abandoned` or
+  `all`, repeatable), the list holds `main` and the open or publishing drafts you may read;
+  `merged` or `abandoned` alone leaves `main` out.
 - **Cursors** on long or changing lists: search hands back `cursor`; an entity's history and a
   graph's commit log hand back `nextBefore` with `hasMore`. Send the value back as-is, and keep
   going while `hasMore` is `true` — a page can be short and still have more. A commit log also
@@ -737,8 +743,10 @@ publish.
    write**.
 
    An `idempotencyKey` makes the request safe to send again: the same key from you answers with
-   the import it started — and if the first request failed before its file arrived, takes this
-   one's file and starts it. A key you used for an export answers `409 idempotency_key_reused`.
+   the import it started, with no second draft or job. If the first request broke off before its
+   file was stored, its import was failed there and then, and the same key takes it back with this
+   one's file — if you could start that import now. A key you used for an export answers
+   `409 idempotency_key_reused`.
 3. For a larger file — up to 10 GiB as NDJSON, CSV or TSV; JSON and Excel files stay at
    100 MB — send it in parts instead. Ask for an upload, send each part (numbered from `0`),
    then complete it:
@@ -764,7 +772,8 @@ publish.
    api GET "/api/v1/$WS/versioning/graphs/$GID/imports/$JOB" | jq '{status, summary, errorMessage}'
    ```
 
-5. Review the draft (`branchId` from step 2), then publish it:
+5. Review the draft (`branchId` from step 2), then publish it. Publishing needs
+   `workspace:datasource:publish`:
 
    ```bash
    api POST "/api/v1/$WS/versioning/graphs/$GID/branches/$BRANCH/publish" -d '{"message": "Nightly import"}'
@@ -773,7 +782,9 @@ publish.
    A `409 not_up_to_date` means the published graph moved since the draft began: pull the
    latest in with `POST …/branches/$BRANCH/rebase` (body `{}`), then publish again. A draft
    that changes more than 20,000 entities publishes as a job: the answer is `202` with a
-   `jobId` to poll at `GET …/graphs/$GID/publish-jobs/$JOB`.
+   `jobId` to poll at `GET …/graphs/$GID/publish-jobs/$JOB`. No API key can publish
+   (`403 api_key_not_allowed`): with a key, raise a merge request
+   (`POST …/branches/$BRANCH/merge-requests`) for a person to review and merge.
 
 To export, ask the workers to write the file, then download it — the download resumes:
 
@@ -885,10 +896,10 @@ in [Single Sign-On](/guide/sso-setup).
 | `401` `api_key_owner_inactive` | The person the key acts as is suspended, or the service account is disabled | Ask an administrator to reactivate them; ask the account's managers to enable it — or an administrator, if one disabled it |
 | `401` `api_key_ip_not_allowed` | The request came from an address outside the key's networks | Run it from one of them. Behind a proxy, the deployment must trust the proxy's address: [Network limits behind a proxy](/guide/api-keys#network-limits-behind-a-proxy) |
 | `401` `api_keys_disabled` | An administrator switched API keys off | Ask them; until then, a person signs in with a password |
-| `403` `api_key_not_allowed` | The route can't be called with a key — people and access, sharing, settings and switches, layout templates, saved filters, importing a view file | A person signs in with a password for it; a service account can't |
+| `403` `api_key_not_allowed` | The route can't be called with a key — people and access, sharing, settings and switches, layout templates, saved filters, importing a view file, turning version control on, creating or forking a graph, publishing, merging, reverting, restoring or syncing one ([every versioning route a key can't call](/docs/versioning-api-reference#api-keys)) | A person signs in with a password for it; a service account can't |
 | `403` `api_key_cannot_publish` | A key without **Publish** tried to create a view straight onto the enterprise tier | Create it private or workspace-wide, or use a key that may publish |
 | `403` `missing_permission` | The request needs the permission named in `permission`: whoever it acts as — you, or the service account — lacks it, or the key wasn't given it | Use a key that allows it, or ask a workspace admin for a role that holds it; a service account's roles are on its page |
-| `403` with `"type": "access_denied"` on a pull request | A service account can't approve one or be named its reviewer, and nobody approves one opened through a service account they manage | A person who doesn't manage the account reviews and approves it |
+| `403` with `"type": "access_denied"` on a pull request | A service account can't approve one or be named its reviewer (`person_required`), and nobody approves one opened through a service account they manage, or one from a draft it owns (`self_review`) | A person who doesn't manage the account reviews and approves it |
 | `403` `api_key_out_of_scope` | The request reaches past what the key was limited to — or a key limited to data sources didn't name one | Pass `?dataSourceId=`, or use a key that reaches it |
 | `403` `api_key_read_only` | A read-only key asked to change something | Use a key with read & write |
 | Requests work, then all answer `401` | The access cookie expired | Renew with `POST /api/v1/auth/refresh` and retry; sign in again if the renewal is refused too |

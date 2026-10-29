@@ -170,7 +170,7 @@ Key guards:
 ## 5. Watermark & bounded staleness
 
 `ProjectionStateORM` (`models.py:223-250`) is the per-graph control row:
-`projected_commit_seq`, `target_commit_seq`, `status ∈ idle|projecting|rebuilding|evicted`,
+`projected_commit_seq`, `target_commit_seq`, `status ∈ idle|projecting|rebuilding|evicted|reseeding`,
 `falkor_graph_name`, `falkor_provider`, `last_error`, `last_projected_at`, and
 `progress_done`/`progress_total` (live full-seed progress).
 
@@ -182,6 +182,8 @@ stateDiagram-v2
     rebuilding --> idle: full seed applied + verified
     idle --> evicted: cache_manager.evict (drop key, projected = 0)
     evicted --> rebuilding: ensure_rebuilt / poll loop reseeds
+    idle --> reseeding: operator watermark reset (DR, projected = 0)
+    reseeding --> rebuilding: poll loop reseeds
     projecting --> idle: failure/cancel → status reset (not stranded)
 ```
 
@@ -338,6 +340,25 @@ flowchart TD
 The probe-before-drop guard (§6) turns an unreachable pinned instance into a raised error before any
 destructive op — so a misroute never wipes the cache.
 
+**Moving a graph's projection.** `projection_state` (`falkor_provider`, `falkor_graph_name`) is
+authoritative: `ensure_projection_target` heals only a graph with no key or the `gv_<id>`
+placeholder, and a pinned key changes only by a move. Readers and rollup writers of a versioned data
+source follow the pin, not `ds.graph_name`, which stays the logical name: `ProviderManager.get_provider`
+routes through `versioned_sources.physical_key`, and ContextEngine serves main from FalkorDB only when
+the provider it holds serves the published pin (`serves_pin`). A platform admin moves a graph with
+`POST /admin/versioning/graphs/{graphId}/projection/move {providerId, key?}` (doc 14 §6, phase 1: a
+reseed move). Only owned keys move; the customer's own graph, an unpinned graph and a key other data
+sources read answer 409 `projection_not_adopted`. The new key is the graph's `gvp_<graphId>{<tag>.<n>}`
+(the first free one when `key` is omitted). `move_projection` swaps the pin, bumps the epoch (a pass
+in flight is superseded), lowers the watermark to 0 (`reseeding`) and appends the old key to
+`retired_keys`; reads fall back to Postgres until the reseed catches up. The worker's retire loop
+(`keymigrate.retire_moved_keys`) drops the old key under `gvproj` once the new key has reached the
+head at the move and `RETIRE_GRACE_SECS` have passed, unless something still reads or pins it; purge
+drops pending retired keys too. A key without the projector's pass marker is dropped only when it is
+one of the graph's own `gvp_` keys, which a reseed cut short leaves unmarked; the retire loop keeps
+any other, with its `retired_keys` entry, so the inventory still shows it. Until then, a move back
+onto the retired key reconciles it in place.
+
 ---
 
 ## 10. The read providers
@@ -365,11 +386,16 @@ provider per request:
   the engine degrades gracefully, `:165`); as-of views are read-only (a `_commit` with `as_of` set
   raises). Its `get_stats`/`get_schema_stats` recompute counts with the projector's own label
   sanitizer so they match FalkorDB once main projects.
-- **`VersionedWriteProvider`** (`versioned_write_provider.py:40`) wraps any provider: reads and
-  lifecycle delegate transparently via `__getattr__` (`:62`), but **every write also lands as an
-  audited commit** before hitting the inner provider — making versioning the system of record.
-  `set_containment_edge_types`/`set_ontology_rules` are intercepted (`:67-84`) so every recorded
-  commit enforces containment/ontology rules. Disabled with `GRAPHVER_VERSIONED_WRITES=0`.
+- **`VersionedWriteProvider`** (`versioned_write_provider.py:64`) wraps any provider: reads and
+  lifecycle delegate transparently via `__getattr__` (`:86`), but **a write lands only as an
+  audited commit** on main in Postgres and never reaches the inner provider; `_record` (`:141`)
+  then nudges the projector, the one writer of the graph's FalkorDB data, to carry it there.
+  Until it does, ContextEngine serves main from Postgres (read-your-writes). A data source with
+  no versioned graph refuses the write (`VersioningNotEnabled`, 409; `_graph_id`, `:119`).
+  `set_containment_edge_types`/`set_ontology_rules` are intercepted (`:99-117`) so every recorded
+  commit enforces containment/ontology rules. ContextEngine always wraps a versioned graph's
+  provider (`context_engine.py:230`); `GRAPHVER_VERSIONED_WRITES=0` opts out only data sources
+  without version control, whose writes then go to the provider directly.
 
 ---
 

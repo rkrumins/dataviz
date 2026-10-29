@@ -126,7 +126,7 @@ describe('a data source’s placement', () => {
         wrap(<GraphStorePlacementCard dataSourceId="ds-1" />)
         const card = await screen.findByTestId('graph-store-placement')
         expect(within(card).getByText('warehouse_proj')).toBeInTheDocument()
-        expect(within(card).getByText('rollup projection')).toBeInTheDocument()
+        expect(within(card).getByText('aggregation rollup')).toBeInTheDocument()
         expect(within(card).getByText(/rollups are on a different shard/)).toBeInTheDocument()
     })
 

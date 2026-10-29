@@ -32,7 +32,9 @@ async def _run_flow() -> None:
     # blank canvas → shared draft (alice + bob) → checkpoints
     g = await svc.create_graph(data_source_id=ds(), workspace_id="ws1", actor="alice")
     gid = g["graph_id"]
-    d = await svc.open_draft(graph_id=gid, owner="alice", originating_view_id="view_lineage")
+    d = await svc.open_draft(graph_id=gid, owner="alice", originating_view_id="view_lineage", shared=True)
+    await svc.add_branch_member(graph_id=gid, branch_id=d, subject_type="user", subject_id="bob",
+                                role="editor", actor="alice")
     await svc.stage_changes(graph_id=gid, branch_id=d, actor="alice", ops=[
         {"op": "create", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "Alpha", "entityType": "Dataset"}},
         {"op": "create", "entity_kind": "node", "entity_id": "B", "payload": {"displayName": "Beta", "entityType": "Dataset"}},

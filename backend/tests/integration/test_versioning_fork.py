@@ -11,11 +11,18 @@ import asyncio
 import os
 
 import pytest
-from sqlalchemy import select
+from datetime import datetime, timedelta
 
-from backend.app.services.versioning import db, models
-from backend.app.services.versioning.models import EdgeVersionORM, NodeVersionORM
-from backend.app.services.versioning.service import GraphVersioningService, MergeConflict
+from sqlalchemy import select, update
+
+from backend.app.services.versioning import config, db, models
+from backend.app.services.versioning.errors import (
+    ForkLimit, ForkNotRestorable, LiveForks, NotAFork)
+from backend.app.services.versioning.models import EdgeVersionORM, GraphORM, NodeVersionORM
+from backend.app.services.versioning.purge_worker import (
+    create_purge_job, tombstone_graphs_for_data_source)
+from backend.app.services.versioning.service import (
+    GraphVersioningService, MergeConflict, PullRequestExists)
 
 
 async def _version_entity_ids(graph_id: str) -> set:
@@ -115,6 +122,247 @@ async def _run() -> None:
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_versioning_fork_e2e():
     asyncio.run(_run())
+
+
+# ── the fork route: MANAGE, no caller-chosen data source, a live-fork cap ──
+R = "workspace:datasource:read"
+M = "workspace:datasource:manage"
+
+
+def _client(perms: tuple):
+    """The versioning router over in-process ASGI, the caller holding ``perms`` in ws1."""
+    from types import SimpleNamespace
+
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.app.api.v1.endpoints import versioning as V
+    from backend.app.auth.dependencies import get_current_user, get_permission_claims
+    from backend.app.services.permission_service import PermissionClaims
+
+    async def _user():
+        return SimpleNamespace(id="u_fork", email="f@example.com")
+
+    async def _claims():
+        return PermissionClaims(sid="", global_perms=(), ws_perms={"ws1": perms})
+
+    app = FastAPI()
+    app.include_router(V.router, prefix="/api/v1/{ws_id}/versioning")
+    app.dependency_overrides[get_current_user] = _user
+    app.dependency_overrides[get_permission_claims] = _claims
+    return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+
+async def _parent(svc) -> str:
+    await models.create_schema_and_partitions()
+    P = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="alice")
+    return P["graph_id"]
+
+
+async def _fork(c, gid, body=None):
+    return await c.post(f"/api/v1/ws1/versioning/graphs/{gid}/forks", json=body or {})
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_fork_needs_manage_and_ignores_a_data_source_id_e2e():
+    async def go():
+        svc = GraphVersioningService()
+        gid = await _parent(svc)
+        async with _client((R,)) as c:
+            r = await _fork(c, gid)
+            assert r.status_code == 403, r.text                      # a member without manage
+        taken = "ds_" + os.urandom(4).hex()
+        async with _client((R, M)) as c:
+            r = await _fork(c, gid, {"dataSourceId": taken})
+            assert r.status_code == 201, r.text
+        fork = await svc.get_graph(r.json()["graphId"])
+        assert fork["data_source_id"] != taken                       # the caller can't pick the key
+        await db.dispose_engine()
+    asyncio.run(go())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_fork_cap_counts_live_forks_only_e2e(monkeypatch):
+    from backend.app.services.versioning import config
+    from backend.app.services.versioning.purge_worker import tombstone_graphs_for_data_source
+
+    monkeypatch.setattr(config, "MAX_FORKS_PER_GRAPH", 2)
+
+    async def go():
+        svc = GraphVersioningService()
+        gid = await _parent(svc)
+        async with _client((R, M)) as c:
+            forks = [(await _fork(c, gid)).json()["graphId"] for _ in range(2)]
+            r = await _fork(c, gid)
+            assert r.status_code == 409, r.text                      # cap reached
+            assert r.json()["detail"]["type"] == "fork_limit"
+            assert r.json()["detail"]["limit"] == 2
+            # A tombstoned fork no longer counts: one slot comes back, and only one.
+            gone = await svc.get_graph(forks[0])
+            assert await tombstone_graphs_for_data_source(
+                data_source_id=gone["data_source_id"], workspace_id="ws1", actor="alice") == 1
+            assert (await _fork(c, gid)).status_code == 201
+            assert (await _fork(c, gid)).status_code == 409
+        await db.dispose_engine()
+    asyncio.run(go())
+
+
+# ── deleting a fork into the trash, restoring it, listing a graph's forks ──
+async def _child(svc, gid) -> str:
+    return (await svc.fork_graph(parent_graph_id=gid, workspace_id="ws1", actor="bob"))["graph_id"]
+
+
+async def _trash_with_data_source(svc, gid) -> None:
+    """Trash a graph as deleting its data source does, not through the fork routes."""
+    ds = (await svc.get_graph(gid))["data_source_id"]
+    assert await tombstone_graphs_for_data_source(data_source_id=ds, workspace_id="ws1",
+                                                  actor="alice") == 1
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_restore_fork_rules_e2e(monkeypatch):
+    async def go():
+        svc = GraphVersioningService()
+        gid = await _parent(svc)
+        f = await _child(svc, gid)
+        assert await svc.delete_fork(graph_id=f, workspace_id="ws1", actor="bob") == gid
+        assert await svc.get_graph(f) is None
+        with pytest.raises(ValueError):                              # another workspace's
+            await svc.restore_fork(graph_id=f, workspace_id="ws2")
+        with pytest.raises(NotAFork):
+            await svc.restore_fork(graph_id=gid, workspace_id="ws1")
+        assert await svc.restore_fork(graph_id=f, workspace_id="ws1") == gid
+        assert (await svc.get_graph(f))["fork_parent_graph_id"] == gid
+        assert await svc.restore_fork(graph_id=f, workspace_id="ws1") is None   # already live
+
+        # Once its purge is queued, it is past its undo.
+        await svc.delete_fork(graph_id=f, workspace_id="ws1", actor="bob")
+        assert await create_purge_job(graph_id=f, workspace_id="ws1", actor="reaper",
+                                      require_tombstoned=True)
+        with pytest.raises(ForkNotRestorable) as exc:
+            await svc.restore_fork(graph_id=f, workspace_id="ws1")
+        assert exc.value.reason == "purging"
+
+        # A fork comes back only under a live parent, as one is made only of a live parent.
+        g = await _child(svc, gid)
+        await svc.delete_fork(graph_id=g, workspace_id="ws1", actor="bob")
+        await _trash_with_data_source(svc, gid)
+        with pytest.raises(ForkNotRestorable) as exc:
+            await svc.restore_fork(graph_id=g, workspace_id="ws1")
+        assert exc.value.reason == "parent_deleted"
+        with pytest.raises(ValueError):
+            await svc.fork_graph(parent_graph_id=gid, workspace_id="ws1", actor="bob")
+
+        # Nor past the cap on live forks.
+        monkeypatch.setattr(config, "MAX_FORKS_PER_GRAPH", 1)
+        p2 = await _parent(svc)
+        h1 = await _child(svc, p2)
+        await svc.delete_fork(graph_id=h1, workspace_id="ws1", actor="bob")
+        await _child(svc, p2)
+        with pytest.raises(ForkLimit):
+            await svc.restore_fork(graph_id=h1, workspace_id="ws1")
+        await db.dispose_engine()
+    asyncio.run(go())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_delete_fork_refusals_e2e():
+    node = {"op": "create", "entity_kind": "node", "entity_id": "A",
+            "payload": {"entityType": "Dataset", "displayName": "A"}}
+
+    async def go():
+        svc = GraphVersioningService()
+        gid = await _parent(svc)
+        await _edit_publish(svc, gid, "alice", [node], "seed")
+
+        # A fork whose pull request into its parent is open stays.
+        f = await _child(svc, gid)
+        pr = await svc.open_pr(source_graph_id=f, actor="bob")
+        with pytest.raises(PullRequestExists):
+            await svc.delete_fork(graph_id=f, workspace_id="ws1", actor="bob")
+        await svc.close_pr(pr_id=pr, actor="bob")
+        assert await svc.delete_fork(graph_id=f, workspace_id="ws1", actor="bob") == gid
+        with pytest.raises(ValueError):                              # trashed: gone to every route
+            await svc.delete_fork(graph_id=f, workspace_id="ws1", actor="bob")
+        with pytest.raises(ValueError):
+            await svc.open_pr(source_graph_id=f, actor="bob")
+
+        # So does a fork that forks of its own read.
+        f1 = await _child(svc, gid)
+        f2 = await _child(svc, f1)
+        with pytest.raises(LiveForks) as exc:
+            await svc.delete_fork(graph_id=f1, workspace_id="ws1", actor="bob")
+        assert exc.value.forks == 1
+        assert await svc.delete_fork(graph_id=f2, workspace_id="ws1", actor="bob") == f1
+        assert await svc.delete_fork(graph_id=f1, workspace_id="ws1", actor="bob") == gid
+
+        # Only a fork fork_graph minted: a data source's graph goes with its data source.
+        with pytest.raises(NotAFork):
+            await svc.delete_fork(graph_id=gid, workspace_id="ws1", actor="bob")
+        legacy = await _parent(svc)
+        async with db.graphver_session() as s:
+            await s.execute(update(GraphORM).where(GraphORM.id == legacy)
+                            .values(fork_parent_graph_id=gid))
+        with pytest.raises(NotAFork):
+            await svc.delete_fork(graph_id=legacy, workspace_id="ws1", actor="bob")
+
+        # A pull request from a fork trashed any other way never merges.
+        f3 = await _child(svc, gid)
+        await _edit_publish(svc, f3, "bob", [{**node, "entity_id": "C"}], "fork work")
+        pr3 = await svc.open_pr(source_graph_id=f3, actor="bob")
+        head = (await svc.get_graph(gid))["main_head_commit_seq"]
+        await _trash_with_data_source(svc, f3)
+        with pytest.raises(ValueError):
+            await svc.merge_pr(pr_id=pr3, actor="alice", message="merge")
+        assert (await svc.get_graph(gid))["main_head_commit_seq"] == head
+        await db.dispose_engine()
+    asyncio.run(go())
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_fork_delete_restore_and_list_routes_e2e():
+    async def go():
+        svc = GraphVersioningService()
+        gid = await _parent(svc)
+        f = await _child(svc, gid)
+        url = f"/api/v1/ws1/versioning/graphs/{f}"
+        async with _client((R,)) as c:
+            r = await c.delete(url)
+            assert r.status_code == 403, r.text
+            assert (await c.post(url + "/restore")).status_code == 403
+        async with _client((R, M)) as c:
+            r = await c.delete(url)
+            assert r.status_code == 204, r.text
+            assert (await c.get(url)).status_code == 404
+            r = await c.delete(url)
+            assert r.status_code == 404, r.text
+            r = await c.delete(f"/api/v1/ws1/versioning/graphs/{gid}")
+            assert r.status_code == 409 and r.json()["detail"]["type"] == "not_a_fork", r.text
+
+        async with _client((R,)) as c:                               # readers see the trash
+            r = await c.get(f"/api/v1/ws1/versioning/graphs/{gid}/forks")
+            assert r.status_code == 200, r.text
+            (row,) = r.json()
+        assert row["graphId"] == f and row["forkParentGraphId"] == gid
+        assert row["deletedAt"] and row["deletedBy"] == "u_fork" and row["purging"] is False
+        assert datetime.fromisoformat(row["purgeAfter"]) == (
+            datetime.fromisoformat(row["deletedAt"]) + timedelta(days=config.PURGE_GRACE_DAYS))
+
+        async with _client((R, M)) as c:
+            assert (await c.post(url + "/restore")).status_code == 204
+            assert (await c.get(url)).status_code == 200
+            r = await c.delete(url)
+            assert r.status_code == 204, r.text
+            assert await create_purge_job(graph_id=f, workspace_id="ws1", actor="reaper",
+                                          require_tombstoned=True)
+            r = await c.post(url + "/restore")
+            assert r.status_code == 409, r.text
+            assert r.json()["detail"]["type"] == "fork_not_restorable"
+            assert r.json()["detail"]["reason"] == "purging"
+            (row,) = (await c.get(f"/api/v1/ws1/versioning/graphs/{gid}/forks")).json()
+            assert row["purging"] is True
+        await db.dispose_engine()
+    asyncio.run(go())
 
 
 if __name__ == "__main__":

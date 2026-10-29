@@ -25,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.auth.dependencies import get_permission_claims, requires
 from backend.app.db.engine import get_db_session
 from backend.app.services.activity import recorder
-from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.graph_store import topology
 from backend.app.services.graph_store.schemas import (
     GraphPlacementResponse,
@@ -298,18 +298,31 @@ async def get_placement(
     dataSourceId: Optional[str] = Query(None),
     providerId: Optional[str] = Query(None),
     graph: Optional[str] = Query(None),
+    graphId: Optional[str] = Query(None),
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> GraphPlacementResponse:
-    """By data source, or by ``providerId``+``graph`` for a catalogue-keyed
-    view that holds a graph name rather than a data source id."""
-    if not dataSourceId and not (providerId and graph):
+    """By data source, by versioned ``graphId``, or by ``providerId``+``graph``
+    for a catalogue-keyed view that holds a graph name rather than a data
+    source id."""
+    if not graphId and not dataSourceId and not (providerId and graph):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Pass dataSourceId, or providerId and graph.",
+            detail="Pass dataSourceId, graphId, or providerId and graph.",
         )
     visible = _visible_workspace_ids(claims)
     snapshot = await _snapshot()
-    if dataSourceId:
+    data_source_id = dataSourceId
+    if graphId:
+        vg = (await _versioned_graphs([graphId], claims)).get(graphId)
+        if vg is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Versioned graph {graphId} not found",
+            )
+        data_source_id = vg["data_source_id"]
+        provider_id = str(vg["falkor_provider"] or "")
+        keys = [("source", vg["falkor_graph_name"])] if vg["falkor_graph_name"] else []
+    elif dataSourceId:
         ds = await _data_source(dataSourceId, visible)
         if ds is None:
             # 404 for "not yours" as well as "not there": the ingestion gate
@@ -336,7 +349,7 @@ async def get_placement(
         )
     ]
     return GraphPlacementResponse(
-        data_source_id=dataSourceId,
+        data_source_id=data_source_id,
         provider_id=provider_id,
         provider_name=next((p.name for p in (instance.providers if instance else [])
                             if p.id == provider_id), None),
@@ -360,26 +373,36 @@ async def get_placement(
     dependencies=[Depends(_require_ingestion_read)],
 )
 async def get_placements(
-    dataSourceIds: str = Query(..., description="Comma-separated data source ids"),
+    dataSourceIds: Optional[str] = Query(None, description="Comma-separated data source ids"),
+    graphIds: Optional[str] = Query(None, description="Comma-separated versioned graph ids"),
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> GraphPlacementsResponse:
-    ids = [i.strip() for i in dataSourceIds.split(",") if i.strip()][:_MAX_BATCH]
+    if dataSourceIds is None and graphIds is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Pass dataSourceIds or graphIds.",
+        )
+    ids = [i.strip() for i in (dataSourceIds or "").split(",") if i.strip()][:_MAX_BATCH]
+    graph_ids = [i.strip() for i in (graphIds or "").split(",") if i.strip()][:_MAX_BATCH]
     snapshot = await _snapshot()
     # Ids the caller cannot see simply do not come back — the response is a
     # map, so a missing key is the same answer a deleted source gives.
     rows = await _data_sources(ids, _visible_workspace_ids(claims))
-    out = {}
+    wanted = []  # (answer id, provider id, graph key)
     for ds in rows:
-        provider_id = str(getattr(ds, "provider_id", "") or "")
         keys = topology.placement_keys_for(ds)
-        if not keys:
-            continue
-        # The source graph is the one a list surface labels a row with.
-        _role, key = keys[0]
+        if keys:
+            # The source graph is the one a list surface labels a row with.
+            wanted.append((ds.id, str(getattr(ds, "provider_id", "") or ""), keys[0][1]))
+    for gid, vg in (await _versioned_graphs(graph_ids, claims)).items():
+        if vg["falkor_graph_name"]:
+            wanted.append((gid, str(vg["falkor_provider"] or ""), vg["falkor_graph_name"]))
+    out = {}
+    for answer_id, provider_id, key in wanted:
         instance = topology.instance_for_provider(snapshot, provider_id)
         shard, _slot = topology.place(instance, key)
         row = topology.graph_row(instance, shard, key)
-        out[ds.id] = PlacementBrief(
+        out[answer_id] = PlacementBrief(
             graph_key=key,
             shard_index=shard.index if shard else None,
             master=shard.master.endpoint if shard else None,
@@ -409,6 +432,22 @@ def _visible_workspace_ids(claims: PermissionClaims) -> Optional[set]:
             or "system:org-admin" in claims.global_perms):
         return None
     return set(claims.ws_perms.keys())
+
+
+async def _versioned_graphs(graph_ids, claims: PermissionClaims) -> dict:
+    """The versioned graphs among ``graph_ids`` the caller may read, by id.
+
+    Their key and provider come from ``projection_state``, where the
+    projector writes, not from the data source's ``graph_name``: a fork
+    projects into its own key and has no data source row at all. Workspace
+    read of the GRAPH's workspace is the gate; a graph outside it is simply
+    absent, like a deleted one.
+    """
+    from .versioning import _READ, get_versioning_service
+
+    rows = await get_versioning_service().projection_placements(graph_ids)
+    return {gid: vg for gid, vg in rows.items()
+            if has_permission(claims, _READ, workspace_id=vg["workspace_id"])}
 
 
 def _require_system_admin(claims: PermissionClaims) -> None:

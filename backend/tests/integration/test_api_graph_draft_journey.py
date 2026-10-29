@@ -46,10 +46,19 @@ class _StubManager:
     async def get_provider_for_workspace(self, workspace_id, session, data_source_id=None):
         return _StubLiveProvider()
 
+    def admit_graph_request(self, source_key):
+        return None
+
+    def release_graph_request(self, source_key):
+        return None
+
 
 class _StubCache:
     async def bump_generation(self, scope):
         return None
+
+    async def get_or_compute(self, *, compute, **_kw):
+        return await compute()
 
 
 def _build_app():
@@ -73,7 +82,8 @@ def _build_app():
         ws = request.path_params.get("ws_id") or "ws1"
         return PermissionClaims(
             sid="", global_perms=(),
-            ws_perms={ws: ("workspace:datasource:read", "workspace:datasource:manage")})
+            ws_perms={ws: ("workspace:datasource:read", "workspace:datasource:manage",
+                           "workspace:datasource:publish")})
 
     async def fake_db():
         # for_workspace only uses this session for ontology resolution (degrades gracefully
@@ -83,6 +93,14 @@ def _build_app():
             yield s
 
     app = FastAPI()
+    from fastapi.responses import JSONResponse
+    from backend.app.services.versioning.errors import HTTP_MAPPED
+
+    async def mapped(request, exc):                  # as main.py registers for every app route
+        return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail},
+                            headers=exc.headers)
+    for cls in HTTP_MAPPED:
+        app.add_exception_handler(cls, mapped)
     app.include_router(V.router, prefix="/api/v1/{ws_id}/versioning")
     app.include_router(G.router, prefix="/api/v1/{ws_id}/graph")
     app.dependency_overrides[get_current_user] = fake_user
@@ -137,7 +155,7 @@ async def _run() -> None:
                 "sourceUrn": "urn:t:child", "targetUrn": new_urn, "edgeType": "LINEAGE"})
             assert r.status_code == 201, r.text
 
-            # 5. read-your-writes on the draft (uncached endpoints — no Redis needed)
+            # 5. read-your-writes on the draft (the stub cache computes every read — no Redis needed)
             nodes = (await c.post(f"{GP}/nodes/query", params=qd, json={"query": {}})).json()
             assert {"urn:t:root", "urn:t:child", new_urn} <= {n["urn"] for n in nodes}
             edges = (await c.post(f"{GP}/edges/query", params=qd, json={"query": {}})).json()
@@ -170,9 +188,10 @@ async def _run() -> None:
             assert st_b["urn:t:child"]["displayName"] == "Child v2", st_b["urn:t:child"]
             assert st_b["urn:t:child"]["entityType"] == "Table", st_b["urn:t:child"]  # merge kept it
 
-            # 6. routing isolation: the same read on MAIN (no branchId) hits the live stub (empty)
+            # 6. routing isolation: the same read on MAIN (no branchId) never sees the draft. No
+            #    projector runs here, so main is stale and served from Postgres: the import only.
             main_nodes = (await c.post(f"{GP}/nodes/query", params={"dataSourceId": ds}, json={"query": {}})).json()
-            assert {n["urn"] for n in main_nodes} == set(), main_nodes
+            assert {n["urn"] for n in main_nodes} == {"urn:t:root", "urn:t:child"}, main_nodes
 
             # 7. store isolation: versioning main state has the import but NOT the draft node yet
             st = (await c.get(f"{V1}/graphs/{gid}/branches/{main_id}/state")).json()
@@ -190,13 +209,33 @@ async def _run() -> None:
             # 10. main now carries the imported graph + the draft edit
             st2 = (await c.get(f"{V1}/graphs/{gid}/branches/{main_id}/state")).json()
             assert {"urn:t:root", "urn:t:child", new_urn} <= set(st2["nodes"])
+
+            # 11. a save to the published draft, or to main by name, is refused with 409
+            late = {"ops": [{"op": "update", "kind": "node", "id": "urn:t:child",
+                             "payload": {"displayName": "too late"}}]}
+            r = await c.post(f"{GP}/changes", params=qd, json=late)
+            assert r.status_code == 409, r.text
+            assert r.json()["detail"]["type"] == "branch_closed", r.text
+            assert r.json()["detail"]["status"] == "merged", r.text
+            for bid in (main_id, "main"):
+                r = await c.post(f"{GP}/changes", params={"dataSourceId": ds, "branchId": bid}, json=late)
+                assert r.status_code == 409, r.text
+                assert r.json()["detail"]["type"] == "main_write_forbidden", r.text
+
+            # 12. a save to a branch id this graph does not have, or another graph's draft, is a 404
+            r = await c.post(f"{V1}/graphs", json={"dataSourceId": ds + "_other", "workspaceId": "ws1"})
+            assert r.status_code == 201, r.text
+            foreign = (await c.post(f"{V1}/graphs/{r.json()['graphId']}/branches", json={})).json()["branchId"]
+            for bid in ("br_does_not_exist", foreign):
+                r = await c.post(f"{GP}/changes", params={"dataSourceId": ds, "branchId": bid}, json=late)
+                assert r.status_code == 404, (bid, r.status_code, r.text)
     finally:
         G.provider_manager, G.get_graph_cache = orig_pm, orig_cache
         await db.dispose_engine()
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_api_graph_draft_journey_e2e():
+def test_api_graph_draft_journey_e2e(data_sources):
     asyncio.run(_run())
 
 
@@ -237,7 +276,7 @@ async def _run_bulk_param_limit() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_bulk_ingest_respects_pg_param_limit():
+def test_bulk_ingest_respects_pg_param_limit(data_sources):
     asyncio.run(_run_bulk_param_limit())
 
 

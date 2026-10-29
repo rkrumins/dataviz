@@ -50,6 +50,7 @@ from sqlalchemy.pool import NullPool
 from backend.app.observability import event_loop_monitor
 
 from . import config, db
+from .errors import LockBusy
 from .models import ImportRowORM, JobORM
 
 logger = logging.getLogger(__name__)
@@ -601,6 +602,8 @@ def is_transient(exc: BaseException) -> bool:
         return False                                   # a missing or unreadable file stays so
     if isinstance(exc, _TRANSIENT_TYPES):
         return True
+    if isinstance(exc, LockBusy):                      # another writer holds the graph (or ran out
+        return True                                    # every retry, ContentionExhausted): it lets go
     if isinstance(exc, SQLAlchemyError):
         # A restarted / failed-over Postgres surfaces as one of these, or as an invalidated DBAPI
         # connection. A constraint violation is an IntegrityError and is NOT any of them — it must

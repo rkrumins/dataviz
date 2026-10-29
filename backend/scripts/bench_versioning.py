@@ -908,7 +908,7 @@ async def run_publish(*, graph_id: str, branch_id: str, store: CountingStore,
             return {"commitId": job["mergedCommitId"]}
         return {"commitId": await svc.publish(
             graph_id=job["graphId"], branch_id=job["branchId"], actor=job["actor"],
-            message=job["message"], containment_edge_types=list(containment))}
+            message=job["message"], containment_edge_types=list(containment), queued=True)}
 
     ie = _service(store, svc, publish_hook=publish)
     meta = await svc.get_graph(graph_id)

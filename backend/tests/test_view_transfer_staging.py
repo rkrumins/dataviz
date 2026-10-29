@@ -21,6 +21,7 @@ from backend.app.db.models import ProviderORM, ViewORM, ViewVersionORM, Workspac
 from backend.app.db.repositories import view_repo
 from backend.app.services import draft_views
 from backend.app.services.permission_service import PermissionClaims
+from backend.app.services.versioning.errors import BranchNotOpen
 from backend.tests.test_view_transfer_import import (  # noqa: F401 — graph is a fixture
     _as, _edit, _file, _import, _user, _view, _workspace, graph,
 )
@@ -52,6 +53,15 @@ class _Versioning:
     async def assert_branch_readable(self, *, graph_id, branch_id, viewer):
         if not any(d["branch_id"] == branch_id and d["graph_id"] == graph_id for d in self.drafts):
             raise ValueError(f"branch {branch_id} not found on graph {graph_id}")
+
+    async def check_view_branch(self, *, data_source_id, branch_id, viewer, write):
+        graph = self.graphs.get(data_source_id)
+        draft = next((d for d in self.drafts if d["branch_id"] == branch_id
+                      and graph is not None and d["graph_id"] == graph["graph_id"]), None)
+        if draft is None:
+            raise ValueError("unknown branch")
+        if write and draft["status"] != "open":
+            raise BranchNotOpen(branch_id, draft["status"])
 
     def finish(self, branch_id: str, status: str) -> None:
         next(d for d in self.drafts if d["branch_id"] == branch_id)["status"] = status

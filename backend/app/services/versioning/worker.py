@@ -10,7 +10,10 @@ mechanisms (matching the locked "inline nudge + reconciling worker" decision):
 
 ``ProjectionStateORM`` is the durable queue, so a lost wake-up is still caught by
 the poll loop. Per-``graph_id`` serialization keeps the two mechanisms from
-projecting the same graph concurrently. Mirrors the aggregation worker runtime.
+projecting the same graph concurrently. Mirrors the aggregation worker runtime. A **liveness
+loop** (every ``LIVENESS_SECS``) lowers the watermark of an idle graph whose FalkorDB key is gone
+or restored behind it, so the poll reseeds it. A **retire loop** drops the old key a moved graph
+left, once its new key has caught up (``keymigrate.retire_moved_keys``).
 
 The **transfer** lane (import / export / publish, and a dedicated package-inspect slot) and the
 **bootstrap** lane (bootstraps, purges) run jobs from ``graphver.jobs`` through one
@@ -26,7 +29,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Optional, Set, Unio
 
 from backend.app.services.background import spawn_detached
 
-from . import config, job_lease
+from . import config, job_lease, keymigrate
 from .messaging import (
     CONSUMER_GROUP,
     PROJECTION_STREAM,
@@ -191,6 +194,9 @@ class ProjectionWorker:
                 loops.append(self._sweep_loop())
             if self._cache is not None:
                 loops.append(self._evict_loop())
+            if config.LIVENESS_SECS > 0:
+                loops.append(self._liveness_loop())
+            loops.append(self._retire_loop())
         if "transfer" in self._lanes:
             if self._transfers is not None:
                 loops.append(self._slot_loop(self._transfers, slots=config.TRANSFER_SLOTS,
@@ -283,12 +289,20 @@ class ProjectionWorker:
                 keeper.unregister(lease)
 
     async def _job_reap_loop(self) -> None:
-        """Fail the transfer jobs nothing will ever run (see ``runner.JobReaper``)."""
+        """Fail the transfer jobs nothing will ever run (see ``runner.JobReaper``), then hand back
+        the drafts held ``publishing`` by a publish job that ended without landing."""
         while not self._stop.is_set():
             try:
                 await self._job_reaper.run_once()
             except Exception:
                 logger.exception("job reaper error")
+            try:
+                from .service import GraphVersioningService
+                released = await GraphVersioningService().release_publishing()
+                if released:
+                    logger.info("reopened %d draft(s) whose publish job ended", len(released))
+            except Exception:
+                logger.exception("publishing release error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=_JOB_REAP_SECS)
             except asyncio.TimeoutError:
@@ -345,6 +359,34 @@ class ProjectionWorker:
                 logger.exception("eviction loop error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._evict_secs)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _liveness_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                reset = await self._proj.check_liveness()
+                if reset:
+                    logger.warning("liveness reset the projection watermark of %d graph(s)",
+                                   len(reset))
+            except Exception:
+                logger.exception("projection liveness loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=config.LIVENESS_SECS)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _retire_loop(self) -> None:
+        """Drop the old keys moved graphs have left, once each may go (doc 14 KeyMigration)."""
+        while not self._stop.is_set():
+            try:
+                done = await keymigrate.retire_moved_keys(self._proj)
+                if done:
+                    logger.warning("retired %d old projection key(s) of moved graphs", len(done))
+            except Exception:
+                logger.exception("projection key retire loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=config.LIVENESS_SECS or 60)
             except asyncio.TimeoutError:
                 pass
 

@@ -37,7 +37,8 @@ from typing import Dict, Iterable, Mapping
 
 #: In-graph bookkeeping NODES: the projector's rollup watermark, the
 #: aggregation pipeline's run stamp, the dedicated-projection scaffolding,
-#: and the writers' property-name reserve.
+#: the writers' property-name reserve, and the projector's pass marker
+#: (``_GVProjMeta {seq, epoch}``, the last write of every publishing pass).
 #:
 #: ``_PropReserve`` is the carrier the writers create, stamp with every
 #: platform-owned property name and delete again in the next statement (see
@@ -49,7 +50,8 @@ from typing import Dict, Iterable, Mapping
 #: for good, with no rows behind it. Every catalogue-driven surface has to
 #: exclude it, count or no count, and this list is what they all filter on —
 #: which is the whole reason the two incidents above happened.
-DERIVED_LABELS: tuple = ("_GVRollupMeta", "_AggMeta", "_Projection", "_PropReserve")
+DERIVED_LABELS: tuple = ("_GVRollupMeta", "_AggMeta", "_Projection", "_PropReserve",
+                         "_GVProjMeta")
 
 #: Derived RELATIONSHIP types — materialised rollups, not ingested lineage.
 #:

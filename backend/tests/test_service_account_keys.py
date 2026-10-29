@@ -31,7 +31,7 @@ from backend.app.db.models import (
     WorkspaceORM,
 )
 from backend.app.db.repositories import api_key_repo, service_account_repo
-from backend.app.services import api_key_housekeeping, service_account_standing
+from backend.app.services import api_key_housekeeping, api_key_service, service_account_standing
 from backend.auth_service.cookies import ACCESS_COOKIE_NAME, CSRF_COOKIE_NAME
 from backend.auth_service.core import api_keys
 from backend.auth_service.core.password import hash_password
@@ -46,6 +46,8 @@ from tests.common.api_key_world import (
     days_ago,
     error,
     mint,
+    publisher_role,
+    reached_the_handler,
     user_row,
 )
 
@@ -353,6 +355,56 @@ async def test_the_key_lists_data_sources_with_their_versioning_and_reads_the_co
     assert log.status_code == 200, log.text
     # Not where the account has no role, whoever made the key.
     assert (await client.get("/api/v1/admin/workspaces/ws_b/data-sources", headers=auth)).status_code == 403
+
+
+async def test_a_key_writes_main_where_the_account_publishes_not_where_its_manager_does(
+    client, db_session, account,
+):
+    """A bulk ingest writes a versioned graph's main directly, so it needs publish: for an
+    ``nxsat_`` key, held by the service account through its own workspace roles (Publisher, on
+    its page), whoever manages it. Advancing main otherwise — publishing, merging, reverting,
+    restoring, syncing — and sharing a draft are refused to every key."""
+    from backend.app.main import app
+
+    class _Versioning(_FakeVersioning):
+        async def bulk_ingest(self, **_kwargs):
+            reached_the_handler()
+
+    app.dependency_overrides[versioning_endpoints.get_versioning_service] = _Versioning
+    await publisher_role(db_session)
+    binding = (await db_session.execute(select(RoleBindingORM).where(
+        RoleBindingORM.subject_id == account, RoleBindingORM.scope_id == "ws_a",
+    ))).scalar_one()
+    binding.role_name = "workspace_publisher"
+    await db_session.commit()
+    key = await _minted(db_session, account, permissions={"views": "none", "data": "write",
+                                                          "publish": False})
+    ingest = "/api/v1/ws_a/versioning/graphs/g_a/bulk-ingest"
+    reached = await client.post(ingest, content=b"", headers=key.headers)
+    assert reached.status_code == 418, reached.text
+
+    # The account loses publish there, and its manager gains it: the key loses it.
+    binding.role_name = "workspace_member"
+    db_session.add(RoleBindingORM(
+        subject_type="user", subject_id=OWNER, role_name="workspace_publisher",
+        scope_type="workspace", scope_id="ws_a",
+    ))
+    await db_session.commit()
+    api_key_service.forget(key.id)
+    refused = await client.post(ingest, content=b"", headers=key.headers)
+    assert refused.status_code == 403, refused.text
+    assert {k: refused.json()["detail"][k] for k in ("type", "code", "required")} == {
+        "type": "access_denied", "code": "publish_required",
+        "required": "workspace:datasource:publish"}
+
+    for path in (
+        "graphs/g_a/branches/br_a/publish", "graphs/g_a/commits/c1/revert",
+        "graphs/g_a/commits/c1/restore", "graphs/g_a/sync", "pulls/pr1/merge",
+        "merge-requests/mr1/merge", "graphs/g_a/branches/br_a/members",
+    ):
+        response = await client.post(f"/api/v1/ws_a/versioning/{path}", json={}, headers=key.headers)
+        assert response.status_code == 403, path
+        assert error(response) == "api_key_not_allowed", path
 
 
 async def test_the_limit_is_the_accounts_own(client, db_session, account, monkeypatch):

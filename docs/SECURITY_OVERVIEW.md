@@ -366,7 +366,8 @@ the API as them — the person's side is in [API Keys](/guide/api-keys).
   by the key — a role taken away reaches the key within 30 seconds. A key never carries
   platform permissions, workspace administration or sharing.
 - **The data plane only.** Keys may call a reviewed list of routes — views, graphs, version
-  control, data-source signals and jobs — and every other route that needs a signed-in caller
+  control except publish, merge, revert, restore and sync (a key writes a published version
+  directly only where whoever it acts as holds publish), data-source signals and jobs — and every other route that needs a signed-in caller
   answers `403 api_key_not_allowed`; a public route, which needs nobody, answers a key as it
   answers anyone. A request naming a workspace, view or data source outside the
   key's limits answers `403 api_key_out_of_scope`, or `404` across workspaces; a read-only key
@@ -461,7 +462,7 @@ addresses see the real client.
 **How it works.** The backend checks the caller's permissions on every request — through the
 permission a route declares, or through an object-level rule such as who may open a view.
 Permissions come in two kinds: `system:*` permissions apply across the platform, and
-`workspace:*` permissions apply inside one workspace. Seven roles are built in:
+`workspace:*` permissions apply inside one workspace. Eight roles are built in:
 
 | Role (on screen) | Internal name | Applies to | In short |
 |---|---|---|---|
@@ -469,8 +470,9 @@ Permissions come in two kinds: `system:*` permissions apply across the platform,
 | Org Admin | `org_admin` | Platform | Every workspace, creating workspaces, and groups — not user accounts or SSO |
 | Org Auditor | `org_auditor` | Platform | Read-only across every workspace, plus the audit log and role bindings |
 | Workspace Admin | `workspace_admin` | One workspace | Everything in the workspace, including its members |
-| Data Engineer | `workspace_data_engineer` | One workspace | Data sources, views, semantic layers and catalog — not members or publishing |
+| Data Engineer | `workspace_data_engineer` | One workspace | Data sources, views, semantic layers and catalog — not members or publishing views to everyone |
 | Member | `workspace_member` | One workspace | Views and data sources |
+| Publisher | `workspace_publisher` | One workspace | A member who may also advance a versioned data source's Published version: publish a draft, merge a review, revert, restore or sync |
 | Viewer | `workspace_viewer` | One workspace | Read-only |
 
 Everyone else has the default `user` tier: no platform permissions, and access only to the

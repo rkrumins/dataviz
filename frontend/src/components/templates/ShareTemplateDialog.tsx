@@ -12,7 +12,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { useAppNotifications } from '@/components/ui/notifications'
-import { AddGrantPicker } from '@/components/views/ShareViewDialog'
+import { AddGrantPicker } from '@/components/access/AddGrantPicker'
 import { useInvalidateLayoutTemplates } from '@/hooks/useLayoutTemplates'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { cn } from '@/lib/utils'
@@ -164,7 +164,7 @@ export function ShareTemplateDialog({ template, onClose, onChanged }: {
                                 </p>
                             ) : (
                                 <>
-                                    <AddGrantPicker disabled={adding} onAdd={add} />
+                                    <AddGrantPicker disabled={adding} onAdd={add} roles={[...ROLES]} defaultRole="viewer" />
                                     <div className="mt-3">
                                         {grants === null ? (
                                             <div className="flex items-center justify-center py-5 text-xs text-ink-muted">

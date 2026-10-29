@@ -129,6 +129,19 @@ PROJECTION_POLL_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_POLL_SECS", "5"))
 # Max graphs projected concurrently per reconciling poll pass (each id appears once per pass,
 # so there's no same-graph race) — keeps the worker caught up across 100s of graphs.
 PROJECTION_CONCURRENCY: int = int(os.getenv("GRAPHVER_PROJECTION_CONCURRENCY", "8"))
+# The poll retries a failed pass after BASE seconds, doubling per consecutive failure up to MAX.
+# A publish (its nudge) and project_now retry at once regardless.
+PROJECTION_RETRY_BASE_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_RETRY_BASE_SECS", "5"))
+PROJECTION_RETRY_MAX_SECS: int = int(os.getenv("GRAPHVER_PROJECTION_RETRY_MAX_SECS", "900"))
+# A publishing pass writes its _GVProjMeta marker last and, with WAIT_REPLICAS > 0, WAITs on that
+# write's own connection: fewer replicas acknowledging within WAIT_MS hold the watermark
+# (replica_unconfirmed) and back off. 0 sends no WAIT (dev, CI, an instance without replicas).
+# Read by the web pods too: project_now and rebuild_now run passes in-process.
+PROJECTION_WAIT_REPLICAS: int = int(os.getenv("GRAPHVER_PROJECTION_WAIT_REPLICAS", "0"))
+PROJECTION_WAIT_MS: int = int(os.getenv("GRAPHVER_PROJECTION_WAIT_MS", "2000"))
+# Every LIVENESS_SECS the projection lane reads each idle graph's marker: a missing key resets its
+# watermark to 0, a marker behind it to the marker's seq, and the poll reseeds. 0 turns it off.
+LIVENESS_SECS: int = int(os.getenv("GRAPHVER_LIVENESS_SECS", "60"))
 READ_MAX_LAG: int = int(os.getenv("GRAPHVER_READ_MAX_LAG", "0"))
 # After each projection, cheaply reconcile live node/edge COUNTS between Postgres
 # (the SoR) and FalkorDB (the cache); on a mismatch, bounded-heal by reseeding the
@@ -163,7 +176,8 @@ REBUILD_SYNC_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_REBUILD_TIMEOUT_SECS", 
 
 # Provider write-through: record every graph write as an audited versioned commit on the
 # data source's versioned graph (the audit trail + branch/version history, on by default).
-# Set GRAPHVER_VERSIONED_WRITES=0 to opt out (writes then hit the provider only).
+# Set GRAPHVER_VERSIONED_WRITES=0 to opt out data sources that are not versioned (their writes
+# then hit the provider only); a versioned graph is always written through versioning.
 VERSIONED_WRITES_ENABLED: bool = os.getenv("GRAPHVER_VERSIONED_WRITES", "1").lower() not in ("0", "false", "no")
 
 # Evictable/rebuildable FalkorDB cache (plan §5, §16.5 #9-10): single-flight
@@ -183,6 +197,9 @@ LEASE_TTL: int = int(os.getenv("GRAPHVER_LEASE_TTL", "60"))
 FALKOR_MAX_RESIDENT: int = int(os.getenv("GRAPHVER_FALKOR_MAX_RESIDENT", "0"))
 FALKOR_BUDGETS: dict = json.loads(os.getenv("GRAPHVER_FALKOR_BUDGETS", "") or "{}")
 DEFAULT_FALKOR_PROVIDER: str = "default"
+# A moved graph's old platform key is dropped no sooner than this after the move, and only once the
+# new key has caught up (doc 14 §6) — until then a move back onto it reconciles in place.
+RETIRE_GRACE_SECS: int = 900
 EVICT_SECS: int = int(os.getenv("GRAPHVER_EVICT_SECS", "300"))
 
 # DERIVED_LABELS / not_derived_clause are imported at the top of this module and
@@ -210,6 +227,10 @@ DRAFT_TTL_DAYS: int = int(os.getenv("GRAPHVER_DRAFT_TTL_DAYS", "30"))
 # Retries when a commit races another writer for the next per-branch commit_seq
 # (uq_commits_branch_seq) — concurrent write-through writes to main.
 COMMIT_MAX_RETRIES: int = int(os.getenv("GRAPHVER_COMMIT_MAX_RETRIES", "5"))
+# How long a writer waits for a graph's lock (or a draft's row lock) before it gives up with
+# 503 lock_busy and retries. Bounded, so a writer queued behind a long publish or sync cannot pin
+# a pooled connection indefinitely; the 5 s matches the lease renewal's and the migrations' bound.
+GRAPH_LOCK_TIMEOUT_MS: int = int(os.getenv("GRAPHVER_GRAPH_LOCK_TIMEOUT_MS", "5000"))
 DRAFT_SWEEP_SECS: int = int(os.getenv("GRAPHVER_DRAFT_SWEEP_SECS", "86400"))
 
 # A draft changing more entities than this has its Changes panel counted, not laid out as a
@@ -225,6 +246,10 @@ SYNC_PUBLISH_MAX_CHANGES: int = int(os.getenv("GRAPHVER_SYNC_PUBLISH_MAX_CHANGES
 # of every changed payload being loaded, merged and re-hashed in the worker. Off = always the full
 # merge. Temporary: removed one release after the narrow squash ships.
 NARROW_SQUASH: bool = os.getenv("GRAPHVER_NARROW_SQUASH", "1").lower() not in ("0", "false", "no")
+# Live (not tombstoned) forks one graph may have; one more is refused with 409 fork_limit. Each
+# fork gets its own FalkorDB key on the parent's instance, so this bounds that until FalkorDB
+# capacity management (E7) brings a real quota.
+MAX_FORKS_PER_GRAPH: int = int(os.getenv("GRAPHVER_MAX_FORKS_PER_GRAPH", "10"))
 
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.
 DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only")
@@ -323,6 +348,15 @@ TRANSFER_SLOTS: int = int(os.getenv("GRAPHVER_TRANSFER_SLOTS", "2"))
 TRANSFER_POLL_SECS: float = float(os.getenv("GRAPHVER_TRANSFER_POLL_SECS", "1"))
 # A queued job no worker has started in this long reads as failed: none may be running.
 TRANSFER_QUEUE_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS", str(6 * 3600)))
+# The transfer lane's JobReaper rules (import_export/runner.py), here so the schema upgrade that
+# fails such jobs before building uq_jobs_ingest_active (models.py) applies the same ones.
+# What a queued job reads when no worker took it in TRANSFER_QUEUE_TIMEOUT_SECS.
+JOB_NOT_STARTED = ("No worker started the job in time. Start it again, or ask an administrator whether "
+                   "the versioning worker is running.")
+# What a job reads whose creator never stored its input and queued it (an upload cut off midway).
+JOB_NEVER_QUEUED = "The upload never finished, so the job never started. Start it again."
+# How long a job may sit created but never queued before that is what happened to it.
+JOB_NEVER_QUEUED_SECS = 3600
 
 
 # --------------------------------------------------------------------------- #
@@ -392,6 +426,14 @@ INGEST_HEARTBEAT_SECS: int = int(os.getenv(
 # is there. It exists to be DELETED: see docs/versioning/11-resync-at-any-scale.md, which
 # makes re-sync bounded and moves it onto the worker, after which no limit is needed.
 RESYNC_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_RESYNC_MAX_ENTITIES", "250000"))
+
+# A sync deletes by ABSENCE, so a snapshot that is missing rows (a truncated provider page,
+# BOOTSTRAP-3) reads as the source deleting them. A sync that would delete more than
+# max(SYNC_DELETE_MAX_ABS, SYNC_DELETE_MAX_FRACTION x live entities on main) is refused unless
+# a workspace admin passes allowMassDelete. The fraction is a FRACTION (0.05 = 5%), not a
+# percent. Stop-gap: INGEST S1's per-source delete breaker replaces it.
+SYNC_DELETE_MAX_ABS: int = int(os.getenv("GRAPHVER_SYNC_DELETE_MAX_ABS", "500"))
+SYNC_DELETE_MAX_FRACTION: float = float(os.getenv("GRAPHVER_SYNC_DELETE_MAX_FRACTION", "0.05"))
 
 BOOTSTRAP_RETRY_BUDGET_SECS: int = int(os.getenv("GRAPHVER_BOOTSTRAP_RETRY_BUDGET_SECS", "600"))
 BOOTSTRAP_RETRY_MAX_DELAY_SECS: float = float(

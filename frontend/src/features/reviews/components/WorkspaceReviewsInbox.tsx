@@ -127,8 +127,10 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
   const user = useAuthStore((s) => s.user)
 
   const [feeds, setFeeds] = useState<Record<string, ReviewItem[]>>({})
-  const onLoaded = useCallback((dsId: string, items: ReviewItem[]) => {
+  const [failed, setFailed] = useState<Record<string, boolean>>({})
+  const onLoaded = useCallback((dsId: string, items: ReviewItem[], readFailed: boolean) => {
     setFeeds((prev) => ({ ...prev, [dsId]: items }))
+    setFailed((prev) => ({ ...prev, [dsId]: readFailed }))
   }, [])
 
   const [scope, setScope] = useState<Scope>('open')
@@ -194,6 +196,7 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
   }), [all, raisedByMe])
 
   const loading = Object.keys(feeds).length < dataSources.length
+  const failedSources = dataSources.filter((ds) => failed[ds.id]).map((ds) => ds.label ?? 'Data source')
   const hasFilters = !!(statusFilter || authorFilter || sourceFilter || search.trim())
   const shown = filtered.slice(0, visible)
 
@@ -253,6 +256,12 @@ export function WorkspaceReviewsInbox({ wsId, initialPrId }: { wsId: string; ini
         )}
         <span className="ml-auto text-[12px] text-ink-muted tabular-nums">{filtered.length} request{filtered.length === 1 ? '' : 's'}</span>
       </div>
+
+      {failedSources.length > 0 && (
+        <p role="alert" className="mb-3 rounded-xl border border-amber-500/20 bg-amber-500/5 px-3 py-2 text-[12px] text-ink-muted">
+          Some requests could not be loaded from {failedSources.join(', ')}. Reload to try again.
+        </p>
+      )}
 
       {/* List */}
       <div data-tour="reviews-list" className="space-y-2">

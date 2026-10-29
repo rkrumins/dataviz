@@ -58,8 +58,9 @@ class _ImportExport:
     """The jobs, recorded rather than run — except a package's check, which runs as the inspect
     slot would, when the test says it gets its turn (:meth:`inspect_queued`)."""
 
-    def __init__(self, store):
+    def __init__(self, store, versioning):
         self.store = store
+        self.versioning = versioning
         self.jobs: dict = {}
         self.keys: dict = {}
         self.ran: list = []
@@ -86,6 +87,10 @@ class _ImportExport:
 
     async def create_import_job(self, **kwargs):
         job_id = self._add("imp", kwargs)
+        if kwargs.get("branch_id") is None:     # opened with the job, as the service does
+            kwargs["branch_id"] = self.jobs[job_id]["branch_id"] = await self.versioning.open_draft(
+                graph_id=kwargs["graph_id"], owner=kwargs["actor"], name=kwargs["name"],
+                originating_view_id=kwargs.get("originating_view_id"))
         return {"job_id": job_id, "branch_id": kwargs["branch_id"], "source_uri": kwargs["source_uri"]}
 
     async def create_inspect_job(self, *, upload_id, source_uri):
@@ -135,7 +140,7 @@ def services(tmp_path):
     from backend.app.main import app
 
     versioning = _Versioning()
-    jobs = _ImportExport(LocalFsObjectStore(tmp_path / "store"))
+    jobs = _ImportExport(LocalFsObjectStore(tmp_path / "store"), versioning)
     app.dependency_overrides[get_versioning_service] = lambda: versioning
     app.dependency_overrides[get_import_export_service] = lambda: jobs
     yield versioning, jobs

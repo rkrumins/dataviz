@@ -7,6 +7,8 @@
  * are unchanged, so deep-links and the server contract are untouched. Change wording here, once.
  */
 
+import type { Branch } from '@/services/versioningApiService'
+
 export const BRANCH_VOCAB = {
   /** `main` — the live version everyone sees. */
   published: 'Published',
@@ -33,7 +35,20 @@ export const BRANCH_VOCAB = {
   newDraft: 'New draft',
   manageAll: 'Manage all drafts',
   untitled: 'Untitled draft',
+  viewOnly: 'view only',
 } as const
+
+/** Can `me` change this draft? Its owner can, and an editor or maintainer of a shared one; the
+ *  server refuses everyone else, so the UI shows them the draft read-only. */
+export function canWriteDraft(b: Pick<Branch, 'owner' | 'isShared' | 'myRole'>, me?: string | null): boolean {
+  return (!!me && b.owner === me) || (!!b.isShared && (b.myRole === 'editor' || b.myRole === 'maintainer'))
+}
+
+/** Can `me` discard, archive, rename or directly publish this draft? Its owner can, and a maintainer
+ *  of a shared one; an editor only edits it (and can request review). */
+export function canManageDraft(b: Pick<Branch, 'owner' | 'isShared' | 'myRole'>, me?: string | null): boolean {
+  return (!!me && b.owner === me) || (!!b.isShared && b.myRole === 'maintainer')
+}
 
 export type StatusTone = 'ok' | 'attention' | 'neutral'
 

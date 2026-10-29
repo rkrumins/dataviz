@@ -156,6 +156,22 @@ async def test_the_reaper_fails_jobs_queued_too_long_and_uploads_that_never_fini
     assert "current_phase IS NULL" in str(executed[1].compile())
 
 
+async def test_the_reaper_can_judge_one_job_alone():
+    """An import refused because its draft has an active job asks the reaper about that one job:
+    the same rules, that row only."""
+    executed = []
+
+    @contextlib.asynccontextmanager
+    async def session():
+        async with _session(executed=executed, ahead=1) as s:
+            yield s
+
+    assert await JobReaper(session_factory=session).run_once(job_id="vjob_7") == {
+        "timedOut": 1, "neverQueued": 1}
+    for stmt in executed:
+        assert stmt.compile().params["id_1"] == "vjob_7"
+
+
 # ── The worker's slot loop ───────────────────────────────────────────────────
 
 

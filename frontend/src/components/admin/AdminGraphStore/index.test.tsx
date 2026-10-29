@@ -560,6 +560,12 @@ describe('Admin → Graph store', () => {
         expect(screen.getByTestId('shard-replication-0')).toBeInTheDocument()
     })
 
+    it('says when the versioned graphs could not be read, so a fork key is not taken for a leftover', async () => {
+        getTopology.mockResolvedValue(snapshot({ versionedUnread: true }))
+        wrap()
+        expect(await screen.findByTestId('graph-store-versioned-unread')).toHaveTextContent(/could not be read/)
+    })
+
     it('explains every term on the page for someone who did not build the cluster', async () => {
         wrap()
         await userEvent.click(await screen.findByRole('button', { name: /How to read this page/ }))

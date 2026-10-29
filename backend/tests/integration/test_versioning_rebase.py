@@ -45,7 +45,7 @@ async def _run() -> None:
     d1 = await _draft(svc, gid, "alice", "feature-x", [_upd("A", f=2)])     # edits A
     d2 = await _draft(svc, gid, "bob", "feature-y", [_upd("B", f=2)])       # edits B (non-overlapping)
     d3 = await _draft(svc, gid, "carol", "feature-z", [_upd("A", f=99)])    # edits A (will clash with d1)
-    metas = {b["branch_id"]: b for b in await svc.list_branches(graph_id=gid)}
+    metas = {b["branch_id"]: b for b in (await svc.list_branches(graph_id=gid))[0]}
     assert metas[d1]["name"] == "feature-x" and metas[d2]["name"] == "feature-y"   # names round-trip
 
     # ── merge one (main advances: A.f -> 2) ──
@@ -81,7 +81,8 @@ async def _run() -> None:
                                  resolutions={"A": {"displayName": "A", "entityType": "Dataset", "f": 99}})
     assert rc2["clean"] is True
     # The SAME PR merges — a pull does not stale a PR, so no second one is opened (nor could be:
-    # one live PR per branch). Its diff is computed live from the branch, so the rebase is already
+    # one live PR per branch). This one has no reviewers; what a pull does to an approval is pinned
+    # in test_versioning_pr_gate. Its diff is computed live from the branch, so the rebase is already
     # reflected in it, and the pull cleared its behind-gate.
     assert (await svc.get_pr(mr3a))["behind"] is False
     assert await svc.merge_mr(mr_id=mr3a, actor="carol", message="merge z2")
@@ -137,6 +138,53 @@ async def _run() -> None:
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_versioning_rebase_e2e():
     asyncio.run(_run())
+
+
+async def _run_route_bumps_draft_cache() -> None:
+    """The rebase ROUTE invalidates the draft's canvas read-cache, as /graph/changes does, so the
+    pulled-in state shows on the next read instead of after the cache TTL."""
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.app.api.v1.endpoints import versioning as V
+    from backend.app.services.graph_cache import CacheScope
+    from backend.tests.integration.test_api_graph_draft_journey import _build_app
+
+    bumped: list = []
+
+    class _RecordingCache:
+        async def bump_generation(self, scope):
+            bumped.append(scope)
+
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    ds = "ds_" + os.urandom(4).hex()
+    gid = (await svc.create_graph(data_source_id=ds, workspace_id="ws1", actor="u_test"))["graph_id"]
+    mine = await _draft(svc, gid, "u_test", "mine", [_node("A")])
+    other = await _draft(svc, gid, "u_test", "other", [_node("B")])
+    await svc.publish(graph_id=gid, branch_id=other, actor="u_test", message="other")   # mine is behind
+
+    app, _G = _build_app()
+    orig = V.get_graph_cache
+    V.get_graph_cache = lambda: _RecordingCache()
+    url = f"/api/v1/ws1/versioning/graphs/{gid}/branches/{mine}/rebase"
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            r = await c.post(url, json={})
+            assert r.status_code == 200 and r.json()["clean"] is True, r.text
+            assert bumped == [CacheScope("ws1", ds, mine)], bumped
+            # An up-to-date pull wrote nothing, so the cache is left alone.
+            bumped.clear()
+            r = await c.post(url, json={})
+            assert r.status_code == 200 and r.json()["alreadyUpToDate"] is True, r.text
+            assert bumped == [], bumped
+    finally:
+        V.get_graph_cache = orig
+        await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_rebase_route_bumps_draft_cache_e2e():
+    asyncio.run(_run_route_bumps_draft_cache())
 
 
 if __name__ == "__main__":

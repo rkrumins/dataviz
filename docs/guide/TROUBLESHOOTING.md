@@ -412,7 +412,11 @@ or it may not do what the script asked.
 2. If it is `active`, read `detail.error` on the refused request:
    `api_key_not_allowed` (keys can't call that route), `api_key_read_only`,
    `api_key_out_of_scope` (the key doesn't reach it — one limited to data
-   sources must name one with `dataSourceId`) or `missing_permission`.
+   sources must name one with `dataSourceId`) or `missing_permission`. On a
+   version-controlled data source, `"type": "access_denied"` with
+   `publish_required` means whoever the key acts as lacks publish, so it can't
+   write the published version directly: send the change to a draft for a
+   person to publish.
 3. Every reason and what to do is in
    [When a key is refused](/guide/api-keys#when-a-key-is-refused). For the
    script's side — retries, timeouts and the rate limit — see the

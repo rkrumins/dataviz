@@ -4,7 +4,8 @@
 source of truth, so we can spend RAM lazily:
 
 * **Evict** a cold ``main`` from FalkorDB (LRU by ``last_projected_at``), marking
-  ``status=evicted`` and resetting ``projected_commit_seq=0``. Because projected
+  ``status=evicted`` and resetting ``projected_commit_seq=0``. Only a key the platform minted,
+  of a live graph past genesis with no unfinished bootstrap, is ever dropped (:func:`_evictable`). Because projected
   now lags target, the projection worker's poll loop will **rebuild it from
   Postgres** on next pass — and a read of an evicted graph serves the bounded
   Postgres fallback meanwhile (see the read path, P2).
@@ -23,11 +24,12 @@ from __future__ import annotations
 import logging
 from typing import Awaitable, Callable, List, Optional
 
-from sqlalchemy import select, func
+from sqlalchemy import select, func, update
 
 from . import config, db
 from .messaging import get_broker_redis
-from .models import GraphORM, ProjectionStateORM
+from .models import GraphORM, ProjectionStateORM, _now
+from .service import bootstrap_unfinished
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +40,25 @@ def _lock_key(graph_id: str) -> str:
 
 def _lease_key(graph_id: str) -> str:
     return f"versioning:lease:{graph_id}"
+
+
+def _evictable() -> tuple:
+    """The resident graphs eviction may drop — one predicate for the budget count, the LRU order
+    and :meth:`CacheManager.evict`'s own re-check. A key we did not mint is the customer's, so it
+    is never dropped. Nor is a tombstoned graph's, nor one still at genesis (head ≤ 1: its version
+    control is being enabled, is paused, failed, or is being seeded — its key is the data source's
+    own graph or a half-built copy, and a reseed from genesis would empty it), nor one whose
+    bootstrap is unfinished. Both subqueries correlate to the projection row being tested."""
+    return (
+        ProjectionStateORM.status == "idle",
+        ProjectionStateORM.owns_falkor_graph.is_(True),
+        select(1).where(GraphORM.id == ProjectionStateORM.graph_id,
+                        GraphORM.deleted_at.is_(None),
+                        GraphORM.main_head_commit_seq > 1)
+        .correlate(ProjectionStateORM).exists(),
+        ~select(1).where(*bootstrap_unfinished(ProjectionStateORM.graph_id))
+        .correlate(ProjectionStateORM).exists(),
+    )
 
 
 # Module-level lease helpers so a read path can pin a graph without holding a
@@ -85,26 +106,51 @@ class CacheManager:
 
     # ---- eviction --------------------------------------------------------- #
     async def evict(self, graph_id: str, *, drop_graph: Callable[..., Awaitable]) -> bool:
-        """Evict a cold ``main`` from FalkorDB. Skips a pinned graph. Marks
-        ``status=evicted`` + ``projected_commit_seq=0`` (so the worker rebuilds it)
-        and drops the FalkorDB graph via ``drop_graph(name, provider_id)`` — routed to
-        the graph's pinned provider instance. Returns whether it evicted."""
+        """Evict a cold ``main`` from FalkorDB. Skips a pinned graph, and any graph that is not
+        :func:`_evictable`. Marks ``status=evicted`` + ``projected_commit_seq=0`` (so the worker
+        rebuilds it) and drops the FalkorDB graph via ``drop_graph(name, provider_id)`` — routed
+        to the graph's pinned provider instance. Returns whether it evicted.
+
+        Runs under the projector's own per-graph lock (``project_graph``'s): a projection in
+        flight means the graph is not cold, and nothing writes the key between the re-check and
+        the drop. The re-check and the status change are one guarded UPDATE."""
         if await self.is_pinned(graph_id):
             return False
-        async with self._session() as s:
-            ps = await s.get(ProjectionStateORM, graph_id)
-            if ps is None or ps.status == "evicted":
+        lock_scope = (db.graphver_lock_session() if self._session is db.graphver_session
+                      else self._session())
+        lock_s = await lock_scope.__aenter__()
+        lock_arg = func.hashtext(f"gvproj:{graph_id}")
+        acquired = False
+        try:
+            acquired = bool(await lock_s.scalar(select(func.pg_try_advisory_lock(lock_arg))))
+            if not acquired:
                 return False
-            name = ps.falkor_graph_name
-            provider_id = ps.falkor_provider
-            ps.status = "evicted"
-            ps.projected_commit_seq = 0
-        if name:
+            async with self._session() as s:
+                row = (await s.execute(
+                    update(ProjectionStateORM)
+                    .where(ProjectionStateORM.graph_id == graph_id, *_evictable())
+                    .values(status="evicted", projected_commit_seq=0, updated_at=_now(),
+                            epoch=ProjectionStateORM.epoch + 1)
+                    .returning(ProjectionStateORM.falkor_graph_name,
+                               ProjectionStateORM.falkor_provider)
+                    .execution_options(synchronize_session=False)
+                )).first()
+            if row is None:
+                return False
+            name, provider_id = row
+            if name:
+                try:
+                    await drop_graph(name, provider_id)
+                except Exception:   # pragma: no cover - infra
+                    logger.warning("dropping FalkorDB graph %s failed (will be overwritten on rebuild)",
+                                   name)
+            return True
+        finally:
             try:
-                await drop_graph(name, provider_id)
-            except Exception:   # pragma: no cover - infra
-                logger.warning("dropping FalkorDB graph %s failed (will be overwritten on rebuild)", name)
-        return True
+                if acquired:
+                    await lock_s.execute(select(func.pg_advisory_unlock(lock_arg)))
+            finally:
+                await lock_scope.__aexit__(None, None, None)
 
     # ---- single-flight rebuild ------------------------------------------- #
     async def ensure_rebuilt(self, graph_id: str) -> bool:
@@ -151,7 +197,7 @@ class CacheManager:
         async with self._session() as s:
             return int((await s.execute(
                 select(func.count()).select_from(ProjectionStateORM)
-                .where(ProjectionStateORM.status == "idle")
+                .where(*_evictable())
                 .where(self._provider_col() == provider)
             )).scalar_one())
 
@@ -160,13 +206,13 @@ class CacheManager:
         """Coldest resident graphs (oldest ``last_projected_at`` first) — the
         eviction order for a RAM-budget sweep. Scoped to ``provider`` when given.
 
-        Never a graph still at genesis (head ≤ 1): that is one whose version control is being
-        enabled, is paused, failed, or is being seeded — its FalkorDB key is the data source's
-        own graph or a half-built copy, and a reseed from genesis would empty it."""
+        Only :func:`_evictable` graphs — never one still at genesis (head ≤ 1): that is one whose
+        version control is being enabled, is paused, failed, or is being seeded — its FalkorDB key
+        is the data source's own graph or a half-built copy, and a reseed from genesis would
+        empty it."""
         async with self._session() as s:
             q = (select(ProjectionStateORM.graph_id)
-                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
-                 .where(ProjectionStateORM.status == "idle", GraphORM.main_head_commit_seq > 1)
+                 .where(*_evictable())
                  .order_by(ProjectionStateORM.last_projected_at.asc().nulls_first())
                  .limit(limit))
             if provider is not None:

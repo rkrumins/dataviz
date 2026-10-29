@@ -12,7 +12,8 @@ import os
 
 import pytest
 
-from backend.app.services.versioning import db, models
+from backend.app.services.versioning import db, models, service
+from backend.app.services.versioning.models import BranchMemberORM
 from backend.app.services.versioning.service import AccessDenied, GraphVersioningService, Viewer
 
 
@@ -62,9 +63,9 @@ async def _run() -> None:
     assert len(await svc.commit_log(graph_id=gid, branch_id=main, viewer=bob)) >= 1
 
     # ── list_branches is filtered: bob sees only main; alice + manager see the draft ──
-    assert dA not in [b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=bob)]
-    assert dA in [b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=alice)]
-    assert dA in [b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=mgr)]
+    assert dA not in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=bob))[0]]
+    assert dA in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=alice))[0]]
+    assert dA in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=mgr))[0]]
 
     # ── submit a PR with a reviewer; the source-branch owner is surfaced on the single-PR read ──
     mr = await svc.open_draft_mr(graph_id=gid, branch_id=dA, actor="alice", reviewers=["rev"])
@@ -94,19 +95,29 @@ async def _run() -> None:
     bob_in_team = Viewer("bob", False, ("grp_data",))
 
     # ── a page is full until the list ends: others' drafts are left out before it is cut ──
-    pages = [[b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=bob_in_team, limit=1, offset=o)]
-             for o in range(4)]
-    assert pages == [[main], [for_bob], [for_team], []]
-    assert for_team not in [b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=bob)]
+    pages, cursor = [], None
+    while True:
+        page, cursor = await svc.list_branches(graph_id=gid, viewer=bob_in_team, limit=1, cursor=cursor)
+        pages.append([b["branch_id"] for b in page])
+        if cursor is None:
+            break
+    assert pages == [[main], [for_team], [for_bob]]
+    assert for_team not in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=bob))[0]]
 
     # ── reading agrees with the list: a team's member reads its draft, others don't ──
     assert await svc.commit_log(graph_id=gid, branch_id=for_team, viewer=bob_in_team) == []
     with pytest.raises(AccessDenied):
         await svc.commit_log(graph_id=gid, branch_id=for_team, viewer=bob)
 
-    # ── unshared, a draft is neither listed nor readable, though its member row stays ──
+    # ── unshared, a draft is neither listed nor readable; going private removes its members ──
     await svc.update_branch(graph_id=gid, branch_id=for_bob, actor="alice", is_shared=False)
-    assert for_bob not in [b["branch_id"] for b in await svc.list_branches(graph_id=gid, viewer=bob)]
+    assert for_bob not in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=bob))[0]]
+    with pytest.raises(AccessDenied):
+        await svc.commit_log(graph_id=gid, branch_id=for_bob, viewer=bob)
+    # …and a member row left on a private draft still grants nothing
+    async with db.graphver_session() as s:
+        s.add(BranchMemberORM(branch_id=for_bob, subject_type="user", subject_id="bob", role="viewer"))
+    assert for_bob not in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=bob))[0]]
     with pytest.raises(AccessDenied):
         await svc.commit_log(graph_id=gid, branch_id=for_bob, viewer=bob)
 
@@ -114,7 +125,10 @@ async def _run() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_visibility_e2e():
+def test_versioning_visibility_e2e(monkeypatch):
+    async def in_no_team(actor):        # bob's teams are the Viewer's; the real lookup reads the management DB
+        return ()
+    monkeypatch.setattr(service, "_load_actor_groups", in_no_team)
     asyncio.run(_run())
 
 

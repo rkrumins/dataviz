@@ -14,6 +14,15 @@ import { useHealthStore } from '@/store/health'
 import { extractErrorMessageFromText } from '@/lib/errorMessage'
 import { readJsonLossless } from '@/lib/losslessJson'
 
+/** An error body's ``detail``, as the server sent it (undefined when the body is not JSON). */
+function bodyDetail(text: string): unknown {
+    try {
+        return (JSON.parse(text) as { detail?: unknown } | null)?.detail
+    } catch {
+        return undefined
+    }
+}
+
 /** The request + failure handling every helper here shares: a failure
  *  throws a readable Error, success hands back the Response. */
 async function checkedFetch(
@@ -42,9 +51,11 @@ async function checkedFetch(
         const detail = extractErrorMessageFromText(text, res.statusText)
         // The status rides on the error (``httpStatusOf``), so a caller can
         // tell a refusal from a server that failed: a job poll gives up at
-        // once on a 4xx, and asks again through a 502.
+        // once on a 4xx, and asks again through a 502. So does the body's
+        // own ``detail``, so a caller can tell one refusal from another by
+        // its ``type`` instead of its message.
         if (res.status === 401) throw Object.assign(new Error('Session expired'), { status: 401 })
-        throw Object.assign(new Error(detail), { status: res.status })
+        throw Object.assign(new Error(detail), { status: res.status, detail: bodyDetail(text) })
     }
     return res
 }

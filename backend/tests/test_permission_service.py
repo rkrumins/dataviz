@@ -86,12 +86,60 @@ def test_collapse_wildcards_mixed_domain():
         "workspace:view:create", "workspace:view:edit",
         "workspace:view:delete", "workspace:view:publish",
         "workspace:view:read",
-        "workspace:datasource:read",  # only one of two — not collapsed
+        "workspace:datasource:read",  # only one of three — not collapsed
     }
     out = _collapse_wildcards(perms)
     assert "workspace:view:*" in out
     assert "workspace:datasource:read" in out
     assert "workspace:datasource:*" not in out
+
+
+def test_collapse_wildcards_member_datasource_pair_not_collapsed():
+    """A member's read+manage pair must stay explicit now that
+    ``workspace:datasource:publish`` is a known third leaf — a collapsed
+    ``workspace:datasource:*`` would satisfy publish for every member."""
+    member = {"workspace:datasource:read", "workspace:datasource:manage"}
+    out = _collapse_wildcards(member)
+    assert set(out) == member
+    claims = PermissionClaims(sid="sess_t", ws_perms={"ws": out})
+    assert not has_permission(
+        claims, "workspace:datasource:publish", workspace_id="ws"
+    )
+
+
+def test_collapse_wildcards_full_datasource_set():
+    """Regression guard: read+manage+publish still collapses, and the
+    wildcard satisfies publish."""
+    out = _collapse_wildcards({
+        "workspace:datasource:read", "workspace:datasource:manage",
+        "workspace:datasource:publish",
+    })
+    assert out == ("workspace:datasource:*",)
+    claims = PermissionClaims(sid="sess_t", ws_perms={"ws": out})
+    assert has_permission(
+        claims, "workspace:datasource:publish", workspace_id="ws"
+    )
+
+
+def test_admins_imply_datasource_publish():
+    """``workspace:admin`` implies publish through the resolver's category
+    leaves; the platform shortcuts imply it everywhere (regression guard);
+    ``system:org-viewer`` does not, because publish is not a read."""
+    from backend.app.services.permission_service import (
+        _WORKSPACE_CATEGORY_LEAVES,
+    )
+
+    perm = "workspace:datasource:publish"
+    assert perm in _WORKSPACE_CATEGORY_LEAVES
+    ws_admin = PermissionClaims(sid="sess_t", ws_perms={
+        "ws": _collapse_wildcards(set(_WORKSPACE_CATEGORY_LEAVES)),
+    })
+    assert has_permission(ws_admin, perm, workspace_id="ws")
+    for shortcut in ("system:org-admin", "system:admin"):
+        claims = PermissionClaims(sid="sess_t", global_perms=(shortcut,))
+        assert has_permission(claims, perm, workspace_id="ws_any")
+    viewer = PermissionClaims(sid="sess_t", global_perms=("system:org-viewer",))
+    assert not has_permission(viewer, perm, workspace_id="ws_any")
 
 
 def test_has_permission_global_and_workspace():
@@ -214,8 +262,14 @@ async def test_resolve_user_with_workspace_user_role(db_session):
     assert not has_permission(
         claims, "workspace:view:publish", workspace_id="ws_a"
     )
-    # The datasource pair is complete → still collapses.
-    assert "workspace:datasource:*" in perms
+    # Likewise the datasource pair (no publish) stays explicit.
+    assert "workspace:datasource:*" not in perms
+    assert {
+        "workspace:datasource:read", "workspace:datasource:manage",
+    } <= perms
+    assert not has_permission(
+        claims, "workspace:datasource:publish", workspace_id="ws_a"
+    )
 
 
 @pytest.mark.asyncio

@@ -27,7 +27,9 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { useBrand } from '@/store/branding'
 import {
   providerService,
+  VersionedGraphsPinnedError,
   type ConnectionTestResult,
+  type ImpactedEntity,
   type ProviderCreateRequest,
   type ProviderResponse,
   type ProviderType,
@@ -838,6 +840,9 @@ export function ProviderOnboardingWizard({
   const [wizardPhase, setWizardPhase] = useState<WizardPhase>('steps')
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [submitError, setSubmitError] = useState<string | null>(null)
+  // Versioned graphs the server said this edit moves to another server (409); saving again
+  // with confirmReseed reseeds them there.
+  const [pinnedGraphs, setPinnedGraphs] = useState<ImpactedEntity[] | null>(null)
   const [showCloseConfirm, setShowCloseConfirm] = useState(false)
   const [createdProvider, setCreatedProvider] = useState<ProviderResponse | null>(null)
   const [connectionResult, setConnectionResult] = useState<ConnectionTestResult | null>(null)
@@ -957,6 +962,7 @@ export function ProviderOnboardingWizard({
     setSchemaLoading(false)
     setSchemaError(null)
     setSubmitError(null)
+    setPinnedGraphs(null)
     setShowCloseConfirm(false)
     setIsSubmitting(false)
     setWizardPhase('steps')
@@ -1225,7 +1231,7 @@ export function ProviderOnboardingWizard({
     }
   }, [connectivityFingerprint, formData])
 
-  const handleSubmit = useCallback(async () => {
+  const handleSubmit = useCallback(async (confirmReseed = false) => {
     if (mode === 'create' && connectivityCheck.state === 'idle') {
       setSubmitError('Run a connection test before creating the provider.')
       return
@@ -1233,6 +1239,7 @@ export function ProviderOnboardingWizard({
 
     setIsSubmitting(true)
     setSubmitError(null)
+    setPinnedGraphs(null)
 
     try {
       if (mode === 'edit' && provider) {
@@ -1282,7 +1289,9 @@ export function ProviderOnboardingWizard({
           nameProperty: formData.nameProperty.trim(),
           ...(credentialsClear.length ? { credentialsClear } : {}),
         }
-        const updated = await providerService.update(provider.id, req)
+        const updated = await providerService.update(
+          provider.id, req, confirmReseed ? { confirmReseed } : undefined,
+        )
         await onUpdated?.(updated)
         notify('success', `Updated ${updated.name}`)
         onClose()
@@ -1310,7 +1319,8 @@ export function ProviderOnboardingWizard({
           : `${created.name} was created, but its connection needs attention`,
       )
     } catch (error) {
-      setSubmitError(error instanceof Error ? error.message : 'Failed to save provider')
+      if (error instanceof VersionedGraphsPinnedError) setPinnedGraphs(error.graphs)
+      else setSubmitError(error instanceof Error ? error.message : 'Failed to save provider')
     } finally {
       setIsSubmitting(false)
     }
@@ -1318,7 +1328,7 @@ export function ProviderOnboardingWizard({
 
   const requiresConnectivityTest = mode === 'create' && currentStep === 'review'
   const shouldRunConnectivityTest = requiresConnectivityTest && connectivityCheck.state === 'idle'
-  const primaryAction = shouldRunConnectivityTest ? handleTestConnection : handleSubmit
+  const primaryAction = shouldRunConnectivityTest ? handleTestConnection : () => handleSubmit()
 
   useWizardKeyboard({
     containerRef: modalRef,
@@ -2890,6 +2900,29 @@ export function ProviderOnboardingWizard({
             {submitError && (
               <div className="mt-4 rounded-xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-sm text-red-500">
                 {submitError}
+              </div>
+            )}
+
+            {pinnedGraphs && (
+              <div className="mt-4 rounded-xl border border-amber-500/20 bg-amber-500/10 px-4 py-3 text-sm text-amber-600 dark:text-amber-400">
+                <p className="font-medium">
+                  This moves {pinnedGraphs.length} versioned graph{pinnedGraphs.length !== 1 ? 's' : ''} to another server
+                </p>
+                <p className="mt-1 text-xs">
+                  Saving reseeds each one on the new server from its history in Postgres. Until it
+                  catches up, its reads come from Postgres.
+                </p>
+                <ul className="mt-2 space-y-0.5 font-mono text-xs">
+                  {pinnedGraphs.map(g => <li key={g.id}>{g.name}</li>)}
+                </ul>
+                <button
+                  type="button"
+                  onClick={() => handleSubmit(true)}
+                  disabled={isSubmitting}
+                  className="mt-3 rounded-lg bg-amber-500 px-3 py-1.5 text-xs font-semibold text-white transition-colors hover:bg-amber-600 disabled:opacity-50"
+                >
+                  Save and reseed
+                </button>
               </div>
             )}
           </div>

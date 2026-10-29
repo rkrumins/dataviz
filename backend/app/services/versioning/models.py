@@ -16,7 +16,8 @@ is resolved via the small, mutable :class:`EntityHeadORM` pointer table (plan
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import logging
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
     BigInteger,
@@ -38,6 +39,8 @@ from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
 from . import config
 from .db import VersioningBase, get_engine
 from .ids import prefixed_id
+
+logger = logging.getLogger(__name__)
 
 _SCHEMA = config.graphver_schema()
 
@@ -104,6 +107,12 @@ class GraphORM(VersioningBase):
     # EVERY read path must filter `deleted_at IS NULL` (see ix_graphs_live).
     deleted_at = Column(Text, nullable=True)
     deleted_by = Column(Text, nullable=True)
+    # live|frozen, and the revision a freeze or unfreeze compares and bumps. Trashed and purging
+    # are derived from deleted_at (and a purge job) until lifecycle v2 stores them; changed_at
+    # restarts the idle-draft TTL at unfreeze (20261018_1200_gv_lifecycle).
+    lifecycle_state = Column(Text, nullable=False, default="live", server_default=text("'live'"))
+    lifecycle_rev = Column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    lifecycle_changed_at = Column(Text, nullable=True)
 
     __table_args__ = _plain(
         UniqueConstraint("data_source_id", name="uq_graphs_data_source"),
@@ -118,6 +127,9 @@ class GraphORM(VersioningBase):
         ),
         CheckConstraint(
             "audit_tier IN ('commit_only','full_wip')", name="ck_graphs_audit"
+        ),
+        CheckConstraint(
+            "lifecycle_state IN ('live','frozen')", name="ck_graphs_lifecycle_state"
         ),
     )
 
@@ -206,6 +218,9 @@ class MergeRequestORM(VersioningBase):
     resolutions = Column(JSONB, nullable=True)            # who resolved / chosen value
     reviewers = Column(JSONB, nullable=True)
     approved_by = Column(JSONB, nullable=True)
+    # {actor: {headCommitId, headSeq, at}}: the source branch's head each approval was of. A
+    # content commit after it makes the approval stale (GraphVersioningService._approvals).
+    approvals = Column(JSONB, nullable=True)
     approval_status = Column(Text, nullable=True)
     checks_status = Column(JSONB, nullable=True)          # ontology re-validation etc.
     resulting_commit_id = Column(Text, nullable=True)
@@ -248,10 +263,16 @@ class ProjectionStateORM(VersioningBase):
     graph_id = Column(Text, primary_key=True)
     projected_commit_seq = Column(BigInteger, nullable=False, default=0)
     target_commit_seq = Column(BigInteger, nullable=False, default=0)
-    status = Column(Text, nullable=False, default="idle")  # idle|projecting|rebuilding|evicted
+    # idle|projecting|rebuilding|evicted, or reseeding: an operator reset the watermark (DR) and
+    # the next pass reseeds the key; that pass's claim makes it rebuilding.
+    status = Column(Text, nullable=False, default="idle")
     falkor_graph_name = Column(Text, nullable=True)
     falkor_provider = Column(Text, nullable=True)   # FalkorDB instance hosting this cache (per-provider eviction)
     shard_map = Column(JSONB, nullable=True)
+    # A moved graph's old platform keys, waiting to be dropped once the new key has caught up:
+    # ``[{name, provider, retireAfter, afterSeq, movedBy}]``, NULL when none
+    # (``move_projection``; 20261018_1100_gv_ps_retired).
+    retired_keys = Column(JSONB, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -268,17 +289,30 @@ class ProjectionStateORM(VersioningBase):
     # Data health rebuild progress bar. NULL when no full seed is running.
     progress_done = Column(BigInteger, nullable=True)
     progress_total = Column(BigInteger, nullable=True)
+    # The fencing token. A projection pass claims the row by bumping it and publishes only while it
+    # is still its own; evict, rebuild, repin and the bootstrap head flip bump it too, so a pass
+    # they overtook never writes over them (20261017_1550_gv_ps_fencing).
+    epoch = Column(BigInteger, nullable=False, default=0, server_default=text("0"))
+    # Consecutive failed passes, and when the poll may retry (ISO-8601 UTC, like _now()).
+    failed_attempts = Column(Integer, nullable=False, default=0, server_default=text("0"))
+    next_retry_at = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     __table_args__ = _plain(
         CheckConstraint(
-            "status IN ('idle','projecting','rebuilding','evicted')",
+            "status IN ('idle','projecting','rebuilding','evicted','reseeding')",
             name="ck_proj_status",
         ),
+        # One versioned graph per FalkorDB graph: two projecting into one key would each reconcile
+        # the other's entities away (``ensure_ps_key_index``; 20261017_1500_gv_ps_keys).
+        Index("uq_ps_key", text("coalesce(falkor_provider, 'default')"), "falkor_graph_name",
+              unique=True, postgresql_where=text("falkor_graph_name IS NOT NULL")),
     )
 
 
 # Every job type the code writes. ``ck_jobs_type`` allows these (∪ whatever a DB already holds).
+# An import that holds its draft (``uq_jobs_ingest_active``).
+_INGEST_ACTIVE = "job_type = 'ingest' AND status IN ('pending','running')"
 JOB_TYPES = ("ingest", "projection", "rebuild", "export", "bootstrap", "publish", "purge",
              "package_inspect")
 
@@ -347,6 +381,14 @@ class JobORM(VersioningBase):
             "idempotency_key",
             unique=True,
             postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
+        # One import at a time per draft: two would interleave their windows, and a replace
+        # among them would delete what the other writes.
+        Index(
+            "uq_jobs_ingest_active",
+            "branch_id",
+            unique=True,
+            postgresql_where=text(_INGEST_ACTIVE),
         ),
         CheckConstraint(
             "status IN ('pending','running','completed','failed','cancelled')",
@@ -460,6 +502,15 @@ class CommitORM(VersioningBase):
         ),
         Index("ix_commits_seq_brin", "commit_seq", postgresql_using="brin"),
         Index("ix_commits_idem", "graph_id", "idempotency_key"),
+        # One commit per key on a branch: two saves sent with one Idempotency-Key land once.
+        Index(
+            "uq_commits_idem",
+            "graph_id",
+            "branch_id",
+            "idempotency_key",
+            unique=True,
+            postgresql_where=text("idempotency_key IS NOT NULL"),
+        ),
         CheckConstraint(
             # Existing DBs get 'restore' via migration 20260713_1200_restore_kind and 'pull' via
             # 20260714_1600_pull_commit_kind (create_all never alters live tables); keep the sets in
@@ -669,15 +720,278 @@ def _ensure_schema_upgrades(conn) -> None:
     With ``GRAPHVER_DB_URL`` pointing at a separate database, alembic migrates only the management
     DB, and ``create_all`` creates missing tables but never alters an existing one's checks or
     indexes. Without this, such a store keeps the CHECK it was born with and rejects every job type
-    added since. Each step is idempotent and a no-op once applied, so it runs on every start."""
-    widen_job_type_check(conn, JOB_TYPES)
+    added since. Each step is idempotent and a no-op once applied, so it runs on every start, in its
+    own savepoint (:func:`_bounded_step`). The steps the running code cannot do without (the job
+    types it inserts, the columns it maps) are required: one that fails stops the start."""
+    _bounded_step(conn, "ck_jobs_type was not widened",
+                  lambda: widen_job_type_check(conn, JOB_TYPES), required=True)
+
     # 20261008_1200_import_rows_idx (``bootstrap_nodes`` is a new table: ``create_all`` makes it).
-    if sa_inspect(conn).has_table("import_rows", schema=_SCHEMA):
-        rows = f'"{_SCHEMA}"."import_rows"'
-        conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_import_rows_kind_row ON {rows} "
-                          "(job_id, kind, row_index)"))
-        conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_match"'))
-        conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_status"'))
+    def import_rows_indexes() -> None:
+        if sa_inspect(conn).has_table("import_rows", schema=_SCHEMA):
+            rows = f'"{_SCHEMA}"."import_rows"'
+            conn.execute(text(f"CREATE INDEX IF NOT EXISTS ix_import_rows_kind_row ON {rows} "
+                              "(job_id, kind, row_index)"))
+            conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_match"'))
+            conn.execute(text(f'DROP INDEX IF EXISTS "{_SCHEMA}"."ix_import_rows_status"'))
+    _bounded_step(conn, "the import_rows indexes were not swapped", import_rows_indexes)
+    # 20261017_1500_gv_ps_keys. Never strict here: a store holding two live pins on one key starts
+    # without the index rather than not at all.
+    _bounded_step(conn, "uq_ps_key was not built", lambda: ensure_ps_key_index(conn, strict=False))
+    # 20261017_1550_gv_ps_fencing.
+    _bounded_step(conn, "the projection fencing columns were not added",
+                  lambda: ensure_ps_fencing_columns(conn), required=True)
+    # 20261017_1900_gv_commits_idem.
+    _bounded_step(conn, "uq_commits_idem was not built", lambda: ensure_commits_idem_index(conn))
+    # 20261017_1950_gv_ingest_active. Two imports still running on one draft leave the index for a
+    # later start.
+    _bounded_step(conn, "uq_jobs_ingest_active was not built",
+                  lambda: ensure_ingest_active_index(conn, strict=False))
+    # 20261017_2000_gv_ps_reseeding.
+    _bounded_step(conn, "the reseeding status was not allowed",
+                  lambda: ensure_ps_reseeding_status(conn), required=True)
+    # 20261018_1000_gv_mr_approvals.
+    _bounded_step(conn, "merge_requests.approvals was not added",
+                  lambda: ensure_mr_approvals_column(conn), required=True)
+    # 20261018_1100_gv_ps_retired.
+    _bounded_step(conn, "the retired_keys column was not added",
+                  lambda: ensure_ps_retired_keys_column(conn), required=True)
+    # 20261018_1200_gv_lifecycle. Every graph read queues behind its lock request: short tries.
+    _bounded_step(conn, "the graph lifecycle columns were not added",
+                  lambda: ensure_graph_lifecycle_columns(conn), required=True, tries=10)
+
+
+def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
+    """Run one schema step in a savepoint that waits at most five seconds for a lock, as the
+    migrations do (``_bound_lock_wait``): a table a save or a job's heartbeat holds makes the step
+    give up rather than queue every later write on the table behind it. Then, or on any other
+    failure, the step is rolled back and logged, and the worker starts without it; the next start
+    tries again. A ``required`` step's failure is raised instead: the worker exits and its restart
+    tries again, rather than run against a schema its code cannot use.
+
+    ``tries`` splits the five seconds into tries of half a second each, for a table every request
+    reads: what queues behind the step's lock request then waits at most that long, and goes
+    through between tries."""
+    for attempt in range(tries):
+        try:
+            with conn.begin_nested():
+                conn.execute(text(f"SET LOCAL lock_timeout = '{'5s' if tries == 1 else '500ms'}'"))
+                step()
+            return
+        except Exception as exc:
+            if attempt + 1 < tries and getattr(getattr(exc, "orig", None), "sqlstate", None) == "55P03":
+                continue                                 # the lock wait ran out: try again
+            logger.exception("%s; the next start tries again", failure)
+            if required:
+                raise
+            return
+
+
+def ensure_ps_fencing_columns(conn) -> None:
+    """Add ``projection_state``'s fencing columns (``epoch``, ``failed_attempts``,
+    ``next_retry_at``). A no-op without the table, and once they are there: an ALTER takes the
+    table's ACCESS EXCLUSIVE lock even when it adds nothing, and every worker start runs this.
+    ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    present = {c["name"] for c in inspector.get_columns("projection_state", schema=_SCHEMA)}
+    if {"epoch", "failed_attempts", "next_retry_at"} <= present:
+        return
+    ps = f'"{_SCHEMA}"."projection_state"'
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS epoch BIGINT NOT NULL DEFAULT 0"))
+    conn.execute(text(
+        f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS failed_attempts INTEGER NOT NULL DEFAULT 0"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS next_retry_at TEXT"))
+
+
+def ensure_ps_reseeding_status(conn) -> None:
+    """Let ``ck_proj_status`` allow ``reseeding``. A no-op without the table, and once it does:
+    rebuilding the check takes the table's ACCESS EXCLUSIVE lock, and every worker start runs
+    this. ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    if not sa_inspect(conn).has_table("projection_state", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    ps = f'"{_SCHEMA}"."projection_state"'
+    current = conn.execute(text(
+        "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conname = 'ck_proj_status' AND conrelid = CAST(:ps AS regclass)"),
+        {"ps": ps}).scalar()
+    if current is not None and "'reseeding'" in current:
+        return
+    conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_proj_status"))
+    conn.execute(text(
+        f"ALTER TABLE {ps} ADD CONSTRAINT ck_proj_status "
+        "CHECK (status IN ('idle','projecting','rebuilding','evicted','reseeding'))"))
+
+
+def ensure_ps_retired_keys_column(conn) -> None:
+    """Add ``projection_state.retired_keys``, a moved graph's old keys. A no-op without the table,
+    and once it is there (an ALTER takes the table's ACCESS EXCLUSIVE lock even when it adds
+    nothing). ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if "retired_keys" in {c["name"] for c in inspector.get_columns("projection_state",
+                                                                    schema=_SCHEMA)}:
+        return
+    conn.execute(text(
+        f'ALTER TABLE "{_SCHEMA}"."projection_state" ADD COLUMN IF NOT EXISTS retired_keys JSONB'))
+
+
+def ensure_mr_approvals_column(conn) -> None:
+    """Add ``merge_requests.approvals``, the head each approval was of. A no-op without the table,
+    and once it is there (an ALTER takes the table's ACCESS EXCLUSIVE lock even when it adds
+    nothing). ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("merge_requests", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if "approvals" in {c["name"] for c in inspector.get_columns("merge_requests", schema=_SCHEMA)}:
+        return
+    conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."merge_requests" ADD COLUMN IF NOT EXISTS approvals JSONB'))
+
+
+def ensure_graph_lifecycle_columns(conn) -> None:
+    """Add ``graphs.lifecycle_state``, ``lifecycle_rev`` and ``lifecycle_changed_at``, and the check
+    that stores only live or frozen. A no-op without the table, and once they are there (an ALTER
+    takes the table's ACCESS EXCLUSIVE lock even when it adds nothing). Every existing graph reads
+    live at rev 0: none was frozen before the columns existed. ``conn`` is a synchronous
+    connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("graphs", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    present = {c["name"] for c in inspector.get_columns("graphs", schema=_SCHEMA)}
+    if {"lifecycle_state", "lifecycle_rev", "lifecycle_changed_at"} <= present:
+        return
+    graphs = f'"{_SCHEMA}"."graphs"'
+    conn.execute(text(
+        f"ALTER TABLE {graphs} ADD COLUMN IF NOT EXISTS lifecycle_state TEXT NOT NULL DEFAULT 'live'"))
+    conn.execute(text(
+        f"ALTER TABLE {graphs} ADD COLUMN IF NOT EXISTS lifecycle_rev BIGINT NOT NULL DEFAULT 0"))
+    conn.execute(text(f"ALTER TABLE {graphs} ADD COLUMN IF NOT EXISTS lifecycle_changed_at TEXT"))
+    conn.execute(text(f"ALTER TABLE {graphs} DROP CONSTRAINT IF EXISTS ck_graphs_lifecycle_state"))
+    conn.execute(text(f"ALTER TABLE {graphs} ADD CONSTRAINT ck_graphs_lifecycle_state "
+                      "CHECK (lifecycle_state IN ('live','frozen'))"))
+
+
+def ensure_ps_key_index(conn, *, strict: bool) -> None:
+    """Build ``uq_ps_key``: one versioned graph per FalkorDB graph (provider, name).
+
+    First, a tombstoned graph that does not own the key lets go of a key another graph also pins
+    (its pin is cleared and logged; a restore does not bring it back). Pins still shared after that
+    belong to live or owned graphs, which corrupt each other's projection and must be resolved by
+    hand: ``strict`` (the migration) raises, naming them; otherwise (every worker start) the error
+    is logged and the index left unbuilt. A no-op once the index exists. ``conn`` is a synchronous
+    connection (alembic's bind, or ``run_sync``'s)."""
+    if not sa_inspect(conn).has_table("projection_state", schema=_SCHEMA):
+        # A database installed at head has no graphver schema until create_schema_and_partitions
+        # creates it, and that builds the index from the models.
+        return
+    if conn.execute(text("SELECT 1 FROM pg_indexes WHERE schemaname = :s AND indexname = 'uq_ps_key'"),
+                    {"s": _SCHEMA}).first():
+        return
+    ps, graphs = f'"{_SCHEMA}"."projection_state"', f'"{_SCHEMA}"."graphs"'
+    released = conn.execute(text(
+        f"UPDATE {ps} p SET falkor_graph_name = NULL FROM {graphs} g "
+        "WHERE g.id = p.graph_id AND g.deleted_at IS NOT NULL AND NOT p.owns_falkor_graph "
+        "AND p.falkor_graph_name IS NOT NULL "
+        f"AND EXISTS (SELECT 1 FROM {ps} o WHERE o.graph_id <> p.graph_id "
+        "AND o.falkor_graph_name = p.falkor_graph_name "
+        "AND coalesce(o.falkor_provider, 'default') = coalesce(p.falkor_provider, 'default')) "
+        "RETURNING p.graph_id, p.falkor_graph_name")).all()
+    for graph_id, name in released:
+        logger.warning("uq_ps_key: released FalkorDB graph %s from tombstoned graph %s", name, graph_id)
+    shared = conn.execute(text(
+        f"SELECT coalesce(falkor_provider, 'default'), falkor_graph_name, "
+        f"array_agg(graph_id ORDER BY graph_id) FROM {ps} WHERE falkor_graph_name IS NOT NULL "
+        "GROUP BY 1, 2 HAVING count(*) > 1")).all()
+    if shared:
+        message = ("versioned graphs share a FalkorDB graph, so uq_ps_key cannot be built; clear "
+                   "projection_state.falkor_graph_name on all but one of each: " + "; ".join(
+                       f"{provider}/{name}: {', '.join(ids)}" for provider, name, ids in shared))
+        if strict:
+            raise RuntimeError(message)
+        logger.error(message)
+        return
+    conn.execute(text(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_ps_key ON {ps} "
+        "(coalesce(falkor_provider, 'default'), falkor_graph_name) "
+        "WHERE falkor_graph_name IS NOT NULL"))
+
+
+def ensure_commits_idem_index(conn) -> None:
+    """Build ``uq_commits_idem``: one commit per idempotency key on a branch, so a save retried
+    with its key lands once. A later commit sharing its key with an earlier one on the branch
+    (bulk, sync and bootstrap look before they insert, so two could race in) has the key cleared
+    first; every lookup returns one row anyway. A no-op once the index exists: on the partitioned
+    ``commits`` even ``CREATE INDEX IF NOT EXISTS`` locks every partition, and every worker start
+    runs this. ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    if not sa_inspect(conn).has_table("commits", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if conn.execute(text("SELECT to_regclass(:i)"), {"i": f'"{_SCHEMA}".uq_commits_idem'}).scalar():
+        return
+    commits = f'"{_SCHEMA}"."commits"'
+    cleared = conn.execute(text(
+        f"UPDATE {commits} c SET idempotency_key = NULL FROM ("
+        "SELECT graph_id, id, row_number() OVER (PARTITION BY graph_id, branch_id, idempotency_key "
+        f"ORDER BY commit_seq) AS rn FROM {commits} WHERE idempotency_key IS NOT NULL) d "
+        "WHERE c.graph_id = d.graph_id AND c.id = d.id AND d.rn > 1")).rowcount
+    if cleared:
+        logger.warning("uq_commits_idem: cleared the repeated idempotency key of %d commits", cleared)
+    conn.execute(text(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_commits_idem ON {commits} "
+        "(graph_id, branch_id, idempotency_key) WHERE idempotency_key IS NOT NULL"))
+
+
+def ensure_ingest_active_index(conn, *, strict: bool) -> None:
+    """Build ``uq_jobs_ingest_active``: one import pending or running per draft. First, as the
+    transfer lane's JobReaper would, the imports nothing will run are failed (never queued for
+    ``JOB_NEVER_QUEUED_SECS``, or queued past ``TRANSFER_QUEUE_TIMEOUT_SECS``); then, of the
+    imports left on one draft, the first (a running one first) keeps it and a later one that never
+    started is failed. Imports that still share a draft have started, and are never failed here:
+    ``strict`` (the migration) raises naming them; otherwise the build waits for a later start.
+    A no-op once the index exists. ``conn`` is a synchronous connection (alembic's bind, or
+    ``run_sync``'s)."""
+    if not sa_inspect(conn).has_table("jobs", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if conn.execute(text("SELECT to_regclass(:i)"), {"i": f'"{_SCHEMA}".uq_jobs_ingest_active'}).scalar():
+        return
+    jobs = f'"{_SCHEMA}"."jobs"'
+    now = datetime.now(timezone.utc)
+
+    def fail(where: str, message: str, **params) -> int:
+        return conn.execute(text(
+            f"UPDATE {jobs} j SET status = 'failed', error_message = :msg, completed_at = :now, "
+            f"updated_at = :now {where}"), {"msg": message, "now": now.isoformat(), **params}).rowcount
+
+    pending = "j.job_type = 'ingest' AND j.status = 'pending'"
+    reaped = fail(f"WHERE {pending} AND j.current_phase = 'queued' AND j.updated_at < :cut",
+                  config.JOB_NOT_STARTED,
+                  cut=(now - timedelta(seconds=config.TRANSFER_QUEUE_TIMEOUT_SECS)).isoformat())
+    reaped += fail(f"WHERE {pending} AND j.current_phase IS NULL AND j.created_at < :cut",
+                   config.JOB_NEVER_QUEUED,
+                   cut=(now - timedelta(seconds=config.JOB_NEVER_QUEUED_SECS)).isoformat())
+    stacked = fail(
+        f"FROM (SELECT id, row_number() OVER (PARTITION BY branch_id ORDER BY status = 'running' "
+        f"DESC, created_at) AS rn FROM {jobs} WHERE branch_id IS NOT NULL AND {_INGEST_ACTIVE}) d "
+        f"WHERE j.id = d.id AND d.rn > 1 AND {pending} AND j.started_at IS NULL",
+        "Another import was already running on this draft. Start this one again when it has finished.")
+    if reaped or stacked:
+        logger.warning("uq_jobs_ingest_active: failed %d import(s) nothing would run and %d queued "
+                       "behind another on its draft", reaped, stacked)
+    shared = conn.execute(text(
+        f"SELECT branch_id, string_agg(id, ', ' ORDER BY created_at) FROM {jobs} "
+        f"WHERE branch_id IS NOT NULL AND {_INGEST_ACTIVE} GROUP BY branch_id HAVING count(*) > 1")).all()
+    if shared:
+        message = ("uq_jobs_ingest_active: imports running together on one draft ("
+                   + "; ".join(f"{branch}: {ids}" for branch, ids in shared)
+                   + "). Let them finish, or fail the stale ones, then run this again.")
+        if strict:
+            raise RuntimeError(message)
+        logger.warning("%s The next start tries again.", message)
+        return
+    conn.execute(text(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS uq_jobs_ingest_active ON {jobs} (branch_id) "
+        f"WHERE {_INGEST_ACTIVE}"))
 
 
 def widen_job_type_check(conn, required) -> None:

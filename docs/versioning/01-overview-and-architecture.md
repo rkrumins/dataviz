@@ -164,9 +164,10 @@ flowchart TD
    use. See [03](03-branching-commits-merge.md), [07](07-frontend-integration.md),
    [08](08-import-export.md).
 2. **Write-through (the direct path).** `VersionedWriteProvider` wraps any provider so an ordinary
-   graph write **also lands as an audited commit** on the data source's versioned graph before hitting
-   the backing store — making versioning the system of record even for non-draft writes (toggle
-   `GRAPHVER_VERSIONED_WRITES`). See [04](04-projection-and-cache.md).
+   graph write **lands only as an audited commit** on the data source's versioned graph; the
+   projector carries it to FalkorDB — making versioning the system of record even for non-draft
+   writes (`GRAPHVER_VERSIONED_WRITES=0` opts out only data sources without version control). See
+   [04](04-projection-and-cache.md).
 
 Both funnel through `GraphVersioningService.apply_ops` (`O(ops)`), which enforces ontology + edge
 integrity and writes append-only version rows. `update` ops are **field-level patches**, not wholesale

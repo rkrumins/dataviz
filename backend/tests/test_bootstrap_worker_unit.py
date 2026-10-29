@@ -158,6 +158,45 @@ def test_bootstrap_failure_carries_a_code():
     assert exc.reason == "nope" and exc.code == "integrity"
 
 
+# ── a graph server that cuts replies short (FalkorDB RESULTSET_SIZE) ─────────
+
+class _Configured:
+    """A graph client whose server answers ``GRAPH.CONFIG GET RESULTSET_SIZE`` with ``cap``."""
+
+    def __init__(self, cap):
+        self.cap, self.sent = cap, []
+
+    async def execute_command(self, *args):
+        self.sent.append(args)
+        return [b"RESULTSET_SIZE", self.cap]
+
+
+async def test_a_server_that_cuts_replies_short_is_refused():
+    # The stock falkordb/falkordb image's RESULTSET_SIZE: a 20k-node pre-flight window came back
+    # as 10,000 rows, its duplicates unseen, and the copy failed with "the source changed".
+    with pytest.raises(BootstrapFailure) as exc:
+        await BootstrapRunner._require_whole_replies(object(), _Configured(10000))
+    assert exc.value.code == "infrastructure"
+    assert "10,000 rows" in exc.value.reason and "RESULTSET_SIZE" in exc.value.reason
+
+
+async def test_an_uncapped_server_or_one_that_will_not_say_is_read():
+    await BootstrapRunner._require_whole_replies(object(), _Configured(-1))
+    await BootstrapRunner._require_whole_replies(object(), object())   # no raw command: a fake
+
+
+async def test_the_production_graph_handle_answers_the_config_read():
+    # The registry's ResilientGraph hands an unwrapped call to the graph's own client: without
+    # that, the read would fail, read as "no cap", and production would never be checked.
+    from backend.app.providers.falkordb_connection import FalkorDBConnConfig, ResilientGraph
+
+    inner = _Configured(10000)
+    with pytest.raises(BootstrapFailure):
+        await BootstrapRunner._require_whole_replies(
+            object(), ResilientGraph(None, FalkorDBConnConfig(), "g", inner))
+    assert inner.sent == [("GRAPH.CONFIG", "GET", "RESULTSET_SIZE")]
+
+
 # ── misc ─────────────────────────────────────────────────────────────────────
 
 def test_label_of_skips_the_derived_rollup_marker():

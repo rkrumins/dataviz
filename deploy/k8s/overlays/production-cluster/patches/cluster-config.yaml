@@ -56,3 +56,11 @@ data:
   FALKORDB_CLUSTER_NODE_TIMEOUT_MS: "15000"
   FALKORDB_CLUSTER_NODES: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-1-0.falkordb-cluster.synodic.svc.cluster.local:6379,falkordb-shard-2-0.falkordb-cluster.synodic.svc.cluster.local:6379"
   FALKORDB_HOST: "falkordb-shard-0-0.falkordb-cluster.synodic.svc.cluster.local"
+  # Each shard is a master + one replica, replicating asynchronously with no
+  # min-replicas-to-write, so a write the master acknowledged can still be lost
+  # in a failover. A projection pass therefore WAITs for one replica to confirm
+  # its last write before it publishes; an unconfirmed pass holds the watermark
+  # (replica_unconfirmed in Data health) and backs off. "0" stops waiting, e.g.
+  # while a shard's replica is down for long. Both the API and the versioning
+  # worker read it: either can run a projection pass.
+  GRAPHVER_PROJECTION_WAIT_REPLICAS: "1"

@@ -201,6 +201,7 @@ async def _reproject(svc: GraphVersioningService, gid: str) -> None:
             ps = await s.get(ProjectionStateORM, gid)
             if ps is not None:
                 ps.projected_commit_seq = 0
+                ps.epoch = ProjectionStateORM.epoch + 1   # a pass in flight must not write over it
                 await s.commit()
     except Exception as exc:                       # noqa: BLE001
         print(f"    ! could not rewind projection watermark ({exc})")

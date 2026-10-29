@@ -44,6 +44,9 @@ async def _run() -> None:
     g = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws_ni", actor="ana")
     gid = g["graph_id"]
     d = await svc.open_draft(graph_id=gid, owner="ana")
+    # bo edits it too (7): only a private draft's owner and its members may write to it
+    await svc.add_branch_member(graph_id=gid, branch_id=d, subject_type="user", subject_id="bo",
+                                role="editor", actor="ana")
 
     async def value(eid):
         return await svc.entity_value(graph_id=gid, entity_id=eid, branch_id=d)

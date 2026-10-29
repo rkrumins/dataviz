@@ -79,6 +79,7 @@ from backend.common.models.management import (
 from backend.insights_service.enqueue import enqueue_stats_job_safe
 
 from backend.app.services.versioning import config as gv_config
+from backend.app.services.versioning.errors import LockBusy
 from backend.app.services.versioning.service import GraphVersioningService
 
 logger = logging.getLogger(__name__)
@@ -653,7 +654,9 @@ async def list_deleted_data_sources(
 
     `restorable` is the only field the UI must obey. It is False once a purge has been queued —
     at which point the source is being dismantled and there is nothing left to restore — and the
-    row is shown as "Being deleted" rather than offering a button that would 409.
+    row is shown as "Being deleted" rather than offering a button that would 409. A purge that
+    stopped says why instead: `purgeState` is ``failed`` with the job's reason, or ``blocked``
+    with the `liveForks` that hold it back.
     """
     from backend.app.services.versioning import purge_worker
 
@@ -668,10 +671,11 @@ async def list_deleted_data_sources(
     out: List[DeletedDataSource] = []
     for r in rows:
         try:
-            purging = await purge_worker.purge_pending_for_data_source(data_source_id=r.id)
+            purge = await purge_worker.purge_state_for_data_source(data_source_id=r.id,
+                                                                   deleted_at=r.deleted_at)
         except Exception:                                    # pragma: no cover - best effort
             logger.exception("could not read purge state for %s", r.id)
-            purging = False
+            purge = purge_worker.PurgeState()
         try:
             deleted = datetime.fromisoformat(r.deleted_at)
             days_left = max(0, grace - (now - deleted).days)
@@ -684,8 +688,11 @@ async def list_deleted_data_sources(
             deletedBy=users.get(r.deleted_by or "", "a former member" if r.deleted_by else "someone"),
             daysLeft=days_left,
             restoreWindowDays=grace,
-            purging=purging,
-            restorable=not purging,
+            purging=purge.state == "queued",
+            restorable=not purge.final,
+            purgeState=purge.state,
+            purgeReason=purge.reason,
+            liveForks=purge.forks,
         ))
     return out
 
@@ -979,7 +986,9 @@ async def remove_data_source(
     ``?permanent=true`` is the honest escape hatch: it queues the purge immediately (millions of
     version rows are not something an HTTP request deletes inline) and removes the row.
     """
-    ds = await data_source_repo.get_data_source_orm(session, ds_id)
+    # Held FOR UPDATE before the graph is touched, as a move, undo or accept holds it: one in
+    # flight finishes first, and a source it took elsewhere is not found here.
+    ds = await data_source_repo.get_data_source_orm(session, ds_id, lock="update")
     if not ds or ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
 
@@ -995,6 +1004,9 @@ async def remove_data_source(
                 data_source_id=ds_id, workspace_id=workspace_id, actor=_user.id)
             logger.info("data source %s PERMANENTLY deleted by %s; purge queued: %s",
                         ds_id, _user.id, jobs)
+        except purge_worker.PurgeRefused as exc:
+            # Nothing was queued, so nothing is recorded or deleted (e.g. forks still read it).
+            raise HTTPException(status_code=409, detail={"type": exc.code, "message": exc.reason})
         except Exception:
             # Refuse rather than orphan. A permanent delete whose purge never got queued is
             # exactly the leak that put 2,296 unreachable graphs in this database.
@@ -1021,6 +1033,8 @@ async def remove_data_source(
     try:
         await purge_worker.tombstone_graphs_for_data_source(
             data_source_id=ds_id, workspace_id=workspace_id, actor=_user.id)
+    except LockBusy:
+        raise                    # 503 lock_busy: a save or import holds the graph; nothing changed
     except Exception:
         logger.exception("could not tombstone graphs for %s", ds_id)
         raise HTTPException(
@@ -1054,11 +1068,16 @@ async def restore_data_source(
     # The graph goes first, because it is the one that can REFUSE: once a purge has been queued
     # there is nothing left to restore, and we must not hand back a data source pointing at a
     # graph that is being dismantled.
-    if not await purge_worker.restore_graphs_for_data_source(
-            data_source_id=ds_id, workspace_id=workspace_id):
-        raise HTTPException(
-            status_code=409,
-            detail="This data source is being permanently deleted and can no longer be restored.")
+    row = await data_source_repo.get_data_source_orm(session, ds_id, include_deleted=True)
+    purge = await purge_worker.restore_graphs_for_data_source(
+        data_source_id=ds_id, workspace_id=workspace_id,
+        deleted_at=row.deleted_at if row is not None else None)
+    if purge.final:
+        detail = "This data source is being permanently deleted and can no longer be restored."
+        if purge.reason:
+            detail = (f"Permanently deleting this data source stopped ({purge.reason}), and it "
+                      "can no longer be restored.")
+        raise HTTPException(status_code=409, detail=detail)
 
     restored = await data_source_repo.restore_data_source(session, ds_id)
     if restored is None:

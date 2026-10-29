@@ -13,9 +13,13 @@ external system becomes the **base layer** — the graph is periodically **re-sy
 commits** — and human curation moves to an **overlay** of drafts merged *on top* via 3-way merge.
 The key property, already implemented: **an authoritative re-sync never clobbers a human edit** — a
 field the source and a user both changed *conflicts* (or the source wins only if you say
-`external_wins`). The seam for this — provider capabilities, `source_mode`, graph `kind`, the
-`sync_ingest` merge path, and external-type mapping — is **built**; DataHub-specific scheduling,
-write-back, and an OpenMetadata connector are **not yet wired**.
+`external_wins`). **Known limitation:** the merge base is `main` as it stood at the last sync, so
+human edits published before that sync would read as the source's old values on the next one. Until
+the source's own snapshot becomes the base, such a sync is refused with `409 curation_at_risk`
+unless a workspace admin passes `force` ([06 · API Reference](/docs/versioning-api-reference)).
+The seam for this — provider capabilities, `source_mode`, graph `kind`, the `sync_ingest` merge
+path, and external-type mapping — is **built**; DataHub-specific scheduling, write-back, and an
+OpenMetadata connector are **not yet wired**.
 
 ---
 
@@ -132,7 +136,8 @@ A versioned graph carries `kind ∈ manual | authoritative | hybrid | blank`
 (`backend/app/services/versioning/models.py`, `ck_graphs_kind`). It is **descriptive metadata** —
 the write path does not branch on it (only on fork lineage and `ontology_enforcement`) — but it is
 the intended place to distinguish a human-authored graph (`manual`) from one seeded/refreshed from an
-external SoR (`authoritative`) or both (`hybrid`). Nothing sets `authoritative` or `hybrid` today:
+external SoR (`authoritative`) or both (`hybrid`). Only `POST /graphs` sets `authoritative` or
+`hybrid` today, from the `kind` its caller sends ([06 · API Reference](/docs/versioning-api-reference#21-graph-lifecycle--resolution)):
 enabling version control makes `manual`, a blank model `blank`, and a fork takes its parent's. See
 [02 — Data Model](02-data-model.md).
 

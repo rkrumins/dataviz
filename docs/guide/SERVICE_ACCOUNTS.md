@@ -324,7 +324,16 @@ Secret scanners find both kinds with `nx[ps]at_[0-9A-Za-z]{38}`.
 A service account's key can't review or approve a pull request: approving is
 a person's call, and its managers would otherwise approve through it. For the
 same reason, nobody approves a pull request opened through an account they
-manage. Both answer `403` with `"type": "access_denied"`.
+manage or made a key for, or one from a draft it owns: a key keeps working
+after its maker stops managing the account. Both answer `403` with
+`"type": "access_denied"`: `person_required` for the account's key,
+`self_review` for its manager or a key's maker.
+
+Given **Publisher** (or **Data engineer**) in a workspace, its keys may write a
+version-controlled data source's Published version directly — a bulk ingest,
+or an edit with no draft — since that check reads the account's own roles.
+Like every key, they never publish, merge, revert, restore or sync: a person
+with publish lands the drafts it proposes.
 
 ---
 

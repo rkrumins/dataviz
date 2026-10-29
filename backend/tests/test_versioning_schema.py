@@ -50,3 +50,14 @@ def test_version_tables_have_no_is_head_column():
     for tname in ("node_versions", "edge_versions"):
         cols = db.VersioningBase.metadata.tables[f"{models._SCHEMA}.{tname}"].columns
         assert "is_head" not in cols
+
+
+def test_a_commit_idempotency_key_is_unique_per_branch():
+    """``uq_commits_idem`` settles two saves racing with one key; it includes the partition key."""
+    commits = db.VersioningBase.metadata.tables[f"{models._SCHEMA}.commits"]
+    index = next(i for i in commits.indexes if i.name == "uq_commits_idem")
+    assert index.unique
+    assert [c.name for c in index.columns] == ["graph_id", "branch_id", "idempotency_key"]
+    assert "idempotency_key IS NOT NULL" in str(index.dialect_options["postgresql"]["where"])
+    assert "ix_commits_idem" in {i.name for i in commits.indexes}     # graph-scoped lookups
+    assert "WHERE idempotency_key IS NOT NULL" in str(CreateIndex(index).compile(dialect=_PG))

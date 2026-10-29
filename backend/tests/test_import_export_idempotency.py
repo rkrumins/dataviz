@@ -2,19 +2,26 @@
 
 Pins, through the API: the key is its sender's (stored as ``<user id>:<key>``), so another caller's
 job is never found by it; a second request with the key makes no second job and starts nothing
-again; a job whose file never arrived — the first request failed on the way — takes the new
-request's file and starts; a finished job is answered as it is; a key that started the other kind
-of job is a 409; and a request that loses the race to insert the key answers with the winner's job.
+again; an import whose upload broke off is failed there and then, keyed or not, and the same key
+takes it back (``reclaim_import``) with the new request's file and starts it, if the view it places
+into is still the caller's to edit; an import still storing its file is answered as it is, storing
+nothing; a finished job is answered as it is; a key that started the other kind of job is a 409;
+and a request that loses the race to insert the key answers with the winner's job.
 """
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import Optional
 
 import pytest
+from fastapi import HTTPException
 from sqlalchemy.exc import IntegrityError
 
-from backend.app.api.v1.endpoints.versioning import get_import_export_service, get_versioning_service
+from backend.app.api.v1.endpoints import versioning as versioning_endpoints
+from backend.app.api.v1.endpoints.versioning import (create_import, get_import_export_service,
+                                                      get_versioning_service)
 from backend.app.services.storage.object_store import LocalFsObjectStore
+from backend.app.services.versioning.config import JOB_NEVER_QUEUED
 
 URL = "/api/v1/ws1/versioning/graphs/g1"
 ME = "usr_test000000"                                 # conftest's signed-in user
@@ -32,14 +39,17 @@ class _Jobs:
         self.store = store
         self.jobs: dict = {}
         self.started: list = []
+        self.abandoned: list = []
+        self.reclaimed: list = []
         #: A job another request with the same key inserts just before the next one does.
         self.racer: Optional[dict] = None
 
-    def seed(self, job_type, key, *, status="pending", phase="queued"):
+    def seed(self, job_type, key, *, status="pending", phase="queued", error=None):
         job_id = f"vjob_{len(self.jobs) + 1}"
         self.jobs[job_id] = {
             "jobId": job_id, "jobType": job_type, "graphId": "g1", "key": key, "status": status,
-            "phase": phase, "branchId": "br_1", "sourceUri": f"ws1/ds1/g1/{job_id}/source.ndjson",
+            "phase": phase, "errorMessage": error, "branchId": "br_1",
+            "sourceUri": f"ws1/ds1/g1/{job_id}/source.ndjson",
             "resultUri": f"ws1/ds1/g1/{job_id}/export.ndjson"}
         return job_id
 
@@ -70,6 +80,28 @@ class _Jobs:
         return "pending"
 
     start_import = start_export = _start
+
+    async def abandon_unqueued(self, job_id):
+        self.abandoned.append(job_id)
+        job = self.jobs[job_id]
+        if job["status"] == "pending" and job["phase"] is None:
+            job.update(status="failed", errorMessage=JOB_NEVER_QUEUED)
+
+    async def reclaim_import(self, job_id, *, actor, workspace_id):
+        job = self.jobs[job_id]
+        if (job["status"], job["phase"], job["errorMessage"]) != ("failed", None, JOB_NEVER_QUEUED):
+            return False
+        job.update(status="pending", errorMessage=None)
+        self.reclaimed.append(job_id)
+        return True
+
+
+class _CutOff:
+    """A request whose body breaks off midway."""
+
+    async def stream(self):
+        yield b"A\n"
+        raise ConnectionResetError("the client went away")
 
 
 @pytest.fixture
@@ -109,11 +141,69 @@ async def test_another_callers_job_is_never_found_by_the_same_key(test_client, j
 
 
 async def test_an_import_whose_file_never_arrived_takes_this_requests_file(test_client, jobs):
-    job_id = jobs.seed("ingest", f"{ME}:nightly-1", phase=None)
+    # As a request that broke off leaves it: failed there and then, with no phase.
+    job_id = jobs.seed("ingest", f"{ME}:nightly-1", status="failed", phase=None, error=JOB_NEVER_QUEUED)
+    r = await test_client.post(f"{URL}/imports", params={"idempotencyKey": "nightly-1"}, content=b"A\n")
+    assert r.status_code == 202, r.text
+    assert r.json()["jobId"] == job_id and jobs.reclaimed == jobs.started == [job_id]
+    assert await _stored(jobs, job_id) == b"A\n"
+
+
+async def test_an_import_is_taken_back_only_into_a_view_the_caller_can_still_edit(
+        test_client, jobs, monkeypatch):
+    job_id = jobs.seed("ingest", f"{ME}:nightly-1", status="failed", phase=None, error=JOB_NEVER_QUEUED)
+    jobs.jobs[job_id]["scopeViewId"] = "view_1"
+
+    async def check(session, ws_id, view_id, user, claims):     # view_1 is no longer theirs to edit
+        if view_id == "view_1":
+            raise HTTPException(status_code=403, detail="Missing permission: workspace:view:edit")
+    monkeypatch.setattr(versioning_endpoints, "_check_import_view", check)
+    r = await test_client.post(f"{URL}/imports", params={"idempotencyKey": "nightly-1"}, content=b"A\n")
+    assert r.status_code == 403, r.text
+    assert jobs.reclaimed == jobs.started == [] and jobs.jobs[job_id]["status"] == "failed"
+    assert not (await jobs.store.stat(jobs.jobs[job_id]["sourceUri"])).exists
+
+
+@pytest.mark.parametrize("how", ["sent again", "raced"])
+async def test_an_import_still_storing_its_file_is_answered_as_it_is(test_client, jobs, how):
+    uri = "ws1/ds1/g1/vjob_winner/source.ndjson"
+    winner = {"jobId": "vjob_winner", "jobType": "ingest", "graphId": "g1", "key": f"{ME}:nightly-1",
+              "status": "pending", "phase": None, "errorMessage": None, "branchId": "br_9",
+              "sourceUri": uri, "resultUri": None}
+    if how == "sent again":
+        jobs.jobs["vjob_winner"] = winner
+    else:
+        jobs.racer = winner
+    r = await test_client.post(f"{URL}/imports", params={"idempotencyKey": "nightly-1"}, content=b"B\n")
+    assert r.status_code == 202, r.text
+    assert (r.json()["jobId"], r.json()["status"]) == ("vjob_winner", "pending")
+    assert jobs.started == jobs.reclaimed == [], "its own request stores its file and starts it"
+    assert not (await jobs.store.stat(uri)).exists, "nothing written into the file being stored"
+
+
+def _post_directly(jobs, key):
+    return create_import("ws1", "g1", _CutOff(), format="ndjson", reconcile_mode="upsert",
+                         branch_id=None, view_id=None, idempotency_key=key, user=SimpleNamespace(id=ME),
+                         claims=None, meta={"data_source_id": "ds1"}, ie=jobs, session=None)
+
+
+async def test_a_keyed_upload_that_broke_off_is_taken_back_by_its_retry(test_client, jobs):
+    with pytest.raises(ConnectionResetError):
+        await _post_directly(jobs, "nightly-1")
+    (job_id,) = jobs.jobs
+    assert jobs.abandoned == [job_id], "failed there and then: its draft takes the next import now"
+
     r = await test_client.post(f"{URL}/imports", params={"idempotencyKey": "nightly-1"}, content=b"A\n")
     assert r.status_code == 202, r.text
     assert r.json()["jobId"] == job_id and jobs.started == [job_id]
     assert await _stored(jobs, job_id) == b"A\n"
+
+
+async def test_an_unkeyed_upload_that_broke_off_is_failed_at_once(jobs):
+    with pytest.raises(ConnectionResetError):
+        await _post_directly(jobs, None)
+    (job_id,) = jobs.jobs
+    assert jobs.abandoned == [job_id]
 
 
 async def test_a_finished_job_is_answered_as_it_is(test_client, jobs):

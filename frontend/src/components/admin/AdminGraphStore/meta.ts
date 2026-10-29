@@ -100,6 +100,7 @@ export const SEVERITY_CHIP: Record<'info' | 'warn' | 'critical', string> = {
 export const GRAPH_ROLE_LABEL: Record<string, string> = {
     source: 'Source graph',
     projection: 'Rollup projection',
+    versioned: 'Versioned graph',
     unregistered: 'Unregistered',
 }
 
@@ -136,7 +137,11 @@ export const GLOSSARY: { term: string; text: string }[] = [
     },
     {
         term: 'Unregistered graph',
-        text: 'A graph key on the node that no data source claims. Usually a leftover from a deleted source or a manual experiment; it still takes memory.',
+        text: 'A graph key on the node that no data source or versioned graph claims. Usually a leftover from a deleted source or a manual experiment; it still takes memory.',
+    },
+    {
+        term: 'Versioned graph',
+        text: 'A key a versioned graph projects into, marked Versioned or Fork (a fork\u2019s own key). Platform copy: the platform created the key and may delete it. Customer graph: the data source\u2019s own graph, which the platform never deletes. Its state says when the key is behind the graph\u2019s main or was evicted.',
     },
     {
         term: 'Measured vs estimated size',

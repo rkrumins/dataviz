@@ -18,6 +18,7 @@ from backend.app.services.versioning.service import GraphVersioningService
 from backend.tests.integration.test_versioning_projection import FakeFalkor
 
 R, M = "workspace:datasource:read", "workspace:datasource:manage"
+P = "workspace:datasource:publish"
 
 
 # --- a minimal fake FalkorDB read client returning reader-shaped results --- #
@@ -60,7 +61,7 @@ def _build_app():
 
     async def fake_claims(request: Request):
         ws = request.path_params.get("ws_id") or "ws1"
-        return PermissionClaims(sid="", global_perms=(), ws_perms={ws: (R, M)})
+        return PermissionClaims(sid="", global_perms=(), ws_perms={ws: (R, M, P)})
 
     app = FastAPI()
     app.include_router(V.router, prefix="/api/v1/{ws_id}/versioning")
@@ -70,7 +71,7 @@ def _build_app():
     return app, V
 
 
-async def _run() -> None:
+async def _run(data_sources: dict) -> None:
     from httpx import ASGITransport, AsyncClient
 
     await models.create_schema_and_partitions()
@@ -79,8 +80,9 @@ async def _run() -> None:
     ws1 = "/api/v1/ws1/versioning"
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": "ds_" + os.urandom(3).hex(), "workspaceId": "ws1",
-                                                 "falkorGraphName": "gvt_" + os.urandom(3).hex()})).json()["graphId"]
+        ds = "ds_" + os.urandom(3).hex()
+        data_sources[ds] = "gvt_" + os.urandom(3).hex()
+        gid = (await c.post(f"{ws1}/graphs", json={"dataSourceId": ds, "workspaceId": "ws1"})).json()["graphId"]
 
         # ── v1 on main: A -> B ──
         d1 = (await c.post(f"{ws1}/graphs/{gid}/branches", json={})).json()["branchId"]
@@ -158,10 +160,10 @@ async def _run() -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_asof_reads_e2e():
-    asyncio.run(_run())
+def test_versioning_asof_reads_e2e(data_sources):
+    asyncio.run(_run(data_sources))
 
 
 if __name__ == "__main__":
-    asyncio.run(_run())
+    asyncio.run(_run({}))
     print("versioning branch + as-of reads e2e: OK")

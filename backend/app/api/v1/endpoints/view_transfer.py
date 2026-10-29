@@ -690,19 +690,17 @@ async def import_package_data(
             "message": "This package upload is about to expire. Choose the file again to import it."})
 
     with _domain_errors():
-        branch_id = await svc.open_draft(graph_id=graph["graph_id"], owner=user.id, name=name,
-                                         originating_view_id=body.viewId)
-        try:
+        try:                                # its draft is opened with the job: none is left behind
             created = await ie.create_import_job(
                 workspace_id=body.workspaceId, data_source_id=body.dataSourceId, graph_id=graph["graph_id"],
                 actor=user.id, import_format="ndjson", source_uri=uploads.record_key(record),
-                branch_id=branch_id, reconcile_mode="upsert", idempotency_key=key, name=name,
+                reconcile_mode="upsert", idempotency_key=key, name=name, originating_view_id=body.viewId,
             )
         except IntegrityError:              # the same target, asked for twice at once
             return _data_started(await ie.find_job(graph_id=graph["graph_id"], idempotency_key=key), body, name)
     await ie.start_import(created["job_id"])
-    return _data_started({"jobId": created["job_id"], "branchId": branch_id, "graphId": graph["graph_id"]},
-                         body, name)
+    return _data_started({"jobId": created["job_id"], "branchId": created["branch_id"],
+                          "graphId": graph["graph_id"]}, body, name)
 
 
 def _data_started(job: Dict[str, Any], body: PackageDataRequest, draft_name: str) -> Dict[str, Any]:

@@ -7,6 +7,7 @@
  * concurrent admin viewers share one probe sweep.
  */
 import { authFetch } from './apiClient'
+import type { Watermark } from './versioningApiService'
 
 export type ServiceStatus = 'healthy' | 'degraded' | 'down' | 'unknown'
 
@@ -95,6 +96,10 @@ export interface GraphProvider {
     status: ServiceStatus
     error: string | null
     isActive: boolean
+    /** FalkorDB only, once the graph store has been read: versioned graphs
+     *  projecting here and the size of their keys (null when none is known). */
+    versionedGraphs?: number
+    versionedBytes?: number | null
 }
 
 export interface ProjectionWorstRow {
@@ -119,6 +124,51 @@ export interface ProjectionWorstRow {
     progressDone: number | null
     progressTotal: number | null
     updatedAt: string | null
+}
+
+/** An old FalkorDB key a moved graph still holds: it is dropped once the
+ *  new key has caught up to ``afterSeq`` and ``retireAfter`` has passed. */
+export interface RetiredProjectionKey {
+    name: string
+    provider: string | null
+    retireAfter: string
+    afterSeq: number
+}
+
+/** One row of the fleet inventory (``GET /api/v1/admin/versioning/graphs``):
+ *  a projection row, plus whether the platform owns the key, whether the
+ *  graph is a fork or an orphan (not a fork, and its data source is gone),
+ *  and the old keys a move left behind. */
+export interface VersionedGraphRow extends ProjectionWorstRow {
+    owned: boolean
+    forkParentGraphId: string | null
+    orphan: boolean
+    retiredKeys: RetiredProjectionKey[]
+}
+
+/** What ``POST /api/v1/admin/versioning/graphs/{graphId}/projection/move``
+ *  did: ``changed`` is false when the graph already was on the target. */
+export interface ProjectionMoveResult {
+    graphId: string
+    changed: boolean
+    from: { providerId: string; key: string }
+    to: { providerId: string; key: string }
+    retiring: RetiredProjectionKey | null
+    watermark: Watermark
+}
+
+export type ProjectionBucket = 'fresh' | 'lagging' | 'projecting' | 'rebuilding' | 'evicted' | 'failed'
+
+export interface VersionedGraphsFilter {
+    provider?: string
+    status?: ProjectionBucket
+    kind?: 'main' | 'fork' | 'orphan'
+    q?: string
+}
+
+export interface VersionedGraphsPage {
+    graphs: VersionedGraphRow[]
+    nextCursor: string | null
 }
 
 export interface ProjectionSection {
@@ -234,4 +284,27 @@ export interface SystemStatusSnapshot {
 export const systemStatusService = {
     get: (): Promise<SystemStatusSnapshot> =>
         authFetch<SystemStatusSnapshot>('/api/v1/admin/system/status'),
+    /** One keyset page of the fleet inventory; pass the previous page's ``nextCursor``. */
+    versionedGraphs: (filter: VersionedGraphsFilter, cursor?: string | null): Promise<VersionedGraphsPage> => {
+        const params = new URLSearchParams()
+        for (const [k, v] of Object.entries(filter)) if (v) params.set(k, v)
+        if (cursor) params.set('cursor', cursor)
+        return authFetch<VersionedGraphsPage>(`/api/v1/admin/versioning/graphs?${params}`)
+    },
+    /** Reseed every versioned graph on a FalkorDB provider from Postgres
+     *  (after its instance was restored). ``dryRun`` only counts them. */
+    resetWatermarks: (provider: string, opts?: { dryRun?: boolean }): Promise<{
+        provider: string; graphsReset?: number; graphsToReset?: number
+    }> =>
+        authFetch('/api/v1/admin/versioning/watermarks/reset', {
+            method: 'POST',
+            body: JSON.stringify({ provider, dryRun: !!opts?.dryRun }),
+        }),
+    /** Move one versioned graph's projection to another FalkorDB provider or
+     *  key; without ``key`` the server picks the graph's next platform key. */
+    moveProjection: (graphId: string, body: { providerId: string; key?: string }): Promise<ProjectionMoveResult> =>
+        authFetch<ProjectionMoveResult>(`/api/v1/admin/versioning/graphs/${encodeURIComponent(graphId)}/projection/move`, {
+            method: 'POST',
+            body: JSON.stringify(body),
+        }),
 }

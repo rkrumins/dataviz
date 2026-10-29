@@ -7,7 +7,8 @@
  * setting state. Creating a link stages a `create_edge` change (the same draft
  * contract as adding entities), and switching branches reloads the canvas —
  * opening a draft after the first stage would discard it. Centralizing the
- * guard here means every caller gets it for free.
+ * guard here means every caller gets it for free. With no draft (editing
+ * paused, no :manage) it does not open, so no link is staged on main.
  */
 import { create } from 'zustand'
 import { ensureDraftOpen } from '@/features/versioning/model/ensureDraftOpen'
@@ -28,8 +29,9 @@ export const useCreateLinkStore = create<CreateLinkState>((set) => ({
   anchor: null,
 
   open: (opts) => {
-    void ensureDraftOpen()
-    set({ isOpen: true, sourceUrn: opts.sourceUrn, anchor: opts.anchor })
+    void ensureDraftOpen().then((draftId) => {
+      if (draftId) set({ isOpen: true, sourceUrn: opts.sourceUrn, anchor: opts.anchor })
+    })
   },
 
   close: () => set({ isOpen: false, sourceUrn: null, anchor: null }),

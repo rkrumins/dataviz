@@ -32,12 +32,17 @@ class _FakePS:
         self.falkor_provider = None
         self.owns_falkor_graph = False                 # a pinned customer graph, as the column defaults
         self.last_projected_at = None
+        self.epoch = 0
+        self.failed_attempts = 0
+        self.next_retry_at = None
 
 
 class _FakeGraph:
     data_source_id = "ds1"
     workspace_id = "ws1"
     fork_parent_graph_id = None
+    deleted_at = None
+    main_head_commit_seq = 5                           # never past the target
 
 
 class _MinClient:
@@ -63,9 +68,12 @@ class _FakeSession:
 
     async def scalar(self, clause):
         # Single-flight advisory-lock acquire — project_graph holds it for the run; it always
-        # grants here (contention is covered by test_projection_single_flight).
-        assert "pg_try_advisory_lock" in str(clause), str(clause)
-        return True
+        # grants here (contention is covered by test_projection_single_flight). The only other
+        # read is the unfinished-bootstrap check, which finds none.
+        if "pg_try_advisory_lock" in str(clause):
+            return True
+        assert "jobs" in str(clause), str(clause)
+        return None
 
     async def execute(self, clause):
         # Single-flight advisory-lock release, run in project_graph's finally.
@@ -91,6 +99,18 @@ async def _run(monkeypatch, hang_at: str, projected=3, target=5) -> _FakePS:
         graph_client_factory=lambda name, provider_id=None: _MinClient(),
         session_factory=_fake_session_factory(ps, graph),
     )
+
+    # The fenced writes, applied to the fake row: the claim commits the status, the finish
+    # resets it.
+    async def fake_claim(graph_id, seen_epoch, from_seq):
+        ps.status = "rebuilding" if from_seq <= 0 else "projecting"
+        return seen_epoch + 1, ps.failed_attempts
+
+    async def fake_finish(graph_id, mine, *, published, to_seq, error, attempts):
+        ps.status, ps.last_error = "idle", error
+        return True
+    monkeypatch.setattr(proj, "_claim", fake_claim)
+    monkeypatch.setattr(proj, "_finish", fake_finish)
 
     async def fake_main_branch_id(s, graph_id):
         return "main1"

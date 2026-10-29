@@ -15,7 +15,7 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Optional, Sequence
 
-from sqlalchemy import update
+from sqlalchemy import and_, update
 
 from .. import config, db, job_lease
 from ..job_lease import INSPECT_TYPES, QUEUED, Lease  # QUEUED: callers import it from here
@@ -29,14 +29,6 @@ logger = logging.getLogger(__name__)
 _ENTRY_POINTS = {"ingest": "run_import_safe", "export": "run_export_safe",
                  "publish": "run_publish_safe", "package_inspect": "run_inspect_safe"}
 JOB_TYPES = job_lease.TRANSFER_TYPES
-
-# What a queued job reads when no worker took it in ``TRANSFER_QUEUE_TIMEOUT_SECS``.
-_NOT_STARTED = ("No worker started the job in time. Start it again, or ask an administrator whether "
-                "the versioning worker is running.")
-# What a job reads whose creator never stored its input and queued it (an upload cut off midway).
-_NEVER_QUEUED = "The upload never finished, so the job never started. Start it again."
-# How long a job may sit created but never queued before that is what happened to it.
-_NEVER_QUEUED_SECS = 3600
 
 
 def _now() -> str:
@@ -74,6 +66,15 @@ class TransferRunner:
         await getattr(ie, entry)(lease.job_id, lease)
 
 
+def never_runs() -> tuple:
+    """:class:`JobReaper`'s rules, as conditions on a pending job: queued too long, and never
+    queued. A job matching either is failed at the reaper's next round."""
+    return (and_(JobORM.current_phase == QUEUED,
+                 JobORM.updated_at < _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS)),
+            and_(JobORM.current_phase.is_(None),
+                 JobORM.created_at < _ago(config.JOB_NEVER_QUEUED_SECS)))
+
+
 class JobReaper:
     """Fails the transfer jobs nothing will ever run, so their dialogs stop waiting.
 
@@ -83,28 +84,27 @@ class JobReaper:
       input (the upload was cut off, the API pod died), so it will never be queued.
 
     The status GET used to do this as a side effect of being read; it is read-only now, and this
-    runs on the transfer lane every minute instead."""
+    runs on the transfer lane every minute instead. ``job_id`` judges that one job alone: an
+    import refused because its draft has an active job asks whether that job still counts."""
 
     def __init__(self, *, session_factory=None) -> None:
         self._session = session_factory or db.graphver_session
 
-    async def run_once(self) -> Dict[str, int]:
+    async def run_once(self, job_id: Optional[str] = None) -> Dict[str, int]:
         types = JOB_TYPES + INSPECT_TYPES
         now = _now()
         failed = {"status": "failed", "completed_at": now, "updated_at": now}
+        which = (JobORM.job_type.in_(types), JobORM.status == "pending") + (
+            (JobORM.id == job_id,) if job_id else ())
+        queued_too_long, never_queued = never_runs()
         async with self._session() as s:
             timed_out = (await s.execute(
-                update(JobORM).where(
-                    JobORM.job_type.in_(types), JobORM.status == "pending",
-                    JobORM.current_phase == QUEUED,
-                    JobORM.updated_at < _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS))
-                .values(error_message=_NOT_STARTED, **failed)
+                update(JobORM).where(*which, queued_too_long)
+                .values(error_message=config.JOB_NOT_STARTED, **failed)
                 .execution_options(synchronize_session=False))).rowcount
             abandoned = (await s.execute(
-                update(JobORM).where(
-                    JobORM.job_type.in_(types), JobORM.status == "pending",
-                    JobORM.current_phase.is_(None), JobORM.created_at < _ago(_NEVER_QUEUED_SECS))
-                .values(error_message=_NEVER_QUEUED, **failed)
+                update(JobORM).where(*which, never_queued)
+                .values(error_message=config.JOB_NEVER_QUEUED, **failed)
                 .execution_options(synchronize_session=False))).rowcount
         if timed_out or abandoned:
             logger.warning("job reaper: %d queued job(s) timed out, %d never-queued job(s) failed",

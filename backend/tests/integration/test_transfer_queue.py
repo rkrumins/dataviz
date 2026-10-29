@@ -171,13 +171,15 @@ async def _jobs_that_must_not_run_again() -> None:
         await s.execute(update(JobORM).where(JobORM.id == poison).values(
             status="running", retry_count=4, summary={"takeovers": 3},
             updated_at=_ago(config.INGEST_STALE_SECS + 5)))
-    legacy = (await ie.create_import_job(workspace_id="ws1", data_source_id="ds1", graph_id=graph_id,
-                                         actor="u", import_format="ndjson", branch_id="br_x"))["job_id"]
     async with db.graphver_session() as s:              # staged by a worker from before leases
+        row = JobORM(job_type="ingest", graph_id=graph_id, workspace_id="ws1", data_source_id="ds1",
+                     branch_id="br_x", reconcile_mode="upsert", import_format="ndjson",
+                     status="running", updated_at=_ago(config.INGEST_STALE_SECS + 5))
+        s.add(row)
+        await s.flush()
+        legacy = row.id
         await s.execute(insert(ImportRowORM.__table__), [
             {"job_id": legacy, "row_index": 0, "kind": "node", "raw": {"urn": "urn:old"}}])
-        await s.execute(update(JobORM).where(JobORM.id == legacy).values(
-            status="running", updated_at=_ago(config.INGEST_STALE_SECS + 5)))
 
     assert await runner.claim_one() is None, "neither is taken over"
     job = await ie.get_job(poison)

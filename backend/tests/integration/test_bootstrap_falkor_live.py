@@ -37,7 +37,7 @@ from backend.app.services.versioning.models import BranchORM, JobORM
 from backend.app.services.versioning.projection import FalkorProjector
 from backend.app.services.versioning.reconcile import falkor_counts, pg_live_counts_projectable
 from backend.app.services.versioning.service import GraphVersioningService
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 pytestmark = [
     pytest.mark.skipif(not os.getenv("GRAPHVER_E2E") or os.getenv("RUN_FALKOR_LIVE") != "1",
@@ -306,3 +306,29 @@ async def test_the_rollup_rebuild_is_queued_only_after_a_collapse(graph, falkor)
     assert (await runner.run_job(await _take(job_id)))["status"] == "completed"
     assert hooked == [gid], "copies were deleted: their rollups must be rebuilt"
     assert await _rows(dupes, "MATCH ()-[r:AGGREGATED]->() RETURN count(r)") == [[0]]
+
+
+# ── a graph server that cuts replies short ───────────────────────────────────
+
+async def test_a_server_that_cuts_replies_short_is_refused_before_anything_is_read(graph):
+    """FalkorDB's RESULTSET_SIZE drops every row past it without a word (the stock image ships
+    10000). Read through such a cap, the pre-flight sees part of each window, so duplicates go
+    unseen and the copy fails on them later as "the source changed". The job must stop at the
+    pre-flight instead — nothing ranked, nothing copied — and say what to change."""
+    name, client = graph
+    await _make_source(client)
+    was = (await client.execute_command("GRAPH.CONFIG", "GET", "RESULTSET_SIZE"))[1]
+    await client.execute_command("GRAPH.CONFIG", "SET", "RESULTSET_SIZE", 2)
+    try:
+        ds, gid, job_id = await _enable(name)
+        out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    finally:
+        await client.execute_command("GRAPH.CONFIG", "SET", "RESULTSET_SIZE", was)
+    assert out["status"] == "failed", out
+    assert "RESULTSET_SIZE" in out["error"]
+    assert (await bootstrap_status(data_source_id=ds))["status"] == "failed"
+    async with db.graphver_session() as s:
+        assert (await s.get(JobORM, job_id)).current_phase == "counting"
+        read = (await s.execute(select(func.count()).select_from(models.BootstrapNodeORM).where(
+            models.BootstrapNodeORM.graph_id == gid))).scalar_one()
+    assert read == 0, "nothing is read through a cap"

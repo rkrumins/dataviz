@@ -1,21 +1,25 @@
 /**
  * DataSourceVersioningTab — the data-source-level versioning hub (a tab in
  * DataSourceDetailPanel). Shows whether version control is on, lets a manager enable
- * it, and surfaces the branch list + recent commit history. Read-only overview; the
- * editing loop lives on the canvas.
+ * it, and surfaces the branch list, the graph's forks + recent commit history. Read-only overview
+ * apart from deleting and restoring a fork and pausing editing; the editing loop lives on the canvas.
  */
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight } from 'lucide-react'
+import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw, Pause, Play } from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { Button } from '@/components/ui/Button'
+import { DateTime } from '@/components/ui/DateTime'
 import { usePermission } from '@/store/auth'
-import { useBranches, useCommitLog, useMergeRequests, useResolveGraph } from '../hooks/useVersioning'
+import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
+import { useBranches, useCommitLog, useDataSourcePullRequests, useForks, useResolveGraph, useSetGraphFrozen } from '../hooks/useVersioning'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
-import type { Branch } from '@/services/versioningApiService'
+import { deleteFork, restoreFork, PullRequestExistsError, type Branch, type BranchStatusFilter, type ForkSummary } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
 import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
 import { BootstrapProgress } from './BootstrapProgress'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
+import { ProjectionHealthCard } from './ProjectionHealthCard'
 import { kindMeta } from '../model/commitKind'
 import { ownerName } from '../model/branchVocab'
 
@@ -34,6 +38,12 @@ function timeAgo(iso?: string): string {
   return `${Math.floor(s / 86400)}d ago`
 }
 
+// The resolve 404 ("no versioned graph for data source") is the only failure that means version
+// control is off; anything else (a 5xx, a timeout, a refused request) says nothing either way.
+const NOT_VERSIONED = /404|not found|no versioned graph/i
+
+const ARCHIVED: BranchStatusFilter[] = ['merged', 'abandoned']
+
 export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   wsId: string
   dataSourceId: string
@@ -41,13 +51,26 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   itemCount?: number | null
 }) {
   const canManage = usePermission('workspace:datasource:manage', wsId)
+  const canPublish = usePermission('workspace:datasource:publish', wsId)
   const resolve = useResolveGraph(wsId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
+  const frozen = resolve.data?.lifecycleState === 'frozen'
+  const freeze = useSetGraphFrozen(wsId)
+  // The drafts in play; merged and abandoned ones are read only once the Archived tab opens.
+  const [showArchived, setShowArchived] = useState(false)
   const branchesQ = useBranches(wsId, graphId)
+  const archivedQ = useBranches(wsId, showArchived ? graphId : null, undefined, ARCHIVED)
   const commitsQ = useCommitLog(wsId, graphId, resolve.data?.mainBranchId ?? null)
-  const mrsQ = useMergeRequests(wsId, graphId)
+  // The data source's open PRs (the inbox's read), so newer merged or closed PRs can't push an
+  // older one awaiting review off the page.
+  const mrsQ = useDataSourcePullRequests(wsId, dataSourceId, 'open', !!graphId)
+  const forksQ = useForks(wsId, graphId)
   const [openPrId, setOpenPrId] = useState<string | null>(null)
   const [showEnable, setShowEnable] = useState(false)
+  // Only a FalkorDB graph can be copied into version history (the server refuses the rest). A
+  // provider this viewer cannot see reads 'unknown' and is left to the server to judge.
+  const providerType = useDataSourceProviderMap().resolve(dataSourceId)?.providerType
+  const copyable = !providerType || providerType === 'unknown' || providerType === 'falkordb'
   // Same hook as the canvas strip → the two surfaces can never disagree.
   const boot = useBootstrapWatch(wsId, dataSourceId, {
     headSeq: resolve.data?.mainHeadCommitSeq ?? 0,
@@ -58,6 +81,19 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
     return (
       <div className="flex items-center gap-2 text-sm text-ink-muted py-10 justify-center">
         <Loader2 className="w-4 h-4 animate-spin" /> Checking version control…
+      </div>
+    )
+  }
+
+  if (!resolve.data && resolve.isError && !NOT_VERSIONED.test(String(resolve.error?.message))) {
+    return (
+      <div className="rounded-xl border border-glass-border px-4 py-6 text-center" role="alert">
+        <p className="text-sm text-ink">Could not check version control.</p>
+        <p className="text-[11px] text-ink-muted mt-1">{resolve.error?.message}</p>
+        <button type="button" onClick={() => { void resolve.refetch() }}
+          className="mt-3 inline-flex items-center gap-1 text-xs font-semibold text-accent-lineage hover:underline">
+          <RefreshCw className="w-3 h-3" /> Retry
+        </button>
       </div>
     )
   }
@@ -107,7 +143,9 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
             Enable it to edit this data source safely in drafts, review every change against the published
             graph, and publish with a full, auditable history.
           </p>
-          {canManage ? (
+          {!copyable ? (
+            <p className="mt-4 text-xs text-ink-muted/70">Only FalkorDB data sources can be versioned for now.</p>
+          ) : canManage ? (
             <button
               onClick={() => setShowEnable(true)}
               className="mt-4 inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm shadow-indigo-500/20 transition-all hover:scale-[1.02] active:scale-[0.98]"
@@ -131,36 +169,82 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   }
 
   const branches = branchesQ.data ?? []
-  const drafts = branches.filter((b) => b.kind !== 'main')
+  const drafts = branches.filter((b) => b.kind !== 'main' && (b.status === 'open' || b.status === 'publishing'))
   const commits = (commitsQ.data?.commits ?? []) as Array<Record<string, unknown>>
+  const forks = forksQ.data ?? []
 
   return (
     <div className="space-y-6">
       {/* Status header */}
-      <div className="flex items-center gap-3 rounded-xl border border-emerald-500/20 bg-emerald-500/5 px-4 py-3">
-        <span className="flex items-center justify-center w-8 h-8 rounded-lg bg-emerald-500/10 border border-emerald-500/20">
-          <GitBranch className="w-4 h-4 text-emerald-500" />
+      <div className={cn('flex items-center gap-3 rounded-xl border px-4 py-3',
+        frozen ? 'border-amber-500/30 bg-amber-500/[0.06]' : 'border-emerald-500/20 bg-emerald-500/5')}>
+        <span className={cn('flex items-center justify-center w-8 h-8 rounded-lg border',
+          frozen ? 'bg-amber-500/10 border-amber-500/20' : 'bg-emerald-500/10 border-emerald-500/20')}>
+          {frozen ? <Pause className="w-4 h-4 text-amber-500" /> : <GitBranch className="w-4 h-4 text-emerald-500" />}
         </span>
-        <div className="min-w-0">
-          <p className="text-sm font-medium text-ink">Version control is on</p>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-ink">{frozen ? 'Editing is paused' : 'Version control is on'}</p>
           <p className="text-[11px] text-ink-muted">
-            main at commit #{resolve.data?.mainHeadCommitSeq ?? 0} · {drafts.length} open draft{drafts.length === 1 ? '' : 's'}
+            {frozen
+              ? 'Drafts can’t be saved, published or imported until a publisher resumes editing. Viewing is unaffected.'
+              : <>main at commit #{resolve.data?.mainHeadCommitSeq ?? 0} · {drafts.length} open draft{drafts.length === 1 ? '' : 's'}</>}
           </p>
+          {freeze.error && <p className="mt-1 text-[11px] text-red-600 dark:text-red-400" role="alert">{freeze.error.message}</p>}
         </div>
+        {canManage && canPublish && graphId && (
+          <Button size="sm" variant="secondary" leftIcon={frozen ? Play : Pause} loading={freeze.isPending}
+            onClick={() => freeze.mutate({ graphId, frozen: !frozen, expectedRev: resolve.data?.lifecycleRev ?? 0 })}>
+            {frozen ? 'Resume editing' : 'Pause editing'}
+          </Button>
+        )}
       </div>
+
+      {/* Where the graph lives; Rebuild and Check sync for managers */}
+      {graphId && <ProjectionHealthCard wsId={wsId} graphId={graphId} showActions={canManage} />}
 
       {/* Branches */}
       <section>
-        <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider mb-2">
-          <GitMerge className="w-3.5 h-3.5" /> Branches
-        </h4>
+        <div className="flex items-center justify-between gap-2 mb-2">
+          <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider">
+            <GitMerge className="w-3.5 h-3.5" /> Branches
+          </h4>
+          <div className="inline-flex rounded-lg border border-glass-border overflow-hidden text-[11px]">
+            {([false, true] as const).map((archived) => (
+              <button
+                key={String(archived)}
+                onClick={() => setShowArchived(archived)}
+                className={cn(
+                  'px-2 py-0.5 font-medium first:border-0 border-l border-glass-border',
+                  showArchived === archived ? 'bg-accent-lineage/15 text-accent-lineage' : 'text-ink-muted hover:bg-canvas-overlay',
+                )}
+              >
+                {archived ? 'Archived' : 'Active'}
+              </button>
+            ))}
+          </div>
+        </div>
         <div className="space-y-1.5">
-          {branches.map((b) => (
+          {(showArchived ? archivedQ.data ?? [] : branches).map((b) => (
             <BranchRow key={b.branchId} branch={b} />
           ))}
-          {branchesQ.isLoading && <RowSkeleton />}
+          {(showArchived ? archivedQ : branchesQ).isLoading && <RowSkeleton />}
         </div>
       </section>
+
+      {/* Forks — only when there are any; a failed read (or an older server's 404) hides it */}
+      {forks.length > 0 && (
+        <section>
+          <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider mb-2">
+            <GitFork className="w-3.5 h-3.5" /> Forks
+          </h4>
+          <div className="space-y-1.5">
+            {forks.map((f) => (
+              <ForkRow key={f.graphId} wsId={wsId} fork={f} canManage={canManage}
+                onChanged={() => { void forksQ.refetch() }} />
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* Merge requests */}
       <section>
@@ -173,7 +257,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
           </Link>
         </div>
         {(() => {
-          const active = (mrsQ.data ?? []).filter((p) => !['merged', 'closed'].includes(p.status))
+          const active = mrsQ.data ?? []
           if (mrsQ.isLoading) return <RowSkeleton />
           if (active.length === 0) return <p className="text-xs text-ink-muted px-1 py-2">No open merge requests.</p>
           return (
@@ -266,6 +350,64 @@ function BranchRow({ branch }: { branch: Branch }) {
       >
         {isMain ? 'published' : branch.status}
       </span>
+    </div>
+  )
+}
+
+/** A live fork, or one in the trash until its undo window ends. Managers delete a live fork and
+ *  restore a trashed one; once its purge is queued it can no longer come back. */
+function ForkRow({ wsId, fork, canManage, onChanged }: {
+  wsId: string
+  fork: ForkSummary
+  canManage: boolean
+  onChanged: () => void
+}) {
+  const [busy, setBusy] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const trashed = !!fork.deletedAt
+
+  const act = async (call: () => Promise<void>) => {
+    setBusy(true)
+    setError(null)
+    try {
+      await call()
+      onChanged()
+    } catch (e) {
+      setError(e instanceof PullRequestExistsError ? 'Close its open pull request first.' : (e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+  const remove = () => {
+    if (!window.confirm('Move this fork to the trash? It can be restored for 30 days.')) return
+    void act(() => deleteFork(wsId, fork.graphId))
+  }
+
+  return (
+    <div className="rounded-lg border border-glass-border bg-canvas-elevated/40 px-3 py-2">
+      <div className="flex items-center gap-2.5">
+        <GitFork className={cn('w-4 h-4 shrink-0', trashed ? 'text-ink-muted' : 'text-indigo-500')} />
+        <div className="flex-1 min-w-0">
+          <p className={cn('text-sm font-mono truncate', trashed ? 'text-ink-muted' : 'text-ink')}>{fork.graphId}</p>
+          <p className="text-[11px] text-ink-muted truncate">
+            {!trashed
+              ? `by ${actorLabel(fork.createdBy, fork.userNames)} · from #${fork.forkBaseCommitSeq ?? 0} · main #${fork.mainHeadCommitSeq}`
+              : fork.purging
+              ? 'Being deleted'
+              : <>Deleted by {actorLabel(fork.deletedBy, fork.userNames)} · restorable until <DateTime at={fork.purgeAfter} variant="calendar" /></>}
+          </p>
+        </div>
+        {canManage && !trashed && (
+          <Button size="sm" variant="ghost" leftIcon={Trash2} loading={busy} onClick={remove}>Delete</Button>
+        )}
+        {canManage && trashed && !fork.purging && (
+          <Button size="sm" variant="secondary" leftIcon={RotateCcw} loading={busy}
+            onClick={() => { void act(() => restoreFork(wsId, fork.graphId)) }}>
+            Restore
+          </Button>
+        )}
+      </div>
+      {error && <p className="mt-1.5 text-[11px] text-red-600 dark:text-red-400" role="alert">{error}</p>}
     </div>
   )
 }

@@ -25,8 +25,9 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useSchemaStore } from '@/store/schema'
+import { useBranchStore } from '@/store/branchStore'
 import { useViewPortability } from '@/features/view-transfer/useViewPortability'
-import { viewToViewConfig } from '@/services/viewApiService'
+import { getView, viewToViewConfig } from '@/services/viewApiService'
 import type { ViewDefinitionDiff, ViewVersionSource, ViewVersionSummary } from '@/services/viewVersionsApiService'
 import {
   useCompareViewVersions, useRestoreViewVersion, useSaveViewVersion, useViewVersionHistory, useViewVersionStatus,
@@ -369,9 +370,15 @@ function RestoreConfirm({ viewId, version, head, dirty, onClose }: {
               className="px-4 py-2 rounded-xl text-sm font-medium text-ink-muted hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-40">Cancel</button>
             <button type="button" disabled={restore.isPending}
               onClick={() => restore.mutate(version.version, {
-                onSuccess: (r) => {
+                onSuccess: async (r) => {
                   // The canvas reads the view from the schema store; hand it the restored design.
-                  useSchemaStore.getState().addOrUpdateView(viewToViewConfig(r.view))
+                  // On a draft the canvas shows base + overlay and its next gesture saves the store
+                  // into the draft, so it gets the draft as it now reads, never the restored base.
+                  // If that read fails the store keeps the draft view it already holds.
+                  const s = useBranchStore.getState()
+                  const branchId = s.viewId === viewId ? s.currentBranchId : null
+                  const shown = branchId ? await getView(viewId, branchId).catch(() => null) : r.view
+                  if (shown) useSchemaStore.getState().addOrUpdateView(viewToViewConfig(shown))
                   notify('success', `Restored v${version.version} as v${r.version.version}`)
                   onClose()
                 },

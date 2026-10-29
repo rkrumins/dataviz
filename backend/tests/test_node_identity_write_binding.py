@@ -314,7 +314,8 @@ async def test_the_save_route_hands_the_service_the_mapping_and_marks_minted_nod
     request = graph_ep.GraphChangesRequest(ops=[graph_ep.GraphChangeOp(
         op="create", kind="node", ref="tmp1", payload={"entityType": "dataset", "displayName": "Orders"})])
 
-    await graph_ep.apply_graph_changes("ws1", request, dataSourceId="ds1", branchId="br1", user=None,
+    await graph_ep.apply_graph_changes("ws1", request, dataSourceId="ds1", branchId="br1",
+                                       idempotency_key=None, user=SimpleNamespace(id="usr_1"),
                                        engine=engine)
     assert seen["node_identity"] is MAPPED
     [create] = seen["ops"]

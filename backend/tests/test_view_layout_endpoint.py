@@ -173,7 +173,7 @@ async def test_update_view_layout_not_found(test_client: AsyncClient):
 
 
 async def test_layout_draft_write_hits_overlay_base_untouched(
-    test_client: AsyncClient, db_session: AsyncSession,
+    test_client: AsyncClient, db_session: AsyncSession, any_open_draft,
 ):
     """A ?branchId write updates the overlay and leaves the published base row
     completely unchanged (the core BUG 3 fix)."""
@@ -222,7 +222,7 @@ async def test_layout_draft_write_hits_overlay_base_untouched(
     assert overlay is not None
 
 
-async def test_layout_draft_write_unknown_layer_id_422(test_client: AsyncClient):
+async def test_layout_draft_write_unknown_layer_id_422(test_client: AsyncClient, any_open_draft):
     """An assignment naming an unknown layerId is rejected with 422 on the
     overlay path too — and no overlay is left half-created."""
     ws_id = await _create_workspace(test_client)

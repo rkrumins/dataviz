@@ -16,7 +16,12 @@ import { compactBytes, compactEdges } from '../shared/aggregationKnobs'
 import { useGraphPlacement } from '../shared/useGraphStoreTopology'
 import { HEALTH_META, lagLabel, nodeHealth } from './meta'
 
-function PlacementRow({ placement, instanceId }: { placement: GraphPlacement; instanceId?: string | null }) {
+export function PlacementRow({ placement, instanceId, label }: {
+    placement: GraphPlacement
+    instanceId?: string | null
+    /** What the key is, when the caller knows better than its role (a versioned graph's key). */
+    label?: string
+}) {
     const master = placement.master
     const health = master ? nodeHealth(master) : null
     const size = placement.measuredBytes ?? placement.estimatedBytes
@@ -29,7 +34,7 @@ function PlacementRow({ placement, instanceId }: { placement: GraphPlacement; in
             <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
                 <span className="font-mono text-[11px] text-ink-secondary break-all">{placement.graphKey}</span>
                 <span className="text-[10px] uppercase tracking-wide text-ink-muted">
-                    {placement.role === 'projection' ? 'rollup projection' : 'source graph'}
+                    {label ?? (placement.role === 'projection' ? 'aggregation rollup' : 'source graph')}
                 </span>
                 {!placement.present && (
                     <span className="text-[10px] text-amber-600 dark:text-amber-400">not found on the node</span>

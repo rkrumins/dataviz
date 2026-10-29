@@ -234,3 +234,12 @@ async def test_draft_over_a_stale_main_propagates_the_refusal():
 
     with pytest.raises(NotImplementedError):
         await overlay.deep_search(_query("view-1"))
+
+
+async def test_names_on_a_draft_over_a_stale_main_get_the_same_refusal():
+    """Name references go to the base too, so a stale main refuses them the
+    same way: a 501 that says why, not an ``AttributeError`` (500)."""
+    overlay = _overlay(_branch())
+
+    with pytest.raises(NotImplementedError, match="catching up"):
+        await overlay.deep_search_resolve_refs(None, [], context=None)

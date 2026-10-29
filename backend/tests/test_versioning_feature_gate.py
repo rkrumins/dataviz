@@ -4,7 +4,7 @@ Covers the three enforcement layers added for the flag:
 
 * ``versioning_write_gate`` — router-level dependency on ``/{ws}/versioning``:
   mutating methods 403 with ``feature_disabled`` when the flag is off; GETs and
-  the ops allowlist (projection rebuild/reconcile, exports) are never blocked
+  the ops allowlist (projection rebuild/reconcile, exports, a freeze) are never blocked
   by the gate; everything passes when the flag is on.
 * ``require_versioning_enabled`` — per-route dependency on ``/graph/bootstrap``
   and ``/graph/resync``.
@@ -75,6 +75,7 @@ async def test_writes_blocked_when_disabled(test_client: AsyncClient):
         ("POST", f"/api/v1/{WS}/versioning/graphs/g1/commits/c1/revert"),
         ("POST", f"/api/v1/{WS}/versioning/pulls/pr1/merge"),
         ("POST", f"/api/v1/{WS}/versioning/merge-requests/mr1/merge"),
+        ("POST", f"/api/v1/{WS}/versioning/graphs/g1/lifecycle/unfreeze"),
     ]:
         resp = await test_client.request(method, path, json={})
         assert _is_feature_disabled(resp), (
@@ -135,6 +136,7 @@ async def test_ops_allowlist_not_blocked_when_disabled(test_client: AsyncClient)
         f"/api/v1/{WS}/versioning/graphs/g1/projection/rebuild",
         f"/api/v1/{WS}/versioning/graphs/g1/projection/reconcile",
         f"/api/v1/{WS}/versioning/graphs/g1/exports",
+        f"/api/v1/{WS}/versioning/graphs/g1/lifecycle/freeze",
     ):
         resp = await test_client.post(path, json={})
         assert not _is_feature_disabled(resp), f"POST {path} must stay usable (ops surface)"
@@ -184,11 +186,12 @@ async def test_write_provider_passes_when_enabled():
         async def resolve_graph(self, **kw):
             return {"graph_id": "g_stub"}
 
-        async def apply_ops(self, **kw):
+        async def apply_ops_detailed(self, **kw):
             calls["ops"] = kw["ops"]
+            return type("_NoCommit", (), {"commit_id": None})()   # a no-op: no nudge
 
     class _StubInner:
-        async def create_node(self, node, containment_edge=None):
+        async def create_node(self, node, containment_edge=None):  # pragma: no cover
             calls["inner"] = node
             return True
 
@@ -200,4 +203,4 @@ async def test_write_provider_passes_when_enabled():
     node = GraphNode(urn="urn:x:1", display_name="X", entity_type="Node")
     await provider.create_node(node)
     assert calls["ops"], "write must be recorded when the flag is on"
-    assert calls["inner"] is node
+    assert "inner" not in calls, "the projector, not the write-through, writes the provider"

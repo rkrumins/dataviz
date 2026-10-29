@@ -152,10 +152,11 @@ the day comes.
 ### What a key can call
 
 Keys are for the data plane: reading and changing views and the data behind
-them, proposing and publishing changes, and following what changed. People
-and access, sharing, settings and switches, layout templates and saved
-filters are not available to keys, nor importing a view file, turning version
-control on or creating a graph. The API reference marks every operation a key
+them, proposing changes, and following what changed. People and access,
+sharing, settings and switches, layout templates and saved filters are not
+available to keys, nor importing a view file, turning version control on,
+creating or forking a graph, or publishing, merging, reverting, restoring or
+syncing one. The API reference marks every operation a key
 may call — see [Find the endpoint you need](/docs/api-guide#find-the-endpoint-you-need).
 
 | To… | Use |
@@ -166,7 +167,7 @@ may call — see [Find the endpoint you need](/docs/api-guide#find-the-endpoint-
 | Read or change a data source's graph | `/api/v1/{workspace}/graph/…?dataSourceId={id}` |
 | List a workspace's graphs, and which are versioned | `GET /api/v1/admin/workspaces/{workspace}/data-sources?include=versioning` — a key covering the whole workspace |
 | Propose a change | open a draft, stage the change, open a merge request (`/versioning/…`) |
-| Publish a change | merge a request you may merge, or publish your draft |
+| Publish a change | not with a key: a person with publish merges the request, or publishes the draft |
 | Follow what changed | the view's activity (`GET /views/{id}/activity`), the commit log and watermark of its graph (`/versioning/graphs/{id}/commits`, `/watermark` — see [Graph Metadata & History API](/docs/graph-metadata-api)), a data source's jobs and their event stream |
 
 Searches, traces and exports are reads made with `POST`: a read-only key may

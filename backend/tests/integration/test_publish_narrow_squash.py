@@ -200,7 +200,7 @@ async def _publish_both(svc, pair, *, rules=None, via_mr=False, monkeypatch):
             mr = await svc.open_draft_mr(graph_id=gid, branch_id=draft, actor="alice", title="t")
             return await svc.merge_mr(mr_id=mr, actor="bob", message="merge",
                                       containment_edge_types=CONT, ontology_rules=rules)
-        return await svc.publish(graph_id=gid, branch_id=draft, actor="bob", message="publish",
+        return await svc.publish(graph_id=gid, branch_id=draft, actor="alice", message="publish",
                                  containment_edge_types=CONT, ontology_rules=rules)
     (ga, da), (gb, db_) = pair
     out = await _same(lambda: run(ga, da, False), lambda: run(gb, db_, True))

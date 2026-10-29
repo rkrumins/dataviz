@@ -27,11 +27,14 @@ async def _run() -> None:
     d = await svc.open_draft(graph_id=gid, owner="alice")
     f = await svc.branch_freshness(graph_id=gid, branch_id=d)
     assert f["behind"] is False and f["behind_by"] == 0, f          # fresh draft is up-to-date
+    assert f["status"] == "open", f
 
     # A DIFFERENT draft publishes → main advances under d.
     d2 = await svc.open_draft(graph_id=gid, owner="bob")
     await svc.apply_ops(graph_id=gid, branch_id=d2, actor="bob", ops=[_node("X")])
     await svc.publish(graph_id=gid, branch_id=d2, actor="bob", message="B publishes")
+
+    assert (await svc.branch_freshness(graph_id=gid, branch_id=d2))["status"] == "merged"   # d2 is closed
 
     f2 = await svc.branch_freshness(graph_id=gid, branch_id=d)
     assert f2["behind"] is True and f2["behind_by"] >= 1, f2        # d learns it's behind — right away

@@ -7,7 +7,7 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models import ProviderORM
@@ -233,18 +233,31 @@ def credentials_of(row: Optional[ProviderORM]) -> dict:
 
 
 async def has_workspaces(session: AsyncSession, provider_id: str) -> bool:
-    """Check if any workspaces subscribe to catalog items from this provider."""
+    """Check if anything still depends on this provider: a live data source on it, through a
+    catalog item or directly (a manual one, such as a blank model's), or a versioned graph
+    pinned to it, which the graphver store records and no management row names."""
     from ..models import WorkspaceDataSourceORM, CatalogItemORM
+    from backend.app.services import versioned_sources
     result = await session.execute(
         select(WorkspaceDataSourceORM.id)
-        .join(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
-        .where(CatalogItemORM.provider_id == provider_id)
+        .outerjoin(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
+        .where(_on_provider(provider_id))
         # Tombstones must not count as subscribers, or a deleted data source
         # would block this provider from ever being deleted.
         .where(WorkspaceDataSourceORM.deleted_at.is_(None))
         .limit(1)
     )
-    return result.scalar_one_or_none() is not None
+    if result.scalar_one_or_none() is not None:
+        return True
+    return bool(await versioned_sources.graphs_pinned_to(provider_id))
+
+
+def _on_provider(provider_id: str):
+    """A data source on the provider: through its catalog item, or its own ``provider_id`` (a
+    manual source has no catalog item). Needs ``CatalogItemORM`` outer-joined."""
+    from ..models import WorkspaceDataSourceORM, CatalogItemORM
+    return or_(CatalogItemORM.provider_id == provider_id,
+               WorkspaceDataSourceORM.provider_id == provider_id)
 
 
 async def get_provider_impact(session: AsyncSession, provider_id: str) -> ProviderImpactResponse:
@@ -261,8 +274,8 @@ async def get_provider_impact(session: AsyncSession, provider_id: str) -> Provid
     ws_result = await session.execute(
         select(WorkspaceORM.id, WorkspaceORM.name).distinct()
         .join(WorkspaceDataSourceORM, WorkspaceDataSourceORM.workspace_id == WorkspaceORM.id)
-        .join(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
-        .where(CatalogItemORM.provider_id == provider_id)
+        .outerjoin(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
+        .where(_on_provider(provider_id))
         .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
     workspaces = [{"id": r[0], "name": r[1], "type": "workspace"} for r in ws_result.all()]
@@ -271,14 +284,27 @@ async def get_provider_impact(session: AsyncSession, provider_id: str) -> Provid
     view_result = await session.execute(
         select(ContextModelORM.id, ContextModelORM.name).distinct()
         .join(WorkspaceDataSourceORM, ContextModelORM.data_source_id == WorkspaceDataSourceORM.id)
-        .join(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
-        .where(CatalogItemORM.provider_id == provider_id)
+        .outerjoin(CatalogItemORM, WorkspaceDataSourceORM.catalog_item_id == CatalogItemORM.id)
+        .where(_on_provider(provider_id))
         .where(WorkspaceDataSourceORM.deleted_at.is_(None))
     )
     views = [{"id": r[0], "name": r[1], "type": "view"} for r in view_result.all()]
+
+    # 4. Versioned graphs projected into it, by their FalkorDB key
+    from backend.app.services import versioned_sources
+    versioned_graphs = [pinned_graph_entity(g)
+                        for g in await versioned_sources.graphs_pinned_to(provider_id)]
     
     return ProviderImpactResponse(
         catalogItems=[ImpactedEntity(**c) for c in catalog_items],
         workspaces=[ImpactedEntity(**w) for w in workspaces],
-        views=[ImpactedEntity(**v) for v in views]
+        views=[ImpactedEntity(**v) for v in views],
+        versionedGraphs=versioned_graphs,
     )
+
+
+def pinned_graph_entity(graph) -> ImpactedEntity:
+    """A versioned graph pinned to a provider, named by its FalkorDB key."""
+    name = graph.falkor_graph_name or graph.graph_id
+    return ImpactedEntity(id=graph.graph_id, name=f"{name} (in trash)" if graph.trashed else name,
+                          type="versioned_graph")

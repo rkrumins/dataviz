@@ -6,7 +6,7 @@
  *
  * Mounted only while a PR is selected (fresh queries per prId).
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { motion } from 'framer-motion'
@@ -17,9 +17,10 @@ import {
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
+import { Badge } from '@/components/ui/Badge'
 import { timeAgo } from '@/lib/timeAgo'
 import {
-  MergeConflictError, NotUpToDateError,
+  HeadMovedError, MergeConflictError, NotUpToDateError,
   type IncomingChanges, type ResolutionMap,
 } from '@/services/versioningApiService'
 import {
@@ -39,6 +40,7 @@ import { usePermission, useAuthStore } from '@/store/auth'
 import { useFeature } from '@/store/features'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
+import { useUnsavedCountOnBranch } from '@/store/stagedChangesStore'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { PrStatusBadge, ApprovalPill, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
 import { ConflictResolver } from './ConflictResolver'
@@ -65,6 +67,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const { pathname } = useLocation()
   const { notify } = useAppNotifications()
   const canManage = usePermission('workspace:datasource:manage', wsId)
+  // Merging, and reverting a merge, advance main: that needs publish as well.
+  const canPublish = usePermission('workspace:datasource:publish', wsId)
   const user = useAuthStore((s) => s.user)
   const switchToMain = useBranchStore((s) => s.switchToMain)
   const setReceipt = usePublishReceiptStore((s) => s.setReceipt)
@@ -78,6 +82,17 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const pullLatest = usePullLatestDraft(wsId, prQ.data?.graphId ?? '')
 
   const pr = prQ.data
+  // Approve sends the head the PR was read at, so the diff on screen must be of that head: when a
+  // poll brings a new one, read the diff again (Approve waits for it).
+  const refetchDiff = diffQ.refetch
+  const diffHead = useRef(pr?.headCommitId)
+  useEffect(() => {
+    if (pr?.headCommitId === diffHead.current) return
+    if (diffHead.current !== undefined) void refetchDiff()
+    diffHead.current = pr?.headCommitId
+  }, [pr?.headCommitId, refetchDiff])
+  // Edits still staged on the canvas for this draft are not part of it: a merge would leave them behind.
+  const unsaved = useUnsavedCountOnBranch(pr?.sourceBranchId)
 
   // Pre-merge: the draft's individual commits (each with its author), expandable to per-commit diffs.
   // Draft MRs only — a fork PR's source branch lives on another graph (legacy), so leave it disabled.
@@ -134,9 +149,14 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
 
   const terminal = isTerminalPr(pr?.status)
   const isAuthor = !!user && pr?.actor === user.id
+  // Nor does the draft's owner approve its review (doc 13 PR_REVIEW): the server refuses both.
+  const isOwner = !!user && pr?.sourceBranchOwner === user.id
   const alreadyApproved = !!user && (pr?.approvedBy ?? []).includes(user.id)
   const hasReviewers = (pr?.reviewers?.length ?? 0) > 0
-  const showApprove = canManage && !terminal && !isAuthor && !alreadyApproved && hasReviewers
+  // Approve is asked of the requested reviewers. An approval gone stale is not in approvedBy, so
+  // its reviewer is offered Approve again.
+  const isRequested = !!user && (pr?.reviewers ?? []).includes(user.id)
+  const showApprove = canManage && !terminal && !isAuthor && !isOwner && !alreadyApproved && isRequested
   const busy = approve.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
 
   // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
@@ -145,7 +165,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   useEffect(() => { setNeedsPull(!terminal && !!pr?.behind) }, [pr?.behind, terminal])
 
   const runMerge = async (resolutions?: ResolutionMap) => {
-    if (!pr) return
+    if (!pr || unsaved > 0) return
     try {
       const res = await merge.mutateAsync({
         prId, graphId: pr.graphId, message: `Merge: ${derivePrTitle(pr)}`, resolutions,
@@ -357,11 +377,20 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                   {hasReviewers && (
                     <p className="text-[12px] text-ink-muted flex items-center gap-1.5 flex-wrap">
                       <ShieldCheck className="w-3.5 h-3.5" /> Reviewers:
-                      {pr.reviewers!.map((r) => (
-                        <span key={r} className={cn('px-1.5 py-0.5 rounded text-[11px]', (pr.approvedBy ?? []).includes(r) ? 'bg-emerald-500/10 text-emerald-600' : 'bg-ink/5 text-ink-muted')}>
-                          {ownerName(r, pr.userNames)}{(pr.approvedBy ?? []).includes(r) ? ' ✓' : ''}
-                        </span>
-                      ))}
+                      {pr.reviewers!.map((r) => {
+                        const who = ownerName(r, pr.userNames)
+                        if ((pr.approvedBy ?? []).includes(r)) {
+                          return <Badge key={r} tone="success" size="md" title={`${who} approved`}>{who} ✓</Badge>
+                        }
+                        if ((pr.staleApprovedBy ?? []).includes(r)) {
+                          return (
+                            <Badge key={r} tone="warning" size="md" title={`${who} approved an earlier version and must approve again`}>
+                              {who} · stale
+                            </Badge>
+                          )
+                        }
+                        return <Badge key={r} size="md" title={`${who} has not approved yet`}>{who}</Badge>
+                      })}
                     </p>
                   )}
                 </div>
@@ -458,16 +487,27 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           </div>
         )}
 
+        {pr && !terminal && unsaved > 0 && (
+          <div className="mx-5 mb-1 flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 text-xs">
+            <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
+            <span>You have {unsaved} unsaved edit{unsaved === 1 ? '' : 's'} on this draft. Save or discard {unsaved === 1 ? 'it' : 'them'} on the canvas before merging; a merge would leave {unsaved === 1 ? 'it' : 'them'} behind.</span>
+          </div>
+        )}
+
         {/* Action bar */}
         {pr && !terminal && canManage && !dismissing && (
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center gap-2">
             {showApprove && (
               <button
-                onClick={() => approve.mutate({ prId, graphId: pr.graphId }, {
+                onClick={() => approve.mutate({ prId, graphId: pr.graphId, expectedHeadCommitId: pr.headCommitId }, {
                   onSuccess: () => notify('success', 'Approved.'),
-                  onError: (e) => notify('error', (e as Error).message),
+                  onError: (e) => {
+                    // The draft moved on since this review was loaded: load it again before approving.
+                    if (e instanceof HeadMovedError) { void prQ.refetch(); void refetchDiff() }
+                    notify('error', (e as Error).message)
+                  },
                 })}
-                disabled={busy}
+                disabled={busy || diffQ.isFetching}
                 title="Sign off on these changes so they can be merged"
                 className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-emerald-600 border border-emerald-500/30 bg-emerald-500/[0.06] hover:bg-emerald-500/10 disabled:opacity-60"
               >
@@ -487,8 +527,10 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
             ) : (
               <button
                 onClick={() => runMerge()}
-                disabled={busy}
-                title="Apply these changes to main"
+                disabled={busy || unsaved > 0 || !canPublish}
+                title={canPublish
+                  ? 'Apply these changes to main'
+                  : 'Merging into main needs the publish permission on this workspace'}
                 className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
               >
                 {merge.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
@@ -541,7 +583,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
         )}
 
         {/* Merged terminal state — the one action left is undoing the merge. */}
-        {pr && pr.status === 'merged' && canManage && versioningEnabled && pr.resultingCommitId && (
+        {pr && pr.status === 'merged' && canManage && canPublish && versioningEnabled && pr.resultingCommitId && (
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center justify-between gap-3">
             <p className="text-[12px] text-ink-muted leading-snug">
               Merged the wrong thing? Undo it as a new revision — history is kept.

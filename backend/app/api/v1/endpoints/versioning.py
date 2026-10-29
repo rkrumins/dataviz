@@ -13,9 +13,9 @@ Boundary policy
   operations reuse the existing data-source permissions:
     - reads  → ``workspace:datasource:read``
     - writes → ``workspace:datasource:manage``
-  Forking + opening a PR need only ``read`` (anyone who can see a graph may fork
-  it and propose changes); **merging** a PR into the base needs ``manage`` on the
-  base's workspace — the governance gate (plan §12.5).
+  Forking, and deleting or restoring a fork, need ``manage``; opening a PR needs only
+  ``read`` (anyone who can see a fork may propose its changes); **merging** a PR into
+  the base needs ``manage`` on the base's workspace — the governance gate (plan §12.5).
 * **Typed contract.** camelCase request/response models; domain errors map to
   HTTP (merge conflict / integrity → 409 with the conflict set; unknown id → 404).
 """
@@ -29,7 +29,7 @@ import logging
 from contextlib import contextmanager
 from typing import Any, Dict, List, Literal, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError
@@ -42,10 +42,13 @@ from backend.app.services.versioning.entity_audit import (
     HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
+from backend.app.api.v1.versioning_gate import (SyncOverrides, require_publish_for_main,
+                                                sync_override_gate)
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import data_source_repo, service_account_repo, user_repo
+from backend.app.db.repositories import (data_source_repo, group_repo, provider_repo,
+                                         service_account_repo, user_repo)
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
 from backend.app.services.graph_cache import CacheScope, get_graph_cache
@@ -58,10 +61,13 @@ from backend.app.services.managed_sources import (
     drop_managed_data_source,
     register_aggregation,
 )
+from backend.app.services import permission_service
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
+from backend.app.services.versioning.errors import (HTTP_MAPPED, DraftNotReadable, IneligibleMember,
+                                                   ServiceAccountMember)
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
@@ -106,24 +112,21 @@ _GATE_BLANK_MODELS = require_feature("blankModelsEnabled")
 # Permission constants (a graph is a data source — reuse its perms).
 _READ = "workspace:datasource:read"
 _MANAGE = "workspace:datasource:manage"
+# Advancing main (publish, merge, revert, restore, sync) also needs publish, which no API key holds.
+_PUBLISH = "workspace:datasource:publish"
 
 
 async def viewer_ctx(
     ws_id: str,
     user: User = Depends(get_current_user),
     claims: PermissionClaims = Depends(get_permission_claims),
-    session: AsyncSession = Depends(get_db_session),
 ) -> Viewer:
     """Who is asking, for scoping draft/PR reads: the caller's id + whether they hold
-    ``datasource:manage`` in this workspace (managers see everything) and, for someone who
-    doesn't, the teams they're in, since a draft can be shared with a team. Managers, and service
-    accounts — in no team — cost no query. Endpoints still keep their ``requires(_READ)`` gate
+    ``datasource:manage`` in this workspace (managers see everything). Cheap — claims come from
+    the token; no DB hit. Teams aren't read here: the service looks them up when a team's row
+    could decide (``_load_actor_groups``). Endpoints still keep their ``requires(_READ)`` gate
     for the baseline."""
-    can_manage = has_permission(claims, _MANAGE, workspace_id=ws_id)
-    groups: tuple = ()
-    if not can_manage and not is_service_account(user.id):
-        groups = tuple(await user_repo.get_groups_for_user(session, user.id))
-    return Viewer(actor=user.id, can_manage=can_manage, groups=groups)
+    return Viewer(actor=user.id, can_manage=has_permission(claims, _MANAGE, workspace_id=ws_id))
 
 
 # --------------------------------------------------------------------------- #
@@ -149,7 +152,7 @@ def get_import_export_service():
             versioning=_service, scope_resolver=_resolve_export_view_scope,
             ontology_resolver=_resolve_ontology_types,
             layout_writer=_write_view_import_assignments,
-            publish_hook=_publish_from_job,
+            publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope,
             identity_resolver=_resolve_node_identity_for_import)
     return _ie_service
 
@@ -277,8 +280,11 @@ async def rebuild_now(graph_id: str) -> None:
         if proj is None:
             await nudge_projection(graph_id)             # worker deployments pick it up
             return
-        await asyncio.wait_for(
+        result = await asyncio.wait_for(
             proj.project_graph(graph_id), vconfig.REBUILD_SYNC_TIMEOUT_SECS)
+        if result.get("skipped") in ("in-flight", "superseded"):
+            # Another pass held the graph, or overtook this one: the rebuild still has to run.
+            await nudge_projection(graph_id)
     except (Exception, asyncio.CancelledError) as exc:
         # `except Exception` alone would let the wait_for timeout (CancelledError, a
         # BaseException) escape into the BackgroundTasks runner unlogged — the old
@@ -491,14 +497,19 @@ def _domain_errors():
     """Translate service domain exceptions into HTTP responses."""
     try:
         yield
+    except HTTP_MAPPED as exc:       # first: BranchNotOpen is a ValueError, answered 404 below
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail, headers=exc.headers)
     except MergeConflict as exc:
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
+    except DraftNotReadable:         # before AccessDenied: a 404, as for a branch that doesn't exist
+        raise HTTPException(status_code=404, detail="unknown branch")
     except AccessDenied as exc:
         raise HTTPException(status_code=403, detail={"type": "access_denied", "message": str(exc)})
     except ApprovalRequired as exc:
-        raise HTTPException(status_code=409, detail={"type": "approval_required", "pending": exc.pending})
+        raise HTTPException(status_code=409, detail={"type": "approval_required", "pending": exc.pending,
+                                                     "stale": exc.stale})
     except NotUpToDate as exc:
         raise HTTPException(status_code=409, detail={
             "type": "not_up_to_date", "branchId": exc.branch_id, "behindBy": exc.behind_by,
@@ -651,12 +662,6 @@ class CreateGraphRequest(_ApiModel):
     kind: str = "manual"
     base_ontology_id: Optional[str] = Field(default=None, alias="baseOntologyId")
     tenant_id: Optional[str] = Field(default=None, alias="tenantId")
-    # The data source's real FalkorDB graph name (so the existing reader sees
-    # versioned data); omit to use a synthetic gv_<id> fallback.
-    falkor_graph_name: Optional[str] = Field(default=None, alias="falkorGraphName")
-    # The FalkorDB provider/instance hosting this graph's cache; scopes per-provider
-    # eviction budgeting. Omit for single-instance deployments (the "default" provider).
-    falkor_provider: Optional[str] = Field(default=None, alias="falkorProvider")
     # Inline ontology vocabulary {entityTypes, edgeTypes} + strict|permissive.
     ontology_spec: Optional[dict] = Field(default=None, alias="ontologySpec")
     ontology_enforcement: Optional[str] = Field(default=None, alias="ontologyEnforcement")
@@ -669,9 +674,9 @@ class OpenDraftRequest(_ApiModel):
 
 
 class BranchMemberRequest(_ApiModel):
-    subject_type: str = Field(alias="subjectType", description="user | group")
+    subject_type: Literal["user", "group"] = Field(alias="subjectType")
     subject_id: str = Field(alias="subjectId")
-    role: str = Field(description="viewer | editor | maintainer")
+    role: Literal["viewer", "editor", "maintainer"]
 
 
 class UpdateBranchRequest(_ApiModel):
@@ -740,13 +745,14 @@ class RebaseRequest(_ApiModel):
     resolutions: Optional[Dict[str, Optional[dict]]] = None
 
 
-class ForkRequest(_ApiModel):
-    data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
-
-
 class MergePrRequest(_ApiModel):
     message: str
     resolutions: Optional[Dict[str, Optional[dict]]] = None
+
+
+class ApproveRequest(_ApiModel):
+    # The source head the reviewer saw: 409 head_moved when the draft has moved on since.
+    expected_head_commit_id: Optional[str] = Field(default=None, alias="expectedHeadCommitId")
 
 
 class CreateGraphResponse(_ApiModel):
@@ -808,6 +814,19 @@ class ResolveResponse(_ApiModel):
     # The in-flight (or failed) "enable version control" job, when the graph is still at
     # genesis — so a reload lands back on live progress instead of the enable CTA.
     bootstrap: Optional[dict] = None
+    # live | frozen (editing paused), and the rev a freeze or unfreeze compares against.
+    lifecycle_state: str = Field(default="live", alias="lifecycleState")
+    lifecycle_rev: int = Field(default=0, alias="lifecycleRev")
+
+
+class LifecycleRequest(_ApiModel):
+    expected_rev: int = Field(alias="expectedRev", ge=0)
+
+
+class LifecycleResponse(_ApiModel):
+    graph_id: str = Field(alias="graphId")
+    state: str
+    rev: int
 
 
 class GraphResponse(_ApiModel):
@@ -841,6 +860,8 @@ class BranchResponse(_ApiModel):
     updated_at: str = Field(alias="updatedAt")
     # id → display name for every actor id this item references (see _attach_user_names).
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+    # The caller's role on the draft (the list sets it): 'owner', a member role, or null.
+    my_role: Optional[str] = Field(default=None, alias="myRole")
 
 
 class OpenDraftResponse(_ApiModel):
@@ -879,12 +900,23 @@ class RevisionModel(_ApiModel):
     message: Optional[str] = None
 
 
+class ReadRouteModel(_ApiModel):
+    """Which store serves reads (ContextEngine.for_workspace's rule): main from FalkorDB while the
+    projection holds the head, else Postgres; a draft is always its overlay on whatever serves main."""
+    main: Literal["falkordb", "postgres"]
+    drafts: Literal["overlay"] = "overlay"
+
+
 class WatermarkModel(_ApiModel):
     committed: int       # main_head_commit_seq
     projected: int       # projection_state.projected_commit_seq
     fresh: bool          # projected >= committed
-    # Projection lifecycle: idle | projecting | rebuilding | evicted. Only projecting/rebuilding mean
-    # the cache is ACTIVELY catching up — the "refreshing…" badge keys off this, not bare staleness
+    # Set on GET …/watermark (and the rebuild response); the slim watermark on state and
+    # neighbors reads leaves it null — those carry their own `source`.
+    read_route: Optional[ReadRouteModel] = Field(default=None, alias="readRoute")
+    # Projection lifecycle: idle | projecting | rebuilding | evicted | reseeding (an operator reset
+    # it; a reseed is queued). Only projecting/rebuilding mean the cache is ACTIVELY catching
+    # up — the "refreshing…" badge keys off this, not bare staleness
     # (an idle-but-behind graph just means no FalkorDB worker is running; reads use Postgres).
     status: str = "idle"
     # Failure surface + live progress for the Data health tab: `target` is the seq the projection
@@ -898,6 +930,18 @@ class WatermarkModel(_ApiModel):
     # The main revision each side is at: the system of record's head, and what the graph holds.
     committed_revision: Optional[RevisionModel] = Field(default=None, alias="committedRevision")
     projected_revision: Optional[RevisionModel] = Field(default=None, alias="projectedRevision")
+    # Where the projection lives (doc 14 LifecycleSnapshot.projection): its FalkorDB key, the
+    # provider hosting it (null = the default instance) and whether the platform minted the key
+    # (`owned`) or it is the customer's own graph. Then the fencing epoch, the poll's backoff, and
+    # the reason of the last liveness reset (a key that lost what the watermark said it held).
+    projection_key: Optional[str] = Field(default=None, alias="projectionKey")
+    provider_id: Optional[str] = Field(default=None, alias="providerId")
+    provider_name: Optional[str] = Field(default=None, alias="providerName")
+    owned: bool = False
+    epoch: int = 0
+    failed_attempts: int = Field(default=0, alias="failedAttempts")
+    next_retry_at: Optional[str] = Field(default=None, alias="nextRetryAt")
+    liveness_error: Optional[str] = Field(default=None, alias="livenessError")
 
 
 class BranchFreshnessModel(_ApiModel):
@@ -906,6 +950,7 @@ class BranchFreshnessModel(_ApiModel):
     behind_by: int = Field(alias="behindBy")
     main_head_commit_seq: int = Field(alias="mainHeadCommitSeq")
     base_commit_seq: int = Field(alias="baseCommitSeq")
+    status: str
 
 
 class RebuildResponse(_ApiModel):
@@ -1140,6 +1185,15 @@ class ForkResponse(_ApiModel):
     fork_base_commit_seq: int = Field(alias="forkBaseCommitSeq")
 
 
+class ForkSummaryResponse(GraphResponse):
+    """One of a graph's forks, live or in the trash (``deletedAt`` set). ``purging``: its purge
+    is queued, so it can no longer be restored; ``purgeAfter``: the end of its undo window."""
+    deleted_at: Optional[str] = Field(default=None, alias="deletedAt")
+    deleted_by: Optional[str] = Field(default=None, alias="deletedBy")
+    purging: bool = False
+    purge_after: Optional[str] = Field(default=None, alias="purgeAfter")
+
+
 class OpenPrRequest(_ApiModel):
     title: Optional[str] = None
     description: Optional[str] = None
@@ -1153,9 +1207,16 @@ class OpenMrRequest(_ApiModel):
 
 
 class UpdatePrRequest(_ApiModel):
-    """Edit a PR's title/description. A field left unset is untouched."""
+    """Edit a PR's title/description/reviewers. A field left unset is untouched."""
     title: Optional[str] = None
     description: Optional[str] = None
+    reviewers: Optional[List[str]] = None
+
+
+class ReviewerCandidate(_ApiModel):
+    user_id: str = Field(alias="userId")
+    display_name: Optional[str] = Field(default=None, alias="displayName")
+    email: Optional[str] = None
 
 
 class OpenPrResponse(_ApiModel):
@@ -1170,6 +1231,8 @@ class PrResponse(_ApiModel):
     # who owns the draft (only populated by GET /…/{pr_id}, not the list endpoints).
     source_branch_owner: Optional[str] = Field(default=None, alias="sourceBranchOwner")
     source_branch_name: Optional[str] = Field(default=None, alias="sourceBranchName")
+    # The source's head now: approve sends it back as expectedHeadCommitId (409 head_moved if it moved).
+    head_commit_id: Optional[str] = Field(default=None, alias="headCommitId")
     originating_view_id: Optional[str] = Field(default=None, alias="originatingViewId")
     target_graph_id: str = Field(alias="targetGraphId")
     target_branch: str = Field(alias="targetBranch")
@@ -1184,6 +1247,8 @@ class PrResponse(_ApiModel):
     resulting_commit_id: Optional[str] = Field(default=None, alias="resultingCommitId")
     reviewers: Optional[List[str]] = None
     approved_by: Optional[List[str]] = Field(default=None, alias="approvedBy")
+    # Reviewers whose approval went stale (a content commit since): they must approve again.
+    stale_approved_by: Optional[List[str]] = Field(default=None, alias="staleApprovedBy")
     approval_status: Optional[str] = Field(default=None, alias="approvalStatus")
     checks_status: Optional[dict] = Field(default=None, alias="checksStatus")
     actor: Optional[str] = None                                       # who raised it
@@ -1209,9 +1274,9 @@ class PrResponse(_ApiModel):
 # resolved to names HERE — one batched, deduped lookup per request over the
 # request's management session — never as a cross-store join inside the service.
 _ACTOR_ID_FIELDS = (
-    "owner", "created_by", "actor", "merged_by", "closed_by", "source_branch_owner",
+    "owner", "created_by", "actor", "merged_by", "closed_by", "source_branch_owner", "deleted_by",
 )
-_ACTOR_ID_LIST_FIELDS = ("contributors", "reviewers", "approved_by")
+_ACTOR_ID_LIST_FIELDS = ("contributors", "reviewers", "approved_by", "stale_approved_by")
 
 
 def _collect_actor_ids(item: dict) -> set:
@@ -1256,29 +1321,28 @@ async def _attach_user_names(
 async def create_graph(
     ws_id: str,
     body: CreateGraphRequest,
+    request: Request,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     if body.workspace_id != ws_id:
         raise HTTPException(status_code=400, detail="workspaceId must match the path workspace")
-    # Default the FalkorDB provider to the data source's so the worker's RAM-budget
-    # eviction scopes per provider; an explicit falkorProvider wins. Best-effort:
-    # provider resolution is a non-critical eviction hint, so a missing data source
-    # or a lookup error falls back to the "default" provider — never fails creation.
-    falkor_provider = body.falkor_provider
-    if falkor_provider is None:
-        try:
-            ds = await data_source_repo.get_data_source_orm(session, body.data_source_id)
-            falkor_provider = ds.provider_id if ds else None
-        except Exception:
-            logger.debug("provider lookup failed for %s; using default", body.data_source_id, exc_info=True)
-    return await svc.create_graph(
-        data_source_id=body.data_source_id, workspace_id=ws_id, kind=body.kind,
-        base_ontology_id=body.base_ontology_id, tenant_id=body.tenant_id, actor=user.id,
-        falkor_graph_name=body.falkor_graph_name, falkor_provider=falkor_provider,
-        ontology_spec=body.ontology_spec, ontology_enforcement=body.ontology_enforcement,
-    )
+    # The pin decides which FalkorDB graph the projector writes, so it is the data source's own
+    # graph and provider, never the caller's choice. The data source must be this workspace's,
+    # and an API key must cover it (an id in the body is invisible to requires()'s key scope).
+    # The projector writes only FalkorDB, so a source on any other provider is refused (422).
+    from backend.app.api.v1.endpoints.graph import _assert_copyable, _data_source_in_workspace
+    ds = await _data_source_in_workspace(session, body.data_source_id, ws_id)
+    await api_key_auth.hold_to_data_source(request, body.data_source_id, ws_id)
+    await _assert_copyable(session, ds.provider_id)
+    with _domain_errors():                  # a key another versioned graph projects into → 409
+        return await svc.create_graph(
+            data_source_id=body.data_source_id, workspace_id=ws_id, kind=body.kind,
+            base_ontology_id=body.base_ontology_id, tenant_id=body.tenant_id, actor=user.id,
+            falkor_graph_name=ds.graph_name, falkor_provider=ds.provider_id,
+            ontology_spec=body.ontology_spec, ontology_enforcement=body.ontology_enforcement,
+        )
 
 
 @router.get("/blank-graphs/name-check", response_model=GraphNameCheckResponse)
@@ -1400,8 +1464,11 @@ async def get_graph(
 @router.get("/graphs/{graph_id}/branches", response_model=List[BranchResponse])
 async def list_branches(
     ws_id: str, graph_id: str,
+    response: Response,
     limit: int = Query(100, ge=1, le=500),
-    offset: int = Query(0, ge=0),
+    cursor: Optional[str] = Query(None),
+    branch_status: List[Literal["open", "publishing", "merged", "abandoned", "all"]] = Query(
+        ["open", "publishing"], alias="status"),
     view_id: Optional[str] = Query(None, alias="viewId"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
@@ -1410,10 +1477,17 @@ async def list_branches(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Branches on the graph — graph-wide (every view) by default; ``viewId`` narrows to
-    that view's own branches (the Data-Source rollup stays the default, unfiltered)."""
-    branches = await svc.list_branches(
-        graph_id=graph_id, limit=limit, offset=offset, viewer=viewer,
-        originating_view_id=view_id)
+    that view's own branches (the Data-Source rollup stays the default, unfiltered).
+    ``status`` (repeatable; default open + publishing) filters by status. ``main`` comes
+    first, then drafts newest first; ``X-Next-Cursor`` is set when another page follows."""
+    try:
+        branches, next_cursor = await svc.list_branches(
+            graph_id=graph_id, limit=limit, cursor=cursor, viewer=viewer,
+            originating_view_id=view_id, status=branch_status)
+    except ValueError:
+        raise HTTPException(status_code=422, detail="malformed cursor")
+    if next_cursor is not None:
+        response.headers["X-Next-Cursor"] = next_cursor
     await _attach_user_names(session, branches)
     return branches
 
@@ -1509,10 +1583,41 @@ async def list_branch_members(
     ws_id: str, graph_id: str, branch_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    session: AsyncSession = Depends(get_db_session),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
+    await _assert_draft_visible(svc, graph_id, branch_id, viewer)
     with _domain_errors():
-        return {"members": await svc.list_branch_members(graph_id=graph_id, branch_id=branch_id)}
+        members = await svc.list_branch_members(graph_id=graph_id, branch_id=branch_id)
+        my_role = await svc.my_branch_role(graph_id=graph_id, branch_id=branch_id, actor=viewer.actor)
+    users = await resolve_user_ids(session, {m["subjectId"] for m in members if m["subjectType"] == "user"})
+    groups = {}
+    for gid in {m["subjectId"] for m in members if m["subjectType"] == "group"}:
+        group = await group_repo.get_group_by_id(session, gid)
+        groups[gid] = group.name if group else None
+    for m in members:
+        m["name"] = (users.get(m["subjectId"], (None, None))[0] if m["subjectType"] == "user"
+                     else groups[m["subjectId"]])
+    return {"members": members, "myRole": my_role}
+
+
+async def _assert_member_eligible(session: AsyncSession, ws_id: str, subject_type: str,
+                                  subject_id: str, role: str) -> None:
+    """Who is added to a draft must exist and, as a user, read the workspace's data sources (and
+    edit them, for editor or maintainer). A group is checked only to exist: its members are
+    checked at write time, by the routes' own permission gate."""
+    if subject_type == "group":
+        if await group_repo.get_group_by_id(session, subject_id) is None:
+            raise IneligibleMember(subject_id, "unknown_group")
+        return
+    if await user_repo.get_user_by_id(session, subject_id) is None:
+        raise IneligibleMember(subject_id, "unknown_user")
+    claims = await permission_service.resolve(session, subject_id)
+    if not has_permission(claims, _READ, workspace_id=ws_id):
+        raise IneligibleMember(subject_id, "no_read")
+    if role != "viewer" and not has_permission(claims, _MANAGE, workspace_id=ws_id):
+        raise IneligibleMember(subject_id, "no_manage")
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/members")
@@ -1520,17 +1625,18 @@ async def add_branch_member(
     ws_id: str, graph_id: str, branch_id: str, body: BranchMemberRequest,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    session: AsyncSession = Depends(get_db_session),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    if body.subject_type == "user" and is_service_account(body.subject_id):
-        raise HTTPException(status_code=409, detail=(
-            "A draft can't be shared with a service account: its access is the "
-            "workspace roles given on its own page, under Service accounts"
-        ))
     with _domain_errors():
+        # Adding a member and changing its role are this one route.
+        if body.subject_type == "user" and is_service_account(body.subject_id):
+            raise ServiceAccountMember(body.subject_id)     # before anything is read
         return await svc.add_branch_member(
             graph_id=graph_id, branch_id=branch_id, subject_type=body.subject_type,
             subject_id=body.subject_id, role=body.role, actor=user.id,
+            check_eligible=lambda: _assert_member_eligible(
+                session, ws_id, body.subject_type, body.subject_id, body.role),
         )
 
 
@@ -1643,6 +1749,7 @@ async def publish(
     ws_id: str, graph_id: str, branch_id: str, body: PublishRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -1651,8 +1758,9 @@ async def publish(
     """Publish a draft. One that changes more than ``SYNC_PUBLISH_MAX_CHANGES`` entities is
     published by a job instead: 202 with the job to poll (``GET …/publish-jobs/{jobId}``)."""
     if await svc.branch_change_count(graph_id=graph_id, branch_id=branch_id) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
-        return await _queue_publish(ie, workspace_id=ws_id, meta=_meta, graph_id=graph_id,
-                                    branch_id=branch_id, actor=user.id, body=body)
+        with _domain_errors():                   # queuing takes the draft: closed → 409, unknown → 404
+            return await _queue_publish(ie, workspace_id=ws_id, meta=_meta, graph_id=graph_id,
+                                        branch_id=branch_id, actor=user.id, body=body)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     rules = await _rules_for_meta(session, ws_id, _meta)
     identity = await _node_identity_for_meta(session, _meta)
@@ -1710,6 +1818,8 @@ async def _publish_from_job(job: dict) -> dict:
         try:
             with _domain_errors():
                 meta = await svc.get_graph(graph_id)
+                if meta is None:                        # trashed, or being purged, since queued
+                    raise HTTPException(status_code=404, detail="graph not found")
                 async with get_async_session() as session:
                     cset = await _live_containment_types(session, job["workspaceId"], (meta or {}).get("data_source_id"))
                     rules = await _rules_for_meta(session, job["workspaceId"], meta)
@@ -1718,12 +1828,12 @@ async def _publish_from_job(job: dict) -> dict:
                     commit_id = await svc.merge_mr(
                         mr_id=job["mergeRequestId"], actor=actor, message=job["message"],
                         resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
-                        node_identity=identity)
+                        queued=True, node_identity=identity)
                 else:
                     commit_id = await svc.publish(
                         graph_id=graph_id, branch_id=branch_id, actor=actor, message=job["message"],
                         resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
-                        node_identity=identity)
+                        queued=True, node_identity=identity)
         except HTTPException as exc:
             return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
     await _bump_main_cache(graph_id)
@@ -1773,7 +1883,7 @@ async def update_branch(
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """Edit a draft's name / description / shared-visibility (owner or maintainer)."""
+    """Edit a draft's name / description (owner or maintainer) or visibility (owner only)."""
     with _domain_errors():
         return await svc.update_branch(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
@@ -1798,9 +1908,17 @@ async def rebase_draft(
     when the draft was already up to date. The model puts the wire back on the camelCase contract
     every other route here follows."""
     with _domain_errors():
-        return await svc.rebase_draft(
+        res = await svc.rebase_draft(
             graph_id=graph_id, branch_id=branch_id, actor=user.id, resolutions=body.resolutions,
         )
+    if res["clean"] and not res.get("already_up_to_date"):
+        # The pull rewrote the draft: invalidate its read-cache, as /graph/changes does, so the
+        # canvas's next read shows main's changes instead of the pre-pull state for the cache TTL.
+        await get_graph_cache().bump_generation(
+            CacheScope(workspace_id=ws_id, data_source_id=str(_meta.get("data_source_id") or ""),
+                       branch_id=branch_id)
+        )
+    return res
 
 
 @router.get("/graphs/{graph_id}/watermark", response_model=WatermarkModel)
@@ -1809,9 +1927,10 @@ async def get_watermark(
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised)."""
-    return _watermark_model(await svc.projection_watermark(graph_id))
+    return await _watermark_model(session, await svc.projection_watermark(graph_id))
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/freshness", response_model=BranchFreshnessModel)
@@ -1819,27 +1938,41 @@ async def get_branch_freshness(
     ws_id: str, graph_id: str, branch_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Live "is this draft behind main?" signal — O(1), safe to poll frequently while editing so a
     branch owner learns RIGHT AWAY (not at merge) that a teammate published and they must pull."""
+    await _assert_draft_visible(svc, graph_id, branch_id, viewer)
     with _domain_errors():
         f = await svc.branch_freshness(graph_id=graph_id, branch_id=branch_id)
     return BranchFreshnessModel(behind=f["behind"], behind_by=f["behind_by"],
                                 main_head_commit_seq=f["main_head_commit_seq"],
-                                base_commit_seq=f["base_commit_seq"])
+                                base_commit_seq=f["base_commit_seq"], status=f["status"])
 
 
-def _watermark_model(wm: dict) -> WatermarkModel:
+async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
+    # The provider's display name lives in the management DB, not the graphver store.
+    provider = (await provider_repo.get_provider_orm(session, wm["falkor_provider"])
+                if wm.get("falkor_provider") else None)
     return WatermarkModel(committed=wm["committed"], projected=wm["projected"],
                           fresh=wm["fresh"], status=wm["status"],
+                          read_route=ReadRouteModel(**wm["read_route"]),
                           target=wm.get("target", 0),
                           last_error=wm.get("last_error"),
                           last_projected_at=wm.get("last_projected_at"),
                           progress_done=wm.get("progress_done"),
                           progress_total=wm.get("progress_total"),
                           committed_revision=_revision_model(wm.get("committed_revision")),
-                          projected_revision=_revision_model(wm.get("projected_revision")))
+                          projected_revision=_revision_model(wm.get("projected_revision")),
+                          projection_key=wm.get("falkor_graph_name"),
+                          provider_id=wm.get("falkor_provider"),
+                          provider_name=provider.name if provider is not None else None,
+                          owned=wm.get("owns_falkor_graph", False),
+                          epoch=wm.get("epoch", 0),
+                          failed_attempts=wm.get("failed_attempts", 0),
+                          next_retry_at=wm.get("next_retry_at"),
+                          liveness_error=wm.get("liveness_error"))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:
@@ -1856,6 +1989,7 @@ async def rebuild_projection(
     _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Force a full replay of committed ``main`` from Postgres (the SoR) into the graph's FalkorDB
     cache — the "rebuild the cache" operator action. Pins an unpinned graph to its data source's
@@ -1882,7 +2016,8 @@ async def rebuild_projection(
     # rebuild budget (REBUILD_SYNC_TIMEOUT_SECS) lets a real full reseed actually finish.
     background.add_task(rebuild_now, graph_id)
     return RebuildResponse(started=started, already_running=not started,
-                           watermark=_watermark_model(await svc.projection_watermark(graph_id)))
+                           watermark=await _watermark_model(
+                               session, await svc.projection_watermark(graph_id)))
 
 
 # Per-graph in-process guard: a reconcile is a request-scoped full scan; a second concurrent one
@@ -1923,11 +2058,53 @@ async def reconcile_projection(
     return DriftReportModel.model_validate(dataclasses.asdict(report))
 
 
+async def _set_frozen(svc, session: AsyncSession, meta: dict, graph_id: str, expected_rev: int,
+                      frozen: bool) -> dict:
+    with _domain_errors():
+        res = await svc.set_frozen(graph_id=graph_id, frozen=frozen, expected_rev=expected_rev)
+    if res["changed"]:              # a repeat changes nothing, so it records nothing
+        from backend.app.api.v1.endpoints.graph import _record_versioning
+        await _record_versioning(
+            session, "workspace.versioning.frozen" if frozen else "workspace.versioning.unfrozen",
+            meta["data_source_id"], {"graphId": graph_id, "rev": res["rev"]})
+    return res
+
+
+@router.post("/graphs/{graph_id}/lifecycle/freeze", response_model=LifecycleResponse)
+async def freeze_graph(
+    ws_id: str, graph_id: str, body: LifecycleRequest,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Pause editing: every content write to the graph answers 409 ``graph_not_writable`` until
+    it is unfrozen; reads, exports and projection go on. ``expectedRev`` is the ``lifecycleRev``
+    the caller saw (409 ``version_conflict`` when it moved); freezing a frozen graph is a no-op.
+    Open while version control is turned off, so a safety freeze always works."""
+    return await _set_frozen(svc, session, meta, graph_id, body.expected_rev, frozen=True)
+
+
+@router.post("/graphs/{graph_id}/lifecycle/unfreeze", response_model=LifecycleResponse)
+async def unfreeze_graph(
+    ws_id: str, graph_id: str, body: LifecycleRequest,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Resume editing of a frozen graph; as :func:`freeze_graph` otherwise."""
+    return await _set_frozen(svc, session, meta, graph_id, body.expected_rev, frozen=False)
+
+
 @router.post("/graphs/{graph_id}/commits/{commit_id}/revert", response_model=CommitResponse)
 async def revert_commit(
     ws_id: str, graph_id: str, commit_id: str, body: RevertRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),   # writing main is privileged
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
@@ -1946,6 +2123,7 @@ async def restore_to_commit(
     ws_id: str, graph_id: str, commit_id: str, body: RevertRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),   # writing main is privileged
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
@@ -2014,10 +2192,16 @@ async def get_commit_state(
 
 
 async def _assert_line_readable(svc, graph_id: str, branch_id: Optional[str], viewer: Viewer) -> None:
-    """A draft named by ``branchId`` must be the caller's to read (403), and the graph's (404)."""
+    """A draft named by ``branchId`` must be the graph's and the caller's to read (404 either way)."""
     if branch_id:
-        with _domain_errors():
-            await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+        await _assert_draft_visible(svc, graph_id, branch_id, viewer)
+
+
+async def _assert_draft_visible(svc, graph_id: str, branch_id: str, viewer: Viewer) -> None:
+    """READ_DRAFT (doc 13): a draft the caller can't read is a 404, the same as a branch that
+    doesn't exist, so its existence doesn't leak."""
+    with _domain_errors():
+        await svc.assert_branch_readable(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
 
 
 @router.get("/graphs/{graph_id}/entities/{entity_id}/history", response_model=EntityHistoryResponse)
@@ -2287,12 +2471,15 @@ async def graph_neighbors(
     limit: int = Query(500, ge=1, le=5000),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
     read_factory=Depends(get_falkor_read_factory),
 ):
     """Bounded neighborhood of a node — FalkorDB-first only for `main`@head (when the
     projection is caught up); drafts and as-of reads are served from Postgres. Every
     response carries the freshness watermark."""
+    if branch_id:
+        await _assert_draft_visible(svc, graph_id, branch_id, viewer)
     ets = [e for e in edge_types.split(",") if e] if edge_types else None
     return await _serve_neighbors(
         svc, read_factory, graph_id, urn=urn, depth=depth,
@@ -2311,6 +2498,7 @@ async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction
     can_falkor = bool(
         is_head_main and read_factory is not None and wm["status"] != "evicted" and wm["falkor_graph_name"]
         and wm["projected"] >= wm["committed"] - vconfig.READ_MAX_LAG
+        and wm["projected"] > 0       # at 0 the key is empty or mid-reconcile (moved, reseeding)
     )
     if can_falkor:
         await acquire_lease(graph_id)            # pin so an eviction sweep can't drop it mid-read
@@ -2399,6 +2587,7 @@ class SyncResponse(_ApiModel):
     applied: int = 0
     rejected: List[dict] = []
     idempotent_replay: bool = False
+    overrides: List[str] = []
 
 
 @router.post("/graphs/{graph_id}/bulk-ingest", response_model=BulkIngestResponse)
@@ -2408,13 +2597,15 @@ async def bulk_ingest(
     background: BackgroundTasks,
     idempotency_key: Optional[str] = Query(None, alias="idempotencyKey"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    claims: PermissionClaims = Depends(get_permission_claims),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     """Day-0 / large-delta import: POST an ndjson body (one node/edge per line) →
     one ``import`` commit. Invalid lines are reported, not fatal. Idempotent on
     ``idempotencyKey``. (Raw body streams; the object-store upload-URL flow for
-    very large loads plugs in here.)"""
+    very large loads plugs in here.) It writes main, so it needs publish: a key, its owner's."""
+    require_publish_for_main(claims, ws_id)
     rows: List[dict] = []
     content = await request.body()
     for line in content.splitlines():
@@ -2443,6 +2634,8 @@ async def sync_ingest(
     strategy: str = Query("merge", pattern="^(merge|external_wins)$"),
     source: str = Query("external"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
+    overrides: SyncOverrides = Depends(sync_override_gate),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -2451,7 +2644,9 @@ async def sync_ingest(
     ``main`` as a single ``sync`` commit via 3-way merge: user edits to untouched fields
     survive; a field both sides changed conflicts (409) under ``strategy=merge`` or takes
     the external value under ``strategy=external_wins``. A node the snapshot drops cascades
-    to its containment subtree (ontology-driven). Idempotent on ``idempotencyKey``."""
+    to its containment subtree (ontology-driven). Idempotent on ``idempotencyKey``. 409
+    ``curation_at_risk`` / ``mass_delete_blocked`` unless a workspace admin passes ``force`` /
+    ``allowMassDelete``."""
     rows: List[dict] = []
     content = await request.body()
     for line in content.splitlines():
@@ -2467,6 +2662,7 @@ async def sync_ingest(
         report = await svc.sync_ingest(
             graph_id=graph_id, rows=rows, actor=user.id, source=source,
             idempotency_key=idempotency_key, strategy=strategy, containment_edge_types=cset,
+            allow_curation_risk=overrides.force, allow_mass_delete=overrides.allow_mass_delete,
         )
     if report.get("commit_id"):
         background.add_task(nudge_projection, graph_id)
@@ -2638,6 +2834,12 @@ def _never_started(job: dict) -> bool:
     return job.get("status") == "pending" and job.get("phase") is None
 
 
+def _never_arrived(job: dict) -> bool:
+    """An import whose file never arrived (its request broke off, or the reaper failed it)."""
+    return (job.get("status") == "failed" and job.get("phase") is None
+            and job.get("errorMessage") == vconfig.JOB_NEVER_QUEUED)
+
+
 async def _check_import_view(session, ws_id: str, view_id: Optional[str], user, claims) -> None:
     """An import that names a view places the entities it creates in that view's layout
     (``_write_view_import_assignments``) — a write to the view. So the view must be one of this
@@ -2711,14 +2913,42 @@ async def create_import(
             if job is None:
                 raise
         else:
-            job = {"jobId": created["job_id"], "branchId": created["branch_id"],
-                   "sourceUri": created["source_uri"], "status": "pending", "phase": None}
-    status = job["status"]
-    if _never_started(job):
-        await ie.store.put_stream(job["sourceUri"], request.stream())
-        status = await ie.start_import(job["jobId"])
+            return await _store_and_start(ie, request, created["job_id"], created["branch_id"],
+                                          created["source_uri"])
+    if _never_arrived(job):
+        # Its request broke off before storing the file: this one's file is taken, once the job is
+        # taken back under the rules a new import meets (the view it places into included).
+        await _check_import_view(session, ws_id, job.get("scopeViewId"), user, claims)
+        with _domain_errors():
+            if await ie.reclaim_import(job["jobId"], actor=user.id, workspace_id=ws_id):
+                return await _store_and_start(ie, request, job["jobId"], job["branchId"], job["sourceUri"])
+        job = await ie.find_job(graph_id=graph_id, idempotency_key=key)     # another request took it back
+    # Still storing its file, queued, running or finished: answered as it is.
     return {"jobId": job["jobId"], "branchId": job["branchId"], "sourceUri": job["sourceUri"],
-            "status": status}
+            "status": job["status"]}
+
+
+async def _store_and_start(ie, request: Request, job_id: str, branch_id: str, source_uri: str) -> dict:
+    """Store the request's body as import ``job_id``'s file and queue it. A request that breaks off
+    first fails the job there and then (:func:`_abandon_unqueued`): its draft takes the next import
+    now, and the same key sent again takes the job back."""
+    try:
+        await ie.store.put_stream(source_uri, request.stream())
+        status = await ie.start_import(job_id)
+    except BaseException:
+        await _abandon_unqueued(ie, job_id)
+        raise
+    return {"jobId": job_id, "branchId": branch_id, "sourceUri": source_uri, "status": status}
+
+
+async def _abandon_unqueued(ie, job_id: str) -> None:
+    """Fail an import whose request broke off before it was queued (the client went away, the
+    request timed out), so its draft takes the next import now. Shielded, to land while the request
+    is cancelled; a failure is only logged, as the reaper fails the job within the hour."""
+    try:
+        await asyncio.shield(ie.abandon_unqueued(job_id))
+    except Exception:  # noqa: BLE001 — the request's own error is the one to raise
+        logger.exception("import job %s was left pending", job_id)
 
 
 # Resumable uploads: a file of up to IMPORT_MAX_BYTES arrives in parts, then becomes an import
@@ -2834,8 +3064,12 @@ async def complete_import_upload(
             actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
             source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
             scope_view_id=view_id)
-    await uploads.save(ie.store, {**record, "jobId": created["job_id"], "branchId": created["branch_id"]})
-    status = await ie.start_import(created["job_id"])
+    try:
+        await uploads.save(ie.store, {**record, "jobId": created["job_id"], "branchId": created["branch_id"]})
+        status = await ie.start_import(created["job_id"])
+    except BaseException:
+        await _abandon_unqueued(ie, created["job_id"])
+        raise
     return {"jobId": created["job_id"], "branchId": created["branch_id"],
             "sourceUri": created["source_uri"], "status": status}
 
@@ -2845,10 +3079,33 @@ async def list_imports(
     ws_id: str, graph_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
-    """Import job history for this graph/data source (the per-view/data-source surface)."""
-    return await ie.list_jobs(graph_id=graph_id, job_type="ingest")
+    """Import job history for this graph/data source (the per-view/data-source surface), without
+    the imports into drafts the caller can't read."""
+    readable: Dict[Optional[str], bool] = {}            # one check per draft, not per job
+    jobs = []
+    for job in await ie.list_jobs(graph_id=graph_id, job_type="ingest"):
+        if job.get("branchId") not in readable:
+            readable[job.get("branchId")] = await _import_visible(svc, graph_id, job, viewer)
+        if readable[job.get("branchId")]:
+            jobs.append(job)
+    return jobs
+
+
+async def _import_visible(svc, graph_id: str, job: Dict[str, Any], viewer: Viewer) -> bool:
+    """Whether the caller may see an import job: not one into a draft they can't read."""
+    if not job.get("branchId"):
+        return True
+    try:
+        await _assert_draft_visible(svc, graph_id, job["branchId"], viewer)
+    except HTTPException as exc:
+        if exc.status_code != 404:
+            raise
+        return False
+    return True
 
 
 # NOTE: declared before `/imports/{job_id}` so the literal path wins over the path param.
@@ -2880,10 +3137,12 @@ async def get_import(
     ws_id: str, graph_id: str, job_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
     job = await ie.get_job(job_id)
-    if job is None or job.get("graphId") != graph_id:
+    if job is None or job.get("graphId") != graph_id or not await _import_visible(svc, graph_id, job, viewer):
         raise HTTPException(status_code=404, detail="import job not found")
     return job
 
@@ -2893,12 +3152,15 @@ async def get_import_preview(
     ws_id: str, graph_id: str, job_id: str,
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     ie=Depends(get_import_export_service),
 ):
     """Summary counts + a bounded sample of resolved rows. The full field-level diff is the
     draft-vs-main diff served by the existing versioning endpoints."""
     preview = await ie.get_preview(job_id)
-    if preview is None or preview["job"].get("graphId") != graph_id:
+    if (preview is None or preview["job"].get("graphId") != graph_id
+            or not await _import_visible(svc, graph_id, preview["job"], viewer)):
         raise HTTPException(status_code=404, detail="import job not found")
     return preview
 
@@ -2983,7 +3245,7 @@ async def _check_export_access(
     viewer: Viewer, user: User, claims: PermissionClaims, session: AsyncSession, svc: GraphVersioningService,
 ) -> None:
     """What every export checks before it reads: a draft only its readers export (someone else's
-    private draft is 403), and a view only one the caller can read, of this data source (404)."""
+    private draft is 404), and a view only one the caller can read, of this data source (404)."""
     from backend.app.api.v1.endpoints.view_guards import readable_view
 
     if branch_id:
@@ -3233,16 +3495,72 @@ async def cancel_export(
 # --------------------------------------------------------------------------- #
 @router.post("/graphs/{graph_id}/forks", response_model=ForkResponse, status_code=201)
 async def fork_graph(
-    ws_id: str, graph_id: str, body: ForkRequest,
-    user: User = Depends(requires(_READ, workspace="ws_id")),       # read can fork
+    ws_id: str, graph_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
     with _domain_errors():
         return await svc.fork_graph(
             parent_graph_id=graph_id, workspace_id=ws_id, actor=user.id,
-            data_source_id=body.data_source_id, tenant_id=meta.get("tenant_id"),
+            tenant_id=meta.get("tenant_id"),
         )
+
+
+@router.get("/graphs/{graph_id}/forks", response_model=List[ForkSummaryResponse])
+async def list_forks(
+    ws_id: str, graph_id: str,
+    limit: int = Query(100, ge=1, le=500),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The graph's direct forks, newest first, those in the trash included."""
+    forks = await svc.list_forks(graph_id=graph_id, workspace_id=ws_id, limit=limit)
+    await _attach_user_names(session, forks)
+    return forks
+
+
+async def _record_fork_event(session: AsyncSession, verb: str, ws_id: str, graph_id: str,
+                             parent_id: str) -> None:
+    # After the graphver commit: best-effort, the fork has already moved.
+    from backend.app.services.activity import recorder
+
+    await recorder.record_for_request(
+        session, f"workspace.versioning.fork_{verb}", workspace_id=ws_id,
+        target_type="versioned_graph", target_id=graph_id,
+        details={"forkParentGraphId": parent_id}, best_effort=True)
+
+
+@router.delete("/graphs/{graph_id}", status_code=204)
+async def delete_fork(
+    ws_id: str, graph_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Move a fork to the trash, restorable until its purge is queued. Only a fork: a data
+    source's graph goes with its data source (409 ``not_a_fork``)."""
+    with _domain_errors():
+        parent_id = await svc.delete_fork(graph_id=graph_id, workspace_id=ws_id, actor=user.id)
+    await _record_fork_event(session, "deleted", ws_id, graph_id, parent_id)
+
+
+@router.post("/graphs/{graph_id}/restore", status_code=204)
+async def restore_fork(
+    ws_id: str, graph_id: str,
+    # No graph_in_workspace: it hides the trash. The service scopes the fork to ws_id.
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Bring a trashed fork back. A fork that is not in the trash is left as it is."""
+    with _domain_errors():
+        parent_id = await svc.restore_fork(graph_id=graph_id, workspace_id=ws_id)
+    if parent_id is not None:
+        await _record_fork_event(session, "restored", ws_id, graph_id, parent_id)
 
 
 @router.post("/graphs/{graph_id}/pulls", response_model=OpenPrResponse, status_code=201)
@@ -3258,7 +3576,9 @@ async def open_pull_request(
     # parent's data source too, not only the fork's.
     parent_id = _meta.get("fork_parent_graph_id")
     if parent_id:
-        parent = await svc.get_graph(parent_id) or {}
+        parent = await svc.get_graph(parent_id)
+        if parent is None:                              # the parent is trashed, or purging
+            raise HTTPException(status_code=404, detail="parent graph not found")
         await api_key_auth.hold_to_data_source(
             request, parent.get("data_source_id"), parent.get("workspace_id"),
         )
@@ -3311,9 +3631,10 @@ async def update_pull_request(
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """Edit a PR's title/description (review metadata)."""
+    """Edit a PR's title/description/reviewers (review metadata)."""
     with _domain_errors():
-        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description)
+        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description,
+                                   reviewers=body.reviewers)
 
 
 @router.get("/pulls/{pr_id}/preview", response_model=MergePreviewResponse)
@@ -3374,19 +3695,24 @@ async def diff_pull_request_children(
 
 
 async def _not_their_own(session: AsyncSession, pr: dict, approver_id: str) -> None:
-    """Nobody approves what they opened through a service account they
-    manage: the approval would be of their own work."""
-    author = pr.get("actor")
-    if is_service_account(author) and await service_account_repo.is_manager(session, author, approver_id):
-        raise HTTPException(status_code=403, detail={
-            "type": "access_denied",
-            "message": "You manage the service account that opened this, so someone else approves it",
-        })
+    """Nobody approves what they opened, or what their draft proposes, through a service account
+    they manage or made a key for: the approval would be of their own work (``self_review``, as
+    for an author). A key outlives its maker's seat, so leaving the account changes nothing."""
+    for principal in dict.fromkeys((pr.get("actor"), pr.get("source_branch_owner"))):
+        if is_service_account(principal) and (
+                await service_account_repo.is_manager(session, principal, approver_id)
+                or await service_account_repo.made_a_key(session, principal, approver_id)):
+            raise HTTPException(status_code=403, detail={
+                "type": "access_denied", "code": "self_review", "prId": pr.get("pr_id"),
+                "message": "You manage the service account that opened this, or made a key for it, "
+                           "so someone else approves it",
+            })
 
 
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
 async def approve_pull_request(
     ws_id: str, pr_id: str,
+    body: Optional[ApproveRequest] = None,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # a manager approves
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -3394,7 +3720,8 @@ async def approve_pull_request(
 ):
     await _not_their_own(session, _pr, user.id)
     with _domain_errors():
-        return await svc.approve_pr(pr_id=pr_id, actor=user.id)
+        return await svc.approve_pr(pr_id=pr_id, actor=user.id,
+                                    expected_head_commit_id=body.expected_head_commit_id if body else None)
 
 
 @router.post("/pulls/{pr_id}/close", response_model=PrResponse)
@@ -3413,6 +3740,7 @@ async def merge_pull_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # only manage may merge into base
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -3434,6 +3762,36 @@ async def merge_pull_request(
 # --------------------------------------------------------------------------- #
 # Draft -> main merge requests (reviewed publish)                              #
 # --------------------------------------------------------------------------- #
+@router.get("/reviewers", response_model=List[ReviewerCandidate])
+async def list_reviewer_candidates(
+    ws_id: str,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Who the caller can ask to review: the workspace's active members, bound directly or
+    through a group, whose role here grants manage (approve needs it; workspace admin implies
+    it). Never the caller: they are the PR's author, and an author cannot approve. Nor a service
+    account, which never reviews."""
+    from backend.app.db.repositories import binding_repo, group_repo, permission_repo, user_repo
+    bindings = await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id)
+    role_perms = await permission_repo.get_role_permissions_for_roles(
+        session, sorted({b.role_name for b in bindings}))
+    ids: set = set()
+    for b in bindings:
+        if not {_MANAGE, "workspace:admin"} & set(role_perms.get(b.role_name, ())):
+            continue
+        if b.subject_type == "user":
+            ids.add(b.subject_id)
+        elif b.subject_type == "group":
+            ids.update(m.user_id for m in await group_repo.list_group_members(session, b.subject_id))
+    ids.discard(user.id)
+    idents = await user_repo.get_identities_by_ids(session, sorted(ids))
+    people = [{"user_id": uid, "display_name": i["name"] or None, "email": i["email"]}
+              for uid, i in idents.items()
+              if i["status"] == "active" and not i["deleted"] and not is_service_account(uid)]
+    return sorted(people, key=lambda p: (p["display_name"] or p["user_id"]).lower())
+
+
 @router.post("/graphs/{graph_id}/branches/{branch_id}/merge-requests",
              response_model=OpenPrResponse, status_code=201)
 async def open_merge_request(
@@ -3522,8 +3880,9 @@ async def list_data_source_pull_requests(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """All PRs against a data source (every view on it). Tenant-isolated: the data source's
-    graph must live in ``ws_id``."""
+    """All PRs against a data source (every view on it). ``status=open`` lists every PR not yet
+    merged or closed (the review inbox). Tenant-isolated: the data source's graph must live in
+    ``ws_id``."""
     g = await svc.get_graph_by_data_source(data_source_id)
     if g is None or g["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="data source not found in workspace")
@@ -3551,9 +3910,10 @@ async def update_merge_request(
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """Edit a merge request's title/description (review metadata)."""
+    """Edit a merge request's title/description/reviewers (review metadata)."""
     with _domain_errors():
-        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description)
+        return await svc.update_pr(pr_id=pr_id, title=body.title, description=body.description,
+                                   reviewers=body.reviewers)
 
 
 @router.get("/merge-requests/{pr_id}/preview", response_model=MergePreviewResponse)
@@ -3617,6 +3977,7 @@ async def diff_merge_request_children(
 @router.post("/merge-requests/{pr_id}/approve", response_model=PrResponse)
 async def approve_merge_request(
     ws_id: str, pr_id: str,
+    body: Optional[ApproveRequest] = None,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
@@ -3624,7 +3985,8 @@ async def approve_merge_request(
 ):
     await _not_their_own(session, _pr, user.id)
     with _domain_errors():
-        return await svc.approve_pr(pr_id=pr_id, actor=user.id)
+        return await svc.approve_pr(pr_id=pr_id, actor=user.id,
+                                    expected_head_commit_id=body.expected_head_commit_id if body else None)
 
 
 @router.post("/merge-requests/{pr_id}/close", response_model=PrResponse)
@@ -3643,6 +4005,7 @@ async def merge_merge_request(
     ws_id: str, pr_id: str, body: MergePrRequest,
     background: BackgroundTasks,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _publisher: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -3653,9 +4016,10 @@ async def merge_merge_request(
     target, source = str(_pr["target_graph_id"]), _pr.get("source_branch_id")
     if source and await svc.branch_change_count(
             graph_id=target, branch_id=str(source)) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
-        return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),
-                                    graph_id=target, branch_id=str(source), actor=user.id,
-                                    body=body, merge_request_id=pr_id)
+        with _domain_errors():
+            return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),
+                                        graph_id=target, branch_id=str(source), actor=user.id,
+                                        body=body, merge_request_id=pr_id)
     cset = await _pr_containment_types(svc, session, ws_id, _pr)
     rules = await _pr_ontology_rules(svc, session, ws_id, _pr)
     identity = await _node_identity_for_meta(session, await svc.get_graph(target))

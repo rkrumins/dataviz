@@ -33,6 +33,7 @@ _NODES = [
     ["_GVRollupMeta"],                  # projector rollup watermark
     ["_AggMeta"],                       # aggregation run stamp
     ["_Projection"],                    # dedicated-projection scaffolding
+    ["_GVProjMeta"],                    # projector pass marker (seq, epoch)
 ]
 _EDGES = ["FLOWS_TO", "FLOWS_TO", "AGGREGATED", "AGGREGATED"]
 

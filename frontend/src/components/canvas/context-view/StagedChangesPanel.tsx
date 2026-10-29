@@ -7,7 +7,7 @@
  * button that triggers `applyAll → saveToBackend`.
  */
 
-import { useMemo, useState, useEffect, useRef } from 'react'
+import { useCallback, useMemo, useState, useEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
@@ -108,6 +108,9 @@ const TONE = {
   },
 } as const
 
+/** A save is in flight: until it settles the review stays open and nothing in it is discarded. */
+const saving = () => useStagedChangesStore.getState().applyStatus === 'applying'
+
 function timeAgo(ts: number): string {
   const seconds = Math.floor((Date.now() - ts) / 1000)
   if (seconds < 60) return `${seconds}s ago`
@@ -138,6 +141,8 @@ export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModa
   const undo = useStagedChangesStore(s => s.undo)
   const redo = useStagedChangesStore(s => s.redo)
   const redoStack = useStagedChangesStore(s => s.redoStack)
+  const closeUnlessSaving = useCallback(() => { if (!saving()) close() }, [close])
+  const discardUnlessSaving = (id: string) => { if (!saving()) discard(id) }
 
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set())
   const [filter, setFilter] = useState('')
@@ -156,12 +161,12 @@ export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModa
     const onKey = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
         e.stopPropagation()
-        close()
+        closeUnlessSaving()
       }
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [isOpen, close])
+  }, [isOpen, closeUnlessSaving])
 
   const grouped = useMemo(() => {
     const groups = new Map<StagedChangeType, StagedChange[]>()
@@ -200,7 +205,14 @@ export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModa
   }), [changes])
 
   const handleConfirm = async () => {
-    await onConfirm()
+    // One save at a time: a second press while one runs would send the same batch again.
+    if (saving()) return
+    useStagedChangesStore.setState({ applyStatus: 'applying' })
+    try {
+      await onConfirm()
+    } finally {
+      if (saving()) useStagedChangesStore.setState({ applyStatus: 'idle' })
+    }
   }
 
   return createPortal(
@@ -209,7 +221,7 @@ export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModa
           StrictMode click-shield where a stranded fixed-inset-0 node eats clicks). */}
       <Backdrop
         open={isOpen}
-        onClick={close}
+        onClick={closeUnlessSaving}
         zClassName="z-[80]"
         className="bg-black/70 backdrop-blur-md"
       />
@@ -244,7 +256,7 @@ export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModa
             <div className="relative flex-shrink-0 px-7 pt-6 pb-5 border-b border-white/[0.06]">
               {/* Top-right close */}
               <button
-                onClick={close}
+                onClick={closeUnlessSaving}
                 className="absolute top-5 right-5 w-8 h-8 rounded-lg flex items-center justify-center text-white/40 hover:text-white hover:bg-white/[0.06] transition-all"
                 aria-label="Close"
                 title="Close (Esc)"
@@ -283,7 +295,7 @@ export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModa
               {problems.length > 0 && (
                 <SaveProblemsBanner
                   problems={problems}
-                  onDiscard={(ids) => ids.forEach(id => discard(id))}
+                  onDiscard={(ids) => ids.forEach(discardUnlessSaving)}
                 />
               )}
 
@@ -304,8 +316,8 @@ export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModa
 
                   {/* Premium Undo/Redo cluster */}
                   <UndoRedoCluster
-                    canUndo={changes.length > 0}
-                    canRedo={redoStack.length > 0}
+                    canUndo={changes.length > 0 && applyStatus !== 'applying'}
+                    canRedo={redoStack.length > 0 && applyStatus !== 'applying'}
                     onUndo={undo}
                     onRedo={redo}
                   />
@@ -370,7 +382,7 @@ export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModa
                               colorKey={color}
                               isExpanded={expandedIds.has(change.id)}
                               onToggleExpanded={() => toggleExpanded(change.id)}
-                              onDiscard={() => discard(change.id)}
+                              onDiscard={() => discardUnlessSaving(change.id)}
                             />
                           ))}
                         </div>
@@ -405,7 +417,7 @@ export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModa
                               colorKey={rowColor}
                               isExpanded={expandedIds.has(change.id)}
                               onToggleExpanded={() => toggleExpanded(change.id)}
-                              onDiscard={() => discard(change.id)}
+                              onDiscard={() => discardUnlessSaving(change.id)}
                             />
                           )
                         })}
@@ -427,13 +439,14 @@ export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModa
                         close()
                       }
                     }}
-                    className="px-3 py-2 rounded-lg text-[12px] font-medium bg-transparent border border-white/[0.08] text-white/55 hover:bg-rose-500/10 hover:border-rose-400/40 hover:text-rose-200 transition-all"
+                    disabled={applyStatus === 'applying'}
+                    className="px-3 py-2 rounded-lg text-[12px] font-medium bg-transparent border border-white/[0.08] text-white/55 hover:bg-rose-500/10 hover:border-rose-400/40 hover:text-rose-200 transition-all disabled:opacity-50 disabled:pointer-events-none"
                   >
                     Discard all
                   </button>
                   <div className="flex-1" />
                   <button
-                    onClick={close}
+                    onClick={closeUnlessSaving}
                     className="px-4 py-2 rounded-lg text-[13px] font-medium bg-white/[0.04] border border-white/[0.08] text-white/75 hover:bg-white/[0.08] hover:text-white transition-all"
                   >
                     Cancel
@@ -465,7 +478,7 @@ export function StagedChangesPanel({ onConfirm, describe }: SaveConfirmationModa
                 <>
                   <div className="flex-1" />
                   <button
-                    onClick={close}
+                    onClick={closeUnlessSaving}
                     className="px-5 py-2 rounded-lg text-[13px] font-medium bg-white/[0.06] border border-white/10 text-white hover:bg-white/[0.10] transition-all"
                   >
                     Close

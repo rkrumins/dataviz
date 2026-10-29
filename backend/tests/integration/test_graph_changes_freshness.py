@@ -67,7 +67,7 @@ async def _run() -> None:
     current = (await svc.entity_value(graph_id=gid, entity_id="N", branch_id=d))
     try:
         await _save(svc, gid, d, _Op("update", "node", id="N", payload={"properties": {"owner": "eve"}},
-                                     base_version=token), actor="eve")
+                                     base_version=token))
         raise AssertionError("expected a conflict")
     except MergeConflict as exc:
         assert {c["entity_kind"] for c in exc.conflicts} == {"node"}

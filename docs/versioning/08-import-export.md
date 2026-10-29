@@ -271,10 +271,17 @@ write to the view — so the view must be in the workspace, not deleted, and edi
 
 An `idempotencyKey` makes `POST …/imports` and `POST …/exports` safe to send again. The route stores
 it as its sender's (`<user id>:<key>`), and `ix_jobs_idem_active` keeps one job per key on a graph,
-finished or not: the same key from the same caller answers with the job it started (`_job_for_key`)
-— an import whose file never arrived takes the new request's file and starts — and a key that
-started the other kind of job is `409 idempotency_key_reused`. Two requests racing with one key both
-get the winner's job, and the loser's draft is abandoned (`create_import_job`).
+finished or not: the same key from the same caller answers with the job it started (`_job_for_key`),
+and a key that started the other kind of job is `409 idempotency_key_reused`. An import still
+storing its file (pending, with no phase) is answered as it is, and nothing of the second request
+is stored. An import whose request broke off before its file was stored is failed there and then,
+keyed or not (`_abandon_unqueued`), so its draft takes the next import at once; the same key sent
+again takes it back (`reclaim_import`) under the rules a new import meets — the graph still in the
+workspace and writable, the draft open and still the caller's to edit, no other import running on
+it, the view it places into still editable — then stores this request's file and starts it. An
+export never queued is started. Two requests racing with one key both get the winner's job; the
+loser's draft never exists (it is opened in the job's transaction, which the refused insert rolls
+back).
 
 ---
 

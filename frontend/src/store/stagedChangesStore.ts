@@ -144,6 +144,9 @@ interface StagedChangesState {
   patchAfter: (changeId: string, patch: Record<string, unknown>, summary?: string) => void
   discard: (changeId: string) => void
   discardAll: () => void
+  /** Drop the changes a save carried, by id, without running their discard hooks (the canvas keeps
+   *  them as saved). A change staged while the save ran stays. `applyStatus` is left to the save. */
+  clearSaved: (ids: Iterable<string>) => void
   /** `graphWrites: false` — the published graph: every graph-data change fails with
    *  {@link PUBLISHED_READ_ONLY} (kept, for the user to move to a draft) instead of being dropped. */
   applyAll: (
@@ -362,6 +365,11 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
     set({ changes: [], redoStack: [], applyStatus: 'idle', lastApplyResult: null })
   },
 
+  clearSaved: (ids) => {
+    const done = new Set(ids)
+    set((s) => ({ changes: s.changes.filter((c) => !done.has(c.id)), redoStack: [], lastApplyResult: null }))
+  },
+
   undo: () => {
     const { changes } = get()
     if (changes.length === 0) return false
@@ -449,11 +457,13 @@ export const useStagedChangesStore = create<StagedChangesState>((set, get) => ({
       }
     }
 
-    set({
-      changes: remaining,
+    // A change staged while this ran was not sent: keep it.
+    const sent = new Set(sorted.map((c) => c.id))
+    set((s) => ({
+      changes: [...remaining, ...s.changes.filter((c) => !sent.has(c.id))],
       applyStatus: failed > 0 ? 'partial-error' : 'idle',
       lastApplyResult: { ok, failed },
-    })
+    }))
 
     return { ok, failed }
   },
@@ -497,6 +507,22 @@ export const useStagedChangeCount = () => useStagedChangesStore((s) => s.changes
 export const useIsReviewPanelOpen = () => useStagedChangesStore((s) => s.isReviewPanelOpen)
 export const useHasStagedChange = (targetId: string) =>
   useStagedChangesStore((s) => s.changes.some((c) => c.targetId === targetId))
+
+/** Staged changes not yet saved to `branchId`: the active scope's and any parked by a branch
+ *  switch. Scope keys are `${ws}::${ds}::${branch}` (CanvasRouter.tsx). */
+export function unsavedCountOnBranch(
+  s: Pick<StagedChangesState, '_scopeKey' | 'changes' | '_byScope'>,
+  branchId: string | null | undefined,
+): number {
+  if (!branchId) return 0
+  const onBranch = (key: string | null) => key?.split('::')[2] === branchId
+  let n = onBranch(s._scopeKey) ? s.changes.length : 0
+  for (const [key, slice] of Object.entries(s._byScope)) if (onBranch(key)) n += slice.changes.length
+  return n
+}
+
+export const useUnsavedCountOnBranch = (branchId: string | null | undefined) =>
+  useStagedChangesStore((s) => unsavedCountOnBranch(s, branchId))
 
 /**
  * Returns the latest staged change for a target, or undefined.

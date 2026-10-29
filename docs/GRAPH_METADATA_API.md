@@ -154,7 +154,7 @@ The route sits under `/admin/` for historical reasons; it needs only read access
 |---|---|
 | `manual` | Copied from an existing graph when version control was turned on, then curated in {brand}. |
 | `blank` | Built from scratch in {brand}: its first commits are people's, not an import. |
-| `authoritative`, `hybrid` | Reserved for a graph seeded and refreshed from an external system of record. The version store accepts them, but nothing in {brand} sets them today. |
+| `authoritative`, `hybrid` | Reserved for a graph seeded and refreshed from an external system of record. The version store accepts them, but only a caller who creates a graph with that `kind` (`POST /api/v1/{ws_id}/versioning/graphs`) sets them. |
 
 A fork takes its parent's `kind`.
 
@@ -363,7 +363,7 @@ nothing more. Honour `Retry-After` on a `429` or `503` —
 
 | You see | It means | What to do |
 |---|---|---|
-| The source is gone from the list | It was deleted — it sits in the trash for 30 days (`GRAPHVER_PURGE_GRACE_DAYS`), when it can be restored with its history, then is removed — or moved to another workspace | Look for its `id` in your other workspaces: a moved source keeps its `id` and its `graphId`, and its history carries on there. A move can be undone for 7 days; forks of its graph stay in the old workspace. A key limited to the old workspace no longer reaches it, while one limited to the data source itself follows it, if whoever it acts as can read it there. Otherwise treat it as deleted, until it comes back |
+| The source is gone from the list | It was deleted — it sits in the trash for 30 days (`GRAPHVER_PURGE_GRACE_DAYS`), when it can be restored with its history, then is removed — or moved to another workspace | Look for its `id` in your other workspaces: a moved source keeps its `id` and its `graphId`, and its history carries on there. A move can be undone for 7 days; forks of its graph move with it. A key limited to the old workspace no longer reaches it, while one limited to the data source itself follows it, if whoever it acts as can read it there. Otherwise treat it as deleted, until it comes back |
 | History routes answer `404` for a `graphId` you hold | The graph is in the trash or was deleted, or is no longer in this workspace | As above |
 
 No route turns version control off, so `versioning.enabled` doesn't go back to `false` while the
@@ -400,8 +400,7 @@ key is `nxsat_…` and is used exactly as above.
 | `401` | Not signed in, or the key isn't accepted | See [When a key is refused](/guide/api-keys#when-a-key-is-refused) |
 | `403` `missing_permission` | You can't read this workspace's data sources | Ask for access to the workspace |
 | `403` `api_key_out_of_scope` | The key doesn't cover the whole workspace (the list) or the graph's data source (the history) | Use a key that does |
-| `403` with `"type": "access_denied"` | `branchId` names a draft you can't read | Read your own drafts, those shared with you, or — managing the data — any |
-| `404` | The workspace or graph doesn't exist, isn't in the workspace you named, or the graph was deleted | Check the ids — a graph in another workspace answers `404`, never `403` |
+| `404` | The workspace or graph doesn't exist, isn't in the workspace you named, or the graph was deleted — or `branchId` names a draft you can't read | Check the ids — a graph in another workspace answers `404`, never `403`. Read your own drafts, those shared with you, or — managing the data — any |
 | `422` | A parameter out of range: a `limit` above 500, a negative `before`, `include` other than `versioning` | Fix the request |
 | `503` `DB_UNAVAILABLE` | The version store can't be read right now (`include=versioning` only) | Wait `Retry-After` seconds and ask again. Leave out `include=versioning` to list the sources without it |
 | `504` | The request ran past its time limit | Ask again, with a smaller `limit` |

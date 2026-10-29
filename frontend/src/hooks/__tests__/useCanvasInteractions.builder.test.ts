@@ -17,6 +17,11 @@ import { describe, it, expect, beforeEach, vi } from 'vitest'
 vi.mock('@/providers/GraphProviderContext', () => ({
   useGraphProvider: () => ({}),
 }))
+// The builder opens once a draft is active.
+vi.mock('@/features/versioning/model/ensureDraftOpen', () => ({
+  ensureDraftOpen: async () => 'branch-1',
+}))
+const settle = () => new Promise((r) => setTimeout(r, 0))
 
 import { useCanvasInteractions } from '../useCanvasInteractions'
 import { useCanvasStore } from '@/store/canvas'
@@ -38,29 +43,33 @@ const resetStores = () => {
 describe('useCanvasInteractions -> Hierarchy Builder routing', () => {
   beforeEach(resetStores)
 
-  it('createChild(nodeId) opens the builder store scoped to the node urn', () => {
+  it('createChild(nodeId) opens the builder store scoped to the node urn', async () => {
     seedNode('node-1', 'urn:real:node-1', 'dataset')
     const { result } = renderHook(() => useCanvasInteractions())
 
     act(() => result.current.createChild('node-1'))
+    await act(settle)
 
     const s = useHierarchyBuilderStore.getState()
     expect(s.isOpen).toBe(true)
     expect(s.parentUrn).toBe('urn:real:node-1')
   })
 
-  it("keyboardHandlers.onCreate() opens the builder store at root (no parentUrn)", () => {
+  it("keyboardHandlers.onCreate() opens the builder store at root (no parentUrn)", async () => {
     const { result } = renderHook(() => useCanvasInteractions())
 
     act(() => result.current.keyboardHandlers.onCreate())
+    await act(settle)
 
     const s = useHierarchyBuilderStore.getState()
     expect(s.isOpen).toBe(true)
     expect(s.parentUrn).toBeNull()
   })
 
-  it('keyboardHandlers.onCancel() closes the builder when open and no inline edit is active', () => {
+  it('keyboardHandlers.onCancel() closes the builder when open and no inline edit is active', async () => {
     useHierarchyBuilderStore.getState().open()
+    await settle()
+    expect(useHierarchyBuilderStore.getState().isOpen).toBe(true)
     const { result } = renderHook(() => useCanvasInteractions())
 
     act(() => result.current.keyboardHandlers.onCancel())
@@ -68,10 +77,11 @@ describe('useCanvasInteractions -> Hierarchy Builder routing', () => {
     expect(useHierarchyBuilderStore.getState().isOpen).toBe(false)
   })
 
-  it('createChild leaves the builder store untouched when the parent node is missing', () => {
+  it('createChild leaves the builder store untouched when the parent node is missing', async () => {
     const { result } = renderHook(() => useCanvasInteractions())
 
     act(() => result.current.createChild('missing-node'))
+    await act(settle)
 
     expect(useHierarchyBuilderStore.getState().isOpen).toBe(false)
   })

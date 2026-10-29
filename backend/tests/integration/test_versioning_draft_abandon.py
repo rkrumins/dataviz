@@ -1,6 +1,7 @@
 """Draft abandonment (P11) — needs Postgres.
 
-abandon_draft marks an open draft inert: no further stage/checkpoint/publish.
+abandon_draft marks an open draft inert: no further stage/checkpoint/publish, and no
+apply_ops write (409 branch_closed) — nor on a merged draft.
 Re-abandoning is idempotent; main and already-merged drafts cannot be abandoned;
 a shared draft requires a maintainer (an editor cannot abandon it).
 """
@@ -10,6 +11,7 @@ import os
 import pytest
 
 from backend.app.services.versioning import db, models
+from backend.app.services.versioning.errors import BranchNotOpen
 from backend.app.services.versioning.service import AccessDenied, GraphVersioningService
 
 
@@ -20,6 +22,15 @@ def _n(eid):
 
 async def _stage(svc, gid, bid, actor, eid):
     await svc.stage_changes(graph_id=gid, branch_id=bid, actor=actor, ops=[_n(eid)])
+
+
+async def _assert_write_refused(svc, gid, bid, status):
+    """apply_ops on a closed draft is refused and writes no commit."""
+    before = len(await svc.commit_log(graph_id=gid, branch_id=bid))
+    with pytest.raises(BranchNotOpen) as exc:
+        await svc.apply_ops(graph_id=gid, branch_id=bid, actor="alice", ops=[_n("Z")])
+    assert exc.value.status == status
+    assert len(await svc.commit_log(graph_id=gid, branch_id=bid)) == before
 
 
 async def _run() -> None:
@@ -40,10 +51,11 @@ async def _run() -> None:
         await svc.checkpoint(graph_id=gid, branch_id=d, actor="alice")
     with pytest.raises(ValueError):
         await svc.publish(graph_id=gid, branch_id=d, actor="alice", message="x")
+    await _assert_write_refused(svc, gid, d, "abandoned")
 
     # re-abandon is idempotent; the branch listing reflects the status
     assert (await svc.abandon_draft(graph_id=gid, branch_id=d, actor="alice"))["status"] == "abandoned"
-    branches = {b["branch_id"]: b for b in await svc.list_branches(graph_id=gid)}
+    branches = {b["branch_id"]: b for b in (await svc.list_branches(graph_id=gid, status=["all"]))[0]}
     assert branches[d]["status"] == "abandoned"
 
     # ── cannot abandon main, nor an already-merged draft ────────────────────
@@ -57,6 +69,7 @@ async def _run() -> None:
     await svc.publish(graph_id=gid, branch_id=d2, actor="alice", message="ship")   # → merged
     with pytest.raises(ValueError):
         await svc.abandon_draft(graph_id=gid, branch_id=d2, actor="alice")
+    await _assert_write_refused(svc, gid, d2, "merged")
 
     # ── shared draft: an editor cannot abandon; the maintainer can ──────────
     sd = await svc.open_draft(graph_id=gid, owner="alice", shared=True)

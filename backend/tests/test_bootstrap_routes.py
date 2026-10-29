@@ -47,6 +47,8 @@ _DECISION = {"action": "collapse", "fingerprint": "f" * 32}
 @pytest.mark.parametrize("path, target, kind, extra", [
     (f"/api/v1/{WS}/graph/bootstrap?dataSourceId={DS}",
      "create_bootstrap_job", "cleanup_in_progress", {}),
+    (f"/api/v1/{WS}/graph/bootstrap?dataSourceId={DS}",
+     "create_bootstrap_job", "graph_key_in_use", {}),
     (f"/api/v1/{WS}/graph/bootstrap/retry?dataSourceId={DS}&mode=restart",
      "retry_bootstrap", "job_active", {}),
     (f"/api/v1/{WS}/graph/bootstrap/retry?dataSourceId={DS}&mode=resume",

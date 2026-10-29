@@ -55,6 +55,10 @@ class _Session:
     async def get(self, _orm, _key, **_kw):
         return self._row
 
+    async def scalar(self, stmt):
+        self._log.append(("sql", stmt, None))
+        return None
+
 
 def _sessions(log, row=None):
     @contextlib.asynccontextmanager
@@ -228,7 +232,7 @@ async def test_run_import_resolves_the_mapping_for_its_worker(monkeypatch):
             return dict(_NO_TALLIES)
 
     row = SimpleNamespace(workspace_id="ws", data_source_id="ds", scope_view_id=None,
-                          reconcile_mode="upsert")
+                          reconcile_mode="upsert", branch_id="br_1")
     monkeypatch.setattr(ver_db, "graphver_session", _sessions([], row))
     monkeypatch.setattr(service_mod, "ImportWorker", _Worker)
     await ImportExportService(versioning=object(), store=object(),
@@ -347,14 +351,19 @@ async def test_an_import_taken_over_at_its_finish_stops_there():
 ])
 async def test_only_a_failed_job_is_queued_again(monkeypatch, status, cursor, queued, cleared):
     log = []
-    row = SimpleNamespace(status=status, last_cursor=cursor, current_phase=None,
-                          error_message="it broke", completed_at="t", updated_at="t",
+    row = SimpleNamespace(job_type="ingest", graph_id="g_1", branch_id="br_1", status=status,
+                          last_cursor=cursor, current_phase=None, error_message="it broke",
+                          completed_at="t", updated_at="t",
                           summary={**_NO_TALLIES, "new": 9, "takeovers": 4,
                                    "failure": {"code": "infrastructure", "action": "resume"}})
     monkeypatch.setattr(ver_db, "graphver_session", _sessions(log, row))
-    svc = ImportExportService(versioning=object(), store=object())
+
+    async def lock_branch(_s, graph_id, branch_id):
+        log.append(("lock", branch_id))
+    svc = ImportExportService(versioning=SimpleNamespace(_lock_branch=lock_branch), store=object())
 
     assert await svc.requeue_failed("vjob_1") is queued
+    assert (("lock", "br_1") in log) is (status == "failed"), "its draft's lock, to look for another"
     deletes = [entry[1] for entry in log if getattr(entry[1], "is_delete", False)]
     assert bool(deletes) is cleared
     if queued:

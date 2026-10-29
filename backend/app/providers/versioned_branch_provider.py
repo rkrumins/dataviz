@@ -540,6 +540,12 @@ class VersionedBranchProvider:
         """Value suggestions — same gap as :meth:`deep_search`."""
         raise NotImplementedError(_NO_DEEP_SEARCH)
 
+    async def deep_search_resolve_refs(self, scope, refs, *, context, confined=False,
+                                       with_paths=False):
+        """Name references — same gap as :meth:`deep_search`. A draft overlaid on this
+        provider hands them here."""
+        raise NotImplementedError(_NO_DEEP_SEARCH)
+
     # ---- stats: counts + schema summaries over the composed branch state - #
     async def get_stats(self, bypass_cache: bool = False) -> Dict[str, Any]:
         """Node/edge counts + per-type breakdowns from the composed branch state.
@@ -624,9 +630,11 @@ class VersionedBranchProvider:
     async def _commit(self, ops: List[dict], message: str) -> Optional[str]:
         if self._as_of is not None:
             raise PermissionError("cannot write to a historical (as-of) view")
+        # allow_main: ContextEngine serves a stale main through this provider, and its writes are
+        # the ordinary main write-through (a draft id is unaffected by the flag).
         return await self._svc.apply_ops(
             graph_id=self._gid, branch_id=self._branch, ops=ops, actor=self._actor, message=message,
-            containment_edge_types=self._containment_types)
+            containment_edge_types=self._containment_types, allow_main=True)
 
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
         ops = [{"op": "create", "entity_kind": "node", "entity_id": node.urn,
