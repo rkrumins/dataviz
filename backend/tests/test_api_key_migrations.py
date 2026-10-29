@@ -95,6 +95,10 @@ _ON_LIVE_TABLES = {
     "20261018_1200_gv_lifecycle.py": ("upgrade", "downgrade"),
     # graphver.projection_state again: a customer graph's spelling and its outside changes.
     "20261028_1000_gv_ps_unowned.py": ("upgrade", "downgrade"),
+    # graphver.branches, which every draft request reads.
+    "20261029_1000_gv_branch_vis.py": ("upgrade", "downgrade"),
+    # workspaces and workspace_data_sources, which most requests read.
+    "20261029_1100_drafts_policy.py": ("upgrade", "downgrade"),
 }
 
 

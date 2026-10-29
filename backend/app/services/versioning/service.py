@@ -547,7 +547,7 @@ class GraphVersioningService:
             await s.flush()
 
             main = BranchORM(
-                graph_id=graph.id, kind="main", name="main", created_by=actor
+                graph_id=graph.id, kind="main", name="main", visibility="public", created_by=actor
             )
             s.add(main)
             await s.flush()
@@ -2236,7 +2236,8 @@ class GraphVersioningService:
             )
             s.add(fork)
             await s.flush()
-            main = BranchORM(graph_id=fork.id, kind="main", name="main", created_by=actor)
+            main = BranchORM(graph_id=fork.id, kind="main", name="main", visibility="public",
+                             created_by=actor)
             s.add(main)
             await s.flush()
             # Fork-point commit carries the parent's state hash; no version rows.

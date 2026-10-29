@@ -147,7 +147,10 @@ class BranchORM(VersioningBase):
     name = Column(Text, nullable=True)
     description = Column(Text, nullable=True)              # optional, user-editable
     owner = Column(Text, nullable=True)                    # actor (per-user draft)
-    is_shared = Column(Boolean, nullable=False, default=False)
+    is_shared = Column(Boolean, nullable=False, default=False)  # has member rows
+    # public: everyone who reads the data source sees it, and everyone who edits it may write;
+    # private: its owner, its members and the people on its review only. ``main`` reads public.
+    visibility = Column(Text, nullable=False, default="private", server_default=text("'private'"))
     base_commit_seq = Column(BigInteger, nullable=True)    # main seq branched from
     head_commit_id = Column(Text, nullable=True)           # latest checkpoint (logical)
     status = Column(Text, nullable=False, default="open")  # open|publishing|merged|abandoned
@@ -161,12 +164,16 @@ class BranchORM(VersioningBase):
         Index("ix_branches_graph", "graph_id"),
         Index("ix_branches_owner", "owner"),
         Index("ix_branches_status", "status"),
+        Index("ix_branches_graph_vis", "graph_id", "visibility", "status"),
         CheckConstraint(
             "kind IN ('main','draft','fork_draft')", name="ck_branches_kind"
         ),
         CheckConstraint(
             "status IN ('open','publishing','merged','abandoned')",
             name="ck_branches_status",
+        ),
+        CheckConstraint(
+            "visibility IN ('public','private')", name="ck_branches_visibility"
         ),
     )
 
@@ -189,6 +196,7 @@ class BranchMemberORM(VersioningBase):
         UniqueConstraint(
             "branch_id", "subject_type", "subject_id", name="uq_branch_member"
         ),
+        Index("ix_bm_subject", "subject_type", "subject_id"),
         CheckConstraint(
             "subject_type IN ('user','group')", name="ck_bm_subject_type"
         ),
@@ -772,6 +780,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261028_1000_gv_ps_unowned.
     _bounded_step(conn, "the customer key columns were not added",
                   lambda: ensure_ps_customer_key_columns(conn), required=True)
+    # 20261029_1000_gv_branch_vis. Every draft request reads branches: short tries.
+    _bounded_step(conn, "the draft visibility column was not added",
+                  lambda: ensure_branch_visibility(conn), required=True, tries=10)
 
 
 def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
@@ -865,6 +876,51 @@ def ensure_ps_customer_key_columns(conn) -> None:
     ps = f'"{_SCHEMA}"."projection_state"'
     conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS physical_types JSONB"))
     conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS external_drift JSONB"))
+
+
+def ensure_branch_visibility(conn) -> None:
+    """Add ``branches.visibility`` (public or private), its check and the listing index, and the
+    index that finds a person's or group's drafts among ``branch_members``. Every existing draft
+    reads private and ``main`` public. A member row left on a draft that isn't shared granted
+    nothing, and would grant access from now on, so it is deleted; a draft marked shared with no
+    member left is unmarked, so ``is_shared`` means "has members". A no-op without the table, and
+    once it is all there (an ALTER takes the table's ACCESS EXCLUSIVE lock even when it adds
+    nothing). ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("branches", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    has_members = inspector.has_table("branch_members", schema=_SCHEMA)
+    present = {c["name"] for c in inspector.get_columns("branches", schema=_SCHEMA)}
+    indexed = {i["name"] for i in inspector.get_indexes("branches", schema=_SCHEMA)}
+    if has_members:
+        indexed |= {i["name"] for i in inspector.get_indexes("branch_members", schema=_SCHEMA)}
+    if "visibility" in present and "ix_branches_graph_vis" in indexed and (
+            not has_members or "ix_bm_subject" in indexed):
+        return
+    branches = f'"{_SCHEMA}"."branches"'
+    members = f'"{_SCHEMA}"."branch_members"'
+    if "visibility" not in present:
+        conn.execute(text(
+            f"ALTER TABLE {branches} ADD COLUMN IF NOT EXISTS visibility TEXT NOT NULL DEFAULT 'private'"))
+        conn.execute(text(f"ALTER TABLE {branches} DROP CONSTRAINT IF EXISTS ck_branches_visibility"))
+        conn.execute(text(f"ALTER TABLE {branches} ADD CONSTRAINT ck_branches_visibility "
+                          "CHECK (visibility IN ('public','private'))"))
+        conn.execute(text(f"UPDATE {branches} SET visibility = 'public' WHERE kind = 'main'"))
+        if has_members:
+            left = conn.execute(text(
+                f"DELETE FROM {members} m USING {branches} b "
+                "WHERE b.id = m.branch_id AND NOT b.is_shared")).rowcount
+            if left:
+                logger.warning("%d member row(s) left on drafts that weren't shared were deleted: "
+                               "they granted nothing", left)
+            conn.execute(text(
+                f"UPDATE {branches} b SET is_shared = false WHERE b.is_shared "
+                f"AND NOT EXISTS (SELECT 1 FROM {members} m WHERE m.branch_id = b.id)"))
+    conn.execute(text(
+        f"CREATE INDEX IF NOT EXISTS ix_branches_graph_vis ON {branches} (graph_id, visibility, status)"))
+    if has_members:
+        conn.execute(text(
+            f"CREATE INDEX IF NOT EXISTS ix_bm_subject ON {members} (subject_type, subject_id)"))
 
 
 def ensure_mr_approvals_column(conn) -> None:
