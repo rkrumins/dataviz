@@ -35,7 +35,12 @@ limitations** — a changelog that only lists good news is not worth reading.
   that, a replica held up by a write is never flagged failed. A search that needs longer runs as
   more statements and finishes as before. A part's last try is the same length (it was 94 s).
   With no replica to answer, the master takes the read for two fifths of the window, as a write
-  does. Standalone and sentinel deployments are unchanged.
+  does. On standalone and sentinel deployments the limits are unchanged; a sentinel deployment
+  with replicas sends search reads to them too.
+- **A query that runs as one statement stops at the same limit on a cluster.** A Cypher query in
+  the console and a path search ("how does A reach B") can't be split, so they stop at 10 s on
+  the shipped window (6 s on a master), whatever `NATIVE_QUERY_MAX_TIMEOUT_MS` (30 s) allows. A
+  longer window gives them longer: 45000 allows 30 s.
 
 ### Upgrading
 

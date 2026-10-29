@@ -597,8 +597,16 @@ How the deployed `FALKORDB_ARGS` values are derived:
     `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` together: 30000 allows 20 s statements,
     45000 allows 30 s. The cost is a slower failover when a master really dies;
     search never runs on a master, so it never needs the window for itself.
+  - *Queries that run as one statement.* A Cypher query in the console and a
+    path search can't be split, so on a cluster they stop at the same limit
+    (10 s at 15000, 6 s on a master), whatever `NATIVE_QUERY_MAX_TIMEOUT_MS`
+    allows. A longer window is the only way to give them longer.
   - *More concurrent searches.* Search capacity is the replicas' query threads,
-    so add replicas per shard (each adds `THREAD_COUNT` threads); a replica kept
+    so add replicas per shard (each adds `THREAD_COUNT` threads). Measured on a
+    ~5M-entity graph (1.5M nodes, 3.8M edges), one search over the whole data
+    source — text, tag, property or two conditions — took 2–4 s of replica CPU,
+    so each replica core finishes about one such search every 3 s; a graph lives
+    on one shard, so it is that shard's replicas that count. A replica kept
     for search can be set to `cluster-replica-no-failover yes` so that its
     pauses never touch failover. Size `repl-backlog-size` for the writes a
     replica may queue during a long statement, so that it catches up with a
