@@ -291,6 +291,33 @@ class ProjectionKeyInvalid(_HttpMapped, RuntimeError):
                          {"type": "invalid_target_key", "key": key})
 
 
+class AmbiguousSpelling(_HttpMapped, RuntimeError):
+    """A customer's graph spells one of history's types more than one way (``table`` and
+    ``Table``, both holding nodes), and nothing recorded which is its own: the projector can't
+    tell which to write, and what is brought into history from one would be written back as a
+    copy under the other. ``spelled`` maps each such type to its spellings."""
+
+    def __init__(self, spelled: Dict[str, Any]):
+        self.spelled = {t: sorted(s) for t, s in spelled.items()}
+        ways = "; ".join(f"{t} as {' and '.join(s)}" for t, s in sorted(self.spelled.items()))
+        super().__init__(
+            f"The graph spells a type history holds as one more than one way ({ways}). Keep one "
+            "spelling of each in the graph, relabelling or removing the other's nodes.",
+            {"type": "spelled_two_ways", "spelled": self.spelled})
+
+
+class NotAnEdge(_HttpMapped, ValueError):
+    """An edge update or delete named an id that, on that branch, names an item and no edge:
+    refused rather than the item be changed or deleted as if it were the edge."""
+
+    status_code = 422
+
+    def __init__(self, ids):
+        self.ids = sorted(ids)
+        super().__init__(f"Not a connection: {', '.join(self.ids[:5])} — an item has that id.",
+                         {"type": "invalid_patch"})
+
+
 class GraphNotWritable(_HttpMapped, RuntimeError):
     """A content write reached a graph that is not live: editing is paused (``frozen``), or it is
     in the trash (``trashed``) or being permanently deleted (``purging``). A state a later schema
@@ -325,4 +352,5 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
                LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionKeyInUse,
-               ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict)
+               ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
+               AmbiguousSpelling, NotAnEdge)

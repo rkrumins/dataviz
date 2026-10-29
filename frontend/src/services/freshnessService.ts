@@ -156,7 +156,7 @@ export interface FreshnessRow {
     rollupStorageOverride?: RollupStorage | null
     resolvedRollupStorage?: RollupStorage | null
     rollupStorageSource?: 'custom' | 'global' | 'default' | null
-    /** True when a live versioned graph exists — mastered here, not external.
+    /** True when a live versioned graph exists and its enable has finished — mastered here, not external.
      *  Also true under ``projectionStalled``: a wedged source keeps its
      *  "mastered here" badge at exactly the moment an operator most needs to
      *  know who owns it. */

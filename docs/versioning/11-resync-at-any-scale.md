@@ -11,11 +11,18 @@
 > size guard (`GRAPHVER_RESYNC_MAX_ENTITIES`, default 250,000) still refuses what would not
 > survive. This chapter is how that guard gets deleted. It exists so the next person does not
 > have to re-derive any of it.
+>
+> **2026-10-28:** a re-sync now reads the graph's own key and makes its rows say what history
+> would before the merge (`_as_history_holds`: the data source's spelling, no empty field a read
+> fills in that the item never held, and `edge:<id>` for a connection whose id is an item's).
+> `test_bring_into_history_takes_in_what_the_graph_holds_and_nothing_else` re-syncs a bootstrapped
+> graph that the projector has also written, and asserts that only what was written outside
+> history is applied.
 
 ## The problem, measured
 
-`POST /{ws}/graph/resync` → `resync_from_provider` → `sync_ingest`, run against a real
-478,430-entity graph:
+A re-sync (`resync_from_provider` → `sync_ingest`, then what `POST /{ws}/graph/resync` ran), run
+against a real 478,430-entity graph:
 
 | | |
 |---|---|
@@ -120,7 +127,7 @@ Result: **O(seen + touched + page)** instead of O(graph).
 
 Bounded memory is necessary and not sufficient: even at O(window), a 7.7M re-sync is ~20
 minutes of work, and it currently runs **inline in the HTTP request**
-(`endpoints/graph.py` awaits `resync_from_provider`). The end state is a **`resync` job on the
+(`endpoints/graph.py` awaits `bring_into_history`). The end state is a **`resync` job on the
 existing phased worker** — the machinery landed with the bootstrap and is a direct fit:
 
 - `JobORM` as the durable queue, `job_type='resync'` (widen `ck_jobs_type` — **widen-only**,

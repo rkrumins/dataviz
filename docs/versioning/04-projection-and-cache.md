@@ -71,6 +71,37 @@ through the projector automatically.
   `PROJECTION_FALKOR_WRITE_TIMEOUT_S` (default 60, clamped under the fleet's `TIMEOUT_MAX`) /
   `PROJECTION_FALKOR_READ_TIMEOUT_S` (default 30), plus a client-side hang net. Without an explicit
   budget the FalkorDB fleet's `TIMEOUT_DEFAULT 30000` killed un-budgeted seed batches mid-load.
+- **A graph enabled in place keeps its relationships' ids.** Nodes and edges share one id space, so
+  the enable re-keys an edge whose id is also a node's to `edge:<id>` in history; the graph still
+  calls it `<id>`. On a key the platform doesn't own, the edge merge sets `r.id =
+  coalesce(r.id, item.eid)`, and the typed delete matches `r.id IN [eid, pid]` (`pid` without one
+  `edge:` prefix), so a change or delete reaches it. `GraphVersioningService.resolve_edges` turns
+  the id the canvas holds into the edge it names (never a node that shares it) for both write
+  providers' `update_edge` / `delete_edge`; `/graph/changes` has the service do the same
+  (`apply_ops_detailed(aim_edges=True)`) once the draft is found writable by the caller and a retry
+  answered, a retry aimed as its first attempt was.
+- **A graph enabled in place keeps its own spelling of its types.** History stores each type as the
+  ontology declares it (`Table`, `FLOWS_TO`); the graph may say `table` and `flows_to`. Enabling
+  version control records the graph's spelling of every type
+  (`projection_state.physical_types`, `{"nodes": {type: label}, "edges": {...}}`), and every
+  label and relationship type a pass writes or matches goes through it (`reconcile.spelled_label` /
+  `spelled_type`, set per pass), as does Check sync. Types are matched without case, so a type the
+  ontology has since re-cased is still found. So an edit updates the node that is there rather than
+  adding a `:Table` copy beside it. A type the graph never had is written as declared. A graph that
+  spells one type two ways (`table` and `TABLE`) stops the enable at its checks
+  (`one_spelling_per_type`). Keys the platform owns are written with the declared spelling.
+  - **A graph enabled before 2026-10-28** has no recorded spelling. Its next pass reads it from the
+    graph (`reconcile.graph_spelling`: its labels and relationship types; of several spellings of
+    one type, only those still holding something count, since a label outlives its nodes) and
+    records it once nothing is ambiguous. A type two spellings of which still hold nodes — such as
+    the `:Table` copies earlier passes wrote into a `:table` graph — is never written: the pass is
+    held back with `last_error` naming both spellings (`AmbiguousSpelling`, logged without a trace),
+    Check sync answers with the same reason, and nothing in the graph is written, copied or
+    relabelled until one spelling is left.
+  - **Bringing changes into history** records the spelling of each type it reads, over what was
+    recorded, so a type another writer introduced is written back as that writer spells it. A type
+    the graph spells two ways is refused (**409 `spelled_two_ways`**). A type history already holds
+    keeps history's casing, so a re-cased ontology doesn't retype every item.
 
 > **Limitation (phantom keys).** A node with no `urn` in its payload is keyed as `gv:<entity_id>` and
 > logs a WARN (`_node_urn`, `projection.py:93-106`; `_urn_for`, `:701-718`). This is a deliberate
@@ -240,8 +271,33 @@ reconciles **live node/edge counts** between Postgres and FalkorDB and bounded-h
 - **FalkorDB has *more* than committed main** (`projection.py:773-794`): first `_sweep_tombstoned`
   DETACH-DELETEs anything `main` has tombstoned that the incremental pass stranded (matched by
   committed `urn` with `entityId` confirmed, bounded by delete count — `projection.py:818-861`), then
-  re-counts. Whatever extra remains carries no tombstone (un-imported legacy/aggregation data) and is
-  **not** auto-deleted — it records an error prompting enablement/bootstrap.
+  re-counts. Whatever extra remains carries no tombstone and is **not** deleted. In a key the platform
+  minted it holds the pass back, with an error that says Rebuild replaces it with what history
+  holds: nothing else should write there, so there is nothing to bring into history. In a
+  customer's own graph (`owns_falkor_graph` false) it is what the graph's other writers put there —
+  an ETL that kept writing — so the pass publishes, and records how much in
+  `projection_state.external_drift` (`{at, nodes, edges, via}`, `via: verify`), which the next pass
+  that counts none clears (a pass that doesn't count, because the head moved on, leaves it); the
+  watermark's `externalDrift` carries it to the UI. A loader's or connector's change notification
+  (`signal_source_changed` with origin `script` or `connector`; `/source-changed` is a connector's)
+  flags it too, `via: notification`, before the signal's change check, which a property edit
+  passes unseen; no pass clears it, since such an edit changes no count. A key the platform minted
+  is never flagged. Bringing those changes into history (`POST /graph/resync`, [06](06-api-reference.md))
+  reads the graph, only while it holds main, as the enable reads it, and commits what history
+  doesn't hold; it deletes nothing from history. It clears the flag it began under (one raised
+  while it read stays), and queues a rebuild of the rollups, since the publish that follows moves
+  them by relationships the batch job may already have counted. Two guards keep a
+  surplus from hiding a loss: the edge merge returns how many of its items landed, and one whose
+  endpoint wasn't there is a shortfall, healed; and a surplus equal to the one last recorded skips
+  the sweep, which reads every tombstone of the graph. Counts can't see a balanced change, though:
+  a writer that removes items history holds and adds as many of its own leaves them level, so the
+  pass publishes, views read the graph without those items, and nothing is flagged. Check sync
+  (§12) lists the missing nodes, but relationships only by count; Rebuild writes them back.
+- **A customer's graph loses nothing history doesn't hold.** A reconcile into it (Rebuild, the heal
+  below) deletes no node, relationship or duplicate copy history doesn't hold, whatever its share of
+  the graph; it sweeps only what history tombstoned, and hands the rollups to the batch job when it
+  kept anything. An incremental pass removes only properties the node's payload had before the
+  window (`_mark_removed_properties`' `prior`); a reconcile removes none.
 - **FalkorDB has *fewer*** (`projection.py:795-813`): **bounded reseed once** — recompute the full
   `_compute_changes(0, to_seq)`, drop, re-apply, re-verify. Returns `reseeded=True`, which (because it
   wipes rollups) makes the caller queue a rollup rebuild via `on_rollups_stale`.
@@ -278,17 +334,25 @@ rollups are fresh without waiting for a full aggregation job.
 flowchart LR
     P["project_graph"] -->|"full seed<br/>OR rollup_pairs == 'stale'<br/>OR heal reseeded"| H["on_rollups_stale(graph_id)"]
     H --> MK["make_rollup_rebuild_hook<br/>(projection_target.py:62)"]
-    MK -->|"dedicated mode → skip"| SKIP["no-op<br/>(_proj graph untouched)"]
+    MK -->|"dedicated mode → mark stale"| TRIG
     MK -->|"in_source mode"| TRIG["AggregationService.trigger<br/>idempotency: gv-rollup-rebuild:&lt;graph_id&gt;"]
     TRIG --> AW["AggregationWorker MERGEs :AGGREGATED"]
 ```
 
 The hook fires after the watermark is durable (`projection.py:376-382`) so the rebuild sees the
 projected raw edges. `make_rollup_rebuild_hook` (`projection_target.py:62-98`) resolves the data
-source, **skips dedicated mode** (the `{graph_name}_proj` graph is never wiped by the projector,
-`:81-85`), and otherwise triggers the aggregation service with a stable idempotency key that collapses
-churn to one job. `resolve_aggregation_edge_types` (`projection_target.py:22-49`) likewise returns
-`None` in dedicated mode (incremental maintenance would write where nothing reads).
+source and triggers the aggregation service with a stable idempotency key that collapses churn to one
+job. A source in **dedicated mode** keeps its rollups in `{graph_name}_proj`, which the projector never
+writes, so every publish that changes its lineage or containment comes here: its summaries are marked
+stale (`source_changed`, cleared when the job completes) and the job is queued in dedicated mode.
+A change signal on such a source (the reconciliation sweep's, a loader's) marks and rebuilds it as
+any source's, rather than only refreshing reads as for a versioned source the projector maintains.
+A publish whose job is turned away because one is already running is not lost: a dedicated job is
+compared afterwards against the fingerprint it took before it ran (`worker._gate_fingerprint`), so
+the sweep sees what was written while it ran and queues another.
+`resolve_aggregation_edge_types` (`projection_target.py:22-49`) answers such a source's types with
+`"dedicated"` after them, and `_compute_rollup_deltas` and `_reconcile_in_place` then answer `"stale"`
+for a window or reconcile that changes lineage or containment, writing no rollup.
 
 > **Fixed (standalone-worker rollup gap).** The standalone worker now wires
 > `on_rollups_stale=make_rollup_rebuild_hook(...)` like the in-process worker and the interactive
@@ -412,12 +476,14 @@ provider per request:
   (`cache_manager.py:46-63`, TTL `LEASE_TTL=60s`, `config.py:140`) refcount in-flight reads so a
   graph isn't evicted mid-read. The neighbors endpoint pins the graph on the FalkorDB path
   (`versioning.py:1750`). Best-effort — a broker outage never fails a read.
-- **Evict** — `evict` (`cache_manager.py:87`) **skips a pinned graph**, marks `status=evicted` +
+- **Evict** — `evict` (`cache_manager.py:87`) **skips a pinned graph**, and a key another data source
+  or catalog entry reads, or whose readers can't be asked (`purge_worker.graph_key_readers`); marks `status=evicted` +
   `projected_commit_seq=0` (so the poll loop rebuilds it), and drops the FalkorDB key on the graph's
   pinned provider. Reads of an evicted graph serve the bounded Postgres fallback meanwhile.
 - **Per-provider RAM budget** — `ProjectionWorker.evict_once` (`worker.py:86`) evicts the coldest
   resident graphs per provider (`lru_candidates` by `last_projected_at`, `cache_manager.py:159`) down
-  to that provider's budget. Budgets come from `make_registry_budget_resolver` (`eviction_budget.py:24`,
+  to that provider's budget, taking the next coldest when one is refused, so a provider whose other
+  graphs are all refused stays above it. Budgets come from `make_registry_budget_resolver` (`eviction_budget.py:24`,
   provider row → `vconfig.falkor_budget_for` fallback).
 
 > **Limitation (no budget set by default).** RAM is a property of a FalkorDB *instance*, so each

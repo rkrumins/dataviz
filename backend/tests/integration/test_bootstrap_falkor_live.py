@@ -8,22 +8,42 @@ FalkorDB can answer is pinned here:
   INDEX — never a per-row id lookup under UNWIND, which FalkorDB answers with a full scan per row.
 * L2 — a source with duplicate urns (one of them under two labels), ``:AGGREGATED`` rollups,
   parallel relationships with distinct ids, a genuine self-loop, an edge between two copies and
-  a node with no urn: pause, decide, copy — with the collapse crashing once between moving the
+  edges with no id: pause, decide, copy — with the collapse crashing once between moving the
   edges and deleting the copies — and the source graph ends up holding exactly what Postgres
   holds: one node per urn, one relationship per stored edge. Its counts match, and the verify
   after the next publish is clean.
 * L3 — the rollups computed over the deleted copies are handed to the rebuild, and only then.
+* L5 — a graph that keys its nodes by another property (``id``) gets ``urn`` stamped from it
+  before the copy, so the copy holds every node and a publish lands on the node that is there; a
+  node with no identifier at all stops the enable before anything is copied.
+* L6 — an edge whose id is also a node's urn, re-keyed ``edge:<id>`` in history, keeps the graph's
+  own id through an update, and a delete reaches it: every publish goes out fresh.
+* L7 — something else keeps writing to the graph after the enable (a node, a relationship, a
+  property on a node history holds): publishes still go out fresh, the outside writes are kept and
+  counted (``external_drift``), and a Rebuild writes history back while deleting none of them.
+  Bringing them into history reads the graph itself and commits those writes and nothing else:
+  not the graph's spelling of a type, not the empty fields the projector writes. Over HTTP, the
+  route finds the graph through the projection's pin, clears the flag and queues the summaries'
+  rebuild.
+* L4 — a graph that spells its types its own way (``:table``, ``:flows_to``) against an ontology
+  that declares ``Table`` and ``FLOWS_TO`` keeps its spelling: history holds the declared one, and
+  every publish after the enable lands on the graph's own labels and goes out fresh. A graph
+  whose spelling was never recorded is read for it; one that spells a type two ways is held back
+  and left untouched. Types brought into history keep the graph's spelling, and a type spelled
+  two ways is refused.
 
 Needs Postgres (``GRAPHVER_E2E=1``) and FalkorDB:
   GRAPHVER_E2E=1 RUN_FALKOR_LIVE=1 FALKORDB_HOST=localhost FALKORDB_PORT=6379 \\
     python -m pytest -q tests/integration/test_bootstrap_falkor_live.py
 """
+import json
 import os
 
 import pytest
 from falkordb.asyncio import FalkorDB
 from redis.asyncio import ConnectionPool
 
+from backend.app.providers.falkordb_provider import FalkorDBProvider
 from backend.app.services.versioning import bootstrap_worker as bw
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.bootstrap_worker import (
@@ -31,11 +51,17 @@ from backend.app.services.versioning.bootstrap_worker import (
     bootstrap_status,
     create_bootstrap_job,
     decide_duplicates,
+    retry_bootstrap,
 )
 from backend.app.services.versioning.job_lease import Lease
-from backend.app.services.versioning.models import BranchORM, JobORM
+from backend.app.services.versioning.models import BranchORM, GraphORM, JobORM, ProjectionStateORM
+from backend.app.services.versioning.ontology import EdgeRule, EntityRule, OntologyRules
 from backend.app.services.versioning.projection import FalkorProjector
-from backend.app.services.versioning.reconcile import falkor_counts, pg_live_counts_projectable
+from backend.app.services.versioning.reconcile import (
+    ProjectionReconciler,
+    falkor_counts,
+    pg_live_counts_projectable,
+)
 from backend.app.services.versioning.service import GraphVersioningService
 from sqlalchemy import func, select
 
@@ -102,7 +128,7 @@ async def _make_source(client):
     2 a  Table  a-new  synced 2026-02  (kept)
     3 c  Column                        (kept: no times, lower id)
     4 c  Table                         (discarded — the same urn under another label)
-    5 —  Thing  no urn                 (invisible: never copied)
+    5 e  Thing
     6 d  Domain
     """
     for props, label in (
@@ -113,7 +139,7 @@ async def _make_source(client):
              "Table"),
             ({"urn": "urn:c", "displayName": "c-column"}, "Column"),
             ({"urn": "urn:c", "displayName": "c-table"}, "Table"),
-            ({"displayName": "no identifier"}, "Thing"),
+            ({"urn": "urn:e", "displayName": "e"}, "Thing"),
             ({"urn": "urn:d", "displayName": "d"}, "Domain")):
         await client.query(f"CREATE (n:{label}) SET n = $p", {"p": props})
     ids = [r[0] for r in await _rows(client, "MATCH (n) RETURN ID(n) ORDER BY ID(n)")]
@@ -127,7 +153,7 @@ async def _make_source(client):
             (2, 2, "FLOWS", {"id": "e6"}),                                  # a genuine self-loop
             (4, 1, "OWNS", {"id": "e4"}),                                   # cross-label copy
             (6, 4, "CONTAINS", {"id": "e8"}),                               # into it
-            (5, 0, "FLOWS", {}),                                            # from a urn-less node
+            (5, 0, "FLOWS", {}),                                            # no id, into a copy
             (6, 1, "FLOWS", {}), (6, 1, "FLOWS", {}),                       # parallel, no ids
             (0, 6, "AGGREGATED", {"weight": 2}), (6, 1, "AGGREGATED", {"weight": 1})):
         await client.query(f"MATCH (a), (b) WHERE ID(a) = $s AND ID(b) = $t "
@@ -233,20 +259,20 @@ async def test_a_collapse_leaves_the_source_graph_as_the_copy_has_it(graph):
 
     status = await bootstrap_status(data_source_id=ds)
     assert all(c["ok"] for c in status["report"]["checks"]), status["report"]["checks"]
-    assert status["report"]["stored"] == {"nodes": 4, "edges": 7}
+    assert status["report"]["stored"] == {"nodes": 5, "edges": 8}
 
-    # One node per urn — the copies kept — and the urn-less node left alone.
+    # One node per urn — the copies kept.
     nodes = await _rows(client, "MATCH (n) RETURN ID(n), n.urn ORDER BY ID(n)")
-    assert nodes == [[1, "urn:b"], [2, "urn:a"], [3, "urn:c"], [5, None], [6, "urn:d"]], nodes
+    assert nodes == [[1, "urn:b"], [2, "urn:a"], [3, "urn:c"], [5, "urn:e"], [6, "urn:d"]], nodes
     # Every relationship moved to the copy kept, keyed by its id: one per stored edge (the
     # parallel e1/e7 stay two), the edge between two copies gone with them, the rollup over a
-    # deleted copy gone with it — and a relationship from the urn-less node moved too.
+    # deleted copy gone with it — and an id-less relationship into a copy moved too, stamped.
     rels = sorted(tuple(r) for r in await _rows(
         client, "MATCH (a)-[r]->(b) RETURN ID(a), type(r), ID(b), coalesce(r.id, '')"))
     assert rels == sorted([
         (2, "FLOWS", 1, "e1"), (2, "FLOWS", 1, "e7"), (1, "FLOWS", 2, "e5"),
         (2, "FLOWS", 2, "e6"), (3, "OWNS", 1, "e4"), (6, "CONTAINS", 3, "e8"),
-        (5, "FLOWS", 2, ""), (6, "FLOWS", 1, "urn:d|FLOWS|urn:b"),
+        (5, "FLOWS", 2, "urn:e|FLOWS|urn:a"), (6, "FLOWS", 1, "urn:d|FLOWS|urn:b"),
         (6, "FLOWS", 1, "urn:d|FLOWS|urn:b"), (6, "AGGREGATED", 1, "")]), rels
 
     # The counts agree: Postgres' projectable counts against the source counted as a graph the
@@ -255,9 +281,9 @@ async def test_a_collapse_leaves_the_source_graph_as_the_copy_has_it(graph):
         main_id = (await s.execute(select(BranchORM.id).where(
             BranchORM.graph_id == gid, BranchORM.kind == "main"))).scalars().one()
         pg = await pg_live_counts_projectable(s, gid, main_id)
-    assert pg == (4, 6) and await falkor_counts(client, owned=False) == pg
-    # (Counted as a graph the projector owns, the urn-less node and the parallel copies would
-    # read as "extra entities" on every verify.)
+    assert pg == (5, 7) and await falkor_counts(client, owned=False) == pg
+    # (Counted as a graph the projector owns, the parallel copies would read as "extra
+    # entities" on every verify.)
     assert await falkor_counts(client) != pg
     assert hooked == [gid]
 
@@ -306,6 +332,671 @@ async def test_the_rollup_rebuild_is_queued_only_after_a_collapse(graph, falkor)
     assert (await runner.run_job(await _take(job_id)))["status"] == "completed"
     assert hooked == [gid], "copies were deleted: their rollups must be rebuilt"
     assert await _rows(dupes, "MATCH ()-[r:AGGREGATED]->() RETURN count(r)") == [[0]]
+
+
+async def _fresh(gid) -> bool:
+    async with db.graphver_session() as s:
+        ps, g = await s.get(ProjectionStateORM, gid), await s.get(GraphORM, gid)
+        return ps.projected_commit_seq == g.main_head_commit_seq
+
+
+# ── L5: a graph keyed by another property gets urns before the copy ──────────
+
+async def test_a_graph_keyed_by_another_property_is_stamped_then_copied(graph, monkeypatch):
+    """The data source names its nodes by ``id``. The enable stamps ``urn`` (and ``urnSource``)
+    from it, as the summaries' conformance step does, then copies every node — before, the copy
+    read ``urn`` alone and finished green with nothing in it. A publish then updates the node
+    that is there."""
+    name, client = graph
+    for i in ("x1", "x2"):
+        await client.query("CREATE (:Table {id: $i, name: $i})", {"i": i})
+    await client.query("MATCH (a:Table {id: 'x1'}), (b:Table {id: 'x2'}) "
+                       "CREATE (a)-[:FLOWS {id: 'f1'}]->(b)")
+    provider = FalkorDBProvider(host=os.getenv("FALKORDB_HOST", "localhost"),
+                                port=int(os.getenv("FALKORDB_PORT", "6379")), graph_name=name)
+    provider.set_node_identity("id", "name")
+
+    async def stamp(_job_id):
+        return {"property": "id", "stamped": await provider.stamp_identity_urns()}
+
+    monkeypatch.setattr(bw, "_stamp_identity", stamp)
+    ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+    status = await bootstrap_status(data_source_id=ds)
+    assert status["report"]["stored"] == {"nodes": 2, "edges": 1}, status["report"]
+    assert await _rows(client, "MATCH (n:Table) RETURN n.id, n.urn, n.urnSource ORDER BY n.id") == [
+        ["x1", "x1", "id"], ["x2", "x2", "id"]]
+
+    svc, projector = GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename x1", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "x1",
+         "payload": {"urn": "x1", "entityType": "Table", "displayName": "x1 renamed"}}])
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    assert await _rows(client, "MATCH (n:Table) RETURN n.id, n.displayName ORDER BY n.id") == [
+        ["x1", "x1 renamed"], ["x2", "x2"]], "the node that was there, not a second copy"
+
+
+async def test_a_node_with_no_identifier_stops_the_enable_before_the_copy(graph, monkeypatch):
+    name, client = graph
+    await client.query("CREATE (:Table {id: 'x1'}), (:Table {name: 'nameless'})")
+    provider = FalkorDBProvider(host=os.getenv("FALKORDB_HOST", "localhost"),
+                                port=int(os.getenv("FALKORDB_PORT", "6379")), graph_name=name)
+    provider.set_node_identity("id", "name")
+
+    async def stamp(_job_id):
+        return {"property": "id", "stamped": await provider.stamp_identity_urns()}
+
+    monkeypatch.setattr(bw, "_stamp_identity", stamp)
+    ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "failed", out
+    assert "1 item in the graph has no urn and no id to take one from" in out["error"], out
+    async with db.graphver_session() as s:
+        assert (await s.get(JobORM, job_id)).current_phase == "counting", "nothing was copied"
+    # urn and urnSource on x1; displayName and nameSource, from its name, on the other.
+    assert (await bootstrap_status(data_source_id=ds))["identityStamped"] == {
+        "property": "id", "stamped": 4}
+
+    # Starting over stamps nothing new, and still says what the graph was given.
+    await retry_bootstrap(data_source_id=ds, mode="restart")
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "failed", out
+    assert (await bootstrap_status(data_source_id=ds))["identityStamped"] == {
+        "property": "id", "stamped": 4}
+
+
+# ── L6: an edge whose id is also a node's ─────────────────────────────────────
+
+async def test_an_edge_whose_id_was_a_node_keeps_it_and_a_delete_reaches_it(graph):
+    """Nodes and edges share one id space, so the copy re-keys an edge whose id is also a node's
+    urn to ``edge:<id>``, while the graph still calls it ``<id>``. An update leaves the graph's id
+    on it; a delete removes it and only it."""
+    name, client = graph
+    for urn in ("X", "Y", "urn:a", "urn:b"):
+        await client.query("CREATE (:Table {urn: $u})", {"u": urn})
+    await client.query("MATCH (a:Table {urn: 'urn:a'}), (b:Table {urn: 'urn:b'}) "
+                       "CREATE (a)-[:FLOWS {id: 'X'}]->(b), (b)-[:OWNS {id: 'Y'}]->(a)")
+    ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+    assert (await bootstrap_status(data_source_id=ds))["rekeyedEdges"] == 2
+
+    svc, projector = GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+    for message, op in (
+            ("weigh X", {"op": "update", "entity_kind": "edge", "entity_id": "edge:X",
+                         "payload": {"properties": {"w": 2}}}),
+            ("drop Y", {"op": "delete", "entity_kind": "edge", "entity_id": "edge:Y",
+                        "payload": None})):
+        await svc.apply_ops(graph_id=gid, actor="bob", message=message, ops=[op])
+        res = await projector.project_graph(gid)
+        assert res.get("verify_error") is None and await _fresh(gid), (message, res)
+
+    rels = await _rows(client, "MATCH ()-[r]->() WHERE type(r) <> 'AGGREGATED' "
+                               "RETURN type(r), r.id, r.properties")
+    assert [r[:2] for r in rels] == [["FLOWS", "X"]], rels
+    assert json.loads(rels[0][2]) == {"w": 2}
+    assert await _rows(client, "MATCH (n:Table) RETURN n.urn ORDER BY n.urn") == [
+        ["X"], ["Y"], ["urn:a"], ["urn:b"]], "only the edge was deleted"
+    # The id the graph uses names the edge, never the node that shares it.
+    named = await svc.resolve_edges(graph_id=gid, edge_ids=["X", "Y", "Z"])
+    assert (named["X"][0], named["Y"]) == ("edge:X", None) and "Z" not in named, named
+
+
+# ── L7: something else keeps writing to the graph ────────────────────────────
+
+async def _drift(gid):
+    async with db.graphver_session() as s:
+        d = (await s.get(ProjectionStateORM, gid)).external_drift
+    return d and {k: v for k, v in d.items() if k != "at"}
+
+
+async def test_writes_from_outside_history_are_kept_flagged_and_survive_a_rebuild(graph):
+    """An ETL keeps writing after the enable. Views keep reading FalkorDB — ETL data included —
+    because every publish still goes out fresh; what history doesn't hold is counted, not
+    deleted; the platform's own delete still lands; and a Rebuild deletes nothing it didn't
+    write."""
+    name, client = graph
+    for urn in ("urn:a", "urn:b", "urn:c"):
+        await client.query("CREATE (:Table {urn: $u, displayName: $u})", {"u": urn})
+    await client.query("CREATE INDEX FOR (n:Table) ON (n.urn)")
+    await client.query("MATCH (a:Table {urn: 'urn:a'}), (b:Table {urn: 'urn:b'}) "
+                       "CREATE (a)-[:FLOWS {id: 'f1'}]->(b)")
+    _ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+
+    # The ETL, after the enable: a node, a relationship, and a property on a node history holds.
+    await client.query("CREATE (:Table {urn: 'urn:etl', displayName: 'from the etl'})")
+    await client.query("MATCH (a:Table {urn: 'urn:etl'}), (b:Table {urn: 'urn:a'}) "
+                       "CREATE (a)-[:FLOWS {id: 'f9'}]->(b)")
+    await client.query("MATCH (n:Table {urn: 'urn:a'}) SET n.owner = 'etl-team'")
+
+    svc, projector = GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+    for message, op in (
+            ("rename a", {"op": "update", "entity_kind": "node", "entity_id": "urn:a",
+                          "payload": {"urn": "urn:a", "entityType": "Table",
+                                      "displayName": "a renamed"}}),
+            ("delete c", {"op": "delete", "entity_kind": "node", "entity_id": "urn:c",
+                          "payload": None})):
+        await svc.apply_ops(graph_id=gid, actor="bob", message=message, ops=[op])
+        res = await projector.project_graph(gid)
+        assert res.get("verify_error") is None and await _fresh(gid), (message, res)
+    assert await _drift(gid) == {"nodes": 1, "edges": 1, "via": "verify"}
+
+    async def held():
+        return (await _rows(client, "MATCH (n:Table) RETURN n.urn, n.displayName, n.owner "
+                                    "ORDER BY n.urn"),
+                await _rows(client, "MATCH ()-[r:FLOWS]->() RETURN r.id ORDER BY r.id"))
+
+    assert await held() == ([["urn:a", "a renamed", "etl-team"], ["urn:b", "urn:b", None],
+                             ["urn:etl", "from the etl", None]], [["f1"], ["f9"]])
+
+    # A Rebuild writes history back into the graph and deletes nothing history doesn't hold.
+    assert await svc.request_projection_rebuild(gid)
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    assert await held() == ([["urn:a", "a renamed", "etl-team"], ["urn:b", "urn:b", None],
+                             ["urn:etl", "from the etl", None]], [["f1"], ["f9"]])
+    assert await _drift(gid) == {"nodes": 1, "edges": 1, "via": "verify"}
+
+    # Gone from the graph, the flag clears with the next publish.
+    await client.query("MATCH (n:Table {urn: 'urn:etl'}) DETACH DELETE n")
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename b", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "urn:b",
+         "payload": {"urn": "urn:b", "entityType": "Table", "displayName": "b renamed"}}])
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    assert await _drift(gid) is None
+
+
+async def test_bring_into_history_takes_in_what_the_graph_holds_and_nothing_else(graph,
+                                                                               monkeypatch):
+    """What the graph's other writers put there — a node, relationships, a property — goes into
+    history as one sync commit read from the graph itself. Nothing the projector wrote reads back
+    as a change: not the graph's own spelling of a type, not the empty fields it writes, not an
+    edge whose id was a node's. A new edge the ETL gave a node's id is keyed ``edge:<id>``, as
+    the enable keys it. The flag clears with the publish that follows."""
+    name, client = graph
+    for urn in ("urn:a", "urn:b", "X"):
+        await client.query("CREATE (:table {urn: $u, displayName: $u, sourceSystem: 'dbt'})",
+                           {"u": urn})
+    await client.query("CREATE INDEX FOR (n:table) ON (n.urn)")
+    await client.query("MATCH (a:table {urn: 'urn:a'}), (b:table {urn: 'urn:b'}) "
+                       "CREATE (a)-[:flows {id: 'f1'}]->(b), (b)-[:flows {id: 'X'}]->(a)")
+    rules = OntologyRules(entity_types={"Table": EntityRule()}, edge_types={"FLOWS": EdgeRule()},
+                          edge_type_canonical={"FLOWS": "FLOWS"})
+
+    async def declared(_job_id):
+        return rules
+
+    monkeypatch.setattr(bw, "_ontology_rules", declared)
+    _ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+    svc, projector = GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename a", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "urn:a",
+         "payload": {"urn": "urn:a", "entityType": "Table", "displayName": "a renamed"}}])
+    assert (await projector.project_graph(gid)).get("verify_error") is None
+
+    # The ETL: a node, a relationship, one whose id is a node's, and a property.
+    await client.query("CREATE (:table {urn: 'urn:etl', displayName: 'from the etl'})")
+    await client.query("MATCH (e:table {urn: 'urn:etl'}), (a:table {urn: 'urn:a'}), "
+                       "(b:table {urn: 'urn:b'}) "
+                       "CREATE (e)-[:flows {id: 'f9'}]->(a), (e)-[:flows {id: 'urn:b'}]->(b)")
+    await client.query("MATCH (n:table {urn: 'urn:b'}) SET n.owner = 'etl-team'")
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename b", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "urn:b",
+         "payload": {"urn": "urn:b", "entityType": "Table", "displayName": "b renamed"}}])
+    assert (await projector.project_graph(gid)).get("verify_error") is None
+    assert await _drift(gid) == {"nodes": 1, "edges": 2, "via": "verify"}
+
+    res = await svc.bring_into_history(graph_id=gid, client=client, rules=rules, actor="bob")
+    changed = []
+    async with db.graphver_session() as s:
+        for m in (models.NodeVersionORM, models.EdgeVersionORM):
+            changed += [(m.__name__[:4], op, eid) for eid, op in (await s.execute(
+                select(m.entity_id, m.op).where(m.graph_id == gid,
+                                                m.commit_seq == res["commit_seq"]))).all()]
+    changed.sort()
+    assert changed == [("Edge", "create", "edge:urn:b"), ("Edge", "create", "f9"),
+                       ("Node", "create", "urn:etl"), ("Node", "update", "urn:b")], changed
+    b = await svc.entity_value(graph_id=gid, entity_id="urn:b")
+    assert (b["entityType"], b["displayName"], b["properties"]) == (
+        "Table", "b renamed", {"owner": "etl-team"}), b
+    assert (await projector.project_graph(gid)).get("verify_error") is None and await _fresh(gid)
+    assert await _drift(gid) is None
+    assert (await _rows(client, "MATCH ()-[r:flows]->() RETURN r.id ORDER BY r.id")) == [
+        ["X"], ["f1"], ["f9"], ["urn:b"]], "the graph's own ids, and no copies"
+
+
+async def _enabled_over_http(name, client, relationships, *, identity=(None, None),
+                             dedicated=False):
+    """A data source on the env FalkorDB reading graph ``name``, with an ontology declaring
+    ``Table`` and ``relationships``, enabled for version control. Returns the workspace, data
+    source and graph, and a function that posts ``POST /graph/resync`` for it as the UI does.
+    ``identity``: the provider's identity and name properties. ``dedicated``: the data source's
+    lineage summaries are dedicated, and a job of theirs has left its shared provider so."""
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.app.db.engine import PoolRole, get_session_factory
+    from backend.app.db.models import (
+        OntologyORM, ProviderORM, WorkspaceDataSourceORM, WorkspaceORM,
+    )
+    from backend.app.providers.manager import provider_manager
+    from backend.tests.integration.test_api_graph_draft_journey import _build_app
+
+    tag = os.urandom(3).hex()
+    ws, prov, ds, ont = f"ws_bih_{tag}", f"prov_bih_{tag}", f"ds_bih_{tag}", f"bp_bih_{tag}"
+    async with get_session_factory(PoolRole.WEB)() as s:
+        s.add_all([WorkspaceORM(id=ws, name=ws),
+                   ProviderORM(id=prov, name=prov, provider_type="falkordb",
+                               host=os.getenv("FALKORDB_HOST", "localhost"),
+                               port=int(os.getenv("FALKORDB_PORT", "6379")),
+                               identity_property=identity[0], name_property=identity[1]),
+                   # The data source's own ontology: a deployment always resolves one (the
+                   # system default is seeded at start-up, which this process never ran).
+                   OntologyORM(id=ont, name=ont, is_published=True,
+                               entity_type_definitions=json.dumps({"Table": {"name": "Table"}}),
+                               relationship_type_definitions=json.dumps(relationships))])
+        await s.flush()
+        s.add(WorkspaceDataSourceORM(id=ds, workspace_id=ws, provider_id=prov, graph_name=name,
+                                     ontology_id=ont,
+                                     projection_mode="dedicated" if dedicated else None))
+        await s.commit()
+        if dedicated:
+            await (await provider_manager.get_provider(ws, s, ds)).set_projection_mode("dedicated")
+    await models.create_schema_and_partitions()
+    job = await create_bootstrap_job(data_source_id=ds, workspace_id=ws, actor="alice",
+                                     falkor_graph_name=name, falkor_provider=prov)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job["job_id"]))
+    assert out["status"] == "completed", out
+    app, _G = _build_app()
+
+    async def bring_in():
+        try:
+            async with AsyncClient(transport=ASGITransport(app=app),
+                                   base_url="http://test") as c:
+                return await c.post(f"/api/v1/{ws}/graph/resync", params={"dataSourceId": ds})
+        finally:
+            await provider_manager.evict_data_source(prov, name)
+
+    return ws, ds, job["graph_id"], bring_in
+
+
+async def test_bring_into_history_over_http_reads_the_graph_and_clears_the_flag(graph,
+                                                                               monkeypatch):
+    """``POST /graph/resync`` as the UI sends it, with the real provider manager: it reads the
+    data source's graph through the projection's pin — not whatever serves reads — brings the
+    ETL's writes into history, clears the flag at once, and queues the summaries' rebuild. A
+    loader's change notification flags what no count shows, until it is brought in too."""
+    from backend.app.services import projection_target, versioned_sources
+
+    name, client = graph
+    for urn in ("urn:a", "urn:b"):
+        await client.query("CREATE (:Table {urn: $u, displayName: $u})", {"u": urn})
+    await client.query("CREATE INDEX FOR (n:Table) ON (n.urn)")
+    await client.query("MATCH (a:Table {urn: 'urn:a'}), (b:Table {urn: 'urn:b'}) "
+                       "CREATE (a)-[:FLOWS {id: 'f1'}]->(b)")
+    _ws, ds, gid, bring_in = await _enabled_over_http(
+        name, client, {"FLOWS": {"name": "FLOWS", "is_lineage": True}})
+
+    await client.query("CREATE (:Table {urn: 'urn:etl', displayName: 'from the etl'})")
+    await client.query("MATCH (e:Table {urn: 'urn:etl'}), (a:Table {urn: 'urn:a'}) "
+                       "CREATE (e)-[:FLOWS {id: 'f9'}]->(a)")
+    svc, projector = GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename a", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "urn:a",
+         "payload": {"urn": "urn:a", "entityType": "Table", "displayName": "a renamed"}}])
+    assert (await projector.project_graph(gid)).get("verify_error") is None
+    assert await _drift(gid) == {"nodes": 1, "edges": 1, "via": "verify"}
+
+    queued = []
+
+    async def queue(ds_id, _key, _mode):
+        queued.append(ds_id)
+
+    monkeypatch.setattr(projection_target, "_queue_on_control_plane", queue)
+    r = await bring_in()
+    assert r.status_code == 200, r.text
+    assert r.json()["applied"] == 2, r.json()
+    assert await _drift(gid) is None and queued == [ds]
+    assert (await projector.project_graph(gid)).get("verify_error") is None and await _fresh(gid)
+    assert await _drift(gid) is None
+
+    # A property edit moves no count. A loader that says it wrote flags it, and the publishes in
+    # between keep that flag until the change is brought into history.
+    await client.query("MATCH (n:Table {urn: 'urn:b'}) SET n.owner = 'etl-team'")
+    await versioned_sources.flag_external_changes(ds)
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename b", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "urn:b",
+         "payload": {"urn": "urn:b", "entityType": "Table", "displayName": "b renamed"}}])
+    assert (await projector.project_graph(gid)).get("verify_error") is None
+    assert await _drift(gid) == {"nodes": None, "edges": None, "via": "notification"}
+    r = await bring_in()
+    assert r.status_code == 200 and r.json()["applied"] == 1, r.text
+    assert (await svc.entity_value(graph_id=gid, entity_id="urn:b"))["properties"] == {
+        "owner": "etl-team"}
+    assert await _drift(gid) is None
+
+
+async def test_bring_into_history_reads_what_the_enable_reads_and_deletes_nothing(graph,
+                                                                                 monkeypatch):
+    """Over HTTP, on a graph larger than one page of the old reader, where other writers left
+    what the enable never copies: a node with no identifier (on the first page: it takes a
+    deleted node's id), a relationship to it, a rollup, the summaries' own node, and a
+    container whose child count a reader would work out. The graph also lacks a node history
+    holds. Only the other writers' real changes come in — a node, a relationship, a property —
+    and nothing is deleted from history, whatever the graph lacks."""
+    from backend.app.services import projection_target
+
+    name, client = graph
+    monkeypatch.setattr(config, "BOOTSTRAP_SCAN_WIDTH", 1000)
+    await client.query("UNWIND range(0, 2099) AS i "
+                       "CREATE (:Table {urn: 'urn:n' + toString(i), displayName: toString(i)})")
+    await client.query("CREATE INDEX FOR (n:Table) ON (n.urn)")
+    await client.query("MATCH (a:Table {urn: 'urn:n1'}), (b:Table {urn: 'urn:n2'}) "
+                       "CREATE (a)-[:CONTAINS {id: 'c1'}]->(b), (a)-[:FLOWS {id: 'f1'}]->(b)")
+    _ws, _ds, gid, bring_in = await _enabled_over_http(name, client, {
+        "FLOWS": {"name": "FLOWS", "is_lineage": True},
+        "CONTAINS": {"name": "CONTAINS", "is_containment": True}})
+
+    await client.query("MATCH (n:Table {urn: 'urn:n5'}) DETACH DELETE n")
+    await client.query("CREATE (:Table {displayName: 'no identifier'})")
+    freed = await _rows(client, "MATCH (n:Table) WHERE n.urn IS NULL RETURN ID(n)")
+    assert freed and freed[0][0] < 2000, freed
+    await client.query("MATCH (a:Table {urn: 'urn:n1'}), (b:Table) WHERE b.urn IS NULL "
+                       "CREATE (a)-[:FLOWS]->(b)")
+    await client.query("CREATE (:_AggMeta {id: 'singleton', urn: 'singleton'})")
+    await client.query("MATCH (a:Table {urn: 'urn:n3'}), (b:Table {urn: 'urn:n4'}) "
+                       "CREATE (a)-[:AGGREGATED {weight: 3}]->(b)")
+    await client.query("CREATE (:Table {urn: 'urn:etl', displayName: 'from the etl'})")
+    await client.query("MATCH (e:Table {urn: 'urn:etl'}), (a:Table {urn: 'urn:n1'}) "
+                       "CREATE (e)-[:FLOWS {id: 'f9'}]->(a)")
+    await client.query("MATCH (n:Table {urn: 'urn:n2'}) SET n.owner = 'etl-team'")
+
+    async def queue(_ds_id, _key, _mode):
+        pass
+
+    monkeypatch.setattr(projection_target, "_queue_on_control_plane", queue)
+    r = await bring_in()
+    assert r.status_code == 200, r.text
+    changed = []
+    async with db.graphver_session() as s:
+        for m in (models.NodeVersionORM, models.EdgeVersionORM):
+            changed += [(m.__name__[:4], op, eid) for eid, op in (await s.execute(
+                select(m.entity_id, m.op).where(m.graph_id == gid,
+                                                m.commit_seq == r.json()["commit_seq"]))).all()]
+    assert sorted(changed) == [("Edge", "create", "f9"), ("Node", "create", "urn:etl"),
+                               ("Node", "update", "urn:n2")], sorted(changed)
+    svc = GraphVersioningService()
+    assert (await svc.entity_value(graph_id=gid, entity_id="urn:n5")) is not None
+    res = await FalkorProjector(lambda _n, _p=None: client).project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+
+
+async def test_a_graph_whose_summaries_are_dedicated_is_stamped_too(graph, monkeypatch):
+    """Dedicated lineage summaries live in a graph of their own, and their conformance step leaves
+    the data source's graph unstamped, as one that may be read-only. Providers are shared, so a
+    summaries job leaves the data source's provider that way. Version control enabled in place
+    writes into the graph on every publish, so the enable and Bring into history stamp it as any
+    other. Before, the enable then stopped saying its items had no id."""
+    from backend.app.services import projection_target
+
+    name, client = graph
+    for i in ("x1", "x2"):
+        await client.query("CREATE (:Table {id: $i, name: $i})", {"i": i})
+    await client.query("MATCH (a:Table {id: 'x1'}), (b:Table {id: 'x2'}) "
+                       "CREATE (a)-[:FLOWS {id: 'f1'}]->(b)")
+    _ws, ds, _gid, bring_in = await _enabled_over_http(
+        name, client, {"FLOWS": {"name": "FLOWS", "is_lineage": True}},
+        identity=("id", "name"), dedicated=True)
+    assert (await bootstrap_status(data_source_id=ds))["report"]["stored"] == {
+        "nodes": 2, "edges": 1}
+    assert await _rows(client, "MATCH (n:Table) RETURN n.id, n.urn, n.urnSource ORDER BY n.id") == [
+        ["x1", "x1", "id"], ["x2", "x2", "id"]]
+
+    async def queue(_ds_id, _key, _mode):
+        pass
+
+    monkeypatch.setattr(projection_target, "_queue_on_control_plane", queue)
+    await client.query("CREATE (:Table {id: 'x3', name: 'from the etl'})")
+    r = await bring_in()
+    assert r.status_code == 200 and r.json()["applied"] == 1, r.text
+
+
+# ── L4: a graph that spells its types its own way keeps that spelling ────────
+
+async def test_a_graph_keeps_its_own_spelling_of_its_types(graph, monkeypatch):
+    """An update lands on the node that is there, not on a second ``:Table`` copy; a delete finds
+    it; a new relationship is a ``flows_to``; an edge's new property lands on it. Every publish is
+    verified and goes out fresh, and the sync check finds nothing out of place."""
+    name, client = graph
+    for urn in ("urn:t1", "urn:t2", "urn:t3"):
+        await client.query("CREATE (:table {urn: $u, displayName: $u})", {"u": urn})
+    await client.query("CREATE INDEX FOR (n:table) ON (n.urn)")
+    await client.query("MATCH (a:table {urn: 'urn:t1'}), (b:table {urn: 'urn:t2'}) "
+                       "CREATE (a)-[:flows_to {id: 'f1', properties: $p}]->(b)",
+                       {"p": json.dumps({"w": 1})})
+    rules = OntologyRules(entity_types={"Table": EntityRule()}, edge_types={"FLOWS_TO": EdgeRule()},
+                          edge_type_canonical={"FLOWS_TO": "FLOWS_TO"})
+
+    async def declared(_job_id):
+        return rules
+
+    monkeypatch.setattr(bw, "_ontology_rules", declared)
+    _ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+    async with db.graphver_session() as s:
+        assert (await s.get(ProjectionStateORM, gid)).physical_types == {
+            "nodes": {"Table": "table"}, "edges": {"FLOWS_TO": "flows_to"}}
+
+    svc, projector = GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+    for message, op in (
+            ("rename t1", {"op": "update", "entity_kind": "node", "entity_id": "urn:t1",
+                           "payload": {"urn": "urn:t1", "entityType": "Table",
+                                       "displayName": "t1 renamed"}}),
+            ("delete t3", {"op": "delete", "entity_kind": "node", "entity_id": "urn:t3",
+                           "payload": None}),
+            ("t2 flows to t1", {"op": "create", "entity_kind": "edge", "entity_id": "f2",
+                                "payload": {"sourceEntityId": "urn:t2", "targetEntityId": "urn:t1",
+                                            "edgeType": "FLOWS_TO"}}),
+            ("weigh f1", {"op": "update", "entity_kind": "edge", "entity_id": "f1",
+                          "payload": {"properties": {"w": 2}}})):
+        await svc.apply_ops(graph_id=gid, actor="bob", message=message, ops=[op])
+        res = await projector.project_graph(gid)
+        assert res.get("verify_error") is None, (message, res)
+        assert await _fresh(gid), (message, res)
+
+    assert await _rows(client, "MATCH (n:Table) RETURN count(n)") == [[0]]
+    assert await _rows(client, "MATCH ()-[r:FLOWS_TO]->() RETURN count(r)") == [[0]]
+    assert await _rows(client, "MATCH (n:table) RETURN n.urn, n.displayName ORDER BY n.urn") == [
+        ["urn:t1", "t1 renamed"], ["urn:t2", "urn:t2"]]
+    rels = await _rows(client, "MATCH (a)-[r:flows_to]->(b) "
+                               "RETURN a.urn, r.id, b.urn, r.properties ORDER BY r.id")
+    assert [r[:3] for r in rels] == [["urn:t1", "f1", "urn:t2"], ["urn:t2", "f2", "urn:t1"]], rels
+    assert json.loads(rels[0][3]) == {"w": 2}
+    report = await ProjectionReconciler(db.graphver_session, lambda _n, _p=None: client).reconcile(
+        gid, deep=True)
+    assert report.in_sync and not report.mismatched and not report.edge_mismatched, report
+
+
+async def test_a_type_the_graph_spells_two_ways_stops_the_enable(graph, monkeypatch):
+    """``table`` and ``TABLE`` are both the declared ``Table``: history can keep one spelling, and
+    the projector would reach only the nodes under it. The checks stop the enable and say why;
+    nothing becomes visible."""
+    name, client = graph
+    await client.query("CREATE (:table {urn: 'urn:a'}), (:TABLE {urn: 'urn:b'})")
+    rules = OntologyRules(entity_types={"Table": EntityRule()})
+
+    async def declared(_job_id):
+        return rules
+
+    monkeypatch.setattr(bw, "_ontology_rules", declared)
+    ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "failed" and "spelled more than one way" in out["error"], out
+    status = await bootstrap_status(data_source_id=ds)
+    failed = [c for c in status["report"]["checks"] if not c["ok"]]
+    assert [(c["key"], c["detail"]) for c in failed] == [
+        ("one_spelling_per_type", "Table is spelled TABLE and table")], failed
+    async with db.graphver_session() as s:
+        assert (await s.get(GraphORM, gid)).main_head_commit_seq <= 1, "nothing became visible"
+
+
+async def _enabled_spelled(name, client, monkeypatch):
+    """A ``:table`` / ``:flows_to`` graph (t1, t2, t3; t1 flows to t2) against an ontology that
+    declares ``Table`` and ``FLOWS_TO``, enabled. Returns the graph, the service, a projector."""
+    for urn in ("urn:t1", "urn:t2", "urn:t3"):
+        await client.query("CREATE (:table {urn: $u, displayName: $u})", {"u": urn})
+    await client.query("CREATE INDEX FOR (n:table) ON (n.urn)")
+    await client.query("MATCH (a:table {urn: 'urn:t1'}), (b:table {urn: 'urn:t2'}) "
+                       "CREATE (a)-[:flows_to {id: 'f1'}]->(b)")
+    rules = OntologyRules(entity_types={"Table": EntityRule()}, edge_types={"FLOWS_TO": EdgeRule()},
+                          edge_type_canonical={"FLOWS_TO": "FLOWS_TO"})
+
+    async def declared(_job_id):
+        return rules
+
+    monkeypatch.setattr(bw, "_ontology_rules", declared)
+    _ds, gid, job_id = await _enable(name)
+    out = await BootstrapRunner(lambda _n, _p=None: client).run_job(await _take(job_id))
+    assert out["status"] == "completed", out
+    return gid, GraphVersioningService(), FalkorProjector(lambda _n, _p=None: client)
+
+
+async def _unrecorded(gid):
+    """As a graph enabled before the enable recorded its spelling: the column the migration
+    added, NULL."""
+    from sqlalchemy import null, update
+
+    async with db.graphver_session() as s:
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == gid)
+                        .values(physical_types=null()))
+
+
+async def test_a_graph_whose_spelling_was_never_recorded_is_read_for_it(graph, monkeypatch):
+    """A graph enabled before the enable recorded its spelling has none. Its passes MERGEd
+    ``:Table`` copies, and a relationship whose endpoints the window didn't write was lost and
+    healed by relabelling every ``:table`` node ``:Table``. The pass reads the graph's own
+    spelling instead: nothing is copied or relabelled, and the spelling it read is recorded. The
+    sync check reads it the same way, and finds the graph in sync."""
+    name, client = graph
+    gid, svc, projector = await _enabled_spelled(name, client, monkeypatch)
+    await _unrecorded(gid)
+    report = await ProjectionReconciler(db.graphver_session, lambda _n, _p=None: client).reconcile(
+        gid, deep=True)
+    assert report.in_sync and not report.mismatched, report
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename t1; t3 flows to t2", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "urn:t1",
+         "payload": {"urn": "urn:t1", "entityType": "Table", "displayName": "t1 renamed"}},
+        {"op": "create", "entity_kind": "edge", "entity_id": "f2",
+         "payload": {"sourceEntityId": "urn:t3", "targetEntityId": "urn:t2",
+                     "edgeType": "FLOWS_TO"}}])
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    assert await _rows(client, "MATCH (n:Table) RETURN count(n)") == [[0]]
+    assert await _rows(client, "MATCH (n:table) RETURN n.urn, n.displayName ORDER BY n.urn") == [
+        ["urn:t1", "t1 renamed"], ["urn:t2", "urn:t2"], ["urn:t3", "urn:t3"]]
+    assert await _rows(client, "MATCH (a)-[r:flows_to]->(b) RETURN a.urn, r.id, b.urn "
+                               "ORDER BY r.id") == [["urn:t1", "f1", "urn:t2"],
+                                                    ["urn:t3", "f2", "urn:t2"]]
+    async with db.graphver_session() as s:
+        assert (await s.get(ProjectionStateORM, gid)).physical_types == {
+            "nodes": {"TABLE": "table"}, "edges": {"FLOWS_TO": "flows_to"}}
+
+
+async def test_a_graph_that_spells_a_type_two_ways_holds_its_projection_back(graph,
+                                                                             monkeypatch):
+    """Passes from before this release left ``:Table`` copies in a ``:table`` graph. Both
+    spellings hold nodes, and nothing recorded which is the graph's own: the projection is held
+    back, naming both, and nothing in the graph is written, copied or relabelled. The sync check
+    says the same instead of comparing."""
+    name, client = graph
+    gid, svc, projector = await _enabled_spelled(name, client, monkeypatch)
+    await _unrecorded(gid)
+    await client.query("MATCH (n:table {urn: 'urn:t2'}) "
+                       "CREATE (:Table {urn: n.urn, displayName: n.displayName})")
+    held = ("MATCH (n) WHERE n.urn IS NOT NULL "
+            "RETURN labels(n), n.urn, n.displayName ORDER BY n.urn, labels(n)")
+    before = await _rows(client, held)
+    await svc.apply_ops(graph_id=gid, actor="bob", message="rename t1", ops=[
+        {"op": "update", "entity_kind": "node", "entity_id": "urn:t1",
+         "payload": {"urn": "urn:t1", "entityType": "Table", "displayName": "t1 renamed"}}])
+    res = await projector.project_graph(gid)
+    assert "Table as Table and table" in (res.get("verify_error") or ""), res
+    assert not await _fresh(gid)
+    assert await _rows(client, held) == before
+    async with db.graphver_session() as s:
+        ps = await s.get(ProjectionStateORM, gid)
+        assert ps.physical_types is None and "Table as Table and table" in ps.last_error
+    report = await ProjectionReconciler(db.graphver_session, lambda _n, _p=None: client).reconcile(
+        gid, deep=True)
+    assert "Table as Table and table" in (report.skipped_reason or ""), report
+
+
+async def test_types_brought_into_history_keep_the_graphs_spelling(graph, monkeypatch):
+    """The ETL adds a ``:column`` node and a ``:contains`` relationship, declared ``Column`` and
+    ``CONTAINS``. Brought into history, they are written back as the graph spells them — no
+    ``:Column`` copy, and no flag raised again by one — and their spelling is recorded. The
+    ontology has also changed its casing since the enable (``TABLE``, ``Flows_To``): the types
+    history already holds come in as no change, not as a retype of every item."""
+    name, client = graph
+    gid, svc, projector = await _enabled_spelled(name, client, monkeypatch)
+    await client.query("CREATE (:column {urn: 'urn:c1', displayName: 'c1'})")
+    await client.query("MATCH (t:table {urn: 'urn:t1'}), (c:column {urn: 'urn:c1'}) "
+                       "CREATE (t)-[:contains {id: 'k1'}]->(c)")
+    rules = OntologyRules(entity_types={"TABLE": EntityRule(), "Column": EntityRule()},
+                          edge_types={"FLOWS_TO": EdgeRule(), "CONTAINS": EdgeRule()},
+                          edge_type_canonical={"FLOWS_TO": "Flows_To", "CONTAINS": "CONTAINS"})
+    res = await svc.bring_into_history(graph_id=gid, client=client, rules=rules, actor="bob")
+    changed = []
+    async with db.graphver_session() as s:
+        for m in (models.NodeVersionORM, models.EdgeVersionORM):
+            changed += [(m.__name__[:4], op, eid) for eid, op in (await s.execute(
+                select(m.entity_id, m.op).where(m.graph_id == gid,
+                                                m.commit_seq == res["commit_seq"]))).all()]
+    assert sorted(changed) == [("Edge", "create", "k1"), ("Node", "create", "urn:c1")], changed
+    assert (await svc.entity_value(graph_id=gid, entity_id="urn:c1"))["entityType"] == "Column"
+    assert (await svc.entity_value(graph_id=gid, entity_id="k1"))["edgeType"] == "CONTAINS"
+
+    res = await projector.project_graph(gid)
+    assert res.get("verify_error") is None and await _fresh(gid), res
+    assert await _drift(gid) is None
+    assert await _rows(client, "MATCH (n) WHERE n:Column OR n:TABLE OR n:Table "
+                               "RETURN count(n)") == [[0]]
+    assert await _rows(client, "MATCH ()-[r]->() WHERE type(r) IN ['CONTAINS', 'FLOWS_TO', "
+                               "'Flows_To'] RETURN count(r)") == [[0]]
+    assert await _rows(client, "MATCH (:table)-[r:contains]->(c:column) RETURN r.id, c.urn") == [
+        ["k1", "urn:c1"]]
+
+
+async def test_bring_into_history_refuses_a_type_the_graph_spells_two_ways(graph, monkeypatch):
+    """People added a ``Dashboard``, which the projector wrote as declared; then the ETL wrote a
+    ``:dashboard`` node. Brought in, it would be written back as a ``:Dashboard`` copy, so it is
+    refused, naming both spellings, and history is unchanged."""
+    from backend.app.services.versioning.errors import AmbiguousSpelling
+
+    name, client = graph
+    gid, svc, projector = await _enabled_spelled(name, client, monkeypatch)
+    await svc.apply_ops(graph_id=gid, actor="bob", message="add d1", ops=[
+        {"op": "create", "entity_kind": "node", "entity_id": "urn:d1",
+         "payload": {"urn": "urn:d1", "entityType": "Dashboard", "displayName": "d1"}}])
+    assert (await projector.project_graph(gid)).get("verify_error") is None
+    await client.query("CREATE (:dashboard {urn: 'urn:d2', displayName: 'd2'})")
+    async with db.graphver_session() as s:
+        head = (await s.get(GraphORM, gid)).main_head_commit_seq
+    rules = OntologyRules(entity_types={"Table": EntityRule(), "Dashboard": EntityRule()},
+                          edge_types={"FLOWS_TO": EdgeRule()},
+                          edge_type_canonical={"FLOWS_TO": "FLOWS_TO"})
+    with pytest.raises(AmbiguousSpelling) as refused:
+        await svc.bring_into_history(graph_id=gid, client=client, rules=rules, actor="bob")
+    assert "Dashboard as Dashboard and dashboard" in str(refused.value), str(refused.value)
+    async with db.graphver_session() as s:
+        assert (await s.get(GraphORM, gid)).main_head_commit_seq == head
 
 
 # ── a graph server that cuts replies short ───────────────────────────────────

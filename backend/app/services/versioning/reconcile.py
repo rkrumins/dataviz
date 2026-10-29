@@ -27,6 +27,7 @@ import inspect
 import json
 import logging
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Tuple
@@ -46,6 +47,7 @@ def _bounded_query(client, cypher: str, params=None):
     return _q(client, cypher, params=params, timeout_ms=_READ_TIMEOUT_MS, read_only=True)
 
 from . import config
+from .errors import AmbiguousSpelling
 from .models import (
     BranchORM,
     EdgeVersionORM,
@@ -65,6 +67,81 @@ _NOT_DERIVED = config.not_derived_clause("n")
 from backend.app.providers.falkordb_provider import _sanitize_label
 
 logger = logging.getLogger(__name__)
+
+# A customer graph's own spelling of its types (:func:`spelling` of ``projection_state.
+# physical_types``, or of what :func:`graph_spelling` read from the graph when nothing recorded
+# it) while a projection pass or a sync check works on its key. The projector writes and matches,
+# and the check compares, the labels and types ``spelled_label`` / ``spelled_type`` give, so a
+# ``:table`` graph keeps ``:table``. Unset (a key the platform owns): the declared spelling.
+SPELLING: ContextVar[Optional[dict]] = ContextVar("gv_projection_spelling", default=None)
+
+
+def spelling(types: Optional[dict], ambiguous: Optional[dict] = None) -> dict:
+    """What :data:`SPELLING` holds: ``types`` (``{"nodes": {type: label}, "edges": {...}}``)
+    keyed without case, since history spells a type the ontology's way and the ontology may
+    change its casing; and ``ambiguous``, the types the graph spells more than one way
+    (``{"nodes": {TYPE: [labels]}, ...}``), which are never written (:class:`AmbiguousSpelling`)."""
+    out = {kind: {spelling_key(t): s for t, s in ((types or {}).get(kind) or {}).items()}
+           for kind in ("nodes", "edges")}
+    out["ambiguous"] = ambiguous or {}
+    return out
+
+
+def spelling_key(t: str) -> str:
+    """A type as a spelling is recorded under: any casing of it is the same type."""
+    return _sanitize_label(t).upper()
+
+
+def _spelled(kind: str, t: str) -> str:
+    sp = SPELLING.get()
+    if not sp:
+        return _sanitize_label(t)
+    key = spelling_key(t)
+    found = (sp.get(kind) or {}).get(key)
+    if found is None and key in ((sp.get("ambiguous") or {}).get(kind) or {}):
+        raise AmbiguousSpelling({t: sp["ambiguous"][kind][key]})
+    return _sanitize_label(found or t)
+
+
+def spelled_label(entity_type: Optional[str]) -> str:
+    """The node label the projector writes for ``entity_type``."""
+    return _spelled("nodes", entity_type or "Entity")
+
+
+def spelled_type(edge_type: Optional[str]) -> str:
+    """The relationship type the projector writes for ``edge_type``."""
+    return _spelled("edges", edge_type or "REL")
+
+
+def _rows(res) -> list:
+    return list(getattr(res, "result_set", None) or [])
+
+
+async def graph_spelling(client) -> Tuple[dict, dict]:
+    """A customer's graph's own spelling of its types, read from the graph, for one whose enable
+    recorded none (it predates the record): each label and relationship type, keyed without
+    case. Labels outlive their nodes, so of several spellings of one type only those still
+    holding something count; if more than one does, the type is ambiguous. Derived labels and
+    the rollups are left out. Returns ``(types, ambiguous)`` for :func:`spelling`."""
+    types: Dict[str, dict] = {"nodes": {}, "edges": {}}
+    ambiguous: Dict[str, dict] = {"nodes": {}, "edges": {}}
+    for kind, call, probe in (
+            ("nodes", "CALL db.labels()", "MATCH (n:`{}`) RETURN 1 LIMIT 1"),
+            ("edges", "CALL db.relationshipTypes()", "MATCH ()-[r:`{}`]->() RETURN 1 LIMIT 1")):
+        groups: Dict[str, List[str]] = {}
+        for row in _rows(await _bounded_query(client, call)):
+            name = str(row[0])
+            if name not in config.DERIVED_LABELS and name != "AGGREGATED":
+                groups.setdefault(spelling_key(name), []).append(name)
+        for key, names in groups.items():
+            if len(names) > 1:
+                names = [n for n in names if _rows(await _bounded_query(
+                    client, probe.format(n.replace("`", "``"))))]
+            if len(names) == 1:
+                types[kind][key] = names[0]
+            elif names:
+                ambiguous[kind][key] = sorted(names)
+    return types, ambiguous
 
 
 # --------------------------------------------------------------------------- #
@@ -373,6 +450,7 @@ class ProjectionReconciler:
             name = ps.falkor_graph_name if ps is not None else None
             provider_id = ps.falkor_provider if ps is not None else None
             owned = bool(ps.owns_falkor_graph) if ps is not None else True
+            recorded = ps.physical_types if ps is not None else None
             # Collapse-modeled counts (node count + DISTINCT-triple edge count) so the report is
             # apples-to-apples with FalkorDB (which collapses parallel edges) — a parallel-edge graph
             # is NOT reported as a false shortfall / out-of-sync.
@@ -414,15 +492,30 @@ class ProjectionReconciler:
             client = await client
         falkor_nodes, falkor_edges = await falkor_counts(client, owned=owned)
 
-        missing_nodes, extra_nodes, mismatched, trunc_n = await self._diff_nodes(
-            client, graph_id, main_id, sample_limit, deep)
-        # Edge missing/extra BY ID is collapse-noisy — N Postgres edges sharing a (src,type,tgt)
-        # triple collapse to ONE FalkorDB relationship, so the collapsed-away ids read as "missing"
-        # though the triple is present. Edge COVERAGE is owned by the DISTINCT-triple count compare
-        # (``pg_edges == falkor_edges`` below, where ``pg_edges`` is the projectable triple count);
-        # drop the id samples and keep only the per-edge ATTRIBUTE drift on matched ids.
-        _me, _xe, edge_mismatched, trunc_e = await self._diff_edges(
-            client, graph_id, main_id, sample_limit, deep)
+        # A customer's graph is compared in its own spelling: recorded, or read from it.
+        if owned:
+            spelled = None
+        elif recorded is not None:
+            spelled = spelling(recorded)
+        else:
+            spelled = spelling(*await graph_spelling(client))
+        token = SPELLING.set(spelled)
+        try:
+            missing_nodes, extra_nodes, mismatched, trunc_n = await self._diff_nodes(
+                client, graph_id, main_id, sample_limit, deep)
+            # Edge missing/extra BY ID is collapse-noisy — N Postgres edges sharing a
+            # (src,type,tgt) triple collapse to ONE FalkorDB relationship, so the collapsed-away ids
+            # read as "missing" though the triple is present. Edge COVERAGE is owned by the
+            # DISTINCT-triple count compare (``pg_edges == falkor_edges`` below, where ``pg_edges``
+            # is the projectable triple count); drop the id samples and keep only the per-edge
+            # ATTRIBUTE drift on matched ids.
+            _me, _xe, edge_mismatched, trunc_e = await self._diff_edges(
+                client, graph_id, main_id, sample_limit, deep)
+        except AmbiguousSpelling as exc:          # which spelling is the graph's own is unknown
+            return _report(falkor_nodes=falkor_nodes, falkor_edges=falkor_edges,
+                           skipped_reason=str(exc))
+        finally:
+            SPELLING.reset(token)
         truncated = trunc_n or trunc_e
 
         in_sync = (
@@ -430,6 +523,11 @@ class ProjectionReconciler:
             and not mismatched and not edge_mismatched
             and pg_nodes == falkor_nodes and pg_edges == falkor_edges
         )
+        if not owned:
+            # A customer's key may also hold what its other writers put there: kept and flagged
+            # (``external_drift``), not out of sync.
+            in_sync = (not missing_nodes and not mismatched and not edge_mismatched
+                       and falkor_nodes >= pg_nodes and falkor_edges >= pg_edges)
         try:
             health = await rollup_health(client)
             rollups = {"status": health.status, "aggregated": health.aggregated,
@@ -639,13 +737,13 @@ class ProjectionReconciler:
 def _field_mismatches(pg_node: dict, f_eid, f_dname, f_labels) -> List[tuple]:
     """The ``(field, pg_value, falkor_value)`` triples where a cached node disagrees with its
     Postgres head payload — comparing the SAME derivations the projector wrote (empty-string
-    normalised ``displayName``; sanitised ``entityType`` label)."""
+    normalised ``displayName``; sanitised ``entityType`` label, in the graph's spelling)."""
     out: List[tuple] = []
     if pg_node["entityId"] != f_eid:
         out.append(("entityId", pg_node["entityId"], f_eid))
     if (pg_node["displayName"] or "") != (f_dname or ""):
         out.append(("displayName", pg_node["displayName"], f_dname))
-    pg_label = _sanitize_label(pg_node["entityType"] or "Entity")
+    pg_label = spelled_label(pg_node["entityType"])
     if pg_label not in f_labels:
         out.append(("entityType", pg_label, f_labels))
     return out
@@ -654,10 +752,10 @@ def _field_mismatches(pg_node: dict, f_eid, f_dname, f_labels) -> List[tuple]:
 def _edge_field_mismatches(pg_edge: dict, f_type, f_conf, f_props) -> List[tuple]:
     """The ``(field, pg_value, falkor_value)`` triples where a cached edge disagrees with its
     committed-``main`` payload — comparing the SAME derivations the projector wrote: the sanitised
-    ``edgeType`` label (``_sanitize_label(edgeType or "REL")``), the top-level ``confidence`` scalar,
-    and the JSON-serialised nested ``properties``."""
+    ``edgeType`` label in the graph's spelling (``spelled_type``), the top-level ``confidence``
+    scalar, and the JSON-serialised nested ``properties``."""
     out: List[tuple] = []
-    pg_type = _sanitize_label(pg_edge["edgeType"] or "REL")
+    pg_type = spelled_type(pg_edge["edgeType"])
     if pg_type != f_type:
         out.append(("edgeType", pg_type, f_type))
     if not _conf_equal(pg_edge["confidence"], f_conf):

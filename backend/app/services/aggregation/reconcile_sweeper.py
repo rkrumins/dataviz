@@ -375,10 +375,12 @@ class ReconciliationSweeper:
                 result.finished_at = _now_iso()
                 await self._record_run(result, actor)
             return None
-        actions, nudges = phase_a
+        actions, nudges, refreshes = phase_a
 
         for ds_id, ws_id in nudges:
             await self._nudge_stats(ds_id, ws_id)
+        for ds_id in refreshes:
+            await self._refresh_versioned(ds_id, result.run_id)
 
         if not dry_run:
             await self._phase_b(actions, result, mode, actor)
@@ -394,9 +396,9 @@ class ReconciliationSweeper:
     # ── Phase A: locked, pure SQL ────────────────────────────────────
 
     async def _phase_a(self, result, data_source_ids, dry_run):
-        """Returns ``(actions, nudges)``, or ``None`` if the sweep did not run
-        — the lock is held by another replica, or the versioned-source lookup
-        below is cold and unavailable."""
+        """Returns ``(actions, nudges, refreshes)``, or ``None`` if the sweep did
+        not run — the lock is held by another replica, or the versioned-source
+        lookup below is cold and unavailable."""
         from backend.app.services.versioned_sources import (
             ProjectorHealthUnavailable,
             VersionedLookupUnavailable,
@@ -416,6 +418,7 @@ class ReconciliationSweeper:
 
         actions: List[_Action] = []
         nudges: List[tuple] = []
+        refreshes: List[str] = []
         suspend_notices: List[dict] = []
 
         # Resolved BEFORE the lock is claimed. The graphver store sits behind
@@ -428,8 +431,16 @@ class ReconciliationSweeper:
         # assuming everything is versioned silently stops reconciling the
         # fleet. The next tick is 60s away against an hourly check interval, so
         # waiting costs nothing.
+        #
+        # Only sources whose enable has finished: until then the FalkorDB graph
+        # is still the source of truth, so a pending, paused or failed enable
+        # is reconciled like any other source. Read every tick, not from the
+        # ten-minute cache: once an enable finishes, that graph is a versioned
+        # graph's projection and must be guarded from the next tick on.
         try:
-            versioned = await versioned_data_source_ids()
+            versioned = await versioned_data_source_ids(
+                finished_only=True, ttl_secs=0,
+            )
         except VersionedLookupUnavailable as exc:
             logger.warning(
                 "reconcile sweep deferred: cannot determine which data "
@@ -489,7 +500,7 @@ class ReconciliationSweeper:
             )
             result.rows_read = len(states)
             if not states:
-                return actions, nudges
+                return actions, nudges, refreshes
 
             ds_ids = [s.data_source_id for s in states]
             ctx = await self._batch_context(session, ds_ids, versioned, health)
@@ -635,6 +646,12 @@ class ReconciliationSweeper:
                         # Never acted on, but keep the baseline moving with the
                         # source so that one later taken back out of versioning
                         # does not read as drifted on its first sweep after.
+                        # A move since the last baseline gets its read caches
+                        # refreshed (_refresh_versioned), never a rebuild.
+                        if (not dry_run and state.raw_fingerprint is not None
+                                and obs.observed_raw_fingerprint
+                                not in (None, state.raw_fingerprint)):
+                            refreshes.append(state.data_source_id)
                         self._adopt(state, obs)
                     elif verdict.skip == "projection_stalled":
                         # DELIBERATELY NO ADOPT. The baseline is only moved
@@ -750,7 +767,7 @@ class ReconciliationSweeper:
                         "(%s) — the suspended state itself is committed",
                         exc,
                     )
-        return actions, nudges
+        return actions, nudges, refreshes
 
     async def _live_observe_counts(
         self, ctx: Dict[str, Dict], targets: List[tuple],
@@ -1512,6 +1529,29 @@ class ReconciliationSweeper:
             job_id=job.id,
             run_id=run_id,
         )
+
+    async def _refresh_versioned(self, ds_id: str, run_id: str) -> None:
+        """Refresh what serves a versioned source's reads, its graph having moved since the
+        last sweep. A publish refreshes them itself (``projection_target.after_projection``);
+        another writer's change (an ETL) has nothing else to. Through the signal, whose
+        versioned path clears the caches and rebuilds nothing — so no action, and no breaker.
+        Best-effort: a miss waits for the next move."""
+        svc = self._service_getter()
+        if svc is None:
+            return
+        try:
+            async with self._session_factory() as session:
+                await svc.signal_source_changed(
+                    ds_id, session, reason="external_load", origin="reconcile-sweep",
+                    actor="internal", trigger_source="reconcile", run_id=run_id,
+                )
+                await session.commit()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "reconcile sweep: read caches of versioned %s not refreshed: %s", ds_id, exc,
+            )
 
     async def _nudge_stats(self, ds_id, workspace_id) -> None:
         """Get fresh numbers for a source whose counts were too stale to act on.

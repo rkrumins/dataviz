@@ -543,10 +543,10 @@ async def _run() -> None:
     n, _ = await _counts(gid, await _commit_id(gid))
     assert n == 7, "restart re-imports the CURRENT source (6 + the late node)"
 
-    # ══ D. items the app can't see are skipped + REPORTED (never silent) ═════
-    # A node with no identifier never renders, searches or traces — it isn't part of
-    # the graph as far as this product is concerned, so copying it is meaningless.
-    # It must still be counted and stated, which is what the old path failed to do.
+    # ══ D. an item with no identifier stops the enable, and says how many ════
+    # A node with no urn, and no identity property to take one from, can't be kept in version
+    # history. Copying around it used to finish green — on a graph keyed by another property,
+    # with nothing copied at all. The pre-flight stops instead, before anything is copied.
     d = ds()
     invisible = FakeGraph(
         [_node("urn:a"), _node("urn:b"), (["SentinelMarker"], {"id": "left-over-test-node"})],
@@ -554,11 +554,10 @@ async def _run() -> None:
     )
     res = await _enable(d)
     out = await _drive(_runner(invisible), res["job_id"])
-    assert out["status"] == "completed", out
+    assert out["status"] == "failed" and "1 item in the graph has no urn" in out["error"], out
     status = await bootstrap_status(data_source_id=d)
-    assert status["report"]["skippedWithoutIdentifier"] == {"nodes": 1, "edges": 0}
-    n, e = await _counts(res["graph_id"], await _commit_id(res["graph_id"]))
-    assert (n, e) == (2, 1)
+    assert status["failure"]["code"] == "integrity", status
+    assert await _counts(res["graph_id"], await _commit_id(res["graph_id"])) == (0, 0)
 
     # ...but a connection between two REAL items whose endpoint never arrived is a
     # genuine inconsistency and must fail.

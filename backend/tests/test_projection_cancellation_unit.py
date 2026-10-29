@@ -31,6 +31,8 @@ class _FakePS:
         self.falkor_graph_name = "real_pinned_graph"   # != default_graph_name → not "unpinned"
         self.falkor_provider = None
         self.owns_falkor_graph = False                 # a pinned customer graph, as the column defaults
+        self.physical_types = {"nodes": {}, "edges": {}}    # recorded: spelled as declared
+        self.external_drift = None
         self.last_projected_at = None
         self.epoch = 0
         self.failed_attempts = 0
@@ -106,7 +108,7 @@ async def _run(monkeypatch, hang_at: str, projected=3, target=5) -> _FakePS:
         ps.status = "rebuilding" if from_seq <= 0 else "projecting"
         return seen_epoch + 1, ps.failed_attempts
 
-    async def fake_finish(graph_id, mine, *, published, to_seq, error, attempts):
+    async def fake_finish(graph_id, mine, *, published, to_seq, error, attempts, surplus=None):
         ps.status, ps.last_error = "idle", error
         return True
     monkeypatch.setattr(proj, "_claim", fake_claim)

@@ -273,6 +273,16 @@ class ProjectionStateORM(VersioningBase):
     # ``[{name, provider, retireAfter, afterSeq, movedBy}]``, NULL when none
     # (``move_projection``; 20261018_1100_gv_ps_retired).
     retired_keys = Column(JSONB, nullable=True)
+    # A customer graph's own spelling of its types, where it differs from the declared one:
+    # ``{"nodes": {declared: physical}, "edges": {declared: physical}}``, recorded when the enable
+    # finishes. The projector writes and matches with it, so a ``:table`` graph never gets a second,
+    # ``:Table`` copy of a node. NULL on platform keys and on graphs enabled before it
+    # (20261028_1000_gv_ps_unowned).
+    physical_types = Column(JSONB, nullable=True)
+    # What a pass found in a customer graph that history does not hold, kept rather than deleted:
+    # ``{at, nodes, edges, via}``, NULL when nothing. Cleared once it is gone or brought into
+    # history (20261028_1000_gv_ps_unowned).
+    external_drift = Column(JSONB, nullable=True)
     last_projected_at = Column(Text, nullable=True)
     last_error = Column(Text, nullable=True)
     # THE GUARDRAIL. A bootstrapped graph is PINNED to the customer's REAL FalkorDB graph — that
@@ -759,6 +769,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261018_1200_gv_lifecycle. Every graph read queues behind its lock request: short tries.
     _bounded_step(conn, "the graph lifecycle columns were not added",
                   lambda: ensure_graph_lifecycle_columns(conn), required=True, tries=10)
+    # 20261028_1000_gv_ps_unowned.
+    _bounded_step(conn, "the customer key columns were not added",
+                  lambda: ensure_ps_customer_key_columns(conn), required=True)
 
 
 def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
@@ -836,6 +849,22 @@ def ensure_ps_retired_keys_column(conn) -> None:
         return
     conn.execute(text(
         f'ALTER TABLE "{_SCHEMA}"."projection_state" ADD COLUMN IF NOT EXISTS retired_keys JSONB'))
+
+
+def ensure_ps_customer_key_columns(conn) -> None:
+    """Add ``projection_state.physical_types`` and ``external_drift``, a customer graph's own
+    spelling of its types and what was written to it outside history. A no-op without the table,
+    and once they are there (an ALTER takes the table's ACCESS EXCLUSIVE lock even when it adds
+    nothing). ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    present = {c["name"] for c in inspector.get_columns("projection_state", schema=_SCHEMA)}
+    if {"physical_types", "external_drift"} <= present:
+        return
+    ps = f'"{_SCHEMA}"."projection_state"'
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS physical_types JSONB"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS external_drift JSONB"))
 
 
 def ensure_mr_approvals_column(conn) -> None:

@@ -199,8 +199,11 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
         )}
       </div>
 
-      {/* Where the graph lives; Rebuild and Check sync for managers */}
-      {graphId && <ProjectionHealthCard wsId={wsId} graphId={graphId} showActions={canManage} />}
+      {/* Where the graph lives; Rebuild and Check sync for managers, Bring into history for publishers */}
+      {graphId && (
+        <ProjectionHealthCard wsId={wsId} graphId={graphId} showActions={canManage}
+          dataSourceId={canPublish ? dataSourceId : undefined} />
+      )}
 
       {/* Branches */}
       <section>

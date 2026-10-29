@@ -239,6 +239,81 @@ def test_api_graph_draft_journey_e2e(data_sources):
     asyncio.run(_run())
 
 
+async def _run_edge_ops_aimed_after_the_draft_is_checked() -> None:
+    """``/graph/changes`` aims an edge update or delete at the edge its id names (``edge:X``, an
+    edge copied in whose id was also an item's) only once the draft is found writable by this
+    person and a retry has been answered. Aimed before, a retry of a delete that had landed was
+    refused, ``main`` failed with a 500, and another person's private draft answered whether it
+    held an item of that id."""
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.app.services.versioning.service import GraphVersioningService
+
+    await models.create_schema_and_partitions()
+    app, G = _build_app()
+    orig_pm, orig_cache = G.provider_manager, G.get_graph_cache
+    G.provider_manager = _StubManager()
+    G.get_graph_cache = lambda: _StubCache()
+    svc = GraphVersioningService()
+    ds = "ds_" + os.urandom(4).hex()
+    V1, GP = "/api/v1/ws1/versioning", "/api/v1/ws1/graph"
+
+    def node(urn):
+        return {"op": "create", "entity_kind": "node", "entity_id": urn,
+                "payload": {"urn": urn, "entityType": "Table", "displayName": urn}}
+
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            r = await c.post(f"{V1}/graphs", json={"dataSourceId": ds, "workspaceId": "ws1"})
+            assert r.status_code == 201, r.text
+            gid = r.json()["graphId"]
+            # On main: items X and Y, and the connection the enable keys edge:X.
+            await svc.apply_ops(graph_id=gid, actor="alice", message="seed", ops=[
+                node("X"), node("Y"),
+                {"op": "create", "entity_kind": "edge", "entity_id": "edge:X",
+                 "payload": {"sourceEntityId": "X", "targetEntityId": "Y", "edgeType": "FLOWS"}}])
+            mine = (await c.post(f"{V1}/graphs/{gid}/branches", json={})).json()["branchId"]
+            delete_x = {"ops": [{"op": "delete", "kind": "edge", "id": "X"}]}
+
+            # A retry of a delete that landed answers as the first attempt did.
+            sent = []
+            for _ in range(2):
+                sent.append(await c.post(f"{GP}/changes", json=delete_x,
+                                         params={"dataSourceId": ds, "branchId": mine},
+                                         headers={"Idempotency-Key": "edge-x-1"}))
+            first, again = sent
+            assert first.status_code == 200, first.text
+            assert first.json()["entities"] == {
+                "edge:X": {"kind": "edge", "version": None, "deleted": True}}, first.json()
+            assert again.status_code == 200, again.text
+            assert (again.json()["commitId"], again.json()["entities"]) == (
+                first.json()["commitId"], first.json()["entities"])
+
+            # main is not a draft: refused as every write to it here is.
+            r = await c.post(f"{GP}/changes", params={"dataSourceId": ds, "branchId": "main"},
+                             json=delete_x)
+            assert r.status_code == 409, r.text
+            assert r.json()["detail"]["type"] == "main_write_forbidden", r.text
+
+            # Another person's private draft tells nothing of what it holds. (An id no draft or
+            # commit id can contain, so only a reply naming the item has it.)
+            secret = "their-private-item"
+            theirs = await svc.open_draft(graph_id=gid, owner="u_other")
+            await svc.apply_ops(graph_id=gid, branch_id=theirs, actor="u_other", message="add",
+                                ops=[node(secret)])
+            r = await c.post(f"{GP}/changes", params={"dataSourceId": ds, "branchId": theirs},
+                             json={"ops": [{"op": "delete", "kind": "edge", "id": secret}]})
+            assert r.status_code in (403, 404) and secret not in r.text, r.text
+    finally:
+        G.provider_manager, G.get_graph_cache = orig_pm, orig_cache
+        await db.dispose_engine()
+
+
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_edge_ops_are_aimed_after_the_draft_is_checked(data_sources):
+    asyncio.run(_run_edge_ops_aimed_after_the_draft_is_checked())
+
+
 def _large_rows(n_nodes: int, n_edges: int) -> list:
     """A graph big enough that one commit's edge INSERT exceeds the bind-param cap
     unless batches are sized by column count (17 cols × 5000 = 85k)."""

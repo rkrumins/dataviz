@@ -932,3 +932,69 @@ async def test_the_lifecycle_step_never_stalls_graph_reads_for_long(store):
 
         _, waited, _ = await asyncio.gather(upgrade(), read(), release())
     assert waited < 1, f"a graph read waited {waited:.1f}s behind the schema step"
+
+
+# ── projection_state.physical_types and external_drift: a customer graph's own spelling of its
+#    types, and what was written to it outside history (20261028_1000_gv_ps_unowned) ──
+_PS_UNOWNED = _VERSIONS / "20261028_1000_gv_ps_unowned.py"
+_UNOWNED_COLUMNS = {"physical_types", "external_drift"}
+
+
+def test_the_customer_key_columns_are_declared_and_migrated():
+    table = models.ProjectionStateORM.__table__
+    assert table.c.physical_types.nullable and table.c.external_drift.nullable
+    migration = _migration(_PS_UNOWNED)
+    assert migration.revision == _PS_UNOWNED.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261018_1200_gv_lifecycle"
+    assert "ensure_ps_customer_key_columns" in _PS_UNOWNED.read_text()
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_customer_key_columns(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            for column in sorted(_UNOWNED_COLUMNS):
+                await conn.execute(text(f"ALTER TABLE {_PS} DROP COLUMN {column}"))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert _UNOWNED_COLUMNS <= await _ps_columns(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_customer_key_migration_round_trips(store, caplog):
+    """Down drops both columns, saying how many customer graphs go back to the declared spelling
+    and how many lose their flag of outside changes."""
+    migration = _migration(_PS_UNOWNED)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(
+                f"INSERT INTO {_PS} (graph_id, projected_commit_seq, target_commit_seq, status, "
+                "owns_falkor_graph, updated_at, physical_types, external_drift) VALUES "
+                "('g_schema_unowned', 0, 0, 'idle', false, '2026-10-28', "
+                "CAST(:types AS JSONB), CAST(:drift AS JSONB))"),
+                {"types": '{"nodes": {"Table": "table"}, "edges": {}}',
+                 "drift": '{"at": "2026-10-28", "nodes": 1, "edges": 0, "via": "verify"}'})
+            spelled, drifted = (await conn.execute(text(
+                f"SELECT count(physical_types), count(external_drift) FROM {_PS}"))).one()
+            caplog.set_level("WARNING", logger="alembic.runtime.migration")
+            await conn.run_sync(run("downgrade"))
+            assert f"{spelled} graph(s) had their own spelling of types recorded" in caplog.text
+            assert f"{drifted} graph(s) were flagged with changes made outside history" in caplog.text
+            assert not _UNOWNED_COLUMNS & await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert _UNOWNED_COLUMNS <= await _ps_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

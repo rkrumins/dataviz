@@ -11,6 +11,7 @@ sweep turns into "defer to the next tick".
 import asyncio
 
 import pytest
+from sqlalchemy.dialects import postgresql
 
 from backend.app.services import versioned_sources as vs
 
@@ -43,6 +44,24 @@ def _factory_returning(ids, calls=None):
             calls.append(1)
         return lambda: _Session(ids)
     return _get_session_factory
+
+
+class _EnablingStore(_Session):
+    """Two live graphs: ``ds_done``, whose enable job completed, and ``ds_enabling``, whose enable
+    job has not. Answers as Postgres would: ``ds_enabling`` is left out only by a statement that
+    excludes graphs with an unfinished bootstrap job, correlated to the graph row."""
+
+    def __init__(self, statements):
+        super().__init__(None)
+        self._statements = statements
+
+    async def execute(self, stmt):
+        sql = str(stmt.compile(dialect=postgresql.dialect()))
+        self._statements.append(sql)
+        sub = sql.partition("NOT (EXISTS")[2]
+        unfinished_out = ("FROM graphver.jobs" in sub and "FROM graphver.graphs" not in sub
+                          and "jobs.graph_id = graphver.graphs.id" in sub)
+        return _Rows(["ds_done"] if unfinished_out else ["ds_done", "ds_enabling"])
 
 
 @pytest.fixture(autouse=True)
@@ -101,6 +120,27 @@ def test_an_expired_ttl_re_reads(monkeypatch):
 
     asyncio.run(_twice())
     assert len(calls) == 2
+
+
+def test_an_unfinished_enable_is_left_out_of_the_finished_set_only(monkeypatch):
+    """A ``graphs`` row exists from the moment an enable is queued, so the default set counts a
+    graph whose enable is pending, running, paused for a decision or failed. The finished-only set
+    leaves it out until its enable completes. The two answers are cached apart."""
+    statements: list = []
+    monkeypatch.setattr(
+        "backend.app.services.versioning.db.get_session_factory",
+        lambda: lambda: _EnablingStore(statements),
+    )
+
+    async def _asks():
+        return [await vs.versioned_data_source_ids(),
+                await vs.versioned_data_source_ids(finished_only=True),
+                await vs.versioned_data_source_ids(),
+                await vs.versioned_data_source_ids(finished_only=True)]
+
+    every, finished = frozenset({"ds_done", "ds_enabling"}), frozenset({"ds_done"})
+    assert asyncio.run(_asks()) == [every, finished, every, finished]
+    assert len(statements) == 2, "each set is read once, then served from its own cache"
 
 
 def test_a_refresh_failure_serves_the_last_good_answer(monkeypatch):

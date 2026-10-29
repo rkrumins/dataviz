@@ -164,6 +164,18 @@ export interface Watermark {
   /** Which store serves reads, by the server's own routing rule: published from FalkorDB while the
    *  projection holds the head, else Postgres; a draft is always an overlay on whatever serves it. */
   readRoute?: { main: 'falkordb' | 'postgres'; drafts: 'overlay' }
+  /** What the customer's own graph holds that history doesn't (another writer kept writing to it),
+   *  kept, not deleted; null when there is none. Brought in with {@link bringIntoHistory}. */
+  externalDrift?: ExternalDrift | null
+}
+
+/** Changes in a graph that version history doesn't hold. `via`: `verify` counted them on the last
+ *  publish (`nodes`, `edges`), `notification` — the writer said so; a property edit has no count. */
+export interface ExternalDrift {
+  at?: string | null
+  nodes?: number | null
+  edges?: number | null
+  via?: 'verify' | 'notification'
 }
 
 /** Result of kicking a full rebuild of the fast read layer. `alreadyRunning` ⇒ a
@@ -191,8 +203,8 @@ export interface DriftMismatch {
 
 /**
  * Drift report: the fast read layer compared against the source of truth. `inSync` ⇒ they match.
- * `skippedReason` (set) ⇒ the check couldn't run (no target / a refresh in flight) and the counts
- * are meaningless. Sample lists are bounded; `truncated` ⇒ more drift exists than is listed.
+ * `skippedReason` (set) ⇒ the check couldn't run (`no projection target`, `projection in flight`,
+ * or why the graph stops it, such as a type it spells two ways) and the counts are meaningless. Sample lists are bounded; `truncated` ⇒ more drift exists than is listed.
  */
 export interface DriftReport {
   graphId: string
@@ -860,8 +872,8 @@ export interface BootstrapReport {
   sampleChecked: number
   sampleMismatched: Array<Record<string, unknown>>
   mergedDuplicateConnections: number
-  /** Entities with no identifier: invisible to the app (they never render, search or
-   *  trace), so they were not copied — stated plainly rather than hidden. */
+  /** Entities with no urn, which the copy left out — only on a job from before an enable stopped
+   *  on them instead. */
   skippedWithoutIdentifier?: { nodes: number; edges: number }
   merkle: 'inline' | 'deferred' | 'pending'
 }
@@ -902,6 +914,10 @@ export interface BootstrapJob {
   /** Set once duplicate copies may have been removed from the source graph — kept through a
    *  restart, since nothing puts them back. */
   sourceCollapse?: { moved: number; deleted: number } | null
+  /** The source's identity property, and how many properties (`urn`, `urnSource`, and a name from
+   *  a custom name property) were stamped from it onto its items before the copy: they stay there
+   *  whatever happens to the enable. */
+  identityStamped?: { property: string; stamped: number } | null
 }
 
 /** Why a job failed, and what can be done: an `integrity` failure (the copy didn't match its source)
@@ -995,6 +1011,24 @@ export function retryBootstrap(
 ): Promise<{ jobId: string; status: BootstrapJobStatus }> {
   return vfetch(
     `/api/v1/${wsId}/graph/bootstrap/retry?dataSourceId=${encodeURIComponent(dataSourceId)}&mode=${mode}`,
+    withReason({ method: 'POST' }, opts?.reason),
+  )
+}
+
+/** What a re-sync committed: `commit_id` null when there was nothing new. */
+export interface ResyncResult {
+  commit_id: string | null
+  applied: number
+}
+
+/** Bring what the data source's graph holds and history doesn't into history, as one commit on main
+ *  read from the graph itself (`POST /graph/resync`), and clear its {@link ExternalDrift} flag.
+ *  Nothing is deleted from history. 409 while the graph doesn't hold all of main yet (catching up,
+ *  being rebuilt or moved), on a copy the platform owns, which nothing else writes to, and when the
+ *  graph spells a type two ways. */
+export function bringIntoHistory(wsId: string, dataSourceId: string, opts?: ActivityOpts): Promise<ResyncResult> {
+  return vfetch<ResyncResult>(
+    `/api/v1/${wsId}/graph/resync?dataSourceId=${encodeURIComponent(dataSourceId)}`,
     withReason({ method: 'POST' }, opts?.reason),
   )
 }

@@ -3,10 +3,12 @@
 A versioned graph pinned to a data source's own FalkorDB graph (``owns_falkor_graph`` false)
 shares that key with whatever the source put there. So:
 
-* a reconcile into such a key deletes neither its urn-less nodes nor the extra copies of a
-  relationship — what the version log never held is not the log's to remove;
-* a full replay that would delete more than half of what the key holds is refused
-  (``SeedRefused``): the watermark is held back, the error is recorded, nothing raises;
+* a reconcile into such a key deletes nothing the version log doesn't hold — urn-less nodes,
+  extra copies of a relationship, entities and relationships its other writers put there —
+  whatever their share of the key; only what history tombstoned is swept;
+* a pass that finds more in such a key than history holds publishes, and hands back how much
+  (``external_drift``); a pass whose own edge did not land heals instead; a key the platform
+  minted still holds such a pass back, saying what to do;
 * nothing projects into a graph whose "enable version control" job is unfinished, or into a
   tombstoned graph's retained pin;
 * eviction considers only keys the platform minted, of live graphs past genesis, with no
@@ -59,6 +61,8 @@ class _PS:
         self.falkor_graph_name = "customer_graph"
         self.falkor_provider = None
         self.owns_falkor_graph = owns
+        self.physical_types = {"nodes": {}, "edges": {}}    # recorded: spelled as declared
+        self.external_drift = None
         self.last_projected_at = None
         self.progress_done = None
         self.progress_total = None
@@ -109,10 +113,13 @@ def _projector(ps=None, graph=None, bootstrap_status=None, client=None):
         ps.status = "rebuilding" if from_seq <= 0 else "projecting"
         return seen_epoch + 1, ps.failed_attempts
 
-    async def finish(graph_id, mine, *, published, to_seq, error, attempts):
+    async def finish(graph_id, mine, *, published, to_seq, error, attempts,
+                     surplus=projection._UNCOUNTED):
         ps.status, ps.last_error = "idle", error
         if published:
             ps.projected_commit_seq = to_seq
+            if surplus is not projection._UNCOUNTED:
+                ps.external_drift = surplus
         elif attempts is not None:
             ps.failed_attempts = attempts + 1
         return True
@@ -199,27 +206,40 @@ def test_owned_key_still_clears_unkeyed(monkeypatch):
     assert any(_UNKEYED_DELETE in q for q in client.queries), client.queries
 
 
-def test_seed_refused_when_expected_empty(monkeypatch):
+def _stub_sweep(monkeypatch, proj):
+    swept = []
+
+    async def sweep(client, graph_id, main_id):
+        swept.append(graph_id)
+
+    monkeypatch.setattr(proj, "_sweep_tombstoned", sweep)
+    return swept
+
+
+def test_a_reconcile_of_a_customer_key_deletes_nothing_history_does_not_hold(monkeypatch):
+    """Expected empty, the key holding three entities and a relationship: none of it is deleted,
+    whatever its share of the key; what history tombstoned is swept after."""
     proj, _, client = _projector()
+    e = ("Dataset", "urn:1", "FLOWS_TO", "Dataset", "urn:2")
     writes = _stub_reconcile(monkeypatch, proj,
-                             actual=({_key(1): 1, _key(2): 2, _key(3): 3}, {}, set(), []))
-    with pytest.raises(projection.SeedRefused, match="3 of 3"):
-        _reconcile(proj, client, owned=False)
-    assert client.queries == [] and writes["node_deletes"] == []
+                             actual=({_key(1): 1, _key(2): 2, _key(3): 3}, {e: 5}, set(), []))
+    swept = _stub_sweep(monkeypatch, proj)
+    out = _reconcile(proj, client, owned=False)
+    assert writes == {"node_deletes": [], "edge_key_deletes": []}, writes
+    assert not any("DETACH DELETE" in q for q in client.queries), client.queries
+    assert swept == ["g1"]
+    assert out["rollups"] != "applied", "what stays can't be moved out of the rollups by delta"
 
 
-def test_seed_refused_over_half_but_allowed_at_half(monkeypatch):
-    proj, _, client = _projector()
-    _stub_reconcile(monkeypatch, proj, expected=({_key(1): _node(1)}, {}),
-                    actual=({_key(1): 1, _key(2): 2, _key(3): 3}, {}, set(), []))
-    with pytest.raises(projection.SeedRefused):
-        _reconcile(proj, client, owned=False)             # 2 of 3
-
-    proj, _, client = _projector()
+def test_a_reconcile_of_a_key_the_platform_minted_deletes_what_history_does_not_hold(monkeypatch):
+    # Regression guard (passes before the change): the platform's own key keeps today's rule.
+    proj, _, client = _projector(ps=_PS(owns=True))
     writes = _stub_reconcile(monkeypatch, proj, expected=({_key(1): _node(1)}, {}),
-                             actual=({_key(1): 1, _key(2): 2}, {}, set(), []))
-    _reconcile(proj, client, owned=False)                 # 1 of 2: allowed
-    assert writes["node_deletes"] == [("urn:2", "Dataset")]
+                             actual=({_key(1): 1, _key(2): 2, _key(3): 3}, {}, set(), []))
+    swept = _stub_sweep(monkeypatch, proj)
+    _reconcile(proj, client)
+    assert writes["node_deletes"] == [("urn:2", "Dataset"), ("urn:3", "Dataset")]
+    assert swept == []
 
 
 # ── project_graph ───────────────────────────────────────────────────────
@@ -240,20 +260,73 @@ def _stub_window(monkeypatch, proj, reconcile):
     monkeypatch.setattr(projection, "reconcile_interrupted", not_interrupted)
 
 
-def test_full_seed_refusal_holds_watermark(monkeypatch):
+def _stub_counts(monkeypatch, proj, pg, *falkor):
+    """Postgres counts ``pg``; FalkorDB answers ``falkor`` in turn (the last one from then on)."""
+    seen = list(falkor)
+
+    async def pg_counts(*a):
+        return pg
+
+    async def falkor_counts(client, owned=True):
+        return seen.pop(0) if len(seen) > 1 else seen[0]
+
+    monkeypatch.setattr(proj, "_pg_live_counts", pg_counts)
+    monkeypatch.setattr(proj, "_falkor_counts", falkor_counts)
+
+
+def test_a_full_seed_of_a_customer_key_holding_more_publishes_and_says_how_much(monkeypatch):
     proj, ps, _ = _projector(ps=_PS(projected=0, target=2))
     calls = []
 
-    async def refusing(*a, **kw):
+    async def reconcile(*a, **kw):
         calls.append(kw.get("owned"))
-        raise projection.SeedRefused("refusing to delete 3 of 3 entities")
+        return {"writes": 0, "rollups": "none"}
 
-    _stub_window(monkeypatch, proj, refusing)
+    _stub_window(monkeypatch, proj, reconcile)
+    _stub_counts(monkeypatch, proj, (1, 0), (3, 1))
+    _stub_sweep(monkeypatch, proj)
     r = asyncio.run(proj.project_graph("g1"))
-    assert "refusing" in r["verify_error"] and r["projected"] == 0, r
+    assert r.get("verify_error") is None and r["projected"] == 2, r
     assert calls == [False]
-    assert ps.projected_commit_seq == 0 and ps.target_commit_seq == 2
-    assert ps.status == "idle" and "refusing" in ps.last_error and ps.failed_attempts == 1
+    assert ps.projected_commit_seq == 2 and ps.external_drift == (2, 1)
+
+
+def test_a_pass_that_did_not_count_leaves_the_flag_alone(monkeypatch):
+    """A pass counts only when its window is main's head (and verify is on, and the counts
+    answer). One that didn't neither raises the flag nor clears it: under steady writes most
+    passes are such, and the flag would come and go."""
+    proj, ps, _ = _projector(ps=_PS(projected=0, target=2))
+    ps.external_drift = (2, 1)
+
+    async def reconcile(*a, **kw):
+        return {"writes": 0, "rollups": "none"}
+
+    _stub_window(monkeypatch, proj, reconcile)
+    _stub_counts(monkeypatch, proj, None, (3, 1))           # the head moved on: not counted
+    r = asyncio.run(proj.project_graph("g1"))
+    assert r.get("verify_error") is None and r["projected"] == 2, r
+    assert ps.external_drift == (2, 1)
+    # Regression guard (passes before the change): a pass that counted none clears it.
+    _stub_counts(monkeypatch, proj, (1, 0), (1, 0))
+    ps.projected_commit_seq = 0
+    asyncio.run(proj.project_graph("g1"))
+    assert ps.external_drift is None
+
+
+def test_a_key_the_platform_minted_holding_more_is_held_back_and_says_what_to_do(monkeypatch):
+    proj, ps, _ = _projector(ps=_PS(projected=0, target=2, owns=True))
+
+    async def reconcile(*a, **kw):
+        return {"writes": 0, "rollups": "none"}
+
+    _stub_window(monkeypatch, proj, reconcile)
+    _stub_counts(monkeypatch, proj, (1, 0), (3, 1))
+    _stub_sweep(monkeypatch, proj)
+    r = asyncio.run(proj.project_graph("g1"))
+    assert r["projected"] == 0 and ps.projected_commit_seq == 0, r
+    assert "Rebuild replaces it with what history holds" in r["verify_error"], r
+    assert "Bring" not in r["verify_error"], "nothing but the projector writes a minted key"
+    assert "enablement" not in r["verify_error"], "re-enabling answers 'already enabled'"
 
 
 def test_full_seed_skipped_while_bootstrapping(monkeypatch):
@@ -309,24 +382,60 @@ def test_project_pending_skips_tombstoned_graphs():
 
 # ── the bounded heal ────────────────────────────────────────────────────
 
-def test_heal_of_unowned_key_never_deletes_and_never_raises(monkeypatch):
+def test_heal_of_unowned_key_never_deletes(monkeypatch):
     proj, _, client = _projector()
     # Postgres holds 3, FalkorDB 1 keyed + 2 urn-less: the incremental window's heal reconciles,
-    # and that reconcile would delete 2 of 3 — refused, recorded, not raised.
-    _stub_reconcile(monkeypatch, proj, expected=({_key(1): _node(1)}, {}),
-                    actual=({_key(1): 1, _key(2): 2, _key(3): 3}, {}, set(), [7]))
-
-    async def pg_counts(*a):
-        return (3, 0)
-
-    async def falkor_counts(client, owned=True):
-        return (1, 0)
-
-    monkeypatch.setattr(proj, "_pg_live_counts", pg_counts)
-    monkeypatch.setattr(proj, "_falkor_counts", falkor_counts)
+    # keeping all of it; the shortfall it couldn't write is held back as before.
+    writes = _stub_reconcile(monkeypatch, proj, expected=({_key(1): _node(1)}, {}),
+                             actual=({_key(1): 1, _key(2): 2, _key(3): 3}, {}, set(), [7]))
+    _stub_counts(monkeypatch, proj, (3, 0), (1, 0))
+    _stub_sweep(monkeypatch, proj)
     err, healed = asyncio.run(proj._verify_and_heal(client, "g1", "main1", 1, 2, False, owned=False))
-    assert err.startswith("projection heal reconcile failed"), err
+    assert err.startswith("projection verify mismatch") and healed is False, err
+    assert writes["node_deletes"] == []
     assert not any(_UNKEYED_DELETE in q for q in client.queries), client.queries
+
+
+def test_a_customer_key_holding_more_is_kept_and_counted(monkeypatch):
+    proj, _, client = _projector()
+    _stub_counts(monkeypatch, proj, (3, 2), (5, 3))
+    swept = _stub_sweep(monkeypatch, proj)
+    outcome = {}
+    err, healed = asyncio.run(proj._verify_and_heal(
+        client, "g1", "main1", 1, 2, False, owned=False, heal_outcome=outcome))
+    assert (err, healed, outcome) == (None, False, {"surplus": (2, 1)})
+    assert swept == ["g1"], "a surplus not seen before is swept for history's deletes first"
+
+
+def test_a_surplus_already_counted_is_not_swept_again(monkeypatch):
+    """Sweeping reads every tombstone of the graph: on a key whose other writers keep it above
+    history, it runs when the surplus changes, not on every pass."""
+    proj, _, client = _projector()
+    _stub_counts(monkeypatch, proj, (3, 2), (5, 3))
+    swept = _stub_sweep(monkeypatch, proj)
+    outcome = {}
+    err, _ = asyncio.run(proj._verify_and_heal(
+        client, "g1", "main1", 1, 2, False, owned=False, heal_outcome=outcome,
+        drift={"nodes": 2, "edges": 1, "via": "verify"}))
+    assert err is None and outcome == {"surplus": (2, 1)} and swept == []
+
+
+def test_an_edge_of_the_pass_that_did_not_land_is_healed_whatever_the_surplus(monkeypatch):
+    proj, _, client = _projector()
+    healed_with = []
+
+    async def reconcile(client, graph_id, main_id, to_seq, is_fork, level_map, **kw):
+        healed_with.append(kw.get("owned"))
+        return {"writes": 1, "rollups": "none"}
+
+    monkeypatch.setattr(proj, "_reconcile_in_place", reconcile)
+    _stub_counts(monkeypatch, proj, (3, 2), (4, 3))
+    _stub_sweep(monkeypatch, proj)
+    outcome = {}
+    err, healed = asyncio.run(proj._verify_and_heal(
+        client, "g1", "main1", 1, 2, False, owned=False, heal_outcome=outcome, dropped=1))
+    assert (err, healed, healed_with) == (None, True, [False])
+    assert outcome["surplus"] == (1, 1)
 
 
 # ── eviction ────────────────────────────────────────────────────────────

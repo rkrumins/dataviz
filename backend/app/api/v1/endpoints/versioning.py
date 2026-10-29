@@ -60,6 +60,7 @@ from backend.app.services.managed_sources import (
     create_managed_data_source,
     drop_managed_data_source,
     register_aggregation,
+    same_server_providers,
 )
 from backend.app.services import permission_service
 from backend.app.services.permission_service import PermissionClaims, has_permission
@@ -942,6 +943,11 @@ class WatermarkModel(_ApiModel):
     failed_attempts: int = Field(default=0, alias="failedAttempts")
     next_retry_at: Optional[str] = Field(default=None, alias="nextRetryAt")
     liveness_error: Optional[str] = Field(default=None, alias="livenessError")
+    # A customer's own graph (`owned` false) may hold what history doesn't — another writer kept
+    # writing to it. Kept, not deleted: `{at, nodes, edges, via}` (`via`: the projector's count,
+    # `verify`, or a change notification), null when there is none. Bring it into history with
+    # POST /graph/resync.
+    external_drift: Optional[Dict[str, Any]] = Field(default=None, alias="externalDrift")
 
 
 class BranchFreshnessModel(_ApiModel):
@@ -1336,13 +1342,25 @@ async def create_graph(
     ds = await _data_source_in_workspace(session, body.data_source_id, ws_id)
     await api_key_auth.hold_to_data_source(request, body.data_source_id, ws_id)
     await _assert_copyable(session, ds.provider_id)
-    with _domain_errors():                  # a key another versioned graph projects into → 409
+    # Another versioned graph may hold the key through any provider on the same server.
+    aliases = await same_server_providers(session, ds.provider_id)
+    try:
         return await svc.create_graph(
             data_source_id=body.data_source_id, workspace_id=ws_id, kind=body.kind,
             base_ontology_id=body.base_ontology_id, tenant_id=body.tenant_id, actor=user.id,
             falkor_graph_name=ds.graph_name, falkor_provider=ds.provider_id,
+            provider_aliases=aliases,
             ontology_spec=body.ontology_spec, ontology_enforcement=body.ontology_enforcement,
         )
+    except (ConcurrencyError, IntegrityError) as exc:
+        # A key another versioned graph projects into: the claim's refusal, or uq_ps_key when a
+        # concurrent claim won. Enabling version control onto it answers the same.
+        if isinstance(exc, IntegrityError) and "uq_ps_key" not in str(exc):
+            raise
+        raise HTTPException(status_code=409, detail={
+            "type": "graph_key_in_use",
+            "message": "another versioned data source already projects into this FalkorDB graph",
+        }) from None
 
 
 @router.get("/blank-graphs/name-check", response_model=GraphNameCheckResponse)
@@ -1415,7 +1433,9 @@ async def create_blank_graph(
         created = await svc.create_graph(
             data_source_id=ds_id, workspace_id=ws_id, kind="blank", actor=user.id,
             base_ontology_id=body.ontology_id, falkor_graph_name=graph_name,
-            falkor_provider=body.provider_id, ontology_enforcement="strict",
+            falkor_provider=body.provider_id,
+            provider_aliases=await same_server_providers(session, body.provider_id),
+            ontology_enforcement="strict",
             # A blank model HAS no source — WE mint its FalkorDB graph (`blank_<ds>`), so it is
             # ours to reclaim. This is the only user-facing case where a purge may drop the key.
             owns_falkor_graph=True)
@@ -1972,7 +1992,8 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           epoch=wm.get("epoch", 0),
                           failed_attempts=wm.get("failed_attempts", 0),
                           next_retry_at=wm.get("next_retry_at"),
-                          liveness_error=wm.get("liveness_error"))
+                          liveness_error=wm.get("liveness_error"),
+                          external_drift=wm.get("external_drift"))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:

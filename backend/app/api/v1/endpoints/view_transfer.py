@@ -912,6 +912,8 @@ async def create_source_from_package(
             job = await create_bootstrap_job(
                 data_source_id=ds.id, workspace_id=body.workspaceId, actor=user.id,
                 falkor_graph_name=ds.graph_name, falkor_provider=ds.provider_id,
+                provider_aliases=await managed_sources.same_server_providers(
+                    session, ds.provider_id),
                 base_ontology_id=ds.ontology_id, ontology_enforcement=_SEED_ENFORCEMENT,
                 origin="package", payload_uri=uploads.record_key(record), upload_id=upload_id,
                 package={"integrity": found.get("integrity"), "scope": found.get("scope"),

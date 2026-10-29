@@ -30,7 +30,7 @@ import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import (Any, Awaitable, Callable, Collection, Dict, List, Mapping, NamedTuple, Optional,
-                    Sequence, Tuple)
+                    Sequence, Set, Tuple)
 
 from sqlalchemy import (Boolean, Text, TextClause, any_, bindparam, insert, select, func, delete, null,
                         literal, text, update, or_, tuple_, and_, case)
@@ -44,10 +44,12 @@ from .changeset import Delta, fold_batch_ops, materialize, net_delta, diff_state
 from backend.common.property_patch import apply_patch, compose_patches, strip_deletes
 from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
-from .errors import (AccessDenied, BranchNotOpen, ContentionExhausted, CurationAtRisk, DraftNotReadable,
+from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionExhausted,
+                     CurationAtRisk, DraftNotReadable,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
-                     MainWriteForbidden, MassDeleteBlocked, NotAFork, NotDraftOwner, PersonRequired,
+                     MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
+                     PersonRequired,
                      ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted, SelfReview,
                      VersionConflict)
 from .ids import prefixed_id
@@ -313,6 +315,18 @@ class ApprovalRequired(RuntimeError):
 # truth in the refusal message, and to size the default limit.
 _SYNC_BYTES_PER_ENTITY = 4_600
 
+# A node's fields a read of a FalkorDB graph hands back filled in when the node has none: the
+# projector writes each so (`projection._node_item`), and the reader's model defaults some. Empty
+# like this, a field the node's history doesn't hold is not a change (_as_history_holds).
+_FILLED_IN = {"displayName": "", "qualifiedName": "", "description": "", "tags": [],
+              "layerAssignment": "", "childCount": 0, "sourceSystem": "", "lastSyncedAt": "",
+              "properties": {}}
+
+
+def _same_type(held: Optional[str], read: Optional[str]) -> bool:
+    """One type in two casings: types are matched without case (``canonicalize_payload_types``)."""
+    return bool(held and read) and str(held).upper() == str(read).upper()
+
 
 class GraphTooLargeToSync(RuntimeError):
     """A re-sync of this graph would not fit in memory, so we refuse it instead of dying.
@@ -500,6 +514,7 @@ class GraphVersioningService:
         tenant_id: Optional[str] = None,
         falkor_graph_name: Optional[str] = None,
         falkor_provider: Optional[str] = None,
+        provider_aliases: Sequence[str] = (),
         ontology_spec: Optional[Mapping] = None,
         ontology_enforcement: Optional[str] = None,
         session=None,
@@ -507,11 +522,15 @@ class GraphVersioningService:
         """Create a blank versioned graph: graph row + ``main`` branch + empty
         genesis commit + projection state.  Returns ids and the genesis seq.
 
+        ``provider_aliases``: the providers on ``falkor_provider``'s server, through any of which
+        another graph may already hold ``falkor_graph_name`` (:meth:`_claim_projection_key`).
+
         Pass ``session`` to compose with a following ingest in one transaction (the
         atomic bootstrap), so a seed failure also rolls back the graph creation."""
         async with self._session_scope(session) as s:
             if falkor_graph_name:
                 await self._claim_projection_key(s, falkor_graph_name, falkor_provider,
+                                                 provider_aliases=provider_aliases,
                                                  data_source_id=data_source_id)
             graph = GraphORM(
                 data_source_id=data_source_id,
@@ -672,19 +691,27 @@ class GraphVersioningService:
             raise GraphNotWritable(row.lifecycle_state)
 
     async def _claim_projection_key(self, s, name: str, provider: Optional[str], *,
+                                    provider_aliases: Sequence[str] = (),
                                     exclude_graph_id: Optional[str] = None,
                                     data_source_id: Optional[str] = None) -> None:
         """Take FalkorDB graph ``name`` on ``provider`` as one versioned graph's projection target.
 
         Two versioned graphs projecting into one key would each reconcile the other's entities
-        away. A tombstoned holder that does not own the key lets go of it (its pin is cleared, as
+        away. A key is one physical graph however it is reached: ``provider_aliases`` are the
+        providers on ``provider``'s server (``managed_sources.same_server_providers``, asked of
+        the management database by the caller), and a holder through any of them holds this
+        key. A tombstoned holder that does not own the key lets go of it (its pin is cleared, as
         the ``20261017_1500_gv_ps_keys`` migration does); any other holder refuses the claim
-        (:class:`ConcurrencyError`). ``uq_ps_key`` settles two claims racing past this check.
+        (:class:`ConcurrencyError`). Claims of one name take its advisory lock, held to the end of
+        ``s``'s transaction, so two racing past this check serialize: ``uq_ps_key`` compares
+        provider ids, and is left unbuilt while pins conflict.
 
         A holder that is ``data_source_id``'s own graph is not a rival: the caller lost a
         concurrent create for that data source, and ``uq_graphs_data_source`` refuses it."""
         default = config.DEFAULT_FALKOR_PROVIDER
-        key = [func.coalesce(ProjectionStateORM.falkor_provider, default) == (provider or default),
+        await s.execute(select(func.pg_advisory_xact_lock(func.hashtext(f"gvkey:{name}"))))
+        key = [func.coalesce(ProjectionStateORM.falkor_provider, default).in_(
+                   [provider or default, *provider_aliases]),
                ProjectionStateORM.falkor_graph_name == name]
         if exclude_graph_id is not None:
             key.append(ProjectionStateORM.graph_id != exclude_graph_id)
@@ -3071,10 +3098,26 @@ class GraphVersioningService:
                                    else None),
                 # Old platform keys a move left, waiting to be dropped (move_projection).
                 "retired_keys": list(ps.retired_keys or []) if ps else [],
+                # What a customer's key holds that history doesn't, kept and flagged.
+                "external_drift": ps.external_drift if ps else None,
             }
 
+    async def clear_external_changes(self, graph_id: str, seen_at: Optional[str] = None) -> None:
+        """What the graph held that history didn't has been brought into it: the flag goes,
+        whichever check raised it (``projection_state.external_drift``) — the flag as it was when
+        the graph was read (``seen_at``, its ``at``; None: there was none). One raised since, say
+        by a writer's notification that arrived during the read, stays: what it reports may not
+        be in what was read."""
+        at = ProjectionStateORM.external_drift["at"].astext
+        async with self._session() as s:
+            await s.execute(update(ProjectionStateORM)
+                            .where(ProjectionStateORM.graph_id == graph_id,
+                                   func.coalesce(at, "") == (seen_at or ""))
+                            .values(external_drift=None)
+                            .execution_options(synchronize_session=False))
+
     async def ensure_projection_target(
-        self, *, graph_id: str, falkor_graph_name: str,
+        self, *, graph_id: str, falkor_graph_name: str, provider_aliases: Sequence[str] = (),
     ) -> Optional[str]:
         """Pin an UNPINNED graph's FalkorDB projection to ``falkor_graph_name`` (the data source's
         real graph — the one the canvas reads). Self-healing: graphs auto-created before the name was
@@ -3088,7 +3131,9 @@ class GraphVersioningService:
         ``None``. A fork is left untouched — it legitimately owns its ``__fork_`` graph.
 
         Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
-        unfinished, and when another versioned graph already projects into ``falkor_graph_name``."""
+        unfinished, and when another versioned graph already projects into ``falkor_graph_name``
+        through the graph's provider or one of ``provider_aliases``, the providers on its server
+        (:meth:`_claim_projection_key`)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or graph.fork_parent_graph_id is not None:
@@ -3102,6 +3147,7 @@ class GraphVersioningService:
             if ps.falkor_graph_name not in (None, f"gv_{graph_id}"):
                 return None
             await self._claim_projection_key(s, falkor_graph_name, ps.falkor_provider,
+                                             provider_aliases=provider_aliases,
                                              exclude_graph_id=graph_id)
             old = ps.falkor_graph_name
             ps.falkor_graph_name = falkor_graph_name
@@ -6238,6 +6284,106 @@ class GraphVersioningService:
             containment_edge_types=containment_edge_types, message="resync from provider",
             allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete)
 
+    async def bring_into_history(self, *, graph_id: str, client, rules, actor: str,
+                                 strategy: str = "merge") -> Dict[str, object]:
+        """Take what a customer's FalkorDB graph holds that history doesn't into ``main``, as
+        one ``sync`` commit. ``client`` is the key the projection publishes into, read whole as
+        the enable reads it (``BootstrapRunner.read_graph``, each type spelled by ``rules``). The
+        caller has seen that key hold main — a fresh watermark, on a key the platform doesn't
+        own — so every edit people made is in it and none reads back as an old value
+        (``curation_at_risk`` does not apply). A field both people and the graph changed
+        conflicts unless ``strategy='external_wins'``.
+
+        Nothing is deleted from history: a node the graph lacks may be one a read missed, and a
+        publish writes history back into the key. Identifiers several nodes in the graph share
+        with different contents are left out (``duplicates``).
+
+        The projector writes each type back in the graph's spelling of it, as read here and
+        recorded (``physical_types``). A type the graph spells more than one way is refused
+        (:class:`AmbiguousSpelling`): brought in, what one spelling holds would be written back
+        as a copy under the other."""
+        await self._assert_syncable(graph_id)       # before the read, as for any re-sync
+        async with self._session() as s:
+            await self._assert_writable(s, graph_id)
+        from .bootstrap_worker import BootstrapRunner
+        rows, spelled, clashes = await BootstrapRunner(None).read_graph(client, rules)
+        twice = {t: s for kind in ("nodes", "edges") for t, s in spelled[kind].items() if len(s) > 1}
+        if twice:
+            raise AmbiguousSpelling(twice)
+        await self._record_spelling(graph_id, spelled)
+        await self._as_history_holds(graph_id, rows)
+        result = await self.sync_ingest(
+            graph_id=graph_id, rows=rows, actor=actor, source="provider", strategy=strategy,
+            message="bring into history", holds_main=True, deletes=False)
+        return {**result, "duplicates": sorted(clashes)[:200]}
+
+    async def _record_spelling(self, graph_id: str, spelled: Mapping[str, Mapping[str, Set[str]]]
+                               ) -> None:
+        """Record, over what was recorded, a customer's graph's spelling of each type a read of
+        it found spelled one way (``projection_state.physical_types``): the graph's own word is
+        what the projector writes. A key the platform owns is spelled as declared."""
+        from .reconcile import spelling_key
+        async with self._session() as s:
+            ps = await s.get(ProjectionStateORM, graph_id, with_for_update=True)
+            if ps is None or ps.owns_falkor_graph:
+                return
+            types = {}
+            for kind in ("nodes", "edges"):
+                seen = {t: next(iter(v)) for t, v in (spelled.get(kind) or {}).items() if len(v) == 1}
+                keys = {spelling_key(t) for t in seen}
+                types[kind] = {t: v for t, v in ((ps.physical_types or {}).get(kind) or {}).items()
+                               if spelling_key(t) not in keys}
+                types[kind].update(seen)
+            ps.physical_types = types
+
+    async def _as_history_holds(self, graph_id: str, rows: List[dict]) -> None:
+        """Make a FalkorDB graph's rows say what history would, so a sync of them holds only
+        real changes. A field filled in empty (:data:`_FILLED_IN`) that the node's head doesn't
+        hold is dropped; an edge whose id is also a node's is ``edge:<id>``, as the enable keys
+        it (``bootstrap_worker._rekey``) — else it would take the node's place in the merge; and
+        a type history holds the item as, in another casing (the ontology changed its own since),
+        is history's. One indexed lookup per chunk."""
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            nodes = [r for r in rows if r.get("kind") == "node" and r.get("urn")]
+            for chunk in _chunks(nodes, 5000):
+                held = dict((await s.execute(
+                    select(NodeVersionORM.urn, NodeVersionORM.payload)
+                    .join(EntityHeadORM, (EntityHeadORM.graph_id == NodeVersionORM.graph_id)
+                          & (EntityHeadORM.head_version_id == NodeVersionORM.id))
+                    .where(EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                           EntityHeadORM.is_tombstone.is_(False),
+                           NodeVersionORM.urn.in_([r["urn"] for r in chunk])))).all())
+                for r in chunk:
+                    head = held.get(r["urn"])
+                    for k, empty in (_FILLED_IN.items() if head is not None else ()):
+                        if k in r and k not in head and r[k] == empty:
+                            del r[k]
+                    if head is not None and _same_type(head.get("entityType"), r.get("entityType")):
+                        r["entityType"] = head["entityType"]
+            named = {r["id"] for r in nodes if r.get("id")}       # a new node's id is its urn
+            edges = [r for r in rows if r.get("kind") == "edge" and r.get("id")]
+            for chunk in _chunks([r["id"] for r in edges if r["id"] not in named], 10000):
+                named.update((await s.execute(select(EntityHeadORM.entity_id).where(
+                    EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                    EntityHeadORM.entity_kind == "node",
+                    EntityHeadORM.entity_id.in_(chunk)))).scalars())
+            for r in edges:
+                if r["id"] in named:
+                    r["id"] = f"edge:{r['id']}"
+            for chunk in _chunks([r["id"] for r in edges], 10000):
+                typed = dict((await s.execute(
+                    select(EntityHeadORM.entity_id, EdgeVersionORM.edge_type)
+                    .join(EdgeVersionORM, (EdgeVersionORM.graph_id == EntityHeadORM.graph_id)
+                          & (EdgeVersionORM.id == EntityHeadORM.head_version_id))
+                    .where(EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+                           EntityHeadORM.entity_kind == "edge",
+                           EntityHeadORM.is_tombstone.is_(False),
+                           EntityHeadORM.entity_id.in_(chunk)))).all())
+                for r in edges:
+                    if _same_type(typed.get(r["id"]), r.get("edgeType")):
+                        r["edgeType"] = typed[r["id"]]
+
     async def _assert_syncable(self, graph_id: str) -> None:
         """Refuse a sync the machine cannot survive, with the number that proves it.
 
@@ -6338,6 +6484,7 @@ class GraphVersioningService:
         strategy: str = "merge", resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         containment_edge_types: Optional[Sequence[str]] = None,
         allow_curation_risk: bool = False, allow_mass_delete: bool = False,
+        holds_main: bool = False, deletes: bool = True,
     ) -> Dict[str, object]:
         """Re-sync an authoritative/external snapshot into ``main`` as a single ``sync``
         commit **without clobbering user edits** (plan §D5). 3-way merge: base = the
@@ -6358,7 +6505,10 @@ class GraphVersioningService:
         older than the last import or sync (``allow_curation_risk``), and
         :class:`MassDeleteBlocked` when the sync would delete more than
         max(``SYNC_DELETE_MAX_ABS``, ``SYNC_DELETE_MAX_FRACTION`` x live) entities
-        (``allow_mass_delete``)."""
+        (``allow_mass_delete``). ``holds_main``: the snapshot is the graph's own published key
+        (:meth:`bring_into_history`), which nothing people did is missing from, so
+        :class:`CurationAtRisk` does not apply. ``deletes=False``: the snapshot may be partial,
+        so an entity it doesn't mention is left as it is."""
         await self._assert_syncable(graph_id)
         rows = list(rows)        # every attempt reads it; a spent iterator would delete everything
         return await self._retry_seq(
@@ -6367,14 +6517,16 @@ class GraphVersioningService:
                 graph_id=graph_id, rows=rows, actor=actor, source=source,
                 idempotency_key=idempotency_key, message=message, strategy=strategy,
                 resolutions=resolutions, containment_edge_types=containment_edge_types,
-                allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete))
+                allow_curation_risk=allow_curation_risk, allow_mass_delete=allow_mass_delete,
+                holds_main=holds_main, deletes=deletes))
 
     async def _sync_ingest_once(
         self, *, graph_id: str, rows, actor: str, source: str,
         idempotency_key: Optional[str], message: str, strategy: str,
         resolutions: Optional[Mapping[str, Optional[dict]]],
         containment_edge_types: Optional[Sequence[str]],
-        allow_curation_risk: bool, allow_mass_delete: bool,
+        allow_curation_risk: bool, allow_mass_delete: bool, holds_main: bool = False,
+        deletes: bool = True,
     ) -> Dict[str, object]:
         """One attempt at :meth:`sync_ingest`, under the graph lock: the idempotent replay, the
         last sync and main's head are all read with main held still."""
@@ -6401,7 +6553,8 @@ class GraphVersioningService:
             last_seq = await self._last_sync_seq(s, graph_id, main_id)
             # After the replay, so a retried key still answers; before any O(graph) work.
             overrides: List[str] = []
-            human = await self._human_commit_in_sync_base(s, graph_id, main_id, last_seq)
+            human = (None if holds_main
+                     else await self._human_commit_in_sync_base(s, graph_id, main_id, last_seq))
             if human is not None:
                 if not allow_curation_risk:
                     raise _curation_at_risk(human)
@@ -6422,7 +6575,8 @@ class GraphVersioningService:
             # see an absence by looking at what is there. So the external id SET is kept (strings
             # only) and the live head is streamed against it.
             theirs, seen, rejected = await self._external_state_bounded(s, graph_id, main_id, rows)
-            deletions = await self._live_ids_absent_from(s, graph_id, main_id, seen)
+            deletions = (await self._live_ids_absent_from(s, graph_id, main_id, seen)
+                         if deletes else set())
             changed = set(theirs) | deletions | set(resolutions or {})
             base = await self._values_at(s, graph_id, main_id, changed, last_seq)
             ours = await self._values_at(s, graph_id, main_id, changed, graph.main_head_commit_seq)
@@ -6907,13 +7061,18 @@ class GraphVersioningService:
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
         allow_main: bool = False,
         idempotency_key: Optional[str] = None,
+        aim_edges: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
     ) -> ApplyResult:
         """:meth:`apply_ops`, answering with every addressed entity's value after the batch.
 
         With ``idempotency_key``, a batch whose commit on the branch already carries the key is
         not applied again: the answer is that commit, with the addressed entities' current values.
-        A replay runs no ``on_commit``, so the two never go together."""
+        A replay runs no ``on_commit``, so the two never go together.
+
+        ``aim_edges``: each edge update or delete goes to the edge its id names on the branch
+        (:meth:`resolve_edges`), once the branch has been found writable by ``actor`` and a
+        retry answered; an id that names only an item is refused (:class:`NotAnEdge`)."""
         assert not (idempotency_key and on_commit), "a replay would skip on_commit"
         return await self._retry_seq(
             f"apply_ops on {graph_id}/{branch_id or 'main'}",
@@ -6921,7 +7080,8 @@ class GraphVersioningService:
                 graph_id=graph_id, ops=ops, actor=actor, message=message,
                 branch_id=branch_id, containment_edge_types=containment_edge_types,
                 ontology_rules=ontology_rules, on_commit=on_commit, allow_main=allow_main,
-                idempotency_key=idempotency_key, node_identity=node_identity),
+                idempotency_key=idempotency_key, aim_edges=aim_edges,
+                node_identity=node_identity),
         )
 
     async def _apply_ops_once(
@@ -6932,6 +7092,7 @@ class GraphVersioningService:
         on_commit: Optional[Callable[[Any], Awaitable[None]]] = None,
         allow_main: bool = False,
         idempotency_key: Optional[str] = None,
+        aim_edges: bool = False,
         node_identity: Optional[ResolvedNodeIdentity] = None,
     ) -> ApplyResult:
         async with self._session() as s:
@@ -6977,6 +7138,8 @@ class GraphVersioningService:
                     CommitORM.graph_id == graph_id, CommitORM.branch_id == bid,
                     CommitORM.idempotency_key == idempotency_key))
                 if prior is not None:
+                    if aim_edges:                  # at the edges that save wrote, as it aimed them
+                        ops = await self._aimed_as_written(s, graph_id, prior, ops)
                     kinds = {o["entity_id"]: o.get("entity_kind", "node") for o in ops}
                     cur = await self._current_values(s, graph_id, bid, list(kinds))
                     return ApplyResult(
@@ -6988,6 +7151,8 @@ class GraphVersioningService:
             if bid != main_id:
                 self._require_open(branch)
                 await self._require_edit(s, branch, actor, ())
+            if aim_edges:
+                ops = await self._aimed(s, graph_id, bid, ops)
 
             ops = await self._expand_moves(s, graph_id, bid, ops, containment_edge_types)
 
@@ -7910,6 +8075,59 @@ class GraphVersioningService:
         async with self._session() as s:
             bid = branch_id or await self._main_branch_id(s, graph_id)
             return (await self._current_values(s, graph_id, bid, [entity_id])).get(entity_id)
+
+    async def resolve_edges(
+        self, *, graph_id: str, edge_ids: Collection[str], branch_id: Optional[str] = None,
+    ) -> Dict[str, Optional[Tuple[str, dict]]]:
+        """The edge each id names on a branch (default ``main``): ``{id: (entity id, payload)}``;
+        None for an id that names only a node; an id that names nothing is left out. Nodes and
+        edges share one id space, so an edge whose id was also a node's was re-keyed ``edge:<id>``
+        when its graph was copied in (``bootstrap_worker._rekey``), while the graph still calls it
+        ``<id>``: that edge answers for ``<id>``. A node never does."""
+        async with self._session() as s:
+            bid = branch_id or await self._main_branch_id(s, graph_id)
+            return await self._edges_named(s, graph_id, bid, edge_ids)
+
+    async def _edges_named(self, s, graph_id: str, bid: str, edge_ids: Collection[str]
+                           ) -> Dict[str, Optional[Tuple[str, dict]]]:
+        ids = list(dict.fromkeys(edge_ids))
+        vals = await self._current_values(s, graph_id, bid, ids + [f"edge:{i}" for i in ids])
+        out: Dict[str, Optional[Tuple[str, dict]]] = {}
+        for i in ids:
+            eid = next((e for e in (i, f"edge:{i}") if _is_edge_payload(vals.get(e))), None)
+            if eid is not None:
+                out[i] = (eid, vals[eid])
+            elif vals.get(i) is not None:
+                out[i] = None
+        return out
+
+    async def _aimed(self, s, graph_id: str, bid: str, ops: Sequence[Mapping]) -> List[Mapping]:
+        """``ops`` with each edge update or delete aimed at the edge its id names on the branch
+        (:meth:`_edges_named`). An id that names only an item there is refused
+        (:class:`NotAnEdge`); one that names nothing goes as it came."""
+        asked = [o["entity_id"] for o in ops
+                 if o.get("entity_kind") == "edge" and o.get("op") in ("update", "delete")]
+        if not asked:
+            return list(ops)
+        named = await self._edges_named(s, graph_id, bid, asked)
+        items = {i for i in asked if i in named and named[i] is None}
+        if items:
+            raise NotAnEdge(items)
+        return [{**o, "entity_id": named[o["entity_id"]][0]}
+                if o.get("entity_kind") == "edge" and o.get("op") in ("update", "delete")
+                and named.get(o["entity_id"]) else o for o in ops]
+
+    async def _aimed_as_written(self, s, graph_id: str, commit_id: str,
+                                ops: Sequence[Mapping]) -> List[Mapping]:
+        """A retried batch's edge ops aimed as its first attempt aimed them: at the ``edge:<id>``
+        that attempt's commit wrote, when it wrote that and not ``<id>``. The edge may be deleted
+        since, so what the branch holds now can't say."""
+        wrote = set((await s.execute(select(EdgeVersionORM.entity_id).where(
+            EdgeVersionORM.graph_id == graph_id, EdgeVersionORM.commit_id == commit_id)
+        )).scalars())
+        return [{**o, "entity_id": f"edge:{o['entity_id']}"}
+                if o.get("entity_kind") == "edge" and o["entity_id"] not in wrote
+                and f"edge:{o['entity_id']}" in wrote else o for o in ops]
 
     async def _entity_value_at(self, s, graph_id, branch_id, entity_id, seq) -> Optional[dict]:
         """One entity's value at ``seq`` (fork-aware): this graph, else the parent

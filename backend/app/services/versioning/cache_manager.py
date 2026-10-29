@@ -106,14 +106,19 @@ class CacheManager:
 
     # ---- eviction --------------------------------------------------------- #
     async def evict(self, graph_id: str, *, drop_graph: Callable[..., Awaitable]) -> bool:
-        """Evict a cold ``main`` from FalkorDB. Skips a pinned graph, and any graph that is not
-        :func:`_evictable`. Marks ``status=evicted`` + ``projected_commit_seq=0`` (so the worker
+        """Evict a cold ``main`` from FalkorDB. Skips a pinned graph, any graph that is not
+        :func:`_evictable`, and one whose key anything besides the graph's own data source reads
+        (:func:`purge_worker.graph_key_readers`, as purge and move ask) or whose readers cannot be
+        asked. Marks ``status=evicted`` + ``projected_commit_seq=0`` (so the worker
         rebuilds it) and drops the FalkorDB graph via ``drop_graph(name, provider_id)`` — routed
         to the graph's pinned provider instance. Returns whether it evicted.
 
         Runs under the projector's own per-graph lock (``project_graph``'s): a projection in
         flight means the graph is not cold, and nothing writes the key between the re-check and
-        the drop. The re-check and the status change are one guarded UPDATE."""
+        the drop. The re-check and the status change are one guarded UPDATE, held to the key
+        whose readers were asked."""
+        from .purge_worker import graph_key_readers
+
         if await self.is_pinned(graph_id):
             return False
         lock_scope = (db.graphver_lock_session() if self._session is db.graphver_session
@@ -126,9 +131,34 @@ class CacheManager:
             if not acquired:
                 return False
             async with self._session() as s:
+                key = (await s.execute(
+                    select(ProjectionStateORM.falkor_graph_name, ProjectionStateORM.falkor_provider,
+                           GraphORM.data_source_id)
+                    .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
+                    .where(ProjectionStateORM.graph_id == graph_id, *_evictable())
+                )).first()
+            if key is None:
+                return False
+            name, provider_id, ds_id = key
+            if name:
+                # A key we minted can still be read by another data source or a catalog entry.
+                # An answer we cannot get keeps it: fail closed.
+                try:
+                    readers = await graph_key_readers(provider_id, name, ds_id)
+                except Exception:   # noqa: BLE001
+                    logger.warning("not evicting graph %s: could not ask who reads '%s'",
+                                   graph_id, name, exc_info=True)
+                    return False
+                if readers:
+                    logger.info("not evicting graph %s: '%s' is still read by %d data source(s) "
+                                "or catalog entr(ies)", graph_id, name, len(readers))
+                    return False
+            async with self._session() as s:
                 row = (await s.execute(
                     update(ProjectionStateORM)
-                    .where(ProjectionStateORM.graph_id == graph_id, *_evictable())
+                    .where(ProjectionStateORM.graph_id == graph_id, *_evictable(),
+                           ProjectionStateORM.falkor_graph_name.is_not_distinct_from(name),
+                           ProjectionStateORM.falkor_provider.is_not_distinct_from(provider_id))
                     .values(status="evicted", projected_commit_seq=0, updated_at=_now(),
                             epoch=ProjectionStateORM.epoch + 1)
                     .returning(ProjectionStateORM.falkor_graph_name,

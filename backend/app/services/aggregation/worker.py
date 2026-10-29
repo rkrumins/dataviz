@@ -192,6 +192,18 @@ _LEARNED_KEYS = ("scan_width", "extract_concurrency", "reconcile_strategy",
                  "write_batch", "delete_chunk", "apply_rows_per_s")
 
 
+def _gate_fingerprint(job) -> Optional[str]:
+    """The fingerprint later change signals are compared against once ``job`` has finished.
+    A dedicated run writes its summaries into a graph of their own, so the source graph's
+    fingerprint moves while it runs only by what others write — a publish whose rebuild this run
+    turned away, say — which its summaries may not hold: the one taken before the run, so a
+    later sweep sees that change. An in-source run writes into the graph it fingerprints: the
+    one taken after."""
+    if (job.projection_mode or "in_source") == "dedicated":
+        return job.graph_fingerprint_before or None
+    return job.graph_fingerprint_after
+
+
 def _learned_from(run_stats: Any, *, job_id: Optional[str] = None) -> dict:
     """What this run's ``adapted`` record teaches the next run of the same
     source: the narrowest scan width it needed, whether it read serially,
@@ -959,7 +971,7 @@ class AggregationWorker:
                     aggregation_status="ready",
                     last_aggregated_at=job.completed_at,
                     aggregation_edge_count=job.created_edges,
-                    graph_fingerprint=job.graph_fingerprint_after,
+                    graph_fingerprint=_gate_fingerprint(job),
                     # What this run measured per new edge on its shard — the
                     # next run's budget starts from it. None (no calibration
                     # this run) leaves the previous figure standing.
@@ -990,7 +1002,7 @@ class AggregationWorker:
                     aggregation_status="ready",
                     last_aggregated_at=job.completed_at,
                     aggregation_edge_count=job.created_edges,
-                    graph_fingerprint=job.graph_fingerprint_after,
+                    graph_fingerprint=_gate_fingerprint(job),
                 )
 
                 # Audit-log row written in this same transaction so the
@@ -1046,7 +1058,7 @@ class AggregationWorker:
                             job_id=job_id,
                             data_source_id=job.data_source_id,
                             edge_count=job.created_edges,
-                            fingerprint=job.graph_fingerprint_after,
+                            fingerprint=_gate_fingerprint(job),
                             completed_at=job.completed_at,
                             workspace_id=job.workspace_id,
                             identity_stamped=self._identity_stamped,

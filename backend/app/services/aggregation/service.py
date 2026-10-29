@@ -668,6 +668,21 @@ def _is_resumable(job) -> bool:
 #: Every other origin is a caller who watched a write happen.
 _PROBE_ONLY_ORIGINS = frozenset({"drift", "reconcile", "reconcile-sweep"})
 
+#: Origins whose signal says something wrote to the graph: a loader script, a connector. On a
+#: versioned source that is a change outside history (``versioned_sources.flag_external_changes``).
+_OUTSIDE_WRITER_ORIGINS = frozenset({"script", "connector"})
+
+
+async def _version_controlled(ds_id: str) -> bool:
+    """Whether the source is under version control, its enable finished. Not knowing reads as
+    no: the signal then does what it does for any source."""
+    from backend.app.services import versioned_sources
+    try:
+        return ds_id in await versioned_sources.versioned_data_source_ids(finished_only=True)
+    except versioned_sources.VersionedLookupUnavailable:
+        return False
+
+
 #: ``JobLimitsPatch.reset`` keys (the wire names) → the ``live_overrides``
 #: fields they clear.
 _LIVE_RESET_FIELDS = {
@@ -2440,7 +2455,10 @@ class AggregationService:
         :AGGREGATED overlay go stale silently. This signal, once a real
         change is confirmed via the graph fingerprint, marks the source
         stale, clears content caches, invalidates hierarchy read caches,
-        nudges stats, and queues an idempotency-keyed rebuild.
+        nudges stats, and queues an idempotency-keyed rebuild. A source under
+        version control is refreshed and nothing more: its projection maintains
+        its rollups, so it is neither marked nor rebuilt, and a writer's own
+        notification flags the change as not in its history.
 
         Change-gated: unless ``force``, a fingerprint that matches the last
         aggregated fingerprint is a no-op — NOTHING after the gate runs.
@@ -2482,6 +2500,14 @@ class AggregationService:
             ds_orm = await session.get(WorkspaceDataSourceORM, ds_id)
             if ds_orm is not None and ds_orm.deleted_at is None:
                 workspace_id = ds_orm.workspace_id
+
+        # A writer said it wrote to the graph: on a source under version control, history doesn't
+        # hold that until it is brought in. Its word is the evidence, so it comes before the change
+        # gate: a property edit moves no count, and so no fingerprint either.
+        versioned = await _version_controlled(ds_id)
+        if versioned and origin in _OUTSIDE_WRITER_ORIGINS:
+            from backend.app.services import versioned_sources
+            await versioned_sources.flag_external_changes(ds_id)
 
         # 2. Resolve the provider and fingerprint the live graph (same
         # bounded pattern as check_drift / the scheduler). A resolution
@@ -2579,8 +2605,20 @@ class AggregationService:
         # keeps evaluating changed=True and the reconciler re-signals every
         # tick forever. Any marker a prior (then-applicable) signal left is
         # cleared here instead.
+        #
+        # So for a source under version control: the projector maintains its
+        # rollups, and a job queued beside it is the loop the reconciliation
+        # sweep guards against (reconcile._guard). What serves reads is
+        # refreshed below; nothing is marked or rebuilt. Unless its summaries
+        # are dedicated: the projector writes none of those, so they fall
+        # behind as any source's do.
+        maintained = versioned
+        if versioned:
+            from backend.app.db.models import WorkspaceDataSourceORM
+            ds_row = await session.get(WorkspaceDataSourceORM, ds_id)
+            maintained = getattr(ds_row, "projection_mode", None) != "dedicated"
         status = (state.aggregation_status if state else None) or "none"
-        applicable = status not in self._AGG_NOT_APPLICABLE
+        applicable = status not in self._AGG_NOT_APPLICABLE and not maintained
 
         # 4-7. Best-effort convergence (sequential awaits; the helpers never
         # raise). workspace-scoped helpers only fire once a workspace is
@@ -2737,7 +2775,7 @@ class AggregationService:
             # Distinguishes this noop from the unchanged-gate noop above —
             # the cockpit needs to tell "nothing changed" apart from
             # "changed, but aggregation doesn't apply to this source".
-            trigger_detail = "not_applicable"
+            trigger_detail = "version_controlled" if maintained else "not_applicable"
 
         # Audit outcome: not-applicable and the unchanged-gate no-op above
         # both leave nothing queued ("noop"); otherwise deferred/accepted/
@@ -4042,13 +4080,14 @@ def _rebuild_cooldown_until(
 
 
 async def _platform_mastered_ids() -> frozenset:
-    """Live versioned-graph set. Empty on a cold lookup failure so a
-    freshness read never 500s because graphver is down."""
+    """Live versioned-graph set, graphs whose enable has not finished left out
+    (as the reconcile sweep leaves them out). Empty on a cold lookup failure so
+    a freshness read never 500s because graphver is down."""
     try:
         from backend.app.services.versioned_sources import (
             versioned_data_source_ids,
         )
-        return await versioned_data_source_ids()
+        return await versioned_data_source_ids(finished_only=True)
     except Exception as exc:
         logger.warning("versioned-source lookup failed for freshness: %s", exc)
         return frozenset()

@@ -47,6 +47,16 @@ class _Svc:
         self.calls.append("entity_value")
         return self.values.get(entity_id)
 
+    async def resolve_edges(self, *, graph_id, edge_ids, branch_id=None):
+        self.calls.append("resolve_edges")
+        out = {}
+        for i in edge_ids:                              # as the service's: never a node
+            eid = next((e for e in (i, f"edge:{i}")
+                        if "sourceEntityId" in (self.values.get(e) or {})), None)
+            if eid is not None or i in self.values:
+                out[i] = (eid, self.values[eid]) if eid is not None else None
+        return out
+
     async def apply_ops_detailed(self, **kw):
         self.calls.append("apply_ops_detailed")
         self.applied.extend(kw["ops"])
@@ -220,3 +230,22 @@ async def test_the_flag_is_checked_before_any_service_call(monkeypatch, write):
     with pytest.raises(FeatureDisabledError):
         await write(_provider(inner, svc))
     assert svc.calls == [] and inner.calls == []
+
+
+@pytest.mark.asyncio
+async def test_an_edge_named_by_a_node_id_is_the_re_keyed_edge_never_the_node(nudges):
+    """An edge copied in whose id was also a node's is ``edge:<id>`` in history, while the graph —
+    and so the canvas — still calls it ``<id>``. Updating or deleting ``<id>`` acts on that edge,
+    and never on the node."""
+    inner = _Falkor()
+    svc = _Svc({"X": _A, "edge:X": _E}, written={"edge:X": ("edge", _E)})
+    edge = await _provider(inner, svc).update_edge("X", {"w": 2})
+    assert edge is not None and edge.id == "X", "answered under the id it was asked by"
+    assert await _provider(inner, svc).delete_edge("X") is True
+    assert [(o["op"], o["entity_id"]) for o in svc.applied] == [
+        ("update", "edge:X"), ("delete", "edge:X")]
+
+    svc = _Svc({"X": _A})                                  # a node, and no edge by either id
+    assert await _provider(inner, svc).update_edge("X", {"w": 2}) is None
+    assert await _provider(inner, svc).delete_edge("X") is False
+    assert svc.applied == []

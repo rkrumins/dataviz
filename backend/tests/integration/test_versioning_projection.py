@@ -52,6 +52,12 @@ class FakeGraph:
         # (a trivial read that never touches the graph); a reachable instance answers it.
         if cypher == "RETURN 1":
             return _Result([[1]])
+        # A customer graph with no recorded spelling is read for it (``reconcile.graph_spelling``):
+        # each label and relationship type it holds. One spelling of each, so nothing is probed.
+        if cypher == "CALL db.labels()":
+            return _Result([[lb] for lb in sorted({n.get("_label") for n in self.nodes.values()})])
+        if cypher == "CALL db.relationshipTypes()":
+            return _Result([[t] for t in sorted({e.get("type") for e in self.edges.values()})])
         # Projection verify (Part 1E) — mirrors `reconcile.falkor_counts`: exclude the
         # rollup-derived artifacts (the :AGGREGATED layer and the DERIVED_LABELS markers)
         # the same way FalkorDB's WHERE does.

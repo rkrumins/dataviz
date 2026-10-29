@@ -143,6 +143,24 @@ describe('DataHealthTab', () => {
     expect(screen.queryByRole('button', { name: 'Rebuild' })).not.toBeInTheDocument()
   })
 
+  it('says why the check could not compare, when the graph is what stops it', () => {
+    const why = 'The graph spells a type history holds as one more than one way (Table as Table and table).'
+    reconcileResolve = { ok: true, report: baseReport({ inSync: false, skippedReason: why }) }
+    renderTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Check sync' }))
+
+    expect(screen.getByText(why)).toBeInTheDocument()
+    expect(screen.queryByText(/no fast read layer yet/i)).not.toBeInTheDocument()
+  })
+
+  it('says what a rebuild of the customer\'s own graph changes, and what it leaves', () => {
+    watermark = { committed: 12, projected: 12, fresh: true, status: 'idle', owned: false }
+    renderTab()
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild fast read layer' }))
+    expect(screen.getByText(/fields go back to their values in history/)).toBeInTheDocument()
+    expect(screen.queryByText(/No data is lost/)).not.toBeInTheDocument()
+  })
+
   it('opens a confirm before rebuilding: confirming calls the mutation, cancelling does not', () => {
     renderTab()
 

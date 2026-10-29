@@ -100,21 +100,17 @@ async def test_the_resync_route_answers_a_refused_sync(monkeypatch, exc, status,
     from fastapi import HTTPException
 
     from backend.app.api.v1.endpoints import graph as graph_ep
-    from backend.app.api.v1.versioning_gate import SyncOverrides
     from backend.app.services.versioning import service as svc_mod
+    from backend.tests.test_sync_stopgap_guards import _ReadsTheGraph, read_the_graph
 
-    class _Svc:
-        async def resolve_graph(self, **_kw):
-            return {"graph_id": "g1"}
-
-        async def resync_from_provider(self, **_kw):
+    class _Svc(_ReadsTheGraph):
+        async def bring_into_history(self, **_kw):
             if exc == "merge":
                 raise svc_mod.MergeConflict([{"entity_id": "e1", "path": ["x"]}])
             raise svc_mod.ConcurrencyError("version control is still being enabled")
     monkeypatch.setattr(svc_mod, "GraphVersioningService", _Svc)
     with pytest.raises(HTTPException) as refused:
         await graph_ep.resync_versioned_graph_endpoint(
-            ws_id="ws1", dataSourceId="ds1", strategy="merge", _gate=None, _perm=None, user=None,
-            overrides=SyncOverrides(False, False),
-            engine=type("_E", (), {"provider": None})(), session=None)
+            read_the_graph(monkeypatch), ws_id="ws1", dataSourceId="ds1", strategy="merge",
+            _gate=None, _perm=None, user=None, session=None)
     assert refused.value.status_code == status and refused.value.detail["type"] == kind

@@ -121,8 +121,9 @@ class Observation:
     # ── public.workspace_data_sources ────────────────────────────────
     deleted: bool = False
     ontology_id: Optional[str] = None
-    # Mastered by the versioning store (a live ``graphver.graphs`` row), so
-    # Postgres is the source of truth and FalkorDB a rebuildable read cache.
+    # Mastered by the versioning store (a live ``graphver.graphs`` row whose
+    # enable has finished), so Postgres is the source of truth and FalkorDB a
+    # rebuildable read cache.
     # Resolved by the sweeper; see ``_guard``.
     platform_mastered: bool = False
 

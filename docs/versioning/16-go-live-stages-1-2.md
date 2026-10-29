@@ -145,8 +145,8 @@ p95 under 3 s, zero lost acknowledged writes.
 
 ## 9. Rollout
 
-1. Migrations after `main`'s `20261024_1000_native_query`: `20261017_1000_datasource_publish`, then eight
-   `gv_` revisions to `20261018_1200_gv_lifecycle`. Each `gv_` one waits at most 5 s for a lock.
+1. Migrations after `main`'s `20261024_1000_native_query`: `20261017_1000_datasource_publish`, then nine
+   `gv_` revisions to `20261028_1000_gv_ps_unowned`. Each `gv_` one waits at most 5 s for a lock.
 2. With a separate `GRAPHVER_DB_URL`, start the versioning workers before the API pods.
 3. Grant `workspace_publisher` to people who land changes and to owners of keys that write `main`
    (for a service account's key, the service account, on its own page under Service accounts).

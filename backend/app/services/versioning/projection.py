@@ -28,12 +28,18 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from sqlalchemy import func, literal, null, or_, select, update
+from sqlalchemy import case, func, literal, null, or_, select, update
 
 from . import config, db
+from .errors import AmbiguousSpelling
 from .falkor_indexes import ensure_urn_indexes
 from .merkle import content_hash
 from .reconcile import (
+    SPELLING,
+    graph_spelling,
+    spelled_label,
+    spelled_type,
+    spelling,
     falkor_counts, pg_live_counts_projectable, reconcile_interrupted, rollup_health,
 )
 from .projection_reconcile import (
@@ -72,9 +78,9 @@ from backend.app.providers.falkordb_provider import (  # noqa: E402
 logger = logging.getLogger(__name__)
 
 
-class SeedRefused(RuntimeError):
-    """A replay into a FalkorDB graph this platform did not create would delete most of it."""
-
+#: ``_finish``'s ``surplus`` when the pass did not count a customer's key (the key is the
+#: platform's, or the counts were not taken): ``external_drift`` is left alone.
+_UNCOUNTED = object()
 
 NodeUpsert = Tuple[str, str, dict]                     # (entity_id, urn, payload)
 # (entity_id, src_urn, tgt_urn, payload, src_label, tgt_label) — endpoint
@@ -309,14 +315,21 @@ def _node_merge_cypher(label: str) -> str:
     )
 
 
-def _edge_merge_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
+def _edge_merge_cypher(rel_type: str, src_label: str, tgt_label: str, *,
+                       keep_id: bool = False) -> str:
+    """``keep_id``: a customer's graph keeps the id its relationship already has. An edge whose id
+    was also a node's is ``edge:<id>`` in history (``bootstrap_worker._rekey``) and still ``<id>``
+    there, and nothing may rename it under whatever else keys on it."""
+    rid = "coalesce(r.id, item.eid)" if keep_id else "item.eid"
+    # How many items landed: one whose endpoint is not there matches nothing, silently.
     return (
         f"UNWIND $batch AS item "
         f"MATCH (a:{src_label} {{urn: item.src}}) "
         f"MATCH (b:{tgt_label} {{urn: item.tgt}}) "
         f"MERGE (a)-[r:{rel_type}]->(b) "
-        f"SET r.id = item.eid, r.confidence = item.conf, r.properties = item.props, "
-        f"r.gvHash = item.gvHash"
+        f"SET r.id = {rid}, r.confidence = item.conf, r.properties = item.props, "
+        f"r.gvHash = item.gvHash "
+        f"RETURN count(DISTINCT item.eid)"
     )
 
 
@@ -337,12 +350,13 @@ def _delete_nodes_cypher(label: str) -> str:
 
 def _delete_edges_cypher(rel_type: str, src_label: str, tgt_label: str) -> str:
     # Anchored + typed: both endpoints seek their per-label URN index and
-    # the relationship match is bounded by the (a)->(b) adjacency.
+    # the relationship match is bounded by the (a)->(b) adjacency. ``item.pid`` is the id a
+    # customer's graph knows an edge re-keyed ``edge:<id>`` by (``_edge_merge_cypher``).
     return (
         f"UNWIND $batch AS item "
         f"MATCH (a:{src_label} {{urn: item.src}})"
-        f"-[r:{rel_type} {{id: item.eid}}]->"
-        f"(b:{tgt_label} {{urn: item.tgt}}) DELETE r"
+        f"-[r:{rel_type}]->"
+        f"(b:{tgt_label} {{urn: item.tgt}}) WHERE r.id IN [item.eid, item.pid] DELETE r"
     )
 
 
@@ -546,12 +560,14 @@ class FalkorProjector:
         lock_s = await lock_scope.__aenter__()
         lock_arg = func.hashtext(f"gvproj:{graph_id}")
         acquired = False
+        spelling = SPELLING.set(None)       # the pass sets the graph's own; it ends with the pass
         try:
             acquired = bool(await lock_s.scalar(select(func.pg_try_advisory_lock(lock_arg))))
             if not acquired:
                 return {"noop": True, "skipped": "in-flight"}
             return await self._project_graph_locked(graph_id)
         finally:
+            SPELLING.reset(spelling)
             try:
                 if acquired:
                     await lock_s.execute(select(func.pg_advisory_unlock(lock_arg)))
@@ -585,16 +601,29 @@ class FalkorProjector:
         return tuple(row) if row is not None else None
 
     async def _finish(self, graph_id: str, mine: int, *, published: bool, to_seq: int,
-                      error: Optional[str], attempts: Optional[int]) -> bool:
+                      error: Optional[str], attempts: Optional[int],
+                      surplus: object = _UNCOUNTED) -> bool:
         """End a pass while the row is still its own (epoch ``mine``): publish ``to_seq``, or
         record the error and, unless ``attempts`` is None (a cancel), back off. Never writes the
         target or the key, which belong to the publishers and the repin. Returns False when the
-        pass was superseded."""
+        pass was superseded.
+
+        On a customer's key a published pass also says what it found there that history doesn't
+        hold: ``surplus`` (nodes, edges) becomes ``external_drift``, and none clears the count it
+        recorded before. A flag a change notification raised stays (its ``via`` says so) until
+        the changes are brought into history."""
         values = {"status": "idle", "last_error": error,
                   "progress_done": None, "progress_total": None}      # progress is over either way
         if published:
             values.update(projected_commit_seq=to_seq, last_projected_at=_now(),
                           failed_attempts=0, next_retry_at=None)
+            if surplus is not _UNCOUNTED:
+                drift = ProjectionStateORM.external_drift
+                notified = drift["via"].astext == "notification"
+                values["external_drift"] = (
+                    func.jsonb_build_object("at", _now(), "nodes", surplus[0], "edges", surplus[1],
+                                            "via", case((notified, "notification"), else_="verify"))
+                    if surplus else case((notified, drift), else_=null()))
         elif attempts is not None:
             values.update(failed_attempts=attempts + 1, next_retry_at=_retry_at(attempts + 1))
         async with self._session() as s:
@@ -643,6 +672,12 @@ class FalkorProjector:
             name = ps.falkor_graph_name or self.default_graph_name(graph_id)
             provider_id = ps.falkor_provider    # pinned instance; None → env default
             owned = bool(ps.owns_falkor_graph)  # how the verify counts it (falkor_counts)
+            # What this pass may find in a customer's key that history doesn't hold, as last counted.
+            drift = None if owned else ps.external_drift
+            # Every label and type the pass writes or matches, in the graph's own spelling (reset
+            # by ``project_graph``); a customer's graph that recorded none is read for it below.
+            SPELLING.set(None if owned else spelling(ps.physical_types))
+            unspelled = not owned and ps.physical_types is None
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
             if name == self.default_graph_name(graph_id):
@@ -675,6 +710,12 @@ class FalkorProjector:
         changes, structural, retypes, rollup_pairs = ([], [], [], []), False, [], None
         superseded = False
         try:
+            # Inside the try: the factory does a real Postgres provider lookup + FalkorDB handle
+            # build (a genuine suspension point), so a cancellation here must ALSO reset the
+            # already-claimed "projecting" row rather than strand it.
+            client = await self._graph_client(name, provider_id)
+            if unspelled:
+                await self._learn_spelling(client, graph_id)
             async with self._session() as s:
                 graph = await s.get(GraphORM, graph_id)
                 main_id = await self._svc._main_branch_id(s, graph_id)
@@ -684,9 +725,13 @@ class FalkorProjector:
                 if from_seq > 0:
                     changes = await self._compute_changes(s, graph, main_id, from_seq, to_seq)
                 total_items = sum(len(c) for c in changes)
+                prior = None
                 if from_seq > 0:
                     structural, retypes = await self._window_meta(s, graph, main_id, from_seq,
                                                                   changes)
+                    if not owned:
+                        prior = await self._properties_before(s, graph, main_id, from_seq,
+                                                              changes[0])
                 # Incremental :AGGREGATED rollup maintenance for a publish window. A full
                 # replay's rollups are moved by the reconcile's own diff instead.
                 # Skipped for forks: their containment chains span the parent graph's rows, so
@@ -701,15 +746,11 @@ class FalkorProjector:
                                          graph_id)
                         rollup_pairs = "stale"
 
-            # Inside the try: the factory does a real Postgres provider lookup + FalkorDB handle
-            # build (a genuine suspension point), so a cancellation here must ALSO reset the
-            # already-claimed "projecting" row rather than strand it.
-            client = await self._graph_client(name, provider_id)
             # Ontology entity-type→level map so projected nodes carry n.level (parity with
             # save_custom_graph). Best-effort: {} when unavailable, leaving level unset.
             level_map = await self._resolve_level_map(graph_id)
             reconciled: Optional[Dict[str, object]] = None
-            refused: Optional[str] = None
+            dropped = 0
             if from_seq <= 0:
                 # Probe BEFORE writing anything. Deliberately NOT ``read_only``: it is a proof
                 # that this node takes the writes below — under ``min-replicas-to-write`` a read
@@ -723,15 +764,14 @@ class FalkorProjector:
                 # long-lived reader (Domain rendered as "Schema Field"), took the indexes, and
                 # took every :AGGREGATED rollup with it. On a fresh key the diff is simply
                 # "everything", so a first seed is the same code path.
-                try:
-                    reconciled = await self._reconcile_in_place(
-                        client, graph_id, main_id, to_seq, is_fork, level_map, track_progress=True,
-                        provider_id=provider_id, owned=owned)
-                except SeedRefused as exc:
-                    refused = str(exc)               # held back below, like an unfaithful seed
+                reconciled = await self._reconcile_in_place(
+                    client, graph_id, main_id, to_seq, is_fork, level_map, track_progress=True,
+                    provider_id=provider_id, owned=owned)
             else:
                 await self._relabel_in_place(client, retypes)
-                await self._apply(client, *changes, level_map=level_map, provider_id=provider_id)
+                dropped = await self._apply(client, *changes, level_map=level_map,
+                                            provider_id=provider_id, owned=owned,
+                                            prior=prior) or 0
             window_rollups_applied = False
             if rollup_pairs and rollup_pairs != "stale":
                 window_rollups_applied = True
@@ -757,16 +797,13 @@ class FalkorProjector:
             except Exception:                            # pragma: no cover - infra
                 logger.debug("rollup health unreadable for %s", graph_id, exc_info=True)
             heal_outcome: Dict[str, object] = {}
-            if refused:
-                verify_error, healed = refused, False
-            else:
-                verify_error, healed = (
-                    await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork,
-                                                level_map=level_map, heal_outcome=heal_outcome,
-                                                rollups_moved=window_rollups_applied, owned=owned,
-                                                provider_id=provider_id)
-                    if config.PROJECTION_VERIFY_ENABLED else (None, False)
-                )
+            verify_error, healed = (
+                await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork,
+                                            level_map=level_map, heal_outcome=heal_outcome,
+                                            rollups_moved=window_rollups_applied, owned=owned,
+                                            provider_id=provider_id, dropped=dropped, drift=drift)
+                if config.PROJECTION_VERIFY_ENABLED else (None, False)
+            )
 
             # Verified faithful → publish: advance the watermark so reads flip to FalkorDB. A reseed
             # that did NOT match committed main (a dropped/mistyped edge, a drifted field — the
@@ -781,7 +818,8 @@ class FalkorProjector:
                 verify_error = await _write_marker(client, to_seq, mine)
                 published = verify_error is None
             if not await self._finish(graph_id, mine, published=published, to_seq=to_seq,
-                                      error=verify_error, attempts=attempts):
+                                      error=verify_error, attempts=attempts,
+                                      surplus=heal_outcome.get("surplus", _UNCOUNTED)):
                 # Something reset the watermark while this pass wrote (an evict, a rebuild, a
                 # repin, another pass): it wins. This pass's writes may have landed after the
                 # winner's, so lower the watermark to where it began; the next pass re-applies.
@@ -801,9 +839,13 @@ class FalkorProjector:
             # BEFORE that commit never reaches this handler and correctly leaves the prior status
             # untouched. CancelledError is re-raised below per the asyncio contract — never swallowed.
             cancelled = isinstance(exc, asyncio.CancelledError)
+            # Not a fault of the pass: the graph spells a type two ways, until someone fixes it.
+            ambiguous = isinstance(exc, AmbiguousSpelling)
             if cancelled:
                 logger.warning("projection for %s cancelled; resetting status so it is not stranded",
                                graph_id)
+            elif ambiguous:
+                logger.warning("projection for %s held back: %s", graph_id, exc)
             else:
                 logger.exception("projection apply failed for %s: %s", graph_id, exc)
 
@@ -825,6 +867,9 @@ class FalkorProjector:
             except Exception:                          # pragma: no cover - infra
                 logger.warning("could not reset projection status for %s after failure/cancel",
                                graph_id, exc_info=True)
+            if ambiguous:
+                return {"projected": from_seq, "applied": 0, "noop": False,
+                        "verify_error": str(exc)}
             raise
 
         if orphan:                                     # the old gv_* graph is now unread — reclaim its RAM
@@ -1305,9 +1350,32 @@ class FalkorProjector:
             new_type = (p or {}).get("entityType")
             if old and old.get("entityType") != new_type:
                 structural = True
-                retypes.append((urn, _sanitize_label(old.get("entityType") or "Entity"),
-                                _sanitize_label(new_type or "Entity")))
+                retypes.append((urn, spelled_label(old.get("entityType")), spelled_label(new_type)))
         return structural, retypes
+
+    async def _learn_spelling(self, client, graph_id: str) -> None:
+        """A customer's graph whose enable recorded no spelling (it predates the record) says it
+        itself (:func:`graph_spelling`). Recorded once nothing in it is ambiguous, so a spelling
+        another writer adds later doesn't change what the projector writes."""
+        types, ambiguous = await graph_spelling(client)
+        SPELLING.set(spelling(types, ambiguous))
+        if not (ambiguous["nodes"] or ambiguous["edges"]):
+            async with self._session() as s:
+                await s.execute(update(ProjectionStateORM)
+                                .where(ProjectionStateORM.graph_id == graph_id,
+                                       # SQL NULL, or a JSON null an enable wrote for "none"
+                                       func.coalesce(func.jsonb_typeof(
+                                           ProjectionStateORM.physical_types), "null") == "null")
+                                .values(physical_types=types)
+                                .execution_options(synchronize_session=False))
+
+    async def _properties_before(self, s, graph, main_id, seq: int,
+                                 node_upserts) -> Dict[str, Set[str]]:
+        """Each upserted node's property names as of ``seq``: on a customer's key, the only
+        properties a pass may strip from it."""
+        ids = [eid for eid, _urn, _p in node_upserts]
+        vals = await self._svc._values_at(s, graph.id, main_id, ids, seq) if ids else {}
+        return {eid: set(((p or {}).get("properties") or {})) for eid, p in vals.items()}
 
     async def _compute_rollup_deltas(self, s, graph, main_id, from_seq, to_seq):
         """Net ``:AGGREGATED`` rollup adjustments implied by this window's committed changes:
@@ -1316,7 +1384,9 @@ class FalkorProjector:
         under containers that were MOVED in the window. O(window delta × chain depth²).
 
         Returns ``{(src_urn, tgt_urn): {"dw": int, "types": set}}``, ``None`` when nothing
-        rollup-affecting changed, or the sentinel ``"stale"`` when a move exceeded the cap."""
+        rollup-affecting changed, or the sentinel ``"stale"`` when a move exceeded the cap —
+        and, for a data source whose rollups live in a dedicated key (the resolver's
+        ``"dedicated"``), whenever lineage or containment changed: none is written here."""
         try:
             sets = await self._edge_types_resolver(self._svc, graph.id)
         except Exception:                                # pragma: no cover - app-layer resolution
@@ -1384,6 +1454,10 @@ class FalkorProjector:
                 elif et in cont_types:
                     moved.add(_edge_endpoints(new)[1])
         moved.discard("")
+        if "dedicated" in sets[3:]:
+            # The aggregation job builds these rollups in a key of their own: this key gets
+            # none, and a window that changes lineage or containment hands them to the job.
+            return "stale" if lineage_creates or lineage_deletes or moved else None
         if len(lineage_creates) + len(lineage_deletes) > self._MOVE_EDGE_CAP:
             # Past the inline cap the aggregation JOB takes over — it too writes only the
             # difference. Below it the chains come from one batched climb (``prefetch``).
@@ -1643,10 +1717,7 @@ class FalkorProjector:
             dw = int(v["dw"] if (regime == "cube" or "dwc" not in v) else v["dwc"])
             if dw == 0:
                 continue
-            key = (
-                _sanitize_label(str(v.get("slb") or "Entity")),
-                _sanitize_label(str(v.get("tlb") or "Entity")),
-            )
+            key = (spelled_label(v.get("slb")), spelled_label(v.get("tlb")))
             items_by_labels.setdefault(key, []).append(
                 {"s": s_, "t": t_, "dw": dw, "et": sorted(v["types"]),
                  "key": f"{s_}|{t_}", "seq": seq,
@@ -1898,7 +1969,7 @@ class FalkorProjector:
             etype = etype or "Entity"
             urn_of[eid], label_of[eid] = urn, etype
             types_by_urn[urn] = etype
-            label = _sanitize_label(etype)
+            label = spelled_label(etype)
             nodes[(label, urn)] = ExpectedNode(
                 entity_id=eid, ref=("node", gid, vid),
                 fp=_node_fingerprint(label, chash, lm.get(etype)))
@@ -1909,8 +1980,8 @@ class FalkorProjector:
                 continue                                 # the platform's, never the log's
             su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
             tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
-            rel = _sanitize_label(etype or "REL")
-            edges[(_sanitize_label(slb or "Entity"), su, rel, _sanitize_label(tlb or "Entity"), tu)] = \
+            rel = spelled_type(etype)
+            edges[(spelled_label(slb), su, rel, spelled_label(tlb), tu)] = \
                 ExpectedEdge(entity_id=eid, ref=("edge", gid, vid), fp=_edge_fingerprint(rel, chash))
         del heads
         return nodes, edges, types_by_urn
@@ -1936,12 +2007,16 @@ class FalkorProjector:
         base, this pass already moved them from Postgres's window (``rollups_moved_this_pass``
         — a heal after a publish window; its deltas assumed raw writes that did not land, so a
         second delta would double-count), rollup cells went with a node that had to be deleted
-        outright, or the graph is a fork (its chains span the parent's rows).
+        outright, or the graph is a fork (its chains span the parent's rows). For a data source
+        whose rollups live in a dedicated key none is read or written here: ``"stale"`` when
+        lineage or containment changed, else ``"none"``.
 
         ``owned`` is the graph's ``owns_falkor_graph``. In a key the platform did not mint, what
-        the log never held is never deleted — urn-less nodes, extra copies of a relationship — and
-        a reconcile that would delete more than half of what the key holds raises
-        :class:`SeedRefused` before writing anything."""
+        the log does not hold is never deleted — urn-less nodes, entities and relationships its
+        other writers put there, extra copies of one — and no property history never held is
+        stripped. Only what history tombstoned goes (:meth:`_sweep_tombstoned`). The rollups are
+        then the batch job's whenever something was kept, since moving them by the difference
+        would take out what stays."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             nodes, edges, types_by_urn = await self._expected_projection(
@@ -1967,14 +2042,10 @@ class FalkorProjector:
         # multi-million-entity graph never stalls the requests sharing this process.
         diff = await asyncio.to_thread(
             diff_projection, nodes, edges, comparable_nodes, comparable_edges)
+        # What the log doesn't hold, in a key the platform did not mint, is someone else's.
+        kept = not owned and bool(diff.node_deletes or diff.edge_deletes or duplicated)
         if not owned:
-            # The destructive-seed valve, before any write: a key holding data the log does not
-            # (expected empty but the key is not, or most of it unknown to main) is not replayed.
-            doomed = len(diff.node_deletes) + len(diff.edge_deletes)
-            held = sum(copies.values()) + len(actual_edges)
-            if doomed * 2 > held:
-                raise SeedRefused(f"refusing to delete {doomed} of {held} entities from a FalkorDB "
-                                  "graph this platform did not create")
+            diff.node_deletes, diff.edge_deletes, duplicated = [], [], set()
 
         rollups, plan, sets = "none", None, None
         cont_types: Set[str] = set()
@@ -1995,7 +2066,13 @@ class FalkorProjector:
         if sets:
             cont_types = {t.upper() for t in (sets[0] or [])}
             lineage_types = {t.upper() for t in (sets[1] or [])}
-            if lineage_types:
+            if lineage_types and "dedicated" in sets[3:]:
+                # The aggregation job builds these rollups in a key of their own: this key's are
+                # neither read nor written, and a change to lineage or containment is the job's.
+                relevant = lineage_types | cont_types
+                changed = urn_triples(edges.keys()) ^ urn_triples(actual_edges.keys())
+                rollups = "stale" if any(k[1].upper() in relevant for k in changed) else "none"
+            elif lineage_types:
                 expected_triples = urn_triples(edges.keys())
                 actual_triples = urn_triples(actual_edges.keys())
                 plan = await asyncio.to_thread(
@@ -2006,7 +2083,7 @@ class FalkorProjector:
                     if level_map else None,
                 )
                 actual_lineage = sum(1 for k in actual_triples if k[1].upper() in lineage_types)
-                if (plan.stale or cells_lost or (rollups_moved_this_pass and plan.pairs)
+                if (plan.stale or cells_lost or kept or (rollups_moved_this_pass and plan.pairs)
                         or not await self._rollups_trusted(client, actual_lineage)):
                     rollups, plan = "stale", None
                 elif plan.pairs:
@@ -2053,8 +2130,11 @@ class FalkorProjector:
                         for k in edge_keys]
         await self._apply(client, node_upserts, edge_upserts,
                           [(u, l) for (l, u) in diff.node_deletes], [],
-                          progress=progress, level_map=level_map, provider_id=provider_id)
+                          progress=progress, level_map=level_map, provider_id=provider_id,
+                          owned=owned, prior=None if owned else {})
         await self._delete_edges_by_key(client, diff.edge_deletes, progress)
+        if kept:
+            await self._sweep_tombstoned(client, graph_id, main_id)
 
         if plan is not None and plan.pairs:
             label_by_urn = {**stored_label, **{u: l for (l, u) in nodes}}
@@ -2116,7 +2196,8 @@ class FalkorProjector:
     async def _verify_and_heal(
         self, client, graph_id, main_id, from_seq, to_seq, is_fork, level_map=None,
         heal_outcome: Optional[Dict[str, object]] = None, rollups_moved: bool = False,
-        owned: bool = True, provider_id: Optional[str] = None,
+        owned: bool = True, provider_id: Optional[str] = None, dropped: int = 0,
+        drift: Optional[dict] = None,
     ) -> Tuple[Optional[str], bool]:
         """Reconcile live node/edge COUNTS between Postgres (SoR) and FalkorDB after an
         apply, and — on a FULL SEED — additionally CONTENT-verify (id-set + deep fields), since
@@ -2131,8 +2212,13 @@ class FalkorProjector:
           stranded — urn drift, a re-point reset, or a pre-versioning seed); a tombstone
           is main's authoritative "this is deleted" and must always clear the cache.
           Whatever extra remains is un-imported legacy/aggregation data (no tombstone):
-          DO NOT auto-delete it (that would wipe un-versioned data); record the
-          discrepancy so enablement/bootstrap reconciles.
+          DO NOT auto-delete it (that would wipe un-versioned data). In a key the platform
+          minted it is an error, held back until it is brought into history or rebuilt away.
+          In a customer's key (``owned`` false) it is what the key's other writers put there
+          (an ETL that kept writing): tolerated, and handed back in ``heal_outcome["surplus"]``
+          as (nodes, edges) to be flagged (None: counted, and none; absent: not counted) — so long as the pass's own writes landed
+          (``dropped`` edges whose endpoint was not there are a shortfall, healed). A surplus
+          equal to the one last recorded (``drift``) has nothing new to sweep for.
 
         Returns ``(error_or_None, healed)`` — ``healed`` is True when the heal reconcile
         ran; its outcome (writes, and whether the rollups were moved or must be handed
@@ -2145,15 +2231,19 @@ class FalkorProjector:
         except Exception:
             logger.debug("projection verify skipped for %s (count failed)", graph_id, exc_info=True)
             return None, False
-        if pg == fk:
+        if heal_outcome is not None and not owned:
+            heal_outcome["surplus"] = None               # counted: none, unless found below
+        lost = bool(dropped) and not owned             # a write of this pass's that did not land
+        if pg == fk and not lost:
             # Counts match — but on a full seed that is NOT sufficient (content drift keeps the
             # counts). Run the content verify; None unless it finds drift (or not a full seed).
             # Pass the entity count so the deep pass can size-gate itself (fk = node + edge counts).
             return (await self._full_seed_content_error(
-                client, graph_id, main_id, from_seq, fk[0] + fk[1])), False
+                client, graph_id, main_id, from_seq, fk[0] + fk[1], owned=owned)), False
         pg_n, pg_e = pg
         f_n, f_e = fk
-        if f_n > pg_n or f_e > pg_e:
+        seen = (drift or {}).get("nodes"), (drift or {}).get("edges")
+        if (f_n > pg_n or f_e > pg_e) and (owned or lost or (f_n - pg_n, f_e - pg_e) != seen):
             # Remove deleted-on-main entities the cache stranded, then re-count. Legacy
             # (never-versioned) entities carry no tombstone, so they survive the sweep.
             try:
@@ -2166,13 +2256,19 @@ class FalkorProjector:
                     logger.warning("projection: swept %d node(s) + %d edge(s) tombstoned-but-"
                                    "lingering from FalkorDB for %s (deletes the incremental pass "
                                    "missed)", f_n - fk[0], f_e - fk[1], graph_id)
-                if pg == fk:
+                if pg == fk and not lost:
                     return None, False
                 f_n, f_e = fk
-        if f_n > pg_n or f_e > pg_e:
-            msg = (f"FalkorDB has extra entities vs committed main "
-                   f"(PG n={pg_n},e={pg_e}; Falkor n={f_n},e={f_e}) — "
-                   f"run versioning enablement/bootstrap to import them")
+        if not owned and f_n >= pg_n and f_e >= pg_e and not lost:
+            # A customer's key: kept, and flagged with how much history doesn't hold.
+            if heal_outcome is not None:
+                heal_outcome["surplus"] = (f_n - pg_n, f_e - pg_e)
+            return (await self._full_seed_content_error(
+                client, graph_id, main_id, from_seq, f_n + f_e, owned=False)), False
+        if owned and (f_n > pg_n or f_e > pg_e):
+            msg = (f"FalkorDB holds entities version history does not "
+                   f"(PG n={pg_n},e={pg_e}; Falkor n={f_n},e={f_e}): something wrote to this graph "
+                   f"outside version control. Rebuild replaces it with what history holds")
             logger.error("%s for %s", msg, graph_id)
             return msg, False
         if from_seq > 0:                                 # missing committed data → reconcile once
@@ -2194,7 +2290,13 @@ class FalkorProjector:
                     heal_outcome.update(healed)
                 pg2 = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)
                 fk2 = await self._falkor_counts(client, owned)
+                if pg2 is None and heal_outcome is not None:
+                    heal_outcome.pop("surplus", None)    # not re-counted: the flag stays as is
                 if pg2 is None or pg2 == fk2:
+                    return None, True
+                if not owned and fk2[0] >= pg2[0] and fk2[1] >= pg2[1]:
+                    if heal_outcome is not None:
+                        heal_outcome["surplus"] = (fk2[0] - pg2[0], fk2[1] - pg2[1])
                     return None, True
             except Exception:
                 logger.exception("projection heal reconcile failed for %s", graph_id)
@@ -2204,7 +2306,7 @@ class FalkorProjector:
         return msg, False
 
     async def _full_seed_content_error(
-        self, client, graph_id, main_id, from_seq, entity_count=0
+        self, client, graph_id, main_id, from_seq, entity_count=0, owned: bool = True,
     ) -> Optional[str]:
         """Content verify for a FULL SEED whose COUNTS already matched: the reconciler's single-scan
         content diff (node displayName/label drift + edge type/confidence/properties drift) of the
@@ -2212,7 +2314,8 @@ class FalkorProjector:
         verify can't see, else None. No-op off the full-seed path, when disabled, or above the
         deep-verify entity ceiling (the ordered scan's SKIP/LIMIT paging degrades on a very large
         graph — count verify still ran; the on-demand reconcile can deep-diff any size). Best-effort:
-        a diff-infra failure degrades to None (counts already passed), never raises."""
+        a diff-infra failure degrades to None (counts already passed), never raises. In a customer's
+        key (``owned`` false) an entity history doesn't hold is someone else's, not drift."""
         if from_seq > 0 or not config.PROJECTION_VERIFY_DEEP:
             return None
         cap = config.PROJECTION_VERIFY_DEEP_MAX_ENTITIES
@@ -2230,7 +2333,7 @@ class FalkorProjector:
             logger.debug("full-seed content verify skipped for %s (diff failed)",
                          graph_id, exc_info=True)
             return None
-        if mn or xn or mm or em:
+        if mn or (xn and owned) or mm or em:
             msg = (f"content drift after full seed: {len(mn)} missing node(s), "
                    f"{len(xn)} extra node(s), {len(mm)} node field mismatch(es), "
                    f"{len(em)} edge attr mismatch(es) (bounded sample) — cache NOT published")
@@ -2242,15 +2345,17 @@ class FalkorProjector:
         """DETACH DELETE from the cache every node/edge ``main`` has TOMBSTONED that the
         incremental pass stranded (a re-point reset, a partial delete, or a pre-versioning seed).
         A tombstone is main's authoritative "this is deleted", so it must always clear the cache;
-        never-versioned legacy entities carry no tombstone and are left for enablement/bootstrap.
+        never-versioned entities carry no tombstone and are never deleted here (on a customer's
+        key they are counted in ``external_drift``).
 
         Nodes are matched by their committed ``urn`` (the indexed key — fast on a large graph) with
         the entityId confirmed, so a live entity that later reused the urn is never deleted. The
         rare case where a stranded node's cache urn DIFFERS from its committed urn is not caught
         here (it needs a full reseed/resync); the count check still flags it.
 
-        Reached only on the heal path (a count mismatch on a caught-up, non-fork main), so the
-        work is bounded by the number of deletes on the graph, not by the graph size."""
+        Reached on the heal path (a count mismatch on a caught-up, non-fork main) and after a
+        reconcile of a customer's key that kept what history doesn't hold, so the work is bounded
+        by the number of deletes on the graph, not by the graph size."""
         async with self._session() as s:
             node_ids = (await s.execute(
                 select(EntityHeadORM.entity_id).where(
@@ -2278,7 +2383,7 @@ class FalkorProjector:
                 for eid, urn, payload in rows:      # ascending commit_seq → last non-null wins
                     latest[eid] = (urn, str((payload or {}).get("entityType") or "Entity"))
                 for e, (u, lbl) in latest.items():
-                    pairs_by_label.setdefault(_sanitize_label(lbl), []).append(
+                    pairs_by_label.setdefault(spelled_label(lbl), []).append(
                         {"urn": u, "eid": e})
             # Tombstoned edges: their delete rows carry no payload — fold the last
             # non-delete row per entity so the delete runs typed + endpoint-anchored;
@@ -2350,7 +2455,8 @@ class FalkorProjector:
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
                      progress=None, level_map: Optional[Dict[str, int]] = None,
-                     provider_id: Optional[str] = None, known_empty: bool = False) -> None:
+                     provider_id: Optional[str] = None, known_empty: bool = False,
+                     owned: bool = True, prior: Optional[Dict[str, Set[str]]] = None) -> int:
         """Apply one pass: nodes in (grouped by label), edges in (grouped by
         type + endpoint labels — the per-label URN indexes drive every node
         match), edges out, nodes out.
@@ -2366,7 +2472,11 @@ class FalkorProjector:
         An upsert's payload may be a :class:`_Pending`; it is read with the batch that writes it.
         ``provider_id`` is the instance ``client`` writes to (None: the default one).
         ``known_empty``: no node being written exists yet (a package seed's own fresh key), so no
-        node can carry a property its payload lost — the read for them is skipped."""
+        node can carry a property its payload lost — the read for them is skipped. ``owned`` is the
+        key's ``owns_falkor_graph``: a customer's graph keeps its relationships' ids. ``prior``
+        (a customer's key): each node's property names before this pass, the only ones it may
+        strip (:meth:`_mark_removed_properties`). Returns how many edges did not land: an
+        endpoint that isn't there matches nothing."""
         await self._ensure_urn_indexes(client, provider_id, [
             *(p.get("entityType") or "Entity" for _e, _u, p in node_upserts),
             *(lbl for *_rest, slb, tlb in edge_upserts for lbl in (slb, tlb)),
@@ -2400,7 +2510,7 @@ class FalkorProjector:
                 )
         by_label: Dict[str, list] = {}
         for up in node_upserts:
-            by_label.setdefault(_sanitize_label(up[2].get("entityType") or "Entity"), []).append(up)
+            by_label.setdefault(spelled_label(up[2].get("entityType")), []).append(up)
         keep = _projector_owned_property_names()
         for label, ups in by_label.items():
             for batch in _batches(ups, self._batch):
@@ -2416,7 +2526,7 @@ class FalkorProjector:
                     for item in chunk:
                         item["gone"] = {}
                 else:
-                    await self._mark_removed_properties(client, label, chunk, keep)
+                    await self._mark_removed_properties(client, label, chunk, keep, prior)
                 await _q(client, _node_merge_cypher(label), params={"batch": chunk})
                 if progress:
                     await progress(len(chunk))
@@ -2424,12 +2534,9 @@ class FalkorProjector:
         by_rel: Dict[Tuple[str, str, str], list] = {}
         for up in edge_upserts:
             _eid, _su, _tu, p, slb, tlb = up
-            key = (
-                _sanitize_label(p.get("edgeType") or "REL"),
-                _sanitize_label(slb or "Entity"),
-                _sanitize_label(tlb or "Entity"),
-            )
+            key = (spelled_type(p.get("edgeType")), spelled_label(slb), spelled_label(tlb))
             by_rel.setdefault(key, []).append(up)
+        dropped = 0
         for (rel, sl, tl), ups in by_rel.items():
             for batch in _batches(ups, self._batch):
                 chunk = []
@@ -2437,7 +2544,11 @@ class FalkorProjector:
                     item = _edge_item(eid, su, tu, p)
                     item["gvHash"] = _edge_fingerprint(rel, content_hash(p))
                     chunk.append(item)
-                await _q(client, _edge_merge_cypher(rel, sl, tl), params={"batch": chunk})
+                res = await _q(client, _edge_merge_cypher(rel, sl, tl, keep_id=not owned),
+                               params={"batch": chunk})
+                landed = getattr(res, "result_set", None) or []
+                if landed and landed[0]:
+                    dropped += len(chunk) - int(landed[0][0] or 0)
                 if progress:
                     await progress(len(chunk))
 
@@ -2445,12 +2556,13 @@ class FalkorProjector:
 
         ndel_by: Dict[str, list] = {}
         for urn, label in node_deletes:
-            ndel_by.setdefault(_sanitize_label(label or "Entity"), []).append(urn)
+            ndel_by.setdefault(spelled_label(label), []).append(urn)
         for label, urns in ndel_by.items():
             for chunk in _batches(urns, self._batch):
                 await _q(client, _delete_nodes_cypher(label), params={"urns": list(chunk)})
                 if progress:
                     await progress(len(chunk))
+        return dropped
 
     async def _ensure_urn_indexes(self, client, provider_id: Optional[str],
                                   labels: Iterable[Optional[str]]) -> None:
@@ -2465,7 +2577,7 @@ class FalkorProjector:
         set: every other statement would fail the same way. ``drop_graph`` forgets a graph's
         entries, since GRAPH.DELETE takes its indexes."""
         name = str(getattr(client, "name", "") or "")
-        want = [lbl for lbl in dict.fromkeys(_sanitize_label(lbl or "Entity") for lbl in labels)
+        want = [lbl for lbl in dict.fromkeys(spelled_label(lbl) for lbl in labels)
                 if (provider_id, name, lbl) not in _URN_INDEXED]
         for lbl in want:
             try:
@@ -2512,7 +2624,8 @@ class FalkorProjector:
         return [(*up[:at], payload_of.get(up[at].ref[2]), *up[at + 1:])
                 if isinstance(up[at], _Pending) else up for up in batch]
 
-    async def _mark_removed_properties(self, client, label: str, chunk: list, keep) -> None:
+    async def _mark_removed_properties(self, client, label: str, chunk: list, keep,
+                                       prior: Optional[Dict[str, Set[str]]] = None) -> None:
         """Give each item a ``gone`` map of the user properties its node still carries but
         the committed payload no longer has — ``n += nativeProps`` only ever adds, so a
         property removed from an entity used to stay on its node (in Properties, matching
@@ -2521,7 +2634,9 @@ class FalkorProjector:
 
         ``keep`` is never removed, and neither is a node's own identity property — the source
         property its ``urnSource`` / ``nameSource`` stamp says its urn / name was filled from
-        (a source whose identity column is ``id`` keeps its ``id``)."""
+        (a source whose identity column is ``id`` keeps its ``id``). With ``prior`` (a customer's
+        key), only a property the node's payload had before is removed: what history never held,
+        something else wrote, and it stays."""
         for item in chunk:
             item["gone"] = {}
         res = await _q(client, f"UNWIND $urns AS u MATCH (n:{label} {{urn: u}}) "
@@ -2533,6 +2648,8 @@ class FalkorProjector:
             held[str(u)] = set(ks or []) - {k for k in identity if isinstance(k, str) and k}
         for item in chunk:
             stale = held.get(item["urn"], set()) - keep - set(item["nativeProps"] or {})
+            if prior is not None:
+                stale &= prior.get(item["entityId"], set())
             item["gone"] = {k: None for k in stale}
 
     async def _run_edge_deletes(self, client, edge_deletes, progress=None) -> None:
@@ -2543,13 +2660,11 @@ class FalkorProjector:
         fallback: list = []
         for e in edge_deletes:
             if isinstance(e, dict):
-                key = (
-                    _sanitize_label(e.get("rel") or "REL"),
-                    _sanitize_label(e.get("slb") or "Entity"),
-                    _sanitize_label(e.get("tlb") or "Entity"),
-                )
+                key = (spelled_type(e.get("rel")), spelled_label(e.get("slb")),
+                       spelled_label(e.get("tlb")))
                 del_by.setdefault(key, []).append(
-                    {"eid": e["eid"], "src": e["src"], "tgt": e["tgt"]}
+                    {"eid": e["eid"], "pid": e["eid"].removeprefix("edge:"),
+                     "src": e["src"], "tgt": e["tgt"]}
                 )
             else:
                 fallback.append(e)

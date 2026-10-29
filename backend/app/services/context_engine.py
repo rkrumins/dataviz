@@ -280,6 +280,30 @@ class ContextEngine:
     # ------------------------------------------------------------------ #
 
     @classmethod
+    async def for_the_graph(
+        cls,
+        workspace_id: str,
+        registry: Any,  # ProviderRegistry — avoid circular import
+        session: "AsyncSession",
+        data_source_id: str,
+    ) -> "ContextEngine":
+        """An engine reading the FalkorDB key a data source's reads go to — a versioned graph's
+        projection key — whatever route those reads take now (a main the projection lags reads
+        Postgres), set up as :meth:`for_workspace` sets up a reader. For reading what the graph
+        itself holds, other writers' entities included."""
+        from ..ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
+        from ..ontology.service import LocalOntologyService
+
+        provider = await registry.get_provider_for_workspace(workspace_id, session, data_source_id)
+        engine = cls(provider=provider,
+                     ontology_service=LocalOntologyService(SQLAlchemyOntologyRepository(session)))
+        engine._workspace_id = workspace_id
+        engine._data_source_id = data_source_id
+        engine._db_session = session
+        await engine._resolve_ontology()
+        return engine
+
+    @classmethod
     async def for_connection(
         cls,
         connection_id: Optional[str],

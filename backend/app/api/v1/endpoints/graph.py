@@ -1,5 +1,6 @@
 from typing import Any, Dict, List, Optional
 import hashlib
+import inspect
 import itertools
 import json
 import logging
@@ -47,8 +48,7 @@ from backend.common.models.search import (
 )
 from backend.common.property_patch import (
     InvalidPatch, lift_top_level_node_fields, normalize_update, strip_deletes)
-from backend.app.api.v1.versioning_gate import (SyncOverrides, require_publish_for_main,
-                                                require_versioning_enabled, sync_override_gate)
+from backend.app.api.v1.versioning_gate import require_publish_for_main, require_versioning_enabled
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.advanced_search_service import (
     SHARED_LINK_RELATIONSHIPS,
@@ -270,11 +270,11 @@ async def bootstrap_versioned_graph_endpoint(
     from backend.app.services.versioning.bootstrap_worker import (
         BootstrapConflict, create_bootstrap_job)
     actor = user.id if user else "system"
-    provider_id, graph_name = await _pin_projection_target(session, dataSourceId, ws_id)
+    provider_id, graph_name, aliases = await _pin_projection_target(session, dataSourceId, ws_id)
     try:
         res = await create_bootstrap_job(
             data_source_id=dataSourceId, workspace_id=ws_id, actor=actor,
-            falkor_graph_name=graph_name, falkor_provider=provider_id)
+            falkor_graph_name=graph_name, falkor_provider=provider_id, provider_aliases=aliases)
     except BootstrapConflict as exc:
         raise HTTPException(status_code=409, detail=exc.detail)
     except ValueError as exc:
@@ -450,6 +450,7 @@ async def bootstrap_abandon_endpoint(
 
     A data source being seeded from a view package was made for that seed and never went live: it
     goes too (``{origin: 'package', dataSourceRemoved: true}``)."""
+    from backend.app.services import versioned_sources
     from backend.app.services.managed_sources import drop_managed_data_source
     from backend.app.services.versioning.bootstrap_worker import abandon_bootstrap
     from backend.app.services.versioning.service import ConcurrencyError
@@ -461,6 +462,8 @@ async def bootstrap_abandon_endpoint(
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    # The graph is soft-deleted now; this process stops counting it as versioned at once.
+    versioned_sources.reset_cache()
     # Before a package's data source goes below: the record names it, and the
     # drop's commit carries the record with it.
     await _record_versioning(session, "workspace.versioning.abandoned", dataSourceId)
@@ -511,10 +514,14 @@ async def _pin_projection_target(session: AsyncSession, data_source_id: str, ws_
     """The data source's REAL FalkorDB graph + provider — the graph the canvas already
     reads. The versioned graph is pinned to it (the same target
     ``projection_target.repair_projection_target`` self-heals to) so the import's
-    projection is a fast-forward, not a drop-and-reseed of data we just copied."""
+    projection is a fast-forward, not a drop-and-reseed of data we just copied. Also every
+    provider on that provider's server (``managed_sources.same_server_providers``): another
+    versioned graph pinned to the key through any of them already holds it."""
+    from backend.app.services.managed_sources import same_server_providers
     ds = await _data_source_in_workspace(session, data_source_id, ws_id)
     await _assert_copyable(session, getattr(ds, "provider_id", None))
-    return getattr(ds, "provider_id", None), getattr(ds, "graph_name", None)
+    return (getattr(ds, "provider_id", None), getattr(ds, "graph_name", None),
+            await same_server_providers(session, getattr(ds, "provider_id", None)))
 
 
 async def _assert_copyable(session: AsyncSession, provider_id: Optional[str]) -> None:
@@ -551,6 +558,7 @@ async def _assert_copyable(session: AsyncSession, provider_id: Optional[str]) ->
 
 @router.post("/resync")
 async def resync_versioned_graph_endpoint(
+    request: Request,
     ws_id: str,
     dataSourceId: str = Query(..., description="Data source whose versioned graph to re-sync."),
     strategy: str = Query("merge", description="merge | external_wins"),
@@ -565,17 +573,22 @@ async def resync_versioned_graph_endpoint(
     _perm=Depends(require_ws_manage),
     _publish=Depends(require_ws_publish),          # a sync advances main
     user=Depends(get_optional_user),
-    # Before `engine`: dependencies resolve in order, so a refused override never builds a provider.
-    overrides: SyncOverrides = Depends(sync_override_gate),
-    engine: ContextEngine = Depends(get_context_engine),
     session: AsyncSession = Depends(get_engine_session),
 ):
-    """Re-sync a versioned graph from its provider's CURRENT state on demand — runnable at
-    any time for any versioned graph. 3-way merge preserves user edits (a field both the
-    source and a user changed conflicts under ``merge``; pass ``external_wins`` to take the
-    source). 404 if the data source isn't versioned yet (enable it first). 409
-    ``curation_at_risk`` / ``mass_delete_blocked`` unless a workspace admin passes ``force`` /
-    ``allowMassDelete``."""
+    """Bring into history what the data source's own FalkorDB graph holds that history doesn't —
+    what other writers put there (``externalDrift`` on the watermark) — as one ``sync`` commit on
+    main, and clear the flag. It reads the key the projection publishes into, whole, as the
+    enable reads it, and only while that key holds main: 409 ``not_ready`` while the projection
+    is behind main, evicted, being rebuilt or moved, since what it hasn't written would read as
+    the graph's own change. 409 ``platform_copy`` on a key the platform owns: nothing else writes
+    there, and Rebuild rewrites it from history. Nothing is deleted from history. 3-way merge
+    preserves people's edits (a field both changed conflicts under ``merge``; pass
+    ``external_wins`` to take the graph's). 404 if the data source isn't versioned yet."""
+    from backend.app.api.v1.endpoints.versioning import get_falkor_read_factory
+    from backend.app.services.node_identity import stamp_identity_for_enable
+    from backend.app.services.projection_target import make_rollup_rebuild_hook
+    from backend.app.services.versioning.bootstrap_worker import BootstrapFailure
+    from backend.app.services.versioning.errors import AmbiguousSpelling
     from backend.app.services.versioning.service import GraphVersioningService
     actor = user.id if user else "system"
     svc = GraphVersioningService()
@@ -583,19 +596,56 @@ async def resync_versioned_graph_endpoint(
         data_source_id=dataSourceId, actor=actor, workspace_id=ws_id, open_draft_if_absent=False)
     if res is None:
         raise HTTPException(status_code=404, detail="data source is not versioned; enable versioning first")
+    gid = res["graph_id"]
+    wm = await svc.projection_watermark(gid)
+    if wm.get("owns_falkor_graph"):
+        raise HTTPException(status_code=409, detail={
+            "type": "platform_copy",
+            "message": "This graph's FalkorDB copy belongs to the platform, and nothing else "
+                       "writes to it, so there is nothing outside history to bring in. Rebuild "
+                       "rewrites it from history."})
+    if not wm.get("fresh") or wm.get("status") in ("evicted", "rebuilding", "reseeding"):
+        raise HTTPException(status_code=409, detail={
+            "type": "not_ready", "status": wm.get("status"),
+            "message": "The graph doesn't hold everything in history yet: it is catching up, or "
+                       "being rebuilt or moved. Bring its changes into history once it has "
+                       "caught up."})
+    factory = get_falkor_read_factory()
+    if factory is None:
+        raise HTTPException(status_code=503, detail={
+            "type": "graph_unavailable", "message": "The graph server can't be reached."})
+    # A node the graph names by another property gets its urn first, as at the enable.
+    await stamp_identity_for_enable(dataSourceId)
+    engine = await ContextEngine.for_the_graph(ws_id, provider_manager, session, dataSourceId)
+    client = factory(wm["falkor_graph_name"], wm.get("falkor_provider"))
+    if inspect.isawaitable(client):
+        client = await client
     from backend.app.services.versioning.service import ConcurrencyError, MergeConflict
     try:
-        result = await svc.resync_from_provider(
-            graph_id=res["graph_id"], provider=engine.provider, actor=actor, strategy=strategy,
-            allow_curation_risk=overrides.force, allow_mass_delete=overrides.allow_mass_delete)
+        result = await svc.bring_into_history(
+            graph_id=gid, client=client, rules=await _resolve_ontology_rules(engine),
+            actor=actor, strategy=strategy)
     except MergeConflict as exc:
         raise HTTPException(status_code=409, detail={"type": "merge_conflict", "conflicts": exc.conflicts})
     except ConcurrencyError as exc:
         raise HTTPException(status_code=409, detail={"type": "integrity", "message": str(exc)})
-    details = {"strategy": strategy, "commitId": (result or {}).get("commit_id")}
-    if (result or {}).get("overrides"):
-        details["overrides"] = result["overrides"]       # an admin overrode a sync safety check
-    await _record_versioning(session, "workspace.versioning.resynced", dataSourceId, details)
+    except BootstrapFailure as exc:                 # a server that cuts replies short
+        raise HTTPException(status_code=503, detail={"type": "graph_unavailable",
+                                                     "message": str(exc)})
+    except AmbiguousSpelling as exc:                # a type the graph spells two ways
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
+    await svc.clear_external_changes(gid, seen_at=(wm.get("external_drift") or {}).get("at"))
+    if (result or {}).get("commit_id"):
+        # The publish that follows moves the lineage summaries by relationships that were
+        # already in the graph, which the batch job may have counted: rebuilt, they converge.
+        try:
+            await make_rollup_rebuild_hook(
+                lambda: getattr(request.app.state, "aggregation_service", None))(gid)
+        except Exception:                                # pragma: no cover - infra
+            logger.warning("resync of %s: the lineage summaries' rebuild was not queued", gid,
+                           exc_info=True)
+    await _record_versioning(session, "workspace.versioning.resynced", dataSourceId,
+                             {"strategy": strategy, "commitId": (result or {}).get("commit_id")})
     return result
 
 
@@ -4245,6 +4295,7 @@ async def apply_graph_changes(
         return {"commitId": None, "assigned": assigned}
 
     from backend.app.services.versioning.entity_audit import ENTITY_VIEW_CAP, entity_views
+    from backend.app.services.versioning.errors import NotAnEdge
     try:
         result = await svc.apply_ops_detailed(
             graph_id=graph_id, branch_id=branchId, ops=ops, actor=actor,
@@ -4253,7 +4304,13 @@ async def apply_graph_changes(
             containment_edge_types=await _resolve_containment_types(engine),
             ontology_rules=await _resolve_ontology_rules(
                 engine, fail_closed=(g.get("kind") == "blank")),
-            node_identity=await _node_identity_for_write(engine))
+            node_identity=await _node_identity_for_write(engine),
+            # An edge copied in whose id was also an item's is ``edge:<id>`` in history, while
+            # the graph the canvas reads still calls it ``<id>``: each edge update or delete goes
+            # to the edge its id names, never to an item that shares it.
+            aim_edges=True)
+    except NotAnEdge as exc:
+        raise HTTPException(status_code=exc.status_code, detail=exc.detail)
     except OntologyViolation as exc:
         raise HTTPException(status_code=422, detail={"type": "ontology_violation", "violations": exc.violations})
     except MergeConflict as exc:

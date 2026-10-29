@@ -123,6 +123,7 @@ def _build(
     cooldown=None,
     emit_raises=False,
     invalidate_purge_count=2,
+    versioned=False,
 ):
     """Wire a service with all collaborators mocked to record their call
     order. Returns (svc, session, order, captured). The audit emit
@@ -193,6 +194,16 @@ def _build(
 
     monkeypatch.setattr(svc, "trigger", _fake_trigger)
 
+    async def _version_controlled(ds_id):
+        return versioned
+
+    async def _flag(ds_id):
+        captured.setdefault("flagged", []).append(ds_id)
+
+    from backend.app.services import versioned_sources
+    monkeypatch.setattr(svc_mod, "_version_controlled", _version_controlled, raising=False)
+    monkeypatch.setattr(versioned_sources, "flag_external_changes", _flag, raising=False)
+
     session = _FakeSession(state=state, ds=ds)
     return svc, session, order, captured
 
@@ -204,6 +215,109 @@ _FULL_SEQUENCE = [
     "mark_stats_changed",
     "trigger",
 ]
+
+
+# ── A source under version control ──────────────────────────────────────
+
+
+def test_a_versioned_source_has_what_serves_reads_refreshed_and_nothing_rebuilt(monkeypatch):
+    """The projector maintains a versioned source's rollups; an aggregation job queued beside
+    it fed the loop the reconciliation sweep guards against. So a change refreshes what serves
+    reads, and that is all: no rebuild, and no stale marker that no rebuild would ever clear."""
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="OLD"), current_fp="NEW", versioned=True)
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert resp.changed is True and resp.job_id is None
+    assert order == ["clear_source_stale", "clear_content_caches",
+                     "invalidate_hierarchy_reads", "mark_stats_changed"]
+    assert svc._events[-1]["outcome"] == "noop"
+
+
+@pytest.mark.parametrize("origin, flagged", [
+    ("script", True), ("connector", True),
+    ("api", False), ("drift", False), ("reconcile", False), ("reconcile-sweep", False)])
+def test_a_writer_saying_it_wrote_flags_changes_outside_history(monkeypatch, origin, flagged):
+    """A loader or a connector that says it wrote to the graph: history doesn't hold that
+    until it is brought in, and a property edit moves no count the projector could flag it by.
+    A person's refresh, or the platform's own probe, says no such thing."""
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="OLD"), current_fp="NEW", versioned=True)
+    _run(svc.signal_source_changed("ds-1", session, origin=origin))
+    assert captured.get("flagged", []) == (["ds-1"] if flagged else [])
+
+
+def test_a_writer_saying_it_wrote_flags_even_a_change_no_count_shows(monkeypatch):
+    """A property edit moves no count, so the fingerprint matches and nothing else runs: the
+    writer's own word that it wrote still flags the change as not in history."""
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="SAME"), current_fp="SAME", versioned=True)
+    resp = _run(svc.signal_source_changed("ds-1", session, origin="connector"))
+    assert captured.get("flagged") == ["ds-1"]
+    assert resp.changed is False and order == []
+
+
+@pytest.mark.parametrize("route", ["api", "control plane"])
+def test_source_changed_is_a_connectors_word_that_it_wrote(monkeypatch, route):
+    """``POST …/source-changed`` is what connectors call after writing to the graph themselves:
+    its signal says so (origin ``connector``), which flags a versioned source's change as not in
+    history. It carried the default origin, ``api``, which flags nothing."""
+    seen = {}
+
+    class _Svc:
+        async def signal_source_changed(self, ds_id, session, **kw):
+            seen.update(kw, ds_id=ds_id)
+            return "signalled"
+
+    if route == "api":
+        from backend.app.api.v1.endpoints import aggregation as ep
+
+        class _Request:
+            async def body(self):
+                return b""
+
+        monkeypatch.setattr(ep, "_PROXY_ENABLED", False)
+        _run(ep.source_changed("ds-1", _Request(), svc=_Svc(), session=None))
+    else:
+        from backend.app.services.aggregation import controlplane
+        from backend.app.services.aggregation.schemas import SourceChangedRequest
+        _run(controlplane.source_changed("ds-1", SourceChangedRequest(), svc=_Svc(), session=None))
+    assert (seen["ds_id"], seen["origin"]) == ("ds-1", "connector"), seen
+
+
+def test_a_versioned_source_whose_summaries_are_dedicated_is_marked_and_rebuilt(monkeypatch):
+    """The projector writes none of a dedicated source's summaries, so a change leaves them
+    behind as for any source: marked, and rebuilt. The versioned refresh cleared the marker a
+    publish had just set while that publish's rebuild still waited, and queued nothing."""
+    dedicated = types.SimpleNamespace(id="ds-1", workspace_id="ws-1", deleted_at=None,
+                                      projection_mode="dedicated")
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="OLD"), ds=dedicated, current_fp="NEW",
+        versioned=True)
+    resp = _run(svc.signal_source_changed("ds-1", session))
+    assert order == _FULL_SEQUENCE and resp.job_id == "agg_new"
+
+
+@pytest.mark.parametrize("mode, stored", [("dedicated", "BEFORE"), ("in_source", "AFTER"),
+                                          (None, "AFTER")])
+def test_a_finished_run_is_compared_by_the_graph_its_summaries_hold(mode, stored):
+    """A dedicated run writes its summaries into a graph of their own, so the source graph's
+    fingerprint moves while it runs only by what others write — a publish, say, whose rebuild
+    the running job turned away — and its summaries may not hold that: the gate keeps the
+    fingerprint taken before the run, so a later sweep sees the change. An in-source run writes
+    into the graph it fingerprints, so it keeps the one taken after."""
+    from backend.app.services.aggregation.worker import _gate_fingerprint
+
+    job = types.SimpleNamespace(projection_mode=mode, graph_fingerprint_before="BEFORE",
+                                graph_fingerprint_after="AFTER")
+    assert _gate_fingerprint(job) == stored
+
+
+def test_an_unversioned_source_is_never_flagged(monkeypatch):
+    # Regression guard (passes before the change): nothing to bring into history.
+    svc, session, order, captured = _build(
+        monkeypatch, state=_state(status="ready", fp="OLD"), current_fp="NEW")
+    _run(svc.signal_source_changed("ds-1", session, origin="script"))
+    assert "flagged" not in captured and order == _FULL_SEQUENCE
 
 
 # ── Scenario 1: fingerprints match → no-op ──────────────────────────────

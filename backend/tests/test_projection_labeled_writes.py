@@ -12,7 +12,17 @@ un-budgeted writes at 30s — mid-seed).
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
+from backend.app.services.versioning.errors import AmbiguousSpelling
 from backend.app.services.versioning.projection import FalkorProjector
+from backend.app.services.versioning.reconcile import (
+    SPELLING,
+    graph_spelling,
+    spelled_label,
+    spelled_type,
+    spelling,
+)
 
 
 def _run(coro):
@@ -85,7 +95,7 @@ def test_edge_deletes_are_typed_and_anchored_with_fallback():
     }
     _run(p._apply(client, [], [], [], [resolved, "E-unresolved"]))
     typed = [c for c in client.cyphers()
-             if "[r:FLOWS {id: item.eid}]" in c and "DELETE r" in c]
+             if "-[r:FLOWS]->" in c and "WHERE r.id IN [item.eid, item.pid] DELETE r" in c]
     assert typed, f"no typed anchored edge delete: {client.cyphers()}"
     assert all("(a:Table {urn: item.src})" in c for c in typed)
     # The unresolvable eid still gets deleted via the legacy full form.
@@ -131,6 +141,31 @@ def test_apply_rollups_queries_are_label_anchored():
         assert ":Table" in c and ":Dataset" in c, c
     for cypher, _params, timeout in client.calls:
         assert timeout is not None, f"rollup query without timeout: {cypher[:80]}"
+
+
+def test_a_pass_writes_and_matches_the_graph_own_spelling_of_its_types():
+    """A customer graph spells ``Table`` as ``table`` and ``FLOWS`` as ``flows``
+    (``projection_state.physical_types``): every label and type a pass writes or matches is the
+    graph's own, and one the graph never had is written as declared."""
+    client = _CaptureClient()
+    p = _projector()
+    token = SPELLING.set(spelling({"nodes": {"Table": "table"}, "edges": {"FLOWS": "flows"}}))
+    try:
+        _run(p._apply(client, [_NODE_A, _NODE_B], [_EDGE], [("urn:x", "Table")],
+                      [{"eid": "E1", "src": "urn:a", "tgt": "urn:b",
+                        "rel": "FLOWS", "slb": "Table", "tlb": "Dataset"}]))
+        _run(p._apply_rollups(client, {("urn:a", "urn:b"): {
+            "dw": 1, "types": {"FLOWS"}, "sl": 2, "tl": 2, "dg": "d",
+            "slb": "Table", "tlb": "Dataset"}}, 1, 2))
+    finally:
+        SPELLING.reset(token)
+    written = " ".join(client.cyphers())
+    assert "MERGE (n:table {urn: item.urn})" in written
+    assert "MATCH (a:table {urn: item.src})" in written and "MERGE (a)-[r:flows]->(b)" in written
+    assert "MATCH (n:table {urn: u}) DETACH DELETE n" in written
+    assert "-[r:flows]->(b:Dataset {urn: item.tgt}) WHERE r.id IN" in written
+    assert ":Dataset" in written
+    assert ":Table" not in written and ":FLOWS" not in written, written
 
 
 def _node_items(client):
@@ -225,3 +260,110 @@ def test_urnless_node_resolves_to_the_label_it_was_merged_under():
     graph = SimpleNamespace(id="g1", fork_parent_graph_id=None)
     assert _run(p._urn_label_for(_Session(), graph, "main", "B")) == ("gv:B", "Dataset")
     assert _run(p._endpoint(_Session(), graph, "main", "B", {}, {})) == ("gv:B", "Dataset")
+
+
+def test_an_edge_delete_also_finds_the_id_the_graph_knows_it_by():
+    """An edge re-keyed ``edge:<id>`` in history (its id was also a node's) is ``<id>`` in the
+    customer's graph: the delete matches either."""
+    client = _CaptureClient()
+    _run(_projector()._apply(client, [], [], [], [
+        {"eid": "edge:X", "src": "urn:a", "tgt": "urn:b",
+         "rel": "FLOWS", "slb": "Table", "tlb": "Dataset"}]))
+    (params,) = [p for c, p, _t in client.calls if "DELETE r" in c]
+    assert params["batch"] == [{"eid": "edge:X", "pid": "X", "src": "urn:a", "tgt": "urn:b"}]
+
+
+def test_a_customer_graph_keeps_the_id_its_relationship_has():
+    owned, customer = _CaptureClient(), _CaptureClient()
+    _run(_projector()._apply(owned, [_NODE_A, _NODE_B], [_EDGE], [], []))
+    _run(_projector()._apply(customer, [_NODE_A, _NODE_B], [_EDGE], [], [], owned=False))
+    assert any("SET r.id = item.eid," in c for c in owned.cyphers())
+    assert any("SET r.id = coalesce(r.id, item.eid)," in c for c in customer.cyphers())
+
+
+class _HeldClient(_CaptureClient):
+    """Node ``urn:a`` holds ``held`` property names, as the strip's read sees it; an edge merge
+    reports ``landed`` items."""
+
+    def __init__(self, held=(), landed=None):
+        super().__init__()
+        self._held, self._landed = list(held), landed
+
+    async def query(self, cypher, params=None, timeout=None):
+        self.calls.append((cypher, params, timeout))
+        if "RETURN u, keys(n)" in cypher:
+            return SimpleNamespace(result_set=[["urn:a", self._held, None, None]])
+        if "RETURN count(DISTINCT item.eid)" in cypher and self._landed is not None:
+            return SimpleNamespace(result_set=[[self._landed]])
+        return SimpleNamespace(result_set=[])
+
+
+def _gone(client):
+    return [i["gone"] for _c, p, _t in client.calls if p and "batch" in p
+            for i in p["batch"] if "gone" in i]
+
+
+def test_a_customer_key_keeps_the_properties_history_never_held():
+    """A property the node had before the pass and lost is removed; one history never held was
+    written by something else, and stays."""
+    node = ("A", "urn:a", {"urn": "urn:a", "entityType": "Table", "displayName": "a",
+                           "properties": {"kept": 1}})
+    owned, customer = _HeldClient(["kept", "dropped", "etl"]), _HeldClient(["kept", "dropped", "etl"])
+    _run(_projector()._apply(owned, [node], [], [], []))
+    _run(_projector()._apply(customer, [node], [], [], [], owned=False,
+                             prior={"A": {"kept", "dropped"}}))
+    assert _gone(owned) == [{"dropped": None, "etl": None}]
+    assert _gone(customer) == [{"dropped": None}]
+
+
+def test_an_edge_whose_endpoint_is_not_there_is_counted_as_not_landed():
+    assert _run(_projector()._apply(_HeldClient(landed=0), [], [_EDGE], [], [])) == 1
+    assert _run(_projector()._apply(_HeldClient(landed=1), [], [_EDGE], [], [])) == 0
+
+
+def test_a_spelling_is_found_whatever_case_the_type_is_asked_in():
+    """History spells a type the ontology's way, and the ontology may change its casing after
+    the enable: the graph's spelling is found either way, so nothing is relabelled for it."""
+    token = SPELLING.set(spelling({"nodes": {"Table": "table"}, "edges": {"FLOWS_TO": "flows_to"}}))
+    try:
+        assert [spelled_label(t) for t in ("Table", "TABLE", "table")] == ["table"] * 3
+        assert [spelled_type(t) for t in ("FLOWS_TO", "Flows_To")] == ["flows_to"] * 2
+        assert spelled_label("Column") == "Column", "a type the graph never had: as declared"
+    finally:
+        SPELLING.reset(token)
+
+
+def test_a_type_the_graph_spells_two_ways_is_never_written():
+    """Nothing recorded which of two spellings holding nodes is the graph's own: writing either
+    could copy every node of the other, so neither is written, and the refusal names both."""
+    token = SPELLING.set(spelling({"nodes": {"COLUMN": "column"}},
+                                  {"nodes": {"TABLE": ["Table", "table"]}, "edges": {}}))
+    try:
+        with pytest.raises(AmbiguousSpelling) as refused:
+            spelled_label("Table")
+        assert refused.value.detail["type"] == "spelled_two_ways"
+        assert "Table as Table and table" in str(refused.value), str(refused.value)
+        assert spelled_label("Column") == "column"
+    finally:
+        SPELLING.reset(token)
+
+
+def test_a_graph_that_recorded_no_spelling_says_it_itself():
+    """``graph_spelling``: each label and relationship type, keyed without case. Of several
+    spellings of one, only those still holding something count (a label outlives its nodes),
+    and two that do are ambiguous. Derived labels and the rollups are left out."""
+    class _Graph:
+        async def query(self, cypher, params=None, timeout=None):
+            rows = {"CALL db.labels()": [["table"], ["Table"], ["Column"], ["column"],
+                                         ["_AggMeta"], ["Domain"]],
+                    "CALL db.relationshipTypes()": [["flows_to"], ["FLOWS_TO"],
+                                                    ["AGGREGATED"]]}.get(cypher)
+            if rows is None:                 # a probe: does this spelling still hold anything
+                held = ("`table`", "`Table`", "`Column`", "`flows_to`")
+                rows = [[1]] if any(h in cypher for h in held) else []
+            return SimpleNamespace(result_set=rows)
+
+    types, ambiguous = _run(graph_spelling(_Graph()))
+    assert types == {"nodes": {"COLUMN": "Column", "DOMAIN": "Domain"},
+                     "edges": {"FLOWS_TO": "flows_to"}}, types
+    assert ambiguous == {"nodes": {"TABLE": ["Table", "table"]}, "edges": {}}, ambiguous

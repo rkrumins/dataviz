@@ -254,6 +254,22 @@ describe('when the copy fails', () => {
     expect(screen.getByText(/already removed from your data source are\s+not put back/)).toBeInTheDocument()
   })
 
+  it('stops promising an untouched source once its items were given a urn', () => {
+    // A source keyed by `id` had `urn` stamped from it before the copy; giving up leaves the stamps.
+    render_({ ...failed, identityStamped: { property: 'id', stamped: 2 } })
+    expect(screen.queryByText(/untouched/)).not.toBeInTheDocument()
+    expect(screen.getByText(/given a urn from their id, which they keep/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Give up/ }))
+    expect(screen.queryByText(/Your data source is not touched/)).not.toBeInTheDocument()
+    expect(screen.getByText(/keep the urn they were given from their id/)).toBeInTheDocument()
+  })
+
+  it('still promises an untouched source when nothing needed a urn', () => {
+    render_({ ...failed, identityStamped: { property: 'urn', stamped: 0 } })
+    fireEvent.click(screen.getByRole('button', { name: /Give up/ }))
+    expect(screen.getByText(/Your data source is not touched/)).toBeInTheDocument()
+  })
+
   it('remembers that copies left the source after a restart forgot the list', () => {
     // A restart re-reads the source — whose duplicates the collapse already removed — so there is
     // no list or decision left; `sourceCollapse` is what still says copies are gone.

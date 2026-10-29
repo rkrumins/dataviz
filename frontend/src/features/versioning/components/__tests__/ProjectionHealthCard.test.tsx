@@ -1,8 +1,9 @@
 /**
  * ProjectionHealthCard — where one versioned graph's fast read layer lives (provider, key, whose
- * key it is, node/shard/slot) and how healthy it is (watermark, epoch, backoff, liveness). The
- * watermark and placement hooks and the two projection mutations are mocked; the actions only
- * render when the caller says the viewer may manage.
+ * key it is, node/shard/slot) and how healthy it is (watermark, epoch, backoff, liveness, and what
+ * the graph holds that history doesn't). The watermark and placement hooks and the projection
+ * mutations are mocked; the actions only render when the caller says the viewer may manage, and
+ * Bring into history only when it also passes the data source, for a viewer who may publish.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -13,6 +14,7 @@ import type { GraphPlacementResponse } from '@/services/graphStoreService'
 const notify = vi.fn()
 const reconcileMutate = vi.fn()
 const rebuildMutate = vi.fn()
+const bringMutate = vi.fn()
 const refetch = vi.fn()
 
 let wmQ: { data?: Watermark; isLoading: boolean; isError: boolean }
@@ -24,6 +26,7 @@ vi.mock('../../hooks/useVersioning', () => ({
   useProjectionWatermark: () => ({ ...wmQ, refetch }),
   useReconcileProjection: () => ({ mutate: reconcileMutate, isPending: false }),
   useRebuildProjection: () => ({ mutate: rebuildMutate, isPending: false }),
+  useBringIntoHistory: () => ({ mutate: bringMutate, isPending: false }),
 }))
 vi.mock('@/components/admin/shared/useGraphStoreTopology', () => ({
   useGraphPlacementByGraph: (graphId: string | null) => {
@@ -63,17 +66,20 @@ const report = (over: Partial<DriftReport> = {}): DriftReport => ({
   skippedReason: null, ...over,
 })
 
-const renderCard = (showActions = false) =>
+const renderCard = (showActions = false, dataSourceId?: string) =>
   render(
     <MemoryRouter>
-      <ProjectionHealthCard wsId="ws1" graphId="g1" showActions={showActions} />
+      <ProjectionHealthCard wsId="ws1" graphId="g1" showActions={showActions} dataSourceId={dataSourceId} />
     </MemoryRouter>,
   )
+
+const CUSTOMER: Watermark = { ...WM, owned: false, projectionKey: 'warehouse' }
 
 beforeEach(() => {
   notify.mockReset()
   reconcileMutate.mockReset()
   rebuildMutate.mockReset()
+  bringMutate.mockReset()
   refetch.mockReset()
   placementCalls.length = 0
   wmQ = { data: { ...WM }, isLoading: false, isError: false }
@@ -171,7 +177,17 @@ describe('ProjectionHealthCard', () => {
     expect(screen.getByText(/In sync — 40 items and 12 connections checked/)).toBeInTheDocument()
   })
 
-  it('lets a manager rebuild after confirming', () => {
+  it('says why the check could not compare, when the graph is what stops it', () => {
+    const why = 'The graph spells a type history holds as one more than one way (Table as Table and table).'
+    reconcileMutate.mockImplementation((_v: unknown, opts: { onSuccess: (r: DriftReport) => void }) =>
+      opts.onSuccess(report({ inSync: false, skippedReason: why })))
+    renderCard(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Check sync' }))
+    expect(screen.getByText(why)).toBeInTheDocument()
+    expect(screen.queryByText(/no fast read layer yet/i)).not.toBeInTheDocument()
+  })
+
+  it('lets a manager rebuild a platform copy after confirming', () => {
     rebuildMutate.mockImplementation((_v: unknown, opts: { onSuccess: (r: unknown) => void }) =>
       opts.onSuccess({ started: true, alreadyRunning: false, watermark: WM }))
     renderCard(true)
@@ -181,5 +197,49 @@ describe('ProjectionHealthCard', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Rebuild now' }))
     expect(rebuildMutate).toHaveBeenCalled()
     expect(notify).toHaveBeenCalledWith('info', expect.stringMatching(/rebuild started/i))
+  })
+
+  it('says what a rebuild of the customer\'s own graph changes, and what it leaves', () => {
+    wmQ.data = { ...CUSTOMER }
+    renderCard(true)
+    fireEvent.click(screen.getByRole('button', { name: 'Rebuild' }))
+    expect(screen.getByText(/fields go back to their values in history/)).toBeInTheDocument()
+    expect(screen.getByText(/nothing history doesn.t hold is removed/)).toBeInTheDocument()
+    expect(screen.queryByText(/No data is lost/)).not.toBeInTheDocument()
+  })
+
+  it('says what the graph holds that history does not, to everyone', () => {
+    wmQ.data = { ...CUSTOMER, externalDrift: { at: '2026-10-28T09:00:00Z', nodes: 1, edges: 2, via: 'verify' } }
+    renderCard()
+    expect(screen.getByText('Not in history')).toBeInTheDocument()
+    expect(screen.getByText(/1 item and 2 connections/)).toBeInTheDocument()
+  })
+
+  it('says when a writer reported changes no count shows', () => {
+    wmQ.data = { ...CUSTOMER, externalDrift: { at: '2026-10-28T09:00:00Z', nodes: null, edges: null, via: 'notification' } }
+    renderCard()
+    expect(screen.getByText(/Changes a writer reported/)).toBeInTheDocument()
+  })
+
+  it('lets a publisher bring those changes into history after confirming', () => {
+    wmQ.data = { ...CUSTOMER, externalDrift: { at: '2026-10-28T09:00:00Z', nodes: 1, edges: 0, via: 'verify' } }
+    bringMutate.mockImplementation((_ds: string, opts: { onSuccess: (r: unknown) => void }) =>
+      opts.onSuccess({ commit_id: 'c9', applied: 3 }))
+    renderCard(true, 'ds1')
+    fireEvent.click(screen.getByRole('button', { name: 'Bring into history' }))
+    expect(bringMutate).not.toHaveBeenCalled()
+    expect(screen.getByText(/published as one commit/)).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Bring in' }))
+    expect(bringMutate).toHaveBeenCalledWith('ds1', expect.anything())
+    expect(notify).toHaveBeenCalledWith('success', 'Brought 3 changes into history.')
+  })
+
+  it('offers Bring into history only to a publisher, and only for a flagged graph', () => {
+    wmQ.data = { ...CUSTOMER, externalDrift: { at: '2026-10-28T09:00:00Z', nodes: 1, edges: 0, via: 'verify' } }
+    renderCard(true).unmount()
+    expect(screen.queryByRole('button', { name: 'Bring into history' })).not.toBeInTheDocument()
+    wmQ.data = { ...CUSTOMER }
+    renderCard(true, 'ds1')
+    expect(screen.queryByRole('button', { name: 'Bring into history' })).not.toBeInTheDocument()
   })
 })

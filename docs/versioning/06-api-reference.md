@@ -152,13 +152,14 @@ Other refusals you will meet on these routers:
 
 | Answer | `detail.type` | When |
 |---|---|---|
-| **422** | `invalid_patch` | An `unsetProperties` that contradicts its op or payload |
+| **422** | `invalid_patch` | An `unsetProperties` that contradicts its op or payload; on `/graph/changes`, an edge update or delete whose id names an item, not a connection |
 | **422** | `invalid_cursor` | A history page's `before` cursor isn't one the server issued |
 | **422** | `ontology_required` | A blank (ontology-governed) graph whose data source has no ontology assigned |
 | **503** | `ontology_unavailable` | A blank graph's ontology can't be resolved right now; writes wait for it |
 | **422** | `graph_too_large_to_sync` | A sync or re-sync on a graph above the size guard ([§2.9](#29-bulk-ingest--authoritative-sync)) |
-| **409** | `curation_at_risk` | A sync or re-sync while `main` holds people's edits from before its last import or sync; `lastHumanCommit` names the newest. A workspace admin may pass `?force=true` |
-| **409** | `mass_delete_blocked` | A sync or re-sync that would delete more than the limit; `{deletes, live, limit}`. A workspace admin may pass `?allowMassDelete=true` |
+| **409** | `curation_at_risk` | A sync while `main` holds people's edits from before its last import or sync; `lastHumanCommit` names the newest. A workspace admin may pass `?force=true` |
+| **409** | `mass_delete_blocked` | A sync that would delete more than the limit; `{deletes, live, limit}`. A workspace admin may pass `?allowMassDelete=true` |
+| **409** | `platform_copy`, `not_ready`, `spelled_two_ways` | Bringing a graph's changes into history ([§4](#cascade-preview--bootstrapresync)) on a copy the platform made; while the projection doesn't hold main (`{status}`); from a graph that spells a type two ways (`{spelled}`) |
 | **409** | `fork_limit` | A fork of a graph that already has `limit` live forks (`GRAPHVER_MAX_FORKS_PER_GRAPH`, default 10), or the restore of a fork into a graph that has them; `{limit}` |
 | **409** | `not_a_fork` | A fork delete or restore on a graph `…/forks` did not make: a data source's graph, or a fork bound to a data source. It goes to the trash and back with its data source; `{graphId}` |
 | **409** | `live_forks` | The delete of a fork that has live forks of its own; `{graphId, forks}`. Delete those first |
@@ -168,7 +169,7 @@ Other refusals you will meet on these routers:
 | **409** | `version_conflict` | A freeze or unfreeze whose `expectedRev` is no longer current; `{resource: "lifecycle", currentVersion}`. Reload and retry |
 | **409** | `bootstrapping` | A projection rebuild, or a projection move, while version control is still being enabled for the data source |
 | **403** | `feature_disabled` | A switch closed the route ([above](#the-switches-that-close-these-routes)) |
-| **403** | `needs_admin` | `?force` or `?allowMassDelete` on a sync or re-sync by anyone but a workspace admin: `{type: "access_denied", code: "needs_admin", required: "workspace:admin", error: "missing_permission", permission, scope, message}` |
+| **403** | `needs_admin` | `?force` or `?allowMassDelete` on a sync by anyone but a workspace admin: `{type: "access_denied", code: "needs_admin", required: "workspace:admin", error: "missing_permission", permission, scope, message}` |
 | **403** | — | The route's permission is missing: `{error: "missing_permission", permission, scope: {type, id}, message}`, with no `type`. An API key on a route it can't call gets `{error: "api_key_not_allowed", message}` instead ([§1](#api-keys)) |
 | **503** | — | `"Authorization temporarily unavailable"`: a permission check would refuse, but the workspace's grants could not be read. Retry |
 
@@ -194,7 +195,7 @@ All paths below are relative to `/api/v1/{ws_id}/versioning`; `…` stands for `
 
 | Method · Path | Gate | Purpose / key fields |
 |---|---|---|
-| `POST /graphs` | `_MANAGE` | Create a versioned graph holding only its genesis commit. `{dataSourceId, workspaceId, kind?, baseOntologyId?, tenantId?, ontologySpec?, ontologyEnforcement?}` → **201** `{graphId, mainBranchId, genesisCommitId}`. The graph projects into the data source's own FalkorDB graph on its own provider; the caller does not choose them. `workspaceId` must equal the path (else **400**); a data source not in this workspace is a **404**; a source that isn't FalkorDB is **422 `provider_unsupported`**; a FalkorDB graph another versioned graph already projects into is **409 `integrity`**. To copy a data source's existing graph in, use **bootstrap** ([§4](#cascade-preview--bootstrapresync)) instead |
+| `POST /graphs` | `_MANAGE` | Create a versioned graph holding only its genesis commit. `{dataSourceId, workspaceId, kind?, baseOntologyId?, tenantId?, ontologySpec?, ontologyEnforcement?}` → **201** `{graphId, mainBranchId, genesisCommitId}`. The graph projects into the data source's own FalkorDB graph on its own provider; the caller does not choose them. `workspaceId` must equal the path (else **400**); a data source not in this workspace is a **404**; a source that isn't FalkorDB is **422 `provider_unsupported`**; a FalkorDB graph another versioned graph already projects into, through any provider on the same server (for a sentinel or cluster provider, the server its topology names), is **409 `graph_key_in_use`**. To copy a data source's existing graph in, use **bootstrap** ([§4](#cascade-preview--bootstrapresync)) instead |
 | `GET /graphs/{gid}` | `_READ` | Graph metadata (`GraphResponse`: `graphId`, `workspaceId`, `tenantId`, `kind`, `baseOntologyId`, `forkParentGraphId`, `forkBaseCommitSeq`, `mainHeadCommitSeq`, `createdBy`, `createdAt`, `userNames`) |
 | `GET /resolve` | `_READ`, or read access to the view in `viewId` | `?dataSourceId&viewId` → `ResolveResponse{graphId, mainBranchId, mainHeadCommitSeq, myDraft?, kind, bootstrap?, lifecycleState, lifecycleRev}`. **Read-only — never opens a draft.** `kind` is `manual`, `authoritative`, `hybrid` or `blank`; `bootstrap` is the enablement job while the graph is still at genesis and that job is pending, running, waiting for a decision (`needs_decision`) or failed — the graph is versioned only once `bootstrap` is `null`. `lifecycleState` is `live` or `frozen` (editing is paused), and `lifecycleRev` is what a freeze or unfreeze names. **404** when no versioned graph backs the data source. For every data source of a workspace at once, `GET /api/v1/admin/workspaces/{ws_id}/data-sources?include=versioning` gives each one's `graphId`, `kind` and the head of `main` — see [Graph Metadata & History API](/docs/graph-metadata-api) |
 | `POST /resolve` | `_MANAGE` | `{dataSourceId, originatingViewId?}` → the same shape, but **opens the caller's draft if there is none** (the frontend's `resolveAndOpenDraft`); on a frozen graph that has none, **409 `graph_not_writable`** |
@@ -499,7 +500,11 @@ frozen since; a reused key returns the first result whatever the body. Its refus
 graph's or one you can't read; **422 `invalid_patch`**; **409 `integrity`** while version control
 is still being enabled; **409 `main_write_forbidden`** for `main`; **503 `lock_busy`**;
 **409 `graph_not_writable`**; **409 `branch_closed`**; **403 `not_draft_owner`** or
-**`not_owner_or_member`** (**503 `groups_unavailable`** when a group decides). It:
+**`not_owner_or_member`** (**503 `groups_unavailable`** when a group decides); then **422
+`invalid_patch`** for an edge update or delete whose id names only an item on the draft. An edge
+copied in as `edge:<id>`, because an item has `<id>`, is still `<id>` in the graph, and that id
+finds it; the ids are matched only once the draft is found writable by you, and a retry is aimed
+as its first attempt was. It:
 
 1. Finds the data source's versioned graph and asserts it is in `ws_id` (else **404**).
 2. Translates each op into a service op: `create` mints or echoes `ref → entityId`; `delete` passes
@@ -541,6 +546,11 @@ ontology, and fails closed for blank models (**422 `ontology_required`**, **503
   `GET /bootstrap/status?dataSourceId=…` → `{jobId, graphId, status, phase, processed, total,
   percent, startedAt, updatedAt, error, report}`; `status` ends `completed`, `failed` or `cancelled`.
   The status route isn't switch-gated, so a job stays observable after the switch is turned off.
+  Before reading, the pre-flight stamps `urn` (with `urnSource`) from the data source's identity
+  property on a graph that names its items by another one (`id`, say), and `identityStamped`
+  (`{property, stamped}`, kept through a restart) counts the properties it set; they stay on the
+  graph whatever happens to the job. An item with no identifier left (no `urn`, nothing to take one
+  from) fails the job before anything is copied (`failure.code` `integrity`, naming the count).
   When the pre-flight finds identifiers used by more than one item, the job pauses before copying
   anything: `status` reads `needs_decision`, with `duplicates` (the counts, the `fingerprint` a
   decision must carry, a sample, and `sharedWith`, the other data sources reading the same graph).
@@ -558,13 +568,27 @@ ontology, and fails closed for blank models (**422 `ontology_required`**, **503
   windows, can resume after a crash, and finishes only after an integrity report proves the copy —
   see the [End-to-End Testing Guide](/docs/versioning-e2e).
 - `POST /resync?dataSourceId=…&strategy=merge|external_wins` (`_MANAGE` + `workspace:datasource:publish` + **Version control**)
-  re-syncs a versioned graph from its provider's current state with the service's 3-way merge;
-  **404** when the data source isn't versioned. It refuses above `GRAPHVER_RESYNC_MAX_ENTITIES`
-  (250,000) with **422 `graph_too_large_to_sync`**, and with **409 `curation_at_risk`** or
-  **409 `mass_delete_blocked`** as `POST …/sync` does ([§2.9](#29-bulk-ingest--authoritative-sync)),
-  before it reads the provider when it can. A workspace admin may pass `force=true` or
-  `allowMassDelete=true` (anyone else gets **403 `needs_admin`**; an API key can't call this route); the
-  activity record lists the overrides used. See
+  brings what the data source's own FalkorDB graph holds that history doesn't into history
+  (**Bring into history**) as one `sync` commit, with the service's 3-way merge; **404** when the
+  data source isn't versioned. It reads the key the projection publishes into, through the
+  projection's pin, not whatever serves reads, and only while that key holds main: **409
+  `not_ready`** `{status}` while the projection is behind main, evicted, being rebuilt or moved
+  (`reseeding`), since what it hasn't written would read as the graph's own change. A key the
+  platform minted (a blank graph's, a fork's) is **409 `platform_copy`**: nothing else writes
+  there, and Rebuild rewrites it from history. **503 `graph_unavailable`** when the graph server
+  can't be reached or cuts replies short (`RESULTSET_SIZE`). It stamps `urn` first, as the enable
+  does, then reads the graph whole as the enable reads it: id windows over nodes with a urn and
+  nothing derived, relationships between two of them, no rollups, no child counts. Each type is
+  spelled as history spells it (a type history holds, in history's casing); an empty field a read
+  fills in that the item never held is left out, and a connection whose id is also an item's is
+  keyed `edge:<id>`. A type the graph spells two ways is **409 `spelled_two_ways`** `{spelled}`;
+  otherwise the graph's spelling of each type it read is recorded for the projector. An identifier several
+  nodes share with different contents is left out and listed in `duplicates`. **Nothing is
+  deleted from history**, whatever the graph lacks. On success it clears the watermark's
+  `externalDrift` and queues a rebuild of the lineage summaries. It refuses above
+  `GRAPHVER_RESYNC_MAX_ENTITIES` (250,000) with **422 `graph_too_large_to_sync`** before it reads
+  the graph. Neither sync check applies, and it takes no override of one: the key holds every edit
+  people made, and nothing is deleted. An API key can't call this route. See
   [10 · Authoritative Sources](/docs/versioning-authoritative-sources) and
   [Re-sync at Any Scale](/docs/versioning-resync-at-any-scale).
 

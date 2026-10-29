@@ -71,13 +71,34 @@ sources read the same graph. Someone who can manage the data sources then
 chooses **Collapse *N* duplicates and continue**, **Re-check source** after
 fixing them at the source, or **Give up**.
 
-Turning version control on doesn't change your existing data, unless you
-collapse duplicates: that removes the extra copies from the graph itself, for
-every data source that reads it, and **Give up** doesn't bring them back. If the
-copy stops part-way, the strip explains why and offers **Resume** or to start
-over.
+If the data source names its items by another property than `urn` — an `id`,
+say, set as its identity property — the copy first gives each item a `urn` from
+it, because version history tells items apart by `urn`. Each one also gets a
+`urnSource` saying where it came from. An item with no identifier at all stops
+the copy before anything is copied, and the strip says how many: give them one,
+then start over.
+
+Turning version control on doesn't change your existing data, except in two
+ways. Collapsing duplicates removes the extra copies from the graph itself, for
+every data source that reads it. And items given a `urn` keep it. **Give up**
+undoes neither. If the copy stops part-way, the strip explains why and offers
+**Resume** or to start over.
 
 ![The canvas strip after turning on version control: 'Everything checked out', the list of passed checks, and the View history and Done buttons](/docs-assets/guide/versioning-change-control-enable.png)
+
+**If another tool keeps writing to the graph.** Something outside this app (an
+ETL job, say, or a connector) may keep writing to the data source's graph after
+version control is on. What it writes stays in the graph and shows in views, but
+it isn't in the version history. The data source's **Versioning** tab says so
+under **Not in history**: how many items and connections, or that the tool
+reported a change. Someone who can publish chooses **Bring into history** to take
+it in as one published change. It adds and updates items; it never removes
+anything from the version history. **Rebuild** on that tab writes what version
+history holds back into your own graph: items' fields go back to their values in
+history, and nothing else in the graph is removed. **Not in history** counts what
+the tool adds: if it also removes items the version history holds, as many as it
+adds, nothing shows there. **Check sync** lists such missing items, and
+**Rebuild** puts them back.
 
 ## The life of a change
 

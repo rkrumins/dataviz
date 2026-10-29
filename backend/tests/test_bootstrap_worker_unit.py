@@ -21,9 +21,12 @@ from backend.app.services.versioning.bootstrap_worker import (
     _merge_scan_summary,
     _next_phase,
     _percent,
+    _physical_types,
+    _spelled_two_ways,
     _tally_matches,
     _vid,
 )
+from backend.app.services.versioning.ontology import EdgeRule, EntityRule, OntologyRules
 
 
 # ── deterministic version ids (crash-replay safety) ──────────────────────────
@@ -137,6 +140,7 @@ def test_tally_match_tolerates_merged_duplicate_connections_only_when_allowed():
     ("nodes_seen", "changed while we were copying"),
     ("no_duplicate_items", "share an identifier"),
     ("no_dropped_connections", "point at items that don't exist"),
+    ("one_spelling_per_type", "spelled more than one way"),
 ])
 def test_failed_checks_explain_themselves_in_plain_language(key, expected):
     msg = _explain_failed_checks([{"key": key, "ok": False, "blocking": True, "detail": ""}])
@@ -268,3 +272,121 @@ def test_edges_to_rows_drops_dangling_and_dedups_same_triple():
     assert rejects["danglingEdges"] == 1
     assert dupes == 1
     assert [d["entity_id"] for d in dicts] == ["c2"]
+
+
+# ── the graph's own spelling of its types (projection_state.physical_types) ───
+
+_RULES = OntologyRules(entity_types={"Table": EntityRule(), "Column": EntityRule()},
+                       edge_types={"FLOWS_TO": EdgeRule()}, edge_type_canonical={"FLOWS_TO": "FLOWS_TO"})
+_CTX = types.SimpleNamespace(commit_id="cmt_1", commit_seq=1, main_id="main_1", actor="alice")
+
+
+def test_a_window_records_how_the_graph_spells_each_type():
+    """History stores the declared spelling; the window remembers the graph's own, every one."""
+    nodes = BootstrapRunner._nodes_to_rows(
+        object(), [(0, ["table"], {"urn": "urn:a"}), (1, ["Table"], {"urn": "urn:b"}),
+                   (2, ["Column"], {"urn": "urn:c"})], _CTX, "g1", _RULES, set())
+    assert [d["entity_type"] for d in nodes.dicts] == ["Table", "Table", "Column"]
+    assert nodes.spellings == {"Table": {"table", "Table"}, "Column": {"Column"}}
+    edges = BootstrapRunner._edges_to_rows(
+        object(), [(0, 1, "urn:a", "urn:b", "flows_to", {"id": "f1"})], _CTX, "g1", _RULES,
+        {"urn:a", "urn:b"})
+    assert edges.dicts[0]["edge_type"] == "FLOWS_TO"
+    assert edges.spellings == {"FLOWS_TO": {"flows_to"}}
+
+
+def test_scan_summary_gathers_every_spelling_of_a_type_across_windows():
+    s = _merge_scan_summary({}, "nodes", scanned=1, written=1, tallies={}, rejects={}, sample=None,
+                            dupes=0, spellings={"Table": {"table"}})
+    s = _merge_scan_summary(s, "nodes", scanned=2, written=2, tallies={}, rejects={}, sample=None,
+                            dupes=0, spellings={"Table": {"TABLE", "table"}, "Column": {"Column"}})
+    s = _merge_scan_summary(s, "edges", scanned=1, written=1, tallies={}, rejects={}, sample=None,
+                            dupes=0, spellings={"FLOWS_TO": {"flows_to"}})
+    assert s["physicalTypes"] == {"nodes": {"Table": ["TABLE", "table"], "Column": ["Column"]},
+                                  "edges": {"FLOWS_TO": ["flows_to"]}}
+    assert _spelled_two_ways(s) == [("Table", ["TABLE", "table"])]
+
+
+def test_the_projector_gets_the_graphs_spelling_of_every_type():
+    """Every type, also one spelled as declared: a spelling another writer adds later must not
+    make the projector unsure which is the graph's own. Unrecorded (NULL) only when the scan
+    tallied nothing, and the projector then reads it from the graph."""
+    summary = {"physicalTypes": {"nodes": {"Table": ["table"], "Column": ["Column"]},
+                                 "edges": {"FLOWS_TO": ["flows_to"]}}}
+    assert _physical_types(summary) == {"nodes": {"Table": "table", "Column": "Column"},
+                                        "edges": {"FLOWS_TO": "flows_to"}}
+    assert _spelled_two_ways(summary) == []
+    assert _physical_types({"physicalTypes": {"nodes": {"Column": ["Column"]}}}) == {
+        "nodes": {"Column": "Column"}, "edges": {}}
+    assert _physical_types({}) is None, "a job that started before the tally: read from the graph"
+
+
+# ── stamping urns before the copy (node_identity.stamp_identity_for_enable) ──
+
+async def _stamp_with(db_session, monkeypatch, *, identity=None, name=None):
+    """Seed a data source whose provider names nodes by ``identity`` / ``name``, and stamp it
+    through a recording stand-in for the cached provider."""
+    from contextlib import asynccontextmanager
+
+    from backend.app.db import engine
+    from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM, WorkspaceORM
+    from backend.app.providers import manager
+    from backend.app.services.node_identity import invalidate_global_defaults_cache
+
+    invalidate_global_defaults_cache()
+    db_session.add(ProviderORM(id="prov_st", name="P", provider_type="falkordb",
+                               identity_property=identity, name_property=name))
+    db_session.add(WorkspaceORM(id="ws_st", name="W"))
+    db_session.add(WorkspaceDataSourceORM(id="ds_st", workspace_id="ws_st", provider_id="prov_st",
+                                          graph_name="g"))
+    await db_session.flush()
+    calls = []
+
+    class _Provider:
+        def set_node_identity(self, identity_property, name_property):
+            calls.append(("identity", identity_property, name_property))
+
+        async def stamp_identity_urns(self, **kw):
+            calls.append(("stamp", kw))
+            return 3
+
+    async def get_provider(workspace_id, session, data_source_id):
+        calls.append(("provider", workspace_id, data_source_id))
+        return _Provider()
+
+    @asynccontextmanager
+    async def session():
+        yield db_session
+
+    monkeypatch.setattr(engine, "get_async_session", session)
+    monkeypatch.setattr(manager.provider_manager, "get_provider", get_provider)
+    return calls
+
+
+async def test_an_enable_stamps_urn_from_the_identity_property_first(db_session, monkeypatch):
+    from backend.app.services.node_identity import stamp_identity_for_enable
+
+    calls = await _stamp_with(db_session, monkeypatch, identity="id", name="title")
+    assert await stamp_identity_for_enable("ds_st") == {"property": "id", "stamped": 3}
+    # Version control writes into the graph, whatever mode a summaries job left the provider in.
+    assert calls == [("provider", "ws_st", "ds_st"), ("identity", "id", "title"),
+                     ("stamp", {"source_writable": True})]
+
+
+async def test_an_enable_of_a_source_keyed_by_urn_stamps_nothing(db_session, monkeypatch):
+    from backend.app.services.node_identity import stamp_identity_for_enable
+
+    calls = await _stamp_with(db_session, monkeypatch)
+    assert await stamp_identity_for_enable("ds_st") == {"property": "urn", "stamped": 0}
+    assert await stamp_identity_for_enable("ds_gone") is None
+    assert calls == [], "a conforming source is not even looked up"
+
+
+@pytest.mark.parametrize("count,identity,expected", [
+    (1, "urn", "1 item in the graph has no urn. "),
+    (2, "id", "2 items in the graph have no urn and no id to take one from. "),
+])
+def test_items_with_no_identifier_are_counted_in_plain_language(count, identity, expected):
+    from backend.app.services.versioning.bootstrap_worker import _no_identifier
+
+    assert _no_identifier(count, identity).startswith(expected)

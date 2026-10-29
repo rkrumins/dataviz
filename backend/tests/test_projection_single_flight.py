@@ -30,6 +30,8 @@ class _FakePS:
         self.falkor_graph_name = "real_pinned_graph"   # != default_graph_name → not "unpinned"
         self.falkor_provider = None
         self.owns_falkor_graph = False                 # a pinned customer graph, as the column defaults
+        self.physical_types = {"nodes": {}, "edges": {}}    # recorded: spelled as declared
+        self.external_drift = None
         self.last_projected_at = None
         self.progress_done = None
         self.progress_total = None

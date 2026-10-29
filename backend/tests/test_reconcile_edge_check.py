@@ -6,9 +6,12 @@ These pin the field-by-field comparison the check rides on — including the two
 (confidence float tolerance / None, and the JSON-string properties round-trip).
 """
 from backend.app.services.versioning.reconcile import (
+    SPELLING,
     _conf_equal,
     _edge_field_mismatches,
+    _field_mismatches,
     _parse_props,
+    spelling,
 )
 
 
@@ -70,3 +73,17 @@ def test_parse_props_handles_json_string_native_and_garbage():
     assert _parse_props(None) == {}
     assert _parse_props({"a": 1}) == {"a": 1}              # tolerate a legacy native dict
     assert _parse_props("not json") == {}                 # unparseable residual → empty, never raises
+
+
+def test_a_graph_that_spells_its_types_its_own_way_is_compared_in_that_spelling():
+    """``projection_state.physical_types``: the projector wrote ``:table`` and ``:flows_to`` for the
+    declared ``Table`` and ``FLOWS_TO``, so the check compares against those, not the declared."""
+    node = {"entityId": "N1", "displayName": "n", "entityType": "Table"}
+    token = SPELLING.set(spelling({"nodes": {"Table": "table"}, "edges": {"FLOWS_TO": "flows_to"}}))
+    try:
+        assert _field_mismatches(node, "N1", "n", ["table"]) == []
+        assert _edge_field_mismatches(_pg(), "flows_to", 0.9, '{"sql": "s"}') == []
+        assert _field_mismatches(node, "N1", "n", ["Table"]) == [("entityType", "table", ["Table"])]
+    finally:
+        SPELLING.reset(token)
+    assert _field_mismatches(node, "N1", "n", ["Table"]) == [], "unset: the declared spelling"

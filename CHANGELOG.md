@@ -9,6 +9,153 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Versioning: enabling version control on a graph that already exists
+
+Fixes for what went wrong after enabling version control on a FalkorDB graph that already existed,
+which other tools may keep writing to. They cover how the graph spells its types and names its items,
+ids that an item and a connection share, writes made outside version control, and the background
+jobs around such a graph.
+
+### Fixed
+
+- **A graph that spells its types its own way keeps that spelling.** When a graph's labels differ
+  from the ontology's spelling only in case (`:table` for a declared `Table`, `:flows_to` for
+  `FLOWS_TO`), enabling version control now records the graph's own spelling, and every publish
+  writes and matches it. Before, the first publish after enabling added a second `:Table` copy of
+  each node it changed, its check then found "extra entities", and the projection stayed behind
+  from then on, so views read from Postgres. Version history keeps the ontology's spelling. A graph
+  that spells one type two ways (`table` and `TABLE`) now stops the enable with a message saying so:
+  give each type one spelling in the graph, then start over. A graph enabled before this release has
+  no recorded spelling: its next publish reads it from the graph and records it. If earlier
+  publishes left `:Table` copies beside the graph's `:table` nodes, the projection is held back with
+  a message naming both spellings, and nothing is written until one is left; before, such a graph's
+  copies would now have been published, and the heal relabelled every `:table` node `:Table`.
+  Bringing changes into history records the spelling of the types it brings in, refuses a type the
+  graph spells two ways (409 `spelled_two_ways`), and keeps history's casing of a type the ontology
+  has since re-cased.
+- **A graph that names its items by another property is copied whole.** On a data source whose
+  identity property isn't `urn` (an `id`, say), enabling version control copied nothing and still
+  finished green: the copy read `urn` alone, and the screen said the items "don't appear anywhere
+  in this app", which wasn't true. The enable now stamps `urn` from the identity property first,
+  with `urnSource`, as the lineage summaries' conformance step does, so every item is copied, even
+  where those summaries are dedicated and their step leaves the graph alone. The stamps stay on
+  the graph after **Give up**, and the enable screen now says so instead of "not touched". An item
+  with no identifier at all now stops the enable before anything is copied, with the count; before,
+  it was left out and the copy went ahead.
+- **An edge whose id is also an item's is changed and deleted as itself.** Items and connections
+  share one id space, so enabling version control gives such a connection the id `edge:<id>` in
+  history, while the graph keeps `<id>`. Deleting it left it in FalkorDB, and the projection then
+  stayed behind for good ("extra entities"). Changing it overwrote the graph's own id. And deleting
+  connection `<id>` from the canvas deleted the *item* `<id>` instead. Now the graph's own id is
+  kept, the delete finds it by either id, and an update or delete of `<id>` acts on the connection
+  it names. An id that names only an item is refused (422 `invalid_patch`). On `/graph/changes` the
+  ids are matched only once the draft is found writable by the caller and a retry answered: a
+  retry of such a delete answers as its first attempt did, `main` answers 409
+  `main_write_forbidden` (it answered 500 with a connection op), and someone else's private draft
+  tells nothing of what it holds.
+- **Something else writing to the graph no longer stops publishing.** On a graph enabled in place,
+  another writer (an ETL) may keep writing. The first publish after that counted "extra entities"
+  and held the projection back for good. Views then fell back to Postgres, which holds neither the
+  ETL's data nor the lineage summaries. And the message said to enable version control again,
+  which only answers "already enabled". Now a publish into the customer's own graph keeps what
+  history doesn't hold, goes out, and records how much (`externalDrift` on the watermark). Rebuild
+  and the automatic heal no longer delete what history doesn't hold: they used to delete up to half
+  of the graph, and every duplicate copy. An edit no longer strips a property history never held.
+  In a graph the platform created, a held-back publish now says Rebuild replaces it with what
+  history holds.
+- **Bringing changes into history reads the graph.** `POST /graph/resync` read whatever served
+  views at the time, which for a projection behind main is Postgres itself, so it brought nothing
+  in. On a graph the projector writes, a read also came back with the graph's own spelling of each
+  type and the empty fields the projector fills in, so every node it had written read as changed. It
+  now reads the data source's FalkorDB graph through the projection's pin, only while it holds main,
+  stamps `urn` first as the enable does, and reads it whole as the enable reads it. Only what was
+  written outside history comes in, as one commit, and **nothing is deleted from history**. Then the
+  `externalDrift` flag clears, and the lineage summaries are rebuilt. Before, it also read a graph
+  being moved, or one a failed rebuild had left partly written, and took what was missing for
+  deleted; and its reader stopped at the first page a node without a `urn` shortened, failed with
+  500 on a relationship to such a node, and brought in the summaries' own rollups and nodes. It
+  answers 409 `not_ready` while the projection is behind main, evicted, being rebuilt or moved, and
+  409 `platform_copy` on a graph the platform created, which nothing else writes to. A loader's
+  change notification flags only a customer's own graph, and bringing changes in clears only the
+  flag it began under: one that arrives while it reads stays.
+- **The Versioning tab says what the graph holds that history doesn't.** Its fast read layer card
+  has a **Not in history** row: how many items and connections, or that a writer reported a change.
+  People who can publish get **Bring into history** beside it. On a customer's graph, the Rebuild
+  confirmation said "No data is lost", but Rebuild deleted what history didn't hold. It now says
+  that items' fields go back to their values in history and that nothing else is removed.
+- **Changes made outside version control refresh what views read.** The reconciliation sweep
+  marked a versioned source "managed" and took on its new counts without acting, so an ETL's writes
+  to the graph showed only once each cached read expired, after up to an hour (seven days for some
+  content caches). The sweep now refreshes a versioned source's read caches when its counts move. A
+  change signal on a versioned source (`/refresh` at `auto`, `/source-changed`) used to mark it
+  stale and queue an aggregation rebuild, although the projection maintains its rollups and the
+  docs said such a signal had no effect. It now refreshes the caches, clears the stale marker and
+  queues nothing. When a loader or connector says it wrote (origin `script` or `connector`, and
+  `/source-changed`, which connectors call), the graph is flagged as holding changes not in
+  history, even for a property edit, which no count shows: the writer's word is taken before the
+  change check, which such an edit passes unseen.
+- **A paused or failed enable no longer switches off change detection.** From the moment "Enable
+  version control" was queued, the reconciliation sweep treated the data source as versioned: it
+  marked it "managed" and took on every change without acting. That held while the enable was
+  pending, paused for a decision or failed, and for up to ten minutes after it was given up. Now only
+  a source whose enable has finished is treated so. The sweep reads that list on every tick, and
+  giving up clears it at once.
+- **One FalkorDB graph is one versioned graph, however it is reached.** Two provider rows for the
+  same server, or the default instance named both ways, could each claim the same graph for a
+  different versioned graph, and both then wrote into it. A claim now compares servers, not provider
+  ids, and two claims that race for a graph's name wait for each other. A sentinel or cluster
+  provider is the server its topology names, not the host it leaves blank: two clusters no longer
+  read as one, so one's graph name no longer refuses the other's. `POST /graphs` answers 409
+  `graph_key_in_use`; it answered 409 `integrity`, or 500 when two raced.
+- **Dedicated lineage summaries are rebuilt after a publish.** For a data source whose summaries
+  live in a graph of their own (dedicated mode), a publish that changed lineage or containment never
+  refreshed them: the projector writes none there and handed nothing on. Such a publish now marks
+  them stale and queues their rebuild in dedicated mode. A change signal on such a source marks and
+  rebuilds them as for any source, instead of clearing that mark while the rebuild waits. A
+  dedicated rebuild is compared afterwards against the graph as it was when it started, so a
+  publish made while it ran, whose own rebuild it turned away, is rebuilt for next.
+- **Eviction keeps a graph something else reads.** Freeing memory could drop a platform copy that
+  another data source or a catalog entry also read, or one whose readers could not be checked.
+  Eviction now skips it and frees the next coldest graph instead.
+
+### Upgrading
+
+- Run `20261028_1000_gv_ps_unowned` after `20261018_1200_gv_lifecycle`; it is the new head. It
+  adds two nullable JSONB columns to `graphver.projection_state`: `physical_types`, a customer
+  graph's own spelling of its types, and `external_drift`, what was written to it outside history.
+  No rewrite; it waits at most 5 s for the table's lock. With a separate `GRAPHVER_DB_URL`, the
+  versioning worker adds them when it starts, so start the workers on this release before the API
+  pods, as for Stage 2. Downgrading drops both and logs how many graphs had each.
+- **What API callers see change.**
+  - `POST /graphs` answers 409 `graph_key_in_use` where it answered `integrity`.
+  - `POST /graph/resync` reads the data source's own graph, and answers 409 `not_ready` while the
+    projection is behind main, evicted, being rebuilt or moved, 409 `platform_copy` on a graph the
+    platform created, and 503 `graph_unavailable` without a graph server. It deletes nothing from
+    history and no longer takes `force` or `allowMassDelete`.
+  - A change signal on a versioned source (`/refresh` at `auto`, `/source-changed`) returns no
+    `jobId`: it queues no rebuild. `/source-changed` records its signal with origin `connector`.
+  - The watermark gains `externalDrift`.
+
+### Known limitations
+
+- A publish into a customer's graph checks that its own writes landed and counts the rest. A writer
+  that removes items history holds while adding as many of its own leaves the counts level: the
+  publish goes out, views read the graph without those items, and nothing is flagged. **Check
+  sync** lists the missing items, though relationships only by count, and **Rebuild** writes them
+  back. Bringing changes into history deletes nothing, so history keeps them.
+- Another writer's edit to a field history also holds is overwritten when the platform next writes
+  that item: a publish that changes it, or a Rebuild. Such an edit is flagged only when it changes a
+  count, or when its writer says it wrote (origin `script` or `connector`, or `/source-changed`).
+- On a customer's graph a fresh projection holds at least main. Views and drafts read the other
+  writers' data with it; diffs and reads as of a commit come from Postgres, which holds history
+  alone.
+- Between bringing changes into history and the rebuild it queues, the lineage summaries can count
+  the relationships brought in twice.
+- Bringing changes into history reads the whole graph, so the re-sync size limit applies
+  (`GRAPHVER_RESYNC_MAX_ENTITIES`; above it, 422 `graph_too_large_to_sync`).
+
+---
+
 ## [Unreleased] — Versioning Stage 2: people stop overwriting each other
 
 ### Added

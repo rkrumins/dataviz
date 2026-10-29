@@ -5,10 +5,11 @@
  * platform minted that key or it is the customer's own graph, the fencing epoch, the poll's
  * backoff and the last liveness reset) and places the key on its node by GRAPH id, so a fork's own
  * key is found rather than its source's. `showActions` adds Check sync and Rebuild for managers;
- * everyone else gets the same card read-only.
+ * everyone else gets the same card read-only. A customer's graph another writer kept writing to
+ * says how much of it history doesn't hold; with `dataSourceId`, a manager brings that in.
  */
 import { useState } from 'react'
-import { Database, RefreshCw, RotateCcw } from 'lucide-react'
+import { Database, History, RefreshCw, RotateCcw } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
@@ -19,8 +20,10 @@ import { Skeleton, SkeletonText } from '@/components/ui/Skeleton'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { PlacementRow } from '@/components/admin/AdminGraphStore/GraphStorePlacementCard'
 import { useGraphPlacementByGraph } from '@/components/admin/shared/useGraphStoreTopology'
-import type { Watermark } from '@/services/versioningApiService'
-import { useProjectionWatermark, useReconcileProjection, useRebuildProjection } from '../hooks/useVersioning'
+import type { ExternalDrift, Watermark } from '@/services/versioningApiService'
+import {
+  useBringIntoHistory, useProjectionWatermark, useReconcileProjection, useRebuildProjection,
+} from '../hooks/useVersioning'
 
 const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} ${n === 1 ? one : many}`
 
@@ -32,11 +35,23 @@ function watermarkText(wm: Watermark): string {
   return at
 }
 
-export function ProjectionHealthCard({ wsId, graphId, showActions = false, className }: {
+function notInHistory(d: ExternalDrift): string {
+  const counted = [
+    d.nodes ? plural(d.nodes, 'item', 'items') : '',
+    d.edges ? plural(d.edges, 'connection', 'connections') : '',
+  ].filter(Boolean).join(' and ')
+  if (d.via !== 'notification') return counted || 'Changes'
+  return counted ? `${counted}, and changes a writer reported` : 'Changes a writer reported'
+}
+
+export function ProjectionHealthCard({ wsId, graphId, showActions = false, dataSourceId, className }: {
   wsId: string
   graphId: string
   /** Check sync and Rebuild — for viewers who may manage the data source. */
   showActions?: boolean
+  /** The graph's data source, for Bring into history — pass it only to viewers who may also
+   *  publish, since what comes in is published. */
+  dataSourceId?: string
   className?: string
 }) {
   const wmQ = useProjectionWatermark(wsId, graphId)
@@ -119,6 +134,15 @@ export function ProjectionHealthCard({ wsId, graphId, showActions = false, class
         <dd className={cn('min-w-0 break-words', wm.livenessError ? 'text-red-600 dark:text-red-400 font-mono text-[11px]' : 'text-ink')}>
           {wm.livenessError ?? 'No problems recorded'}
         </dd>
+        {wm.externalDrift && (
+          <>
+            <dt className="text-ink-muted">Not in history</dt>
+            <dd className="min-w-0 text-amber-700 dark:text-amber-400">
+              {notInHistory(wm.externalDrift)}
+              {wm.externalDrift.at && <> · as of <DateTime at={wm.externalDrift.at} variant="calendar" /></>}
+            </dd>
+          </>
+        )}
       </dl>
 
       <div className="mt-3">
@@ -141,28 +165,38 @@ export function ProjectionHealthCard({ wsId, graphId, showActions = false, class
         )}
       </div>
 
-      {showActions && <ProjectionActions wsId={wsId} graphId={graphId} />}
+      {showActions && (
+        <ProjectionActions wsId={wsId} graphId={graphId} owned={wm.owned !== false}
+          bringIn={wm.externalDrift ? dataSourceId : undefined} />
+      )}
     </section>
   )
 }
 
-/** Check sync (a shallow reconcile, its verdict in one line) and Rebuild behind an inline confirm.
- *  The Data health tab has the full drift breakdown and follows a rebuild to its end. */
-function ProjectionActions({ wsId, graphId }: { wsId: string; graphId: string }) {
+/** Check sync (a shallow reconcile, its verdict in one line), Rebuild behind an inline confirm, and
+ *  Bring into history behind another when the graph holds what history doesn't (`bringIn`: its data
+ *  source). The Data health tab has the full drift breakdown and follows a rebuild to its end. */
+function ProjectionActions({ wsId, graphId, owned, bringIn }: {
+  wsId: string; graphId: string; owned: boolean; bringIn?: string
+}) {
   const { notify } = useAppNotifications()
   const reconcile = useReconcileProjection(wsId, graphId)
   const rebuild = useRebuildProjection(wsId, graphId)
+  const bring = useBringIntoHistory(wsId, graphId)
   const [verdict, setVerdict] = useState<{ ok: boolean; text: string } | null>(null)
-  const [confirming, setConfirming] = useState(false)
+  const [confirming, setConfirming] = useState<'rebuild' | 'bring' | null>(null)
 
   const check = () => {
     reconcile.mutate({ deep: false }, {
       onSuccess: (r) => setVerdict(
         r.skippedReason ? {
-          ok: true,
+          // Anything else is the graph's to fix (a type it spells two ways), in its own words.
+          ok: r.skippedReason === 'projection in flight' || r.skippedReason === 'no projection target',
           text: r.skippedReason === 'projection in flight'
             ? 'A refresh is in progress — check again in a moment.'
-            : 'This graph has no fast read layer yet.',
+            : r.skippedReason === 'no projection target'
+              ? 'This graph has no fast read layer yet.'
+              : r.skippedReason,
         }
         : r.inSync ? { ok: true, text: `In sync — ${plural(r.pgNodes, 'item', 'items')} and ${plural(r.pgEdges, 'connection', 'connections')} checked.` }
         : { ok: false, text: 'Out of date — rebuild to repair it.' }),
@@ -171,7 +205,7 @@ function ProjectionActions({ wsId, graphId }: { wsId: string; graphId: string })
   }
 
   const doRebuild = () => {
-    setConfirming(false)
+    setConfirming(null)
     rebuild.mutate(undefined, {
       onSuccess: (res) => {
         setVerdict(null)
@@ -181,24 +215,54 @@ function ProjectionActions({ wsId, graphId }: { wsId: string; graphId: string })
     })
   }
 
+  const doBring = (dataSourceId: string) => {
+    setConfirming(null)
+    bring.mutate(dataSourceId, {
+      onSuccess: (res) => {
+        setVerdict(null)
+        notify('success', res.applied
+          ? `Brought ${plural(res.applied, 'change', 'changes')} into history.`
+          : 'Nothing new to bring in.')
+      },
+      onError: (e) => notify('error', (e as Error).message),
+    })
+  }
+
   return (
     <div className="mt-3 border-t border-glass-border pt-3">
-      {confirming ? (
+      {confirming === 'rebuild' ? (
         <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-muted">
           <span className="min-w-0 flex-1">
-            Rebuild the fast read layer from the source of truth? <span className="font-semibold text-ink">No data is lost.</span>
+            {owned ? (
+              <>Rebuild the fast read layer from the source of truth? <span className="font-semibold text-ink">No data is lost.</span></>
+            ) : (
+              <>Write what version history holds back into your graph? Items&apos; fields go back to their values in history; <span className="font-semibold text-ink">nothing history doesn&apos;t hold is removed.</span></>
+            )}
           </span>
           <Button size="sm" variant="primary" leftIcon={RotateCcw} onClick={doRebuild}>Rebuild now</Button>
-          <Button size="sm" variant="ghost" onClick={() => setConfirming(false)}>Cancel</Button>
+          <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>Cancel</Button>
+        </div>
+      ) : confirming === 'bring' && bringIn ? (
+        <div className="flex flex-wrap items-center gap-2 text-[12px] text-ink-muted">
+          <span className="min-w-0 flex-1">
+            Bring what was written outside version control into history? It is published as one commit.
+          </span>
+          <Button size="sm" variant="primary" leftIcon={History} onClick={() => doBring(bringIn)}>Bring in</Button>
+          <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>Cancel</Button>
         </div>
       ) : (
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <Button size="sm" variant="secondary" leftIcon={RefreshCw} loading={reconcile.isPending} onClick={check}>
             Check sync
           </Button>
-          <Button size="sm" variant="ghost" leftIcon={RotateCcw} loading={rebuild.isPending} onClick={() => setConfirming(true)}>
+          <Button size="sm" variant="ghost" leftIcon={RotateCcw} loading={rebuild.isPending} onClick={() => setConfirming('rebuild')}>
             Rebuild
           </Button>
+          {bringIn && (
+            <Button size="sm" variant="secondary" leftIcon={History} loading={bring.isPending} onClick={() => setConfirming('bring')}>
+              Bring into history
+            </Button>
+          )}
         </div>
       )}
       {verdict && (
