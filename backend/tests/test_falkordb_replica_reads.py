@@ -1014,3 +1014,111 @@ def test_the_number_of_pinned_replica_clients_is_bounded(monkeypatch):
     )
     _run(p._replica_for("g1"))
     assert len(p._pinned_replicas) <= fp._MAX_PINNED_REPLICAS
+
+
+# ── Advanced Search reads: on replicas, inside the window ────────────────
+#
+# A long read holds the graph's read lock, and a write that queues behind it
+# freezes the node for as long as the read has left. On a 3 x 2 cluster a
+# 25 s read on a master with a write 2 s in froze that master 22.6 s: it was
+# failed over and the write it had acknowledged was lost. The same read on a
+# replica left the master taking the write in 0.01 s.
+
+
+def _window(monkeypatch, seconds):
+    """A cluster whose nodes reported a ``seconds``-long cluster-node-timeout."""
+    monkeypatch.setattr(fp, "_OBSERVED_NODE_TIMEOUT_S", float(seconds))
+    monkeypatch.setenv("FALKORDB_MODE", "cluster")
+
+
+def test_a_search_never_takes_the_masters_turn(monkeypatch):
+    """The master's turn would put a third of a search's reads on the node
+    a write freezes when it queues behind one."""
+    monkeypatch.setattr(fp, "_MASTER_READ_SHARE", 1)
+    p = _provider(_Conn())
+    with fp.search_reads_on_replicas():
+        served = {_run(p._replica_for("g1", include_master=True)) for _ in range(6)}
+    assert served == {R1, R2}
+    # Every other read still gives the master its turn.
+    assert None in {_run(p._replica_for("g1", include_master=True)) for _ in range(3)}
+
+
+def test_a_search_is_not_pinned_to_the_master_after_a_write():
+    """Read-your-own-writes sends reads to the master exactly while writes
+    land there. A search reads no write of its own."""
+    p = _provider(_Conn())
+    p._note_local_write()
+    assert _run(p._replica_for("g1")) is None
+    with fp.search_reads_on_replicas():
+        assert _run(p._replica_for("g1")) in (R1, R2)
+
+
+def test_a_search_read_ends_inside_the_window_on_whichever_node_answers(monkeypatch):
+    """From a 15 s cluster-node-timeout: 10 s on a replica; 6 s on the master
+    that answers when no replica can, the share a write gets. Any other read
+    keeps the budget its caller chose."""
+    _window(monkeypatch, 15)
+    asked = []
+
+    async def ro_query(self, cypher, params=None, timeout=None):
+        asked.append(timeout)
+        return types.SimpleNamespace(result_set=[])
+
+    monkeypatch.setattr(_Graph, "ro_query", ro_query)
+
+    async def _guarded(call, **kw):
+        return await call()
+
+    on_replica, on_master = _reading_provider(), _reading_provider(_Conn(replicas=()))
+    for p in (on_replica, on_master):
+        p._db_timeout_ms = lambda t: int(t * 1000)
+        p._guarded_timed = _guarded
+        with fp.search_reads_on_replicas():
+            _run(p._ro_query("MATCH (n) RETURN n", timeout=45.0, op="search"))
+    _run(on_replica._ro_query("MATCH (n) RETURN n", timeout=45.0, op="canvas"))
+    assert asked == [10_000, 6_000, 45_000]
+
+
+def test_a_longer_window_allows_longer_search_reads(monkeypatch):
+    """The window is the operator's lever: two thirds of it on a replica,
+    two fifths on a master."""
+    for window, on_replica in ((15, 10.0), (30, 20.0), (45, 30.0)):
+        _window(monkeypatch, window)
+        assert fp.search_replica_ceiling_s() == pytest.approx(on_replica)
+        assert fp.cluster_write_ceiling_s() == pytest.approx(window * 0.4)
+
+
+def test_without_a_cluster_window_a_search_keeps_its_budget(monkeypatch):
+    """Standalone and sentinel have no failure detector to outlive."""
+    monkeypatch.setattr(fp, "_OBSERVED_NODE_TIMEOUT_S", None)
+    monkeypatch.setattr(fp, "_CLUSTER_NODE_TIMEOUT_S", 0.0)
+    monkeypatch.setenv("FALKORDB_MODE", "standalone")
+    assert fp.search_replica_ceiling_s() is None
+    assert fp.cluster_write_ceiling_s() is None
+
+
+def test_every_search_entry_point_reads_on_replicas(monkeypatch):
+    """Discovery, value pickers, counts, membership, exports, name lookups —
+    every read Advanced Search makes, not only the scan."""
+    from backend.app.providers import falkordb_deep_search as fds
+
+    seen = []
+
+    async def values(provider, **kwargs):
+        seen.append(fp._read_consistency.get())
+        return {}
+
+    async def connected():
+        return None
+
+    monkeypatch.setattr(fds, "suggest_property_values", values)
+    p = _provider(_Conn())
+    p._ensure_connected = connected
+    _run(p.deep_search_values(key="owner"))
+    assert seen == ["replica"]
+    assert fp._read_consistency.get() == "auto"
+    for name in ("deep_search", "deep_search_session", "deep_search_count",
+                 "deep_search_membership", "deep_search_catalog", "deep_search_export",
+                 "deep_search_ancestor_counts", "deep_search_resolve_refs",
+                 "deep_search_discover", "deep_search_values"):
+        assert hasattr(getattr(FalkorDBProvider, name), "__wrapped__"), name

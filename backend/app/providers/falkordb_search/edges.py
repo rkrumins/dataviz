@@ -70,6 +70,7 @@ from backend.app.providers.falkordb_search.engine import (
     query_identity,
     request_deadline,
     session_id,
+    statement_s,
     unit_budget,
 )
 from backend.app.providers.falkordb_search.keys import SortKey, SortSpec, name_text
@@ -264,7 +265,7 @@ async def _plan(provider, query: SearchQuery, run, settings, deadline: float
     of that end would read them, each over every edge ID — and what the far
     end's scope check needs, kept with the session (``_EdgeWork.commit``)."""
     edges = query.predicate
-    plan_run = lambda c, p: run(c, p, max(1.0, settings.chunk_timeout_ms / 1000.0))  # noqa: E731
+    plan_run = lambda c, p: run(c, p, max(1.0, statement_s(settings)))  # noqa: E731
     labels = await _searchable_labels(provider, timeout_s=max(0.5, deadline - time.monotonic()))
     containment = _containment(provider)
     stats = await _label_stats(plan_run, labels)

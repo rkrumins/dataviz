@@ -412,6 +412,7 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
         _find,
         request_deadline,
         session_id as session_id_of,
+        statement_s,
         unit_budget,
         within_hops,
     )
@@ -466,7 +467,7 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
         else:
             plan = await make_plan(
                 provider, query, compiler,
-                run=lambda c, p: run(c, p, max(1.0, settings.chunk_timeout_ms / 1000.0)),
+                run=lambda c, p: run(c, p, max(1.0, statement_s(settings))),
                 width=settings.chunk_width, walk_max=settings.walk_max,
                 timeout_s=max(0.5, deadline + _GRACE_S - time.monotonic()),
             )
