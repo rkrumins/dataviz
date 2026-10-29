@@ -444,16 +444,18 @@ def bootstrap_unfinished(graph_id) -> tuple:
 @dataclass(frozen=True)
 class Viewer:
     """Who is asking — used to scope draft/PR reads. ``can_manage`` is workspace
-    ``datasource:manage`` (managers see everything). Supplied only from the HTTP layer;
-    when a read is called without a Viewer (internal callers / tests) no scoping is applied.
-    ``groups``: the actor's teams, when the caller already has them; used as given. Left empty, as
-    every route leaves it (``viewer_ctx`` reads no teams), the service looks them up itself
-    (:func:`_load_actor_groups`, which leaves a deleted team out), only when a team's row could
-    decide. A manager's draft reads never need them, and a service account's lookup costs no query;
-    a manager's own ``my_role`` on a team-shared draft can still look theirs up, once per page."""
+    ``datasource:manage``; ``can_read`` is ``datasource:read``, which opens public drafts. Managing
+    opens no private draft: those are read by their owner, their members and their review's people
+    only. Supplied only from the HTTP layer; when a read is called without a Viewer (internal
+    callers / tests) no scoping is applied. ``groups``: the actor's teams, when the caller already
+    has them; used as given. Left empty, as every route leaves it (``viewer_ctx`` reads no teams),
+    the service looks them up itself (:func:`_load_actor_groups`, which leaves a deleted team out),
+    only when a team's row could decide. A public draft's reads never need them, and a service
+    account's lookup costs no query."""
     actor: str
     can_manage: bool = False
     groups: Tuple[str, ...] = ()
+    can_read: bool = False
 
 
 async def _load_actor_groups(actor: str) -> Tuple[str, ...]:
@@ -4419,7 +4421,7 @@ class GraphVersioningService:
                         .order_by(EdgeVersionORM.commit_seq, EdgeVersionORM.created_at)
                     )
                 ).scalars().all()
-            if viewer is not None and not viewer.can_manage:
+            if viewer is not None:
                 ok = await self._readable_branch_ids(s, [r.branch_id for r in rows], viewer)
                 rows = [r for r in rows if r.branch_id in ok]
             return [
@@ -4479,7 +4481,7 @@ class GraphVersioningService:
           (covered by ``uq_commits_branch_seq``), not every draft commit ever made.
 
         A fork's log holds only its own divergence — inherited history lives on the parent.
-        With a ``viewer``, a draft branch is gated (owner/manager/member/PR-reviewer) and the
+        With a ``viewer``, a draft branch is gated (:meth:`_branch_readable`) and the
         raw view-scoped log drops non-viewable drafts (published_only rows are all on the
         readable ``main``)."""
         commits, _more = await self.commit_log_page(
@@ -4529,8 +4531,7 @@ class GraphVersioningService:
             )).scalars().all()
             has_more = len(rows) > limit
             rows = rows[:limit]
-            if (viewer is not None and not viewer.can_manage
-                    and originating_view_id is not None and not published_only):
+            if viewer is not None and originating_view_id is not None and not published_only:
                 ok = await self._readable_branch_ids(s, [r.branch_id for r in rows], viewer)
                 rows = [r for r in rows if r.branch_id in ok]
             return [self._commit_meta(r) for r in rows], has_more
@@ -5375,9 +5376,9 @@ class GraphVersioningService:
         (``None`` on the last). ``main`` comes first, then drafts newest first. Graph-keyed by
         DEFAULT (every view's branches, the Data-Source rollup); ``originating_view_id`` narrows
         to that view's own branches (``main`` carries no view, so it drops out). ``status`` keeps
-        those statuses (``"all"`` keeps every one). A ``viewer`` who isn't a manager gets only the
-        branches :meth:`_branch_readable` lets them read, filtered here in SQL before the LIMIT so
-        others' private drafts can't crowd theirs off a page. With a ``viewer`` each row carries
+        those statuses (``"all"`` keeps every one). A ``viewer`` gets only the branches
+        :meth:`_branch_readable` lets them read, filtered here in SQL before the LIMIT so others'
+        private drafts can't crowd theirs off a page. With a ``viewer`` each row carries
         ``my_role``: theirs on it, as :meth:`my_branch_role` answers (``None`` on ``main``), so a
         client offers changes only on the drafts that take them. ``ValueError`` on a malformed cursor.
         Every page but the last is full. The viewer's teams are ``viewer.groups`` when given, else
@@ -5395,34 +5396,11 @@ class GraphVersioningService:
                 and_(rank == int(after_rank),
                      tuple_(BranchORM.created_at, BranchORM.id) < tuple_(after_at, after_id))))
         async with self._session() as s:
-            groups = set(viewer.groups) if viewer is not None and viewer.groups else None
-            if viewer is not None and not viewer.can_manage:
-                actor = viewer.actor
-                member = and_(BranchMemberORM.subject_type == "user", BranchMemberORM.subject_id == actor)
-                # A member through a group reads the draft too. Their groups are the viewer's when
-                # given, else looked up once, and only when a shared draft of the graph has a group
-                # row; a failed lookup keeps their own rows, as in _my_roles.
-                if groups is None and await s.scalar(select(BranchMemberORM.branch_id).join(
-                        BranchORM, BranchORM.id == BranchMemberORM.branch_id).where(
-                        BranchORM.graph_id == graph_id, BranchORM.is_shared,
-                        BranchMemberORM.subject_type == "group").limit(1)):
-                    try:
-                        groups = set(await _load_actor_groups(actor))
-                    except GroupsUnavailable:
-                        groups = set()
-                if groups:
-                    member = or_(member, and_(BranchMemberORM.subject_type == "group",
-                                              BranchMemberORM.subject_id.in_(groups)))
-                stmt = stmt.where(or_(
-                    BranchORM.kind == "main",
-                    BranchORM.owner == actor,
-                    and_(BranchORM.is_shared, BranchORM.id.in_(select(BranchMemberORM.branch_id).where(member))),
-                    BranchORM.id.in_(
-                        select(MergeRequestORM.source_branch_id).where(
-                            MergeRequestORM.graph_id == graph_id,
-                            or_(MergeRequestORM.actor == actor,
-                                MergeRequestORM.reviewers.contains([actor])))),
-                ))
+            groups = None
+            if viewer is not None:
+                groups = await self._viewer_groups(s, viewer, graph_id=graph_id)
+                stmt = stmt.where(or_(BranchORM.kind == "main",
+                                      self._readable_draft_clause(viewer, groups, graph_id=graph_id)))
             rows = (await s.execute(
                 stmt.order_by(rank, BranchORM.created_at.desc(), BranchORM.id.desc()).limit(limit + 1)
             )).scalars().all()
@@ -5485,15 +5463,16 @@ class GraphVersioningService:
 
     @staticmethod
     def _pulls_filtered(stmt, *, target_graph_id, data_source_id, originating_view_id,
-                        status, active_only, viewer=None):
+                        status, active_only, viewer=None, groups=None):
         """Apply the optional PR scope filters shared by :meth:`list_pulls`/:meth:`count_pulls`.
         ``data_source_id`` joins the target graph (all PRs on a data source & its views);
         ``originating_view_id`` joins the source branch (PRs raised from one view) — both stay
         within the versioning store, so the join is local. ``active_only`` drops the terminal
         (merged/closed) PRs — the "still needs attention" set the indicator counts. ``status``
         "open" means the same set (a PR is stored as mergeable/conflicts/approved, never plain
-        "open"); any other ``status`` is an exact match. A non-manager ``viewer`` only sees PRs
-        they authored or are a reviewer on (the inbox is scoped)."""
+        "open"); any other ``status`` is an exact match. A ``viewer`` sees the PRs they authored or
+        review, a draft's review when they may read the draft (``groups``: their teams, as
+        :meth:`_viewer_groups` loads them), and, when they manage, a fork's PR."""
         if data_source_id is not None:
             stmt = stmt.join(GraphORM, GraphORM.id == MergeRequestORM.target_graph_id).where(
                 GraphORM.data_source_id == data_source_id)
@@ -5508,9 +5487,16 @@ class GraphVersioningService:
             stmt = stmt.where(MergeRequestORM.status == status)
         if active_only:
             stmt = stmt.where(MergeRequestORM.status.notin_(_TERMINAL_PR_STATUS))
-        if viewer is not None and not viewer.can_manage:
-            stmt = stmt.where(or_(MergeRequestORM.actor == viewer.actor,
-                                  MergeRequestORM.reviewers.contains([viewer.actor])))
+        if viewer is not None:
+            draft_mr = MergeRequestORM.source_graph_id == MergeRequestORM.target_graph_id
+            seen = [MergeRequestORM.actor == viewer.actor,
+                    MergeRequestORM.reviewers.contains([viewer.actor]),
+                    and_(draft_mr, MergeRequestORM.source_branch_id.in_(
+                        select(BranchORM.id).where(
+                            GraphVersioningService._readable_draft_clause(viewer, groups))))]
+            if viewer.can_manage:
+                seen.append(or_(MergeRequestORM.source_graph_id.is_(None), ~draft_mr))
+            stmt = stmt.where(or_(*seen))
         return stmt
 
     async def list_pulls(
@@ -5522,12 +5508,13 @@ class GraphVersioningService:
         """PRs in scope, newest first. Scope is any combination of: a target graph's ``main``
         (the base owner's review queue), a data source (every view's PRs against it), or a
         single originating view — optionally narrowed to one ``status`` or to ``active_only``
-        (not merged/closed). A non-manager ``viewer`` only sees PRs they authored or review."""
+        (not merged/closed). A ``viewer`` sees the PRs :meth:`_pulls_filtered` lets them."""
         async with self._session() as s:
             stmt = self._pulls_filtered(
                 select(MergeRequestORM), target_graph_id=target_graph_id,
                 data_source_id=data_source_id, originating_view_id=originating_view_id,
                 status=status, active_only=active_only, viewer=viewer,
+                groups=await self._viewer_groups(s, viewer) if viewer is not None else None,
             ).order_by(MergeRequestORM.created_at.desc()).limit(limit).offset(offset)
             rows = (await s.execute(stmt)).scalars().all()
             return [await self._pr_meta(s, pr) for pr in rows]
@@ -5544,6 +5531,7 @@ class GraphVersioningService:
                 select(func.count(MergeRequestORM.id)), target_graph_id=target_graph_id,
                 data_source_id=data_source_id, originating_view_id=originating_view_id,
                 status=status, active_only=active_only, viewer=viewer,
+                groups=await self._viewer_groups(s, viewer) if viewer is not None else None,
             )
             return int((await s.execute(stmt)).scalar_one())
 
@@ -5714,18 +5702,33 @@ class GraphVersioningService:
     async def _require_edit(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
         if not branch.is_shared:                          # a private draft is its owner's alone (D4)
             if branch.kind != "main" and branch.owner != actor:
+                await self._unknown_unless_readable(s, branch, actor, groups)
                 raise NotDraftOwner(branch.id, branch.owner)
             return
         role = await self._branch_role(s, branch, actor, groups, need="editor")
         if role is None or ROLE_RANK[role] < ROLE_RANK["editor"]:
+            await self._unknown_unless_readable(s, branch, actor, groups)
             raise DraftRoleRequired(branch.id, "editor")
 
     async def _require_manage(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
         role = await self._branch_role(s, branch, actor, groups, need="maintainer")
         if role != "maintainer":
+            await self._unknown_unless_readable(s, branch, actor, groups)
             if not branch.is_shared:
                 raise NotDraftOwner(branch.id, branch.owner)
             raise DraftRoleRequired(branch.id, "maintainer")
+
+    async def _unknown_unless_readable(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
+        """Before a refusal names a draft's owner or a role on it: a private draft the actor may not
+        even read is unknown to them (:class:`DraftNotReadable`, a 404 as on a read), so a write
+        can't learn it is there. Whoever reaches a write reads the data source, so a public draft
+        is known to them."""
+        if branch.visibility == "public":
+            return
+        if branch.is_shared and await self._branch_role(s, branch, actor, groups, need="viewer") is not None:
+            return
+        if not await self._is_pr_participant_for_branch(s, branch.id, actor):
+            raise DraftNotReadable(f"{actor} cannot view branch {branch.id}")
 
     async def _require_publish(self, s, branch: BranchORM, actor: str, groups: Sequence[str]) -> None:
         """Publishing a shared draft needs maintainer; any other draft, edit."""
@@ -5749,17 +5752,58 @@ class GraphVersioningService:
 
     async def _branch_readable(self, s, branch: BranchORM, viewer: "Viewer") -> bool:
         """Who may READ a branch's history/content. ``main`` is readable by any
-        ``datasource:read`` caller; a draft is private to its owner + workspace managers (+ explicit
-        members of a shared draft) + reviewers of a PR raised from it. Owner/manager short-circuit
-        before any extra query, so the common paths stay O(1)."""
+        ``datasource:read`` caller, and so is a public draft. A private draft is its owner's, its
+        members' (any role, directly or through a team) and its reviews' authors and reviewers;
+        managing the workspace opens none. Owner and public short-circuit before any query, so
+        the common paths stay O(1). :meth:`_readable_draft_clause` says the same in SQL."""
         if branch.kind == "main":
             return True
-        if viewer.can_manage or branch.owner == viewer.actor:
+        if branch.owner == viewer.actor or (branch.visibility == "public" and viewer.can_read):
             return True
         if branch.is_shared and await self._branch_role(s, branch, viewer.actor, viewer.groups,
                                                         need="viewer") is not None:
             return True
         return await self._is_pr_participant_for_branch(s, branch.id, viewer.actor)
+
+    @staticmethod
+    def _readable_draft_clause(viewer: "Viewer", groups, *, graph_id: Optional[str] = None):
+        """The drafts ``viewer`` may read, as a condition on ``branches`` (:meth:`_branch_readable`
+        in one query): their own; the public ones when they read the data source; those they, or a
+        team of theirs in ``groups``, are a member of; those a review of theirs comes from.
+        ``graph_id`` narrows the reviews looked at to one graph's."""
+        member = and_(BranchMemberORM.subject_type == "user", BranchMemberORM.subject_id == viewer.actor)
+        if groups:
+            member = or_(member, and_(BranchMemberORM.subject_type == "group",
+                                      BranchMemberORM.subject_id.in_(groups)))
+        reviews = select(MergeRequestORM.source_branch_id).where(
+            or_(MergeRequestORM.actor == viewer.actor, MergeRequestORM.reviewers.contains([viewer.actor])))
+        if graph_id is not None:
+            reviews = reviews.where(MergeRequestORM.graph_id == graph_id)
+        terms = [BranchORM.owner == viewer.actor,
+                 and_(BranchORM.is_shared, BranchORM.id.in_(select(BranchMemberORM.branch_id).where(member))),
+                 BranchORM.id.in_(reviews)]
+        if viewer.can_read:
+            terms.insert(1, BranchORM.visibility == "public")
+        return or_(*terms)
+
+    @staticmethod
+    async def _viewer_groups(s, viewer: "Viewer", *, graph_id: Optional[str] = None) -> set:
+        """``viewer``'s teams for :meth:`_readable_draft_clause`: as given, else looked up once,
+        and only when a shared draft (of ``graph_id``, when given) has a team's row; a failed
+        lookup keeps their own rows, as in :meth:`_my_roles`."""
+        if viewer.groups:
+            return set(viewer.groups)
+        teams = select(BranchMemberORM.branch_id).join(
+            BranchORM, BranchORM.id == BranchMemberORM.branch_id).where(
+            BranchORM.is_shared, BranchMemberORM.subject_type == "group")
+        if graph_id is not None:
+            teams = teams.where(BranchORM.graph_id == graph_id)
+        if not await s.scalar(teams.limit(1)):
+            return set()
+        try:
+            return set(await _load_actor_groups(viewer.actor))
+        except GroupsUnavailable:
+            return set()
 
     async def _assert_branch_readable(self, s, branch: BranchORM, viewer: Optional["Viewer"]) -> None:
         """No-op when ``viewer`` is None (internal/test callers); else raise on a private draft."""
@@ -5794,13 +5838,14 @@ class GraphVersioningService:
 
     async def _readable_branch_ids(self, s, branch_ids, viewer: "Viewer") -> set:
         """Subset of *branch_ids* the viewer may read — for filtering cross-branch results
-        (view-scoped commit logs, entity history). Bounded by the distinct branches involved."""
-        out: set = set()
-        for bid in {b for b in branch_ids if b}:
-            b = await s.get(BranchORM, bid)
-            if b is not None and await self._branch_readable(s, b, viewer):
-                out.add(bid)
-        return out
+        (view-scoped commit logs, entity history): :meth:`_readable_draft_clause` in one query."""
+        ids = {b for b in branch_ids if b}
+        if not ids:
+            return set()
+        groups = await self._viewer_groups(s, viewer)
+        return set((await s.execute(select(BranchORM.id).where(
+            BranchORM.id.in_(ids),
+            or_(BranchORM.kind == "main", self._readable_draft_clause(viewer, groups))))).scalars().all())
 
     async def _next_seq(self, s, graph_id: str, branch_id: str) -> int:
         cur = (

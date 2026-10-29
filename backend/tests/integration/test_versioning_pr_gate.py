@@ -277,10 +277,11 @@ async def _run_publish_permission() -> None:
                 assert (await c.post(f"{V1}/graphs/{gid}/branches/{d}/commit", json={}, headers=who)).status_code == 200
                 return d
 
-            # Mia edits and raises a review, but nothing she does advances main.
+            # Mia edits and asks Pat to review it, but nothing she does advances main.
             d = await draft(mia, "urn:t:mia")
             needs_publish(await c.post(f"{V1}/graphs/{gid}/branches/{d}/publish", json={"message": "m"}, headers=mia))
-            r = await c.post(f"{V1}/graphs/{gid}/branches/{d}/merge-requests", json={}, headers=mia)
+            r = await c.post(f"{V1}/graphs/{gid}/branches/{d}/merge-requests", json={"reviewers": ["pat"]},
+                             headers=mia)
             assert r.status_code == 201, r.text
             mr = r.json()["prId"]
             needs_publish(await c.post(f"{V1}/merge-requests/{mr}/merge", json={"message": "m"}, headers=mia))
@@ -290,7 +291,11 @@ async def _run_publish_permission() -> None:
             needs_publish(await c.post("/api/v1/ws1/graph/resync", params={"dataSourceId": ds}, headers=mia))
             assert (await c.get(f"{V1}/graphs/{gid}/commits", headers=pat)).json()["commits"][0]["commit_id"] == seed
 
-            # Pat merges her review, publishes his own draft, and reverts and restores main.
+            # Pat, who sees her private draft as its reviewer, approves and merges her review,
+            # publishes his own draft, and reverts and restores main.
+            head = (await c.get(f"{V1}/merge-requests/{mr}", headers=pat)).json()["headCommitId"]
+            r = await c.post(f"{V1}/merge-requests/{mr}/approve", json={"expectedHeadCommitId": head}, headers=pat)
+            assert r.status_code == 200, r.text
             r = await c.post(f"{V1}/merge-requests/{mr}/merge", json={"message": "m"}, headers=pat)
             assert r.status_code == 200, r.text
             merged = r.json()["commitId"]

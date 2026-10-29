@@ -2,8 +2,8 @@
 
 Alice owns a shared draft. Bob is a member editor, Dave a member viewer, and the group ``grp_eng``
 (Erin is in it) a member editor; Carol holds workspace manage but is no member. Bob and Erin write
-it through every draft-write route; Carol and Dave are refused with 403 ``not_owner_or_member``
-naming the role they lack, and nothing they send lands. Publishing and abandoning need maintainer,
+it through every draft-write route; Dave is refused with 403 ``not_owner_or_member`` naming the role
+he lacks, and to Carol the draft doesn't exist (404, as on a read). Nothing they send lands. Publishing and abandoning need maintainer,
 so an editor is refused those, a queued publish at request time. Frank is a maintainer only through
 ``grp_ops``: he manages members, renames and publishes, in the request or as a queued job.
 
@@ -15,8 +15,8 @@ An edit staged by someone who may no longer write the draft (removed, un-shared,
 is withdrawn at the owner's next checkpoint: never committed, never published.
 
 Only the owner changes who a draft is shared with, and every change starts from no members: making
-it private removes them, and member rows left on a private draft grant nothing, not even after it is
-shared again. Whoever is added must exist and, to write, hold workspace manage; that is checked only
+it private removes them, and member rows left on a private draft grant nothing, not even reading it
+(404), nor after it is shared again. Whoever is added must exist and, to write, hold workspace manage; that is checked only
 for a caller allowed to manage members, under the draft's lock. The group lookup, users, groups and
 their permissions are faked here.
 """
@@ -125,6 +125,11 @@ def _not_owner(r, branch_id):
     assert (detail["code"], detail["branchId"], detail["owner"]) == ("not_draft_owner", branch_id, "alice"), detail
 
 
+def _unknown(r):
+    """A private draft the caller may not read: 404, the same answer as a branch that isn't there."""
+    assert r.status_code == 404, (r.request.url, r.text)
+
+
 def _ineligible(r, subject_id, reason):
     assert r.status_code == 422, (r.request.url, r.text)
     detail = r.json()["detail"]
@@ -192,15 +197,16 @@ async def _write_matrix(c, V, ds, gid, shared_draft) -> None:
     d = await shared_draft(bob="editor", dave="viewer", grp_eng="editor")
     qd, B = {"dataSourceId": ds, "branchId": d}, f"{V1}/graphs/{gid}/branches/{d}"
 
-    # Carol (a manager, no member) and Dave (a viewer) are refused every write, naming editor.
-    for who in ("carol", "dave"):
+    # Dave (a viewer) is refused every write, naming editor; to Carol (a manager, no member) the
+    # draft isn't there.
+    for who, refused in (("dave", lambda r: _refused(r, "editor", d)), ("carol", _unknown)):
         h = _as(who)
-        _refused(await c.post(f"{GP}/changes", params=qd, json=_save(who), headers=h), "editor", d)
-        _refused(await c.post(f"{GP}/nodes/create", params=qd, json=_node(who), headers=h), "editor", d)
-        _refused(await c.post(f"{B}/changes", json=_stage(who), headers=h), "editor", d)
-        _refused(await c.post(f"{B}/commit", json={}, headers=h), "editor", d)
-        _refused(await c.post(f"{B}/rebase", json={}, headers=h), "editor", d)
-        _refused(await c.post(f"{B}/merge-requests", json={}, headers=h), "editor", d)
+        refused(await c.post(f"{GP}/changes", params=qd, json=_save(who), headers=h))
+        refused(await c.post(f"{GP}/nodes/create", params=qd, json=_node(who), headers=h))
+        refused(await c.post(f"{B}/changes", json=_stage(who), headers=h))
+        refused(await c.post(f"{B}/commit", json={}, headers=h))
+        refused(await c.post(f"{B}/rebase", json={}, headers=h))
+        refused(await c.post(f"{B}/merge-requests", json={}, headers=h))
     st = (await c.get(f"{B}/state", headers=_as("alice"))).json()["nodes"]
     assert not {"urn:t:carol", "urn:t:dave"} & set(st), st
     assert not any(n.get("displayName") in ("carol", "dave", "carol node", "dave node") for n in st.values())
@@ -374,13 +380,13 @@ async def _unshare_and_reshare(c, V, ds, gid, shared_draft) -> None:
     r = await c.patch(B, json={"isShared": False}, headers=_as("alice"))
     assert r.status_code == 200 and r.json()["isShared"] is False, r.text
     assert (await _members(c, B))["members"] == []
-    _not_owner(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), d)
+    _unknown(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")))
 
     # Sharing it again starts from no members: Bob is not back.
     r = await c.patch(B, json={"isShared": True}, headers=_as("alice"))
     assert r.status_code == 200 and r.json()["isShared"] is True, r.text
     assert (await _members(c, B))["members"] == []
-    _refused(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), "editor", d)
+    _unknown(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")))
 
 
 async def _leftover_rows_grant_nothing(c, V, ds, gid, shared_draft) -> None:
@@ -392,16 +398,16 @@ async def _leftover_rows_grant_nothing(c, V, ds, gid, shared_draft) -> None:
     async with db.graphver_session() as s:          # left by an un-share before members were removed
         s.add(models.BranchMemberORM(branch_id=d, subject_type="user", subject_id="bob", role="maintainer"))
 
-    _not_owner(await _add(c, B, "bob", "carol", "editor"), d)
+    _unknown(await _add(c, B, "bob", "carol", "editor"))
     branches = {b["branchId"]: b for b in (await c.get(f"{V1}/graphs/{gid}/branches", headers=_as("alice"))).json()}
     assert branches[d]["isShared"] is False, branches[d]
-    _not_owner(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), d)
+    _unknown(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")))
 
     # Alice shares it by adding Carol: the leftover row goes, it does not come back to life.
     r = await _add(c, B, "alice", "carol", "editor")
     assert r.status_code == 200, r.text
     assert [m["subjectId"] for m in (await _members(c, B))["members"]] == ["carol"]
-    _refused(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), "editor", d)
+    _unknown(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")))
 
 
 async def _eligibility(c, V, ds, gid, shared_draft, directory) -> None:
@@ -421,14 +427,16 @@ async def _eligibility(c, V, ds, gid, shared_draft, directory) -> None:
 
     # Authorization comes first: a caller who may not manage members costs no lookup.
     directory.resolved[:] = []
-    _refused(await _add(c, B, "carol", "viola", "editor"), "maintainer", d)
+    _refused(await _add(c, B, "bob", "viola", "editor"), "maintainer", d)
+    _unknown(await _add(c, B, "carol", "viola", "editor"))
     assert directory.resolved == []
 
     listed = await _members(c, B)
     assert {m["subjectId"]: (m["role"], m["name"]) for m in listed["members"]} == {
         "bob": ("editor", "Bob"), "grp_eng": ("editor", "Eng"), "viola": ("viewer", "Viola")}
-    roles = {who: (await _members(c, B, who))["myRole"] for who in ("alice", "bob", "erin", "carol")}
-    assert roles == {"alice": "owner", "bob": "editor", "erin": "editor", "carol": None}, roles
+    roles = {who: (await _members(c, B, who))["myRole"] for who in ("alice", "bob", "erin", "viola")}
+    assert roles == {"alice": "owner", "bob": "editor", "erin": "editor", "viola": "viewer"}, roles
+    _unknown(await c.get(f"{B}/members", headers=_as("carol")))
 
 
 async def _membership_takes_the_branch_lock(c, V, ds, gid, shared_draft) -> None:

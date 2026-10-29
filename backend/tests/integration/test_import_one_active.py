@@ -256,9 +256,9 @@ async def _a_taken_back_import_meets_the_drafts_access(svc, ie, root):
     job_id = await _the_job_on(draft)
     await svc.update_branch(graph_id=gid, branch_id=draft, actor="alice", is_shared=False)
 
-    with pytest.raises(HTTPException) as exc:                # what a new import from bob gets
-        await _post(ie, gid, _Body(), draft, "nightly-1", "bob")
-    assert (exc.value.status_code, exc.value.detail["code"]) == (403, "not_draft_owner")
+    with pytest.raises(HTTPException) as exc:                # what a new import from bob gets:
+        await _post(ie, gid, _Body(), draft, "nightly-1", "bob")  # a draft he can no longer read
+    assert (exc.value.status_code, exc.value.detail) == (404, "unknown branch")
     job = await ie.get_job(job_id)
     assert (job["status"], job["errorMessage"]) == ("failed", config.JOB_NEVER_QUEUED)
     assert not (await ie.store.stat(job["sourceUri"])).exists

@@ -52,8 +52,8 @@ class DraftNotReadable(AccessDenied):
 
 
 class NotDraftOwner(_HttpMapped, AccessDenied):
-    """A write reached someone else's private draft. Only its owner writes it;
-    workspace managers may read it, but not write it."""
+    """A write reached someone else's private draft. Only its owner writes it; the people on
+    its review may read it, but not write it. To anyone else it is :class:`DraftNotReadable`."""
 
     status_code = 403
 

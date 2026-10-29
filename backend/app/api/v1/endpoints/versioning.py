@@ -123,11 +123,12 @@ async def viewer_ctx(
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> Viewer:
     """Who is asking, for scoping draft/PR reads: the caller's id + whether they hold
-    ``datasource:manage`` in this workspace (managers see everything). Cheap — claims come from
-    the token; no DB hit. Teams aren't read here: the service looks them up when a team's row
-    could decide (``_load_actor_groups``). Endpoints still keep their ``requires(_READ)`` gate
-    for the baseline."""
-    return Viewer(actor=user.id, can_manage=has_permission(claims, _MANAGE, workspace_id=ws_id))
+    ``datasource:manage`` and ``datasource:read`` in this workspace (read opens public drafts;
+    neither opens a private one). Cheap — claims come from the token; no DB hit. Teams aren't read
+    here: the service looks them up when a team's row could decide (``_load_actor_groups``).
+    Endpoints still keep their ``requires(_READ)`` gate for the baseline."""
+    return Viewer(actor=user.id, can_manage=has_permission(claims, _MANAGE, workspace_id=ws_id),
+                  can_read=has_permission(claims, _READ, workspace_id=ws_id))
 
 
 # --------------------------------------------------------------------------- #
@@ -459,20 +460,33 @@ async def pr_in_workspace(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ) -> dict:
     """Resolve a PR and assert its **base** graph lives in ``ws_id`` (the merge is governed by the
-    base owner's workspace) AND that the caller may see it — its author, an assigned reviewer, or a
-    manager. A non-participant gets 404 (don't leak that the PR exists). An API key must also
-    cover the base graph's data source."""
+    base owner's workspace) AND that the caller may see it: its author, an assigned reviewer, or,
+    for a draft's review, whoever may read the draft; a fork's PR, a manager. Anyone else gets 404
+    (don't leak that the PR exists). An API key must also cover the base graph's data source."""
     pr = await svc.get_pr(pr_id)
     if pr is None:
         raise HTTPException(status_code=404, detail="pull request not found")
     base = await svc.get_graph(str(pr["target_graph_id"]))
     if base is None or base.get("deleted_at") or base["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="pull request not found in workspace")
-    if not (viewer.can_manage or pr.get("actor") == viewer.actor
-            or viewer.actor in (pr.get("reviewers") or [])):
+    if not await _sees_pr(svc, pr, viewer):
         raise HTTPException(status_code=404, detail="pull request not found in workspace")
     await api_key_auth.hold_to_data_source(request, base.get("data_source_id"), ws_id)
     return pr
+
+
+async def _sees_pr(svc: GraphVersioningService, pr: dict, viewer: Viewer) -> bool:
+    """:meth:`GraphVersioningService._pulls_filtered`'s rule for one PR."""
+    if pr.get("actor") == viewer.actor or viewer.actor in (pr.get("reviewers") or []):
+        return True
+    if not (pr.get("source_graph_id") and pr["source_graph_id"] == pr.get("target_graph_id")):
+        return viewer.can_manage
+    try:
+        await svc.assert_branch_readable(graph_id=str(pr["target_graph_id"]),
+                                         branch_id=str(pr["source_branch_id"]), viewer=viewer)
+    except (AccessDenied, ValueError):
+        return False
+    return True
 
 
 async def view_in_workspace(

@@ -18,6 +18,7 @@ from backend.app.services.versioning.errors import (
     BranchNotOpen,
     ContentionExhausted,
     CurationAtRisk,
+    DraftNotReadable,
     DraftRoleRequired,
     ForkNotRestorable,
     GraphNotWritable,
@@ -202,11 +203,23 @@ def test_an_ineligible_member_is_422_with_the_reason():
         "type": "ineligible_member", "subjectId": "usr_v", "reason": "no_manage"}
 
 
+def _reviewed_by(*people):
+    """A service whose only reviews of the draft name ``people``."""
+    svc = GraphVersioningService.__new__(GraphVersioningService)
+
+    async def reviews(s, branch_id, actor):
+        return actor in people
+    svc._is_pr_participant_for_branch = reviews
+    return svc
+
+
 @pytest.mark.asyncio
 async def test_managing_someone_elses_private_draft_is_not_draft_owner():
-    svc = GraphVersioningService.__new__(GraphVersioningService)
-    draft = SimpleNamespace(id="br_6", kind="draft", owner="alice", is_shared=False)
-    with pytest.raises(NotDraftOwner):               # decided before any query: no session needed
+    svc = _reviewed_by("rita")
+    draft = SimpleNamespace(id="br_6", kind="draft", owner="alice", is_shared=False, visibility="private")
+    with pytest.raises(NotDraftOwner):               # Rita reviews it: she reads it, not manages it
+        await svc._require_manage(None, draft, "rita", ())
+    with pytest.raises(DraftNotReadable):            # to Bob, on none of it, it is unknown (404)
         await svc._require_manage(None, draft, "bob", ())
 
 
@@ -227,14 +240,16 @@ async def test_a_draft_the_caller_cannot_read_is_404_like_an_unknown_branch():
 
 @pytest.mark.asyncio
 async def test_a_private_draft_is_written_only_by_its_owner():
-    svc = GraphVersioningService.__new__(GraphVersioningService)
-    draft = SimpleNamespace(id="br_5", kind="draft", owner="alice", is_shared=False)
+    svc = _reviewed_by("rita")
+    draft = SimpleNamespace(id="br_5", kind="draft", owner="alice", is_shared=False, visibility="private")
     await svc._require_edit(None, draft, "alice", ())
-    with pytest.raises(AccessDenied) as info:        # a manager reads it, but does not write it
-        await svc._require_edit(None, draft, "bob", ())
+    with pytest.raises(AccessDenied) as info:        # its reviewer reads it, but does not write it
+        await svc._require_edit(None, draft, "rita", ())
     assert isinstance(info.value, NotDraftOwner)
-    await svc._require_edit(None, SimpleNamespace(id="br_m", kind="main", owner=None, is_shared=False),
-                            "bob", ())
+    with pytest.raises(DraftNotReadable):            # to anyone else it is unknown
+        await svc._require_edit(None, draft, "bob", ())
+    await svc._require_edit(None, SimpleNamespace(id="br_m", kind="main", owner=None, is_shared=False,
+                                                  visibility="public"), "bob", ())
 
 
 def test_fork_errors_carry_their_answer():
