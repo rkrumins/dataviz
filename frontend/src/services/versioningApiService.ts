@@ -66,6 +66,17 @@ export interface BlankGraphResult {
 
 export type BranchKind = 'main' | 'draft' | 'fork'
 
+/** Public: everyone who reads the data source reads it, and everyone who changes it writes it.
+ *  Private: its owner, its members and the people on its review only. */
+export type DraftLevel = 'public' | 'private'
+
+/** What the caller may do with a branch, as the server decided it: render this, never work it out. */
+export interface BranchAccess {
+  canRead: boolean
+  canWrite: boolean
+  canManage: boolean
+}
+
 export interface Branch {
   branchId: string
   kind: BranchKind
@@ -84,6 +95,12 @@ export interface Branch {
   userNames?: Record<string, string>
   /** The caller's role on the draft (the branch list sets it); null when they hold none. */
   myRole?: 'owner' | DraftRole | null
+  /** Who reads and writes it; `main` is public. */
+  visibility?: DraftLevel
+  /** What the caller may do with it (the list and the branch read set it). */
+  access?: BranchAccess | null
+  /** The branch read only: who committed to it, most commits first. */
+  contributors?: string[] | null
 }
 
 export interface Graph {
@@ -462,6 +479,19 @@ export interface PullRequest {
   /** every actor id this PR references (actor/reviewers/approvedBy/mergedBy/closedBy/
    *  sourceBranchOwner) → resolved display name; unresolvable ids are absent. */
   userNames?: Record<string, string>
+  /** The single-PR read only: what the reader may do with it, and why not. */
+  viewerCan?: ReviewViewerCan | null
+}
+
+/** Whether a review's reader may approve it and merge it, decided as the server decides; a reason
+ *  code where they may not: `merged`, `closed`, `person_required`, `manage_required`,
+ *  `publish_required`, `self_review`, `self_merge`. What it still waits for (approvals, a pull of
+ *  latest) is on the review itself. */
+export interface ReviewViewerCan {
+  approve: boolean
+  merge: boolean
+  approveReason: string | null
+  mergeReason: string | null
 }
 
 /** Map of entityId → resolved payload (or `null` to delete) for conflict resolution. */
@@ -612,6 +642,28 @@ export class HeadMovedError extends Error {
   }
 }
 
+/** A draft's level or members could not change: what `actors` staged, who would lose it, clashes
+ *  with the draft and could not be saved first. Nothing about the draft's access changed. */
+export class StagedChangesUnsavedError extends Error {
+  actors: string[]
+  constructor(detail: { actors?: string[]; message?: string }) {
+    super(detail.message ?? 'Someone’s unsaved edits clash with the draft and could not be saved first.')
+    this.name = 'StagedChangesUnsavedError'
+    this.actors = detail.actors ?? []
+  }
+}
+
+/** The data source publishes drafts through a review that someone else merges: a draft can't be
+ *  published directly. Nothing was published. */
+export class ReviewRequiredError extends Error {
+  branchId?: string
+  constructor(detail: { branchId?: string; message?: string }) {
+    super(detail.message ?? 'This data source publishes drafts through a review. Open a review instead.')
+    this.name = 'ReviewRequiredError'
+    this.branchId = detail.branchId
+  }
+}
+
 /** The save named Published itself; edits reach it only through a draft. */
 export class MainWriteForbiddenError extends Error {
   constructor() {
@@ -687,6 +739,8 @@ type RefusalDetail = string | {
   limit?: number
   /** The draft's head now (`head_moved`). */
   headCommitId?: string | null
+  /** Whose staged edits could not be saved first (`staged_changes_unsaved`). */
+  actors?: string[]
 } | null | undefined
 
 /** The error a versioning API refusal (`status`, `detail`) raises — the same whether it came back
@@ -719,6 +773,12 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   }
   if (status === 409 && d?.type === 'main_write_forbidden') {
     return new MainWriteForbiddenError()
+  }
+  if (status === 409 && d?.type === 'staged_changes_unsaved') {
+    return new StagedChangesUnsavedError(d)
+  }
+  if (status === 409 && d?.type === 'review_required') {
+    return new ReviewRequiredError(d)
   }
   if (status === 409 && d?.type === 'graph_not_writable') {
     return new GraphNotWritableError(d.message)
@@ -1076,6 +1136,10 @@ export function decideBootstrapDuplicates(
 
 export type BranchStatusFilter = 'open' | 'publishing' | 'merged' | 'abandoned' | 'all'
 
+/** Whose drafts a list keeps: everyone's the caller may read, their own, those shared with them
+ *  (as a member), or the public ones. */
+export type BranchScope = 'all' | 'mine' | 'shared' | 'public'
+
 /** Branches on a graph, `main` first, then drafts newest first. Graph-wide (every view — the
  *  Data-Source rollup) by DEFAULT; pass `viewId` to get only that Context View's own branches
  *  (branch-per-view). `status` keeps those statuses; without it the server keeps open and
@@ -1084,7 +1148,7 @@ export type BranchStatusFilter = 'open' | 'publishing' | 'merged' | 'abandoned' 
  *  every page (`X-Next-Cursor`). */
 export async function listBranches(
   wsId: string, graphId: string,
-  opts: { viewId?: string | null; status?: BranchStatusFilter[] } = {},
+  opts: { viewId?: string | null; status?: BranchStatusFilter[]; scope?: BranchScope; visibility?: DraftLevel } = {},
 ): Promise<Branch[]> {
   const out: Branch[] = []
   let cursor: string | null = null
@@ -1092,6 +1156,8 @@ export async function listBranches(
     const q = new URLSearchParams({ limit: '500' })
     if (opts.viewId) q.set('viewId', opts.viewId)
     for (const st of opts.status ?? []) q.append('status', st)
+    if (opts.scope) q.set('scope', opts.scope)
+    if (opts.visibility) q.set('visibility', opts.visibility)
     if (cursor) q.set('cursor', cursor)
     const res = await vfetchResponse(`${base(wsId)}/graphs/${graphId}/branches?${q}`)
     out.push(...await readJsonLossless<Branch[]>(res))
@@ -1100,12 +1166,127 @@ export async function listBranches(
   return out
 }
 
+/** Open a draft at `visibility`; left out, its data source's policy decides (409 when the policy
+ *  rules the level out). */
 export function openDraft(
   wsId: string,
   graphId: string,
-  data: { name?: string; originatingViewId?: string; shared?: boolean } = {},
+  data: { name?: string; originatingViewId?: string; shared?: boolean; visibility?: DraftLevel } = {},
 ): Promise<{ branchId: string }> {
   return vfetch<{ branchId: string }>(`${base(wsId)}/graphs/${graphId}/branches`, jsonBody(data))
+}
+
+/** One branch as the list shows it, with who committed to it. 404 for a draft the caller may not read. */
+export function getBranch(wsId: string, graphId: string, branchId: string): Promise<Branch> {
+  return vfetch<Branch>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}`)
+}
+
+/** Make a draft public or private (its owner or a maintainer). Made private, the writers it loses
+ *  have what they staged saved first under their names; {@link StagedChangesUnsavedError} when
+ *  some of it clashes with the draft (the level stays). */
+export function setDraftLevel(
+  wsId: string, graphId: string, branchId: string, visibility: DraftLevel,
+): Promise<Branch> {
+  return vfetch<Branch>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/visibility`, jsonBody({ visibility }))
+}
+
+export interface DraftLevelImpact {
+  visibility: DraftLevel
+  /** Who the change takes write access from and has edits staged: saved under their names first. */
+  saved: Array<{ actor: string; changes: number }>
+}
+
+/** What making the draft `visibility` would do, before doing it. */
+export function getDraftLevelImpact(
+  wsId: string, graphId: string, branchId: string, visibility: DraftLevel,
+): Promise<DraftLevelImpact> {
+  return vfetch<DraftLevelImpact>(
+    `${base(wsId)}/graphs/${graphId}/branches/${branchId}/visibility-impact?visibility=${visibility}`)
+}
+
+/** Hand a draft to `to`: its owner, at any time; a workspace admin, once its owner left. The previous
+ *  owner stays on as a maintainer unless `keepPrevious` is false. */
+export function transferDraft(
+  wsId: string, graphId: string, branchId: string, data: { to: string; keepPrevious?: boolean },
+): Promise<Branch> {
+  return vfetch<Branch>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/transfer`, jsonBody(data))
+}
+
+/** An open draft whose owner left the workspace, as an admin sees it: never what it holds. */
+export interface OwnerLeftDraft {
+  graphId: string
+  branchId: string
+  dataSourceId?: string | null
+  name?: string | null
+  owner: string
+  visibility: DraftLevel
+  status: string
+  updatedAt: string
+  userNames?: Record<string, string>
+}
+
+/** The workspace's open drafts whose owner left, latest changed first (workspace admins). */
+export function listDraftsWhoseOwnerLeft(wsId: string): Promise<OwnerLeftDraft[]> {
+  return vfetch<OwnerLeftDraft[]>(`${base(wsId)}/drafts/owner-left`)
+}
+
+// ============================================
+// Drafts and reviews policy
+// ============================================
+
+export type DraftLevels = 'any' | 'public_only' | 'private_only'
+
+/** One level's own settings: null where it sets nothing (the next level's hold). */
+export interface DraftsPolicySettings {
+  defaultVisibility: DraftLevel | null
+  levels: DraftLevels | null
+  selfApproval: boolean | null
+  selfMerge: boolean | null
+}
+
+/** What holds, with the level each field came from (`data_source`, `workspace` or `default`). */
+export interface EffectiveDraftsPolicy {
+  defaultVisibility: DraftLevel
+  levels: DraftLevels
+  selfApproval: boolean
+  selfMerge: boolean
+  sources: Partial<Record<keyof DraftsPolicySettings, 'data_source' | 'workspace' | 'default'>>
+}
+
+/** A change to one level's settings: a value sets it, `'inherit'` clears it, left out leaves it. */
+export type DraftsPolicyChange = {
+  [K in keyof DraftsPolicySettings]?: NonNullable<DraftsPolicySettings[K]> | 'inherit'
+}
+
+export interface WorkspaceDraftsPolicy {
+  settings: DraftsPolicySettings
+  effective: EffectiveDraftsPolicy
+}
+
+export interface DataSourceDraftsPolicy {
+  overrides: DraftsPolicySettings
+  workspace: DraftsPolicySettings
+  effective: EffectiveDraftsPolicy
+}
+
+export function getWorkspaceDraftsPolicy(wsId: string): Promise<WorkspaceDraftsPolicy> {
+  return vfetch<WorkspaceDraftsPolicy>(`${base(wsId)}/drafts-policy`)
+}
+
+export function putWorkspaceDraftsPolicy(wsId: string, change: DraftsPolicyChange): Promise<WorkspaceDraftsPolicy> {
+  return vfetch<WorkspaceDraftsPolicy>(`${base(wsId)}/drafts-policy`, { method: 'PUT', body: JSON.stringify(change) })
+}
+
+export function getDataSourceDraftsPolicy(wsId: string, dataSourceId: string): Promise<DataSourceDraftsPolicy> {
+  return vfetch<DataSourceDraftsPolicy>(`${base(wsId)}/data-sources/${encodeURIComponent(dataSourceId)}/drafts-policy`)
+}
+
+export function putDataSourceDraftsPolicy(
+  wsId: string, dataSourceId: string, change: DraftsPolicyChange,
+): Promise<DataSourceDraftsPolicy> {
+  return vfetch<DataSourceDraftsPolicy>(
+    `${base(wsId)}/data-sources/${encodeURIComponent(dataSourceId)}/drafts-policy`,
+    { method: 'PUT', body: JSON.stringify(change) })
 }
 
 /** Pull the latest main into a draft ("update branch"). Returns `{clean, conflicts, ...}`; on
@@ -1134,12 +1315,24 @@ export interface BranchFreshness {
   baseCommitSeq: number
   /** The draft's own status — how a client learns it was published or discarded. */
   status: string
+  /** The draft's own latest commit: sent back as `sinceSeq` on the next poll. */
+  headCommitSeq?: number
+  visibility?: DraftLevel | null
+  /** What the caller may do with it now — a write lost to a change of level shows here. */
+  access?: BranchAccess | null
+  /** With `sinceSeq`: what others committed to it since, and who (most commits first). */
+  savedSince?: { commits: number; changes: number; by: string[]; capped: boolean } | null
+  userNames?: Record<string, string>
 }
 
 /** Live "is this draft behind main?" — O(1), safe to poll while editing so a branch owner learns a
- *  teammate published RIGHT AWAY (not at merge). */
-export function getBranchFreshness(wsId: string, graphId: string, branchId: string): Promise<BranchFreshness> {
-  return vfetch<BranchFreshness>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/freshness`)
+ *  teammate published RIGHT AWAY (not at merge). With `sinceSeq` (the `headCommitSeq` of the last
+ *  poll), also what others saved into it since. 404 once the caller may no longer read it. */
+export function getBranchFreshness(
+  wsId: string, graphId: string, branchId: string, sinceSeq?: number | null,
+): Promise<BranchFreshness> {
+  const q = sinceSeq != null ? `?sinceSeq=${sinceSeq}` : ''
+  return vfetch<BranchFreshness>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/freshness${q}`)
 }
 
 /** A graph's direct forks, newest first, those in the trash included. */
@@ -1698,15 +1891,18 @@ export function openMergeRequest(
   )
 }
 
-/** Someone who can be asked to review: a workspace member who can approve (never the caller). */
+/** Someone who can be asked to review: a workspace member who can approve — the caller too, where
+ *  the policy lets whoever opens a review approve it. */
 export interface ReviewerCandidate {
   userId: string
   displayName?: string | null
   email?: string | null
 }
 
-export function listReviewerCandidates(wsId: string): Promise<ReviewerCandidate[]> {
-  return vfetch<ReviewerCandidate[]>(`${base(wsId)}/reviewers`)
+/** Who could approve a review of `dataSourceId`'s drafts (else under the workspace's policy). */
+export function listReviewerCandidates(wsId: string, dataSourceId?: string | null): Promise<ReviewerCandidate[]> {
+  const q = dataSourceId ? `?dataSourceId=${encodeURIComponent(dataSourceId)}` : ''
+  return vfetch<ReviewerCandidate[]>(`${base(wsId)}/reviewers${q}`)
 }
 
 export function listMergeRequests(wsId: string, graphId: string): Promise<PullRequest[]> {

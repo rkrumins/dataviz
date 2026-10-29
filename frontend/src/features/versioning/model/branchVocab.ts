@@ -38,15 +38,19 @@ export const BRANCH_VOCAB = {
   viewOnly: 'view only',
 } as const
 
-/** Can `me` change this draft? Its owner can, and an editor or maintainer of a shared one; the
- *  server refuses everyone else, so the UI shows them the draft read-only. */
-export function canWriteDraft(b: Pick<Branch, 'owner' | 'isShared' | 'myRole'>, me?: string | null): boolean {
+/** Can `me` change this draft? As the server says (`access`); without its word, its owner can, and
+ *  an editor or maintainer member. The server refuses everyone else, so the UI shows them the draft
+ *  read-only. */
+export function canWriteDraft(b: Pick<Branch, 'owner' | 'isShared' | 'myRole' | 'access'>, me?: string | null): boolean {
+  if (b.access) return b.access.canWrite
   return (!!me && b.owner === me) || (!!b.isShared && (b.myRole === 'editor' || b.myRole === 'maintainer'))
 }
 
-/** Can `me` discard, archive, rename or directly publish this draft? Its owner can, and a maintainer
- *  of a shared one; an editor only edits it (and can request review). */
-export function canManageDraft(b: Pick<Branch, 'owner' | 'isShared' | 'myRole'>, me?: string | null): boolean {
+/** Can `me` discard, archive, rename, change the level of or directly publish this draft? As the
+ *  server says (`access`); without its word, its owner can, and a maintainer member. Everyone else
+ *  only edits it, where they may, and can request review. */
+export function canManageDraft(b: Pick<Branch, 'owner' | 'isShared' | 'myRole' | 'access'>, me?: string | null): boolean {
+  if (b.access) return b.access.canManage
   return (!!me && b.owner === me) || (!!b.isShared && b.myRole === 'maintainer')
 }
 

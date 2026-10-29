@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { canManageDraft, draftStatus, ownerName, ownerInitials, BRANCH_VOCAB } from '../branchVocab'
+import { canManageDraft, canWriteDraft, draftStatus, ownerName, ownerInitials, BRANCH_VOCAB } from '../branchVocab'
 
 describe('draftStatus', () => {
   it('flags updates-available when the base trails the published head', () => {
@@ -60,5 +60,23 @@ describe('canManageDraft', () => {
     expect(canManageDraft({ owner: 'bob', isShared: true, myRole: 'viewer' }, 'ana')).toBe(false)
     // A maintainer row left on a draft made private grants nothing.
     expect(canManageDraft({ owner: 'bob', isShared: false, myRole: 'maintainer' }, 'ana')).toBe(false)
+  })
+})
+
+describe('what the server says the caller may do', () => {
+  const access = (canWrite: boolean, canManage: boolean) => ({ canRead: true, canWrite, canManage })
+
+  it('decides, over the owner and role the client knows', () => {
+    // A public draft: everyone who changes its data source writes it, without a role on it.
+    expect(canWriteDraft({ owner: 'bob', myRole: null, access: access(true, false) }, 'ana')).toBe(true)
+    expect(canManageDraft({ owner: 'bob', myRole: null, access: access(true, false) }, 'ana')).toBe(false)
+    // Its owner, whose write the server took (a reader only, say): read-only.
+    expect(canWriteDraft({ owner: 'ana', access: access(false, false) }, 'ana')).toBe(false)
+  })
+
+  it('falls back to the owner and role when the server hasn’t said', () => {
+    expect(canWriteDraft({ owner: 'ana' }, 'ana')).toBe(true)
+    expect(canWriteDraft({ owner: 'bob', isShared: true, myRole: 'editor' }, 'ana')).toBe(true)
+    expect(canWriteDraft({ owner: 'bob' }, 'ana')).toBe(false)
   })
 })
