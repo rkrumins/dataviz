@@ -1920,6 +1920,7 @@ class DraftLevelImpactResponse(_ApiModel):
     visibility: str
     # Who the change takes write access from, with edits staged: committed under their names first.
     saved: List[Dict[str, Any]]
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/visibility", response_model=BranchResponse)
@@ -1960,12 +1961,15 @@ async def draft_visibility_impact(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """What making the draft ``visibility`` would do, for its owner or a maintainer to see first:
     whose staged edits are committed under their names before it changes, and how many."""
     with _domain_errors():
-        return await svc.visibility_impact(graph_id=graph_id, branch_id=branch_id,
-                                           visibility=visibility, actor=user.id)
+        impact = await svc.visibility_impact(graph_id=graph_id, branch_id=branch_id,
+                                             visibility=visibility, actor=user.id)
+    resolved = await resolve_user_ids(session, {s["actor"] for s in impact["saved"]}) if impact["saved"] else {}
+    return {**impact, "user_names": {uid: disp for uid, (disp, _email) in resolved.items() if disp}}
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/changes", response_model=StageResponse)

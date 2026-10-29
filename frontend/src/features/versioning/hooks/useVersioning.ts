@@ -5,7 +5,7 @@
  */
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, DraftRole, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, DraftLevel, DraftRole, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
@@ -131,6 +131,29 @@ export function useBranchMembers(wsId?: string, graphId?: string | null, branchI
     queryKey: VERSIONING_KEYS.branchMembers(wsId, graphId, branchId),
     queryFn: () => api.listBranchMembers(wsId!, graphId!, branchId!),
     enabled: !!wsId && !!graphId && !!branchId,
+  })
+}
+
+/** What making a draft `visibility` would do — whose staged edits are saved first. Asked only
+ *  while a change of level is being confirmed (`visibility` set). */
+export function useDraftLevelImpact(
+  wsId?: string, graphId?: string | null, branchId?: string | null, visibility?: DraftLevel | null,
+) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.all, 'levelImpact', wsId, graphId, branchId, visibility] as const,
+    queryFn: () => api.getDraftLevelImpact(wsId!, graphId!, branchId!, visibility!),
+    enabled: !!wsId && !!graphId && !!branchId && !!visibility,
+    staleTime: 0,
+  })
+}
+
+/** The drafts and reviews policy a data source works under. */
+export function useDataSourceDraftsPolicy(wsId?: string, dataSourceId?: string | null) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.all, 'draftsPolicy', wsId, dataSourceId] as const,
+    queryFn: () => api.getDataSourceDraftsPolicy(wsId!, dataSourceId!),
+    enabled: !!wsId && !!dataSourceId,
+    staleTime: 60_000,
   })
 }
 
@@ -586,18 +609,36 @@ export function useAbandonDraft(wsId: string, graphId: string) {
   })
 }
 
-/** Edit a draft's name / description / shared-visibility. Refreshes the branch list + resolve. */
+/** Edit a draft's name / description. Refreshes the branch list + resolve. */
 export function useUpdateBranch(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (v: { branchId: string; name?: string; description?: string; isShared?: boolean }) =>
-      api.updateBranch(wsId, graphId, v.branchId, { name: v.name, description: v.description, isShared: v.isShared }),
-    onSuccess: (_d, v) => {
+    mutationFn: (v: { branchId: string; name?: string; description?: string }) =>
+      api.updateBranch(wsId, graphId, v.branchId, { name: v.name, description: v.description }),
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
-      // Making a draft private removes its members.
-      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchMembers(wsId, graphId, v.branchId) })
     },
+  })
+}
+
+/** Make a draft public or private. Refreshes who it lists, its members and its level everywhere. */
+export function useSetDraftLevel(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { branchId: string; visibility: DraftLevel }) =>
+      api.setDraftLevel(wsId, graphId, v.branchId, v.visibility),
+    onSuccess: (_d, v) => invalidateBranchMembers(qc, wsId, graphId, v.branchId),
+  })
+}
+
+/** Hand a draft to someone else. Refreshes its owner and members everywhere. */
+export function useTransferDraft(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { branchId: string; to: string; keepPrevious: boolean }) =>
+      api.transferDraft(wsId, graphId, v.branchId, { to: v.to, keepPrevious: v.keepPrevious }),
+    onSuccess: (_d, v) => invalidateBranchMembers(qc, wsId, graphId, v.branchId),
   })
 }
 

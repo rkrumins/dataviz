@@ -1,33 +1,47 @@
 /**
- * BranchSettingsModal — manage a draft branch: rename, optional description, shared/private
- * visibility, its members, and a one-click shareable deep-link (/views/{viewId}?branch={branchId}).
- * Opened from the BranchSwitcher (per-draft gear). Edits go through useUpdateBranch (owner/maintainer
- * gated server-side; visibility is the owner's alone); the link is permission-gated on open by
- * useBranchDeepLink.
+ * BranchSettingsModal — manage a draft branch: rename, optional description, who can see it (public
+ * or private, within its data source's policy), its members, handing it on, and a one-click
+ * shareable deep-link (/views/{viewId}?branch={branchId}). Opened from the BranchSwitcher
+ * (per-draft gear). A change of level is confirmed in DraftLevelDialog, which says whose unsaved
+ * edits are saved first; the server decides who may do each (its owner or a maintainer; handing on,
+ * its owner); the link is permission-gated on open by useBranchDeepLink.
  */
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, GitBranch, Link2, Check, Loader2, Lock, Users } from 'lucide-react'
+import { X, GitBranch, Link2, Check, Loader2, Lock, Globe2 } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore } from '@/store/auth'
-import type { Branch } from '@/services/versioningApiService'
-import { useBranchMembers, useUpdateBranch } from '../hooks/useVersioning'
+import type { Branch, DraftLevel } from '@/services/versioningApiService'
+import { useBranchMembers, useDataSourceDraftsPolicy, useUpdateBranch } from '../hooks/useVersioning'
+import { canManageDraft } from '../model/branchVocab'
 import { BranchMembersSection } from './BranchMembersSection'
+import { DraftLevelDialog } from './DraftLevelDialog'
+import { HandOnDraftForm } from './HandOnDraftForm'
+
+const LEVELS = [
+  { v: 'public', Icon: Globe2, label: 'Public', sub: 'Everyone who can see this data source',
+    tip: 'Everyone who can see this data source sees it, and everyone who can edit it can change it' },
+  { v: 'private', Icon: Lock, label: 'Private', sub: 'You, the people you add, and reviewers',
+    tip: 'Only you, the people you add here and the people on its review see it' },
+] as const
 
 export function BranchSettingsModal({
   wsId,
   graphId,
   viewId,
+  dataSourceId,
   branch,
   onClose,
 }: {
   wsId: string
   graphId: string
   viewId: string | null
+  /** Its data source, for the levels its policy allows; without it the server alone says. */
+  dataSourceId?: string | null
   branch: Branch
   onClose: () => void
 }) {
@@ -36,14 +50,15 @@ export function BranchSettingsModal({
   const [name, setName] = useState(branch.name ?? '')
   const [description, setDescription] = useState(branch.description ?? '')
   const membersQ = useBranchMembers(wsId, graphId, branch.branchId)
+  const policyQ = useDataSourceDraftsPolicy(wsId, dataSourceId)
   const me = useAuthStore((s) => s.user?.id)
-  // `branch` is a snapshot from when the modal opened: adding the first member shares the draft,
-  // so visibility is compared with (and sent only when it differs from) this baseline instead.
-  const [baseShared, setBaseShared] = useState(!!branch.isShared)
-  const [isShared, setIsShared] = useState(!!branch.isShared)
+  const [level, setLevel] = useState<DraftLevel>(branch.visibility ?? 'private')
+  const [changingTo, setChangingTo] = useState<DraftLevel | null>(null)
   const [copied, setCopied] = useState(false)
   const isOwner = membersQ.data ? membersQ.data.myRole === 'owner' : branch.owner === me
-  const losing = baseShared && !isShared ? membersQ.data?.members ?? [] : []
+  const canManageIt = canManageDraft(branch, me)
+  const allowed = policyQ.data?.effective.levels ?? 'any'
+  const ruledOut = (v: DraftLevel) => allowed !== 'any' && allowed !== `${v}_only`
 
   // Prefer the view the branch was created from so the link lands on its home context; fall back to
   // the view in hand. Both resolve to the same data source, so the branch is accessible either way.
@@ -54,8 +69,7 @@ export function BranchSettingsModal({
 
   const dirty =
     name.trim() !== (branch.name ?? '') ||
-    description.trim() !== (branch.description ?? '') ||
-    isShared !== baseShared
+    description.trim() !== (branch.description ?? '')
 
   const copyLink = async () => {
     if (!link) return
@@ -70,10 +84,7 @@ export function BranchSettingsModal({
 
   const save = () => {
     update.mutate(
-      {
-        branchId: branch.branchId, name: name.trim(), description: description.trim(),
-        ...(isShared !== baseShared ? { isShared } : {}),
-      },
+      { branchId: branch.branchId, name: name.trim(), description: description.trim() },
       {
         onSuccess: () => { notify('success', 'Draft updated.'); onClose() },
         onError: (e) => notify('error', (e as Error).message),
@@ -132,28 +143,27 @@ export function BranchSettingsModal({
             </div>
 
             <div>
-              <label className="block text-[11px] font-semibold uppercase tracking-wider text-ink-muted/80 mb-1.5">Visibility</label>
+              <label className="block text-[11px] font-semibold uppercase tracking-wider text-ink-muted/80 mb-1.5">Who can see it</label>
               <div className="grid grid-cols-2 gap-1.5">
-                {([
-                  { v: false, Icon: Lock, label: 'Private', sub: 'Only you' },
-                  { v: true, Icon: Users, label: 'Shared', sub: 'Team can access' },
-                ] as const).map(({ v, Icon, label, sub }) => (
+                {LEVELS.map(({ v, Icon, label, sub, tip }) => (
                   <HoverTip
-                    key={label}
+                    key={v}
                     className="flex"
-                    label={v ? 'Let the people you add here see and edit this draft' : 'Keep this draft to yourself'}
-                    detail={isOwner ? undefined : 'Only the draft’s owner can change who it’s shared with'}
+                    label={tip}
+                    detail={!canManageIt ? 'Only the draft’s owner or a maintainer can change who sees it'
+                      : ruledOut(v) ? `This data source doesn’t allow ${v} drafts` : undefined}
                   >
                   <button
-                    onClick={() => setIsShared(v)}
-                    disabled={!isOwner}
+                    onClick={() => { if (v !== level) setChangingTo(v) }}
+                    disabled={!canManageIt || ruledOut(v)}
+                    aria-pressed={level === v}
                     className={cn(
                       'w-full rounded-lg border px-3 py-2 text-left transition-colors disabled:opacity-50 disabled:cursor-not-allowed',
-                      isShared === v ? 'border-accent-lineage/50 bg-accent-lineage/[0.07] ring-1 ring-accent-lineage/30'
+                      level === v ? 'border-accent-lineage/50 bg-accent-lineage/[0.07] ring-1 ring-accent-lineage/30'
                         : 'border-glass-border hover:border-glass-border/80',
                     )}
                   >
-                    <span className={cn('flex items-center gap-1.5 text-[12px] font-semibold', isShared === v ? 'text-accent-lineage' : 'text-ink')}>
+                    <span className={cn('flex items-center gap-1.5 text-[12px] font-semibold', level === v ? 'text-accent-lineage' : 'text-ink')}>
                       <Icon className="w-3.5 h-3.5" /> {label}
                     </span>
                     <span className="block text-[10px] text-ink-muted mt-0.5">{sub}</span>
@@ -161,21 +171,28 @@ export function BranchSettingsModal({
                   </HoverTip>
                 ))}
               </div>
-              {losing.length > 0 && (
-                <p className="mt-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] text-amber-700 dark:text-amber-400">
-                  Making this draft private removes {losing.map((m) => m.name ?? m.subjectId).join(', ')}
-                </p>
-              )}
             </div>
 
             {membersQ.isError ? (
               <p className="text-xs text-ink-muted">Couldn’t load this draft’s members.</p>
             ) : (
               <BranchMembersSection
-                wsId={wsId} graphId={graphId} branchId={branch.branchId}
+                wsId={wsId} graphId={graphId} branchId={branch.branchId} level={level}
                 members={membersQ.data?.members} myRole={membersQ.data?.myRole}
-                onAdded={() => { setBaseShared(true); setIsShared(true) }}
               />
+            )}
+
+            {isOwner && (
+              <div>
+                <label className="block text-[11px] font-semibold uppercase tracking-wider text-ink-muted/80 mb-1.5">Hand it on</label>
+                <HandOnDraftForm
+                  wsId={wsId} graphId={graphId} branchId={branch.branchId} previousOwner={branch.owner}
+                  onDone={onClose}
+                />
+                <p className="text-[10px] text-ink-muted/70 mt-1">
+                  The new owner manages it from then on: its name, who sees it, and publishing it.
+                </p>
+              </div>
             )}
 
             {link && (
@@ -210,12 +227,16 @@ export function BranchSettingsModal({
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-50"
             >
               {update.isPending && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-              {losing.length > 0 ? `Make private and remove ${losing.length}` : 'Save changes'}
+              Save changes
             </button>
           </div>
         </motion.div>
       </AnimatePresence>
       </div>
+      <DraftLevelDialog
+        wsId={wsId} graphId={graphId} branchId={branch.branchId} to={changingTo}
+        onClose={() => setChangingTo(null)} onChanged={setLevel}
+      />
     </>,
     document.body,
   )

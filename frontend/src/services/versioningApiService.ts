@@ -1194,6 +1194,7 @@ export interface DraftLevelImpact {
   visibility: DraftLevel
   /** Who the change takes write access from and has edits staged: saved under their names first. */
   saved: Array<{ actor: string; changes: number }>
+  userNames?: Record<string, string>
 }
 
 /** What making the draft `visibility` would do, before doing it. */
@@ -1378,13 +1379,13 @@ export function abandonDraft(wsId: string, graphId: string, branchId: string): P
   return vfetch<Branch>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}/abandon`, jsonBody({}))
 }
 
-/** Edit a draft's name / description / shared-visibility. PATCH: omitted fields are untouched;
- *  pass `''` to clear name/description. */
+/** Edit a draft's name / description. PATCH: omitted fields are untouched; pass `''` to clear one.
+ *  Its level changes through {@link setDraftLevel}. */
 export function updateBranch(
   wsId: string,
   graphId: string,
   branchId: string,
-  data: { name?: string; description?: string; isShared?: boolean },
+  data: { name?: string; description?: string },
 ): Promise<Branch> {
   return vfetch<Branch>(`${base(wsId)}/graphs/${graphId}/branches/${branchId}`, {
     method: 'PATCH',

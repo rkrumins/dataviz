@@ -374,6 +374,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
           wsId={workspaceId}
           graphId={graphId}
           viewId={originatingViewId}
+          dataSourceId={dataSourceId}
           branch={settingsBranch}
           onClose={() => setSettingsBranch(null)}
         />
@@ -384,6 +385,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
           wsId={workspaceId}
           graphId={graphId}
           viewId={originatingViewId}
+          dataSourceId={dataSourceId}
           mainHead={mainHead}
           currentBranchId={currentBranchId}
           canManage={canManage}

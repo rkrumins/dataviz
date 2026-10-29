@@ -81,6 +81,7 @@ async def _narrowing_run(monkeypatch) -> None:
             r = await c.get(f"{B}/{d}/visibility-impact", params={"visibility": "private"}, headers=h("alice"))
             assert r.status_code == 200, r.text
             assert r.json()["saved"] == [{"actor": "bob", "changes": 1}, {"actor": "carol", "changes": 1}]
+            assert r.json()["userNames"] == {}, r.text      # nobody here resolves to a name
             r = await level(d, "private")
             assert r.status_code == 200 and r.json()["visibility"] == "private", r.text
             log = (await c.get(f"{V1}/graphs/{gid}/commits", params={"branchId": d}, headers=h("alice"))).json()

@@ -41,6 +41,7 @@ export function BranchManager({
   wsId,
   graphId,
   viewId,
+  dataSourceId,
   mainHead,
   currentBranchId,
   canManage,
@@ -50,6 +51,8 @@ export function BranchManager({
   wsId: string
   graphId: string
   viewId: string | null
+  /** For the levels its drafts policy allows, in a draft's settings. */
+  dataSourceId?: string | null
   mainHead: number
   currentBranchId: string | null
   canManage: boolean
@@ -278,7 +281,7 @@ export function BranchManager({
       {/* Per-draft sub-flows — each owns its own portal/animation, kept outside the drawer's presence. */}
       {settingsBranch && (
         <BranchSettingsModal
-          wsId={wsId} graphId={graphId} viewId={viewId}
+          wsId={wsId} graphId={graphId} viewId={viewId} dataSourceId={dataSourceId}
           branch={settingsBranch}
           onClose={() => setSettingsBranch(null)}
         />
