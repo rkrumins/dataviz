@@ -3963,8 +3963,8 @@ async def _node_identity_for_write(engine: ContextEngine):
     live elsewhere."""
     identity = engine._node_identity or await engine._resolve_node_identity()
     if identity is None:
-        logger.warning("node-identity mapping unavailable for ds=%s: this save binds no "
-                       "name or identity properties", engine._data_source_id)
+        # Says what failed, not which source: the id came in on the request (log injection).
+        logger.warning("node-identity mapping unavailable: this save binds no name or identity properties")
     return identity
 
 

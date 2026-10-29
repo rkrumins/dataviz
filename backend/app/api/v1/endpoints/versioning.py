@@ -633,7 +633,8 @@ async def _node_identity_for_meta(session: AsyncSession, meta: Optional[dict]):
         from backend.app.services.node_identity import load_node_identity
         return await load_node_identity(session, ds_id)
     except Exception:
-        logger.exception("node-identity resolution failed (ds=%s): nothing is bound", ds_id)
+        # Says what failed, not which source: the id traces back to the request (log injection).
+        logger.exception("node-identity resolution failed: nothing is bound")
         return None
 
 
@@ -2563,7 +2564,7 @@ async def _resolve_node_identity_for_import(workspace_id, data_source_id):
         async with get_async_session() as session:
             return await _node_identity_for_meta(session, {"data_source_id": data_source_id})
     except Exception:
-        logger.exception("node-identity resolution failed for import (ds=%s)", data_source_id)
+        logger.exception("node-identity resolution failed for an import: nothing is bound")
         return None
 
 
