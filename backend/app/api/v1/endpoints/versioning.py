@@ -68,7 +68,8 @@ from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
 from backend.app.services.versioning.errors import (HTTP_MAPPED, DraftNotReadable, IneligibleMember,
-                                                   ReviewRequired, SelfMerge, ServiceAccountMember)
+                                                   IneligibleOwner, ReviewRequired, SelfMerge,
+                                                   ServiceAccountMember)
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
     AccessDenied,
@@ -1767,6 +1768,74 @@ async def remove_branch_member(
             subject_id=subject_id, actor=user.id, **await _settle_as_checkpoint(session, ws_id, _meta),
         )
     return {"removed": True}
+
+
+async def _owners_who_left(session: AsyncSession, ws_id: str, owners) -> set:
+    """Which of ``owners`` have left the workspace: their account is gone, deleted or not active,
+    or they no longer read its data sources."""
+    owners = list(dict.fromkeys(o for o in owners if o))
+    idents = await user_repo.get_identities_by_ids(session, owners)
+    left = set()
+    for owner in owners:
+        ident = idents.get(owner)
+        if ident is None or ident["deleted"] or ident["status"] != "active" or not has_permission(
+                await permission_service.resolve(session, owner), _READ, workspace_id=ws_id):
+            left.add(owner)
+    return left
+
+
+async def _assert_owner_eligible(session: AsyncSession, ws_id: str, user_id: str) -> None:
+    """Who a draft is handed to: an active person who changes this workspace's data sources."""
+    if is_service_account(user_id):
+        raise IneligibleOwner(user_id, "service_account")
+    user = await user_repo.get_user_by_id(session, user_id)
+    if user is None:
+        raise IneligibleOwner(user_id, "unknown_user")
+    if user.status != "active":
+        raise IneligibleOwner(user_id, "inactive")
+    if not has_permission(await permission_service.resolve(session, user_id), _MANAGE, workspace_id=ws_id):
+        raise IneligibleOwner(user_id, "no_manage")
+
+
+class TransferDraftRequest(_ApiModel):
+    to: str
+    # The previous owner stays on as a maintainer; false: they keep nothing.
+    keep_previous: bool = Field(default=True, alias="keepPrevious")
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/transfer", response_model=BranchResponse)
+async def transfer_draft(
+    ws_id: str, graph_id: str, branch_id: str, body: TransferDraftRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Hand a draft to someone else: its owner does, at any time; a workspace admin does once its
+    owner has left the workspace. It goes to an active person who changes the workspace's data
+    sources (422 ``ineligible_owner``). The previous owner stays on as a maintainer unless
+    ``keepPrevious`` is false; then, if that takes their write access, what they staged is
+    committed first, under their name (409 ``staged_changes_unsaved`` when it clashes)."""
+    admin = has_permission(claims, "workspace:admin", workspace_id=ws_id)
+
+    async def owner_left(owner: str) -> bool:
+        return owner in await _owners_who_left(session, ws_id, [owner])
+
+    with _domain_errors():
+        branch = await svc.transfer_branch(
+            graph_id=graph_id, branch_id=branch_id, to=body.to, actor=user.id,
+            keep_previous=body.keep_previous, owner_left=owner_left if admin else None,
+            check_eligible=lambda: _assert_owner_eligible(session, ws_id, body.to),
+            **await _settle_as_checkpoint(session, ws_id, _meta))
+    previous = branch.pop("previous_owner")
+    if branch["owner"] != previous:
+        from backend.app.api.v1.endpoints.graph import _record_versioning
+        await _record_versioning(session, "workspace.versioning.draft_transferred",
+                                 _meta.get("data_source_id"), {"graphId": graph_id, "branchId": branch_id,
+                                                               "from": previous, "to": branch["owner"]})
+    await _attach_user_names(session, [branch])
+    return branch
 
 
 async def _settle_as_checkpoint(session: AsyncSession, ws_id: str, meta: dict) -> dict:
@@ -4161,6 +4230,35 @@ async def _record_policy_change(session: AsyncSession, scope: str, before: dict,
     await recorder.record_for_request(
         session, "workspace.versioning.drafts_policy_updated", **target,
         details={"scope": scope, "from": before, "to": after})
+
+
+class OwnerLeftDraft(_ApiModel):
+    graph_id: str = Field(alias="graphId")
+    branch_id: str = Field(alias="branchId")
+    data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
+    name: Optional[str] = None
+    owner: str
+    visibility: str
+    status: str
+    updated_at: str = Field(alias="updatedAt")
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+
+
+@router.get("/drafts/owner-left", response_model=List[OwnerLeftDraft])
+async def list_drafts_whose_owner_left(
+    ws_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    _admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The workspace's open drafts whose owner has left it (their account is gone or not active,
+    or they no longer read its data sources), for a workspace admin to hand on: where each is, its
+    name, owner, level and status — never what it holds. The latest changed first."""
+    left = await _owners_who_left(session, ws_id, await svc.draft_owners(workspace_id=ws_id))
+    drafts = await svc.drafts_owned_by(workspace_id=ws_id, owners=sorted(left), limit=limit)
+    await _attach_user_names(session, drafts)
+    return drafts
 
 
 @router.get("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse)

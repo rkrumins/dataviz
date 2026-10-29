@@ -169,6 +169,24 @@ class ServiceAccountMember(IneligibleMember):
         super().__init__(subject_id, "service_account")
 
 
+class IneligibleOwner(_HttpMapped, RuntimeError):
+    """Who a draft was to be handed to can't own it: no such person, not active, a service
+    account, or someone who doesn't change this workspace's data sources."""
+
+    status_code = 422
+    _MESSAGES = {
+        "unknown_user": "no such user",
+        "inactive": "their account isn't active",
+        "service_account": "a service account doesn't own drafts",
+        "no_manage": "they can't edit this workspace's data sources",
+    }
+
+    def __init__(self, user_id: str, reason: str):
+        self.user_id, self.reason = user_id, reason
+        super().__init__(f"can't hand the draft to {user_id}: {self._MESSAGES[reason]}",
+                         {"type": "ineligible_owner", "userId": user_id, "reason": reason})
+
+
 class HeadMoved(_HttpMapped, RuntimeError):
     """An approval named the head the reviewer saw, and the draft has moved on
     since: what they approved is not what would merge."""
@@ -393,4 +411,5 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
-               AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired)
+               AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
+               IneligibleOwner)

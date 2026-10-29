@@ -885,15 +885,106 @@ class GraphVersioningService:
                      and not await self._still_writes(s, branch, who, visibility=visibility)]
             return {"visibility": visibility, "saved": saved}
 
+    async def transfer_branch(
+        self, *, graph_id: str, branch_id: str, to: str, actor: str, actor_groups: Sequence[str] = (),
+        keep_previous: bool = True,
+        owner_left: Optional[Callable[[str], Awaitable[bool]]] = None,
+        check_eligible: Optional[Callable[[], Awaitable[None]]] = None,
+        **checkpoint_kwargs,
+    ) -> dict:
+        """Hand a draft to ``to``. Its owner does, at any time; so does whoever is given
+        ``owner_left`` (the route gives it to a workspace admin), once it says the owner left. The
+        previous owner stays on as a maintainer (``keep_previous``); else, if that takes their write
+        access, what they staged is committed first, under their name (:meth:`_settled_change`).
+        ``check_eligible`` (raising :class:`IneligibleOwner`) runs once the actor is authorized,
+        under the draft's lock. Returns the draft's metadata and its ``previous_owner``: an admin
+        who takes over a draft they may not read sees no more of it."""
+        async with self._session() as s:                 # refused before anyone's edits are saved
+            branch = await self._get_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                raise MainWriteForbidden()
+            self._require_open(branch)
+
+        async def may_hand_on(s, branch):
+            if actor == branch.owner or (owner_left is not None and await owner_left(branch.owner)):
+                return
+            await self._unknown_unless_readable(s, branch, actor, actor_groups)
+            raise NotDraftOwner(branch.id, branch.owner)
+
+        async with self._settled_change(graph_id, branch_id, actor, actor_groups, checkpoint_kwargs,
+                                        owner=None if keep_previous else to, authorize=may_hand_on,
+                                        message="Saved before the draft changed hands") as (s, branch):
+            self._require_open(branch)
+            previous = branch.owner
+            if to == previous:
+                return {**self._branch_meta(branch), "previous_owner": previous}
+            if check_eligible:
+                await check_eligible()
+            if not branch.is_shared:                     # before the selects: drop rows left behind
+                await s.execute(delete(BranchMemberORM).where(BranchMemberORM.branch_id == branch.id))
+            await s.execute(delete(BranchMemberORM).where(   # an owner needs no row
+                BranchMemberORM.branch_id == branch.id, BranchMemberORM.subject_type == "user",
+                BranchMemberORM.subject_id == to))
+            if keep_previous:
+                row = (await s.execute(select(BranchMemberORM).where(
+                    BranchMemberORM.branch_id == branch.id, BranchMemberORM.subject_type == "user",
+                    BranchMemberORM.subject_id == previous))).scalar_one_or_none()
+                if row is None:
+                    s.add(BranchMemberORM(branch_id=branch.id, subject_type="user", subject_id=previous,
+                                          role="maintainer"))
+                else:
+                    row.role = "maintainer"
+            await s.flush()
+            branch.is_shared = bool(await s.scalar(select(BranchMemberORM.branch_id).where(
+                BranchMemberORM.branch_id == branch.id).limit(1)))     # shared means "has members"
+            branch.owner = to
+            branch.updated_at = _now()
+            return {**self._branch_meta(branch), "previous_owner": previous}
+
+    async def draft_owners(self, *, workspace_id: str) -> List[str]:
+        """Who owns an open draft of the workspace's versioned graphs."""
+        async with self._session() as s:
+            return list((await s.execute(
+                select(BranchORM.owner).distinct()
+                .join(GraphORM, GraphORM.id == BranchORM.graph_id)
+                .where(GraphORM.workspace_id == workspace_id, GraphORM.deleted_at.is_(None),
+                       BranchORM.kind == "draft", BranchORM.status.in_(("open", "publishing")),
+                       BranchORM.owner.isnot(None))
+            )).scalars().all())
+
+    async def drafts_owned_by(self, *, workspace_id: str, owners: Sequence[str],
+                              limit: int = 500) -> List[dict]:
+        """The open drafts of the workspace's versioned graphs that ``owners`` own, the latest
+        changed first: what a workspace admin sees of a draft they may not read — where it is, its
+        name, owner, level and status — never what it holds."""
+        if not owners:
+            return []
+        async with self._session() as s:
+            rows = (await s.execute(
+                select(BranchORM, GraphORM.data_source_id)
+                .join(GraphORM, GraphORM.id == BranchORM.graph_id)
+                .where(GraphORM.workspace_id == workspace_id, GraphORM.deleted_at.is_(None),
+                       BranchORM.kind == "draft", BranchORM.status.in_(("open", "publishing")),
+                       BranchORM.owner.in_(list(owners)))
+                .order_by(BranchORM.updated_at.desc(), BranchORM.id)
+                .limit(limit)
+            )).all()
+            return [{"graph_id": b.graph_id, "branch_id": b.id, "data_source_id": ds, "name": b.name,
+                     "owner": b.owner, "visibility": b.visibility, "status": b.status,
+                     "updated_at": b.updated_at} for b, ds in rows]
+
     @contextlib.asynccontextmanager
     async def _settled_change(self, graph_id: str, branch_id: str, actor: str, actor_groups,
                               checkpoint_kwargs: dict, *, message: str,
                               visibility: Optional[str] = None,
                               without: Optional[Tuple[str, str]] = None,
-                              role: Optional[Tuple[str, str, str]] = None):
+                              role: Optional[Tuple[str, str, str]] = None,
+                              owner: Optional[str] = None,
+                              authorize: Optional[Callable[[Any, BranchORM], Awaitable[None]]] = None):
         """A change to who writes a draft (its level, ``visibility``; a member row removed,
-        ``without``; or a member's ``role`` changed), made once nobody it takes write access from
-        has anything staged. Under the draft's lock, with the actor authorized: those writers'
+        ``without``; a member's ``role`` changed; or its ``owner``), made once nobody it takes
+        write access from has anything staged. Under the draft's lock, with the actor authorized
+        (``authorize(session, branch)``; else as its owner or a maintainer): those writers'
         staged edits are committed first, each under their own name in the order they staged
         (outside the lock, which a checkpoint takes), and the check repeats. Yields ``(session,
         branch)`` with the lock held and nobody left to settle. Edits that clash with the draft
@@ -901,11 +992,14 @@ class GraphVersioningService:
         for _round in range(3):
             async with self._session() as s:
                 branch = await self._lock_branch(s, graph_id, branch_id)
-                await self._require_manage(s, branch, actor, actor_groups)
+                if authorize is None:
+                    await self._require_manage(s, branch, actor, actor_groups)
+                else:
+                    await authorize(s, branch)
                 losing = [who for who, _n in await self._stagers(s, graph_id, branch_id)
                           if await self._still_writes(s, branch, who)
                           and not await self._still_writes(s, branch, who, visibility=visibility,
-                                                           without=without, role=role)]
+                                                           without=without, role=role, owner=owner)]
                 if not losing:
                     yield s, branch
                     return
@@ -917,12 +1011,14 @@ class GraphVersioningService:
 
     async def _still_writes(self, s, branch: BranchORM, who: str, *, visibility: Optional[str] = None,
                             without: Optional[Tuple[str, str]] = None,
-                            role: Optional[Tuple[str, str, str]] = None) -> bool:
+                            role: Optional[Tuple[str, str, str]] = None,
+                            owner: Optional[str] = None) -> bool:
         """Whether ``who`` writes the draft at level ``visibility`` (its own when None), without the
-        member row ``without`` (subject type, id), or with ``role`` (subject type, id, role) on an
-        existing row: its owner always; on a public draft anyone who changes its data source; else
-        an editor or maintainer member, directly or through a team."""
-        if who == branch.owner:
+        member row ``without`` (subject type, id), with ``role`` (subject type, id, role) on an
+        existing row, or owned by ``owner`` (its own when None): its owner always; on a public
+        draft anyone who changes its data source; else an editor or maintainer member, directly or
+        through a team."""
+        if who == (owner or branch.owner):
             return True
         if (visibility or branch.visibility) == "public":
             return True
