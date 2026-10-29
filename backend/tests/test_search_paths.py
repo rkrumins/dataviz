@@ -213,3 +213,29 @@ class TestService:
             "events/orders/costs", "events/orders/revenue"]
         assert re.fullmatch(r"\$\.children\[0\]\.sourceWhere\.refs\[0\]",
                             page.scope_diagnostics.resolved_refs[0].at)
+
+
+class TestRunningOutOfTime:
+    @pytest.mark.parametrize("exc", [
+        asyncio.TimeoutError(),
+        RuntimeError("Query timed out"),
+    ], ids=["the request's deadline", "FalkorDB's own"])
+    async def test_routes_that_run_out_of_time_say_so(self, monkeypatch, exc):
+        """FalkorDB killing the route statement at its own timeout used to
+        reach the client as a 504; like the request's deadline, it is an
+        answer that ran out of time."""
+        from backend.app.providers import falkordb_deep_search as deep
+
+        async def slow(*args, **kwargs):
+            raise exc
+
+        monkeypatch.setattr(deep, "_run_path_query", slow)
+        provider = SimpleNamespace(
+            _get_lineage_edge_types=lambda: ["TRANSFORMS"],
+            _get_containment_edge_types=lambda: ["CONTAINS"])
+        query = SearchQuery.model_validate({
+            "predicate": path(sourceUrns=["urn:a"], targetUrns=["urn:b"]),
+            "scope": {"viewId": "v", "scopeMode": "data_source"},
+            "options": {"results": "paths"}})
+        page = await deep.execute_deep_search(provider, query)
+        assert page.deadline_exceeded and page.truncated and page.paths == []

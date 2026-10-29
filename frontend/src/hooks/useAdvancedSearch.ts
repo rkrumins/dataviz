@@ -2,8 +2,8 @@
  * State machine + provider orchestration for the SearchMapPanel.
  *
  * Three responsibilities:
- *   1. Hold the current view: idle → templateSelected → running → results,
- *      with the active template inputs / parsed query alongside.
+ *   1. Hold the current view: idle → running → results (or error), with
+ *      the query it sent alongside.
  *   2. Talk to the backend through RemoteGraphProvider.searchAdvanced,
  *      with abort-on-restart so a stale request can never overwrite a
  *      fresh one (e.g. user re-runs while a slow query is still in flight).
@@ -20,18 +20,15 @@
  * own draft: visible, editable, undoable, and compiled into the very
  * same root-URN clamp server-side. See `predicateComposition.setScopeCondition`.
  *
- * The view's OWN roots aren't computed here either. `scope.rootUrns` is
- * now only ever a caller-supplied narrowing (a template that targets one
- * container): the backend resolves the view's boundary from
- * `scope.viewId` on every request and only ever intersects a client hint
- * with it, so sending a client-side guess could narrow the search but
- * never widen it — and when the guess was stale or truncated it hid real
- * matches.
+ * The view's OWN roots aren't computed here either: the backend resolves
+ * the view's boundary from `scope.viewId` on every request and only ever
+ * intersects a client hint with it, so sending a client-side guess could
+ * narrow the search but never widen it — and when the guess was stale or
+ * truncated it hid real matches.
  *
  * Not stored: the raw-JSON / Explain / Discover surfaces — those live
  * in the SearchMapPanel's "Power tools" tab and share the same query
- * pipeline through `runPredicate`. The hook stays focused on
- * template-driven + visual-builder paths.
+ * pipeline through `runPredicate`.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
@@ -44,6 +41,7 @@ import {
     useSearchStore,
     type AncestorCountInfo,
     type AncestorPathInfo,
+    type DraftSource,
     type MatchedEdge,
 } from '@/store/searchStore'
 import type {
@@ -57,22 +55,20 @@ import type {
     SearchScope,
 } from '@/types/search'
 
-import {
-    defaultInputs,
-    findTemplate,
-    type SearchTemplate,
-} from '@/components/canvas/search/searchTemplates'
+import { currentEditorMode, type EditorMode } from '@/components/canvas/search/panel/builderMode'
 import { queryLabel } from '@/components/canvas/search/panel/findMode'
 import { readableSearchError } from '@/components/canvas/search/panel/errorPaths'
-import { currentScope, requestOptions, requestPredicate } from '@/components/canvas/search/searchRequest'
+import { buildSearchRequest } from '@/components/canvas/search/searchRequest'
+import { isApiStatusError, isClientTimeout, isNetworkError } from '@/services/graphRequestFailure'
+import { pause, rideOut, waitsOut } from '@/services/rideOut'
 import { recordEvent } from '@/services/telemetryService'
 
 
 /**
  * Whitelist of predicate kinds the user might want to re-run from the
- * Recent list. Path-mode and aggregation-driven templates aren't
- * meaningfully "re-runnable as a free-form draft" — they need their
- * full SearchQuery context, not just the predicate.
+ * Recent list. Path-mode queries aren't meaningfully "re-runnable as a
+ * free-form draft" — they need their full SearchQuery context, not just
+ * the predicate.
  */
 const RECENTABLE_KINDS = new Set([
     'group', 'text', 'property', 'tag', 'hasProperty',
@@ -333,40 +329,52 @@ function loadedContainerUrns(): string[] {
  *  within a second and its exact count when the scan ends. */
 export const PROGRESS_WAIT_MS = 800
 
-/** A follow-up that fails is retried this often, backing off, before the
- *  search stops where it is. */
-const CONTINUE_ATTEMPTS = 3
+/** A follow-up that brings nothing new is followed by a longer wait, up to
+ *  this — and a tab out of sight never asks more often than this. */
+const IDLE_POLL_MAX_MS = 5_000
 
 function progressive(query: SearchQuery): SearchQuery {
     return { ...query, options: { ...(query.options ?? {}), waitMs: PROGRESS_WAIT_MS } }
 }
 
+/** The next answer of a running search, or why it was interrupted. */
+type Continued = { page: SearchResultPage } | { interrupted: string }
+
 /**
  * The next answer of a running search: the same request, naming its
- * session. A failure is retried; if it persists, the search stops at the
- * last answer — marked as cut short, so the count reads as a floor and the
- * panel says the search did not finish.
+ * session. While the graph can't answer — busy, failing over, restarting —
+ * it is asked again, for minutes (``rideOut``); still not answering, the
+ * search is interrupted where it is, its session kept for Resume. A search
+ * the server could not finish, or a refused request, throws at once.
  */
 async function continueSession(
     provider: RemoteGraphProvider,
     query: SearchQuery,
     last: SearchResultPage,
     signal: AbortSignal,
-): Promise<SearchResultPage> {
+): Promise<Continued> {
     const next: SearchQuery = {
         ...query, options: { ...(query.options ?? {}), sessionId: last.sessionId ?? undefined },
     }
-    for (let attempt = 0; ; attempt++) {
-        try {
-            return await provider.searchAdvanced(next, { signal })
-        } catch (e) {
-            if (signal.aborted || attempt + 1 >= CONTINUE_ATTEMPTS) {
-                if (signal.aborted) throw e
-                return { ...last, status: undefined, truncated: true, deadlineExceeded: true }
-            }
-            await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt))
-        }
+    try {
+        return { page: await rideOut(() => provider.searchAdvanced(next, { signal }), signal) }
+    } catch (e) {
+        if (signal.aborted || !waitsOut(e)) throw e
+        return { interrupted: readableSearchError(e instanceof Error ? e.message : String(e)) }
     }
+}
+
+/** How long to wait before asking a running search again: at once after an
+ *  answer that moved it on, longer after each that didn't — and never less
+ *  than ``IDLE_POLL_MAX_MS`` while the tab is out of sight. */
+export function pollDelayMs(idle: number, hidden: boolean): number {
+    const delay = idle === 0 ? 0 : Math.min(IDLE_POLL_MAX_MS, 250 * 2 ** idle)
+    return hidden ? Math.max(IDLE_POLL_MAX_MS, delay) : delay
+}
+
+function sameProgress(a: SearchResultPage, b: SearchResultPage): boolean {
+    return a.progress?.scanned === b.progress?.scanned
+        && a.progress?.matched === b.progress?.matched
 }
 
 
@@ -375,20 +383,40 @@ async function continueSession(
 // ---------------------------------------------------------------------------
 
 export type PanelView =
-    | { kind: 'idle' }                                          // template picker
-    | { kind: 'templateSelected'; template: SearchTemplate;     // params form
-        inputs: Record<string, string | number> }
-    | { kind: 'running'; template: SearchTemplate;               // spinner
-        inputs: Record<string, string | number>;
-        query: SearchQuery; startedAt: number }
-    | { kind: 'results'; template: SearchTemplate;               // cards/rows
-        inputs: Record<string, string | number>;
+    | { kind: 'idle' }                                          // nothing run yet
+    | { kind: 'running'; query: SearchQuery; startedAt: number } // spinner
+    | { kind: 'results';                                        // cards/rows
         query: SearchQuery; result: SearchResultPage;
-        elapsedMs: number }
-    | { kind: 'error'; template: SearchTemplate;                 // error card
-        inputs: Record<string, string | number>;
+        elapsedMs: number;
+        /** When the run started (``performance.now()``): a scan's clock. */
+        startedAt?: number;
+        /** A running search no longer followed — Resume picks it up. */
+        halted?: Halted }
+    | { kind: 'error';                                          // error card
         query: SearchQuery; message: string;
         elapsedMs: number }
+
+/** Where a search came from, as its telemetry says: what put the query in
+ *  its shape, or else the editor it was built in. */
+type SearchSource = DraftSource | EditorMode
+
+/** What following one run's answers needs to know about it. */
+interface FollowedRun {
+    query: SearchQuery
+    startedAt: number
+    runKey: string | null
+    source: SearchSource
+    /** Search Studio was open when it ran. */
+    studio: boolean
+    /** Followed again after a Stop or an interruption. */
+    resumed: boolean
+}
+
+/** Why a running search is no longer being followed: the user stopped it,
+ *  or the graph stayed out of reach. Its session keeps what it found. */
+export type Halted =
+    | { kind: 'stopped' }
+    | { kind: 'interrupted'; reason: string }
 
 /**
  * Which draft the panel has actually dispatched, and how that went.
@@ -412,32 +440,26 @@ export interface UseAdvancedSearchResult {
     /** Which draft produced the current view, and how it went. Null
      *  before the first run and after an explicit cancel/reset. */
     runState: RunState | null
-    /** True when no template has been selected yet. */
-    isIdle: boolean
-    /** Pick a template — moves the view to `templateSelected` with default inputs. */
-    selectTemplate: (templateId: string) => void
-    /** Update one input on the active template. */
-    setInput: (name: string, value: string | number) => void
-    /** Pop back to the template picker. */
+    /** Abort any run and go back to idle, its matches off the canvas. */
     resetTemplate: () => void
-    /** Run the search with the current template + inputs. */
+    /** Run the current search again (the error card's Try again), in the
+     *  view's scope as it is now. */
     run: () => Promise<void>
-    /** Run a template directly without going through the templateSelected
-     *  intermediate state — used by the AskBar's one-click chips so the
-     *  user never sees the form flash before results appear. Uses
-     *  ``defaultInputs(template)`` unless explicit inputs are supplied. */
-    runTemplate: (template: SearchTemplate,
-                  inputs?: Record<string, string | number>) => Promise<void>
-    /** Run a raw predicate tree (from the visual builder OR the AskBar).
-     *  Bypasses the template form: stamps view scope, dispatches through
-     *  the same running → results state machine.
+    /** Run a raw predicate tree (from the visual builder OR the AskBar):
+     *  stamps view scope and dispatches through the running → results
+     *  state machine.
      *  Optional ``optionsOverride`` lets free-form searches opt out of
      *  the default aggregation (so a 49-hit search renders 49 rows, not
      *  one bucket containing 49). */
     runPredicate: (predicate: Predicate,
                    optionsOverride?: SearchQuery['options']) => Promise<void>
-    /** Abort any in-flight query and return to idle. */
+    /** Abort any in-flight query and drop its matches; the query stays. */
     cancel: () => void
+    /** Stop following a running search: its matches so far stay, and
+     *  ``resume`` picks its session up again. */
+    stop: () => void
+    /** Follow a stopped or interrupted search again, from its session. */
+    resume: () => Promise<void>
     /** Fetch the next page of hits using the cursor on the current
      *  result. No-op when ``view.kind !== 'results'`` or the result has
      *  no cursor. New hits are APPENDED to the existing list — the
@@ -449,6 +471,45 @@ export interface UseAdvancedSearchResult {
     /** Why the last ``loadMore`` failed, in words — null unless it failed
      *  for the page the result still ends on. */
     loadMoreError: string | null
+}
+
+
+/** How a search ended, as its telemetry says. */
+type Outcome = 'complete' | 'atLeast' | 'stopped' | 'interrupted' | 'failed'
+
+/**
+ * One event for each search that ends — complete, at least N, stopped,
+ * interrupted or failed — with where it came from.
+ *
+ * A search that finds nothing (a failed one too: the person asked and got
+ * nothing) is its own event type, mirroring the `docs.search_miss`
+ * precedent: the zero-result queries are the interesting ones — they say
+ * what people expected the graph to contain and it didn't. The predicate
+ * is deliberately NOT sent; it can carry node names, and this store holds
+ * no PII beyond the actor id. Nor is a failure's message, which can quote
+ * the query: its code is. The shape of the query is enough to spot a
+ * pattern. A Connections search counts its edges; one followed again after
+ * a Stop reports again, marked ``resumed``.
+ */
+function measure(run: FollowedRun, outcome: Outcome, result: SearchResultPage | null, reason?: string): void {
+    const matches = result ? result.edges?.length ?? collectMatchUrns(result).length : 0
+    recordEvent(matches > 0 ? 'graph.search' : 'graph.search_miss', {
+        matches,
+        source: run.source,
+        outcome,
+        ...(reason ? { reason } : {}),
+        ...(run.query.predicate.kind === 'edges' ? { connections: true } : {}),
+        ...(run.studio ? { studio: true } : {}),
+        ...(run.resumed ? { resumed: true } : {}),
+        elapsedMs: Math.round(performance.now() - run.startedAt),
+    })
+}
+
+/** Why a search failed, as its telemetry may say it: the server's code, or
+ *  its HTTP status — never its message. */
+function failureReason(e: unknown): string {
+    if (isApiStatusError(e)) return e.code ?? String(e.status)
+    return isClientTimeout(e) ? 'timeout' : isNetworkError(e) ? 'network' : 'error'
 }
 
 
@@ -475,6 +536,8 @@ export function useAdvancedSearch(
     const [view, setView] = useState<PanelView>({ kind: 'idle' })
     const [runState, setRunState] = useState<RunState | null>(null)
     const abortRef = useRef<AbortController | null>(null)
+    // The run the view shows: Stop, Resume and Try again report as it.
+    const lastRun = useRef<FollowedRun | null>(null)
 
     // Read through a ref: the unmount effect runs once, so capturing the
     // option in its closure would pin whatever value the first render
@@ -578,57 +641,149 @@ export function useAdvancedSearch(
         }
     }, [view, provider, viewId])
 
-    const selectTemplate = useCallback((templateId: string) => {
-        const t = findTemplate(templateId)
-        setView({
-            kind: 'templateSelected',
-            template: t,
-            inputs: defaultInputs(t),
-        })
-    }, [])
-
-    const setInput = useCallback((name: string, value: string | number) => {
-        setView((v) => {
-            if (v.kind === 'idle' || v.kind === 'running') return v
-            return { ...v, inputs: { ...v.inputs, [name]: value } }
-        })
-    }, [])
-
     const resetTemplate = useCallback(() => {
         abortRef.current?.abort()
         // Drop any in-flight result-set publication from a prior run so
-        // the canvas stops highlighting matches the moment the user
-        // backs out of the form.
-        useSearchStore.getState().clear()
+        // the canvas stops highlighting matches at once. The query is the
+        // caller's to clear — undoably, when the person asked.
+        useSearchStore.getState().clearSearchResults()
         setRunState(null)
         setView({ kind: 'idle' })
     }, [])
 
-    const stampScope = useCallback(
-        (template: SearchTemplate,
-         inputs: Record<string, string | number>): SearchQuery => {
-            const raw = template.build(inputs)
-            // ALWAYS stamp the viewId — the backend's ViewScopeResolver
-            // requires it on every request. Scope and the root wrap are
-            // ``searchRequest``'s, the same the Cypher tab shows.
-            return {
-                ...raw,
-                predicate: requestPredicate(raw.predicate),
-                scope: currentScope(viewId, raw.scope),
-            }
-        },
-        [viewId],
-    )
+    // What the canvas shows of a result: its matches, edges, where they
+    // sit and how many each container holds.
+    const publish = useCallback((query: SearchQuery, result: SearchResultPage) => {
+        const ancestorPaths = collectAncestorPaths(result)
+        rememberUrnLabels(ancestorPaths.flatMap((p) => p.path))
+        useSearchStore.getState().setResult({
+            viewId,
+            matchUrns: collectMatchUrns(result),
+            edgeKeys: collectEdgeKeys(result),
+            matchedEdges: collectMatchedEdges(result),
+            matchedEdgesComplete: !result.cursor && result.status !== 'running',
+            ancestorPaths,
+            ancestorCounts: collectAncestorCounts(query, result),
+            queryHash: JSON.stringify(query),
+        })
+    }, [viewId])
 
-    const runWithInputs = useCallback(async (
-        template: SearchTemplate,
-        inputs: Record<string, string | number>,
-        runKey: string | null,
+    // A run's last answer: shown, published, measured and remembered.
+    const finish = useCallback((run: FollowedRun, result: SearchResultPage) => {
+        const { query, startedAt, runKey } = run
+        setView({
+            kind: 'results', query, result, startedAt,
+            elapsedMs: Math.round(performance.now() - startedAt),
+        })
+        if (runKey) setRunState({ hash: runKey, status: 'done' })
+        // Every ancestor ref and aggregate bucket ships a
+        // displayName. Remember them so a scope row built from
+        // these results can render "inside GOLD" rather than the
+        // raw URN — the container often isn't loaded on the canvas,
+        // so this response is the only place the name exists.
+        for (const facet of result.aggregates ?? []) {
+            rememberUrnLabels(facet.map((b) => ({
+                urn: b.ancestorUrn,
+                displayName: b.ancestorDisplayName,
+            })))
+        }
+        measure(run, result.countStatus === 'lowerBound' ? 'atLeast' : 'complete', result)
+        // Publish the match URN set so the ContextView canvas
+        // (W3 — useSearchHighlight + SearchPinOverlay +
+        // ChevronMatchBadge) can react. JSON.stringify is
+        // deterministic enough for the consumer's "did the query
+        // change?" check; a real fingerprint can replace it if
+        // ordering ever becomes an issue.
+        publish(query, result)
+        // Auto-save the dispatched predicate to per-view Recent.
+        // Skips path-mode queries, whose predicate isn't a meaningful
+        // "free-form draft" the user could re-author.
+        if (isRecentablePredicate(query.predicate)) {
+            useSearchStore.getState().addRecent({
+                viewId,
+                predicate: query.predicate,
+                label: queryLabel(query.predicate),
+            })
+        }
+    }, [publish, viewId])
+
+    // A run that failed: the error, with the query kept to fix.
+    const fail = useCallback((run: FollowedRun, e: unknown) => {
+        const { query, startedAt, runKey } = run
+        setView({
+            kind: 'error', query,
+            message: (e as Error).message,
+            elapsedMs: Math.round(performance.now() - startedAt),
+        })
+        // Remember the failure against this draft so the auto-run
+        // effect doesn't hammer a query that can't succeed. The
+        // explicit Run button still forces a retry.
+        if (runKey) setRunState({ hash: runKey, status: 'failed' })
+        // On error, drop any previously-published result-set so the
+        // canvas doesn't keep highlighting stale matches — but keep the
+        // query itself, so the user can fix it.
+        useSearchStore.getState().clearSearchResults()
+        measure(run, 'failed', null, failureReason(e))
+    }, [])
+
+    // Every answer of a running search is shown as it lands — the hits are
+    // already in their final order, only more of them are still coming —
+    // until it is complete. One the graph stays out of reach for is left
+    // interrupted where it is, for Resume.
+    const follow = useCallback(async (
+        run: FollowedRun, first: SearchResultPage, controller: AbortController,
     ) => {
+        const { query, startedAt } = run
+        const show = (result: SearchResultPage, halted?: Halted) => {
+            setView({
+                kind: 'results', query, result, startedAt,
+                elapsedMs: Math.round(performance.now() - startedAt),
+                ...(halted ? { halted } : {}),
+            })
+            publish(query, result)
+        }
+        let result = first
+        let idle = 0
+        while (result.status === 'running' && result.sessionId) {
+            show(result)
+            const wait = pollDelayMs(idle, document.visibilityState === 'hidden')
+            if (wait > 0) {
+                await pause(wait, controller.signal)
+                if (controller.signal.aborted) return
+            }
+            const next = await continueSession(
+                provider as RemoteGraphProvider, progressive(query), result, controller.signal)
+            if (controller.signal.aborted) return
+            if ('interrupted' in next) {
+                show(result, { kind: 'interrupted', reason: next.interrupted })
+                if (run.runKey) setRunState({ hash: run.runKey, status: 'done' })
+                measure(run, 'interrupted', result)
+                return
+            }
+            idle = sameProgress(result, next.page) ? idle + 1 : 0
+            result = next.page
+        }
+        finish(run, result)
+    }, [provider, publish, finish])
+
+    const runQuery = useCallback(async (
+        predicate: Predicate,
+        options: SearchQuery['options'],
+        runKey: string | null,
+        origin: Pick<FollowedRun, 'source' | 'studio'>,
+    ) => {
+        // ALWAYS stamp the viewId — the backend's ViewScopeResolver
+        // requires it on every request. Scope and the root wrap are
+        // ``searchRequest``'s, the same the Cypher tab shows.
+        const query = buildSearchRequest(predicate, options, viewId)
+        const run: FollowedRun = {
+            query, startedAt: performance.now(), runKey,
+            source: origin.source, studio: origin.studio, resumed: false,
+        }
+        lastRun.current = run
         if (!(provider instanceof RemoteGraphProvider)) {
             setView({
-                kind: 'error', template, inputs,
-                query: stampScope(template, inputs),
+                kind: 'error', query,
                 message:
                     'Active provider is not the remote backend — ' +
                     'advanced search only works against the live API.',
@@ -641,145 +796,67 @@ export function useAdvancedSearch(
         const controller = new AbortController()
         abortRef.current = controller
 
-        const query = stampScope(template, inputs)
-        const startedAt = performance.now()
-        setView({ kind: 'running', template, inputs, query, startedAt })
+        setView({ kind: 'running', query, startedAt: run.startedAt })
         if (runKey) setRunState({ hash: runKey, status: 'running' })
 
-        // Every page of a running search is shown as it lands: the hits are
-        // already in their final order, only more of them are still coming.
-        const show = (result: SearchResultPage) => {
-            setView({
-                kind: 'results', template, inputs, query, result,
-                elapsedMs: Math.round(performance.now() - startedAt),
-            })
-            const ancestorPaths = collectAncestorPaths(result)
-            rememberUrnLabels(ancestorPaths.flatMap((p) => p.path))
-            useSearchStore.getState().setResult({
-                viewId,
-                matchUrns: collectMatchUrns(result),
-                edgeKeys: collectEdgeKeys(result),
-                matchedEdges: collectMatchedEdges(result),
-                matchedEdgesComplete: !result.cursor && result.status !== 'running',
-                ancestorPaths,
-                ancestorCounts: collectAncestorCounts(query, result),
-                queryHash: JSON.stringify(query),
-            })
-        }
-
         try {
-            let result = await provider.searchAdvanced(
+            const first = await provider.searchAdvanced(
                 progressive(query), { signal: controller.signal })
             // An aborted run has been superseded — the newer run owns
             // both the view and the run state, so touch neither.
             if (controller.signal.aborted) return
-            while (result.status === 'running' && result.sessionId) {
-                show(result)
-                result = await continueSession(
-                    provider, progressive(query), result, controller.signal)
-                if (controller.signal.aborted) return
-            }
-            setView({
-                kind: 'results', template, inputs, query, result,
-                elapsedMs: Math.round(performance.now() - startedAt),
-            })
-            if (runKey) setRunState({ hash: runKey, status: 'done' })
-            // Every ancestor ref and aggregate bucket ships a
-            // displayName. Remember them so a scope row built from
-            // these results can render "inside GOLD" rather than the
-            // raw URN — the container often isn't loaded on the canvas,
-            // so this response is the only place the name exists.
-            const ancestorPaths = collectAncestorPaths(result)
-            rememberUrnLabels(ancestorPaths.flatMap((p) => p.path))
-            for (const facet of result.aggregates ?? []) {
-                rememberUrnLabels(facet.map((b) => ({
-                    urn: b.ancestorUrn,
-                    displayName: b.ancestorDisplayName,
-                })))
-            }
-            // Publish the match URN set so the ContextView canvas
-            // (W3 — useSearchHighlight + SearchPinOverlay +
-            // ChevronMatchBadge) can react. JSON.stringify is
-            // deterministic enough for the consumer's "did the query
-            // change?" check; a real fingerprint can replace it if
-            // ordering ever becomes an issue.
-            const matchUrns = collectMatchUrns(result)
-            // A search that finds nothing is its own event type, mirroring the
-            // `docs.search_miss` precedent: the zero-result queries are the
-            // interesting ones — they say what people expected the graph to
-            // contain and it didn't. The predicate is deliberately NOT sent;
-            // it can carry node names, and this store holds no PII beyond the
-            // actor id. The shape of the query is enough to spot a pattern.
-            // A Connections search counts its edges.
-            const matches = result.edges?.length ?? matchUrns.length
-            recordEvent(matches > 0 ? 'graph.search' : 'graph.search_miss', {
-                matches,
-                template: template.id,
-                ...(result.edges ? { connections: true } : {}),
-                elapsedMs: Math.round(performance.now() - startedAt),
-            })
-            useSearchStore.getState().setResult({
-                viewId,
-                matchUrns,
-                edgeKeys: collectEdgeKeys(result),
-                matchedEdges: collectMatchedEdges(result),
-                matchedEdgesComplete: !result.cursor && result.status !== 'running',
-                ancestorPaths,
-                ancestorCounts: collectAncestorCounts(query, result),
-                queryHash: JSON.stringify(query),
-            })
-            // Auto-save the dispatched predicate to per-view Recent.
-            // Skips path-mode / template queries whose predicate isn't
-            // a meaningful "free-form draft" the user could re-author.
-            if (isRecentablePredicate(query.predicate)) {
-                useSearchStore.getState().addRecent({
-                    viewId,
-                    predicate: query.predicate,
-                    label: queryLabel(query.predicate),
-                })
-            }
+            await follow(run, first, controller)
         } catch (e) {
             if (controller.signal.aborted) return
-            setView({
-                kind: 'error', template, inputs, query,
-                message: (e as Error).message,
-                elapsedMs: Math.round(performance.now() - startedAt),
-            })
-            // Remember the failure against this draft so the auto-run
-            // effect doesn't hammer a query that can't succeed. The
-            // explicit Run button still forces a retry.
-            if (runKey) setRunState({ hash: runKey, status: 'failed' })
-            // On error, drop any previously-published result-set so the
-            // canvas doesn't keep highlighting stale matches — but keep the
-            // query itself, so the user can fix it.
-            useSearchStore.getState().clearSearchResults()
+            fail(run, e)
         }
-    }, [provider, stampScope, viewId])
+    }, [provider, viewId, follow, fail])
 
+    // Stop following a running search where it is: what it found stays on
+    // the canvas, and its session waits for Resume.
+    const stop = useCallback(() => {
+        if (view.kind !== 'results' || view.result.status !== 'running' || view.halted) return
+        abortRef.current?.abort()
+        setView({ ...view, halted: { kind: 'stopped' } })
+        setRunState((state) => state && { ...state, status: 'done' })
+        if (lastRun.current) measure(lastRun.current, 'stopped', view.result)
+    }, [view])
+
+    // Follow a stopped or interrupted search again, from its session.
+    const resume = useCallback(async () => {
+        if (view.kind !== 'results' || !view.halted || !lastRun.current
+            || !(provider instanceof RemoteGraphProvider)) return
+        abortRef.current?.abort()
+        const controller = new AbortController()
+        abortRef.current = controller
+        const run: FollowedRun = {
+            ...lastRun.current,
+            query: view.query, startedAt: view.startedAt ?? performance.now(), runKey: null,
+            resumed: true,
+        }
+        lastRun.current = run
+        setView({ ...view, halted: undefined })
+        try {
+            await follow(run, view.result, controller)
+        } catch (e) {
+            if (controller.signal.aborted) return
+            fail(run, e)
+        }
+    }, [view, provider, follow, fail])
+
+    // The query as it was sent: stamped again, it asks in the view's scope
+    // as it is now.
     const run = useCallback(async () => {
-        if (view.kind === 'idle' || view.kind === 'running') return
-        await runWithInputs(view.template, view.inputs, null)
-    }, [view, runWithInputs])
-
-    const runTemplate = useCallback(
-        async (template: SearchTemplate,
-               inputs?: Record<string, string | number>) => {
-            await runWithInputs(template, inputs ?? defaultInputs(template), null)
-        },
-        [runWithInputs],
-    )
+        const last = lastRun.current
+        if (view.kind === 'idle' || view.kind === 'running' || !last) return
+        await runQuery(view.query.predicate, view.query.options, null,
+            { source: last.source, studio: last.studio })
+    }, [view, runQuery])
 
     const runPredicate = useCallback(async (
         predicate: Predicate,
         optionsOverride?: SearchQuery['options'],
     ) => {
-        // Synthesize a transient template so the existing
-        // running → results state machine handles builder-sourced
-        // queries identically to template-sourced ones. The
-        // SearchMapPanel reads view.template.id to distinguish
-        // "back to builder" from "back to template form" — see the
-        // `__builder__` id below.
-        //
         // ``options`` MUST be set explicitly. The backend defaults to
         // ``results: 'aggregates'`` with ``aggregations: None`` — which
         // means a request with no options returns ``aggregates: []``
@@ -805,25 +882,17 @@ export function useAdvancedSearch(
             }
         const options = optionsOverride ?? defaultOptions
 
-        const syntheticTemplate: SearchTemplate = {
-            id: '__builder__',
-            label: 'Custom query',
-            description: 'Built from the predicate editor.',
-            icon: 'Wand2',
-            section: 'find',
-            inputs: [],
-            build: () => ({
-                predicate,
-                scope: undefined,
-                options: requestOptions(predicate, options),
-            }),
-        }
         // The run key must match the hash ``buildRunnablePredicate``
         // computes, so the editor can tell "these results are for the
         // draft I'm looking at" — hash the predicate as handed in,
-        // before stampScope's defensive AND-wrap.
-        await runWithInputs(syntheticTemplate, {}, JSON.stringify(predicate))
-    }, [runWithInputs])
+        // before ``requestPredicate``'s defensive AND-wrap.
+        // Every caller has just committed this as the draft, so what put
+        // the draft in its shape is where the search came from.
+        const { draftSource, studioOpen } = useSearchStore.getState()
+        await runQuery(predicate, options, JSON.stringify(predicate), {
+            source: draftSource ?? currentEditorMode(), studio: studioOpen,
+        })
+    }, [runQuery])
 
     // ---------------------------------------------------------------
     // loadMore — cursor pagination (W2.2).
@@ -874,15 +943,18 @@ export function useAdvancedSearch(
                     results: connections ? 'edges' : 'hits',
                 },
             }
-            let nextPage = await provider.searchAdvanced(
-                nextQuery, { signal: controller.signal })
+            // The graph busy or failing over: asked again, for minutes.
+            let nextPage = await rideOut(() => provider.searchAdvanced(
+                nextQuery, { signal: controller.signal }), controller.signal)
             if (controller.signal.aborted) return
             // A later page past what the search's session holds is a scan
             // of its own; a large one may take more than one request.
             while (nextPage.status === 'running' && nextPage.sessionId) {
-                nextPage = await continueSession(
+                const next = await continueSession(
                     provider, nextQuery, nextPage, controller.signal)
                 if (controller.signal.aborted) return
+                if ('interrupted' in next) throw new Error(next.interrupted)
+                nextPage = next.page
             }
             // Merge: append new hits, replace cursor (may now be null
             // signalling "no more pages"), keep aggregates from p1.
@@ -953,15 +1025,8 @@ export function useAdvancedSearch(
         // state here — otherwise it would sit at 'running' forever and
         // the editor would think the draft was already dispatched.
         setRunState(null)
-        if (view.kind === 'running') {
-            // Restore the form so the user can adjust + retry without
-            // losing their inputs.
-            setView({
-                kind: 'templateSelected',
-                template: view.template,
-                inputs: view.inputs,
-            })
-        }
+        // Nothing is running any more: the query stays in the builder.
+        if (view.kind === 'running') setView({ kind: 'idle' })
     }, [view])
 
     // Memoised because callers hold this object, not its fields: the view
@@ -972,20 +1037,19 @@ export function useAdvancedSearch(
     return useMemo(() => ({
         view,
         runState,
-        isIdle: view.kind === 'idle',
-        selectTemplate,
-        setInput,
         resetTemplate,
         run,
-        runTemplate,
         runPredicate,
         cancel,
+        stop,
+        resume,
         loadMore,
         isLoadingMore,
         loadMoreError: view.kind === 'results' && loadMoreFailure
             && view.result.cursor === loadMoreFailure.cursor ? loadMoreFailure.message : null,
     }), [
-        view, runState, selectTemplate, setInput, resetTemplate,
-        run, runTemplate, runPredicate, cancel, loadMore, isLoadingMore, loadMoreFailure,
+        view, runState, resetTemplate,
+        run, runPredicate, cancel, stop, resume, loadMore, isLoadingMore,
+        loadMoreFailure,
     ])
 }

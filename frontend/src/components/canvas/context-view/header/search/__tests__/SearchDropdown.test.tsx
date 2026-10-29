@@ -289,22 +289,32 @@ describe('SearchDropdown — the states', () => {
         expect(screen.getByTestId('dropdown-rows').className).toContain('opacity-60')
     })
 
-    it('a real zero says so in the words that were typed, and offers a way out', () => {
-        const props = renderDropdown({
+    it('a real zero says so in the words that were typed, and offers no narrower search', () => {
+        renderDropdown({
             text: 'zzz', quick: { ...DEFAULT_QUICK, text: 'zzz' },
             rows: [], zero: true, count: 0,
         })
 
         expect(screen.getByText('Nothing in this view contains "zzz"')).toBeInTheDocument()
+        for (const narrower of ['Starts with', 'Is exactly', 'Names only']) {
+            expect(screen.queryByRole('button', { name: narrower })).not.toBeInTheDocument()
+        }
+        expect(screen.getByRole('button', { name: /Refine/ })).toBeInTheDocument()
+    })
 
-        fireEvent.click(screen.getByRole('button', { name: 'Starts with' }))
-        expect(props.onNarrow).toHaveBeenCalledWith({ match: 'prefix' })
+    it('a zero from a narrowed search says how it was narrowed, and offers each way to widen it', () => {
+        const props = renderDropdown({
+            text: 'zzz', rows: [], zero: true, count: 0,
+            quick: { text: 'zzz', match: 'prefix', lookIn: 'name', scope: { insideUrn: 'urn:s', label: 'Sales' } },
+        })
 
-        fireEvent.click(screen.getByRole('button', { name: 'Is exactly' }))
-        expect(props.onNarrow).toHaveBeenCalledWith({ match: 'exact' })
-
-        fireEvent.click(screen.getByRole('button', { name: 'Names only' }))
-        expect(props.onNarrow).toHaveBeenCalledWith({ lookIn: 'name' })
+        expect(screen.getByText('No name inside Sales starts with "zzz"')).toBeInTheDocument()
+        fireEvent.click(screen.getByRole('button', { name: 'Contains' }))
+        expect(props.onNarrow).toHaveBeenCalledWith({ match: 'substring' })
+        fireEvent.click(screen.getByRole('button', { name: 'Look in everything' }))
+        expect(props.onNarrow).toHaveBeenCalledWith({ lookIn: 'everything' })
+        fireEvent.click(screen.getByRole('button', { name: 'Whole view' }))
+        expect(props.onNarrow).toHaveBeenCalledWith({ scope: 'view' })
     })
 
     it('a failed run shows the failure and keeps a way to ask again', () => {

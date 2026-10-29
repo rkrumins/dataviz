@@ -125,17 +125,61 @@ describe('countRules', () => {
         expect(onUpdate).not.toHaveBeenCalled()
     })
 
-    it('stops a count that never finishes, and says so', async () => {
-        const searchCounts = vi.fn(async () => ({
-            counts: { a: { count: 1, status: 'running' as const, sessionId: 's' } },
-        }))
-        const provider = { searchCounts } as unknown as RemoteGraphProvider
-        const updates: ReadonlyMap<string, RuleCount>[] = []
-        await expect(countRules(provider, 'v', [{ id: 'a', predicate: group }], {
-            onUpdate: (c) => updates.push(c),
-        })).rejects.toThrow('still counting after 600 requests')
-        expect(searchCounts).toHaveBeenCalledTimes(600)
-        expect(updates[updates.length - 1].get('a')?.error).toMatch(/^The count stopped/)
+    it('stops a count still running after half an hour, and says so', async () => {
+        vi.useFakeTimers()
+        try {
+            // Each answer takes the five seconds the server may wait.
+            const searchCounts = vi.fn(async () => {
+                vi.setSystemTime(Date.now() + 5_000)
+                return { counts: { a: { count: 1, status: 'running' as const, sessionId: 's' } } }
+            })
+            const provider = { searchCounts } as unknown as RemoteGraphProvider
+            const updates: ReadonlyMap<string, RuleCount>[] = []
+            await expect(countRules(provider, 'v', [{ id: 'a', predicate: group }], {
+                onUpdate: (c) => updates.push(c),
+            })).rejects.toThrow('still counting after 30 minutes')
+            expect(searchCounts.mock.calls.length).toBeGreaterThan(350)
+            expect(updates[updates.length - 1].get('a')?.error).toMatch(/^The count stopped/)
+        } finally {
+            vi.useRealTimers()
+        }
+    })
+
+    it('asks for a first number soon, then lets the server count as long as it may', async () => {
+        const { provider, searchCounts } = providerAnswering(
+            { counts: { a: { count: 1, status: 'running', sessionId: 's' } } },
+            { counts: { a: { count: 2, status: 'running', sessionId: 's' } } },
+            { counts: { a: { count: 3, status: 'complete', sessionId: 's' } } },
+        )
+        await countRules(provider, 'v', [{ id: 'a', predicate: group }])
+        expect(searchCounts.mock.calls.map(([body]) => body.waitMs)).toEqual([1000, 5000, 5000])
+    })
+
+    it('says a count that left part of the view out is a floor', async () => {
+        const { provider } = providerAnswering(
+            { counts: { a: { count: 7, status: 'complete', lowerBound: true } } },
+        )
+        const final = await countRules(provider, 'v', [{ id: 'a', predicate: group }])
+        expect(final.get('a')).toEqual({ count: 7, complete: true, percent: 100, lowerBound: true })
+    })
+
+    it('rides out a graph that cannot answer just now', async () => {
+        vi.useFakeTimers()
+        try {
+            const busy = Object.assign(new Error('API Error 503: {}'),
+                                       { status: 503, code: 'PROVIDER_FAILING_OVER', retryAfterMs: 3000 })
+            const searchCounts = vi.fn()
+                .mockRejectedValueOnce(busy)
+                .mockRejectedValueOnce(busy)
+                .mockResolvedValueOnce({ counts: { a: { count: 4, status: 'complete' } } })
+            const provider = { searchCounts } as unknown as RemoteGraphProvider
+            const counting = countRules(provider, 'v', [{ id: 'a', predicate: group }])
+            await vi.advanceTimersByTimeAsync(20_000)
+            expect((await counting).get('a')?.count).toBe(4)
+            expect(searchCounts).toHaveBeenCalledTimes(3)
+        } finally {
+            vi.useRealTimers()
+        }
     })
 
     it('counts a search being built in its own scope, held to a search\'s limits', async () => {

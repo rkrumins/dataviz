@@ -213,6 +213,49 @@ class TestContextEngineNodeOps:
         assert results[0].urn == "urn:a"
 
 
+class TestContextEngineCreateNode:
+    """A created node carries its source's own name and identity properties, bound BEFORE it fans
+    out to the provider — a main write-through records and writes that same node."""
+
+    @staticmethod
+    def _engine(monkeypatch, identity):
+        written = []
+
+        class _Recording(_StubProvider):
+            async def create_node(self, node, containment_edge=None) -> bool:
+                written.append(node)
+                return True
+
+        engine = ContextEngine(provider=_Recording())
+
+        async def _resolved():
+            return ResolvedOntology()
+        monkeypatch.setattr(engine, "_resolve_ontology", _resolved)
+        engine._node_identity = identity
+        return engine, written
+
+    async def test_binds_the_name_and_identity_properties(self, monkeypatch):
+        from backend.app.services.node_identity import ResolvedNodeIdentity
+        from backend.common.models.graph import CreateNodeRequest
+
+        engine, written = self._engine(
+            monkeypatch, ResolvedNodeIdentity(identity_property="id", name_property="title"))
+        result = await engine.create_node(CreateNodeRequest(
+            entityType="dataset", displayName="Orders",
+            properties={"id": "copied", "owner": "ana"}))
+        [node] = written
+        assert result.success and result.node is node
+        assert node.properties == {"id": node.urn, "title": "Orders", "owner": "ana"}
+
+    async def test_without_a_mapping_the_node_is_unchanged(self, monkeypatch):
+        from backend.common.models.graph import CreateNodeRequest
+
+        engine, written = self._engine(monkeypatch, None)       # no session: none can be read
+        await engine.create_node(CreateNodeRequest(
+            entityType="dataset", displayName="Orders", properties={"owner": "ana"}))
+        assert written[0].properties == {"owner": "ana"}
+
+
 class TestContextEngineChildren:
     async def test_get_children_with_explicit_edge_types(self):
         parent = _node("urn:parent", "Parent")

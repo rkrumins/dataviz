@@ -486,6 +486,277 @@ grants can't be read.
 
 ---
 
+## [Unreleased] — New and renamed entities are named and keyed the way their source does it
+
+### Added
+
+- **An entity's details say how its data source identifies and names entities.** Under the
+  URN, one line names the two properties: "Identified by `id` · named by `title`". Expanding it
+  shows a card for each, and the drawer remembers that choice. A card shows the entity's value
+  (the identifier's can be copied) and a pill saying where the setting comes from: this data
+  source, the provider, the workspace, the platform default or the built-in default. Hovering the
+  pill walks the whole lookup. The name property's card also says whether a rename carries it
+  along (in step with the name) or leaves it (kept apart). With an edit not saved yet, the card
+  says what the save will store, such as a name property that becomes the new name.
+- **The Name input says what saving does to the name property** before you save: it changes too,
+  it stays because it is kept apart from the name, or an empty one gets filled in.
+- **The mapping setting says what the editor writes.** Wherever the identity and display-name
+  properties are set (a data source, a provider, a workspace or the platform), the setting says
+  that a new entity gets its URN as the identity property, and that the name property is kept in
+  step with the name.
+
+### Fixed
+
+- **New entities get their name property.** An entity created in a versioned graph stored its name
+  only as `displayName`, never under the property its source keeps names in. That property is
+  `name`, unless the data source, its provider, its workspace or the platform maps it to another,
+  such as `title`. This held however the entity was made: one at a time, a set in the Hierarchy
+  Builder or Build mode, a duplicate, through the API, or by import. The Properties panel showed
+  no `name`, and publishing wrote none to the graph. Each new entity now has it.
+- **New entities get their identity property.** In a graph keyed by something other than `urn`
+  (`id`, `identifier`, …), a new entity now carries that property too. It holds the entity's urn,
+  so the source's key and the platform's always agree. A duplicate no longer keeps its original's.
+- **A rename reaches the name property.** Renaming an entity changes its name property with it,
+  and changing the name property renames it, as long as the two agree. A name kept deliberately
+  apart from the display name is left alone, such as OpenMetadata's `customer_orders` beside
+  `Customer Orders`.
+- **Older entities catch up.** An entity saved before this change gets its missing name and
+  identity properties the next time it is saved, whatever that save changes. A property someone
+  deleted stays deleted.
+- The entity editors no longer offer the mapped name or identity property as a field of its own.
+  The Name input is the name property, and the platform assigns the identity property.
+- **The Technical view no longer shows an entity's URN twice.** An entity with no name of its own
+  showed its URN as its name and again underneath. It now shows it once.
+- **A lineage trace row shows its identifier before its details load.** In the Technical view, a
+  row whose details hadn't loaded yet showed nothing under its name. It now shows its URN.
+- **`⌘/` (`Ctrl-/`) switches between Business and Technical names.** The command palette showed
+  the shortcut, but nothing responded to it. It now works anywhere outside a text field. The
+  palette and the top bar's toggle show it as your platform writes it: `⌘/` on a Mac, `Ctrl+/`
+  elsewhere.
+
+### Changed
+
+- **The Technical view shows the same kind of identifier under every name.** On Context View rows,
+  Graph cards and the entity drawer, Technical mode now shows the property the data source
+  identifies entities by, such as `id`. That property is set on the data source, its provider or
+  its workspace. A source that uses the platform's own key shows the URN, as does an entity with
+  no value of its own. The view used to show the qualified name where a loader set one that
+  differed from the name, and the URN everywhere else, so one column mixed paths with URNs.
+  Hovering the line names the property, as in `id: ORD-000417`. The qualified name is still in
+  the entity's details. The line still appears only in the Technical view.
+- A rename shows as two changed fields in history and in the Changes tab: the display name and
+  the name property.
+- A draft rename now conflicts at publish with a re-sync of main that changed the same name
+  property. It used to merge without asking.
+
+### Known limitations
+
+- A new entity's name property is its display name when it is first saved, even if it was set to
+  something else before then. To keep the two apart, change the name property after saving.
+- A mapping onto a field the platform owns (`qualifiedName`, `description`, …) is not kept in step.
+- Changing a mapping doesn't rewrite existing entities. Each catches up on its next save.
+- `POST /graph/save` writes nodes exactly as they are sent, without these properties.
+- The identity property holds a urn string, so a source with numeric ids ends up with mixed types.
+- A save answers with at most 500 entities. Past that, the canvas shows the new properties of the
+  rest once each is opened again.
+
+---
+
+## [Unreleased] — Advanced Search reads on replicas, sized to the cluster
+
+### Fixed
+
+- **A search could take a master out of a Redis Cluster, and lose a write.** A read holds its
+  graph, and a write that arrives meanwhile waits for it while the node answers nothing — the
+  cluster's health checks included. Search statements could run for 45 s, and a third of them ran
+  on a master. On a 3 masters × 2 replicas cluster with a 15 s `cluster-node-timeout`, a 25 s read
+  on a master with a write 2 s in froze that master for 22.6 s: the cluster failed it over, and
+  the write it had acknowledged was lost. Every read Advanced Search makes — the scan, counts,
+  display-rule checks, exports, the property catalog, discovery, value pickers, name lookups and
+  the Cypher console — now runs on a replica, where the same read leaves the master taking the
+  write in 0.01 s. A search is no longer sent to the master for 10 s after a write either, which
+  sent it there exactly while writes were landing.
+- **A cluster could read as empty to a search.** A read that landed on a node without the graph
+  answered "empty key", which the label lookup took to mean an empty graph: the search completed
+  with 0 matches. It is now checked against the cluster first, and otherwise answered as busy and
+  retried.
+
+### Changed
+
+- **A search statement on a cluster runs for up to two thirds of `cluster-node-timeout`** —
+  10 s at the shipped 15 s — on a replica, whatever `DEEP_SEARCH_CHUNK_TIMEOUT_MS` says. Inside
+  that, a replica held up by a write is never flagged failed. A search that needs longer runs as
+  more statements and finishes as before. A part's last try is the same length (it was 94 s).
+  With no replica to answer, the master takes the read for two fifths of the window, as a write
+  does. On standalone and sentinel deployments the limits are unchanged; a sentinel deployment
+  with replicas sends search reads to them too.
+- **A query that runs as one statement stops at the same limit on a cluster.** A Cypher query in
+  the console and a path search ("how does A reach B") can't be split, so they stop at 10 s on
+  the shipped window (6 s on a master), whatever `NATIVE_QUERY_MAX_TIMEOUT_MS` (30 s) allows. A
+  longer window gives them longer: 45000 allows 30 s.
+
+### Upgrading
+
+- Nothing is required. To allow longer statements, raise `--cluster-node-timeout` and
+  `FALKORDB_CLUSTER_NODE_TIMEOUT_MS` together (30000 → 20 s, 45000 → 30 s), at the cost of a
+  slower failover when a master really dies. More replicas per shard add search capacity. See
+  [FalkorDB deployment](docs/FALKORDB_DEPLOYMENT.md#sizing--protection-parameters).
+- `FALKORDB_MASTER_READ_SHARE` no longer applies to Advanced Search.
+
+### Known limitations
+
+- A part that can't be split and can't be read in the statement limit is left out sooner — at
+  10 s rather than 94 s on the shipped window — and the count reads **at least *N***. A longer
+  window gives it longer.
+- Canvas reads keep their routing and their budgets — up to 15 s expanding a container, 30 s
+  for the stats scans, 60 s for the top level — so on a cluster taking a steady stream of writes
+  they can still hold a master up the same way. In a load test on a ~5M-entity graph (20 canvas
+  users, a write a second, a core per node, no searches) canvas reads froze a master for 28–49 s
+  and it was failed over, with and without this change. Bounding canvas reads is a change of its
+  own.
+
+---
+
+## [Unreleased] — Every flow works: Edit in Code, Ask in every mode, undo, Back to results, recipes
+
+### Fixed
+
+- **The query card's header is there in every editor and every state.** An empty Form or
+  Sentence used to replace the whole card with a landing panel — no Form · Sentence · Code ·
+  Cypher switch, no Undo, no Run — so from an empty Form there was no way back to Sentence or
+  Code. The card now opens on the Form under one header: the four editors as tabs, with **New**,
+  **Save** and **Tag** beside them; below them **Entities** or **Connections**, Undo and Redo,
+  **Auto** (a switch: on, the query runs as you edit) and **Run**. Narrow, the editors not chosen
+  show their icons alone. An empty query starts with a filter, or a question in Sentence, under
+  that header.
+- **Edit in Code opens Code.** "Open in Code" on what the Form or the Sentence can't show — a
+  group nested too deep, a number of edges in the Sentence — opened the Advanced drawer's
+  Options, which can't edit the query. It now reads **Edit in Code** and opens Code mode with
+  that part selected.
+- **Within N hops is built in the Form and the Sentence.** Adding it inserted an empty list of
+  URNs to fill in as JSON. It now has an editor: the entities by name, the direction, how many
+  hops (up to 10), and which edges.
+- **Inside Subtree picks its container by name, from anywhere in the View**, not only from what
+  is loaded on the canvas.
+- **Ask is there in Connections**, and its **Try** questions show in the Form as well as the
+  Sentence. A question never adds to a connection; it replaces it.
+- **⌘Z / Ctrl+Z undoes in the panel**, as the guide said it did, and ⌘⇧Z / Ctrl+Shift+Z redoes —
+  except in a text field, which keeps its own. **Clear** is one more step: Undo brings the
+  query back.
+- **How it matches offers Back to results**, instead of needing Undo to get back.
+- **The search box offers broader searches when nothing matches** — **Contains**, **Look in
+  everything**, **Whole view** — and says what it looked for. It offered only narrower ones.
+- **Recipes.** The empty card starts with one recipe per intent instead of the first five, so
+  the quality checks show too. The documentation checks never showed: they waited for a
+  `description` property, which discovery doesn't list (it is every entity's own field). They
+  now show wherever their type does. A recipe that finds nothing in this View says **none in
+  this view**.
+- **Wording.** The relationship card reads **Related to…**, not "Connection", which is the
+  edges search. "Orphan" reads **no lineage**. "a “owner” property" reads "an “owner”
+  property". A finished search's time reads *8.6 s* or *1:23*, not *87146 ms*.
+
+### Added
+
+- **Ask reads more questions.**
+  - Routes: `path from orders to revenue`, `how does orders reach revenue`, `how is orders
+    connected to revenue`.
+  - What lies between two places: `what flows from bronze to gold`, `connections between
+    datasets and dashboards`. A word that names a layer reads as the layer, with chips for its
+    other readings.
+  - The words catalogs use — tables, columns, fields, reports, databases, pipelines, jobs — for
+    the View's own types, when the View has them and none of its own goes by the word.
+  - **Did you mean “datasets”?** for a misspelt type or tag.
+  - A reading that finds nothing offers the fixes an empty answer does.
+- **A Connections recipe**: *What flows from Bronze to Gold*, the lineage edges from the View's
+  first layer to its second.
+- **Telemetry: where a search came from and how it ended.** `graph.search` and
+  `graph.search_miss` carry `source` and `outcome`; still no query text.
+  - `source` is one of ask, recipe, library, results, right-click, property-manager or header,
+    or else the editor: form, sentence or code. `studio` is set when Search Studio was open.
+  - `outcome` is complete, atLeast, stopped, interrupted or failed. A failure's `reason` is
+    the server's code or HTTP status.
+  - Stopped, interrupted and failed searches are recorded now too, so **Searches that
+    matched** counts a failed search as one that found nothing. A search resumed after a Stop
+    reports again, marked `resumed`.
+
+### Removed
+
+- Code nothing in the app reached:
+  - the template runner (`searchTemplates.ts`, `TemplateForm`);
+  - `QueryChips` and `RunBar`;
+  - the first builder (`PredicateBuilder`, its rows, reducer and leaf editors).
+- `graph.search` events no longer carry `template`, which was always `__builder__`.
+
+### Known limitations
+
+- In the Sentence, **Number of edges…** still says **Edit in Code**; the Form edits it.
+- A search's `source` is what last put the query in its shape: a recipe whose blank is filled
+  in the Sentence reads as `sentence`.
+- **Searches that matched** counts events, so a search stopped and then resumed counts twice.
+
+---
+
+## [Unreleased] — Resilient searches: big subtrees, outages, Stop and Resume
+
+### Fixed
+
+- **Searches inside a very large container finish.** A part of a search that couldn't be
+  checked in time — everything under one entity, or a View's visible entities — failed the
+  search. The panel asked again, the server planned the search from the start, and it failed
+  the same way, again and again. Such a part is now split: an entity into itself and each of
+  its children, the visible entities into halves. A part that can't be split (one entity and
+  what's inside it, or one entity's edges) gets one last try at the longest time a request
+  allows, 94 s. If that fails too, it is left out rather than failing the search: the count
+  reads **at least *N***, and a note names what was left out. An export, and a View's property
+  catalog, never leave a part out; they fail instead, as before.
+- **A failed search isn't planned again on every poll.** The server forgot a failed search at
+  once, so the panel's next poll started it over. It is now kept for 2 minutes: a poll for it
+  gets the failure, and only a new run plans it again.
+- **Outages keep a search's progress.** A graph store failing over, loading, with its queue full,
+  or dropping the connection failed the whole search. Now the part being checked goes back in
+  the queue and the search carries on where it was. A part that cuts the connection 5 times is
+  left out, with a note, as above.
+- **The cache Redis no longer takes the graph down with it.** A search keeps its progress in
+  Redis. When that Redis didn't answer, the error counted against the graph's circuit breaker,
+  which then refused every read on the data source. It now answers 503
+  `SEARCH_STORE_UNAVAILABLE` with a `Retry-After`, the panel waits it out, and other reads carry
+  on. A search also lets go of its progress when saving it fails, or, with the cache gone, as
+  soon as the cache answers again, so the next poll can go on.
+- **A route search that runs out of time** answers what it found, saying it ran out of time,
+  instead of failing with a 504.
+- **The panel waits out an outage.** A search, **Load more**, display-rule checks and rule
+  counts gave up within seconds of a graph store that couldn't answer. They now ask again for up
+  to 3 minutes, less often as they go (at most 15 s apart, or as long as the server asks), so
+  "…retrying automatically" is now true. A search still unanswered then reads **Paused: the
+  graph didn't answer for a few minutes**, with what it found so far and **Resume**, which goes
+  on with the same scan. A search the server couldn't finish ends at once, with **Try again**.
+- **Rule counts on a large View finish.** They stopped after 600 requests, about 10 minutes. They
+  now go on for up to 30 minutes, letting the server count for its full 5 s per request after
+  the first.
+- **Load all doesn't start hundreds of scans.** Past the first thousand matches, every thousand
+  more is a new scan of the View, so **Load all** on 200,000 matches started 200 of them. It now
+  lists up to 10,000. Past that it offers **Export all *N***, which writes every match to a file
+  in one pass.
+
+### Added
+
+- **Stop, and a clock.** A long search reads ***N* found · scanning 45% · 1:23**; after 20 s with
+  nothing new it adds **The graph is busy — still working.** **Stop** ends it where it is and
+  keeps what it found; **Resume** carries on without reading anything twice.
+- **Try again** on a failed search's card runs it again as it is.
+- A poll that brings nothing new waits longer before the next, from 0.5 s up to 5 s, and a
+  background tab asks at most every 5 s.
+- API: a rule count carries `lowerBound` when part of the View was left out, and a search's
+  `countStatus` reads `lowerBound` then.
+
+### Known limitations
+
+- A stopped or paused search is held on the server for 15 minutes. **Resume** after that starts
+  the scan over; the answer is the same, it just takes as long as the first time.
+- A search only goes on while its tab is open.
+
+---
+
 ## [Unreleased] — No wrong answers: busy graphs, large exports, silent failures and Ask
 
 ### Fixed

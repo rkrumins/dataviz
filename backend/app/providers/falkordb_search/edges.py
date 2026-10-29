@@ -70,6 +70,7 @@ from backend.app.providers.falkordb_search.engine import (
     query_identity,
     request_deadline,
     session_id,
+    statement_s,
     unit_budget,
 )
 from backend.app.providers.falkordb_search.keys import SortKey, SortSpec, name_text
@@ -81,6 +82,8 @@ from backend.app.providers.falkordb_search.plan import (
     _label_stats,
     _labels_in_scope,
     _rel,
+    describe_unit,
+    expand_unit,
     make_plan,
     match_statement,
     within_hops,
@@ -262,7 +265,7 @@ async def _plan(provider, query: SearchQuery, run, settings, deadline: float
     of that end would read them, each over every edge ID — and what the far
     end's scope check needs, kept with the session (``_EdgeWork.commit``)."""
     edges = query.predicate
-    plan_run = lambda c, p: run(c, p, max(1.0, settings.chunk_timeout_ms / 1000.0))  # noqa: E731
+    plan_run = lambda c, p: run(c, p, max(1.0, statement_s(settings)))  # noqa: E731
     labels = await _searchable_labels(provider, timeout_s=max(0.5, deadline - time.monotonic()))
     containment = _containment(provider)
     stats = await _label_stats(plan_run, labels)
@@ -615,9 +618,19 @@ class _EdgeWork:
     the session, with which end anchors (``_state``), so a unit is counted
     exactly once."""
 
+    #: A part that can't be read is left out and said so (``engine._leave_out``).
+    skips = True
+
     def __init__(self, session: Session, ectx: EdgeContext, run, state: Dict[str, Any]) -> None:
         self.session, self.ectx, self.run = session, ectx, run
         self.state = dict(state)
+
+    async def expand(self, unit: Unit, timeout_s: float) -> Optional[List[Unit]]:
+        return await expand_unit(unit, self.ectx.anchor, self.run, timeout_s)
+
+    async def describe(self, unit: Unit) -> Optional[str]:
+        what = await describe_unit(unit, self.run)
+        return f"the connections of {what}" if what else None
 
     async def begin(self, store: SessionStore) -> None:
         # Read with the lease held: the counts of the latest commit.
@@ -697,7 +710,8 @@ async def _answer(provider, session: Session, pos: int, page_size: int,
         cache_hit=cache_hit,
         session_id=session.sid,
         status="running" if running else "complete",
-        count_status=("exact" if total is not None and not running else "lowerBound"),
+        count_status=("exact" if total is not None and not running and not session.left_out
+                      else "lowerBound"),
         progress=SearchProgress(scanned=session.scanned,
                                 total=max(session.total, session.scanned),
                                 matched=session.count),

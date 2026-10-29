@@ -127,8 +127,10 @@ is named:
 - **Business** — the name people use: a curated business name where one has
   been set, otherwise the entity's own name.
 - **Technical** — the entity's name as the source system has it, with its
-  qualified name (or its URN) on a second line, on Context View rows, Graph
-  cards and the entity details panel.
+  identifier on a second line, on Context View rows, Graph cards and the entity
+  details panel. The identifier is the property the data source identifies
+  entities by, such as `id` (set on the data source, its provider or its
+  workspace), or the entity's URN when the source uses the platform's own.
 
 Nothing else changes — the same entities, the same lines. Switch to
 **Technical** when you need an exact identifier to look something up in another

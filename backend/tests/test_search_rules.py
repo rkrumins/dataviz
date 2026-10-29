@@ -237,6 +237,41 @@ class TestService:
         assert out.counts["broken"].error and "refused" not in out.counts["broken"].error
         assert out.counts["fine"].count == 7 and out.counts["fine"].error is None
 
+    async def test_a_count_named_that_already_failed_is_that_rules_error_alone(self):
+        """The engine keeps a failed count a while, and reading it without
+        advancing says it failed — for that rule; the others count on."""
+        from backend.app.services.deep_search import SearchFailed
+
+        class _Counts:
+            async def deep_search_count(self, query, *, context, advance=True):
+                if query.options.session_id == "failed":
+                    raise SearchFailed("count failed: boom")
+                return {"count": 7, "status": "complete", "sessionId": "s",
+                        "progress": {"scanned": 10, "total": 10, "matched": 7}}
+
+        request = SearchCountsRequest.model_validate({
+            "scope": {"viewId": "v"}, "sessions": {"broken": "failed"},
+            "items": [{"id": n, "predicate": {"kind": "text", "value": n}}
+                      for n in ("broken", "fine")]})
+        out = await _service(_Counts()).counts(request)
+        assert out.counts["broken"].status == "complete"
+        assert out.counts["broken"].error and "boom" not in out.counts["broken"].error
+        assert out.counts["fine"].count == 7 and out.counts["fine"].error is None
+
+    async def test_a_count_that_left_part_of_the_view_out_says_it_is_a_floor(self):
+        class _Counts:
+            async def deep_search_count(self, query, *, context, advance=True):
+                return {"count": 7, "status": "complete", "sessionId": "s",
+                        "progress": {"scanned": 10, "total": 10, "matched": 7},
+                        "lowerBound": True}
+
+        request = SearchCountsRequest.model_validate({
+            "scope": {"viewId": "v"},
+            "items": [{"id": "r", "predicate": {"kind": "text", "value": "x"}}]})
+        out = await _service(_Counts()).counts(request)
+        assert out.counts["r"].count == 7 and out.counts["r"].lower_bound is True
+        assert out.counts["r"].model_dump(by_alias=True)["lowerBound"] is True
+
     async def test_container_counts_are_read_for_the_resolved_view_only(self):
         seen = {}
 

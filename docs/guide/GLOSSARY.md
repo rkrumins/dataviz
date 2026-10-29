@@ -83,7 +83,7 @@ screen.
 | **Org Admin** | An organisation-wide role that manages every workspace and creates new ones, but doesn't manage user accounts or sign-in settings. | [Users & Access](/guide/users-access) |
 | **Org Auditor** | An organisation-wide role that can see every workspace and the activity log, but can't change anything. | [Users & Access](/guide/users-access) |
 | **Orphan** | An entity whose type normally sits inside another (a table in a schema) but which has no parent in the data. List them with **Display → Advanced → Orphaned entities…** in a Context View. | [Navigating Layers](/guide/navigating-layers) |
-| **Persona toggle** | The **Business** / **Technical** switch in the top bar. **Business** shows names only; **Technical** adds each entity's qualified name or URN under its name. | [Reading Lineage](/guide/reading-lineage) |
+| **Persona toggle** | The **Business** / **Technical** switch in the top bar. **Business** shows names only; **Technical** adds each entity's identifier under its name: its data source's identifier property, such as `id`, or its URN. | [Reading Lineage](/guide/reading-lineage) |
 | **Profiling** | A data source's counts and make-up over time, under **Ingestion → Profiling**. | [Data Freshness & Ingestion](/guide/data-freshness) |
 | **Projection Mode** | Where a data source's rollups are written when its aggregation runs: **In-Source** (into the source graph) or **Dedicated Graph** (a separate graph, leaving the source untouched). | [Rollup Capacity & Large Graphs](/guide/rollup-capacity) |
 | **Provider** | A registered connection to a graph database, added with **Register Provider** under **Ingestion → Providers**. | [Admin Setup](/guide/admin-setup) |

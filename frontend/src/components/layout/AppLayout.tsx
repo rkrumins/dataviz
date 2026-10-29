@@ -16,6 +16,8 @@ import { SidebarNav } from './SidebarNav'
 import { CommandPalette } from './CommandPalette'
 import { HelpPanel } from '@/components/help/HelpPanel'
 import { useHelpPanelStore } from '@/store/helpPanel'
+import { usePersonaStore } from '@/store/persona'
+import { hasPrimaryModifier } from '@/lib/platform'
 import { ViewWizard } from '@/components/views/ViewWizard'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { useAuthStore } from '@/store/auth'
@@ -133,6 +135,29 @@ export function AppLayout() {
       }
       e.preventDefault()
       useHelpPanelStore.getState().toggleHelp()
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [])
+
+  // Global ⌘/ (Ctrl-/ elsewhere) switches Business / Technical names: the shortcut the command
+  // palette and the top bar's toggle advertise. Not from inside a field either, where a code
+  // editor's ⌘/ is its own "comment line". A held key switches once, not back and forth.
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key !== '/' || !hasPrimaryModifier(e) || e.altKey || e.repeat) return
+      const el = e.target as HTMLElement | null
+      const tag = el?.tagName
+      if (
+        tag === 'INPUT' ||
+        tag === 'TEXTAREA' ||
+        tag === 'SELECT' ||
+        el?.isContentEditable
+      ) {
+        return
+      }
+      e.preventDefault()
+      usePersonaStore.getState().toggleMode()
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)

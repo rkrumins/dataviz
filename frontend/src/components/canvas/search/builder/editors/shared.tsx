@@ -1,8 +1,6 @@
 /**
- * Shared input atoms for the predicate-builder leaf editors.
- *
- * Visual vocabulary matches TemplateForm so the builder feels like
- * the same panel:
+ * Shared input atoms for the condition editors (the edge filter, the
+ * unified picker). Visual vocabulary:
  *   - rounded-xl on inputs/selects, rounded-2xl on cards
  *   - bg-canvas-elevated/60 surface, border-glass-border outline
  *   - accent-lineage focus ring
@@ -10,10 +8,8 @@
  */
 import { ChevronDown, Check, Plus, X } from 'lucide-react'
 import {
-    type FC,
     type KeyboardEvent,
     useEffect,
-    useId,
     useMemo,
     useRef,
     useState,
@@ -115,97 +111,6 @@ export function SelectField<T extends string>({
                 className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-ink-muted pointer-events-none"
                 strokeWidth={2}
             />
-        </div>
-    )
-}
-
-
-/**
- * Tag-style chip input. The user types a value and presses Enter or
- * comma to commit it as a chip. Existing chips can be removed with
- * the × button or backspace from an empty input. Used for tag values,
- * URN lists, edge-type allowlists, and entity-type multi-select.
- */
-export function ChipInput({
-    values, onChange, placeholder, suggestions, mono = true,
-}: {
-    values: readonly string[]
-    onChange: (next: string[]) => void
-    placeholder?: string
-    /** Optional datalist source for native typeahead. */
-    suggestions?: readonly string[]
-    mono?: boolean
-}) {
-    const datalistId = useId()
-    const [draft, setDraft] = useState('')
-
-    function commit(raw: string) {
-        const trimmed = raw.trim()
-        if (!trimmed) return
-        // De-duplicate on commit. Order-preserving.
-        if (values.includes(trimmed)) {
-            setDraft('')
-            return
-        }
-        onChange([...values, trimmed])
-        setDraft('')
-    }
-
-    function handleKey(e: KeyboardEvent<HTMLInputElement>) {
-        if (e.key === 'Enter' || e.key === ',') {
-            e.preventDefault()
-            commit(draft)
-        } else if (e.key === 'Backspace' && draft === '' && values.length > 0) {
-            onChange(values.slice(0, -1))
-        }
-    }
-
-    return (
-        <div className={cn(
-            "rounded-lg bg-canvas-elevated/60 border border-glass-border px-2 py-1.5",
-            "focus-within:border-accent-lineage/50 focus-within:ring-2 focus-within:ring-accent-lineage/20",
-            "hover:border-glass-border/80 transition-all",
-            "flex flex-wrap gap-1.5 items-center",
-        )}>
-            {values.map((v, i) => (
-                <span
-                    key={`${v}-${i}`}
-                    className={cn(
-                        "inline-flex items-center gap-1 px-2 py-0.5 rounded-md",
-                        "bg-accent-lineage/15 text-accent-lineage text-xs",
-                        mono && "font-mono",
-                    )}
-                >
-                    {v}
-                    <button
-                        type="button"
-                        onClick={() => onChange(values.filter((_, j) => j !== i))}
-                        className="hover:text-ink transition-colors"
-                        aria-label={`Remove ${v}`}
-                    >
-                        <X className="w-3 h-3" strokeWidth={2.5} />
-                    </button>
-                </span>
-            ))}
-            <input
-                type="text"
-                value={draft}
-                onChange={(e) => setDraft(e.target.value)}
-                onKeyDown={handleKey}
-                onBlur={() => commit(draft)}
-                placeholder={values.length === 0 ? placeholder : undefined}
-                list={suggestions ? datalistId : undefined}
-                className={cn(
-                    "flex-1 min-w-[80px] bg-transparent border-none outline-none",
-                    "text-sm text-ink placeholder:text-ink-muted/50 py-0.5",
-                    mono && "font-mono",
-                )}
-            />
-            {suggestions && (
-                <datalist id={datalistId}>
-                    {suggestions.map((s) => <option key={s} value={s} />)}
-                </datalist>
-            )}
         </div>
     )
 }
@@ -391,33 +296,6 @@ export function KeyCombobox({
                 </div>
             )}
         </div>
-    )
-}
-
-
-export function MiniButton({
-    onClick, children, icon: Icon, variant = 'default',
-}: {
-    onClick: () => void
-    children?: React.ReactNode
-    icon?: FC<{ className?: string; strokeWidth?: number }>
-    variant?: 'default' | 'danger' | 'accent'
-}) {
-    return (
-        <button
-            type="button"
-            onClick={onClick}
-            className={cn(
-                "inline-flex items-center gap-1 px-2 py-1 rounded-md",
-                "text-[11px] font-medium transition-colors",
-                variant === 'default' && "text-ink-muted hover:bg-glass/40 hover:text-ink",
-                variant === 'danger' && "text-ink-muted hover:bg-red-500/15 hover:text-red-400",
-                variant === 'accent' && "text-accent-lineage hover:bg-accent-lineage/15",
-            )}
-        >
-            {Icon && <Icon className="w-3 h-3" strokeWidth={2.5} />}
-            {children}
-        </button>
     )
 }
 

@@ -106,6 +106,11 @@ interface PreferencesState {
   // section never arrives hidden and an older stored map never hides one.
   drawerSectionsCollapsed: Record<string, boolean>
   toggleDrawerSection: (key: string) => void
+  // Entity drawer — whether the identifier and name properties are shown in
+  // full under the URN. Unlike a section, CLOSED by default: the URN alone is
+  // the identifier most readers need, and one line says the rest.
+  drawerIdentityDetailsOpen: boolean
+  toggleDrawerIdentityDetails: () => void
 
   // Canvas preferences
   showMinimap: boolean
@@ -381,6 +386,8 @@ export const usePreferencesStore = create<PreferencesState>()(
           [key]: !state.drawerSectionsCollapsed[key],
         },
       })),
+      drawerIdentityDetailsOpen: false,
+      toggleDrawerIdentityDetails: () => set((state) => ({ drawerIdentityDetailsOpen: !state.drawerIdentityDetailsOpen })),
 
       // Canvas
       showMinimap: true,

@@ -229,3 +229,27 @@ async def test_one_client_per_endpoint_with_the_capped_parser(monkeypatch):
     kwargs = built[0][1]
     assert kwargs["max_connections"] == 2 and kwargs["socket_timeout"] == 40
     assert kwargs["parser_class"].cap == 2048
+
+
+async def test_on_a_cluster_a_query_ends_inside_the_window(engine, monkeypatch):
+    """Asked of a replica the way a search is, and held to what the node it
+    runs on may spend: from a 15 s cluster-node-timeout, 10 s on a replica
+    and 6 s on the master."""
+    from backend.app.providers import falkordb_provider as fp
+
+    monkeypatch.setattr(fp, "_OBSERVED_NODE_TIMEOUT_S", 15.0)
+    monkeypatch.setenv("FALKORDB_MODE", "cluster")
+    graph = engine(result([], []))
+    seen = []
+    provider = FakeProvider(replica=SimpleNamespace(host="r", port=1), mode="cluster")
+    replica_for = provider._replica_for
+
+    async def watched(graph_key, *, include_master=False):
+        seen.append(fp._read_consistency.get())
+        return await replica_for(graph_key, include_master=include_master)
+
+    provider._replica_for = watched
+    await run(provider, timeout_ms=60_000)
+    await run(FakeProvider(mode="cluster"), timeout_ms=60_000)
+    assert seen == ["replica"]
+    assert [timeout for _, timeout in graph.calls] == [10_000, 6_000]

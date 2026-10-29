@@ -26,8 +26,9 @@
  *
  * One Query card holds the entire active query. Rows compose with AND;
  * the Visual ↔ Code toggle switches between row-builder and DSL text.
- * Templates SEED the rows (no opaque "replace + run"). Advanced drawer
- * holds Options / JSON / Cypher only — composing happens in the card.
+ * A recipe fills the rows in — one with nothing left to fill in runs at
+ * once. Advanced drawer holds Options / JSON only — composing happens in
+ * the card.
  *
  * Canvas integration unchanged: every successful run publishes
  * matchUrnSet + ancestorMatchCounts + ancestorMatchTypeBreakdowns so
@@ -66,6 +67,7 @@ import {
     useDraftPredicate,
     useRecentQueries,
     useSearchStore,
+    type DraftSource,
     type RecentQueryEntry,
 } from '@/store/searchStore'
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
@@ -260,7 +262,7 @@ function PanelInner({
     onClose, viewId, session, onClear, onRevealNode, onOpenNode, onFrameMatches,
 }: PanelInnerProps) {
     const {
-        view, runState, runPredicate, cancel,
+        view, runState, runPredicate, cancel, stop, resume, run,
         resetTemplate, loadMore, isLoadingMore, loadMoreError,
     } = session
     // The canvas's session, when there is one. `session` above is only
@@ -322,12 +324,16 @@ function PanelInner({
     }, [runPredicate])
     // A change made from the results — a fix for an empty answer, a type
     // to narrow to: the query changes and runs at once, whether or not
-    // the builder is open to run it.
-    const handleRefine = useCallback((next: Predicate) => {
-        useSearchStore.getState().commitDraft(next)
+    // the builder is open to run it. A recipe or the library loads one
+    // the same way, saying so.
+    const handleRefine = useCallback((next: Predicate, source?: DraftSource) => {
+        useSearchStore.getState().commitDraft(next, source)
         const runnable = buildRunnablePredicate(next)
         if (runnable) handleRun(runnable.predicate, SEARCH_OPTIONS)
     }, [handleRun])
+    const refineFromResults = useCallback((next: Predicate) => {
+        handleRefine(next, 'results')
+    }, [handleRefine])
 
     // Hydrate per-view canvas-filter-mode preference on mount /
     // viewId change. The store keeps a single ``canvasFilterMode``
@@ -384,14 +390,14 @@ function PanelInner({
         //                     ``showResultsSection`` gate keeps them
         //                     visible for any non-idle kind) so the X
         //                     button looked like it did nothing.
-        //   3. clearStore()   wipes the draft predicate / undo stack
-        //                     too so the QueryCard returns to its
-        //                     empty hero rather than redisplaying the
-        //                     same filter rows the cleared run came
-        //                     from.
+        //   3. clearStore()   wipes the draft predicate too so the
+        //                     QueryCard returns to its empty hero
+        //                     rather than redisplaying the same filter
+        //                     rows the cleared run came from — one Undo
+        //                     brings them back.
         cancel()
         resetTemplate()
-        clearStore()
+        clearStore({ undoable: true })
     }, [onClear, cancel, resetTemplate, clearStore])
 
     /**
@@ -403,10 +409,10 @@ function PanelInner({
     const handlePickRecipe = useCallback((recipe: Recipe) => {
         setLibraryOpen(false)
         if (!recipe.blank) {
-            handleRefine(recipe.predicate)
+            handleRefine(recipe.predicate, 'recipe')
             return
         }
-        commitDraft(recipe.predicate)
+        commitDraft(recipe.predicate, 'recipe')
         viewSession?.refine()
         if (editorMode !== 'form') {
             setEditorMode('sentence')
@@ -418,12 +424,12 @@ function PanelInner({
     // builder may be folded away, with nothing on screen to run it.
     // A Connections search kept in an AND group of its own loads as itself.
     const handleLoadRecent = useCallback((entry: RecentQueryEntry) => {
-        handleRefine(asDraft(entry.predicate))
+        handleRefine(asDraft(entry.predicate), 'library')
         setLibraryOpen(false)
     }, [handleRefine])
 
     const handleLoadSaved = useCallback((query: SavedViewQuery) => {
-        handleRefine(asDraft(query.predicate))
+        handleRefine(asDraft(query.predicate), 'library')
         setLibraryOpen(false)
     }, [handleRefine])
 
@@ -473,7 +479,7 @@ function PanelInner({
             // editor only lists top-level containers, and a result
             // group is usually deeper than that.
             uiScope: 'any',
-        }))
+        }), 'results')
     }, [commitDraft])
 
     const frameTargetUrns = useMemo<string[]>(() => {
@@ -587,6 +593,14 @@ function PanelInner({
             || target.tagName === 'TEXTAREA'
             || target.isContentEditable
         )) return
+        // ⌘Z / Ctrl+Z steps back through the changes to the query, with ⇧
+        // forward again — in Search Studio too, whose keys bubble up here.
+        if ((e.metaKey || e.ctrlKey) && !e.altKey && e.key.toLowerCase() === 'z') {
+            e.preventDefault()
+            if (e.shiftKey) useSearchStore.getState().redo()
+            else useSearchStore.getState().undo()
+            return
+        }
         // Search Studio and the popovers are portaled: their keys are theirs.
         if (!panelRef.current?.contains(target)) return
         switch (e.key) {
@@ -628,10 +642,6 @@ function PanelInner({
             isRunning={view.kind === 'running'}
             runState={runState}
             onRun={handleRun}
-            onOpenAdvanced={() => {
-                setStudioOpen(false)
-                openAdvanced('options')
-            }}
             onPickRecipe={handlePickRecipe}
         />
     )
@@ -650,6 +660,13 @@ function PanelInner({
             progress={view.kind === 'results'
                 ? view.result.progress ?? null
                 : null}
+            startedAt={view.kind === 'results' ? view.startedAt ?? null : null}
+            halted={view.kind === 'results' ? view.halted ?? null : null}
+            onStop={stop}
+            onResume={() => { void resume() }}
+            countIsFloor={view.kind === 'results' && view.result.status === 'complete'
+                && view.result.countStatus === 'lowerBound'}
+            notes={view.kind === 'results' ? view.result.scopeDiagnostics?.notes ?? null : null}
             onFrame={canFrame
                 ? () => frameMatches?.(frameTargetUrns)
                 : undefined}
@@ -678,8 +695,10 @@ function PanelInner({
             onLoadAll={loadAll}
             isLoadingAll={isLoadingAll}
             onCancelLoadAll={cancelLoadAll}
+            onExportAll={canExport ? () => setExportOpen(true) : undefined}
+            onRetry={() => { void run() }}
             draft={draftPredicate}
-            onRefine={handleRefine}
+            onRefine={refineFromResults}
         />
     )
     // A table only for rows: not routes, not nothing. A Connections search's
@@ -782,9 +801,7 @@ function PanelInner({
                                 {/* With the builder folded away this is the
                                     only statement of what was asked — and
                                     a new question is still one line away. */}
-                                {!refineOpen && draftPredicate?.kind !== 'edges' && (
-                                    <ResultsAskBar viewId={viewId} onRun={handleRun} />
-                                )}
+                                {!refineOpen && <ResultsAskBar viewId={viewId} onRun={handleRun} />}
                                 {!sentenceShowing && <QuerySentence draftPredicate={draftPredicate} />}
                                 {matchBar}
                                 {resultsPane}
@@ -837,7 +854,7 @@ function PanelInner({
                                     hits={tableHits}
                                     query={view.query.predicate}
                                     draft={draftPredicate}
-                                    onRefine={handleRefine}
+                                    onRefine={refineFromResults}
                                     onReveal={revealNode}
                                     onOpen={onOpenNode}
                                     onLookInside={(a) => handleScopeToGroup({ ancestorUrn: a.urn,
@@ -881,8 +898,8 @@ function PanelInner({
  * is a labeled chip so the user can identify it without hovering for
  * a tooltip:
  *
- *   - Library: opens the unified LibraryPopover (Mine / Shared /
- *     Templates tabs). Active state when open.
+ *   - Library: opens the unified LibraryPopover (Mine / This view /
+ *     Other views / Recipes tabs). Active state when open.
  *   - Options: opens the Advanced drawer on its Options tab. Shows a
  *     numeric badge when any option differs from default so a query
  *     that's been power-user-tuned is visually distinct.

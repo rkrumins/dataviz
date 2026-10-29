@@ -66,6 +66,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from backend.app.providers.falkordb_provider import (
     _RESERVED_NODE_KEYS,
+    _is_query_timeout_error,
     platform_property_names,
 )
 from backend.app.providers.falkordb_placement import layer_test
@@ -2574,7 +2575,9 @@ async def _searchable_labels(provider, *, timeout_s: float) -> List[str]:
             raise
         raise _labels_unread() from exc
     except Exception as exc:
-        if "empty key" in str(exc).lower():
+        # On a cluster "empty key" also comes back from a read that landed on
+        # a node without the graph — "no labels" then made it read as empty.
+        if "empty key" in str(exc).lower() and await provider._is_verified_missing_graph(exc):
             return []
         logger.warning("search: CALL db.labels() failed: %s", exc)
         raise _labels_unread() from exc
@@ -3323,7 +3326,12 @@ async def execute_deep_search(
                 elapsed_ms=int((time.monotonic() - start) * 1000),
                 cache_hit=False,
             )
-        except asyncio.TimeoutError:
+        except Exception as exc:
+            # The request's deadline or FalkorDB's own ("Query timed out",
+            # which reached the client as a 504): the routes ran out of
+            # time either way, and the page says so.
+            if not (isinstance(exc, asyncio.TimeoutError) or _is_query_timeout_error(exc)):
+                raise
             return SearchResultPage(
                 paths=[],
                 truncated=True,

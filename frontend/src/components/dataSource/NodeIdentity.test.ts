@@ -1,7 +1,12 @@
+import { readFileSync } from 'node:fs'
+import { join, resolve } from 'node:path'
+import { createElement } from 'react'
+import { render, screen } from '@testing-library/react'
 import { describe, it, expect } from 'vitest'
 import {
     normalizeIdentity, isIdentityOverridden, identityCoalesceExpr,
-    normalizeName, isNameOverridden, nameCoalesceExpr, isInherited,
+    normalizeName, isNameOverridden, nameCoalesceExpr, isInherited, boundFieldIds,
+    boundName, nameOnSave, NodeIdentityField, type NamedShape,
 } from './NodeIdentity'
 
 describe('normalizeIdentity', () => {
@@ -105,5 +110,105 @@ describe('the inherited-value trap', () => {
         expect(isIdentityOverridden(inherited.identityProperty)).toBe(true)
         expect(isInherited(inherited.identityPropertySource)).toBe(true)
         expect(isInherited(local.identityPropertySource)).toBe(false)
+    })
+})
+
+describe('boundFieldIds', () => {
+    it('is the `name` field alone without a mapping, or with the default one', () => {
+        expect([...boundFieldIds(null)]).toEqual(['name'])
+        expect([...boundFieldIds({ nameProperty: 'name', identityProperty: 'urn' })]).toEqual(['name'])
+    })
+    it("adds the source's own name and identity properties — the Name input and the urn stand for them", () => {
+        expect(boundFieldIds({ nameProperty: 'title', identityProperty: 'id' })).toEqual(new Set(['name', 'title', 'id']))
+    })
+    it('leaves a field the platform owns offered: a mapping onto one is not bound', () => {
+        expect(boundFieldIds({ nameProperty: 'description', identityProperty: 'qualifiedName' })).toEqual(new Set(['name']))
+    })
+})
+
+/** backend/tests/fixtures/node_identity/name_binding.json — the server's rule runs the same cases
+ *  (test_node_identity_write_binding.py), so the editor never says a save does what it won't. */
+interface NameCase {
+    name: string
+    mapping: { nameProperty: string }
+    minted: boolean
+    prior: NamedShape | null
+    value: NamedShape
+    expect: { displayName: unknown; name: unknown }
+}
+const CORPUS = join(resolve(__dirname, '../../../..'), 'backend/tests/fixtures/node_identity/name_binding.json')
+const NAME_CASES: NameCase[] = JSON.parse(readFileSync(CORPUS, 'utf-8')).cases
+
+describe('boundName — what a save stores, as the server decides it', () => {
+    it.each(NAME_CASES.map((c) => [c.name, c] as const))('%s', (_name, c) => {
+        const out = boundName(c.prior, c.value, c.mapping, c.minted)
+            ?? { displayName: c.value.displayName, name: c.value.properties?.[c.mapping.nameProperty] }
+        expect(out.displayName).toEqual(c.expect.displayName)
+        expect(out.name ?? null).toEqual(c.expect.name)
+    })
+
+    it('says nothing while the mapping is unknown — the server binds nothing then either', () => {
+        expect(boundName(null, { displayName: 'Orders' }, null, true)).toBeNull()
+    })
+})
+
+describe('nameOnSave', () => {
+    const title = { nameProperty: 'title' }
+    it('a rename carries the name property while the two agree', () => {
+        expect(nameOnSave({ displayName: 'Orders', properties: { title: 'Orders' } },
+            { displayName: 'Sales', properties: { title: 'Orders' } }, title))
+            .toEqual({ kind: 'follows', property: 'title', from: 'Orders', to: 'Sales' })
+    })
+    it('a new entity, or one without the property, gets it filled', () => {
+        expect(nameOnSave(null, { displayName: 'Orders' }, title, true))
+            .toEqual({ kind: 'follows', property: 'title', from: undefined, to: 'Orders' })
+    })
+    it('editing the name property renames the entity while the two agree', () => {
+        expect(nameOnSave({ displayName: 'Orders', properties: { title: 'Orders' } },
+            { displayName: 'Orders', properties: { title: 'Sales' } }, title))
+            .toEqual({ kind: 'renames', property: 'title', to: 'Sales' })
+    })
+    it('the two in step stay so', () => {
+        const node = { displayName: 'Orders', properties: { title: 'Orders' } }
+        expect(nameOnSave(node, node, title)).toEqual({ kind: 'same', property: 'title' })
+    })
+    it('a name kept apart stays apart — through a rename, or set apart by this edit', () => {
+        const prior = { displayName: 'Orders', properties: { title: 'ord' } }
+        expect(nameOnSave(prior, prior, title))
+            .toEqual({ kind: 'apart', property: 'title', value: 'ord', renamed: false, edited: false })
+        expect(nameOnSave(prior, { displayName: 'Sales', properties: { title: 'ord' } }, title))
+            .toEqual({ kind: 'apart', property: 'title', value: 'ord', renamed: true, edited: false })
+        expect(nameOnSave({ displayName: 'Orders', properties: { title: 'Orders' } },
+            { displayName: 'Sales', properties: { title: 'ORD' } }, title))
+            .toEqual({ kind: 'apart', property: 'title', value: 'ORD', renamed: true, edited: true })
+    })
+})
+
+describe('NodeIdentityField — what the setting makes the editor write', () => {
+    const field = (value: string, nameValue: string) => render(createElement(NodeIdentityField, {
+        value, onChange: () => {}, nameValue, onNameChange: () => {}, defaultOpen: true,
+    }))
+    const identityLine = () => screen.queryByText(/each new one gets its URN/)
+    const nameLine = () => screen.queryByText(/The editor keeps it in step/)
+
+    it('says a new entity gets its URN as a mapped identifier, and its name is kept in step', () => {
+        field('id', 'title')
+        expect(identityLine()).toHaveTextContent('each new one gets its URN as its id too.')
+        expect(nameLine()).toBeInTheDocument()
+    })
+    it('promises nothing the server does not write', () => {
+        field('urn', 'name')          // a urn identity needs no copy
+        expect(identityLine()).toBeNull()
+        expect(nameLine()).toBeInTheDocument()
+    })
+    it('an identifier that is also the name property is written as the name', () => {
+        field('title', 'title')
+        expect(identityLine()).toBeNull()
+        expect(nameLine()).toBeInTheDocument()
+    })
+    it('a field the platform owns is never written', () => {
+        field('qualifiedName', 'description')
+        expect(identityLine()).toBeNull()
+        expect(nameLine()).toBeNull()
     })
 })

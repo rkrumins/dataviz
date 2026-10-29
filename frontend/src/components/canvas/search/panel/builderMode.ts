@@ -42,6 +42,11 @@ function savedEditorMode(): EditorMode | null {
     }
 }
 
+/** The editor the card is in, read outside React (a search's telemetry). */
+export function currentEditorMode(): EditorMode {
+    return savedEditorMode() ?? DEFAULT_EDITOR_MODE
+}
+
 /** The editor to open in — the one this browser last chose, or Form —
  *  and how to choose another. */
 export function useEditorMode(): [EditorMode, (next: EditorMode) => void] {

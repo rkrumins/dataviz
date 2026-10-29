@@ -8,9 +8,8 @@
  *    `data.technicalLabel`, a field `toCanvasNode` never maps and the backend's
  *    `GraphNode` has no slot for — so both halves of the toggle resolved to the
  *    same string. The real business/technical axis in this product is the
- *    friendly `displayName` versus the fully-qualified technical identity
- *    (`qualifiedName`, falling back to the URN), both of which are populated on
- *    every node already.
+ *    friendly `displayName` versus the entity's identifier, which every node
+ *    already carries.
  * 2. The same entity could show two different names on one screen: the drawer
  *    tried `businessLabel` first while the context-view row tried `label` first,
  *    so a curated override won in one place and lost in the other.
@@ -19,14 +18,16 @@
  * below rather than re-deriving the precedence at each render site.
  *
  * REVEAL, DON'T SWAP
- * Technical mode does not merely substitute one string for another — on real
- * data `qualifiedName` is frequently identical to `displayName` (some loaders
- * set it from the name), and a swap for an identical string is invisible. So
- * technical mode keeps the name people recognise and *adds* the technical
- * identity as a second line, choosing the first value that says something the
- * name does not.
+ * Technical mode keeps the name people recognise and *adds* the entity's
+ * identifier as a second line. Every row shows the same kind of value: the
+ * identifier property its data source keys entities by (`id`, `identifier`, …,
+ * set on the data source, its provider, its workspace or the platform), else
+ * the URN. It used to show the qualified name where a loader set one that
+ * differed from the name and the URN elsewhere, so one column mixed paths
+ * with URNs.
  */
 import type { PersonaMode } from '@/store/persona'
+import { readSchemaField } from '@/lib/nodeFields'
 
 /**
  * The name-bearing fields carried on a canvas node's `data` (see `toCanvasNode`).
@@ -39,6 +40,7 @@ export interface EntityNameFields {
     businessLabel?: unknown
     qualifiedName?: unknown
     urn?: unknown
+    properties?: unknown
 }
 
 /** A trimmed non-empty string, or undefined — every field here is optional and
@@ -67,24 +69,40 @@ export function resolveEntityName(
     return chosen ?? fallback
 }
 
+/** What technical mode reveals under a name: the property that identifies the entity, and its value. */
+export interface TechnicalIdentity {
+    /** `urn`, or the data source's identifier property (`id`, `identifier`, …). */
+    property: string
+    value: string
+}
+
+/** An identifier as text: a non-blank string, or a number written out. */
+function identifierText(value: unknown): string | undefined {
+    return typeof value === 'number' && Number.isFinite(value) ? String(value) : text(value)
+}
+
 /**
- * The quiet second line technical mode reveals: the entity's technical identity,
- * or undefined when there is nothing to add.
+ * The quiet second line technical mode reveals: the entity's identifier. That is
+ * the value of the identifier property its data source keys entities by
+ * (`identityProperty`, from the data source's resolved mapping), or the URN when
+ * the source keys by `urn`, maps nothing, or this entity has no value of its own.
+ * `urn` stands in for data that carries none (a trace card drawn before its
+ * node loaded).
  *
- * `qualifiedName` first because it is the fully-qualified path a data engineer
- * asks for; the URN when the qualified name is absent or is just the display
- * name again. Returns undefined whenever the value would repeat the name already
- * on screen, so a row never renders the same string twice.
+ * Undefined in business mode, when there is no identifier at all, and when the
+ * identifier is `name`, the name the row already shows, so no row prints the
+ * same string twice.
  */
-export function technicalSubtitle(
+export function technicalIdentity(
     data: EntityNameFields | null | undefined,
     mode: PersonaMode,
-): string | undefined {
+    { identityProperty, urn, name }: { identityProperty?: string | null; urn?: string; name: string },
+): TechnicalIdentity | undefined {
     if (mode !== 'technical') return undefined
-    const d = data ?? {}
-    const name = resolveEntityName(d, mode)
-    for (const candidate of [text(d.qualifiedName), text(d.urn)]) {
-        if (candidate && candidate !== name) return candidate
-    }
-    return undefined
+    const d = (data ?? {}) as Record<string, unknown>
+    const property = identityProperty?.trim() || 'urn'
+    const own = property === 'urn' ? undefined : identifierText(readSchemaField(d, property))
+    const value = own ?? text(d.urn) ?? text(urn)
+    if (value === undefined || value === name) return undefined
+    return { property: own === undefined ? 'urn' : property, value }
 }

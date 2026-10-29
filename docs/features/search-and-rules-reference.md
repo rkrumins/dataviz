@@ -33,7 +33,7 @@ validate → scope → execute pipeline and its configuration — is in
 | **Display rule** | A label, colour and icon on every entity a predicate matches | The View's config (`layout.referenceLayout.displayRules`), or a draft's layout overlay | The View, per branch |
 | **Library pack** | A View's rules and saved queries as a file (`*.library.json`) | A file | Moves between Views |
 | **"Mine" searches** | A user's recent, pinned and named searches | Browser `localStorage` (`synodic.advancedSearch.recent.v1`) | One browser — no API |
-| **Templates** | Built-in starting queries | Frontend code (`searchTemplates.ts`) | Everywhere — no API |
+| **Recipes** | Ready-made questions in the View's own words (its types, tags, keys and layers) | Frontend code (`panel/recipes/recipes.ts`) | Every View — no API |
 
 The same predicate model serves search, saved queries and display rules, so a
 predicate that works in one works in the others (display rules have a few more
@@ -1048,11 +1048,11 @@ curl -s -b "$JAR" -o pii.csv \
   queries belong to one View. "Publish to a data source" is the fan-out above;
   there is no bulk endpoint, and a View created later doesn't inherit anything.
 - **Saved queries keep only the predicate** — not the scope mode, options,
-  aggregations, sort or template inputs.
+  aggregations or sort.
 - **"Mine" searches stay in one browser**: no API, no sync, not in any export.
 - **A View file (`*.view.json`) carries display rules but not saved queries**;
   export the library for those.
-- **No custom templates** without a code change (`searchTemplates.ts`).
+- **No custom recipes** without a code change (`panel/recipes/recipes.ts`).
 - **Rules only add chips.** No node colour, hiding, priority, first-match,
   description, owner or per-rule scope.
 - **A rule can't use** `withinHops`, `path`, lineage relationships past one

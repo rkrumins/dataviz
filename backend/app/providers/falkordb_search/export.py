@@ -52,6 +52,7 @@ from backend.app.providers.falkordb_search.plan import (
     Context,
     Unit,
     _rel,
+    expand_unit,
     make_plan,
     match_statement,
 )
@@ -215,6 +216,9 @@ class _ExportWork:
     def __init__(self, session: Session, ctx: Context, run, objects, manifest: Manifest) -> None:
         self.session, self.ctx, self.run, self.objects = session, ctx, run, objects
         self.manifest = manifest
+
+    async def expand(self, unit: Unit, timeout_s: float) -> Optional[List[Unit]]:
+        return await expand_unit(unit, self.ctx, self.run, timeout_s)
 
     async def begin(self, store: SessionStore) -> None:
         # Read with the lease held: the parts of the latest commit.
@@ -408,6 +412,7 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
         _find,
         request_deadline,
         session_id as session_id_of,
+        statement_s,
         unit_budget,
         within_hops,
     )
@@ -445,7 +450,10 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
         )
     query_id = _query_id(query, context.scope_hash, fmt, cols)
     sid = session_id_of(query_id, context.data_version, None)
-    session = await _find(store, session_id, query_id, None) or await store.load(sid)
+    session = await _find(store, session_id, query_id, None)
+    if session is not None and session.status == FAILED:
+        raise SearchFailed(f"export failed: {session.error}")
+    session = session or await store.load(sid)
     if session is not None and time.time() >= _keep_until(session):
         # Its first parts may be swept by now: export afresh.
         await store.delete(session.sid)
@@ -459,7 +467,7 @@ async def execute_export_session(provider, query: SearchQuery, *, context: Searc
         else:
             plan = await make_plan(
                 provider, query, compiler,
-                run=lambda c, p: run(c, p, max(1.0, settings.chunk_timeout_ms / 1000.0)),
+                run=lambda c, p: run(c, p, max(1.0, statement_s(settings))),
                 width=settings.chunk_width, walk_max=settings.walk_max,
                 timeout_s=max(0.5, deadline + _GRACE_S - time.monotonic()),
             )

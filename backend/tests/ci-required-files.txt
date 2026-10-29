@@ -164,6 +164,7 @@ tests/test_native_query_limit.py
 tests/test_native_query_sharing.py
 tests/test_nav_catalogue.py
 tests/test_neo4j_native_query.py
+tests/test_node_identity_write_binding.py
 tests/test_node_property_hygiene.py
 tests/test_object_store.py
 tests/test_outbox_relay.py
@@ -236,6 +237,7 @@ tests/test_search_rules.py
 tests/test_search_rules_examples.py
 tests/test_search_schema_endpoint.py
 tests/test_search_semantics.py
+tests/test_search_session_store_outage.py
 tests/test_search_values.py
 tests/test_seed_memory.py
 tests/test_seed_templates.py

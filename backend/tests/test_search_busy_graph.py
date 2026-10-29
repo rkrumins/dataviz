@@ -34,9 +34,15 @@ class _Db:
     """Answers ``db.labels()`` — or fails it, ``fail`` times — and nothing
     else, unless a test scripts more."""
 
-    def __init__(self, error=None, *, fail=1, labels=("Dataset",)):
+    def __init__(self, error=None, *, fail=1, labels=("Dataset",), graph_elsewhere=False):
         self.error, self.fail, self.labels = error, fail, list(labels)
+        self.graph_elsewhere = graph_elsewhere
         self.lookups = 0
+
+    async def _is_verified_missing_graph(self, exc):
+        """"Empty key" means no graph yet — unless the cluster still holds
+        it on another node (``graph_elsewhere``): a misrouted read."""
+        return "empty key" in str(exc).lower() and not self.graph_elsewhere
 
     async def _ro_query(self, cypher, params=None, *, timeout=None, op=None):
         if cypher.startswith("CALL db.labels()"):
@@ -74,6 +80,13 @@ class TestTheLabelLookup:
     async def test_a_graph_that_does_not_exist_yet_has_no_labels(self):
         db = _Db(RuntimeError("Invalid graph operation on empty key"))
         assert await _searchable_labels(db, timeout_s=1.0) == []
+
+    async def test_a_misrouted_read_on_a_cluster_is_not_an_empty_graph(self):
+        """A read that lands on a node without the graph answers "empty key"
+        too. Taken at its word, the search completed with 0 matches."""
+        db = _Db(RuntimeError("Invalid graph operation on empty key"), graph_elsewhere=True)
+        with pytest.raises(ProviderBusy):
+            await _searchable_labels(db, timeout_s=1.0)
 
     async def test_value_suggestions_say_they_are_incomplete(self):
         out = await suggest_property_values(_Db(TimeoutError()), key="owner")

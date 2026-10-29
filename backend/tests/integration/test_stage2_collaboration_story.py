@@ -129,7 +129,9 @@ async def _story(prov: str, key: str) -> None:
             assert r.status_code == 200 and r.json()["clean"] is False, r.text
             pulled = r.json()
             assert [(x["entity_id"], x["path"], x["ours"], x["theirs"]) for x in pulled["conflicts"]] == [
-                ("urn:t:child", ["displayName"], "Alice's child", "Pat's child")], pulled
+                ("urn:t:child", ["displayName"], "Alice's child", "Pat's child"),
+                # a rename carries the source's name property with it (#595), so it clashes too
+                ("urn:t:child", ["properties", "name"], "Alice's child", "Pat's child")], pulled
             mine = pulled["seeds"]["urn:t:child"]
             assert mine["displayName"] == "Alice's child", mine
             r = await c.post(f"{B}/rebase", json={"resolutions": {"urn:t:child": mine}}, headers=_as("alice"))
@@ -179,6 +181,8 @@ async def _story(prov: str, key: str) -> None:
             last = r.json()["versions"][0]
             assert (last["commit_id"], last["actor"], last["commit_message"]) == (merged, "pat", "ship it"), last
             assert last["changes"] == [{"path": ["displayName"], "kind": "changed",
+                                        "before": "Pat's child", "after": "Alice's child"},
+                                       {"path": ["properties", "name"], "kind": "changed",
                                         "before": "Pat's child", "after": "Alice's child"}], last
             log = (await c.get(f"{V1}/graphs/{gid}/commits", headers=_as("bob"))).json()["commits"]
             assert (log[0]["commit_id"], log[0]["actor"], log[0]["contributors"]) == (

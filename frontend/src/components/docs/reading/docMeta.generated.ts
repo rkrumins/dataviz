@@ -119,7 +119,7 @@ export const docMeta: Record<string, DocMeta> = {
     "path": "docs/features/view-portability.md"
   },
   "feature-search-and-rules-reference": {
-    "updated": "2026-10-27",
+    "updated": "2026-10-28",
     "path": "docs/features/search-and-rules-reference.md"
   },
   "top-level-nodes-performance": {
@@ -309,7 +309,7 @@ export const guideMeta: Record<string, DocMeta> = {
     "path": "docs/guide/ADVANCED_SEARCH.md"
   },
   "finding-connections": {
-    "updated": "2026-10-27",
+    "updated": "2026-10-28",
     "path": "docs/guide/FINDING_CONNECTIONS.md"
   },
   "lineage-lens": {

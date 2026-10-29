@@ -33,7 +33,7 @@ const PATH = {
 
 function renderPaths(result: Record<string, unknown>) {
     const view = {
-        kind: 'results', template: {}, inputs: {},
+        kind: 'results',
         query: {
             predicate: { kind: 'path', sourceUrns: ['urn:a'], targetUrns: ['urn:b'] },
             scope: { viewId: 'view-1' },

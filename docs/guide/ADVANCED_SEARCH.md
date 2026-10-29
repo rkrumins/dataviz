@@ -73,6 +73,9 @@ server as you type (from two characters; **Enter** searches even one).
 - A scope chip — **inside *Orders* ×** — means the search is limited to one
   container. Remove it with **×**.
 - Your last five searches in this View come back when you focus an empty box.
+- When nothing matches, it says what it looked for — *No name inside Sales
+  starts with "zzz"* — and offers broader searches: **Contains**, **Look in
+  everything**, **Whole view**.
 
 What you type becomes a real filter, so **Refine** opens the panel on exactly
 the same query, ready to extend.
@@ -101,7 +104,9 @@ server works out the View's boundary itself, whatever the browser sends.
 ### Ask in plain words
 
 Ask on the query card — **Or ask in plain words…** under the filters in
-**Form**, at the top in **Sentence**. Type a question the way you'd say it:
+**Form** (in Connections, under From and To), at the top in **Sentence**. While
+the query is empty it offers questions to **Try**. Type a question the way
+you'd say it:
 
 | You ask | It reads as |
 | --- | --- |
@@ -117,22 +122,30 @@ Ask on the query card — **Or ask in plain words…** under the filters in
 | `where does orders come from` · `what does orders depend on` · `what does orders use` | Everything that feeds *orders* |
 | `what does "Sales Ops" contain` · `what is orders linked to` | Everything inside it · everything linked to it |
 | `datasets with more than 100 columns` | How many it holds: a count of the columns inside |
+| `what flows from bronze to gold` · `connections between datasets and dashboards` | A [Connections](#connections-the-edges-themselves) search between two places: the lineage edges from one to the other · every edge between them, either way. A word that names a layer reads as the layer, with chips for its other readings |
+| `path from orders to revenue` · `how does orders reach revenue` · `how is orders connected to revenue` | A route search: the routes from one to the other, downstream, up to 4 hops (3 when both ends are conditions) — `between` and `connected` go either way. A name on its own is that entity |
+| `tables` · `columns` · `fields` · `reports` · `databases` · `pipelines` · `jobs` | The words catalogs use, for this View's types: datasets · schema fields · dashboards · containers · data flows · data jobs — when the View has the type and none of its own goes by the word |
 | `connections from columns tagged PII to dashboards` · `edges from datasets to the gold layer through produces, either way` | A [Connections](#connections-the-edges-themselves) search — each end read as a question of its own; `through …` names edge types or a class, `either way` both directions |
 
 As you type it **reads the question back** — **Reads as**, and how many it
 matches — before anything changes. A word with more than one reading, such as
 a tag that is also a container's name, shows its readings as chips: pick the
 one you mean. A name several entities share says so and lets you pick one.
-Words it can't place are **searched for by name**, and it lists them. What it
-leaves out it says, in amber, rather than reading it as something else: an
-owner in a View with no owner property, `without a steward` in a View with no
-such property (never "whose name doesn't contain steward"), relationships
-nested more than 3 deep.
+Words it can't place are **searched for by name**, and it lists them; one it
+nearly places — a misspelt type or tag, `datsets tagged PII` — gets **Did you
+mean “datasets”?**, a click to put right. What it leaves out it says, in
+amber, rather than reading it as something else: an owner in a View with no
+owner property, `without a steward` in a View with no such property (never
+"whose name doesn't contain steward"), relationships nested more than 3 deep.
+A reading that finds nothing says where its matches run out — **Nothing
+matches past “…” — try** — with the fixes an empty answer offers, each applied
+as **Enter** would.
 
 **Enter** applies the question and runs it; **Esc** clears it; **↑** and **↓**
 bring back earlier questions. Start with **and** — `and tagged PII` — to add to
-the query rather than replace it (**The query becomes** says the result). Over
-an answer, with the builder folded away, the same bar sits above the results.
+the query rather than replace it (**The query becomes** says the result). A
+question never adds to a connection: in Connections it replaces it. Over an
+answer, with the builder folded away, the same bar sits above the results.
 
 > **Note:** Ask is rule-based. It reads your View's own types, tags, properties
 > and layers; nothing you type is sent to an AI service.
@@ -160,10 +173,20 @@ more ways to start. Add more later with the same field under the cards, or
 the layer's rules, or with its container — picked from the View's layers by
 name.
 
+**Within N hops of…** finds everything a few edges from entities you name:
+pick them by name, then the direction (**Either way**, **Downstream**,
+**Upstream**), how many hops (up to 10), and through which edges, with an
+edge filter if you need one. **Inside Subtree** picks its container by name
+too, from anywhere in the View, on the canvas or not.
+
 In **Form**, rows are joined with **AND**; click an **AND** between them to
 match any row (**OR**) instead. Select several rows to **Group as AND / OR** on their own, or
-add a **NOT group** to exclude what it matches.
-**Undo** and **Redo** step through your edits; **New** starts again.
+add a **NOT group** to exclude what it matches. A group nested deeper than
+the Form shows says so: **Edit in Code** opens it in **Code**, selected.
+**Undo** and **Redo** step through your edits — `⌘Z` / `Ctrl+Z` and `⌘⇧Z` /
+`Ctrl+Shift+Z` anywhere in the panel but a text field, which keeps its own —
+and **New** starts again. The panel's **Clear** is one more step: **Undo**
+brings the query back.
 
 **A finished filter reads as one line** — *Type is Dataset*, *Is tagged
 #Certified* — and each part you picked opens that filter's editor where it is.
@@ -211,6 +234,11 @@ The query card shows the same query four ways — **Form**, **Sentence**,
 your choice. It opens in **Form**, the filter cards; **Sentence** is the guided
 alternative.
 
+The four are tabs at the top of the card, with **New**, **Save** and **Tag**
+beside them. Below them: **Entities** or **Connections**, **Undo** and
+**Redo**, **Auto** and **Run**. The header is there whether the query is empty
+or not, so another editor — or Undo after **New** — is always a click away.
+
 **Sentence** reads the query the way you'd say it: *Find* **datasets** *that
 are tagged* **#PII** *and* **feed** **a dashboard**. Every highlighted word is
 a token: click one to change it — a type, a tag, a value, a relationship's
@@ -222,8 +250,8 @@ verb, how far it reaches. A dashed **pick…** is something still to fill in.
   these** and **Remove**.
 - **all** or **any** after *Find* chooses whether every line must match or any
   one.
-- What a sentence can't show — within N hops, a number of edges, groups nested
-  very deep — says **Edit in Code**.
+- What a sentence can't show — a number of edges, groups nested very deep —
+  says **Edit in Code**, which opens Code mode with that part selected.
 
 When the query has a relationship or a route, a **map** above the sentence
 draws its shape — *Datasets* → *feed* → *Dashboard* — with each part's count.
@@ -561,9 +589,10 @@ in [Native read-only queries: security](/docs/native-queries).
 
 ### Running
 
-**Auto** (the default) runs the query a moment after each complete edit;
-**Manual** waits for **Run** — handy while you build a large query. Rows you
-haven't finished are left out of the run, never guessed at.
+**Auto** (the switch beside **Run**, on by default) runs the query a moment
+after each complete edit; switched off, the query waits for **Run** — handy
+while you build a large query. Rows you haven't finished are left out of the
+run, never guessed at.
 
 ### Recipes gallery
 
@@ -574,18 +603,24 @@ words — *Datasets without an owner*, *Everything tagged PII or GDPR* — and
 says how many it finds; one naming a type, tag or property the View doesn't
 have isn't offered.
 
-The empty query card starts with one per intent (**All *N*** shows the rest);
-**Library → Recipes** and an idle **Search Studio** show them all. A recipe
-ready to run runs at once. One with something to fill in — *Everything one
-entity feeds*, *Find something by name* — says **fill in** and opens the query
-at that blank. Picking a recipe replaces your current query.
+The empty query card starts with one per intent — its first ready to run, or
+else one to fill in (**All *N*** shows the rest); **Library → Recipes** and an
+idle **Search Studio** show them all. A recipe ready to run runs at once. One
+with something to fill in — *Everything one entity feeds*, *Find something by
+name* — says **fill in** and opens the query at that blank. One that finds
+nothing in this View says **none in this view**. Picking a recipe replaces
+your current query.
+
+**Discovery** includes a [Connections](#connections-the-edges-themselves)
+search, *What flows from Bronze to Gold*: the lineage edges from the View's
+first layer to its second, edge by edge.
 
 ---
 
 ## Working with results
 
 The **match bar** above the results says how many entities match and how long
-it took, and holds the canvas controls:
+it took (*432 ms*, *8.6 s*, *1:23*), and holds the canvas controls:
 
 | Control | What it does |
 | --- | --- |
@@ -601,14 +636,17 @@ The canvas keeps your matches highlighted after you close the panel, until you
 clear the search or switch View. Collapsed containers show **N matches inside**.
 
 A match found through a lineage relationship offers **How it matches**: the
-routes from it to the relatives it was matched by, drawn as paths. **Undo**
-brings the results back.
+routes from it to the relatives it was matched by, drawn as paths. **Back to
+results** returns to the search they explain.
 
 Below the bar, matches are grouped (by layer in a Context View, by parent on
 the other canvases). A group's **Search inside this group** adds an *Inside
 Subtree* filter for it. **Load more** fetches the next thousand; **Load all**
-keeps going until every match is listed. A page that fails to load says why,
-and **Try again** asks for it once more — the matches already listed stay.
+keeps going until every match is listed, for up to 10,000 matches. Past that it
+offers **Export all *N*** instead, which writes every match to a file in one
+pass rather than scanning the View again for every thousand. A page waits out
+a graph store that can't answer just then. One that still fails says why, and
+**Try again** asks for it once more. The matches already listed stay.
 
 The answer refines the query, not just the list:
 
@@ -621,9 +659,25 @@ The answer refines the query, not just the list:
 
 Each of these changes the query itself, so **Undo** takes it back.
 
-On a very large View the first answer arrives quickly and keeps filling in —
-**scanning N%** shows how far it has got, and the count reads **N+** until it's
-exact. Nothing needs clicking.
+On a very large View the first answer arrives quickly and keeps filling in.
+The match bar reads ***N* found · scanning 45% · 1:23**: what it has found so
+far, how far through the View it is, and for how long. Nothing needs clicking.
+After 20 seconds with nothing new it adds **The graph is busy — still
+working.** **Stop** ends the scan where it is, and what it found stays.
+**Resume** picks it up again without reading anything twice.
+
+If the graph store restarts, fails over or stops answering during a search,
+the search waits it out for up to 3 minutes, asking again less often as it
+goes, then carries on where it was. Past that it reads **Paused: the graph
+didn't answer for a few minutes**, with what it found so far and **Resume**.
+A search the server couldn't finish says **Search failed**, with why, and
+**Try again** runs it again.
+
+The count is exact once the scan finishes, with one exception. If one entity
+and what's inside it, or one entity's edges, can't be read in the longest time
+a request allows, or reading it keeps cutting the connection to the graph
+store, the search leaves that part out rather than fail. The count then reads
+**at least *N***, and a note under the bar names what was left out.
 
 ### Exporting matches
 
@@ -762,6 +816,7 @@ go, and says before you save if the search is one a rule can't be.
 | `⌘↵` / `Ctrl+Enter` | Search box | Open the panel with this query |
 | `Esc` | Search box | Close the list; press again to clear the search |
 | `J` / `↓` · `K` / `↑` | Panel (outside a text field) | Next / previous match |
+| `⌘Z` / `Ctrl+Z` · `⌘⇧Z` / `Ctrl+Shift+Z` | Panel (outside a text field) | Undo · redo a change to the query |
 | `Enter` | Panel (outside a text field or button) | Reveal the current match on the canvas |
 | `E` | Panel (outside a text field) | Open Search Studio |
 | `Esc` | Search Studio | Back to the panel (closes an open picker first) |
@@ -812,7 +867,7 @@ type:dataset owner IS EMPTY
 type:dataset rowCount >= 1000000
 ```
 
-**Orphans — no lineage in or out.** Entity type is `dataset` and **No lineage
+**No lineage in or out.** Entity type is `dataset` and **No lineage
 edges**. Swap in **No upstream lineage** for sources nothing feeds.
 
 ```text
@@ -1033,6 +1088,8 @@ LIMIT 200
 | Connections | Direct edges: one edge from a From match to a To match |
 | Connections lit on the canvas | The first 2,000 loaded; under **On Hover** or **Adaptive**, the 1,000 lines drawing the most |
 | A page of connections | 500 |
+| **Load all** | 10,000 matches; past that, **Export all** writes them to a file |
+| Waiting out a graph store that doesn't answer | 3 minutes, then **Paused** with **Resume** |
 
 **Future scope: multi-hop connections.** A Connections search finds direct
 edges. The edges of every route of up to *N* hops from a From match to a To
@@ -1064,6 +1121,9 @@ steps tests reach.
 | "*This view places … entities by hand…*", "*… too many for a layer filter to follow quickly*" | The layer filter follows the View's own placement, and this View's is too big to follow | Filter by type, tag or container instead |
 | "*This link can't follow lineage or relationships*" | You opened the View through a share link | Open it as a member of the workspace |
 | The count reads **N+** or the results say they stopped | The answer was still being counted when the time ran out | Run it again, or narrow it; **Load all** fetches every match |
+| **The graph is busy — still working.** | Nothing new has come back for 20 seconds | Wait, or **Stop** and narrow the query. What it found stays |
+| **Paused: the graph didn't answer for a few minutes** | The graph store was restarting, failing over or out of reach for longer than a search waits | **Resume** once it's back. The search carries on where it was |
+| The count reads **at least *N***, with "*… couldn't be checked in time, so it was left out*" | One entity and what's inside it, or one entity's edges, couldn't be read in the longest time a request allows, or kept cutting the connection to the graph store | Everything else is counted. Narrow the query to leave that entity out, or run it again when the graph is less busy |
 | **Save** offers only **Just me** | You can't edit this View | Ask someone who can, or share the search with them |
 | "*A query named … is already saved*" | Names are unique in a View (ignoring case) | Choose another name |
 | **Export** is missing | The **Export graph data** feature is off | Ask your administrator |
