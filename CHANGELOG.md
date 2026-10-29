@@ -9,6 +9,91 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Canvas reads off the masters of a Redis Cluster
+
+### Fixed
+
+- **Canvas reads could take a master out of a Redis Cluster, and lose writes.** On one replica
+  per shard, the master took every second canvas read, with budgets up to 60 s. For 10 s after any
+  write through the platform, every pod also sent it all reads of that graph, including after each
+  batch of an aggregation run. A write on a node waits for every read of its graph that the node
+  has queued, and the node answers nothing until they drain, the cluster's health checks included
+  (see Known limitations).
+
+  We ran a load test on a ~5M-entity graph with one replica per shard and a write every half
+  second: 20 canvas users, two of them opening a view that takes ~10 s, and the web tier's
+  admission of 6 reads at a time.
+
+  | | Before | After |
+  |---|---|---|
+  | Master failovers in 3 minutes | 3 | 0 |
+  | Writes that landed | 12 (3 more failed as the master was demoted) | 202, none slower than 5.6 s |
+  | Longest time the master answered nothing | 28 s | 5.5 s |
+  | Canvas loads that completed | 137 | 272 |
+
+  With aggregation-style writes and edits in place of the plain writes, the master failed over
+  twice before; after, not at all.
+
+  Canvas reads now go to replicas. A master answers only these:
+  - the read-back of a person's own edit, for 10 s after it;
+  - reads that no replica in step can take;
+  - the aggregation pipeline's own reads.
+
+  No read runs on a master for more than two fifths of `cluster-node-timeout` (6 s at 15 s). A
+  read stopped there runs again on a replica with its full budget.
+- **An aggregation run no longer sends every reader of its graph to the master.** Each batch
+  pinned every pod's reads of that graph to the master for 10 s, so during a run the whole canvas
+  was on the node taking the writes. The pipeline reads its own writes from the master already. A
+  person's edit still pins the read-back.
+- **A read sent to a replica could run on the master with no limit.** When the replica no longer
+  served the graph, mid-failover or moved to another shard, the Redis client followed its
+  `MOVED` to the master. The read then ran there with the budget it had been given for the
+  replica. It now comes back: that replica is benched, and the master takes the read within its
+  share.
+
+### Changed
+
+- **On a cluster, the master no longer takes a turn in the read rotation.**
+  `FALKORDB_MASTER_READ_SHARE` now defaults to none on a cluster; standalone and sentinel keep one,
+  as before. On one replica per shard, that replica now serves every canvas read: half the read
+  capacity the rotation gave. Keeping the turn is not safe even with every read on the master
+  capped at 6 s: run without the web tier's admission, the load test above still left the master
+  answering nothing for 18 s.
+- **A canvas read that lands on a master stops at 6 s and runs again on a replica.** A view that
+  takes 10–15 s to open takes 6 s longer when it lands on the master. That happens in the 10 s
+  after someone's edit, or when no replica is in step.
+
+### Upgrading
+
+- Nothing is required. To have more read capacity, add replicas per shard (each adds
+  `THREAD_COUNT` query threads). `FALKORDB_MASTER_READ_SHARE=1` gives the master its turn back,
+  with every read there capped at 6 s; see Known limitations for what that risks. See
+  [FalkorDB deployment](docs/FALKORDB_DEPLOYMENT.md#sizing--protection-parameters).
+
+### Known limitations
+
+- **FalkorDB's graph lock favours readers.** FalkorDB 4.18.11, and its current source, guards
+  writer preference with `#ifdef PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP`. glibc declares
+  that as an enum, so the setting is compiled out. A write therefore waits for every queued read
+  of its graph on that node, not only the reads already running. Capping each read does not bound
+  the wait; only keeping reads off the node that takes the writes does. A dozen clients read one
+  graph on its master, every read stopped at 5.5 s, with a write every half second. The master
+  still answered nothing for 8–15 s at a time, and for 32 s with heavier reads, when it was
+  failed over. With no writes it never paused. A fix belongs upstream.
+- **A replica busy with reads stalls under a steady stream of writes.** It applies each write the
+  same way, on its main thread. It is flagged, never failed over. While it is out, reads fall back
+  to the master: capped, but many at once.
+- **A view that needs more than 6 s can fail while its replica is stalled.** With no replica in
+  step, it can only run on the master, which stops it at 6 s; the canvas then retries it. In a
+  lighter load test (6 canvas users, two of them opening a ~10 s view, a write every half second),
+  5 of 14 such opens finished. Before this change 10 of 11 did, by holding the master long enough
+  for it to be failed over. Under the heavier load above, none finished. A second replica per
+  shard gives reads somewhere to go while a long read stalls one.
+- **Every canvas read of a graph goes to its master for 10 s after any edit**, on every pod, so
+  that the person who edited sees the edit.
+
+---
+
 ## [Unreleased] — New and renamed entities are named and keyed the way their source does it
 
 ### Added
@@ -136,7 +221,7 @@ limitations** — a changelog that only lists good news is not worth reading.
   they can still hold a master up the same way. In a load test on a ~5M-entity graph (20 canvas
   users, a write a second, a core per node, no searches) canvas reads froze a master for 28–49 s
   and it was failed over, with and without this change. Bounding canvas reads is a change of its
-  own.
+  own: see "Canvas reads off the masters of a Redis Cluster", above.
 
 ---
 

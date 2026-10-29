@@ -218,6 +218,7 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `FALKORDB_CLUSTER_NODES` | — | cluster seed nodes | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py` |
 | `FALKORDB_DOCKER_LOCALHOST_REWRITE` | (empty) | For a backend running in Docker: a graph data source stored with host `localhost` or `127.0.0.1` connects to this host instead, for example `host.docker.internal`. Unset, nothing is rewritten. | `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_HOST` | `falkordb` / `localhost` / — *(differs by call site)* | Host of the default FalkorDB graph store. Data sources registered in the app keep their own host; `LOCAL_DEV_FALKORDB_OVERRIDE` makes this one win during local development. | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py`, `backend/app/providers/manager.py` +15 more |
+| `FALKORDB_MASTER_READ_SHARE` | — | the master's turns in the read rotation, to each in-step replica's one; unset: none on a cluster, one on standalone and sentinel | `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_MODE` | — | standalone \| sentinel \| cluster | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py`, `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_PASSWORD` | — (secret, set your own) | Password for the default FalkorDB graph store. `FALKORDB_PASSWORD_FILE` takes precedence. | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py`, `backend/scripts/cleanup_graph_indices.py` +1 more |
 | `FALKORDB_PASSWORD_FILE` | — (secret, set your own) | Path to a mounted file holding the default graph store's password; wins over `FALKORDB_PASSWORD`. A missing or empty file is an error, never a silent connection without a password. | `backend/app/api/v1/endpoints/redis_config.py`, `backend/app/providers/falkordb_connection.py` |
@@ -312,7 +313,6 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `FALKORDB_LABEL_WARMUP_COOLDOWN_S` | `900` | `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_LOAD_MAX_WAIT_S` | `900` | `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_LOAD_RETRY_BASE_S` | `0.5` | `backend/app/providers/falkordb_provider.py` |
-| `FALKORDB_MASTER_READ_SHARE` | `1` | `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_NATIVE_PROPERTY_BUDGET` | `50000` | `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_NOREPLICAS_RETRY_AFTER_S` | `180` | `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_POOL_SIZE` | — | `backend/app/providers/falkordb_connection.py` |
