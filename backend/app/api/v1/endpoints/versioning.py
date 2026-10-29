@@ -27,7 +27,7 @@ import inspect
 import json
 import logging
 from contextlib import contextmanager
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -3888,6 +3888,132 @@ async def count_view_pull_requests(
     if ds:
         on_ds = await svc.count_pulls(data_source_id=ds, active_only=True, viewer=viewer)
     return {"fromView": from_view, "onDataSource": on_ds}
+
+
+# --------------------------------------------------------------------------- #
+# Drafts and reviews policy                                                    #
+# --------------------------------------------------------------------------- #
+class DraftsPolicySettings(_ApiModel):
+    """One level's own drafts and reviews settings, on a write: a field left out stays as it is,
+    and ``"inherit"`` clears it, so the next level's holds (``drafts_policy``)."""
+    default_visibility: Optional[Literal["public", "private", "inherit"]] = Field(
+        default=None, alias="defaultVisibility")
+    levels: Optional[Literal["any", "public_only", "private_only", "inherit"]] = None
+    self_approval: Optional[Union[bool, Literal["inherit"]]] = Field(default=None, alias="selfApproval")
+    self_merge: Optional[Union[bool, Literal["inherit"]]] = Field(default=None, alias="selfMerge")
+
+
+class EffectiveDraftsPolicyModel(_ApiModel):
+    default_visibility: str = Field(alias="defaultVisibility")
+    levels: str
+    self_approval: bool = Field(alias="selfApproval")
+    self_merge: bool = Field(alias="selfMerge")
+    sources: Dict[str, str]
+
+
+class WorkspaceDraftsPolicyResponse(_ApiModel):
+    settings: Dict[str, Any]
+    effective: EffectiveDraftsPolicyModel
+
+
+class DataSourceDraftsPolicyResponse(_ApiModel):
+    overrides: Dict[str, Any]
+    workspace: Dict[str, Any]
+    effective: EffectiveDraftsPolicyModel
+
+
+async def _policy_workspace(session: AsyncSession, ws_id: str):
+    from backend.app.db.models import WorkspaceORM
+    ws = await session.get(WorkspaceORM, ws_id)
+    if ws is None or ws.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return ws
+
+
+async def _policy_source(session: AsyncSession, ws_id: str, data_source_id: str):
+    from backend.app.db.models import WorkspaceDataSourceORM
+    ds = await session.get(WorkspaceDataSourceORM, data_source_id)
+    if ds is None or ds.workspace_id != ws_id or ds.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="data source not found in workspace")
+    return ds
+
+
+async def _record_policy_change(session: AsyncSession, scope: str, before: dict, after: dict,
+                                **target) -> None:
+    """A real change, once, with what it was and what it became: in the same transaction as the
+    change, since both are in this database."""
+    from backend.app.services.activity import recorder
+    await recorder.record_for_request(
+        session, "workspace.versioning.drafts_policy_updated", **target,
+        details={"scope": scope, "from": before, "to": after})
+
+
+@router.get("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse)
+async def get_workspace_drafts_policy(
+    ws_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The workspace's own drafts and reviews settings, and the policy its data sources start
+    from: the level a new draft starts at, the levels it may have, and whether a review's opener
+    may approve and merge it."""
+    from backend.app.services import drafts_policy
+    ws = await _policy_workspace(session, ws_id)
+    return {"settings": drafts_policy.settings_of(ws), "effective": drafts_policy.resolve(ws).as_dict()}
+
+
+@router.put("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse)
+async def put_workspace_drafts_policy(
+    ws_id: str, body: DraftsPolicySettings,
+    _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Set the workspace's drafts and reviews policy (workspace admins). A data source's own
+    override still wins. A change is recorded in the activity log; drafts already open keep their
+    level."""
+    from backend.app.services import drafts_policy
+    ws = await _policy_workspace(session, ws_id)
+    before, after = drafts_policy.apply(ws, drafts_policy.changes_from(body))
+    if after:
+        await _record_policy_change(session, "workspace", before, after, workspace_id=ws_id,
+                                    target_type="workspace", target_id=ws_id, target_label=ws.name)
+    return {"settings": drafts_policy.settings_of(ws), "effective": drafts_policy.resolve(ws).as_dict()}
+
+
+def _source_policy(drafts_policy, ws, ds) -> dict:
+    return {"overrides": drafts_policy.settings_of(ds), "workspace": drafts_policy.settings_of(ws),
+            "effective": drafts_policy.resolve(ws, ds).as_dict()}
+
+
+@router.get("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse)
+async def get_data_source_drafts_policy(
+    ws_id: str, data_source_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A data source's drafts and reviews policy: its own overrides, its workspace's settings, and
+    what holds for it, with the level each field came from."""
+    from backend.app.services import drafts_policy
+    ds = await _policy_source(session, ws_id, data_source_id)
+    return _source_policy(drafts_policy, await _policy_workspace(session, ws_id), ds)
+
+
+@router.put("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse)
+async def put_data_source_drafts_policy(
+    ws_id: str, data_source_id: str, body: DraftsPolicySettings,
+    _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Override the workspace's drafts and reviews policy for one data source (workspace admins),
+    field by field; ``"inherit"`` goes back to the workspace's. A change is recorded once."""
+    from backend.app.services import drafts_policy
+    from backend.app.services.activity import recorder
+    ds = await _policy_source(session, ws_id, data_source_id)
+    before, after = drafts_policy.apply(ds, drafts_policy.changes_from(body))
+    if after:
+        await _record_policy_change(session, "data_source", before, after,
+                                    **recorder.data_source_target(ds))
+    return _source_policy(drafts_policy, await _policy_workspace(session, ws_id), ds)
 
 
 @router.get("/data-sources/{data_source_id}/pull-requests", response_model=List[PrResponse])

@@ -88,6 +88,7 @@ tests/test_diff_too_large_api.py
 tests/test_discovery_never_creates_graphs.py
 tests/test_draft_overlay_lazy.py
 tests/test_draft_overlay_paging.py
+tests/test_drafts_policy.py
 tests/test_drift_probe_cost.py
 tests/test_edge_integrity_index.py
 tests/test_edge_update_patch_semantics.py
