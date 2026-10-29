@@ -47,7 +47,7 @@ from backend.app.api.v1.versioning_gate import (SyncOverrides, require_publish_f
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import (data_source_repo, group_repo, provider_repo,
+from backend.app.db.repositories import (data_source_repo, group_repo, notification_repo, provider_repo,
                                          service_account_repo, user_repo)
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
@@ -1635,6 +1635,53 @@ async def resolve_graph_open(
 # --------------------------------------------------------------------------- #
 # Draft editing                                                                #
 # --------------------------------------------------------------------------- #
+# What a draft's people are told, by kind: title (``{name}``: the draft's) and body.
+_DRAFT_NEWS = {
+    "draft.sent_for_review": ('"{name}" is up for review', "A draft you worked on is waiting for approval."),
+    "draft.published": ('"{name}" was published',
+                        "The changes in a draft you worked on are in the published version now."),
+    "draft.discarded": ('"{name}" was discarded',
+                        "A draft you worked on was abandoned. Its changes weren't published."),
+    "draft.made_private": ('"{name}" was made private',
+                           "You no longer have access to it. Anything you had staged in it was saved "
+                           "first, under your name."),
+    "draft.transferred": ('You own "{name}" now', "A draft was handed to you."),
+}
+
+
+async def _tell_draft_people(session: AsyncSession, svc: GraphVersioningService, kind: str, *,
+                             ws_id: str, meta: dict, graph_id: str, branch_id: str, actor: str,
+                             to: Optional[str] = None, pr_id: Optional[str] = None) -> None:
+    """Tell a draft's people (``draft_people``) what became of it, in their Inbox: its readers;
+    for ``draft.made_private`` the ones who read it no longer; else just ``to``. Never its actor,
+    and not again while an earlier notice of it is unread. Best-effort: failing to tell anyone
+    never fails the change."""
+    try:
+        people = await svc.draft_people(graph_id=graph_id, branch_id=branch_id)
+        if to is not None:
+            recipients = {to}
+        elif kind == "draft.made_private":
+            recipients = set(people["people"]) - set(people["readers"])
+        else:
+            recipients = set(people["readers"])
+        view = people["originating_view_id"]
+        if pr_id:
+            link = f"/workspaces/{ws_id}/reviews?pr={pr_id}"
+        elif kind == "draft.made_private":
+            link = None                                  # nowhere they can go
+        elif view:
+            link = f"/views/{view}" + (f"?branch={branch_id}" if kind == "draft.transferred" else "")
+        else:
+            link = f"/workspaces/{ws_id}?ds={meta.get('data_source_id')}&dstab=versioning"
+        title, body = _DRAFT_NEWS[kind]
+        await notification_repo.notify(
+            session, user_ids=recipients, kind=kind, title=title.format(name=people["name"] or "Untitled draft"),
+            body=body, link=link, actor_id=actor, resource_type="branch", resource_id=branch_id,
+            dedupe_unread=True)
+    except Exception:  # noqa: BLE001 — telling people never fails the change it tells of
+        logger.warning("could not tell the people of draft %s (%s)", branch_id, kind, exc_info=True)
+
+
 async def _drafts_policy_of(session: AsyncSession, data_source_id: Optional[str]):
     """The drafts and reviews policy ``data_source_id`` works under (``drafts_policy``). A graph
     whose data source row is gone follows the built-in policy."""
@@ -1851,6 +1898,8 @@ async def transfer_draft(
         await _record_versioning(session, "workspace.versioning.draft_transferred",
                                  _meta.get("data_source_id"), {"graphId": graph_id, "branchId": branch_id,
                                                                "from": previous, "to": branch["owner"]})
+        await _tell_draft_people(session, svc, "draft.transferred", ws_id=ws_id, meta=_meta,
+                                 graph_id=graph_id, branch_id=branch_id, actor=user.id, to=branch["owner"])
     await _attach_user_names(session, [branch])
     return branch
 
@@ -1897,6 +1946,9 @@ async def set_draft_visibility(
         await _record_versioning(session, "workspace.versioning.draft_visibility_changed",
                                  _meta.get("data_source_id"), {"graphId": graph_id, "branchId": branch_id,
                                                                "from": before, "to": branch["visibility"]})
+    if (before, branch["visibility"]) == ("public", "private"):
+        await _tell_draft_people(session, svc, "draft.made_private", ws_id=ws_id, meta=_meta,
+                                 graph_id=graph_id, branch_id=branch_id, actor=user.id)
     await _attach_user_names(session, [branch])
     return branch
 
@@ -2039,6 +2091,8 @@ async def publish(
     await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(graph_id, user.id)   # views' "data updated" freshness
     await _promote_view_layout_overlay(branch_id, user.id)   # fold the draft's layer/assignment edits into the published view
+    await _tell_draft_people(session, svc, "draft.published", ws_id=ws_id, meta=_meta, graph_id=graph_id,
+                             branch_id=branch_id, actor=user.id)
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": commit_id}
 
@@ -2108,6 +2162,10 @@ async def _publish_from_job(job: dict) -> dict:
     await _touch_views_data_updated(graph_id, actor)
     await _promote_view_layout_overlay(branch_id, actor)
     await nudge_projection(graph_id)
+    async with get_async_session() as session:
+        await _tell_draft_people(session, svc, "draft.published", ws_id=job["workspaceId"],
+                                 meta=await svc.get_graph(graph_id) or {}, graph_id=graph_id,
+                                 branch_id=branch_id, actor=actor)
     return {"commitId": commit_id}
 
 
@@ -2137,10 +2195,13 @@ async def abandon_draft(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     with _domain_errors():
         result = await svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=user.id)
     await _drop_view_layout_overlays(branch_id)   # layout edits vanish with the draft (Git-like)
+    await _tell_draft_people(session, svc, "draft.discarded", ws_id=ws_id, meta=_meta, graph_id=graph_id,
+                             branch_id=branch_id, actor=user.id)
     return result
 
 
@@ -4135,6 +4196,7 @@ async def open_merge_request(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # the draft owner raises the MR
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Raise a formal merge request from a per-user draft to its graph's ``main``."""
     with _domain_errors():
@@ -4144,6 +4206,8 @@ async def open_merge_request(
             description=body.description if body else None,
             reviewers=body.reviewers if body else None,
         )
+    await _tell_draft_people(session, svc, "draft.sent_for_review", ws_id=ws_id, meta=_meta,
+                             graph_id=graph_id, branch_id=branch_id, actor=user.id, pr_id=pr_id)
     return {"pr_id": pr_id}
 
 
@@ -4531,5 +4595,9 @@ async def merge_merge_request(
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
     _src_branch = _pr.get("source_branch_id")   # the merged draft — fold its layout overlay into the published view
     await _promote_view_layout_overlay(str(_src_branch) if _src_branch else None, user.id)
+    if _src_branch and _pr.get("source_graph_id") == target:                 # a draft's, not a fork's
+        await _tell_draft_people(session, svc, "draft.published", ws_id=ws_id,
+                                 meta=await svc.get_graph(target) or {}, graph_id=target,
+                                 branch_id=str(_src_branch), actor=user.id)
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
     return {"commit_id": commit_id}

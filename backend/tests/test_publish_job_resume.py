@@ -4,7 +4,8 @@ A publish job's squash commits in one transaction, but the job is finished in an
 that dies (or is taken over) between the two leaves a merged draft and a job still to finish. The
 next attempt finds the draft merged and publishes nothing — it re-runs only what a publish sets
 off (the read caches bumped, the views' "data updated" stamped, the draft's layout overlay
-promoted, the projection lane nudged) and completes with the commit the draft landed as. So too
+promoted, the projection lane nudged, the draft's people told) and completes with the commit the
+draft landed as. So too
 when a superseded attempt's squash lands under this one and its publish is refused for it. The
 job ends through its lease's fenced finish; a job no longer this worker's stops quietly. The
 versioning service, the job row and the lease are faked here; the same runs on Postgres in
@@ -91,6 +92,10 @@ def set_off(monkeypatch):
                  "nudge_projection"):
         monkeypatch.setattr(ep, name, recorder(name))
 
+    async def told(_session, _svc, kind, **kw):
+        calls.append(("_tell_draft_people", kind, kw["branch_id"], kw["actor"]))
+    monkeypatch.setattr(ep, "_tell_draft_people", told)
+
     async def project_here(_graph_id):
         raise AssertionError("a job leaves the projection to the projection lane")
     monkeypatch.setattr(ep, "project_now", project_here)
@@ -130,7 +135,8 @@ def _service(monkeypatch, svc):
 
 
 _SET_OFF = [("_bump_main_cache", "g1"), ("_touch_views_data_updated", "g1", "usr_1"),
-            ("_promote_view_layout_overlay", "br1", "usr_1"), ("nudge_projection", "g1")]
+            ("_promote_view_layout_overlay", "br1", "usr_1"), ("nudge_projection", "g1"),
+            ("_tell_draft_people", "draft.published", "br1", "usr_1")]
 
 
 async def test_a_publish_job_publishes_and_sets_off_what_a_publish_does(monkeypatch, set_off):

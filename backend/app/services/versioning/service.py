@@ -5895,6 +5895,26 @@ class GraphVersioningService:
                 out["access"] = self._access(branch, role, viewer)
             return out
 
+    async def draft_people(self, *, graph_id: str, branch_id: str, limit: int = 200) -> dict:
+        """Who to tell what became of a draft: its ``people`` — its owner, its members (people; a
+        team's members aren't listed one by one) and whoever committed to it, the most active first,
+        ``limit`` at most — and which of them may read it now (``readers``): on a private draft its
+        owner, its members (teams included) and the people on its review. With its ``name`` and
+        the view it was opened from, to say which draft it is and where."""
+        async with self._session() as s:
+            branch = await self._get_branch(s, graph_id, branch_id)
+            people = [branch.owner] if branch.owner else []
+            if branch.is_shared:
+                people += list((await s.execute(select(BranchMemberORM.subject_id).where(
+                    BranchMemberORM.branch_id == branch_id,
+                    BranchMemberORM.subject_type == "user"))).scalars())
+            people += await self._contributors(s, graph_id, branch_id, limit=limit)
+            people = list(dict.fromkeys(people))[:limit]
+            readers = [who for who in people
+                       if await self._branch_readable(s, branch, Viewer(actor=who, can_read=True))]
+            return {"name": branch.name, "originating_view_id": branch.originating_view_id,
+                    "people": people, "readers": readers}
+
     async def _contributors(self, s, graph_id: str, branch_id: str, limit: int = 50) -> List[str]:
         """Who committed to a branch, most commits first, then the latest: ``limit`` of them."""
         rows = (await s.execute(
