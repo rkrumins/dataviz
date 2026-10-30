@@ -12,6 +12,10 @@ cache, with ``ro_query`` and a key that can go missing).
   genesis on a key it does not own is left alone: the key is its data source's own graph.
 * ``fence_projection_passes`` (a provider moved to another server) supersedes a full replay in
   flight on the provider, which the reset skips at watermark 0: it cannot publish.
+* A key no summaries build ever stamped (``_AggMeta``) reads as never summarised on every canvas,
+  and the projector only moves summaries by delta: liveness asks for the first build, once per
+  commit, and never for a fork, a source whose summaries live in a dedicated key, or an ontology
+  with no lineage.
 
 Needs ``GRAPHVER_E2E=1`` and Postgres.
 """
@@ -306,3 +310,71 @@ async def _run_a_move_fences_a_rebuild_in_flight() -> None:
 
 def test_a_move_fences_a_rebuild_in_flight():
     asyncio.run(_run_a_move_fences_a_rebuild_in_flight())
+
+
+class _Summarised(LiveGraph):
+    """A LiveGraph that also says whether a summaries build stamped it (``_AggMeta``)."""
+
+    def __init__(self):
+        super().__init__()
+        self.built = False
+
+    async def ro_query(self, cypher, params=None, timeout=None):
+        if cypher == projection._SUMMARIES_BUILT and self.exists:
+            return _Result([[1 if self.built else 0]])
+        return await super().ro_query(cypher, params, timeout)
+
+
+class _SummarisedFalkor(LiveFalkor):
+    def __call__(self, name, provider_id=None):
+        if name in self.ours:
+            return self.graphs.setdefault(name, _Summarised())
+        return FakeGraph()
+
+
+async def _run_a_key_no_summaries_build_covered_gets_its_first() -> None:
+    svc, fake = GraphVersioningService(), _SummarisedFalkor()
+    gid, proj, graph = await _seed(svc, fake)
+    fork, fork_proj, fork_graph = await _seed(svc, fake)
+    async with db.graphver_session() as s:
+        (await s.get(GraphORM, fork)).fork_parent_graph_id = gid
+    asked: list = []
+    sets = {"now": (["CONTAINS"], ["FLOWS_TO"], {})}
+
+    async def hand_off(graph_id):
+        asked.append(graph_id)
+
+    async def resolver(_svc, graph_id):
+        return sets["now"]
+
+    for p in (proj, fork_proj):
+        p._on_rollups_stale, p._edge_types_resolver = hand_off, resolver
+
+    async def commit_and_check(entity_id):
+        await _edit_publish(svc, gid, "a", _create(entity_id), entity_id)
+        await proj.project_graph(gid)
+        await proj.check_liveness()
+
+    await proj.check_liveness()
+    assert asked == [gid], "asked for its first build; a fork's key is not this check's"
+    await proj.check_liveness()
+    assert asked == [gid], "once per commit: the next minute costs nothing"
+
+    await commit_and_check("D")                     # the build never landed: asked again
+    assert asked == [gid, gid]
+
+    graph.built = True                              # a build stamped the key
+    await commit_and_check("E")
+    assert asked == [gid, gid]
+
+    graph.built = False
+    for entity_id, unbuildable in (("F", (["CONTAINS"], ["FLOWS_TO"], {}, "dedicated")),
+                                   ("G", None)):
+        sets["now"] = unbuildable                   # summaries in another key; no lineage at all
+        await commit_and_check(entity_id)
+    assert asked == [gid, gid]
+    await db.dispose_engine()
+
+
+def test_a_key_no_summaries_build_covered_gets_its_first():
+    asyncio.run(_run_a_key_no_summaries_build_covered_gets_its_first())
