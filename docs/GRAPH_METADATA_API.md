@@ -87,6 +87,7 @@ GET /api/v1/admin/workspaces/{ws_id}/data-sources?providerId={prov_id}&include=v
 |---|---|---|
 | `providerId` | a provider id | Only the data sources on that provider. An id that matches none — or doesn't exist — gives `[]`. |
 | `include` | `versioning` | Adds each data source's `versioning` object. Without it, `versioning` is `null` and the version store isn't asked. |
+| `includeForks` | `true` | Lists forks' data sources too. Without it they are left out: a fork is reached through its graph ([17 · Forks & Residency](versioning/17-forks-and-residency.md)). |
 
 The answer is a JSON array of data sources, oldest first. Data sources in the trash aren't listed.
 
@@ -121,7 +122,7 @@ The route sits under `/admin/` for historical reasons; it needs only read access
 | `id` | The data source's id (`ds_…`). Stable for its life, including a move to another workspace. |
 | `workspaceId` | The workspace it is in — the one you asked about. |
 | `providerId` | The provider the graph lives on (`prov_…`). |
-| `graphName` | The graph's name on that provider. Unique per workspace and provider. |
+| `graphName` | The graph's name on that provider. Unique per workspace and provider. `null` for a fork's data source, which reads through version control. |
 | `label` | The name people see: the label given to it, else the graph's name on its provider. |
 | `catalogItemId` | The catalog entry it was attached from (`cat_…`), or `null`. |
 | `ontologyId` | The semantic layer that types its entities and relationships, or `null` for the system defaults. |
@@ -136,6 +137,7 @@ The route sits under `/admin/` for historical reasons; it needs only read access
 | `sourceMode`, `writeBackEnabled` | `managed` or `federated`, recorded by some setup paths; often `null`. **Don't use it to tell external from versioned** — use `versioning.enabled`. |
 | `extraConfig` | Per-source settings, with any secrets redacted. |
 | `aggregationStatus`, `lastAggregatedAt`, `aggregationEdgeCount`, `aggregationSchedule` | Not filled in by this route: they read `none`, `null`, `0` and `null`. Read a source's lineage-summary state from `GET /api/v1/admin/data-sources/{ds_id}/readiness`. |
+| `forkOf` | For a fork's data source, what it was forked from: `{dataSourceId, graphId}`. `null` otherwise. |
 | `createdAt`, `updatedAt` | When it was attached and last changed, ISO-8601 in UTC. |
 | `versioning` | Its version control — below — when you asked with `include=versioning`; `null` otherwise. `null` says nothing about whether the source is versioned. |
 

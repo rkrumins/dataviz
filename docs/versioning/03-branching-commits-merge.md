@@ -375,6 +375,10 @@ unpinned so the projector doesn't materialize an orphan key nothing reads. Nothi
 pinned fork's key either (the canvas, search and exports reach a fork through Postgres), and its first
 projection reconciles its whole state in one pass: see [09 · Scale](09-scale-limits-and-roadmap.md) §4.1.
 
+A fork is also a data source of its own, in its parent's workspace, governed by its parent's
+settings, and each of its commits reads its parent at a recorded base (`fork_bases`; the fork point
+until the fork takes a newer one): see [17 · Forks & Residency](17-forks-and-residency.md).
+
 Forking needs `workspace:datasource:manage`. It runs under the parent's `_lock_graph`, refuses a
 parent with `GRAPHVER_MAX_FORKS_PER_GRAPH` (default 10) live forks with **409** `fork_limit {limit}`
 (trashed forks do not count), and refuses a frozen parent with **409** `graph_not_writable`. A fork is

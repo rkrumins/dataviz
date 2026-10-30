@@ -598,6 +598,13 @@ export const docEntries: DocEntry[] = [
     importFn: () => import('@docs/versioning/16-go-live-stages-1-2.md?raw'),
   },
   {
+    slug: 'versioning-forks-and-residency',
+    section: 'versioning',
+    title: 'Versioning: Forks & Residency',
+    description: 'A fork as a data source of its own: settings, lifecycle and the per-commit parent base',
+    importFn: () => import('@docs/versioning/17-forks-and-residency.md?raw'),
+  },
+  {
     slug: 'versioning-e2e',
     section: 'versioning',
     title: 'Versioning: End-to-End Walkthrough',

@@ -200,7 +200,7 @@ the log line.
 | `422` | `native_query_too_large` | The reply passed the byte cap, or the engine's memory limit |
 | `429` | `rate_limited` · `busy` | Too many runs by this person · too many at once on this source (`Retry-After`) |
 | `499` | `cancelled` | The person went away |
-| `501` | `native_query_unavailable` | A draft or branch, or a source that isn't FalkorDB or Neo4j |
+| `501` | `native_query_unavailable` | A draft or branch, a fork's data source (it reads through its parent: run it on the parent), or a source that isn't FalkorDB or Neo4j |
 | `503` | `unavailable` · `audit_unavailable` | The source isn't answering, or a versioned source's published graph is catching up · the run couldn't be recorded |
 | `504` | `native_query_timeout` | The query ran past its time |
 | `500` | `native_query_failed` | Anything else (logged with the request id) |

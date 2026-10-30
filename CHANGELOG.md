@@ -9,6 +9,87 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Versioning: forks you can work in
+
+A fork used to be a graph and nothing else: its data source id was minted for the graph and stored
+nowhere, so views, the canvas and the data-source routes could not name it. Forking now makes a data
+source as well, governed by its parent's settings, which goes to the trash, back and away with the
+fork and moves with its parent. It reads and writes through version control and never has a
+FalkorDB graph of its own. Each of a fork's commits records which parent commit it reads, the base
+the next step — taking the parent's newer commits into a fork — builds on. See
+`docs/versioning/17-forks-and-residency.md`.
+
+### Added
+
+- **A fork is a data source of its own.** `POST /api/v1/{ws}/versioning/graphs/{gid}/forks` takes an
+  optional `{name}` (1–80 characters) and answers its `dataSourceId` too: a data source in the
+  parent's workspace, on its provider, labelled `"<parent label> · <name>"` (without a name, `Fork`
+  and the end of its id). Its graph name is always `null`. A fork that cannot be made takes its data
+  source with it. `GET …/forks` gives each fork's `dataSourceId` and `label`, and forking is recorded
+  in the workspace's activity (`workspace.versioning.fork_created`).
+- **Every data-source answer says what it was forked from**: `forkOf` `{dataSourceId, graphId}`, or
+  `null`. `GET /api/v1/admin/workspaces/{ws}/data-sources?includeForks=true` lists forks' data
+  sources too.
+- **Each commit of a fork records the parent commit it reads** (`graphver.fork_bases`; today the fork
+  point). Every as-of read of a fork follows it — its state, heads, bounded values, what changed in a
+  window, time travel, restore and export — so a fork can later take its parent's newer commits by
+  adding a row, and every earlier commit of the fork still reads what it read.
+
+### Changed
+
+- **A fork's settings are its parent's.** Its ontology, restriction, access level, identity and name
+  properties and draft policy are copied when it is made, and every change on the parent is made on
+  its forks, forks of forks too, in the same transaction. Changing one on the fork's own data source
+  is **409** `fork_settings_follow_parent` `{fields}`, and nothing of the request is kept; its label
+  stays its own. A view over a fork is restricted when its parent is.
+- **A fork's data source goes where its graph goes.** Trashing a fork tombstones its data source,
+  restoring it brings it back, and its purge deletes it. Moving a data source carries its forks'
+  data sources, trashed ones too, and the views on them, in the same transaction; undo brings them
+  back. A permanent delete purges the source's trashed forks first, and a live fork refuses it
+  (**409** `live_forks`) — now also when the source has nothing published. The versioning reaper
+  keeps each fork's data source in step with its graph, and deletes one left without a graph after
+  ten minutes (a fork whose making crashed).
+- **No fork's data source reaches a FalkorDB graph of its own.** Its reads compose its own rows over
+  its parent's in Postgres, and its writes are commits; the provider registry hands out its parent's
+  graph read only. Anything that needs a data source's own store — an aggregation trigger, a
+  dedicated rollup graph or projection mode, a projection move, bringing outside changes into
+  history — is **409** `fork_has_no_store`. Native queries on a fork are **501**
+  `native_query_unavailable`, and deep search is **501**: run them on the parent. Probes, stats,
+  silent-source alerts, the reconcile sweeper and the capacity views leave forks out.
+
+### Fixed
+
+- **A managed data source that names no graph no longer reads its provider's default graph**: the
+  provider registry refuses it, where it used to hand out whatever graph the provider defaulted to.
+
+### Upgrading
+
+- **Run the migrations.** `20261030_1100_gv_fork_bases` (graphver: `fork_bases`, with each existing
+  fork's fork point) follows `20261030_1000_gv_mr_merged_seq`; with a separate `GRAPHVER_DB_URL` the
+  versioning worker adds it on start. `20261030_1200_ds_fork_of` (management:
+  `workspace_data_sources.fork_of_data_source_id`, its index, and `ck_ds_fork_no_key`, which keeps a
+  fork's data source from naming a graph) follows it. Both wait at most five seconds for their locks
+  and can be run again. The second will not downgrade while forks' data sources exist: the code before
+  it reads a data source that names no graph from its provider's default graph, so delete them first.
+- **Existing forks get their data sources on the reaper's first pass** after the upgrade, labelled
+  `"<parent label> · Fork <end of its id>"`, while their parent's data source exists. A fork already
+  in the trash gets none, and is purged as before.
+- **The data-source routes refuse a fork's data source.** Delete, permanent delete, restore, move,
+  move preview and transfer requests on one are **409** `use_fork_endpoints`: trash and restore a fork
+  through `DELETE …/graphs/{fork}` and `POST …/graphs/{fork}/restore`, and move its parent. Its
+  settings change on the parent.
+- **Data-source lists leave forks out unless asked**: the workspace's list (pass `includeForks=true`),
+  the data sources in workspace answers, the workspace's default source and its last-source count.
+
+### Known limitations
+
+- **A fork still reads its parent as of its fork point.** Taking the parent's newer commits into a
+  fork comes next, as a new base row.
+- **A fork's reads are served from Postgres**, composing its rows over its parent's, so deep search
+  and native queries are unavailable on it, and looking up, by its URN, an entity the fork has not
+  changed finds nothing (its `gv:` id finds it). Reading a fork as an overlay on its parent's
+  published graph comes next.
+
 ## [Unreleased] — Forks: merged right, and costing what changes in them
 
 A fork can be reviewed into its parent again and again, each review merging what the fork changed
