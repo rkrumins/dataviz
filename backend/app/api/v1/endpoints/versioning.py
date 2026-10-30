@@ -1248,13 +1248,24 @@ class ForkResponse(_ApiModel):
 class ForkSummaryResponse(GraphResponse):
     """One of a graph's forks, live or in the trash (``deletedAt`` set), with its data source and
     that source's label. ``purging``: its purge is queued, so it can no longer be restored;
-    ``purgeAfter``: the end of its undo window."""
+    ``purgeAfter``: the end of its undo window.
+
+    A live one says how far it is from this graph: ``ahead``, the entities it changed since its
+    last merged review (or its fork point); ``behind``, those this graph changed that it has not
+    taken in; ``updateRecommended``, past ``GRAPHVER_FORK_REWIND_WARN`` of those, or past the
+    ceiling its reads go to Postgres (``readsFrom``: ``overlay`` | ``postgres``). The counts stop at
+    ``GRAPHVER_FORK_REWIND_MAX`` (``countsCapped``: one is at least that). Null on a trashed one."""
     data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
     label: Optional[str] = None
     deleted_at: Optional[str] = Field(default=None, alias="deletedAt")
     deleted_by: Optional[str] = Field(default=None, alias="deletedBy")
     purging: bool = False
     purge_after: Optional[str] = Field(default=None, alias="purgeAfter")
+    ahead: Optional[int] = None
+    behind: Optional[int] = None
+    update_recommended: Optional[bool] = Field(default=None, alias="updateRecommended")
+    reads_from: Optional[Literal["overlay", "postgres"]] = Field(default=None, alias="readsFrom")
+    counts_capped: Optional[bool] = Field(default=None, alias="countsCapped")
 
 
 class OpenPrRequest(_ApiModel):

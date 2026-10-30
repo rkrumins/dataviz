@@ -512,6 +512,9 @@ _MACHINE_COMMIT_KINDS = ("genesis", "import", "sync")
 # old head costs no more than one that keeps up (branch_freshness).
 _SAVED_SINCE_SCAN = 200
 
+# What a live fork in a fork list says of how far it is from its parent (_fork_distance).
+_FORK_DISTANCE = ("ahead", "behind", "update_recommended", "reads_from", "counts_capped")
+
 # An "enable version control" job in one of these states means its graph isn't a graph yet: the
 # head is parked at genesis and the import is half-written. A failed job counts — it must be
 # resumed or cancelled, never written around (bootstrap_unfinished, main_heads).
@@ -2947,7 +2950,8 @@ class GraphVersioningService:
     async def list_forks(self, *, graph_id: str, workspace_id: str, limit: int) -> List[dict]:
         """A graph's direct forks, newest first, live and trashed: when a trashed one was
         deleted and by whom, whether its purge is queued (no undo then), and when its undo
-        window (``config.PURGE_GRACE_DAYS``) ends."""
+        window (``config.PURGE_GRACE_DAYS``) ends. A live one says how far it is from this graph
+        (:meth:`_fork_distance`)."""
         purging = select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
                                           JobORM.graph_id == GraphORM.id).exists()
         async with self._session() as s:
@@ -2956,13 +2960,46 @@ class GraphVersioningService:
                     GraphORM.fork_parent_graph_id == graph_id,
                     GraphORM.workspace_id == workspace_id)
                 .order_by(GraphORM.created_at.desc(), GraphORM.id.desc()).limit(limit))).all()
+            distance = {g.id: await self._fork_distance(s, g) for g, _p in rows
+                        if g.deleted_at is None}
         return [{
             **self._graph_meta(g), "deleted_at": g.deleted_at, "deleted_by": g.deleted_by,
             "purging": bool(p),
             "purge_after": (datetime.fromisoformat(g.deleted_at)
                             + timedelta(days=config.PURGE_GRACE_DAYS)).isoformat()
             if g.deleted_at else None,
+            **distance.get(g.id, dict.fromkeys(_FORK_DISTANCE)),
         } for g, p in rows]
+
+    async def _fork_distance(self, s, fork: GraphORM) -> Dict[str, object]:
+        """How far a fork is from its parent: ``ahead``, the entities it changed since its last
+        merged review, or its fork point (:meth:`_fork_merge_base`); ``behind``, those its parent
+        changed that it has not taken in — the parent's window since the base the fork reads
+        (:func:`fork_base_at`); ``update_recommended`` when that is past
+        ``config.FORK_REWIND_WARN``, or the fork's reads are past the ceiling, which
+        ``reads_from`` says (``overlay`` | ``postgres``, as :meth:`fork_reads_from`). Each count
+        stops at the ceiling, ``config.FORK_REWIND_MAX`` (``counts_capped``)."""
+        cap = config.FORK_REWIND_MAX
+        main_id = await self._main_branch_id(s, fork.id)
+        head = fork.main_head_commit_seq
+        ahead = await self._own_change_count(
+            s, fork.id, main_id, await self._fork_merge_base(s, fork), head, cap)
+        parent = await s.get(GraphORM, fork.fork_parent_graph_id)
+        behind = await self._window_count(
+            s, parent.id, await self._main_branch_id(s, parent.id),
+            await fork_base_at(s, fork, head), parent.main_head_commit_seq, cap)
+        past = await self._fork_candidates(s, fork, main_id, cap) > cap
+        return {"ahead": min(ahead, cap), "behind": min(behind, cap),
+                "update_recommended": past or behind >= config.FORK_REWIND_WARN,
+                "reads_from": "postgres" if past else "overlay",
+                "counts_capped": ahead > cap or behind > cap}
+
+    async def _window_count(self, s, graph_id: str, branch_id: str, lo: int, hi: int,
+                            cap: int) -> int:
+        """:meth:`_count_changed_in_window`, each graph's count stopping past ``cap``."""
+        n = await self._own_change_count(s, graph_id, branch_id, lo, hi, cap)
+        parent = await self._parent_window(s, graph_id, branch_id, lo, hi)
+        return n + (await self._window_count(s, *parent, cap) if parent is not None else 0)
 
     async def approve_pr(
         self, *, pr_id: str, actor: str, expected_head_commit_id: Optional[str] = None,
