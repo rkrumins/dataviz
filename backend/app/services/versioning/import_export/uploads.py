@@ -81,7 +81,7 @@ def too_large(size: int, fmt: str) -> Optional[str]:
     if size <= cap:
         return None
     if fmt.lower() in WHOLE_FILE_FORMATS:
-        return (f"A {'JSON' if fmt.lower() == 'json' else 'Excel'} file is read whole, so one import of it "
+        return (f"{'A JSON' if fmt.lower() == 'json' else 'An Excel'} file is read whole, so one import of it "
                 f"can be at most {_mb(cap)}. Export NDJSON or CSV instead: they can be up to {_mb(MAX_BYTES)}.")
     return f"One import can be at most {_mb(cap)}. Split the file and import the parts one after another."
 
