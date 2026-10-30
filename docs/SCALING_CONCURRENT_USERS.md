@@ -999,6 +999,9 @@ package inspections run on the transfer lane. Saves, checkpoints and small publi
   process's pools (62 client connections behind a pooler in §10.2). The Helm chart can also
   scale the lane on its queue with KEDA (`services.versioning.transfer.autoscaling.keda`), which
   adds pods as soon as jobs wait instead of when CPU climbs.
+- **Measure this shape** with `loadtest/runners/versioning_collab.py`: editors on a hot graph and
+  on the others save, pull and publish their drafts while the rest read canvases
+  (`loadtest/README.md`, "People editing drafts together").
 
 ---
 
