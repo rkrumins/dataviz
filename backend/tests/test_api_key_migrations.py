@@ -105,6 +105,10 @@ _ON_LIVE_TABLES = {
     "20261030_1100_gv_fork_bases.py": ("upgrade", "downgrade"),
     # workspace_data_sources again: a fork's row.
     "20261030_1200_ds_fork_of.py": ("upgrade", "downgrade"),
+    # graphver.projection_state again: a graph's residency.
+    "20261030_1300_gv_ps_residency.py": ("upgrade", "downgrade"),
+    # platform_settings again: the residency policy.
+    "20261030_1400_residency_policy.py": ("upgrade", "downgrade"),
 }
 
 

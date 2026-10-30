@@ -291,11 +291,31 @@ class PlatformSettingsORM(Base):
     sa_who_may_create = Column(Text, nullable=True)
     sa_per_person_limit = Column(Integer, nullable=True)
     sa_require_team_manager = Column(Boolean, nullable=True)
+    # The versioned graphs' residency policy (``services.versioning.residency_policy``): whether
+    # the capacity loop evicts, the class a new graph gets, the idle times, each master's start
+    # and stop marks, the load headroom, the per-entity size estimate, the Coldline canvas
+    # threshold and the loop's interval. Same NULL-means-unset semantics: the environment default
+    # applies.
+    gv_eviction_enabled = Column(Boolean, nullable=True)
+    gv_default_residency = Column(Text, nullable=True)
+    gv_standard_idle_secs = Column(Integer, nullable=True)
+    gv_coldline_idle_secs = Column(Integer, nullable=True)
+    gv_high_water_pct = Column(Integer, nullable=True)
+    gv_low_water_pct = Column(Integer, nullable=True)
+    gv_load_margin_pct = Column(Integer, nullable=True)
+    gv_bytes_per_entity = Column(Integer, nullable=True)
+    gv_coldline_canvas_load_above = Column(Integer, nullable=True)
+    gv_capacity_interval_secs = Column(Integer, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_platform_settings_single_row"),
+        CheckConstraint(
+            "gv_default_residency IS NULL OR "
+            "gv_default_residency IN ('always','standard','coldline')",
+            name="ck_platform_settings_gv_default_residency",
+        ),
     )
 
     def __repr__(self) -> str:
