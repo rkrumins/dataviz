@@ -31,7 +31,10 @@ import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
-import { useAbandonDraft, useBranchFreshness, useDiffVsMain, useResolveGraph, useBranchViewChanges } from '../hooks/useVersioning'
+import {
+  useAbandonDraft, useBranch, useBranchFreshness, useDiffVsMain, useRefreshDraftFromOthers, useResolveGraph,
+  useBranchViewChanges,
+} from '../hooks/useVersioning'
 import { useActiveDraftAccess } from '../hooks/useActiveDraftAccess'
 import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBranchGuard'
 import { fromDiffVsMain } from '../model/changeAdapters'
@@ -46,6 +49,8 @@ import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
 import { ReadRouteChip } from './ReadRouteChip'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
+import { ContributorsStack } from './ContributorsStack'
+import { OthersSavedChip } from './OthersSavedChip'
 import { CommitDialog } from './CommitDialog'
 import { PublishReceiptBanner } from './PublishReceiptBanner'
 import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
@@ -145,6 +150,15 @@ export function CanvasVersioningBar({
   // what let the two contradictory banners become one.
   const freshness = useBranchFreshness(workspaceId, graphId, isDraft ? branchId : null)
   const behindMain = freshness.data?.behind === true
+  // Who else is on it: who saved into it, and what they saved since the reader last caught up.
+  const branchQ = useBranch(workspaceId, graphId, isDraft ? branchId : null)
+  const refreshDraft = useRefreshDraftFromOthers(workspaceId, graphId)
+  const headSeq = freshness.data?.headCommitSeq
+  const refreshFromOthers = useCallback(() => {
+    if (branchId && headSeq != null) refreshDraft(branchId, headSeq)
+  }, [refreshDraft, branchId, headSeq])
+  // A draft its reader may no longer read — made private, or they were removed from it — is a 404.
+  const accessLost = (freshness.error as { status?: number } | null)?.status === 404
 
   // A draft can die under you — you published it, its review was merged (possibly from the Reviews
   // inbox, with no canvas mounted), a teammate merged the shared draft, someone discarded it. The
@@ -154,6 +168,12 @@ export function CanvasVersioningBar({
   const onBranchEvicted = useCallback(
     ({ status, hadUnsavedEdits }: BranchEviction) => {
       const merged = status === 'merged'
+      if (status === 'gone') {
+        notify('warning', hadUnsavedEdits
+          ? 'You no longer have access to this draft, so your unsaved edits weren’t saved to it. You’re now on Published; start a new draft to save them.'
+          : 'You no longer have access to this draft — it was made private, or you were removed from it. You’re now on the Published version.')
+        return
+      }
       if (hadUnsavedEdits) {
         // Never silently drop the optimistic canvas — the edits are still in the staged store and
         // can be re-saved onto a fresh draft, but the user has to know they didn't land.
@@ -173,7 +193,7 @@ export function CanvasVersioningBar({
   )
   useActiveBranchGuard({
     enabled: !!graphId,
-    status: freshness.data?.status,
+    status: accessLost ? 'gone' : freshness.data?.status,
     currentBranchId: branchId,
     unsavedCount: uncommitted,
     onEvict: onBranchEvicted,
@@ -341,6 +361,10 @@ export function CanvasVersioningBar({
                     </span>
                   </HoverTip>
                 )}
+                <OthersSavedChip
+                  savedSince={freshness.data?.savedSince} userNames={freshness.data?.userNames}
+                  unsavedCount={uncommitted} onRefresh={refreshFromOthers}
+                />
               </>
             )}
           </div>
@@ -359,6 +383,10 @@ export function CanvasVersioningBar({
             held this whole band for as long as it stood open, above a toolbar,
             which read as a dead strip. It now sits under the actions it points
             at, and this row is empty again on main. */}
+
+        {isDraft && branchId && (
+          <ContributorsStack contributors={branchQ.data?.contributors ?? []} userNames={branchQ.data?.userNames} />
+        )}
 
         {isDraft && branchId && readOnlyDraft && (
           <span className="text-xs text-ink-muted">

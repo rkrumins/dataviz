@@ -3,6 +3,7 @@
  * with the invalidation fan-out that keeps the BranchSwitcher, diff overlay, and
  * history in sync after a save / publish / merge.
  */
+import { useCallback } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
 import type { BranchStatusFilter, DraftLevel, DraftRole, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
@@ -207,14 +208,65 @@ export function useProjectionWatermark(
 /** Live "is this draft behind main?" — the "notified right away" signal. Isolated by design: its OWN
  *  query key (never shared), a CONSTANT poll interval (not a function that can thrash), and it only
  *  runs while a draft is open (`enabled` on branchId). Structurally cannot cause a render loop. */
+/** Per draft: the head its reader last caught up with — others' saves since are news
+ *  (`savedSince`) — and when the draft or main last moved. One reader per tab, so module-level. */
+const caughtUpTo = new Map<string, number>()
+const lastMoved = new Map<string, { at: number; seen: string }>()
+
+/** The reader caught up with a draft at `headCommitSeq` (they refreshed it). */
+export function markDraftCaughtUp(branchId: string, headCommitSeq: number) {
+  caughtUpTo.set(branchId, headCommitSeq)
+}
+
+/** Every 10 s while the draft or main is moving; every 60 s once both were still for two minutes. */
+export function freshnessPollInterval(lastMovedAt: number, now: number = Date.now()): number {
+  return now - lastMovedAt > 120_000 ? 60_000 : 10_000
+}
+
+/** The draft poll: is main ahead of it, is it still open, what may its reader do with it, and what
+ *  did others save into it since the reader last caught up (the first poll learns the head). Polls
+ *  faster while things move; a hidden tab doesn't poll (react-query's default). */
 export function useBranchFreshness(wsId?: string, graphId?: string | null, branchId?: string | null) {
   return useQuery({
     queryKey: VERSIONING_KEYS.branchFreshness(wsId, graphId, branchId),
-    queryFn: () => api.getBranchFreshness(wsId!, graphId!, branchId!),
+    queryFn: async () => {
+      const f = await api.getBranchFreshness(wsId!, graphId!, branchId!, caughtUpTo.get(branchId!) ?? null)
+      if (!caughtUpTo.has(branchId!) && f.headCommitSeq != null) caughtUpTo.set(branchId!, f.headCommitSeq)
+      const seen = `${f.headCommitSeq}:${f.mainHeadCommitSeq}:${f.status}`
+      if (lastMoved.get(branchId!)?.seen !== seen) lastMoved.set(branchId!, { at: Date.now(), seen })
+      return f
+    },
     enabled: !!wsId && !!graphId && !!branchId,
-    refetchInterval: 15_000,
+    refetchInterval: () => freshnessPollInterval(lastMoved.get(branchId ?? '')?.at ?? Date.now()),
     refetchOnWindowFocus: true,
     staleTime: 5_000,
+  })
+}
+
+/** Show what others saved into a draft: its reader is caught up with `headCommitSeq`, and the canvas
+ *  and the draft's own views reload, as after a pull. */
+export function useRefreshDraftFromOthers(wsId?: string, graphId?: string | null) {
+  const qc = useQueryClient()
+  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
+  return useCallback((branchId: string, headCommitSeq: number) => {
+    markDraftCaughtUp(branchId, headCommitSeq)
+    qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchState(wsId, graphId, branchId) })
+    qc.invalidateQueries({ queryKey: VERSIONING_KEYS.diffVsMain(wsId, graphId, branchId) })
+    qc.invalidateQueries({ queryKey: VERSIONING_KEYS.commitLog(wsId, graphId, branchId) })
+    qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'branch', wsId, graphId, branchId] })
+    qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchFreshness(wsId, graphId, branchId) })
+    bumpMainEpoch()
+    invalidateAggregatedEdges()
+  }, [qc, bumpMainEpoch, wsId, graphId])
+}
+
+/** One branch as the lists show it, with who committed to it (`contributors`). */
+export function useBranch(wsId?: string, graphId?: string | null, branchId?: string | null) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.all, 'branch', wsId, graphId, branchId] as const,
+    queryFn: () => api.getBranch(wsId!, graphId!, branchId!),
+    enabled: !!wsId && !!graphId && !!branchId,
+    staleTime: 30_000,
   })
 }
 
