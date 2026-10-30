@@ -8,8 +8,12 @@ fork none, as a draft's.
 
 Every other read of a fork's ``main`` went through the parent's whole state too (``_state_as_of``,
 ``_composed_state``), since the bounded reads saw only the fork's own rows: each save to a draft
-on the fork, its preview, pull, publish and diffs, and a revert or restore of the fork's ``main``.
-Those paths run here with the whole-state reads refused, and must still give the right answer.
+on the fork, its preview, pull, publish and diffs, and a revert or restore of the fork's ``main``;
+and every review of the fork: opening it, its preview, diff and summary, and the merge composed
+three whole states, the parent's under its lock. A review now merges what the fork changed since
+the last one, with the parent's edges on what it deletes and the ends of what it draws. Those paths
+run here with the whole-state reads refused, and must still give the right answer — on a fork, and
+on a fork of a fork, which reads and merges through both.
 """
 import asyncio
 import contextlib
@@ -149,6 +153,74 @@ async def _a_forks_drafts_read_only_what_they_change(svc):
     assert parent["N50"] is not None and parent["E49"] is not None, parent
 
 
+async def _a_fork_review_reads_only_what_the_fork_changed(svc):
+    pg, pmain = await _parent(svc)
+    with _refused(*WHOLE):
+        fg = (await svc.fork_graph(parent_graph_id=pg, workspace_id="ws1", actor="bob"))["graph_id"]
+        await _publish(svc, fg, "bob", [_upd("N1", "one"), _node("X"), _edge("EX", "X", "N2"),
+                                        _del("N50")], "fork work")
+        # The parent moves on: an edge onto N50, which the fork deleted, and N3 deleted, which the
+        # fork then draws an edge to.
+        await _publish(svc, pg, "alice", [_upd("N100", "hundred"), _edge("EP", "N51", "N50"),
+                                          _del("N3")], "parent work")
+        await _publish(svc, fg, "bob", [_edge("EY", "X", "N3")], "fork edge")
+
+        pr = await svc.open_pr(source_graph_id=fg, actor="bob")
+        # The merge's cascade, seen in its preview: EP goes with N50, EY with N3.
+        pv = await svc.preview_pr(pr_id=pr)
+        assert pv["clean"] and pv["changes"] == {"create": 2, "update": 1, "delete": 4}, pv
+        assert (await svc.preview_mr(mr_id=pr))["changes"] == pv["changes"]
+        diff = await svc.diff_pr(pr_id=pr)
+        assert {e["entityId"] for e in diff["added"]} == {"X", "EX"}, diff
+        assert {e["entityId"] for e in diff["modified"]} == {"N1"}, diff
+        assert {e["entityId"] for e in diff["removed"]} == {"N50", "E49", "E50", "EP"}, diff
+        summary = await svc.diff_pr_summary(pr_id=pr, containment_edge_types=CONT)
+        assert summary["counts"] == {"added": 2, "modified": 1, "removed": 4}, summary
+        assert [g["counts"] for g in summary["groups"] if g["key"] == "S"] == [
+            {"added": 0, "modified": 1, "removed": 0}], summary       # N1, under its container
+        assert await svc.merge_pr(pr_id=pr, actor="carol", message="bob's",
+                                  containment_edge_types=CONT)
+
+        # The next review merges what changed since.
+        await _publish(svc, fg, "bob", [_upd("N60", "sixty")], "more fork work")
+        again = await svc.open_pr(source_graph_id=fg, actor="bob")
+        assert (await svc.preview_pr(pr_id=again))["changes"] == {
+            "create": 0, "update": 1, "delete": 0}
+        assert await svc.merge_pr(pr_id=again, actor="carol", message="bob's again")
+
+    now = await _values(svc, pg, pmain, ["N1", "X", "EX", "N50", "E49", "EP", "N3", "EY", "N100",
+                                         "N60", "N2"])
+    assert now["N1"]["displayName"] == "one" and now["X"] and now["EX"], now
+    assert now["N50"] is None and now["E49"] is None and now["EP"] is None, now
+    assert now["N3"] is None and "EY" not in now, now
+    assert now["N100"]["displayName"] == "hundred" and now["N60"]["displayName"] == "sixty", now
+    assert now["N2"]["displayName"] == "N2 name", now
+
+
+async def _a_fork_of_a_fork_reads_and_merges_through_both(svc):
+    pg, _pmain = await _parent(svc)
+    with _refused(*WHOLE):
+        fg = (await svc.fork_graph(parent_graph_id=pg, workspace_id="ws1", actor="bob"))["graph_id"]
+        fmain = await svc.main_branch_id(fg)
+        await _publish(svc, fg, "bob", [_upd("N1", "one")], "the fork's")
+        gg = (await svc.fork_graph(parent_graph_id=fg, workspace_id="ws1", actor="dave"))["graph_id"]
+        gmain = await svc.main_branch_id(gg)
+        # A delete on the grandchild takes the grandparent's edges on N5, two layers up: E4, E5
+        # and its containment link C5.
+        await _publish(svc, gg, "dave", [_upd("N2", "two"), _del("N5")], "the fork's fork's")
+        seen = await _values(svc, gg, gmain, ["N1", "N2", "N3", "N5", "E4", "E5", "C5"])
+        assert seen["N1"]["displayName"] == "one" and seen["N2"]["displayName"] == "two", seen
+        assert seen["N3"]["displayName"] == "N3 name", seen                   # the grandparent's
+        assert seen["N5"] is None and seen["E4"] is None and seen["E5"] is None, seen
+        assert seen["C5"] is None, seen
+        pr = await svc.open_pr(source_graph_id=gg, actor="dave")
+        assert (await svc.preview_pr(pr_id=pr))["changes"] == {"create": 0, "update": 1, "delete": 4}
+        assert await svc.merge_pr(pr_id=pr, actor="bob", message="into the fork")
+    now = await _values(svc, fg, fmain, ["N1", "N2", "N5", "E4", "E5", "C5"])
+    assert now["N1"]["displayName"] == "one" and now["N2"]["displayName"] == "two", now
+    assert now["N5"] is None and now["E4"] is None and now["E5"] is None and now["C5"] is None, now
+
+
 async def _run(case) -> None:
     await models.create_schema_and_partitions()
     try:
@@ -163,3 +235,11 @@ def test_forking_builds_no_whole_graph_fingerprint():
 
 def test_a_forks_drafts_read_only_what_they_change():
     asyncio.run(_run(_a_forks_drafts_read_only_what_they_change))
+
+
+def test_a_fork_review_reads_only_what_the_fork_changed():
+    asyncio.run(_run(_a_fork_review_reads_only_what_the_fork_changed))
+
+
+def test_a_fork_of_a_fork_reads_and_merges_through_both():
+    asyncio.run(_run(_a_fork_of_a_fork_reads_and_merges_through_both))
