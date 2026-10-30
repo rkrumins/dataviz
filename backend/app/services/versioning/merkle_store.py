@@ -11,8 +11,7 @@ The in-memory hashing/bucketing lives in :mod:`merkle`; this module is the
 Postgres-backed persistence + as-of reconstruction + tree-diff + integrity check.
 
 Scope: used for a **non-fork graph's `main`** (the long-lived linear branch where
-the full rebuild hurts at scale). Fork mains keep the in-memory ``MerkleTree.build``
-fallback (cross-branch CoW is a later step); draft commits carry no root at all.
+the full rebuild hurts at scale). A fork's commits and a draft's carry no root at all.
 """
 from __future__ import annotations
 

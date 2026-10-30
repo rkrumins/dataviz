@@ -2732,13 +2732,15 @@ class GraphVersioningService:
                              created_by=actor)
             s.add(main)
             await s.flush()
-            # Fork-point commit carries the parent's state hash; no version rows.
+            # Fork-point commit carries the root the parent stored at its head (none when the
+            # parent is a fork itself); no version rows.
+            parent_head = await s.get(BranchORM, parent_main)
+            stored = await s.scalar(select(CommitORM.merkle_root).where(
+                CommitORM.graph_id == parent_graph_id, CommitORM.id == parent_head.head_commit_id))
             fork_point = CommitORM(
                 graph_id=fork.id, branch_id=main.id, commit_seq=base_seq,
                 kind="genesis", message=f"fork of {parent_graph_id}@{base_seq}",
-                actor=actor, source_branch_id=parent_main,
-                merkle_root=await self._merkle_root(s, parent_graph_id, parent_main),
-                stats={},
+                actor=actor, source_branch_id=parent_main, merkle_root=stored, stats={},
             )
             s.add(fork_point)
             await s.flush()                      # materialise fork_point.id before linking
@@ -6871,27 +6873,20 @@ class GraphVersioningService:
                 out.setdefault(d.entity_id, fallback.get(d.entity_id, "node"))
         return out
 
-    async def _merkle_root(self, s, graph_id: str, branch_id: str) -> str:
-        """Merkle root over a branch's full live state (fork-aware) — the O(graph)
-        full build, used for draft checkpoints and fork mains (cross-branch CoW is
-        a later step)."""
-        state = await self._composed_state(s, graph_id, branch_id)
-        live = {eid: content_hash(p) for eid, p in state.items() if p is not None}
-        return MerkleTree.build(live).root
-
     async def _commit_merkle(self, s, graph_id: str, branch_id: str, commit,
                              deltas: List[Delta]) -> Optional[str]:
         """Merkle root for a commit. For a **non-fork `main`** (linear, long-lived)
         this is the incremental persisted CoW build — O(changed·depth), writing
-        only changed-path rows. Forks fall back to the full build. A draft commit gets
-        none: only ``main``'s roots are ever read (the projector's diff), and an import
-        window would otherwise write tens of thousands of tree rows nobody reads."""
+        only changed-path rows. A draft's commit and a fork's get none: only a non-fork
+        ``main``'s roots are ever read (the projector's diff); an import window would otherwise
+        write tens of thousands of tree rows nobody reads, and a fork's would be built from its
+        parent's whole state on every commit."""
         branch = await s.get(BranchORM, branch_id)
         if branch is not None and branch.kind != "main":
             return None
         graph = await s.get(GraphORM, graph_id)
         if graph is not None and graph.fork_parent_graph_id:
-            return await self._merkle_root(s, graph_id, branch_id)
+            return None
         changes: Dict[str, Optional[str]] = {
             d.entity_id: (None if d.op == "delete" else d.content_hash) for d in deltas
         }
