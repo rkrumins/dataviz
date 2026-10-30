@@ -76,7 +76,7 @@ from backend.common.models.management import (
     DataSourceMoveRequest,
     DataSourceTransferResponse,
 )
-from backend.insights_service.enqueue import enqueue_stats_job_safe
+from backend.insights_service.enqueue import enqueue_stats_job_safe, polls_stats
 
 from backend.app.services.versioning import config as gv_config
 from backend.app.services.versioning.errors import LockBusy
@@ -1519,11 +1519,13 @@ async def get_cached_schema(
 
     synthetic = await build_synthetic_schema(session, ds_id)
     if synthetic:
+        polled = polls_stats(ds_id)               # a fork's: no refresh comes to follow
         meta = build_meta(
             status="partial", source="ontology",
             data_source_id=ds_id,
             missing_fields=SYNTHETIC_SCHEMA_MISSING_FIELDS,
-            refreshing=True, job_id=job_id, poll_url=poll_url,
+            refreshing=polled, job_id=job_id if polled else None,
+            poll_url=poll_url if polled else None,
         )
         return JSONResponse(content=build_envelope(synthetic, meta))
 

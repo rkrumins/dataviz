@@ -205,6 +205,8 @@ async def nudge_stats_after_projection(data_source_id: str) -> None:
             ds_row = await data_source_repo.get_data_source_orm(s, data_source_id)
         if ds_row is None or not getattr(ds_row, "workspace_id", None):
             return
+        if getattr(ds_row, "fork_of_data_source_id", None):
+            return                                       # a fork's stats are not polled
         from backend.insights_service.enqueue import mark_stats_changed
         await mark_stats_changed(data_source_id, ds_row.workspace_id)
     except Exception as exc:                             # pragma: no cover - infra
