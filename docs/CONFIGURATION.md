@@ -651,6 +651,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_PROJECTION_PAGE` | `20000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_PAGED_ABOVE` | `200000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_POLL_SECS` | `5` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE` | `500000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_RETRY_BASE_SECS` | `5` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_RETRY_MAX_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP` | `50000` | `backend/app/services/versioning/config.py` |

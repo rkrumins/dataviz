@@ -143,6 +143,7 @@ tests/integration/test_versioning_scale_smoke.py
 tests/integration/test_versioning_shared.py
 tests/integration/test_versioning_single_writer.py
 tests/integration/test_versioning_state_reconstruction.py
+tests/integration/test_versioning_streamed_reconcile.py
 tests/integration/test_versioning_sync.py
 tests/integration/test_versioning_sync_characterisation.py
 tests/integration/test_versioning_top_level_window.py

@@ -1058,10 +1058,12 @@ async def run_seed(*, upload_key: str, store: CountingStore, keep: bool = False,
                            "collapsed": status.get("collapsed")})
 
 
-async def run_project(*, graph_id: str, keep: bool = False, factory=None) -> Dict[str, Any]:
+async def run_project(*, graph_id: str, keep: bool = False, full: bool = False,
+                      factory=None) -> Dict[str, Any]:
     """The projector's pass over the graph's last commit — the window a publish leaves it — into a
     new ``gvt_bench_*`` key (deleted after unless ``keep``): the graph is pinned there, owned and
-    projected up to the commit before, so the pass writes that one window and verifies it."""
+    projected up to the commit before, so the pass writes that one window and verifies it. With
+    ``full``, projected from nothing instead: the full reconcile a first seed or a rebuild runs."""
     from backend.app.services.versioning import db, models
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
     from backend.app.services.versioning.projection import FalkorProjector, _write_marker
@@ -1076,10 +1078,11 @@ async def run_project(*, graph_id: str, keep: bool = False, factory=None) -> Dic
             ps = ProjectionStateORM(graph_id=graph_id)
             s.add(ps)
         ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = name, None, True
-        ps.projected_commit_seq, ps.target_commit_seq = head - 1, head
+        ps.projected_commit_seq, ps.target_commit_seq = (0 if full else head - 1), head
         ps.status, ps.last_error, ps.failed_attempts, ps.next_retry_at = "idle", None, 0, None
     client = await _client(factory, name)
-    await _write_marker(client, head - 1, 0)       # the key as the pass before left it
+    if not full:
+        await _write_marker(client, head - 1, 0)   # the key as the pass before left it
     try:
         async with probing() as probes:
             out = await FalkorProjector(factory, on_rollups_stale=_noop).project_graph(graph_id)
@@ -1299,7 +1302,7 @@ async def _run(args) -> int:
             graph_id = args.graph_id or (state.get("published") or {}).get("graphId")
             if not graph_id:
                 raise SystemExit("run project needs a published graph: run publish first, or pass --graph-id")
-            result = await run_project(graph_id=graph_id, keep=args.keep)
+            result = await run_project(graph_id=graph_id, keep=args.keep, full=args.full)
         elif args.kind == "export":
             graph_id = args.graph_id or (state.get("published") or {}).get("graphId")
             if not graph_id:
@@ -1492,6 +1495,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run.add_argument("--graph", help="bootstrap: the FalkorDB source graph")
     run.add_argument("--auto-decide", action="store_true", help="bootstrap: collapse the duplicates it pauses on")
     run.add_argument("--keep", action="store_true", help="seed, project: keep the new FalkorDB key")
+    run.add_argument("--full", action="store_true",
+                     help="project: from nothing (a first seed's or a rebuild's full reconcile)")
     run.add_argument("--out", help="export: save the package here")
     run.add_argument("--label", help="the result's name in reports")
     run.add_argument("--check", action="store_true", help="exit 1 when a target is missed")

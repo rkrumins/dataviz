@@ -172,6 +172,10 @@ PROJECTION_ROLLUP_INLINE_CAP: int = int(os.getenv("GRAPHVER_PROJECTION_ROLLUP_IN
 # it, never all of it; and its rollups go to the aggregation job.
 PROJECTION_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGED_ABOVE", "200000"))
 PROJECTION_PAGE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGE", "20000"))
+# A full reconcile (a first seed, a rebuild, a heal) holds both sides of a graph — what Postgres
+# says and what FalkorDB holds. Above this many live entities it compares them a page at a time.
+PROJECTION_RECONCILE_STREAMED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE",
+                                                         "500000"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):
