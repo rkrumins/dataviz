@@ -183,3 +183,169 @@ async def test_a_view_on_a_fork_of_a_restricted_source_publishes_as_on_its_paren
         r = await test_client.put("/api/v1/views/view_f_publisher/visibility",
                                   json={"visibility": "enterprise"})
     assert r.status_code == 200, r.text
+
+
+# ── no fork row ever reaches a FalkorDB key of its own ───────────────────────────────────────
+from unittest.mock import AsyncMock, MagicMock  # noqa: E402
+
+from backend.app.db.repositories import data_source_repo  # noqa: E402
+from backend.app.providers.manager import ProviderManager  # noqa: E402
+from backend.common.interfaces.provider import ProviderConfigurationError  # noqa: E402
+
+
+async def test_lists_leave_forks_out_unless_asked_and_every_source_says_what_it_forks(
+        test_client, db_session, forks):
+    r = await test_client.get(_DS)
+    assert r.status_code == 200, r.text
+    assert [d["id"] for d in r.json()] == ["ds_parent"]
+    assert r.json()[0]["forkOf"] is None
+    r = await test_client.get(_DS, params={"includeForks": "true"})
+    by_id = {d["id"]: d["forkOf"] for d in r.json()}
+    assert by_id == {"ds_parent": None,
+                     "dsfork_a": {"dataSourceId": "ds_parent", "graphId": "g_p"},
+                     "dsfork_b": {"dataSourceId": "dsfork_a", "graphId": "g_a"}}
+    workspace = (await test_client.get(f"/api/v1/admin/workspaces/{WS}")).json()
+    assert [d["id"] for d in workspace["dataSources"]] == ["ds_parent"]
+    got = await data_source_repo.get_data_source(db_session, "dsfork_b")   # by id: it is there
+    assert got is not None and got.fork_of.data_source_id == "dsfork_a"
+    # An edit of a fork's extraConfig keeps what it was made from.
+    r = await test_client.put(f"{_DS}/dsfork_a", json={"extraConfig": {"note": "mine"}})
+    assert r.status_code == 200, r.text
+    assert r.json()["forkOf"] == {"dataSourceId": "ds_parent", "graphId": "g_p"}
+
+
+async def test_a_fork_is_never_the_workspaces_default_nor_counted(db_session, forks):
+    assert await data_source_repo.count_data_sources(db_session, WS) == 1
+    (parent,) = await _rows(db_session, "ds_parent")
+    parent.is_active = False                      # the forks are all that is left active
+    await db_session.commit()
+    assert await data_source_repo.get_primary_data_source(db_session, WS) is None
+    assert await data_source_repo.default_data_source_ids(db_session, [WS]) == {}
+
+
+async def test_a_fork_has_no_rollups_to_place(test_client, db_session, forks):
+    r = await test_client.patch(f"{_DS}/dsfork_a/projection-mode", json={"mode": "dedicated"})
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["type"] == "fork_has_no_store"
+    r = await test_client.put(f"{_DS}/dsfork_a", json={"projectionMode": "dedicated"})
+    assert r.status_code == 409 and r.json()["detail"]["type"] == "fork_has_no_store", r.text
+    (a,) = await _rows(db_session, "dsfork_a")
+    assert a.projection_mode is None
+
+
+def _manager(monkeypatch, row, key):
+    """A provider manager whose data source is ``row``, read from ``key`` (physical_key)."""
+    from backend.app.services import versioned_sources
+
+    async def _row(_session, _ds_id, **_kw):
+        return row
+
+    async def _key(ds_id, provider_id, graph_name):
+        return key
+
+    monkeypatch.setattr(data_source_repo, "get_data_source_orm", _row)
+    monkeypatch.setattr(versioned_sources, "physical_key", _key)
+    inner = MagicMock()
+    inner.close = AsyncMock()
+    inner.get_nodes = AsyncMock(return_value=["a node"])
+    inner.create_node = AsyncMock(return_value=True)
+    inner.purge_aggregated_edges = AsyncMock()
+    mgr = ProviderManager()
+    mgr._instantiate_from_provider = AsyncMock(return_value=inner)
+    mgr._ensure_reachable = AsyncMock()
+    return mgr, inner
+
+
+async def test_the_registry_reads_a_fork_from_its_parents_key_and_never_writes(monkeypatch):
+    fork = SimpleNamespace(id="dsfork_a", provider_id="prov_f", graph_name=None, extra_config=None,
+                           fork_of_data_source_id="ds_parent", source_mode="managed")
+    mgr, inner = _manager(monkeypatch, fork, ("prov_f", "the_parents_key"))
+    provider = await mgr.get_provider(WS, MagicMock(), data_source_id="dsfork_a")
+    assert isinstance(provider, fork_sources.ForkReadOnlyProvider)
+    assert mgr._instantiate_from_provider.await_args.args[:2] == ("prov_f", "the_parents_key")
+    assert await provider.get_nodes(None) == ["a node"]
+    for write in ("create_node", "purge_aggregated_edges"):
+        with pytest.raises(fork_sources.ForkHasNoStore):
+            await getattr(provider, write)(None)
+    inner.create_node.assert_not_awaited()
+    inner.purge_aggregated_edges.assert_not_awaited()
+
+    # With no published key above it, nothing: never the provider's default graph.
+    mgr, _inner = _manager(monkeypatch, fork, ("prov_f", None))
+    with pytest.raises(fork_sources.ForkHasNoStore):
+        await mgr.get_provider(WS, MagicMock(), data_source_id="dsfork_a")
+    mgr._instantiate_from_provider.assert_not_awaited()
+    managed = SimpleNamespace(id="ds_m", provider_id="prov_f", graph_name=None, extra_config=None,
+                              fork_of_data_source_id=None, source_mode="managed")
+    mgr, _inner = _manager(monkeypatch, managed, ("prov_f", None))
+    with pytest.raises(ProviderConfigurationError):
+        await mgr.get_provider(WS, MagicMock(), data_source_id="ds_m")
+    mgr._instantiate_from_provider.assert_not_awaited()
+
+
+async def test_the_stats_scheduler_never_polls_a_fork(db_session, forks, monkeypatch):
+    import contextlib
+
+    from backend.insights_service import scheduler
+    from backend.insights_service.config import StatsServiceConfig
+
+    @contextlib.asynccontextmanager
+    async def _session():
+        yield db_session
+
+    async def _claim(*_a, **_k):
+        return True
+
+    sent = []
+
+    async def _enqueue(fields, **_k):
+        sent.append(fields["data_source_id"] if "data_source_id" in fields else fields)
+        return "1-0"
+
+    monkeypatch.setattr(scheduler, "get_jobs_session", _session)
+    monkeypatch.setattr(scheduler, "try_claim", _claim)
+    monkeypatch.setattr(scheduler, "enqueue", _enqueue)
+    summary = await scheduler._tick(StatsServiceConfig.from_env())
+    assert summary.seen == 1                      # the parent, never a fork
+
+
+async def test_a_key_on_the_parent_does_not_reach_its_forks(db_session, forks):
+    """Keys stay explicit: one that selects the parent's data source covers none of its forks."""
+    from backend.app.db.models import RoleBindingORM, UserORM
+    from backend.app.services.permission_service import key_scope_from_profile, resolve_for_api_key
+
+    db_session.add(UserORM(id="usr_fork_key", email="k@example.com", password_hash="x",
+                           first_name="K", last_name="O", status="active"))
+    db_session.add(RoleBindingORM(subject_type="user", subject_id="usr_fork_key",
+                                  role_name="workspace_member", scope_type="workspace",
+                                  scope_id=WS))
+    await db_session.commit()
+    scope = key_scope_from_profile("apk_fork", kind="personal",
+                                   permissions={"views": "none", "data": "read", "publish": False},
+                                   resources={"dataSources": ["ds_parent"]})
+    claims = await resolve_for_api_key(db_session, "usr_fork_key", scope)
+    assert claims.key_scope.selects_data_source("ds_parent", WS)
+    assert not claims.key_scope.selects_data_source("dsfork_a", WS)
+    assert not claims.key_scope.selects_data_source("dsfork_b", WS)
+
+
+async def test_a_fork_is_never_rolled_up(monkeypatch):
+    """No aggregation run, nor its state, is made for a fork: the trigger every path funnels
+    through refuses one, and a fork's projection queues no rebuild for its data source."""
+    from backend.app.services import projection_target
+    from backend.app.services.aggregation.schemas import AggregationTriggerRequest
+    from backend.tests.test_aggregation_trigger_sources import _make_service
+
+    with pytest.raises(fork_sources.ForkHasNoStore):
+        await _make_service().trigger("dsfork_a", AggregationTriggerRequest(), "manual",
+                                      MagicMock())
+
+    class _Svc:
+        async def get_graph(self, graph_id):
+            return {"data_source_id": "dsfork_a", "workspace_id": WS, "fork_parent_graph_id": "g_p"}
+
+    monkeypatch.setattr(projection_target, "GraphVersioningService", _Svc)
+    agg = MagicMock()
+    agg.trigger = AsyncMock()
+    await projection_target.make_rollup_rebuild_hook(lambda: agg)("g_fork")
+    agg.trigger.assert_not_awaited()

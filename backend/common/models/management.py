@@ -906,6 +906,15 @@ class DataSourceVersioning(BaseModel):
         populate_by_name = True
 
 
+class DataSourceForkOf(BaseModel):
+    """What a fork's data source was forked from: its parent data source and graph."""
+    data_source_id: str = Field(alias="dataSourceId")
+    graph_id: Optional[str] = Field(None, alias="graphId")
+
+    class Config:
+        populate_by_name = True
+
+
 class DataSourceResponse(BaseModel):
     id: str
     workspace_id: str = Field(alias="workspaceId")
@@ -943,6 +952,8 @@ class DataSourceResponse(BaseModel):
     # derive from shape (no catalog item → managed), mirroring the ORM comment.
     source_mode: Optional[str] = Field(None, alias="sourceMode")  # "managed" | "federated"
     write_back_enabled: bool = Field(False, alias="writeBackEnabled")
+    #: A fork's data source: what it was forked from. Null on every other data source.
+    fork_of: Optional[DataSourceForkOf] = Field(None, alias="forkOf")
     #: Version control — set by the data-source list when asked (``include=versioning``), null
     #: wherever it wasn't asked for. Null says nothing about whether the source is versioned.
     versioning: Optional[DataSourceVersioning] = None

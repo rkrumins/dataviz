@@ -603,11 +603,15 @@ async def list_data_sources(
     include: Optional[str] = Query(None, pattern="^versioning$",
                                    description="`versioning`: each data source's version control — "
                                                "whether it is on, its graph, and the head of `main`"),
+    include_forks: bool = Query(False, alias="includeForks",
+                                description="Forks' data sources too (each names what it was "
+                                            "forked from, `forkOf`)"),
     _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """List all data sources for a workspace, or one provider's with ``providerId``.
+    """List all data sources for a workspace, or one provider's with ``providerId``. A fork's data
+    source is listed only with ``includeForks=true``: it is reached through its graph.
 
     ``include=versioning`` adds each one's version control from the version store. Its
     ``mainHeadCommitSeq`` is a change watermark: the graph's commit log has something new only
@@ -616,7 +620,8 @@ async def list_data_sources(
     ws = await workspace_repo.get_workspace_orm(session, workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
-    sources = await data_source_repo.list_data_sources(session, workspace_id, provider_id=provider_id)
+    sources = await data_source_repo.list_data_sources(session, workspace_id, provider_id=provider_id,
+                                                       include_forks=include_forks)
     if include != "versioning" or not sources:
         return sources
     try:
@@ -853,6 +858,8 @@ async def update_data_source(
     old_ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not old_ds or old_ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+    if req.projection_mode is not None or req.dedicated_graph_name is not None:
+        fork_sources.refuse_own_store(old_ds)  # a fork has no rollups to place (409)
     if (
         req.is_restricted is not None
         and req.is_restricted != bool(old_ds.is_restricted)
@@ -1180,6 +1187,7 @@ async def set_projection_mode(
     ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not ds or ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+    fork_sources.refuse_own_store(ds)          # a fork has no rollups to place (409)
 
     # Guard: cannot change mode while an aggregation job is active
     from sqlalchemy import select

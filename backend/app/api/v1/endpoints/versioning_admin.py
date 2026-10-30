@@ -115,6 +115,9 @@ async def move_projection(
     meta = await svc.get_graph(graph_id)
     if meta is None:
         raise HTTPException(status_code=404, detail=f"unknown graph {graph_id}")
+    if meta.get("fork_parent_graph_id"):       # a fork's data source has no store of its own
+        from backend.app.services.fork_sources import ForkHasNoStore
+        raise ForkHasNoStore(meta["data_source_id"])
     wm = await svc.projection_watermark(graph_id)
     pin = wm["falkor_graph_name"]
     # Refused before any lookup; the service checks again under the graph lock.

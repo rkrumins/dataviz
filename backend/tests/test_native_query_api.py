@@ -320,6 +320,20 @@ async def test_a_draft_is_refused(test_client: AsyncClient, db_session, estate, 
     assert r.json()["detail"]["code"] == "native_query_unavailable"
 
 
+async def test_a_fork_is_refused(test_client: AsyncClient, db_session, estate, engine):
+    """A fork's data source has no published store of its own: a query on it would read its
+    parent's as though it were the fork's."""
+    db_session.add(WorkspaceDataSourceORM(id="dsfork_native", workspace_id=WS,
+                                          provider_id="prov_native", fork_of_data_source_id=DS))
+    await db_session.commit()
+    with signed_in(person("usr_reader"), READER):
+        r = await run(test_client, params={"dataSourceId": "dsfork_native"})
+    assert r.status_code == 501, r.text
+    assert r.json()["detail"]["code"] == "native_query_unavailable"
+    assert "fork" in r.json()["detail"]["message"]
+    assert "asked" not in engine                          # no provider was built for it
+
+
 async def test_an_engine_without_native_queries_is_refused(test_client: AsyncClient, db_session,
                                                           estate, engine):
     engine["engine"] = object()

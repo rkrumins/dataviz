@@ -1284,10 +1284,11 @@ async def _live_ds_rows(
     label rides along so batch results can name a source without a second
     query per item."""
     from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.db.repositories.data_source_repo import not_a_fork
 
     q = select(
         WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label,
-    ).where(WorkspaceDataSourceORM.deleted_at.is_(None))
+    ).where(WorkspaceDataSourceORM.deleted_at.is_(None), not_a_fork())
     if provider_id is not None:
         q = q.where(WorkspaceDataSourceORM.provider_id == provider_id)
     rows = await session.execute(q.order_by(WorkspaceDataSourceORM.id))

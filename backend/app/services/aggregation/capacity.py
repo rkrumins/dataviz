@@ -508,11 +508,12 @@ async def _list_sources(
     sources that have (or are getting) rollups — largest first, so the
     sources that matter most to a shard are the ones a capped sweep keeps."""
     from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+    from backend.app.db.repositories.data_source_repo import not_a_fork
 
     base = (
         select(WorkspaceDataSourceORM, ProviderORM.name)  # noqa: cross-domain (capacity view: read-only admin surface labelling sources by provider; one bounded query, no hot path)
         .join(ProviderORM, ProviderORM.id == WorkspaceDataSourceORM.provider_id, isouter=True)
-        .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+        .where(WorkspaceDataSourceORM.deleted_at.is_(None), not_a_fork())
     )
     if ds_id is not None:
         base = base.where(WorkspaceDataSourceORM.id == ds_id)

@@ -590,7 +590,11 @@ async def resync_versioned_graph_endpoint(
     from backend.app.services.projection_target import make_rollup_rebuild_hook
     from backend.app.services.versioning.bootstrap_worker import BootstrapFailure
     from backend.app.services.versioning.errors import AmbiguousSpelling
+    from backend.app.services.fork_sources import ForkHasNoStore
     from backend.app.services.versioning.service import GraphVersioningService
+    if dataSourceId.startswith("dsfork_"):
+        # A fork has no FalkorDB graph of its own that anything else could have written (409).
+        raise ForkHasNoStore(dataSourceId)
     actor = user.id if user else "system"
     svc = GraphVersioningService()
     res = await svc.resolve_graph(
@@ -2309,6 +2313,14 @@ async def search_native(
         raise _native_refusal(
             request_id, exc.status, "missing_permission" if exc.status == 403 else "not_found",
             exc.message, permission=permission,
+        )
+    from backend.app.db.repositories.data_source_repo import get_data_source_orm
+    source = await get_data_source_orm(session, granted.data_source_id) if granted.data_source_id else None
+    if source is not None and source.fork_of_data_source_id:
+        raise _native_refusal(
+            request_id, 501, "native_query_unavailable",
+            "Native queries read a graph's own published store; a fork reads through its parent. "
+            "Run it on the parent, or open the fork's data in the canvas.",
         )
     try:
         provider = await provider_manager.get_provider_for_workspace(

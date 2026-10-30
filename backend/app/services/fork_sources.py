@@ -16,6 +16,7 @@ from fastapi import HTTPException
 from sqlalchemy import select, update
 
 from backend.app.db.models import WorkspaceDataSourceORM
+from backend.common.interfaces.provider import ProviderConfigurationError
 
 #: The settings a fork takes from its parent: what it is governed by, never its own to change.
 GOVERNING = (
@@ -88,3 +89,51 @@ async def governing_row(session, row: Optional[WorkspaceDataSourceORM]):
             break
         row = parent
     return row
+
+
+class ForkHasNoStore(ProviderConfigurationError):
+    """Something needs a data source's own FalkorDB graph — to write it, aggregate it, move it, give
+    it a dedicated rollup graph — and a fork's row has none: it reads through version control.
+    Answered 409 ``fork_has_no_store`` (``main.py``)."""
+
+    def __init__(self, data_source_id: str):
+        self.data_source_id = data_source_id
+        self.detail = {
+            "type": "fork_has_no_store", "dataSourceId": data_source_id,
+            "message": "A fork has no graph store of its own: it reads its parent's through version "
+                       "control. Do this on the data source it was forked from."}
+        super().__init__(self.detail["message"])
+
+
+def refuse_own_store(row: Optional[WorkspaceDataSourceORM]) -> None:
+    """:class:`ForkHasNoStore` for a fork's row, where a request needs the data source's own graph."""
+    if row is not None and getattr(row, "fork_of_data_source_id", None):
+        raise ForkHasNoStore(row.id)
+
+
+#: Every method of a graph provider that writes FalkorDB, or the caches kept for a graph.
+_PROVIDER_WRITES = frozenset({
+    "save_custom_graph", "create_node", "create_edge", "update_edge", "delete_edge",
+    "set_projection_mode", "ensure_projections", "ensure_indices", "on_lineage_edge_written",
+    "on_lineage_edge_deleted", "on_containment_changed", "purge_aggregated_edges",
+    "materialize_lineage_for_edge", "materialize_aggregated_edges_batch", "stamp_identity_urns",
+    "execute_command", "prime_stats_cache", "clear_content_caches",
+})
+
+
+class ForkReadOnlyProvider:
+    """The provider the registry hands out for a fork's row: its root parent's published graph
+    (``versioned_sources.physical_key``), read only. Reads delegate; every write is refused
+    (:class:`ForkHasNoStore`), so nothing addressed to a fork reaches FalkorDB. Version control
+    reads and writes a fork (``ContextEngine``), never this."""
+
+    def __init__(self, inner, data_source_id: str):
+        self._inner = inner
+        self._data_source_id = data_source_id
+
+    def __getattr__(self, name):
+        if name in _PROVIDER_WRITES:
+            async def _refused(*_args, **_kwargs):
+                raise ForkHasNoStore(self._data_source_id)
+            return _refused
+        return getattr(self._inner, name)

@@ -141,7 +141,17 @@ class ContextEngine:
                 if primary is None:
                     raise KeyError(f"No data source for workspace: {workspace_id}")
                 data_source_id = primary.id
-            provider = await registry.get_provider_for_workspace(
+            # A fork's row has no FalkorDB graph of its own: no provider is built from the registry
+            # for it, and it reads through version control below. Its id is its graph's
+            # ``dsfork_…``, so every other source pays no lookup for this.
+            fork = False
+            if data_source_id.startswith("dsfork_"):
+                from ..db.models import WorkspaceDataSourceORM
+                fork_row = await session.get(WorkspaceDataSourceORM, data_source_id)
+                if fork_row is None or fork_row.deleted_at is not None:
+                    raise KeyError(f"Data source not found: {data_source_id}")
+                fork = fork_row.fork_of_data_source_id is not None
+            provider = None if fork else await registry.get_provider_for_workspace(
                 workspace_id, session, data_source_id
             )
         except ProviderUnavailable:
@@ -170,15 +180,24 @@ class ContextEngine:
             from .versioned_sources import serves_pin
             svc = GraphVersioningService()
             graph = await svc.get_graph_by_data_source(data_source_id)
+            if graph is None and fork:
+                raise KeyError(f"Data source not found: {data_source_id}")   # its graph is trashed
             if graph is not None:
                 gid = graph["graph_id"]
                 main_id = await svc.main_branch_id(gid)
                 is_draft = norm not in ("", "main", main_id)
-                wm = await svc.projection_watermark(gid)
-                # Main is served from FalkorDB only from the key the projection publishes.
-                main_fresh = wm["fresh"] and serves_pin(
-                    getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
-                    wm.get("falkor_graph_name"), gid)
+                if fork:
+                    # A fork's main reads through version control (its own rows over its
+                    # parent's), and a draft on it overlays that.
+                    from ..providers.versioned_branch_provider import FORK_NO_DEEP_SEARCH
+                    main_fresh, gap = False, {"deep_search_gap": FORK_NO_DEEP_SEARCH}
+                else:
+                    wm = await svc.projection_watermark(gid)
+                    # Main is served from FalkorDB only from the key the projection publishes.
+                    main_fresh = wm["fresh"] and serves_pin(
+                        getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
+                        wm.get("falkor_graph_name"), gid)
+                    gap = {}
                 read_provider = None
                 read_branch: Optional[str] = None
                 if is_draft:
@@ -195,7 +214,7 @@ class ContextEngine:
                     from ..providers.versioned_branch_provider import VersionedBranchProvider
                     from ..providers.draft_overlay_provider import DraftOverlayProvider
                     base = provider if main_fresh else VersionedBranchProvider(
-                        svc, graph_id=gid, branch_id=main_id, actor=actor)
+                        svc, graph_id=gid, branch_id=main_id, actor=actor, **gap)
                     read_provider = DraftOverlayProvider(
                         base, svc=svc, graph_id=gid, branch_id=norm, actor=actor)
                     read_branch = norm
@@ -203,7 +222,8 @@ class ContextEngine:
                     # Stale main (e.g. right after a merge): serve from Postgres so the change shows
                     # immediately; once the projection catches up, the fresh-FalkorDB hot path is used.
                     from ..providers.versioned_branch_provider import VersionedBranchProvider
-                    read_provider = VersionedBranchProvider(svc, graph_id=gid, branch_id=main_id, actor=actor)
+                    read_provider = VersionedBranchProvider(svc, graph_id=gid, branch_id=main_id,
+                                                            actor=actor, **gap)
                     read_branch = main_id
                 if read_provider is not None:
                     engine = cls(provider=read_provider, ontology_service=ontology_service)

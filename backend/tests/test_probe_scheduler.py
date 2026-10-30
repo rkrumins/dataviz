@@ -65,7 +65,7 @@ def _enqueued(monkeypatch):
 
 
 async def _seed(factory, ds_id, *, last_probed_at=None,
-                probe_enabled=None, probe_interval_secs=None, deleted=False):
+                probe_enabled=None, probe_interval_secs=None, deleted=False, fork_of=None):
     async with factory() as s:
         if await s.get(WorkspaceORM, "ws_1") is None:
             s.add(WorkspaceORM(id="ws_1", name="ws"))
@@ -76,7 +76,7 @@ async def _seed(factory, ds_id, *, last_probed_at=None,
             await s.flush()
         s.add(WorkspaceDataSourceORM(
             id=ds_id, workspace_id="ws_1", provider_id="prov_1",
-            graph_name=f"g_{ds_id}",
+            graph_name=None if fork_of else f"g_{ds_id}", fork_of_data_source_id=fork_of,
             deleted_at=_ago(hours=1) if deleted else None,
         ))
         s.add(DataSourceStatsORM(
@@ -213,6 +213,15 @@ async def test_deleted_source_is_never_probed(session_factory, _enqueued):
     )
     summary = await ProbeScheduler(session_factory).tick()
     assert summary.enqueued == 0
+
+
+@pytest.mark.asyncio
+async def test_a_fork_is_never_probed(session_factory, _enqueued):
+    """A fork has no graph of its own: it reads its parent's through version control."""
+    await _seed(session_factory, "ds_1", last_probed_at=_ago(seconds=300))
+    await _seed(session_factory, "dsfork_1", last_probed_at=_ago(seconds=300), fork_of="ds_1")
+    summary = await ProbeScheduler(session_factory).tick()
+    assert _enqueued == ["ds_1"] and summary.enqueued == 1
 
 
 @pytest.mark.asyncio

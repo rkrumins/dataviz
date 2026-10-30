@@ -1032,21 +1032,25 @@ async def _resolve_data_sources(ds_ids: list[str]) -> dict[str, dict]:
 
 
 async def _present_data_source_ids(label_contains: Optional[str] = None) -> list[str]:
-    """The ids of data sources that are LIVE in the management DB.
+    """The ids of data sources that are LIVE in the management DB, forks' rows left out.
 
     Versioned-graph metrics are scoped to these so the numbers reflect live
     entities — the graphver store has no GC, so graphs for deleted sources
     (and dev/test seed graphs) accumulate and would otherwise dominate every
     count and the projection list. A soft-deleted source is exactly such an
-    orphaned graph, so tombstones are excluded. ``label_contains`` narrows
-    them to the sources whose label holds it (the fleet inventory's search).
+    orphaned graph, so tombstones are excluded; forks are counted as forks,
+    never as data sources (the fleet inventory marks them). ``label_contains``
+    narrows them to the sources whose label holds it (the fleet inventory's
+    search).
     """
     from sqlalchemy import select
 
     from backend.app.db.engine import PoolRole, get_session_factory
     from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.db.repositories.data_source_repo import not_a_fork
 
-    stmt = select(WorkspaceDataSourceORM.id).where(WorkspaceDataSourceORM.deleted_at.is_(None))
+    stmt = select(WorkspaceDataSourceORM.id).where(WorkspaceDataSourceORM.deleted_at.is_(None),
+                                                    not_a_fork())
     if label_contains:
         stmt = stmt.where(WorkspaceDataSourceORM.label.icontains(label_contains, autoescape=True))
     async with asyncio.timeout(_BUDGET_DB):
@@ -1417,8 +1421,8 @@ async def list_versioned_graphs(
     """One page of the fleet inventory (``GET /admin/versioning/graphs``): every live versioned
     graph with its FalkorDB provider, key, ownership and projection state, by graph id.
 
-    Unlike the probe it keeps forks (whose ``dsfork_`` data source is no management row) and
-    orphans (not a fork, and its data source is gone), and marks them. ``kind`` is ``main``,
+    Unlike the probe it keeps forks (whose ``dsfork_`` data source is a fork's row, never counted
+    as present) and orphans (not a fork, and its data source is gone), and marks them. ``kind`` is ``main``,
     ``fork`` or ``orphan``; ``status`` a rollup bucket; ``q`` matches the graph id, data source
     id, FalkorDB key or data-source label. Unlike a probe it raises rather than degrading."""
     from sqlalchemy import func, or_

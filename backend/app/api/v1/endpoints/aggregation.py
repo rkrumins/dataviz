@@ -581,6 +581,11 @@ async def trigger_aggregation(
         "manual", alias="triggerSource",
     ),
 ):
+    # A fork has no graph of its own to roll up (409 fork_has_no_store), in either mode.
+    if ds_id.startswith("dsfork_"):
+        from backend.app.services.fork_sources import ForkHasNoStore
+        raise ForkHasNoStore(ds_id)
+
     # ── Proxy mode preflight ─────────────────────────────────────────
     # The Control Plane has no access to viz-service ontology tables,
     # so when proxying we must enforce the gate here. In direct mode we

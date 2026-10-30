@@ -24,6 +24,7 @@ from backend.common.models.management import (
     WorkspaceResponse,
     DataSourceResponse,
 )
+from .data_source_repo import fork_of
 
 logger = logging.getLogger(__name__)
 
@@ -101,6 +102,7 @@ def _ds_to_response(row: WorkspaceDataSourceORM, identity=None) -> DataSourceRes
         # sources rendered a grey "Not aggregated" chip, and the Health filter's
         # Ready / Syncing / Needs-attention options could never match anything.
         aggregationStatus=row.aggregation_status or "none",
+        forkOf=fork_of(row),
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
@@ -114,6 +116,7 @@ def _to_response(row: WorkspaceORM, identities=None) -> WorkspaceResponse:
     ds_list = [
         _ds_to_response(ds, identities.get(ds.id))
         for ds in (row.data_sources or [])
+        if not getattr(ds, "fork_of_data_source_id", None)     # a fork is listed under its graph
     ]
     return WorkspaceResponse(
         id=row.id,

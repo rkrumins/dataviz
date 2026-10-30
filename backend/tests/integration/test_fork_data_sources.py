@@ -59,27 +59,30 @@ def _client(perms=(R, M), ws=WS):
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
 
-async def _parent(svc, label="Sales", **settings):
-    """A data source in ``WS`` on a FalkorDB provider, with an ontology and ``settings``, and its
-    versioned graph. Returns ``(data source id, graph id)``."""
+async def _parent(svc, label="Sales", pinned=False, **settings):
+    """A data source in ``WS`` on a FalkorDB provider (this lane's), with an ontology and
+    ``settings``, and its versioned graph — ``pinned`` to the data source's FalkorDB key, a
+    ``gvt_`` one the suite's cleanup drops. Returns ``(data source id, graph id)``."""
     from backend.app.db.models import (
         OntologyORM, ProviderORM, WorkspaceDataSourceORM, WorkspaceORM)
 
     await models.create_schema_and_partitions()
     suffix = os.urandom(4).hex()
-    ds_id = f"ds_fk_{suffix}"
+    ds_id, prov, key = f"ds_fk_{suffix}", f"prov_fk_{suffix}", f"gvt_fk_{suffix}"
     async with _mgmt() as s:
         if await s.get(WorkspaceORM, WS) is None:
             s.add(WorkspaceORM(id=WS, name="Forks"))
-        s.add(ProviderORM(id=f"prov_fk_{suffix}", name=f"falkor-{suffix}",
-                          provider_type="falkordb", host="localhost", port=6379))
+        s.add(ProviderORM(id=prov, name=f"falkor-{suffix}", provider_type="falkordb",
+                          host=os.getenv("FALKORDB_HOST", "localhost"),
+                          port=int(os.getenv("FALKORDB_PORT", "6379"))))
         s.add(OntologyORM(id=f"ont_fk_{suffix}", name=f"Ontology {suffix}", is_published=True))
         await s.flush()
         s.add(WorkspaceDataSourceORM(
-            id=ds_id, workspace_id=WS, provider_id=f"prov_fk_{suffix}", graph_name=f"g_{suffix}",
+            id=ds_id, workspace_id=WS, provider_id=prov, graph_name=key,
             label=label, ontology_id=f"ont_fk_{suffix}", **settings))
         await s.commit()
-    graph = await svc.create_graph(data_source_id=ds_id, workspace_id=WS, actor="alice")
+    pin = {"falkor_graph_name": key, "falkor_provider": prov, "owns_falkor_graph": True} if pinned else {}
+    graph = await svc.create_graph(data_source_id=ds_id, workspace_id=WS, actor="alice", **pin)
     return ds_id, graph["graph_id"]
 
 
@@ -193,6 +196,81 @@ def test_fork_graph_takes_only_a_fork_id():
         assert made["data_source_id"].startswith("dsfork_chosen")
         minted = await svc.fork_graph(parent_graph_id=gid, workspace_id=WS, actor="bob")
         assert minted["data_source_id"].startswith("dsfork_")
+    _run(case)
+
+
+# ── read and written through version control, never FalkorDB ─────────────────────────────────
+async def _falkor_keys(prefix):
+    from falkordb.asyncio import FalkorDB
+    from redis.asyncio import ConnectionPool
+
+    pool = ConnectionPool(host=os.getenv("FALKORDB_HOST", "localhost"),
+                          port=int(os.getenv("FALKORDB_PORT", "6379")), max_connections=2)
+    try:
+        names = [k.decode() if isinstance(k, bytes) else k
+                 for k in await FalkorDB(connection_pool=pool).list_graphs()]
+    finally:
+        await pool.disconnect()
+    return sorted(n for n in names if n.startswith(prefix))
+
+
+from backend.app.services.versioned_sources import physical_key as _real_physical_key  # noqa: E402
+
+
+def test_a_fork_is_read_and_written_through_version_control_never_falkordb(monkeypatch):
+    from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.providers.manager import provider_manager
+    from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
+    from backend.app.services import fork_sources, versioned_sources
+    from backend.app.services.context_engine import ContextEngine
+    from backend.common.models.graph import GraphNode
+
+    # The suite's conftest makes physical_key the identity; this test is about the real one.
+    monkeypatch.setattr(versioned_sources, "physical_key", _real_physical_key)
+
+    def node(urn, name):
+        return GraphNode(urn=urn, entityType="Dataset", displayName=name)
+
+    async def case(svc):
+        parent_ds, gid = await _parent(svc, pinned=True)
+        parent = await _row(parent_ds)
+        d = await svc.open_draft(graph_id=gid, owner="alice")
+        await svc.stage_changes(graph_id=gid, branch_id=d, actor="alice", ops=[{
+            "op": "create", "entity_kind": "node", "entity_id": "urn:fk:A",
+            "payload": {"urn": "urn:fk:A", "entityType": "Dataset", "displayName": "A"}}])
+        await svc.checkpoint(graph_id=gid, branch_id=d, actor="alice")
+        await svc.publish(graph_id=gid, branch_id=d, actor="alice", message="A")
+        async with _client() as c:
+            fork = (await _fork(c, gid)).json()
+        fork_ds, fork_gid = fork["dataSourceId"], fork["graphId"]
+        fork_head = (await svc.get_graph(fork_gid))["main_head_commit_seq"]
+        parent_head = (await svc.get_graph(gid))["main_head_commit_seq"]
+
+        # A fork reads its root parent's published key, never one of its own.
+        assert await versioned_sources.physical_key(fork_ds, parent.provider_id, None) == (
+            parent.provider_id, parent.graph_name)
+        async with _mgmt() as session:
+            # Through the engine: its main is version control's, and a write is a commit on it.
+            engine = await ContextEngine.for_workspace(WS, provider_manager, session,
+                                                       data_source_id=fork_ds, actor="u_forker")
+            assert type(engine.provider) is VersionedBranchProvider and engine._writes_main
+            await engine.provider.create_node(node("urn:fk:B", "B"))
+            assert (await engine.provider.get_node("urn:fk:B")).display_name == "B"
+            with pytest.raises(NotImplementedError, match="a fork reads through its parent"):
+                await engine.provider.deep_search(None)
+            # Through the registry, outside the engine: the parent's key, read only.
+            provider = await provider_manager.get_provider(WS, session, fork_ds)
+            assert isinstance(provider, fork_sources.ForkReadOnlyProvider)
+            with pytest.raises(fork_sources.ForkHasNoStore):
+                await provider.create_node(node("urn:fk:C", "C"))
+            assert (await session.get(WorkspaceDataSourceORM, fork_ds)).graph_name is None
+        assert (await svc.get_graph(fork_gid))["main_head_commit_seq"] == fork_head + 1
+        assert (await svc.get_graph(gid))["main_head_commit_seq"] == parent_head
+        fmain = await svc.main_branch_id(fork_gid)
+        state = await svc.materialize_state(graph_id=fork_gid, branch_id=fmain)
+        assert set(state["nodes"]) == {"urn:fk:A", "urn:fk:B"}, state
+        # Nothing reached FalkorDB: neither the parent's key nor the fork's was ever written.
+        assert await _falkor_keys(parent.graph_name) == []
     _run(case)
 
 

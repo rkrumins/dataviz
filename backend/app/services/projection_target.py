@@ -93,8 +93,8 @@ def make_rollup_rebuild_hook(get_aggregation_service):
         svc = GraphVersioningService()
         meta = await svc.get_graph(graph_id)
         ds_id = meta.get("data_source_id") if meta else None
-        if not ds_id:
-            return
+        if not ds_id or meta.get("fork_parent_graph_id"):
+            return          # a fork's data source has no rollups of its own (fork_has_no_store)
         agg = get_aggregation_service()
         mode = await _projection_mode(str(ds_id))
         if mode == "dedicated":
