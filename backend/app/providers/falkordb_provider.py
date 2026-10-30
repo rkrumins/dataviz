@@ -5579,12 +5579,18 @@ class FalkorDBProvider(GraphDataProvider):
         Parameters
         ----------
         types : list
-            The containment edge types. Empty list means the ontology explicitly
-            defines no containment types (flat graph, no hierarchy).
+            The containment edge types. Empty list means a flat graph, no
+            hierarchy: the ontology defines no containment types, or none is
+            assigned and introspection alone classifies none. Either way the
+            set is configured, so a read that needs it reads flat instead of
+            raising ProviderConfigurationError.
         from_ontology : bool
-            True if these came from a real ontology definition (assigned or system).
-            False if from introspection-only — an empty list should NOT suppress
-            the hardcoded fallback.
+            True if these came from a real ontology definition (assigned or
+            system). False for introspection alone: an empty list then
+            configures a provider nothing has configured yet, and leaves a
+            configured one as it is — one instance serves every data source
+            reading this graph through this provider, and one with no ontology
+            must not flatten the hierarchy another one's ontology set.
 
         Cache invalidation is implicit: the ancestors cache key
         (``_ancestors_cache_key``) hashes the resolved type set, so a
@@ -5592,10 +5598,9 @@ class FalkorDBProvider(GraphDataProvider):
         different Redis namespace. No manual flush is needed; old
         namespaces are simply unreachable and lazy-evicted by Redis.
         """
-        if from_ontology or types:
+        if from_ontology or types or not getattr(self, "_resolved_containment_types_set", False):
             self._resolved_containment_types: Set[str] = {t.upper() for t in types}
             self._resolved_containment_types_set = True
-        # else: introspection-only with no containment found — don't set sentinel
 
     def set_entity_type_levels(self, mapping: Dict[str, int]) -> None:
         """Called by ContextEngine after ontology resolution to inject the

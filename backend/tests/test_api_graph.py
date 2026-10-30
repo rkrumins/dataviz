@@ -1499,3 +1499,131 @@ async def test_top_level_default_request_never_resolves_orphan_types(top_level_c
     assert resp.status_code == 200
     orphan_spy.assert_not_called()
     assert live_spy.await_args.kwargs["entity_types"] is None
+
+
+# ── POST /nodes/query on a data source with no ontology assigned ──────
+
+
+class _OntologyRepo:
+    """The one read the ontology service makes here: the ontology assigned to
+    the data source, or None."""
+
+    def __init__(self, assigned):
+        self._assigned = assigned
+
+    async def get_for_data_source(self, workspace_id, data_source_id=None):
+        return self._assigned
+
+
+def _a_warehouse_ontology():
+    """An assigned ontology in which `CONTAINS` is containment."""
+    from backend.app.ontology.models import OntologyData
+
+    return OntologyData(
+        id="ont-warehouse", name="Warehouse", version=1,
+        entity_type_definitions={"table": {"name": "Table"}},
+        relationship_type_definitions={"CONTAINS": {"name": "Contains", "is_containment": True}},
+    )
+
+
+class _Rows:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+def _falkor_with_one_table(cyphers: list):
+    """A real FalkorDBProvider with its I/O stubbed. Introspection sees a
+    `CONTAINS` relationship and no hierarchy; a node read answers one table,
+    with 2 children when the read counts them over containment."""
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+    from backend.common.models.graph import EdgeTypeMetadata
+
+    p = FalkorDBProvider(host="x", graph_name="flat-reads")
+
+    async def _nothing(*_a, **_k):
+        return None
+
+    async def _introspect():
+        return OntologyMetadata(
+            containmentEdgeTypes=[], lineageEdgeTypes=[], rootEntityTypes=[],
+            edgeTypeMetadata={"CONTAINS": EdgeTypeMetadata(isContainment=False, direction="bidirectional")},
+            entityTypeHierarchy={},
+        )
+
+    async def _ro_query(cypher, params=None, **_k):
+        cyphers.append(cypher)
+        children = 0 if "0 as childCount" in cypher else 2
+        return _Rows([[{"urn": "urn:t:orders", "displayName": "orders", "entityType": "table"}, children]])
+
+    p._ensure_connected = _nothing
+    p.ensure_indices = _nothing
+    p._check_levels_backfilled = _nothing
+    p.get_ontology_metadata = _introspect
+    p._ro_query = _ro_query
+    return p
+
+
+@pytest.fixture()
+async def nodes_query(test_client: AsyncClient, monkeypatch):
+    """POST /nodes/query through the real ContextEngine and FalkorDBProvider,
+    resolved as ``ContextEngine.for_workspace`` resolves: eagerly, by the
+    ontology service, for a data source with the given ontology assigned (or
+    none). The shared ontology cache, the alignment write and the response
+    cache are kept out."""
+    from backend.app.main import app
+    from backend.app.api.v1.endpoints import graph as graph_module
+    from backend.app.ontology.service import LocalOntologyService
+    from backend.app.services import resolved_ontology_cache as ont_cache
+
+    def _unavailable():
+        raise ConnectionError("not in this test")
+
+    monkeypatch.setattr(ont_cache, "_redis", _unavailable)
+    monkeypatch.setattr("backend.app.db.engine.get_session_factory", _unavailable)
+    monkeypatch.setattr(graph_module, "get_graph_cache", lambda: _PassthroughGraphCache())
+
+    async def _post(assigned):
+        cyphers: list = []
+
+        async def _engine():
+            engine = ContextEngine(provider=_falkor_with_one_table(cyphers),
+                                   ontology_service=LocalOntologyService(_OntologyRepo(assigned)))
+            engine._workspace_id = "test-ws"
+            engine._data_source_id = "ds1"
+            await engine._resolve_ontology()
+            return engine
+
+        app.dependency_overrides[graph_module.get_context_engine] = _engine
+        resp = await test_client.post(
+            "/api/v1/test-ws/graph/nodes/query", json={"query": {"entityTypes": ["table"]}},
+        )
+        return resp, cyphers
+
+    yield _post
+    app.dependency_overrides.pop(graph_module.get_context_engine, None)
+
+
+async def test_nodes_query_with_no_ontology_assigned_reads_flat_with_a_notice(nodes_query):
+    """With no ontology assigned nothing classifies containment. The provider's
+    containment set was left unconfigured, so the canvas's node read raised
+    ProviderConfigurationError and answered 500. It is a flat read: no children
+    counted, and a notice saying why."""
+    resp, cyphers = await nodes_query(assigned=None)
+
+    assert resp.status_code == 200, resp.text
+    [node] = resp.json()
+    assert (node["urn"], node["childCount"]) == ("urn:t:orders", 0)
+    assert "CONTAINS" not in cyphers[-1]
+    assert resp.headers["X-Graph-Notice"] == (
+        "No ontology is assigned to this data source. Assign one to see its hierarchy."
+    )
+
+
+async def test_nodes_query_with_an_assigned_ontology_keeps_its_hierarchy_and_no_notice(nodes_query):
+    resp, cyphers = await nodes_query(assigned=_a_warehouse_ontology())
+
+    assert resp.status_code == 200, resp.text
+    [node] = resp.json()
+    assert node["childCount"] == 2
+    assert "[:CONTAINS]" in cyphers[-1]
+    assert "X-Graph-Notice" not in resp.headers

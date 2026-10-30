@@ -200,15 +200,18 @@ class _FleetSlot:
 #     the guarantee: a saturated neighbour can never take a source's reserved
 #     share, so N-1 healthy sources keep serving.
 #   * otherwise                 → admit while the process still has room for
-#     every OTHER source's reserve. "Other" means every source this process
-#     has served inside ``_GRAPH_SOURCE_RECENT_S``, not just the ones with a
-#     request in flight right now: a source whose users are between clicks
-#     must still find room when it comes back, and reserving only for
-#     in-flight work let a saturated neighbour take the last slot in the gap.
-#     Sized from what the deployment actually uses, so a single-source
-#     install holds nothing back and uses the whole ceiling, while five busy
-#     sources each keep a share. A fixed mid-ceiling would have throttled the
-#     single-source case to protect neighbours that do not exist.
+#     what every ACTIVE neighbour has not used of its reserve, plus one
+#     newcomer's reserve. Active means a request in flight, or one that
+#     started or finished inside ``_GRAPH_SOURCE_HOLD_S``: a source whose
+#     users are between clicks must still find room when it comes back, and
+#     reserving only for in-flight work let a saturated neighbour take the
+#     last slot in the gap. A neighbour already using its reserve holds
+#     nothing more back, and one nobody is reading holds nothing at all, so
+#     a busy source takes whatever the others leave idle. The newcomer's
+#     reserve lets a source arriving cold in at once, however much a hot
+#     neighbour has taken. Counting every source served in the last minute
+#     instead held a hot source to its own reserve once a handful of others
+#     had been read, with all of them idle.
 #
 # Both numbers come from _graph_inflight_limits() below, derived from the pool
 # and overridable as GRAPH_INFLIGHT_HARD_MAX / PROVIDER_SOURCE_RESERVED.
@@ -216,11 +219,12 @@ class _FleetSlot:
 # place — the same treatment as a full slot queue, and far better than a 10s
 # stall followed by an unexplained 503.
 
-# How long a data source counts toward the reserve after its last graph
-# request. Long enough to span a user's think time between canvas gestures,
-# short enough that a source removed from the deployment stops holding
-# capacity within a minute.
-_GRAPH_SOURCE_RECENT_S = float(os.getenv("GRAPH_SOURCE_RECENT_SECS", "60"))
+# How long a data source keeps its reserve after its last graph request
+# started or finished. A canvas fires its reads in bursts with short gaps; the
+# hold spans a gap, and a shed request's retry (Retry-After is 1 s), so the
+# source finds its reserve when it comes back, while one nobody is reading
+# stops holding capacity within seconds.
+_GRAPH_SOURCE_HOLD_S = float(os.getenv("GRAPH_SOURCE_HOLD_SECS", "1.5"))
 
 # Ceiling on one provider's ``close()``. See _close_and_forget.
 _PROVIDER_CLOSE_TIMEOUT_S = float(os.getenv("PROVIDER_CLOSE_TIMEOUT_S", "2.0"))
@@ -416,9 +420,10 @@ class ProviderManager:
         # between awaits on one event loop, so no lock is needed.
         self._graph_inflight: Dict[str, int] = {}
         self._graph_inflight_total: int = 0
-        # source key -> monotonic time of its last graph request. Sizes the
-        # reserve (see admit_graph_request); pruned there on the same pass.
-        self._graph_recent: Dict[str, float] = {}
+        # source key -> monotonic time its last graph request started or
+        # finished. Says which neighbours are active, and so hold back their
+        # unused reserve (see admit_graph_request); pruned there on the same pass.
+        self._graph_activity: Dict[str, float] = {}
 
         # Short-lived inline reachability verdicts (WS0.1). See the
         # _REACHABLE_PROBE_* constants + _ensure_reachable below.
@@ -1148,15 +1153,22 @@ class ProviderManager:
         total = self._graph_inflight_total
         current = self._graph_inflight.get(source_key, 0)
 
-        # Note this source as present (whether or not it is admitted — a shed
-        # source is still one this process serves) and forget the ones that
-        # have gone quiet. O(sources), and a process serves a handful.
+        # Note this source as active (whether or not it is admitted — a shed
+        # source is still one this process serves), add up what the room must
+        # keep for the others — each active neighbour's unused reserve, and a
+        # newcomer's — and forget the ones that have gone quiet. O(sources).
         now = time.monotonic()
-        self._graph_recent[source_key] = now
-        if len(self._graph_recent) > 1:
-            cutoff = now - _GRAPH_SOURCE_RECENT_S
-            for stale in [k for k, seen in self._graph_recent.items() if seen < cutoff]:
-                del self._graph_recent[stale]
+        self._graph_activity[source_key] = now
+        held_back = reserved
+        cutoff = now - _GRAPH_SOURCE_HOLD_S
+        for key, seen in list(self._graph_activity.items()):
+            if key == source_key:
+                continue
+            inflight = self._graph_inflight.get(key, 0)
+            if not inflight and seen < cutoff:
+                del self._graph_activity[key]
+            else:
+                held_back += max(0, reserved - inflight)
 
         if total >= hard:
             self.stats["graph_shed_process_full"] += 1
@@ -1168,14 +1180,13 @@ class ProviderManager:
                 ),
                 retry_after_seconds=1,
             )
-        others = len(self._graph_recent) - 1
-        if current >= reserved and total >= hard - others * reserved:
-            # Over its reserved share, and the room left is spoken for by the
-            # reserves of the other sources this process serves. Their share is
-            # never refused, so they keep serving — including a source arriving
-            # cold, which is the case that matters when a neighbour has been
-            # saturated for a while. With no other source seen this never fires
-            # and one source uses the whole ceiling.
+        if current >= reserved and total >= hard - held_back:
+            # Over its reserved share, and the room left is spoken for: by what
+            # active neighbours have not used of theirs, and by a newcomer's.
+            # Their share is never refused, so they keep serving — including a
+            # source arriving cold, which is the case that matters when a
+            # neighbour has been saturated for a while. With no neighbour
+            # active, one source uses all but the newcomer's reserve.
             self.stats["graph_shed_over_share"] += 1
             raise ProviderBusy(
                 provider_name=source_key,
@@ -1199,6 +1210,8 @@ class ProviderManager:
         else:
             self._graph_inflight[source_key] = current - 1
         self._graph_inflight_total = max(0, self._graph_inflight_total - 1)
+        # Finishing is activity too: the source's hold runs from here.
+        self._graph_activity[source_key] = time.monotonic()
 
     async def acquire_provider_slot(
         self, provider_id: str, graph_name: str = "",

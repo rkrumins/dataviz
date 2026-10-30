@@ -300,6 +300,12 @@ across its outbound call, and that pool is shared by all data sources.
 * Check `/health/deps` → `resilience.provider_manager` for `graph_shed_over_share`.
 * `PROVIDER_SOURCE_RESERVED` (default `pool // 8` = 2) is the share each source can
   always take. With many sources and a small pool, raise the pool rather than the reserve.
+* Past its reserve, a source takes what its neighbours leave idle. Room is held back only
+  for the neighbours that are reading — a request in flight, or one that started or
+  finished in the last `GRAPH_SOURCE_HOLD_SECS` (1.5 s) — up to what each has not used of
+  its reserve, plus one newcomer's reserve, so a source nobody was reading still gets in at
+  once. A busy source with idle neighbours takes all of `hard` but that one reserve; it is
+  shed on its share only while others are actually reading.
 * Verify `DB_GRAPH_READ_POOL_MAX_OVERFLOW` is spelled correctly in your ConfigMap —
   a misspelling leaves the pool at the code default and the admission gate sizes itself
   from a number you did not choose.

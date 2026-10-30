@@ -384,6 +384,18 @@ class ContextEngine:
         callers outside the engine (top-level cache serve/compute paths)."""
         return await self._resolve_ontology()
 
+    async def reads_flat_without_ontology(self) -> bool:
+        """True when no ontology is assigned, so nothing says what contains
+        what: no type in the resolution came from an ``assigned`` (or
+        ``system_default``) layer, and nothing is containment. Not an error —
+        the provider reads flat (see ``_inject_resolved``) — but worth saying,
+        since assigning an ontology is what gives the items a hierarchy."""
+        resolved = await self._resolve_ontology()
+        return not resolved.containment_edge_types and not any(
+            s in ("assigned", "system_default")
+            for s in (resolved.resolution_sources or {}).values()
+        )
+
     def _inject_resolved(self, resolved, *, force_authoritative: bool = False) -> None:
         """Push a resolved ontology's config into the provider (in-memory
         setters only — no I/O). Shared by the full resolution path and the
@@ -395,7 +407,9 @@ class ContextEngine:
         of resolution_sources — used by the LAST-layer fallback, where an
         introspection-only (possibly empty) result must still configure the
         provider: empty-but-configured beats every subsequent call raising
-        ProviderConfigurationError."""
+        ProviderConfigurationError. With no ontology assigned, an empty set
+        configures a provider nothing has configured yet as a flat graph,
+        and leaves one another data source configured as it is."""
         has_real_ontology = force_authoritative or bool(
             resolved.resolution_sources
             and any(s in ("assigned", "system_default")
