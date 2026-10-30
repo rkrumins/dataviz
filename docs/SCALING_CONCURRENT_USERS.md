@@ -320,9 +320,18 @@ and impossible direct. ([INFRASTRUCTURE_LAUNCH_SCALE.md](INFRASTRUCTURE_LAUNCH_S
 ### 4.6 `GRAPH_READ` also sizes the admission gate
 
 ```
-hard     = GRAPH_INFLIGHT_HARD_MAX   or max(4, GRAPH_READ pool + overflow − 4)
-reserved = PROVIDER_SOURCE_RESERVED  or max(1, (GRAPH_READ pool + overflow) // 8)
+hard      = GRAPH_INFLIGHT_HARD_MAX   or max(4, GRAPH_READ pool + overflow − 4)
+reserved  = PROVIDER_SOURCE_RESERVED  or max(1, (GRAPH_READ pool + overflow) // 8)
+held back = reserved + Σ over active neighbours of max(0, reserved − their requests in flight)
 ```
+
+A data source with fewer than `reserved` requests in flight is admitted while the process is
+under `hard`. Past its reserve, it is admitted while the process is under `hard − held back`.
+A neighbour is active while it has a request in flight, or one that started or finished in the
+last `GRAPH_SOURCE_HOLD_SECS` (1.5 s), which spans the gaps in a canvas's bursts. The first
+`reserved` in `held back` is a newcomer's: a data source nobody was reading gets in at once,
+however much a busy one has taken. So one busy data source takes `hard − reserved` when its
+neighbours are idle, and less only while they are reading.
 
 | `GRAPH_READ` pool + overflow | `hard` (graph requests per process) | `reserved` per data source |
 |---|---|---|
@@ -415,7 +424,7 @@ Retry-After** (code `PROVIDER_BUSY`), which the canvas retries in place.
 
 | Layer | Knob and default | Scope |
 |---|---|---|
-| Admission gate | `GRAPH_INFLIGHT_HARD_MAX` (0 = pool − 4), `PROVIDER_SOURCE_RESERVED` (0 = pool ÷ 8) | Per process, per data source |
+| Admission gate | `GRAPH_INFLIGHT_HARD_MAX` (0 = pool − 4), `PROVIDER_SOURCE_RESERVED` (0 = pool ÷ 8), `GRAPH_SOURCE_HOLD_SECS` 1.5 s | Per process, per data source |
 | Provider semaphore | `PROVIDER_MAX_CONCURRENCY` 8; waits `PROVIDER_SEMAPHORE_BUDGET_S` 2.0 s; `PROVIDER_SLOT_MAX_WAITERS` 16 | Per process, per (provider, graph) |
 | Fleet slot | `PROVIDER_FLEET_MAX_CONCURRENCY`: 0 (default) sizes from the node's `THREAD_COUNT`, floor 4; a positive value fixes it; a negative value turns it off | Fleet-wide per (provider, graph), counted in Redis STREAMS. **Fails open** when Redis is unreachable. |
 | FalkorDB queue | `MAX_QUEUED_QUERIES` (64 single node, 150 cluster shard) | Per node: "Max pending queries exceeded" becomes a 429 |
