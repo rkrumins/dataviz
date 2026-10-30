@@ -16,7 +16,17 @@ a publish, its projection and a rebuild hold a page of the graph at a time inste
 Measured on a graph of 300,000 nodes and 300,000 edges (the numbers in
 `docs/versioning/09-scale-limits-and-roadmap.md` §2): publishing it took 369 MB of the worker where
 the same publish of a third of it took 436 MB; projecting it 182 MB instead of 956 MB; rebuilding
-it 209 MB instead of 1,653 MB.
+it 209 MB instead of 1,653 MB. At 1,000,000 nodes and 1,000,000 edges every step stayed under
+400 MB: import 197 MB, publish 399 MB, projection 206 MB, rebuild 216 MB, export 166 MB.
+
+### Added
+
+- **A weekly CI job runs a graph of a million nodes and a million edges end to end**
+  (`.github/workflows/versioning-scale.yml`; on demand at any size, and on a pull request that changes
+  `backend/scripts/bench_versioning.py`). It imports, publishes, projects, rebuilds and exports the
+  graph, and fails when a step does not complete, passes its memory ceiling or leaves FalkorDB and
+  Postgres disagreeing. `docs/versioning/09-scale-limits-and-roadmap.md` §2 has what it measured,
+  what 10 million would take, and how to measure at your own size.
 
 ### Changed
 
@@ -65,7 +75,8 @@ it 209 MB instead of 1,653 MB.
 - **A view's export holds the ids of the view's entities** (about 100 bytes each: about 1 GB for a
   10-million-entity view, within the transfer worker's 4 GiB).
 - **A very large publish holds its graph's publish lock while it runs** (measured: 111 s for
-  600,000 changes): other publishes to that graph wait, then answer 503 `lock_busy`.
+  600,000 changes, 367 s for 2,000,000): other publishes to that graph wait, then answer 503
+  `lock_busy`.
 - **A graph with no FalkorDB key is read from Postgres**: listing its top-level entities and
   searching it are bounded by page, but a graph of millions belongs on a FalkorDB projection.
 
