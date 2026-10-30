@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import OrderedDict
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
@@ -180,10 +181,16 @@ async def on_read(svc, graph: Mapping, *, viewer, wm: Optional[Mapping] = None) 
     if wm["status"] == "rehydrating":
         return
     if wm["residency"] == "coldline":
-        entities = (await _entities([root["data_source_id"]])).get(root["data_source_id"])
+        entities = _COUNTS.get((root["graph_id"], wm["committed"]))
+        if entities is None and wm.get("size_bytes"):
+            entities = wm["size_bytes"] // policy.bytes_per_entity
         if entities is None:
-            entities = (wm.get("size_bytes") or 0) // policy.bytes_per_entity
-        if entities <= policy.coldline_canvas_load_above:
+            try:
+                entities = await _entity_count(root["graph_id"], root["data_source_id"],
+                                               wm["committed"])
+            except _Unread:
+                entities = None
+        if entities is None or entities <= policy.coldline_canvas_load_above:
             return
     await request_load(root["graph_id"])
 
@@ -227,6 +234,8 @@ class Snapshot:
     #: Graphs the pass puts in the queue itself (an Always graph out of FalkorDB, a waiting graph
     #: whose request the broker lost), with the score they get once, and keep.
     requeue: Dict[str, float] = field(default_factory=dict)
+    #: False when graphs' sizes could not be read: the pass then plans no pressure eviction.
+    sized: bool = True
 
 
 def _ts(value) -> Optional[datetime]:
@@ -253,21 +262,62 @@ async def _provider_client(provider: str, key: str) -> Tuple[Any, Optional[str]]
 
 async def _entities(data_source_ids: Collection[str]) -> Dict[str, int]:
     """Nodes plus edges each data source holds, rollups included, as its statistics last counted
-    them — what a graph never measured is estimated from."""
+    them: the estimate's fallback when graphver's own counts are missing. Raises when they
+    cannot be read."""
     if not data_source_ids:
         return {}
     from backend.app.db.engine import get_readonly_session
     from backend.app.db.models import DataSourceStatsORM as Stats
 
-    try:
-        async with get_readonly_session() as s:
-            rows = (await s.execute(
-                select(Stats.data_source_id, Stats.node_count + Stats.edge_count)
-                .where(Stats.data_source_id.in_(list(data_source_ids))))).all()
-    except Exception:  # noqa: BLE001 — an estimate the pass can do without
-        logger.warning("residency: data source statistics unreadable", exc_info=True)
-        return {}
+    async with get_readonly_session() as s:
+        rows = (await s.execute(
+            select(Stats.data_source_id, Stats.node_count + Stats.edge_count)
+            .where(Stats.data_source_id.in_(list(data_source_ids))))).all()
     return {ds: int(n or 0) for ds, n in rows}
+
+
+#: Each graph's entities at a main head, as counted: (graph id, head) -> nodes plus edges.
+_COUNTS: "OrderedDict[Tuple[str, int], int]" = OrderedDict()
+_COUNTS_KEPT = 4096
+
+
+class _Unread(Exception):
+    """A graph's entities could be read from neither graphver nor the data source's statistics."""
+
+
+async def _entity_count(graph_id: str, data_source_id: str, head: int) -> Optional[int]:
+    """``graph_id``'s nodes and edges at main head ``head``, as graphver counts them
+    (``schema_counts``; rollups are not in history), else as its data source's statistics last
+    counted them; None when neither has a count. Kept per head in this process. Raises
+    :class:`_Unread` when neither could be read."""
+    from .service import GraphVersioningService
+
+    key = (graph_id, head)
+    if key in _COUNTS:
+        _COUNTS.move_to_end(key)
+        return _COUNTS[key]
+    count, failed = None, False
+    try:
+        svc = GraphVersioningService()
+        counts = await svc.schema_counts(graph_id=graph_id,
+                                         branch_id=await svc.main_branch_id(graph_id))
+        if counts is not None:
+            count = sum(counts["nodes"].values()) + sum(counts["edges"].values())
+    except Exception:  # noqa: BLE001 — the statistics, then
+        logger.warning("residency: graphver's counts of %s unreadable", graph_id, exc_info=True)
+        failed = True
+    if count is None:
+        try:
+            count = (await _entities([data_source_id])).get(data_source_id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("residency: data source statistics unreadable", exc_info=True)
+            if failed:
+                raise _Unread(graph_id) from exc
+    if count is not None:
+        _COUNTS[key] = count
+        while len(_COUNTS) > _COUNTS_KEPT:
+            _COUNTS.popitem(last=False)
+    return count
 
 
 async def _dedicated(data_source_ids: Collection[str]) -> Optional[set]:
@@ -384,7 +434,15 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
         if r.graph_id not in asked and (r.status == "waiting_capacity" or
                                         (r.status == "evicted" and r.residency == "always")):
             asked[r.graph_id] = snap.requeue[r.graph_id] = now
-    estimate = await _entities({r.data_source_id for r in found if r.size_bytes is None})
+    estimate: Dict[str, Optional[int]] = {}
+    for r in found:              # only a load asked for, or one in flight, needs an estimate
+        target = max(r.target_commit_seq, r.main_head_commit_seq)
+        if r.size_bytes is None and (r.graph_id in asked or _seeding(r, target)):
+            try:
+                estimate[r.graph_id] = await _entity_count(r.graph_id, r.data_source_id,
+                                                           r.main_head_commit_seq)
+            except _Unread:
+                snap.sized = False
     dedicated = await _dedicated({r.data_source_id for r in found})
     by_provider: Dict[str, List[Any]] = {p: [] for p in providers or ()}
     for r in found:
@@ -428,12 +486,17 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             evictable=bool(r.past_genesis and r.enable_finished),
             leased=candidate and await is_pinned(r.graph_id),
             last_read=_ts(r.last_read_at),       # none on record: its clock starts this pass
-            size_bytes=r.size_bytes, entities=estimate.get(r.data_source_id),
-            seeding=(r.status == "rehydrating" and r.projected_commit_seq < target)
-            or (r.status in ("rebuilding", "reseeding") and r.projected_commit_seq == 0),
+            size_bytes=r.size_bytes, entities=estimate.get(r.graph_id),
+            seeding=_seeding(r, target),
             requested_at=asked.get(r.graph_id),
             provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=placed))
     return snap
+
+
+def _seeding(r, target: int) -> bool:
+    """Whether a load or a full projection is writing the graph into its key."""
+    return ((r.status == "rehydrating" and r.projected_commit_seq < target)
+            or (r.status in ("rebuilding", "reseeding") and r.projected_commit_seq == 0))
 
 
 def _pool(decided: Plan, graph: Graph) -> List[MasterPlan]:
@@ -454,8 +517,17 @@ async def admission(graph_id: str) -> Tuple[bool, Optional[str], Optional[int]]:
     graph = next((g for g in snap.graphs if g.graph_id == graph_id), None)
     if graph is None:
         return False, None, None
-    decided = plan(policy, snap.masters, snap.graphs, _clock())
+    if graph.bytes(policy) is None:
+        row = snap.rows[graph_id]
+        try:
+            graph = replace(graph, entities=await _entity_count(
+                graph_id, row["data_source_id"], row["main_head_commit_seq"]))
+        except _Unread:
+            pass
+    decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
     target = roomiest(_pool(decided, graph), policy)
+    if need(graph, policy) is None:
+        return False, target.master.endpoint if target else graph.endpoint, None
     if target is None:
         return False, graph.endpoint, None
     fits, shortfall = admit(target.master, need(graph, policy), policy, target.reserved)
@@ -470,7 +542,7 @@ async def place_key(graph_id: str, provider: str,
     there within the search's bound."""
     policy = await residency_policy.resolve()
     snap = await gather(providers=[provider])
-    decided = plan(policy, snap.masters, snap.graphs, _clock())
+    decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
     target = roomiest([p for p in decided.masters if provider in p.master.providers], policy)
     if target is None:
         return None
@@ -483,7 +555,7 @@ async def preview(policy, *, graph_ids: Optional[Collection[str]] = None,
     """What the next pass would do under ``policy`` at ``now`` (default: the clock), acting on
     nothing."""
     snap = await gather(graph_ids=graph_ids)
-    return plan(policy, snap.masters, snap.graphs, now or _clock()), snap
+    return plan(policy, snap.masters, snap.graphs, now or _clock(), sized=snap.sized), snap
 
 
 class CapacityLoop:
@@ -510,7 +582,7 @@ class CapacityLoop:
             await _start_idle_clocks(graph_ids)
             snap = await gather(graph_ids=graph_ids)
             await _requeue(snap)
-            decided = plan(policy, snap.masters, snap.graphs, _clock())
+            decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
             await self._measure(snap, first={e.graph_id for e in decided.evictions})
             await self._act(decided, snap)
             await self._finish_loads(snap)
@@ -528,10 +600,12 @@ class CapacityLoop:
         from .cache_manager import CacheManager
 
         evictor = CacheManager(self._proj)
+        evicted_on = set()
         for e in decided.evictions:
             if await evictor.evict(e.graph_id, drop_graph=self._proj.drop_graph, reason=e.reason):
+                evicted_on.add(e.endpoint)
                 metrics.increment("versioning_residency_evictions_total", reason=e.reason)
-                logger.info("residency: evicted graph %s from %s (%s, %d bytes)",
+                logger.info("residency: evicted graph %s from %s (%s, %s bytes)",
                             e.graph_id, e.endpoint, e.reason, e.bytes)
         used = {m.endpoint: m.used for m in snap.masters}
         for load in decided.loads:
@@ -539,7 +613,8 @@ class CapacityLoop:
             if chosen is None:
                 continue
             if await _start_load(load.graph_id, key=chosen[0], shard_map=chosen[1]):
-                self._started[load.graph_id] = (load.endpoint, used.get(load.endpoint))
+                if load.endpoint not in evicted_on:     # a delta across evictions means nothing
+                    self._started[load.graph_id] = (load.endpoint, used.get(load.endpoint))
                 metrics.increment("versioning_residency_loads_total", outcome="started")
                 logger.info("residency: loading graph %s onto %s (about %d bytes)",
                             load.graph_id, load.endpoint, load.bytes)
@@ -618,9 +693,11 @@ class CapacityLoop:
             if size is None:
                 continue
             async with db.graphver_session() as s:
+                # 0 is under the reading's resolution (GRAPH.MEMORY USAGE answers in whole MiB):
+                # no size, so the graph keeps its estimate, and is not read again until it changes.
                 await s.execute(update(ProjectionStateORM)
                                 .where(ProjectionStateORM.graph_id == r["graph_id"])
-                                .values(size_bytes=size, size_measured_at=func.now())
+                                .values(size_bytes=size or None, size_measured_at=func.now())
                                 .execution_options(synchronize_session=False))
 
 

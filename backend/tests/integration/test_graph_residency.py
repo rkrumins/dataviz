@@ -338,12 +338,13 @@ async def _set_ps(gid: str, **values) -> None:
 
 
 async def _live_graphs(svc, proj, mine, n: int) -> list:
-    """``n`` graphs projected into real keys, read a moment ago, each measured at 1 byte."""
-    now = datetime.now(timezone.utc)
+    """``n`` graphs projected into real keys, read a moment ago, each measured at 1 byte since its
+    projection (so no pass measures it again)."""
     out = []
     for _ in range(n):
         gid = await _resident(svc, proj)
         mine.append(gid)
+        now = datetime.now(timezone.utc)
         await _set_ps(gid, last_read_at=now, size_bytes=1, size_measured_at=now)
         out.append(gid)
     return out
@@ -605,15 +606,50 @@ async def test_adopt_never_touches_the_customer_s_key_through_an_eviction_and_a_
 
 
 @live
-async def test_a_projected_key_is_measured(store, falkor, mine, monkeypatch):
-    """A key that was never measured, or was projected since, is measured on the next pass."""
+async def test_a_graph_never_measured_is_estimated_from_its_own_history(
+        store, falkor, mine, monkeypatch):
+    """Its estimate is its nodes and edges at the main head, as graphver counts them, times the
+    bytes per entity — not the data source's statistics, which a probe of an evicted key zeroes."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(svc, proj, mine, 1)                  # one node in its history
+    assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+    await _set_ps(gid, size_bytes=None, size_measured_at=None)
+    await residency.request_load(gid)
+    decided, _snap = await residency.preview(residency_policy.defaults(), graph_ids=[gid])
+    assert [(x.graph_id, x.bytes) for x in decided.loads] == [(gid, 1 * 550)]
+
+
+@live
+async def test_a_key_under_the_measurement_s_resolution_is_left_unmeasured(
+        store, falkor, mine, monkeypatch):
+    """GRAPH.MEMORY USAGE answers in whole MiB, so a small key reads 0: that is no size, and
+    the graph keeps its estimate rather than a size of 0."""
+    from backend.app.providers.shard_capacity import read_graph_memory
+
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
+    key = (await _ps(gid)).falkor_graph_name
+    client, mode = await residency._provider_client(config.DEFAULT_FALKOR_PROVIDER, key)
+    assert await read_graph_memory(client, mode=mode, graph_key=key, timeout=5) == 0
     await _set_ps(gid, size_bytes=None, size_measured_at=None)
     await CapacityLoop(proj).run_once(graph_ids=[gid])
     ps = await _ps(gid)
-    assert ps.size_bytes is not None and ps.size_measured_at is not None
+    assert ps.size_bytes is None and ps.size_measured_at is not None
+
+
+@live
+async def test_a_projected_key_is_measured(store, falkor, mine, monkeypatch):
+    """A key that was never measured, or was projected since, is measured on the next pass (this
+    one is under the reading's resolution, so it has no size)."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(svc, proj, mine, 1)
+    await _set_ps(gid, size_bytes=5, size_measured_at=None)
+    await CapacityLoop(proj).run_once(graph_ids=[gid])
+    ps = await _ps(gid)
+    assert ps.size_measured_at is not None and ps.size_bytes != 5
 
 
 async def test_one_pass_at_a_time_across_workers(store, monkeypatch):

@@ -66,17 +66,18 @@ class Graph:
     placed: bool = True               # its load goes onto a fresh key on the roomiest master;
                                       # False: back onto its key (a rollup graph is named from it)
 
-    def bytes(self, policy: ResidencyPolicy) -> int:
+    def bytes(self, policy: ResidencyPolicy) -> Optional[int]:
+        """Its measured size, else its entities times the bytes per entity; None: unknown."""
         if self.size_bytes is not None:
             return self.size_bytes
-        return (self.entities or 0) * policy.bytes_per_entity
+        return None if self.entities is None else self.entities * policy.bytes_per_entity
 
 
 @dataclass(frozen=True)
 class Eviction:
     graph_id: str
     endpoint: str
-    bytes: int
+    bytes: Optional[int]              # None: unknown (an idle eviction needs no size)
     reason: str                       # idle_standard | idle_coldline | pressure
 
 
@@ -91,8 +92,8 @@ class Load:
 class Wait:
     graph_id: str
     endpoint: str
-    bytes: int
-    reason: str                       # capacity | queued | unmeasured | the master's hold
+    bytes: Optional[int]
+    reason: str                       # capacity | queued | unmeasured | unsized | the master's hold
     shortfall: Optional[int] = None   # for capacity: how much room is missing
 
 
@@ -124,9 +125,11 @@ class Plan:
         return [w for m in self.masters for w in m.waits]
 
 
-def need(graph: Graph, policy: ResidencyPolicy) -> int:
-    """The room a load of ``graph`` asks for: its estimate times the headroom."""
-    return -(-graph.bytes(policy) * policy.load_margin_pct // 100)
+def need(graph: Graph, policy: ResidencyPolicy) -> Optional[int]:
+    """The room a load of ``graph`` asks for: its estimate times the headroom; None when its size
+    is unknown."""
+    size = graph.bytes(policy)
+    return None if size is None else -(-size * policy.load_margin_pct // 100)
 
 
 def admit(master: Master, needed: int, policy: ResidencyPolicy,
@@ -165,9 +168,9 @@ def _candidates(graphs: Sequence[Graph]) -> List[Graph]:
 
 
 def _plan_master(policy: ResidencyPolicy, master: Master, graphs: Sequence[Graph],
-                 now: datetime) -> MasterPlan:
+                 now: datetime, sized: bool) -> MasterPlan:
     seeding = [g for g in graphs if g.seeding]
-    reserved = master.reserved + sum(need(g, policy) for g in seeding)
+    reserved = master.reserved + sum(need(g, policy) or 0 for g in seeding)
     out = MasterPlan(master=master, reserved=reserved, used_after=master.used,
                      seeding=bool(seeding))
     if policy.eviction_enabled:
@@ -180,12 +183,14 @@ def _plan_master(policy: ResidencyPolicy, master: Master, graphs: Sequence[Graph
                                               f"idle_{g.residency}"))
             else:
                 left.append(g)
-        freed = sum(e.bytes for e in out.evictions)
-        if master.used is not None and master.maxmemory > 0 \
+        freed = sum(e.bytes or 0 for e in out.evictions)
+        if sized and master.used is not None and master.maxmemory > 0 \
                 and master.used * 100 >= master.maxmemory * policy.high_water_pct:
             stop = master.maxmemory * policy.low_water_pct // 100
-            # No read on record sorts as read now: its idle clock has not started.
-            for g in sorted(left, key=lambda g: (g.residency != "coldline", g.last_read or now)):
+            # No read on record sorts as read now: its idle clock has not started. A graph of
+            # unknown size is no candidate: its eviction would count as freeing nothing.
+            for g in sorted((g for g in left if g.bytes(policy) is not None),
+                            key=lambda g: (g.residency != "coldline", g.last_read or now)):
                 if master.used - freed <= stop:
                     break
                 out.evictions.append(Eviction(g.graph_id, master.endpoint, g.bytes(policy),
@@ -215,6 +220,8 @@ def _plan_loads(policy: ResidencyPolicy, plans: Sequence[MasterPlan],
         target, reason, shortfall = roomiest(free, policy), None, None
         if g.provider in blocked:
             reason = "queued"                  # the first in line waits for room
+        elif need(g, policy) is None:
+            reason = "unsized"                 # admitted only with a size or an estimate
         elif not readable:
             reason = "unmeasured"
         elif target is None:
@@ -235,17 +242,18 @@ def _plan_loads(policy: ResidencyPolicy, plans: Sequence[MasterPlan],
 
 
 def plan(policy: ResidencyPolicy, masters: Sequence[Master], graphs: Sequence[Graph],
-         now: datetime) -> Plan:
+         now: datetime, *, sized: bool = True) -> Plan:
     """One pass's decisions: per master (in the order given, then any a graph names that was not
     read, which counts as unreadable), its evictions, the loads it starts and the loads that
-    wait there."""
+    wait there. ``sized`` False — the pass could not read the graphs' sizes — plans no pressure
+    eviction."""
     by_master: Dict[str, List[Graph]] = {}
     for g in graphs:
         by_master.setdefault(g.endpoint, []).append(g)
     known = {m.endpoint for m in masters}
     unread = [Master(endpoint=e, used=None, maxmemory=0, providers=(gs[0].provider,))
               for e, gs in by_master.items() if e not in known]
-    plans = [_plan_master(policy, m, by_master.get(m.endpoint, []), now)
+    plans = [_plan_master(policy, m, by_master.get(m.endpoint, []), now, sized)
              for m in [*masters, *unread]]
     _plan_loads(policy, plans, graphs)
     return Plan(masters=plans)

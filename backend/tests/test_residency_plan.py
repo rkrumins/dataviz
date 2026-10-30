@@ -301,6 +301,62 @@ def test_a_graph_never_measured_is_estimated_from_its_entities():
     assert plan(pricier, [_master(used_pct=0)], graphs, NOW).waits[0].reason == "capacity"
 
 
+# ── a graph of unknown size ──────────────────────────────────────────────────────────────────────
+def test_a_graph_of_unknown_size_is_never_evicted_for_pressure():
+    """Counted as freeing nothing, every such graph would go and the stop mark still not be
+    reached: one is never a pressure candidate. Idle eviction needs no size."""
+    graphs = [_graph(f"u{i}", "coldline", read=_ago(minutes=30), size=None) for i in range(5)]
+    assert plan(POLICY, [_master(used_pct=85)], graphs, NOW).evictions == []
+    sized = graphs + [_graph("s", "coldline", read=_ago(minutes=40), size=200 * MB)]
+    assert _evicted(plan(POLICY, [_master(used_pct=85)], sized, NOW)) == [("s", "pressure")]
+    idle = [_graph("u", "coldline", read=_ago(hours=2), size=None)]
+    assert _evicted(plan(POLICY, [_master(used_pct=40)], idle, NOW)) == [("u", "idle_coldline")]
+
+
+def test_a_pass_that_could_not_read_sizes_plans_no_pressure_eviction():
+    graphs = [_graph("s", "coldline", read=_ago(minutes=40), size=200 * MB),
+              _graph("i", "coldline", read=_ago(hours=2), size=10 * MB)]
+    p = plan(POLICY, [_master(used_pct=85)], graphs, NOW, sized=False)
+    assert _evicted(p) == [("i", "idle_coldline")]
+
+
+def test_a_load_of_unknown_size_waits_until_it_has_one():
+    graphs = [_graph("g", status="evicted", requested_at=1.0, size=None)]
+    p = plan(POLICY, [_master(used_pct=0)], graphs, NOW)
+    assert p.loads == [] and [(w.graph_id, w.reason) for w in p.waits] == [("g", "unsized")]
+
+
+async def test_a_load_s_size_is_not_taken_from_a_master_that_evicted_in_the_same_pass(
+        monkeypatch):
+    """The used-memory delta that sizes a load where GRAPH.MEMORY USAGE cannot is meaningless
+    across the same pass's evictions on that master: no baseline is kept there."""
+    from backend.app.services.versioning import cache_manager
+    from backend.app.services.versioning.residency_plan import Eviction, Load, MasterPlan, Plan
+
+    async def evicted(self, graph_id, *, drop_graph, reason=None):
+        return True
+
+    async def key(load, snap):
+        return "k", None
+
+    async def started(graph_id, *, key=None, shard_map=None):
+        return True
+
+    monkeypatch.setattr(cache_manager.CacheManager, "evict", evicted)
+    monkeypatch.setattr(residency, "_load_key", key)
+    monkeypatch.setattr(residency, "_start_load", started)
+    decided = Plan(masters=[
+        MasterPlan(master=_master(), reserved=0, used_after=None,
+                   evictions=[Eviction("e", "m1", 10 * MB, "pressure")],
+                   loads=[Load("l1", "m1", MB)]),
+        MasterPlan(master=_master(endpoint="m2"), reserved=0, used_after=None,
+                   loads=[Load("l2", "m2", MB)])])
+    snap = residency.Snapshot(masters=[_master(), _master(endpoint="m2")])
+    loop = residency.CapacityLoop(SimpleNamespace(drop_graph=None))
+    await loop._act(decided, snap)
+    assert set(loop._started) == {"l2"}
+
+
 def test_a_resident_graph_asks_for_no_load():
     graphs = [_graph("g", requested_at=1.0)]
     assert plan(POLICY, [_master()], graphs, NOW).loads == []

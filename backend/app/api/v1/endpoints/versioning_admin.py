@@ -301,7 +301,7 @@ async def preview_residency_policy(
             "waits": [item(w, reason=w.reason, shortfallBytes=w.shortfall) for w in m.waits],
         } for m in decided.masters],
         "evictions": len(decided.evictions),
-        "evictedBytes": sum(e.bytes for e in decided.evictions),
+        "evictedBytes": sum(e.bytes or 0 for e in decided.evictions),
         "loads": len(decided.loads),
     }
 

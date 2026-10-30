@@ -39,7 +39,7 @@ class _Svc:
 
 
 def _wm(status="idle", residency_class="standard", size=None, fresh=None):
-    return {"status": status, "residency": residency_class, "size_bytes": size,
+    return {"status": status, "residency": residency_class, "size_bytes": size, "committed": 7,
             "fresh": status == "idle" if fresh is None else fresh}
 
 
@@ -55,8 +55,8 @@ def asked(monkeypatch):
     async def request_load(gid):
         out.append(gid)
 
-    async def no_entities(ids):
-        return {}
+    async def no_count(graph_id, data_source_id, head):
+        return None
 
     async def lease(gid, ttl=None):
         out.append(("lease", gid, ttl))
@@ -64,7 +64,7 @@ def asked(monkeypatch):
 
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     monkeypatch.setattr(residency, "request_load", request_load)
-    monkeypatch.setattr(residency, "_entities", no_entities)
+    monkeypatch.setattr(residency, "_entity_count", no_count)
     monkeypatch.setattr(cache_manager, "acquire_lease", lease)
     monkeypatch.setattr(residency, "_note_read", lambda gid: out.append(("read", gid)))
     residency_policy._MEMO.update(policy=residency_policy.defaults(), at=residency_policy._clock())
@@ -93,13 +93,23 @@ async def test_a_read_of_a_graph_out_of_falkordb_and_the_load_it_asks_for(
     assert _loads(asked) == (["g"] if loads else [])
 
 
-async def test_a_coldline_graph_whose_statistics_count_past_the_threshold_loads(asked, monkeypatch):
-    async def entities(ids):
-        return {"ds_g": 500_001}
+async def test_a_coldline_graph_whose_count_is_past_the_threshold_loads(asked, monkeypatch):
+    """Its nodes and edges at the main head, as graphver counts them, kept per head: the next read
+    asks nothing of the database."""
+    counted = []
 
-    monkeypatch.setattr(residency, "_entities", entities)
-    await _read(_Svc({"g": _wm("evicted", "coldline")}))
-    assert _loads(asked) == ["g"]
+    async def count(graph_id, data_source_id, head):
+        counted.append((graph_id, head))
+        residency._COUNTS[(graph_id, head)] = 500_001
+        return 500_001
+
+    monkeypatch.setattr(residency, "_entity_count", count)
+    try:
+        await _read(_Svc({"g": _wm("evicted", "coldline")}))
+        await _read(_Svc({"g": _wm("evicted", "coldline")}))
+        assert _loads(asked) == ["g", "g"] and counted == [("g", 7)]
+    finally:
+        residency._COUNTS.clear()
 
 
 async def test_a_resident_graph_asks_for_nothing_and_says_nothing(asked):
@@ -158,6 +168,28 @@ async def test_node_degrees_on_a_graph_out_of_falkordb_is_a_503(asked, monkeypat
     assert caught.value.status_code == 503 and caught.value.detail["type"] == "graph_loading"
     await asyncio.sleep(0)
     assert _loads(asked) == ["g"]
+
+
+# ── the stats probe ──────────────────────────────────────────────────────────────────────────────
+async def test_the_stats_probe_skips_a_graph_out_of_falkordb(monkeypatch):
+    """Its key is gone: a probe would read an empty graph and record 0 nodes and 0 edges."""
+    from backend.app.services.aggregation.service import AggregationService
+
+    asked = []
+
+    class _Registry:
+        async def get_provider_for_workspace(self, *a, **kw):
+            asked.append("provider")
+            raise AssertionError("the probe must not read FalkorDB")
+
+    async def out(ds_id):
+        return "g_evicted"
+
+    monkeypatch.setattr(residency, "non_resident", out)
+    probe = SimpleNamespace(_registry=_Registry())
+    assert await AggregationService._probe_live_stats(probe, "ws1", "ds1", None) == (
+        None, None, None)
+    assert asked == []
 
 
 # ── read tracking and the read lease ─────────────────────────────────────────────────────────────
