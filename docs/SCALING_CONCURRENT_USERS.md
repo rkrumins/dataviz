@@ -629,7 +629,7 @@ graphs finish instead of failing. The price:
 | Event-loop lag | `/health/deps` `event_loop_lag_p99_ms`; CRITICAL samples (`EVENT_LOOP_CRITICAL_THRESHOLD_S`, 0.5 s; 5 s on the versioning lanes) | Any CRITICAL sample | A worker is CPU-starved or blocked: check CPU against workers |
 | Evictions on the `STREAMS` instance | `evicted_keys` in `INFO stats` | Any | Locks and streams are at risk: split or grow |
 | HPA at `maxReplicas` | `kubectl get hpa` | Sustained | You have reached the connection budget you designed: redo §4 before raising it |
-| Versioning job backlog | `GET /api/v1/admin/system/status` → `bootstrapJobs.lanes.<transfer\|bootstrap>`: `claimable` and `oldestClaimableSecs` | Grows and doesn't drain | That lane is missing or saturated: check its pods, then raise the transfer HPA ceiling or the bootstrap replicas (§3) |
+| Versioning job backlog | `GET /api/v1/admin/system/status` → `bootstrapJobs.lanes.<transfer\|bootstrap>`: `claimable`, `oldestClaimableSecs` and `running`; on the API scrape, `versioning_jobs_claimable{lane}`, `versioning_jobs_oldest_claimable_seconds{lane}` and `versioning_jobs_running{lane}` (the fleet's numbers, the same from every pod: take `max`) | Grows and doesn't drain | That lane is missing or saturated: check its pods, then raise the transfer HPA ceiling or the bootstrap replicas (§3) |
 | Aggregation and projection backlog | Admin → Infrastructure: the `aggregation.jobs` stream (depth, pending, oldest pending, group lag) and the projection panel (graphs catching up, max lag); `GET /api/v1/admin/system/status` → `streams`, `projection` | Rises and doesn't drain between bursts | The workers are behind: add aggregation-worker or versioning-worker replicas (§3) |
 | `aggregation_slot_fail_open_total`, `metrics_series_dropped_total` | Worker and API scrapes | Any | Write admission didn't hold, or the registry is undercounting |
 
@@ -976,6 +976,63 @@ crowd out canvases on a hot source, add `DEEP_SEARCH_CHUNK_CONCURRENCY: "1"`.
 **Redis:** split, highly available, and check `connected_clients` against your tier's limit
 (§6.2). **FalkorDB sockets:** see §5.3.
 
+### 10.4 The transfer lane at ~300 concurrent users
+
+One shape: about 300 people on about 50 graphs, 20 of them editing one hot graph at once and
+the rest reading. Only imports, exports, publishes too large to run inside the request and
+package inspections run on the transfer lane. Saves, checkpoints and small publishes don't, so
+20 people editing one graph add only their large publishes to it.
+
+- **Capacity as shipped:** 2 pods × `GRAPHVER_TRANSFER_SLOTS` (2) run 4 jobs at once, plus one
+  inspection per pod. At the HPA ceiling of 8 pods, 16 *(derived)*.
+- **Demand** *(derived, Little's law)*: jobs running at once ≈ jobs started per minute ×
+  average minutes per job. Thirty jobs an hour averaging 4 minutes keep 2 slots busy, so the
+  shipped minimum absorbs a steady day. Bursts queue: 20 ten-minute imports started together
+  take about 50 minutes on 4 slots and about 20 on 16.
+- **Who waits:** a queued publish runs right after inspections, then each workspace's first
+  `GRAPHVER_JOBS_PER_WORKSPACE` (2) jobs, then each person's first `GRAPHVER_JOBS_PER_USER` (1).
+  One person's burst of imports waits behind colleagues' single jobs, not in front of them, and
+  a job waiting behind busy workers is never timed out as not started.
+- **Raise nothing until it queues.** Watch `versioning_jobs_claimable{lane="transfer"}` and
+  `versioning_jobs_oldest_claimable_seconds` (§8.2). If the oldest wait stays above a few
+  minutes with the HPA at `maxReplicas`, redo §4 before raising it: each transfer pod adds a
+  process's pools (62 client connections behind a pooler in §10.2). The Helm chart can also
+  scale the lane on its queue with KEDA (`services.versioning.transfer.autoscaling.keda`), which
+  adds pods as soon as jobs wait instead of when CPU climbs.
+- **Measure this shape** with `loadtest/runners/versioning_collab.py`: editors on a hot graph and
+  on the others save, pull and publish their drafts while the rest read canvases
+  (`loadtest/README.md`, "People editing drafts together").
+
+**Measured on one machine (2026-10-30).** The collaboration load test against the real API and
+versioning workers, on 50 versioned graphs of 300 nodes and 500 edges, one of them hot. Everything
+shared one 4-CPU machine: the API (uvicorn, 2 processes), the projection and transfer lanes (a
+process each), Postgres, FalkorDB and Locust. `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES=6`, so every
+publish went through the transfer lane.
+
+| Run | Requests | Gave up (429 after its retries) | p50 / p95 | Shed mostly by |
+|---|---:|---:|---|---|
+| 100 users: 40 editors, 20 on the hot graph, 6 min | 42,472 | 1,511 (3.6 %) | 180 / 640 ms | the hot graph's share (13,921) |
+| The same with `PROVIDER_SOURCE_RESERVED=8` | 32,608 | 100 (0.3 %) | 430 / 1,100 ms | the process ceiling (4,580; share 2,683) |
+| 300 users: 60 editors, 20 on the hot graph, 12 min | 141,769 | 6,340 (4.5 %) | 680 / 2,100 ms | the process ceiling (63,330; share 978) |
+
+- **Correct throughout:** no 5xx and no pool timeout in any run.
+  - Every publish landed, or was refused as it should be. At 300 users: 41 publish jobs completed;
+    one job and three inline publishes were refused `not_up_to_date` and pulled.
+  - A publish job waited at most 1.0 s for the lane and ran in at most 0.85 s.
+  - All 50 projections caught up, without an error, and no draft was left `publishing`.
+- **The limit was the API's CPU.** Both API processes ran at about 95 % while Postgres and FalkorDB
+  stayed near idle: one process served about 100 requests a second of this mix. A profile of one
+  spent about 16 % of its time matching the URL against the app's routes, a third in SQLAlchemy and
+  asyncpg, and 4 % decoding the session token.
+- **Size viz-service by that** *(derived)*. 300 people at this test's pace send 200–300 requests a
+  second, which 4 processes carry at the 70 % CPU target. The shipped production minimum is 12
+  (3 pods × `GUNICORN_WORKERS` 4).
+- **A hot graph's share.** In each process, a graph over its reserve (`PROVIDER_SOURCE_RESERVED`,
+  the pool ÷ 8: 2) is shed while the room left is held for every other graph read in the last
+  minute. With 50 graphs that is always the case, so the hot graph gets 2 concurrent reads per
+  process: 24 across 12 processes. A larger reserve trades its 429s for slower answers while the
+  processes are busy (the second row): add processes first.
+
 ---
 
 ## 11. Known gaps
@@ -989,5 +1046,5 @@ crowd out canvases on a hot source, add `DEEP_SEARCH_CHUNK_CONCURRENCY: "1"`.
 | **NetworkPolicy is default-deny for ingress.** No rule admits the load generator or a Prometheus scraper. The cluster shards carry `app.kubernetes.io/name: falkordb-shard-N`, which the FalkorDB allow rule (`falkordb`) doesn't match. | Under an enforcing dataplane, backends may not reach the shards, and scrapes and load tests fail. | Verify in your cluster; add allow rules (§9 has the load-test pair). |
 | **The FalkorDB PVC is mounted at `/data` in the k8s base and cluster.** Compose and Helm mount `/var/lib/falkordb/data`, the image's data directory. | Graphs may not survive a pod restart. | Restart one pod and verify persistence before relying on it. |
 | **The Helm chart has no PDBs, pool-size values or `FORWARDED_ALLOW_IPS`, and its only HPA is the transfer lane's.** The control plane is fixed at one replica. | viz-service runs a fixed replica count, and every user behind one nginx pod shares a rate-limit bucket. | Use the kustomize overlays at scale, or post-render the chart. |
-| **Autoscaling uses CPU only** (plus memory for viz). The aggregation worker is bound by memory and queue depth. Of the versioning lanes only transfer has an HPA, and none has a PDB or probes. | Scale-out lags real demand on the workers. | Scale workers by hand from queue and projection lag and the per-lane job backlog (§8.2). |
+| **Autoscaling uses CPU only** (plus memory for viz). The aggregation worker is bound by memory and queue depth. Of the versioning lanes only transfer has an HPA, and none has a PDB or probes. | Scale-out lags real demand on the workers. | Scale workers by hand from queue and projection lag and the per-lane job backlog (§8.2). On Helm the transfer lane can scale on its queue with KEDA (§10.4). |
 | **nginx keeps 32 pooled upstream connections per worker.** | A newly scaled viz pod receives traffic only as pooled connections recycle (unverified). | After a scale-up, check that requests spread across the new pods. |

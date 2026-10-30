@@ -29,7 +29,8 @@ loadtest/
 │   ├── graph_lineage.py     # HttpUser wrapper around GraphLineageTasks (Tier-1 stress)
 │   ├── graph_walks.py       # HttpUser wrapper around GraphWalksTasks (Tier-1 stress)
 │   ├── graph_children.py    # HttpUser wrapper around GraphChildrenTasks (Tier-1 stress)
-│   └── canvas_open.py       # HttpUser wrapper around CanvasOpenTasks (the view open)
+│   ├── canvas_open.py       # HttpUser wrapper around CanvasOpenTasks (the view open)
+│   └── versioning_collab.py # editors + readers around the collaboration tasks
 └── scenarios/
     ├── views.py             # GET /views/ + /views/popular
     ├── workspaces.py        # GET /admin/workspaces/.../cached-stats
@@ -41,7 +42,8 @@ loadtest/
     │                        # GET /{ws}/graph/nodes/{urn}/descendants
     ├── graph_children.py    # GET /{ws}/graph/nodes/{urn}/children     (Tier-1 stress)
     │                        # GET /{ws}/graph/nodes/{urn}/children-with-edges
-    └── canvas_open.py       # POST /{ws}/graph/nodes/query ×N + /edges/between (the view open)
+    ├── canvas_open.py       # POST /{ws}/graph/nodes/query ×N + /edges/between (the view open)
+    └── versioning_collab.py # drafts edited, saved, pulled and published together, canvases read
 ```
 
 ## Install
@@ -246,6 +248,67 @@ Separately, if you see HTTP 500 on `/auth/login` with `AttributeError: 'State' o
 ### Troubleshooting: 401 on every admin call
 
 The backend ships with `AUTH_COOKIE_SECURE=true` by default, so the `nx_access` JWT cookie is set with the `Secure` flag. Over plain `http://localhost:…`, Python's `requests` cookie jar stores those cookies but refuses to resend them, and every authenticated call 401s. The harness compensates by stripping the `Secure` flag after a successful cookie login on `http://` hosts ([lib/auth.py](lib/auth.py)) — you'll see an `INFO` line `Stripped Secure flag from N session cookie(s)…` when it kicks in. To avoid the workaround entirely, run the backend with `AUTH_COOKIE_SECURE=false` for local dev (see [backend/auth_service/cookies.py](../backend/auth_service/cookies.py)).
+
+## People editing drafts together
+
+`runners/versioning_collab.py` drives the collaboration load on versioned graphs:
+`SYNODIC_COLLAB_EDITORS` users each open or resume a draft on one graph and edit it the way the
+canvas does, `SYNODIC_COLLAB_HOT_EDITORS` of them on one hot graph and the rest spread over up to
+`SYNODIC_COLLAB_GRAPHS` others; every user beyond the editors reads a published canvas.
+
+```bash
+SYNODIC_COLLAB_HOT_DATA_SOURCE=<data source id> \
+.venv/bin/locust -f runners/versioning_collab.py --headless \
+    --users 300 --spawn-rate 20 --run-time 15m --csv results/collab
+.venv/bin/python -m scenarios.versioning_collab results/collab_stats.csv
+```
+
+| An editor… | Request | Row (`versioning-collab:…`) |
+|---|---|---|
+| Opens or resumes a draft | `GET /{ws}/versioning/resolve`, `GET …/graphs/{gid}/branches?scope=mine`, `POST …/graphs/{gid}/branches` | `resolve`, `drafts`, `open-draft` |
+| Reads it | `POST /{ws}/graph/nodes/query`, then `/graph/edges/between`, with `dataSourceId` and `branchId` | `draft-nodes`, `draft-edges` |
+| Saves the edits staged in the canvas, as one commit | `POST /{ws}/graph/changes?dataSourceId=&branchId=` | `save` |
+| Saves through the API instead (now and then) | `POST …/branches/{bid}/changes`, then `…/commit` | `stage`, `checkpoint` |
+| Keeps the draft fresh, every `SYNODIC_COLLAB_FRESHNESS_SECS` | `GET …/branches/{bid}/freshness?sinceSeq=` | `freshness` |
+| Pulls main in when it moved | `POST …/branches/{bid}/rebase` | `pull` |
+| Publishes after `SYNODIC_COLLAB_SAVES_PER_PUBLISH` saves, then starts another draft | `POST …/branches/{bid}/publish`; a 202 is followed at `…/publish-jobs/{jobId}` | `publish`, `publish-job` |
+
+Readers' rows are `canvas-nodes` and `canvas-edges`.
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `SYNODIC_COLLAB_EDITORS` | `60` | Users who edit (a fixed count); the rest read |
+| `SYNODIC_COLLAB_HOT_EDITORS` | `20` | Of the editors, how many edit the hot graph |
+| `SYNODIC_COLLAB_HOT_DATA_SOURCE` | the first versioned one found | The hot graph's data source |
+| `SYNODIC_COLLAB_GRAPHS` | `50` | Versioned graphs used at most, the hot one included |
+| `SYNODIC_COLLAB_FRESHNESS_SECS` | `10` | How often an open draft polls its freshness (the UI's cadence while things move) |
+| `SYNODIC_COLLAB_SAVES_PER_PUBLISH` | `20` | Saves on a draft before it is published |
+
+- **It changes data.** Each editor sets one property of its own (`loadtest_<worker>_<n>`) on
+  existing nodes, and a publish writes it to main. Run it against a deployment whose data may
+  change, as an account that may edit and publish there. Drafts are named `loadtest-collab` and
+  are resumed by the next run rather than opened again.
+- **What collaboration answers is not a failure.** A publish refused because main moved since the
+  pull, or by the data source's drafts policy (409, inside the request or by its job), a save whose
+  base moved (409 `merge_conflict`) and a pull with conflicts (the draft is abandoned for a new one)
+  each count as a `COLLAB` row of their own, such as `versioning-collab:publish:409:not_up_to_date`
+  or `versioning-collab:publish-job:409:not_up_to_date`.
+- **The transfer lane only gets publishes too large for the request.** A publish runs as a job when
+  its draft changes more than `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` entities (20,000 by default);
+  this test's drafts change about 20, so at the default every publish is answered inside the
+  request. To load the lane too, run the API under test with a lower value (6 sends nearly every
+  publish there).
+- **One sign-in per Locust process, never refreshed.** Keep a run shorter than the API's
+  access-token lifetime (`JWT_EXPIRY_MINUTES`: 15 in the shipped configs, 5 by default), or run the
+  API with a longer one; past it, every request answers 401.
+- **The gate at the end** fails the run (exit code 1) when freshness p99 passes 300 ms, a save or
+  checkpoint p95 passes 1 s, a publish p95 passes 5 s, or any request met a database pool timeout.
+  These are starting points: tune them from a baseline.
+- Editors are counted per Locust process in the share `SYNODIC_COLLAB_EDITORS` gives them, so a
+  distributed run spreads the hot graph's editors across its workers.
+- `make smoke-versioning-collab` runs it alone with the smoke settings and checks the run with the
+  scenario's own gate. It is not part of `make smoke`, because it publishes. Set
+  `SYNODIC_COLLAB_EDITORS` below `SMOKE_USERS` to have readers too.
 
 ## Validate the run — SLO check
 

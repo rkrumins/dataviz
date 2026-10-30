@@ -24,6 +24,7 @@ zero at the moment you most want history.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 
@@ -109,6 +110,40 @@ def _sample_process_counters(backend) -> None:
         logger.debug("metrics: could not sample process counters", exc_info=True)
 
 
+#: How long a scrape waits on the versioning store for the job lanes' queues.
+_JOB_BACKLOG_SECS = 2.0
+
+
+async def _sample_job_backlog(backend, session_factory=None) -> None:
+    """Copy the versioning worker lanes' queues into the registry, read from ``graphver.jobs``.
+
+    Per lane (``job_lease.claimable_backlog``): the jobs its workers are running
+    (``versioning_jobs_running``), the jobs one could claim now (``versioning_jobs_claimable``)
+    and how long the oldest has waited (``versioning_jobs_oldest_claimable_seconds``). The lanes
+    serve no HTTP, so the web tier reports them. They are the fleet's numbers, so every pod
+    reports the same and a query takes ``max``. Running plus claimable is a lane's demand: the
+    transfer lane's optional KEDA scaler (Helm ``services.versioning.transfer.autoscaling.keda``)
+    divides it by the jobs one pod runs.
+
+    Bounded by ``_JOB_BACKLOG_SECS``, and never raises: a store that can't answer leaves the last
+    reading in place."""
+    try:
+        from backend.app.services.versioning import db as gv_db
+        from backend.app.services.versioning import job_lease
+
+        async with asyncio.timeout(_JOB_BACKLOG_SECS):
+            async with (session_factory or gv_db.graphver_session)() as s:
+                lanes = await job_lease.claimable_backlog(s)
+        for lane, queue in lanes.items():
+            labels = {"lane": str(lane)}
+            backend.gauge_set("versioning_jobs_running", labels, float(queue["running"]))
+            backend.gauge_set("versioning_jobs_claimable", labels, float(queue["claimable"]))
+            backend.gauge_set("versioning_jobs_oldest_claimable_seconds", labels,
+                              float(queue["oldestClaimableSecs"] or 0))
+    except Exception:  # noqa: BLE001 — a scrape must not 500 over telemetry
+        logger.debug("metrics: could not read the job lanes' queues", exc_info=True)
+
+
 @router.get(
     "/metrics",
     summary="Prometheus scrape endpoint (METRICS_ENABLED + METRICS_TOKEN)",
@@ -143,4 +178,5 @@ async def scrape(request: Request) -> PlainTextResponse:
             media_type=_CONTENT_TYPE,
         )
     _sample_process_counters(backend)
+    await _sample_job_backlog(backend)
     return PlainTextResponse(backend.render(), media_type=_CONTENT_TYPE)

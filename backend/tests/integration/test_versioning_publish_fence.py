@@ -2,7 +2,9 @@
 — needs Postgres.
 
 * Queuing a publish (``create_publish_job``) takes the draft's row lock and sets it ``publishing``
-  in the transaction that stores the job, already queued. Saves, stages, checkpoints, pulls,
+  in the transaction that stores the job, already queued — unless the draft is behind ``main``,
+  which is refused then and there (409 not_up_to_date), as a publish inside the request is, rather
+  than queued to fail. Saves, stages, checkpoints, pulls,
   abandons, an in-request publish and a second queued publish are then refused (409
   branch_closed); only the job's own publish runs. A job queued before this change, on a draft
   still ``open``, runs as well.
@@ -26,7 +28,7 @@ from sqlalchemy import func, select, update
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.errors import BranchNotOpen, MainWriteForbidden
 from backend.app.services.versioning.models import JobORM, WorkingChangeORM
-from backend.app.services.versioning.service import GraphVersioningService
+from backend.app.services.versioning.service import GraphVersioningService, NotUpToDate
 
 pytestmark = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"),
                                 reason="set GRAPHVER_E2E=1 + a live Postgres to run")
@@ -67,6 +69,20 @@ def _ago(secs):
 async def _set_job(job_id, **values):
     async with db.graphver_session() as s:
         await s.execute(update(JobORM).where(JobORM.id == job_id).values(**values))
+
+
+async def _quiet_lane():
+    """Nothing on the transfer lane claimed or beating for the whole queue timeout, as when no
+    worker runs: earlier claims are moved back past it, and running jobs fall silent."""
+    from backend.app.services.versioning.import_export.runner import INSPECT_TYPES, JOB_TYPES
+
+    long_ago = _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS + 60)
+    lane = JobORM.job_type.in_(JOB_TYPES + INSPECT_TYPES)
+    async with db.graphver_session() as s:
+        await s.execute(update(JobORM).where(lane, JobORM.started_at >= long_ago)
+                        .values(started_at=long_ago))
+        await s.execute(update(JobORM).where(lane, JobORM.status == "running")
+                        .values(updated_at=long_ago))
 
 
 def _e2e(coro_fn):
@@ -137,6 +153,28 @@ def test_a_queued_publish_holds_its_draft_until_it_lands():
     _e2e(_queued_publish_holds_the_draft)
 
 
+async def _behind_is_refused_before_it_is_queued(svc, ie):
+    gid = await _graph(svc)
+    behind = await _draft(svc, gid, description="behind")
+    first = await svc.open_draft(graph_id=gid, owner="u")
+    await svc.apply_ops(graph_id=gid, branch_id=first, actor="u", ops=[_upd("M", description="first")])
+    await svc.publish(graph_id=gid, branch_id=first, actor="u", message="main moves on")
+
+    with pytest.raises(NotUpToDate):
+        await _queue(ie, gid, behind)
+    assert await _status(svc, behind) == "open"             # not closed for a job bound to fail
+    async with db.graphver_session() as s:
+        assert (await s.execute(select(JobORM.id).where(JobORM.branch_id == behind))).first() is None
+    # Pulled, it is queued.
+    await svc.rebase_draft(graph_id=gid, branch_id=behind, actor="u")
+    assert (await _queue(ie, gid, behind))["job_id"]
+    assert await _status(svc, behind) == "publishing"
+
+
+def test_a_draft_behind_main_is_refused_before_its_publish_is_queued():
+    _e2e(_behind_is_refused_before_it_is_queued)
+
+
 async def _release(svc, ie):
     from backend.app.services.versioning.import_export.import_worker import lease_job
     from backend.app.services.versioning.import_export.runner import JobReaper
@@ -161,6 +199,7 @@ async def _release(svc, ie):
     timed_out = await _draft(svc, gid)
     job = await _queue(ie, gid, timed_out)
     await _set_job(job["job_id"], updated_at=_ago(config.TRANSFER_QUEUE_TIMEOUT_SECS + 60))
+    await _quiet_lane()                                     # ...nor any other job
     assert (await JobReaper().run_once())["timedOut"] >= 1
     assert timed_out in await svc.release_publishing(graph_id=gid)
     assert await _status(svc, timed_out) == "open"

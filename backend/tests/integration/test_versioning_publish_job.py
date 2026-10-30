@@ -3,7 +3,8 @@
 The job goes through the same hook the API wires into the import/export service (the target's
 live ontology, the route's refusals, then what a publish sets off), so this runs it end to end
 against Postgres: the draft's changes reach main and the job carries the commit; a draft that fell
-behind main is refused with the route's own answer, for the client to raise the same error; the
+behind main while its job waited is refused with the route's own answer, for the client to raise
+the same error; the
 merge of a draft's review goes the same way, and one its reviewer has not approved is refused
 before it is queued. And a job run again after its draft merged — its worker died after the
 squash, or a superseded attempt's squash landed under it — completes with that merge, publishing
@@ -54,14 +55,15 @@ async def _run(monkeypatch) -> None:
     log = await svc.commit_log(graph_id=gid, branch_id=main)
     assert log[0]["commit_id"] == result["commitId"] and log[0]["message"] == "publish by job", log[0]
 
-    # A draft that fell behind main: refused with the route's own answer.
+    # A draft that fell behind main while its job waited: refused with the route's own answer. (One
+    # already behind is refused before it is queued: test_versioning_publish_fence.)
     behind = await svc.open_draft(graph_id=gid, owner="alice")
     await svc.apply_ops(graph_id=gid, branch_id=behind, actor="alice", ops=[upd("B", displayName="b")])
+    job2 = await ie.create_publish_job(workspace_id="ws1", data_source_id=ds, graph_id=gid,
+                                       branch_id=behind, actor="alice", message="too late")
     other = await svc.open_draft(graph_id=gid, owner="bob")
     await svc.apply_ops(graph_id=gid, branch_id=other, actor="bob", ops=[upd("A", displayName="a")])
     await svc.publish(graph_id=gid, branch_id=other, actor="bob", message="first")
-    job2 = await ie.create_publish_job(workspace_id="ws1", data_source_id=ds, graph_id=gid,
-                                       branch_id=behind, actor="alice", message="too late")
     result2 = await ie.run_publish(job2["job_id"])
     assert result2["error"]["status"] == 409, result2
     assert result2["error"]["detail"]["type"] == "not_up_to_date", result2

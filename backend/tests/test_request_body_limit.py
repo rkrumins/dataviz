@@ -106,3 +106,23 @@ async def test_upload_routes_take_up_to_100_mib(csrf_client: AsyncClient, path):
         path, content=b"x", headers={**headers, "Content-Length": str(cap + 1)},
     )
     assert over.status_code == 413, over.text
+
+
+@pytest.mark.parametrize("fmt, says", [
+    ("json", "A JSON file is read whole"), ("json", "NDJSON or CSV"),
+    ("xlsx", "An Excel file is read whole"), ("xlsx", "NDJSON or CSV"),
+    ("ndjson", "/imports/uploads"),
+])
+async def test_an_import_sent_whole_past_the_cap_is_told_how_to_send_it(
+    csrf_client: AsyncClient, fmt, says,
+):
+    """A script that posts a whole file to ``…/imports`` past the cap was
+    told only the byte limit. A file read whole (JSON, Excel) has to become
+    NDJSON or CSV to be any larger; any other goes up in parts."""
+    resp = await csrf_client.post(
+        "/api/v1/ws_1/versioning/graphs/g1/imports", params={"format": fmt}, content=b"x",
+        headers={"Content-Type": "application/octet-stream",
+                 "Content-Length": str(100 * 1024 * 1024 + 1)},
+    )
+    assert resp.status_code == 413, resp.text
+    assert says in resp.json()["detail"], resp.json()["detail"]

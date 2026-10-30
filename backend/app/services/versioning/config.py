@@ -347,7 +347,8 @@ if os.getenv("GRAPHVER_TRANSFER_INPROCESS"):
 TRANSFER_SLOTS: int = int(os.getenv("GRAPHVER_TRANSFER_SLOTS", "2"))
 # How often an idle worker looks for a queued job: about how long a queued job waits for a free one.
 TRANSFER_POLL_SECS: float = float(os.getenv("GRAPHVER_TRANSFER_POLL_SECS", "1"))
-# A queued job no worker has started in this long reads as failed: none may be running.
+# A queued job no worker has started in this long reads as failed, when no job of the lane was
+# claimed or beat in that time either: none is running. Behind busy workers it waits its turn.
 TRANSFER_QUEUE_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS", str(6 * 3600)))
 # The transfer lane's JobReaper rules (import_export/runner.py), here so the schema upgrade that
 # fails such jobs before building uq_jobs_ingest_active (models.py) applies the same ones.
@@ -493,6 +494,11 @@ BOOTSTRAP_PER_PROVIDER: int = int(os.getenv("GRAPHVER_BOOTSTRAP_PER_PROVIDER", "
 # running fewer than this, so one tenant queueing 50 imports doesn't hold every slot while
 # another's single job waits. Soft (work-conserving): with nobody else waiting it still runs.
 JOBS_PER_WORKSPACE: int = int(os.getenv("GRAPHVER_JOBS_PER_WORKSPACE", "2"))
+# The same SOFT share per person, after the workspace's: a claim prefers the job of someone running
+# fewer than this, so one person queueing ten large imports doesn't hold their workspace's share
+# while a colleague's export waits. A job is the person's who asked for it (an export, a publish);
+# an import is its draft owner's. Soft too: with nobody else waiting, their jobs still run.
+JOBS_PER_USER: int = int(os.getenv("GRAPHVER_JOBS_PER_USER", "1"))
 # How long a stopping worker gives its running jobs to hand themselves back at a window boundary
 # (release: pending again, cursor kept) before cancelling them. Inside the deployment's 60 s
 # termination grace, with time left to release the cancelled ones.
