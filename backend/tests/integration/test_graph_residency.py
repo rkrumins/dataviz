@@ -90,11 +90,11 @@ async def _publish(svc, gid: str, *names: str) -> None:
     await svc.publish(graph_id=gid, branch_id=d, actor="a", message="seed")
 
 
-async def _resident(svc, proj) -> str:
+async def _resident(svc, proj, provider=None) -> str:
     """A graph with its own platform key, projected (so idle, past genesis, evictable)."""
     gid = (await svc.create_graph(data_source_id="ds_" + _hex(), workspace_id="ws_res",
                                   actor="a", falkor_graph_name="gvt_" + _hex(),
-                                  owns_falkor_graph=True))["graph_id"]
+                                  falkor_provider=provider, owns_falkor_graph=True))["graph_id"]
     await _publish(svc, gid, "A")
     assert not (await proj.project_graph(gid)).get("skipped")
     return gid
@@ -165,22 +165,63 @@ async def test_an_evicted_graph_stays_evicted_whatever_asks_for_a_pass(store, mo
         await get_broker_redis().zrem(residency.LOAD_REQUESTS, gid)
 
 
-async def test_a_move_keeps_an_evicted_graph_evicted(store, monkeypatch):
-    """Moving an evicted graph moves its pin and nothing else: no pass reseeds the new key
-    until a load is admitted."""
+@pytest.mark.parametrize("status, after", [
+    ("evicted", "evicted"), ("waiting_capacity", "waiting_capacity"),
+    ("rehydrating", "evicted"),                  # its load in flight starts again, admitted again
+])
+async def test_a_move_of_a_graph_out_of_falkordb_changes_only_its_pin(
+        store, monkeypatch, status, after):
+    """Nothing writes to FalkorDB without admission: moving a graph that is not in FalkorDB
+    moves its pin, and its load is asked for again; no pass seeds the new key until the load is
+    admitted. A load in flight is fenced off (the epoch) and goes back to the queue."""
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, fake = store, FakeFalkor()
     proj = FalkorProjector(graph_client_factory=fake)
     gid = await _resident(svc, proj)
     assert await CacheManager(proj).evict(gid, drop_graph=_dropped) is True
+    await _set_ps(gid, status=status, projected_commit_seq=1 if status == "rehydrating" else 0)
+    epoch = (await _ps(gid)).epoch
     from backend.app.services.versioning import keymigrate
     key = keymigrate.owned_key(gid, 2)
-    res = await svc.move_projection(graph_id=gid, provider=config.DEFAULT_FALKOR_PROVIDER, key=key,
-                                    actor="a", shard_map={})
-    assert res["changed"] is True
-    ps = await _ps(gid)
-    assert (ps.falkor_graph_name, ps.status, ps.projected_commit_seq) == (key, "evicted", 0)
-    assert await _pending(proj, gid) is False
+    try:
+        res = await svc.move_projection(graph_id=gid, provider=config.DEFAULT_FALKOR_PROVIDER,
+                                        key=key, actor="a", shard_map={})
+        assert res["changed"] is True
+        ps = await _ps(gid)
+        assert (ps.falkor_graph_name, ps.status, ps.projected_commit_seq) == (key, after, 0)
+        assert ps.epoch > epoch and ps.rehydrating_since is None
+        assert await _load_requested(gid)
+        assert await _pending(proj, gid) is False
+    finally:
+        await get_broker_redis().zrem(residency.LOAD_REQUESTS, gid)
+
+
+async def test_the_watermark_reset_sends_a_load_in_flight_back_to_the_queue(store, monkeypatch):
+    """A reset after a restore reseeds what FalkorDB holds in place; a load in flight is not
+    reseeded outside admission: it goes back to the queue, fenced, and is admitted again. A graph
+    out of FalkorDB (watermark 0) has nothing to reset."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, fake = store, FakeFalkor()
+    proj = FalkorProjector(graph_client_factory=fake)
+    provider = "p_" + _hex()                     # the reset is scoped to it
+    resident, loading, out = (await _resident(svc, proj, provider),
+                              await _resident(svc, proj, provider),
+                              await _resident(svc, proj, provider))
+    await _set_ps(loading, status="rehydrating", projected_commit_seq=1)
+    assert await CacheManager(proj).evict(out, drop_graph=_dropped) is True
+    try:
+        assert set(await svc.reset_projection_watermarks(provider=provider, actor="a",
+                                                         dry_run=True)) == {resident, loading}
+        assert (await _ps(loading)).status == "rehydrating"            # a dry run changes nothing
+        assert set(await svc.reset_projection_watermarks(provider=provider, actor="a")) == {
+            resident, loading}
+        ps = await _ps(resident)
+        assert (ps.status, ps.projected_commit_seq) == ("reseeding", 0)
+        ps = await _ps(loading)
+        assert (ps.status, ps.projected_commit_seq, ps.rehydrating_since) == ("evicted", 0, None)
+        assert await _load_requested(loading) and not await _load_requested(out)
+    finally:
+        await get_broker_redis().zrem(residency.LOAD_REQUESTS, resident, loading, out)
 
 
 async def test_a_fork_stays_outside_residency_and_is_reseeded_as_before(store, monkeypatch):

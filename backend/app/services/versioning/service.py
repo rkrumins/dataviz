@@ -3900,9 +3900,12 @@ class GraphVersioningService:
         Moving to the current pin changes nothing (``changed: False``). Refused
         (:class:`ConcurrencyError`) while the graph's "enable version control" job is unfinished.
         No FalkorDB I/O: the caller checks the key is free there and schedules the reseed. With
-        residency on, an evicted graph (or one waiting for room) only changes its pin: it stays
-        evicted, and its load seeds the new key once admitted."""
+        residency on, nothing is written to FalkorDB without admission: a graph that is not in
+        FalkorDB only changes its pin, and its load is asked for again (``residency.request_load``)
+        to seed the new key once admitted; a load in flight is fenced off and the graph is
+        evicted again, to wait its turn."""
         default = config.DEFAULT_FALKOR_PROVIDER
+        out = False                      # not in FalkorDB under residency: its load is asked for
         try:
             async with self._session() as s:
                 await self._lock_graph(s, graph_id)
@@ -3943,8 +3946,12 @@ class GraphVersioningService:
                 ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
                 ps.projected_commit_seq = 0
                 ps.target_commit_seq = graph.main_head_commit_seq
-                if not (config.RESIDENCY_ENABLED and ps.status in ("evicted", "waiting_capacity")):
+                out = config.RESIDENCY_ENABLED and ps.status in (
+                    "evicted", "waiting_capacity", "rehydrating")
+                if not out:
                     ps.status = "reseeding"
+                elif ps.status == "rehydrating":
+                    ps.status, ps.rehydrating_since = "evicted", None
                 ps.last_error = None
                 ps.failed_attempts = 0
                 ps.next_retry_at = None
@@ -3954,6 +3961,9 @@ class GraphVersioningService:
                 ps.shard_map = shard_map
         except IntegrityError:
             raise ProjectionKeyInUse(provider, key) from None     # uq_ps_key: a concurrent claim won
+        if out:
+            from .residency import request_load
+            await request_load(graph_id)
         return {"changed": True, "from": cur, "to": tgt, "retiring": entry}
 
     async def reset_projection_watermarks(self, *, provider: str, actor: str,
@@ -3965,8 +3975,10 @@ class GraphVersioningService:
         nothing failed) and bumps its epoch, so a pass in flight cannot publish over it; the poll
         then reseeds each key in place, writing only what differs. Graphs the poll does not
         project (unpinned, tombstoned, still being enabled for version control) are left alone,
-        as are graphs parked at genesis on their data source's own key. Returns the ids reset;
-        ``dry_run`` returns the ids it would reset and changes nothing."""
+        as are graphs parked at genesis on their data source's own key. With residency on, a
+        load in flight is not reseeded outside admission: it is fenced off, evicted again and its
+        load asked for again; a graph not in FalkorDB is at watermark 0, with nothing to reset.
+        Returns the ids reset; ``dry_run`` returns the ids it would reset and changes nothing."""
         ps = ProjectionStateORM
         resettable = (
             func.coalesce(func.nullif(ps.falkor_provider, ""),
@@ -3986,19 +3998,33 @@ class GraphVersioningService:
                 return list((await s.execute(
                     select(ps.graph_id).where(*resettable).order_by(ps.graph_id)
                 )).scalars().all())
+        loading = ps.status == "rehydrating"
         async with self._session() as s:
             ids = (await s.execute(
                 update(ps)
-                .where(*resettable)
+                .where(*resettable, *((~loading,) if config.RESIDENCY_ENABLED else ()))
                 .values(projected_commit_seq=0, epoch=ps.epoch + 1, status="reseeding",
                         last_error=None,
                         failed_attempts=0, next_retry_at=None, updated_at=_now())
                 .returning(ps.graph_id)
                 .execution_options(synchronize_session=False)
             )).scalars().all()
+            requeued = (await s.execute(
+                update(ps)
+                .where(*resettable, loading)
+                .values(projected_commit_seq=0, epoch=ps.epoch + 1, status="evicted",
+                        rehydrating_since=None, last_error=None,
+                        failed_attempts=0, next_retry_at=None, updated_at=_now())
+                .returning(ps.graph_id)
+                .execution_options(synchronize_session=False)
+            )).scalars().all() if config.RESIDENCY_ENABLED else []
+        if requeued:
+            from .residency import request_load
+            for gid in requeued:
+                await request_load(gid)
         logger.warning("%s reset the projection watermarks of %d graph(s) on FalkorDB provider %s",
-                       actor, len(ids), provider)
-        return list(ids)
+                       actor, len(ids) + len(requeued), provider)
+        return [*ids, *requeued]
 
     async def fence_projection_passes(self, *, provider: str) -> None:
         """FalkorDB ``provider`` moved to another server: bump the epoch of its graphs at
