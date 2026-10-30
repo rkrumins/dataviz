@@ -216,9 +216,10 @@ class _Session:
 
 
 def _snapshot() -> residency.Snapshot:
+    now = datetime.now(timezone.utc)                          # the preview plans at the real now
     graphs = [
-        _graph("cold", "coldline", read=NOW - timedelta(minutes=20), size=150 * MB),
-        _graph("std", read=NOW - timedelta(days=2), size=150 * MB),
+        _graph("cold", "coldline", read=now - timedelta(minutes=20), size=150 * MB),
+        _graph("std", read=now - timedelta(days=2), size=150 * MB),
         _graph("asked", status="waiting_capacity", requested_at=1.0, size=10 * MB),
     ]
     rows = {"cold": {"data_source_id": "ds_cold"}, "std": {"data_source_id": "ds_std"},
@@ -353,3 +354,24 @@ def test_a_pass_reports_each_master_s_memory_and_the_graphs_by_class_and_state(m
     assert (graphs("standard", "resident"), graphs("standard", "evicted"),
             graphs("standard", "waiting_capacity"), graphs("coldline", "resident"),
             graphs("always", "rehydrating"), graphs("always", "resident")) == (1, 1, 1, 1, 1, 0)
+    assert g[("versioning_residency_oldest_rehydrating_seconds", ())] == 0     # none has a start
+
+
+def test_a_pass_reports_how_long_the_oldest_load_has_been_under_way(monkeypatch):
+    """A load has no timeout (its reads stay on Postgres meanwhile), so one that does not finish
+    must be visible: the age of the oldest load in flight; 0 when there is none."""
+    from backend.app.jobs import metrics
+
+    sink = _Metrics()
+    monkeypatch.setattr(metrics, "_backend", sink)
+    now = datetime.now(timezone.utc)
+    snap = residency.Snapshot(rows={
+        "a": {"status": "rehydrating", "rehydrating_since": now - timedelta(minutes=50)},
+        "b": {"status": "rehydrating", "rehydrating_since": now - timedelta(minutes=5)},
+        "c": {"status": "idle", "rehydrating_since": now - timedelta(days=3)},   # long done
+    })
+    residency._report(snap)
+    age = sink.gauges[("versioning_residency_oldest_rehydrating_seconds", ())]
+    assert 50 * 60 <= age < 50 * 60 + 30
+    residency._report(residency.Snapshot())
+    assert sink.gauges[("versioning_residency_oldest_rehydrating_seconds", ())] == 0

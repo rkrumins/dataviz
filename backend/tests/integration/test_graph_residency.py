@@ -388,6 +388,8 @@ async def test_admission_holds_a_load_that_does_not_fit_and_starts_it_when_room_
         ("versioning_residency_loads_total", (("outcome", "started"),)): 1}
     ps = await _ps(gid)
     assert (ps.status, ps.projected_commit_seq) == ("rehydrating", 0)
+    assert ps.rehydrating_since is not None                  # how long it has been loading
+    assert (await svc.projection_watermark(gid))["rehydrating_since"] == ps.rehydrating_since
     assert not await _load_requested(gid)
 
 
@@ -573,7 +575,8 @@ async def test_a_reloaded_key_serves_reads_only_once_its_summaries_are_built(
     await graph.query("MERGE (m:_AggMeta {id: 'singleton'})")      # the build's stamp
     counted = _counting(monkeypatch)
     await loop.run_once(graph_ids=[gid])
-    assert (await _ps(gid)).status == "idle"
+    ps = await _ps(gid)
+    assert (ps.status, ps.rehydrating_since) == ("idle", None)
     assert counted == {("versioning_residency_loads_total", (("outcome", "completed"),)): 1}
     assert (await svc.projection_watermark(gid))["fresh"] is True
 

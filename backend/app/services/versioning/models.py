@@ -352,6 +352,9 @@ class ProjectionStateORM(VersioningBase):
     # The key's measured size in bytes, and when: what evicting it frees and loading it costs.
     size_bytes = Column(BigInteger, nullable=True)
     size_measured_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    # When its load in flight started (status ``rehydrating``); NULL once it is done. A load has no
+    # timeout, so one that never finishes is told by this.
+    rehydrating_since = Column(TIMESTAMP(timezone=True), nullable=True)
 
     __table_args__ = _plain(
         CheckConstraint(
@@ -1041,7 +1044,8 @@ def ensure_fork_bases(conn) -> None:
 
 def ensure_ps_residency(conn) -> None:
     """Add ``projection_state``'s residency columns (``residency``, Standard for every graph,
-    ``last_read_at``, ``evicted_reason``, ``size_bytes``, ``size_measured_at``) with the checks on
+    ``last_read_at``, ``evicted_reason``, ``size_bytes``, ``size_measured_at``,
+    ``rehydrating_since``) with the checks on
     the class and the reason, and let ``ck_proj_status`` allow ``rehydrating`` and
     ``waiting_capacity``. A no-op without the table, and once it is all there: an ALTER takes the
     table's ACCESS EXCLUSIVE lock even when it adds nothing, and every worker start runs this.
@@ -1054,7 +1058,8 @@ def ensure_ps_residency(conn) -> None:
     checks = dict(conn.execute(text(
         "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
         "WHERE conrelid = CAST(:ps AS regclass) AND contype = 'c'"), {"ps": ps}).all())
-    columns = {"residency", "last_read_at", "evicted_reason", "size_bytes", "size_measured_at"}
+    columns = {"residency", "last_read_at", "evicted_reason", "size_bytes", "size_measured_at",
+               "rehydrating_since"}
     widened = "'waiting_capacity'" in (checks.get("ck_proj_status") or "")
     if columns <= present and widened and {"ck_ps_residency", "ck_ps_evicted_reason"} <= set(checks):
         return
@@ -1064,6 +1069,7 @@ def ensure_ps_residency(conn) -> None:
     conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS evicted_reason TEXT"))
     conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS size_bytes BIGINT"))
     conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS size_measured_at TIMESTAMPTZ"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS rehydrating_since TIMESTAMPTZ"))
     conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_ps_residency"))
     conn.execute(text(f"ALTER TABLE {ps} ADD CONSTRAINT ck_ps_residency "
                       "CHECK (residency IN ('always','standard','coldline'))"))

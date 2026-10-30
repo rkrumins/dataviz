@@ -984,12 +984,13 @@ class WatermarkModel(_ApiModel):
     # Residency (doc 17): the class a system admin set (always | standard | coldline) and whether
     # the key is in FalkorDB: resident | evicted | rehydrating (being loaded) | waiting_capacity
     # (its master has no room for it yet). Then why it was evicted, when a person last read it and
-    # its measured size.
+    # its measured size; while it is being loaded, since when (a load has no timeout).
     residency: str = "standard"
     residency_state: str = Field(default="resident", alias="residencyState")
     evicted_reason: Optional[str] = Field(default=None, alias="evictedReason")
     last_read_at: Optional[datetime] = Field(default=None, alias="lastReadAt")
     size_bytes: Optional[int] = Field(default=None, alias="sizeBytes")
+    rehydrating_since: Optional[datetime] = Field(default=None, alias="rehydratingSince")
 
 
 class SavedSinceModel(_ApiModel):
@@ -2355,7 +2356,8 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           residency_state=wm.get("residency_state", "resident"),
                           evicted_reason=wm.get("evicted_reason"),
                           last_read_at=wm.get("last_read_at"),
-                          size_bytes=wm.get("size_bytes"))
+                          size_bytes=wm.get("size_bytes"),
+                          rehydrating_since=wm.get("rehydrating_since"))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:

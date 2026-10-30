@@ -11,6 +11,7 @@ it. This revision adds what the capacity loop decides from and records:
 * ``evicted_reason`` — ``idle_standard``, ``idle_coldline``, ``pressure`` or ``admin``
   (check ``ck_ps_evicted_reason``);
 * ``size_bytes`` and ``size_measured_at`` — the key's measured size;
+* ``rehydrating_since`` — when its load in flight started;
 
 and widens ``ck_proj_status`` with ``rehydrating`` (a load in flight) and ``waiting_capacity`` (a
 load its master has no room for yet). Columns with a constant default or none: catalog-only, no
@@ -70,5 +71,6 @@ def downgrade() -> None:
         "CHECK (status IN ('idle','projecting','rebuilding','evicted','reseeding'))"))
     for check in ("ck_ps_residency", "ck_ps_evicted_reason"):
         bind.execute(sa.text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS {check}"))
-    for column in ("residency", "last_read_at", "evicted_reason", "size_bytes", "size_measured_at"):
+    for column in ("residency", "last_read_at", "evicted_reason", "size_bytes", "size_measured_at",
+                   "rehydrating_since"):
         bind.execute(sa.text(f"ALTER TABLE {ps} DROP COLUMN IF EXISTS {column}"))

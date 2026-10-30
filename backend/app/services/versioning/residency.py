@@ -27,8 +27,9 @@ for ``GRAPHVER_TRACE_LEASE_TTL_SECS``, so no pass evicts a graph mid-read.
 Metrics (``jobs.metrics``), from the projection lane: each master's used and maximum memory
 (``versioning_residency_master_used_bytes`` / ``_max_bytes``), the graphs per class and state
 (``versioning_residency_graphs``), evictions by reason (``versioning_residency_evictions_total``),
-loads started and completed (``versioning_residency_loads_total``) and loads that began to wait,
-by why (``versioning_residency_load_waits_total``).
+loads started and completed (``versioning_residency_loads_total``), loads that began to wait, by
+why (``versioning_residency_load_waits_total``), and how long the oldest load in flight has been
+under way (``versioning_residency_oldest_rehydrating_seconds``: a load has no timeout).
 """
 from __future__ import annotations
 
@@ -272,7 +273,8 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None) -> Snapshot:
     query = (
         select(ps.graph_id, ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph,
                ps.status, ps.residency, ps.last_read_at, ps.last_projected_at, ps.size_bytes,
-               ps.size_measured_at, ps.projected_commit_seq, ps.target_commit_seq, head,
+               ps.size_measured_at, ps.rehydrating_since,
+               ps.projected_commit_seq, ps.target_commit_seq, head,
                GraphORM.data_source_id,
                (head > 1).label("past_genesis"),
                (~select(1).where(*bootstrap_unfinished(ps.graph_id)).correlate(ps).exists())
@@ -472,7 +474,7 @@ class CapacityLoop:
                            ProjectionStateORM.status == "rehydrating",
                            ProjectionStateORM.projected_commit_seq == projected)
                     .values(status="idle", evicted_reason=None, last_read_at=func.now(),
-                            updated_at=_now())
+                            rehydrating_since=None, updated_at=_now())
                     .returning(ProjectionStateORM.graph_id)
                     .execution_options(synchronize_session=False))).first()
             if done:
@@ -511,7 +513,8 @@ class CapacityLoop:
 
 
 def _report(snap: Snapshot) -> None:
-    """What a pass read, as gauges: each master's memory, and the graphs per class and state."""
+    """What a pass read, as gauges: each master's memory, the graphs per class and state, and the
+    age of the oldest load in flight (0 when there is none)."""
     for m in snap.masters:
         if m.used is not None:
             metrics.gauge_set("versioning_residency_master_used_bytes", m.used, master=m.endpoint)
@@ -524,6 +527,11 @@ def _report(snap: Snapshot) -> None:
         for state in _STATES:
             metrics.gauge_set("versioning_residency_graphs", counts.get((cls, state), 0),
                               residency=cls, state=state)
+    now = datetime.now(timezone.utc)
+    since = [r["rehydrating_since"] for r in snap.rows.values()
+             if r["status"] == "rehydrating" and r.get("rehydrating_since") is not None]
+    metrics.gauge_set("versioning_residency_oldest_rehydrating_seconds",
+                      max(((now - s).total_seconds() for s in since), default=0))
 
 
 async def _clear_spent(snap: Snapshot, *, full: bool) -> None:
@@ -551,7 +559,7 @@ async def _start_load(graph_id: str) -> bool:
                    ProjectionStateORM.status.in_(("evicted", "waiting_capacity")))
             .values(status="rehydrating", projected_commit_seq=0, last_error=None,
                     failed_attempts=0, next_retry_at=None, updated_at=_now(),
-                    epoch=ProjectionStateORM.epoch + 1)
+                    rehydrating_since=func.now(), epoch=ProjectionStateORM.epoch + 1)
             .returning(ProjectionStateORM.graph_id)
             .execution_options(synchronize_session=False))).first()
     if row is None:

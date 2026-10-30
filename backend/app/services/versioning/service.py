@@ -3780,6 +3780,9 @@ class GraphVersioningService:
                 "evicted_reason": ps.evicted_reason if ps else None,
                 "last_read_at": ps.last_read_at if ps else None,
                 "size_bytes": ps.size_bytes if ps else None,
+                # When its load in flight started; a load has no timeout.
+                "rehydrating_since": (ps.rehydrating_since if ps and status == "rehydrating"
+                                      else None),
             }
 
     async def clear_external_changes(self, graph_id: str, seen_at: Optional[str] = None) -> None:

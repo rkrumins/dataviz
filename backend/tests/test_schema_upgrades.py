@@ -1336,7 +1336,8 @@ async def test_the_draft_visibility_step_never_stalls_draft_reads_for_long(store
 # ── projection_state residency: a graph's class, its last read, why it was evicted and its size;
 #    the rehydrating and waiting_capacity statuses (20261030_1300_gv_ps_residency) ──
 _PS_RESIDENCY = _VERSIONS / "20261030_1300_gv_ps_residency.py"
-_RESIDENCY_COLUMNS = {"residency", "last_read_at", "evicted_reason", "size_bytes", "size_measured_at"}
+_RESIDENCY_COLUMNS = {"residency", "last_read_at", "evicted_reason", "size_bytes", "size_measured_at",
+                      "rehydrating_since"}
 _STATUSES_BEFORE = "'idle','projecting','rebuilding','evicted','reseeding'"
 
 
@@ -1352,9 +1353,11 @@ def test_the_residency_columns_are_declared_and_migrated():
     table = models.ProjectionStateORM.__table__
     assert not table.c.residency.nullable
     assert str(table.c.residency.server_default.arg) == "'standard'"
-    for name in ("last_read_at", "evicted_reason", "size_bytes", "size_measured_at"):
+    for name in ("last_read_at", "evicted_reason", "size_bytes", "size_measured_at",
+                 "rehydrating_since"):
         assert table.c[name].nullable, name
     assert table.c.last_read_at.type.timezone and table.c.size_measured_at.type.timezone
+    assert table.c.rehydrating_since.type.timezone
     assert "residency IN ('always','standard','coldline')" in _check_sql("ck_ps_residency")
     assert ("evicted_reason IN ('idle_standard','idle_coldline','pressure','admin')"
             in _check_sql("ck_ps_evicted_reason"))

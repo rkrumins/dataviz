@@ -194,8 +194,13 @@ async def test_the_watermark_says_the_class_and_the_state():
     wm = {"committed": 7, "projected": 0, "fresh": False, "status": "evicted",
           "read_route": {"main": "postgres", "drafts": "overlay"}, "falkor_provider": None,
           "residency": "coldline", "residency_state": "evicted", "evicted_reason": "idle_coldline",
-          "last_read_at": read, "size_bytes": 4096}
+          "last_read_at": read, "size_bytes": 4096, "rehydrating_since": None}
     out = (await V._watermark_model(None, wm)).model_dump(by_alias=True)
     assert (out["residency"], out["residencyState"], out["evictedReason"]) == (
         "coldline", "evicted", "idle_coldline")
     assert out["lastReadAt"] == read and out["sizeBytes"] == 4096
+    assert out["rehydratingSince"] is None
+    since = datetime(2026, 10, 30, 9, 5, tzinfo=timezone.utc)
+    loading = dict(wm, status="rehydrating", residency_state="rehydrating", rehydrating_since=since)
+    out = (await V._watermark_model(None, loading)).model_dump(by_alias=True)
+    assert out["residencyState"] == "rehydrating" and out["rehydratingSince"] == since

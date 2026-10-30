@@ -1324,6 +1324,7 @@ def _projection_rows():
             ProjectionStateORM.updated_at, ProjectionStateORM.retired_keys,
             ProjectionStateORM.residency, ProjectionStateORM.evicted_reason,
             ProjectionStateORM.last_read_at, ProjectionStateORM.size_bytes,
+            ProjectionStateORM.rehydrating_since,
         )
         .select_from(GraphORM)
         .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
@@ -1487,13 +1488,14 @@ async def list_versioned_graphs(
                              "retireAfter": e["retireAfter"], "afterSeq": e["afterSeq"]}
                             for e in r.retired_keys or []],
             # Residency (doc 17): its class, whether its key is in FalkorDB, why it was evicted,
-            # its last read and its measured size.
+            # its last read, its measured size and, while it is being loaded, since when.
             "residency": r.residency,
             "residencyState": (r.status if r.status in ("evicted", "rehydrating",
                                                         "waiting_capacity") else "resident"),
             "evictedReason": r.evicted_reason,
             "lastReadAt": r.last_read_at,
             "sizeBytes": r.size_bytes,
+            "rehydratingSince": r.rehydrating_since if r.status == "rehydrating" else None,
         } for r in page],
         "nextCursor": page[-1].id if more else None,
     }

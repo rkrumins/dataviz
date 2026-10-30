@@ -105,7 +105,7 @@ async def _run() -> None:
         "lastProjectedAt": None, "progressDone": None, "progressTotal": None, "updatedAt": None,
         "owned": True, "forkParentGraphId": None, "orphan": False, "retiredKeys": [],
         "residency": "standard", "residencyState": "resident", "evictedReason": None,
-        "lastReadAt": None, "sizeBytes": None,
+        "lastReadAt": None, "sizeBytes": None, "rehydratingSince": None,
     }
     # A moved graph's old key, until it is dropped.
     assert rows[fork]["retiredKeys"] == [{"name": "gvt_old", "provider": None,
