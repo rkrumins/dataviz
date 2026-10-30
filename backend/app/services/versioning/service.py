@@ -178,8 +178,18 @@ def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, befo
                                  "edgeType": b.type or "unknown"})
         else:                                          # added/modified → loaded when a read serves it
             edges_upsert.append({"id": eid, "sourceUrn": h.src or "", "targetUrn": h.tgt or "",
-                                 "edgeType": h.type or "unknown", "lazy": True})
+                                 "edgeType": h.type or "unknown", "lazy": True, **_was(b)})
     return nodes_upsert, nodes_modified, nodes_remove, edges_upsert, edges_remove, nodes_new
+
+
+def _was(held: Optional[_Stored]) -> dict:
+    """An overlay edge's ``was``: where the base holds it (its ends and type), so a reader serves
+    the overlay's value and counts the edge where it runs — once, never on top of the base's count.
+    Nothing for an edge the base does not hold."""
+    if held is None:
+        return {}
+    return {"was": {"sourceUrn": held.src or "", "targetUrn": held.tgt or "",
+                    "edgeType": held.type or "unknown"}}
 
 
 #: The lists of a reader-shaped patch set (:meth:`GraphVersioningService.branch_overlay_delta`),
@@ -219,7 +229,7 @@ def _fork_patch(ids, ours: Dict[str, _Stored], theirs: Dict[str, _Stored]) -> Di
                                        "edgeType": r.type or "unknown"})
         else:
             out["edgesUpsert"].append({"id": eid, "sourceUrn": f.src or "", "targetUrn": f.tgt or "",
-                                       "edgeType": f.type or "unknown", "lazy": True})
+                                       "edgeType": f.type or "unknown", "lazy": True, **_was(r)})
     return out
 
 
@@ -5502,16 +5512,23 @@ class GraphVersioningService:
             if bv is None and hv is None:
                 continue
             if _is_edge_payload(bv if bv is not None else hv):
-                # Edges: rewind only ADD (main added → hide) and DELETE (main removed → restore). A
-                # property-only modification (present at both ends) is skipped — restoring it as an
-                # upsert would double-count in the aggregated rollup (main's head already counts the
-                # edge), and edge endpoints don't change in practice.
+                # Edges: main ADDED → hide; main DELETED → restore; main CHANGED it (its properties,
+                # or where it runs) → its fork-point value, loaded when a read serves it, as the
+                # draft's own edit is, and counted where it runs at the fork point rather than
+                # where main's head counts it (``was``): never twice in a rollup or a child count.
                 if bv is None:                             # main ADDED after fork → hide from the read
                     src, tgt = _edge_src_tgt(hv)
                     edges_remove.append(_graphedge_dict(eid, hv, {src: src, tgt: tgt}))
                 elif hv is None:                           # main DELETED after fork → restore fork-point edge
                     src, tgt = _edge_src_tgt(bv)
                     edges_upsert.append(_graphedge_dict(eid, bv, {src: src, tgt: tgt}))
+                elif bv != hv:                             # main CHANGED it after fork → fork-point value
+                    at, now = (_graphedge_dict(eid, v, {e: e for e in _edge_src_tgt(v)})
+                               for v in (bv, hv))
+                    edges_upsert.append({**{k: at[k] for k in ("id", "sourceUrn", "targetUrn",
+                                                               "edgeType")}, "lazy": True,
+                                         "was": {k: now[k] for k in ("sourceUrn", "targetUrn",
+                                                                     "edgeType")}})
             elif bv is not None:                           # node existed at the fork point → restore its value
                 urn = bv.get("urn") or f"gv:{eid}"
                 nodes_upsert.append(_graphnode_dict(eid, urn, bv))

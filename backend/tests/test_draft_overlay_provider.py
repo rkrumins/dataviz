@@ -384,6 +384,101 @@ def test_a_draft_over_a_base_that_cannot_count_says_so():
         asyncio.run(p.get_node_degrees(["A"], ["LINEAGE"], include_rollups=True))
 
 
+# ── An edge the overlay changed: served with its value, counted where it runs ────────────────
+def _was(e, **base):
+    """``e`` as a lazy overlay entry (its id, type and ends) over an edge the base holds too: at
+    ``base``'s ends (``s``, ``t``), its own unless given."""
+    return {**{k: e[k] for k in ("id", "sourceUrn", "targetUrn", "edgeType")}, "lazy": True,
+            "was": {"sourceUrn": base.get("s", e["sourceUrn"]),
+                    "targetUrn": base.get("t", e["targetUrn"]), "edgeType": e["edgeType"]}}
+
+
+class _EdgesMain(_CountingMain):
+    """Main holding A.c → B.c (lin1) and A ⊃ A.c (cA), each with properties of its own."""
+    LIN = {**_lin("lin1", "A.c", "B.c"), "properties": {"w": "main"}}
+    CONT = {**_lin("cA", "A", "A.c", "CONTAINS"), "properties": {"p": "main"}}
+
+    async def get_edges(self, query: EdgeQuery):
+        from backend.common.models.graph import GraphEdge
+        return [GraphEdge(**self.LIN), GraphEdge(**self.CONT)]
+
+    async def get_children_with_edges(self, parent_urn, **kw):
+        from backend.common.models.graph import GraphEdge
+        res = await super().get_children_with_edges(parent_urn, **kw)
+        cont = [GraphEdge(**self.CONT)] if parent_urn == "A" else []
+        return res.model_copy(update={"containment_edges": cont})
+
+    async def trace_at_level(self, urn, *a, **kw):
+        from backend.common.models.graph import GraphEdge
+        res = await super().trace_at_level(urn, *a, **kw)
+        return res.model_copy(update={"edges": [GraphEdge(**self.LIN)]})
+
+
+class _EdgeSvc(_ChainSvc):
+    """Loads the overlay's value of an edge, and records the rollups it is asked to adjust."""
+
+    def __init__(self, delta, values):
+        super().__init__(delta)
+        self.values = values
+        self.adjusted = []
+
+    async def overlay_payloads(self, *, graph_id, branch_id, entity_ids, kind="node"):
+        self.loads.append(list(entity_ids))
+        return [self.values[e] for e in entity_ids if e in self.values] if kind == "edge" else []
+
+    async def aggregated_overlay_adjust(self, *, lineage_delta, **kw):
+        self.adjusted.append(sorted(lineage_delta))
+        return {}
+
+
+def _edged(delta, values):
+    svc = _EdgeSvc(delta, values)
+    p = DraftOverlayProvider(_EdgesMain(), svc=svc, graph_id="g", branch_id="d")
+    p.set_containment_edge_types(["CONTAINS"])
+    return p, svc
+
+
+def test_an_edge_changed_where_it_runs_is_served_and_counted_as_main_counts_it():
+    """An edge the overlay holds as a value of its own, between the ends main has it at — a
+    draft's own property edit, the rewind of one main made after the draft's base, a fork's
+    either way — reads with the overlay's value everywhere it is served, and moves no count:
+    no rollup, degree or child count. Before, each was counted once more."""
+    async def run():
+        p, svc = _edged({**_EMPTY, "edgesUpsert": [_was(_EdgesMain.LIN), _was(_EdgesMain.CONT)]},
+                        {"lin1": {**_EdgesMain.LIN, "properties": {"w": "overlay"}},
+                         "cA": {**_EdgesMain.CONT, "properties": {"p": "overlay"}}})
+        main = _EdgesMain()
+        agg = await p.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"])
+        assert [(e.source_urn, e.target_urn, e.edge_count) for e in agg.aggregated_edges] == [("A", "B", 1)]
+        assert svc.adjusted == []
+        assert await p.get_node_degrees(URNS, ["LINEAGE"], include_rollups=True) == \
+            await main.get_node_degrees(URNS, ["LINEAGE"], include_rollups=True)
+        assert (await p.get_node("A")).child_count == 1
+        kids = await p.get_children_with_edges("A")
+        assert kids.total_children == 1 and [c.urn for c in kids.children] == ["A.c"]
+        assert [(e.id, e.properties) for e in kids.containment_edges] == [("cA", {"p": "overlay"})]
+        assert {e.id: e.properties for e in await p.get_edges(EdgeQuery())} == {
+            "lin1": {"w": "overlay"}, "cA": {"p": "overlay"}}
+        trace = await p.trace_at_level("A", 0, 1, 1, ["LINEAGE"], ["CONTAINS"], 100, 1000)
+        assert [(e.id, e.properties) for e in trace.edges] == [("lin1", {"w": "overlay"})]
+    asyncio.run(run())
+
+
+def test_an_edge_the_overlay_moved_is_counted_where_it_runs_now():
+    """A changed edge whose ends moved counts where the overlay has it and no longer where main
+    holds it: its rollup and degrees move with it, and so does a child from one parent to the
+    other."""
+    async def run():
+        flow = _was(_lin("lin1", "B.c", "A.c"), s="A.c", t="B.c")
+        cont = _was(_lin("cA", "B", "A.c", "CONTAINS"), s="A")
+        p, svc = _edged({**_EMPTY, "edgesUpsert": [flow, cont]}, {})
+        await p.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"])
+        assert svc.adjusted == [[("A.c", "B.c", "LINEAGE", -1), ("B.c", "A.c", "LINEAGE", 1)]]
+        got = await p.get_node_degrees(["A.c", "B.c"], ["LINEAGE"])
+        assert got == {"A.c": {"in": 1, "out": 0}, "B.c": {"in": 0, "out": 1}}
+        assert ((await p.get_node("A")).child_count, (await p.get_node("B")).child_count) == (0, 2)
+    asyncio.run(run())
+
 # ── A large draft: modified nodes come by name, and a read loads just the ones it serves ─────
 _MODIFIED = {**_EMPTY, "nodesModified": [
     {"urn": "A", "entityId": "e0"}, {"urn": "A.c", "entityId": "e1"}, {"urn": "B.c", "entityId": "e2"}]}

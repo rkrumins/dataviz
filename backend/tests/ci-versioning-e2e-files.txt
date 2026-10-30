@@ -51,6 +51,7 @@ tests/integration/test_merged_draft_overlay.py
 tests/integration/test_move_op.py
 tests/integration/test_node_sort_desc_live.py
 tests/integration/test_nodes_type_paging_live.py
+tests/integration/test_overlay_edge_rewind.py
 tests/integration/test_package_seed_job.py
 tests/integration/test_private_draft_owner.py
 tests/integration/test_private_draft_read.py

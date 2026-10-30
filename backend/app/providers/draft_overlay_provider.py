@@ -97,25 +97,39 @@ class _OverlayDelta:
         for d in raw.get("nodesRemove", []):
             self.node_remove.add(d["urn"])
         for d in raw.get("edgesUpsert", []):
+            # ``was``: the base holds this edge too, there — its ends and type. It is served with
+            # the overlay's value, and counted where it runs now: an edge still between the same
+            # ends as the same type is counted as the base counts it already, never once more.
+            was = d.get("was")
+            fields = {k: v for k, v in d.items() if k != "was"}
             if d.get("lazy"):
-                e = GraphEdge.model_construct(**d, properties={})
+                e = GraphEdge.model_construct(**fields, properties={})
                 self.edge_lazy.add(e.id)
             else:
-                e = GraphEdge(**d)
+                e = GraphEdge(**fields)
             self.edge_upsert[e.id] = e
-            if (e.edge_type or "").upper() in cset:
-                self.cont_added.append(e)
-                self.child_count_delta[e.source_urn] = self.child_count_delta.get(e.source_urn, 0) + 1
-            else:
-                self.lineage_added.append(e)
+            if was is not None:
+                held = GraphEdge.model_construct(id=e.id, sourceUrn=was["sourceUrn"],
+                                                 targetUrn=was["targetUrn"],
+                                                 edgeType=was["edgeType"], properties={})
+                if (held.source_urn, held.target_urn, (held.edge_type or "").upper()) == (
+                        e.source_urn, e.target_urn, (e.edge_type or "").upper()):
+                    continue
+                self._count(held, -1, cset)
+            self._count(e, +1, cset)
         for d in raw.get("edgesRemove", []):
             e = GraphEdge(**d)
             self.edge_remove[e.id] = e
-            if (e.edge_type or "").upper() in cset:
-                self.cont_removed.append(e)
-                self.child_count_delta[e.source_urn] = self.child_count_delta.get(e.source_urn, 0) - 1
-            else:
-                self.lineage_removed.append(e)
+            self._count(e, -1, cset)
+
+    def _count(self, e: GraphEdge, sign: int, cset: set) -> None:
+        """Count ``e`` in (+1) or out (-1) where it runs: a containment edge in its source's child
+        count, a lineage edge in the rollups and degrees."""
+        if (e.edge_type or "").upper() in cset:
+            (self.cont_added if sign > 0 else self.cont_removed).append(e)
+            self.child_count_delta[e.source_urn] = self.child_count_delta.get(e.source_urn, 0) + sign
+        else:
+            (self.lineage_added if sign > 0 else self.lineage_removed).append(e)
 
     @property
     def empty(self) -> bool:
@@ -678,10 +692,9 @@ class DraftOverlayProvider:
         """Main's lineage counts, moved by the draft's own flows. A urn main
         could not count stays absent (unknown), and a base that cannot count at
         all (a stale projection is served by VersionedBranchProvider) says so,
-        as the draft's other unsupported reads do: a 501 at the route. The
-        delta does not tell an added flow from an edited one, so an edited
-        flow counts once more, as in the roll-ups above: too high keeps a
-        marker solid.
+        as the draft's other unsupported reads do: a 501 at the route. A flow
+        the draft edited where it runs counts as main counts it, and one it
+        moved counts where it runs now, as in the roll-ups above.
 
         Roll-up presence: a flow the draft added gives its source and every
         container above it a cell out, and its target and theirs a cell in, as
@@ -792,21 +805,22 @@ class DraftOverlayProvider:
     async def _overlay_trace(self, base: _TraceT) -> _TraceT:
         """Patch a base trace with the draft's lineage delta, bounded to the trace's node scope."""
         d = await self._delta_()
-        if not d.lineage_changed and not d.node_remove:
+        if not d.lineage_changed and not d.node_remove and not d.edge_upsert:
             return base
         # Drop nodes the rewind/draft removed (e.g. a main-added node that must not leak into this
-        # draft's trace) and any base edge INCIDENT to a removed node. Keep other base edges verbatim —
-        # a base trace can legitimately carry boundary edges whose endpoint node was capped out of
-        # base.nodes (max_nodes), and those must not be dropped just because the scope shrank.
+        # draft's trace) and any base edge INCIDENT to a removed node. Keep other base edges — with
+        # the overlay's value of one it changed — a base trace can legitimately carry boundary edges
+        # whose endpoint node was capped out of base.nodes (max_nodes), and those must not be
+        # dropped just because the scope shrank.
         nodes = [n for n in base.nodes if n.urn not in d.node_remove]
         scope = {n.urn for n in nodes}
-        edges = [e for e in base.edges
+        edges = [d.edge_upsert.get(e.id, e) for e in base.edges
                  if e.id not in d.edge_remove
                  and e.source_urn not in d.node_remove and e.target_urn not in d.node_remove]
         seen = {e.id for e in edges}
-        edges += await d.edges([e for e in d.lineage_added
-                                if e.id not in seen and e.source_urn in scope and e.target_urn in scope])
-        return base.model_copy(update={"nodes": nodes, "edges": edges})
+        edges += [e for e in d.lineage_added
+                  if e.id not in seen and e.source_urn in scope and e.target_urn in scope]
+        return base.model_copy(update={"nodes": nodes, "edges": await d.edges(edges)})
 
     # ---- deep search: the base answers, the draft's delta does not ------ #
     #: Read by ``AdvancedSearchService._build_scope_diagnostics`` to note
