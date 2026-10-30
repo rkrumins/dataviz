@@ -306,6 +306,10 @@ class PlatformSettingsORM(Base):
     gv_bytes_per_entity = Column(Integer, nullable=True)
     gv_coldline_canvas_load_above = Column(Integer, nullable=True)
     gv_capacity_interval_secs = Column(Integer, nullable=True)
+    # Who last changed the residency policy, and when: its own, as the row's are shared by every
+    # platform setting.
+    gv_policy_updated_by = Column(Text, nullable=True)
+    gv_policy_updated_at = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 

@@ -33,6 +33,7 @@ _POLICY_COLUMNS = {
     "gv_eviction_enabled", "gv_default_residency", "gv_standard_idle_secs",
     "gv_coldline_idle_secs", "gv_high_water_pct", "gv_low_water_pct", "gv_load_margin_pct",
     "gv_bytes_per_entity", "gv_coldline_canvas_load_above", "gv_capacity_interval_secs",
+    "gv_policy_updated_by", "gv_policy_updated_at",
 }
 
 e2e = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres")
@@ -220,11 +221,15 @@ async def _put(body, session, recorded=None):
 
 
 async def test_get_says_each_value_as_saved_its_default_and_what_is_in_force():
-    row = PlatformSettingsORM(id=1, gv_low_water_pct=60, updated_at="2026-10-30T10:00:00+00:00",
-                              updated_by="usr_ops")
+    """Who changed the policy last, and when, is the policy's own: another platform setting
+    saved since does not change it."""
+    row = PlatformSettingsORM(id=1, gv_low_water_pct=60,
+                              gv_policy_updated_at="2026-10-30T10:00:00+00:00",
+                              gv_policy_updated_by="usr_res",
+                              updated_at="2026-10-30T11:00:00+00:00", updated_by="usr_ops")
     out = await va.get_residency_policy(_user=_ADMIN, session=_Session(row))
     assert out["enabled"] is config.RESIDENCY_ENABLED
-    assert out["updatedBy"] == "usr_ops" and out["updatedAt"] == "2026-10-30T10:00:00+00:00"
+    assert out["updatedBy"] == "usr_res" and out["updatedAt"] == "2026-10-30T10:00:00+00:00"
     assert set(out["values"]) == set(_DEFAULTS)
     assert out["values"]["lowWaterPct"] == {"saved": 60, "default": 70, "effective": 60}
     assert out["values"]["highWaterPct"] == {"saved": None, "default": 80, "effective": 80}
@@ -242,7 +247,9 @@ async def test_put_saves_what_it_names_and_records_from_and_to():
     row = session.row
     assert (row.gv_high_water_pct, row.gv_low_water_pct, row.gv_default_residency) == (
         75, 60, "coldline")
+    assert row.gv_policy_updated_by == "usr_admin" and row.gv_policy_updated_at
     assert row.updated_by == "usr_admin" and row.updated_at and session.commits == 1
+    assert (out["updatedBy"], out["updatedAt"]) == ("usr_admin", row.gv_policy_updated_at)
     assert out["values"]["highWaterPct"]["effective"] == 75
     assert recorded == [("platform.residency_policy.updated", {"details": {
         "from": {"defaultResidency": None, "highWaterPct": 85, "lowWaterPct": None},
@@ -265,7 +272,7 @@ async def test_minus_one_clears_a_value_back_to_its_default():
 async def test_a_save_that_changes_nothing_records_nothing():
     session, recorded = _Session(PlatformSettingsORM(id=1, gv_load_margin_pct=150)), []
     await _put({"loadMarginPct": 150}, session, recorded)
-    assert recorded == []
+    assert recorded == [] and session.row.gv_policy_updated_by is None
 
 
 @pytest.mark.parametrize("body, field", [

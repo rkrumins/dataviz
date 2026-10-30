@@ -814,6 +814,9 @@ _EVENT_META.update({
         f"Set versioned graph {_detail(p, 'graphId') or '?'} to "
         f"{(_detail(p, 'to') or '?').capitalize()} residency"
     )),
+    "platform.versioning.load_requested": ("info", lambda p: (
+        f"Asked for versioned graph {_detail(p, 'graphId') or '?'} to be loaded into FalkorDB"
+    )),
     "platform.activity.exported": ("info", lambda p: (
         f"Exported the activity of {_subject(p)} as CSV" if p.get("workspace_id")
         else "Exported platform activity as CSV"
@@ -885,6 +888,7 @@ LABELS: dict[str, str] = {
     "platform.versioning.projection_moved": "Moved a versioned graph projection",
     "platform.residency_policy.updated": "Changed residency policy",
     "platform.versioning.residency_changed": "Changed a versioned graph's residency",
+    "platform.versioning.load_requested": "Asked for a versioned graph's load",
     "platform.activity.exported": "Exported activity",
     "rbac.group.member_added": "Added to a group",
     "rbac.group.member_removed": "Removed from a group",

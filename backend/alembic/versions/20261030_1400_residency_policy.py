@@ -12,7 +12,9 @@ What the capacity loop evicts and loads by, changed live from the admin UI:
 * ``gv_bytes_per_entity`` — the estimate for a graph whose size was never measured;
 * ``gv_coldline_canvas_load_above`` — a Coldline graph larger than this loads on its first canvas
   read;
-* ``gv_capacity_interval_secs`` — how often the loop runs.
+* ``gv_capacity_interval_secs`` — how often the loop runs;
+* ``gv_policy_updated_by`` / ``gv_policy_updated_at`` — who last changed the policy, and when (the
+  row's own ``updated_by`` and ``updated_at`` are shared by every platform setting).
 
 All nullable: NULL is unset, and the environment default applies, so nothing changes until an
 administrator saves a value. ``platform_settings`` is a single row the app reads often, so the
@@ -49,6 +51,8 @@ _COLUMNS = (
     ("gv_bytes_per_entity", sa.Integer()),
     ("gv_coldline_canvas_load_above", sa.Integer()),
     ("gv_capacity_interval_secs", sa.Integer()),
+    ("gv_policy_updated_by", sa.Text()),
+    ("gv_policy_updated_at", sa.Text()),
 )
 
 

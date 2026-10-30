@@ -68,27 +68,31 @@ def world(monkeypatch):
     return out
 
 
-async def test_load_now_asks_for_an_evicted_graph_s_load(world):
+async def test_load_now_asks_for_an_evicted_graph_s_load_and_is_recorded(world):
     for state in ("evicted", "waiting_capacity"):
         world.svc = _Svc(state=state)
-        out = await va.load_graph("g1", _user=_ADMIN)
+        out = await va.load_graph("g1", user=_ADMIN, session=object())
         assert out == {"graphId": "g1", "state": state, "loadRequested": True}
     assert world.loads == ["g1", "g1"]
+    assert world.recorded == [("platform.versioning.load_requested", {
+        "details": {"graphId": "g1", "workspaceId": "ws1", "dataSourceId": "ds1",
+                    "state": state}, "best_effort": True})
+        for state in ("evicted", "waiting_capacity")]
 
 
 async def test_load_now_leaves_a_graph_in_falkordb_or_loading_alone(world):
     for state in ("resident", "rehydrating"):
         world.svc = _Svc(state=state)
-        out = await va.load_graph("g1", _user=_ADMIN)
+        out = await va.load_graph("g1", user=_ADMIN, session=object())
         assert out["loadRequested"] is False and out["state"] == state
-    assert world.loads == []
+    assert world.loads == world.recorded == []
 
 
 @pytest.mark.parametrize("call", ["load", "class"])
 async def test_an_unknown_graph_is_a_404_and_a_fork_a_409(world, call):
     async def run():
         if call == "load":
-            return await va.load_graph("g1", _user=_ADMIN)
+            return await va.load_graph("g1", user=_ADMIN, session=object())
         return await va.set_graph_residency(
             "g1", va.ResidencyClassRequest.model_validate({"class": "always"}),
             user=_ADMIN, session=object())
@@ -172,8 +176,12 @@ def test_the_activity_log_can_say_what_happened():
         "platform.versioning.residency_changed",
         {"details": {"graphId": "g1", "from": "standard", "to": "always"}})
     assert severity == "info" and "g1" in summary and "always" in summary.lower()
-    assert catalogue.LABELS["platform.versioning.residency_changed"]
-    assert catalogue.category_of("platform.versioning.residency_changed") == "platform"
+    severity, summary = catalogue.summarize(
+        "platform.versioning.load_requested", {"details": {"graphId": "g1", "state": "evicted"}})
+    assert severity == "info" and "g1" in summary and "load" in summary.lower()
+    for event in ("platform.versioning.residency_changed", "platform.versioning.load_requested"):
+        assert catalogue.LABELS[event]
+        assert catalogue.category_of(event) == "platform"
 
 
 # ── what the watermark says ──────────────────────────────────────────────────────────────────────

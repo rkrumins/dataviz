@@ -235,7 +235,7 @@ def apply(row, values: Mapping[str, Any]) -> None:
 
 def describe(row) -> Dict[str, Any]:
     """Each value as saved, its default and its effective value, with each whole number's range,
-    who saved the platform settings last and when, and whether residency is on here."""
+    who changed the policy last and when, and whether residency is on here."""
     saved = saved_values(row)
     default, effect = defaults(), effective(saved)
     return {
@@ -244,6 +244,6 @@ def describe(row) -> Dict[str, Any]:
                           "effective": getattr(effect, attr)}
                    for wire, attr in WIRE_NAMES.items()},
         "ranges": {wire: {"min": lo, "max": hi} for wire, (lo, hi) in RANGES.items()},
-        "updatedBy": getattr(row, "updated_by", None),
-        "updatedAt": getattr(row, "updated_at", None),
+        "updatedBy": getattr(row, "gv_policy_updated_by", None),
+        "updatedAt": getattr(row, "gv_policy_updated_at", None),
     }

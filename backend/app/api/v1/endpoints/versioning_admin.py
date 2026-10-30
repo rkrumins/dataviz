@@ -239,8 +239,8 @@ async def put_residency_policy(
     after = residency_policy.saved_values(row)
     changed = sorted(w for w in after if after[w] != before[w])
     if changed:
-        row.updated_at = datetime.now(timezone.utc).isoformat()
-        row.updated_by = user.id
+        row.updated_at = row.gv_policy_updated_at = datetime.now(timezone.utc).isoformat()
+        row.updated_by = row.gv_policy_updated_by = user.id
         await recorder.record_for_request(
             session, "platform.residency_policy.updated",
             details={"from": {w: before[w] for w in changed}, "to": {w: after[w] for w in changed}})
@@ -313,15 +313,25 @@ async def _graph_with_a_key(graph_id: str) -> dict:
 
 @router.post("/graphs/{graph_id}/load",
              summary="Load an evicted versioned graph into FalkorDB again (Load now)")
-async def load_graph(graph_id: str, _user: User = Depends(requires("system:admin"))) -> dict:
+async def load_graph(
+    graph_id: str,
+    user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
     """Asks for the graph's load (residency, doc 17), which the capacity loop admits like any
     other: it may wait for room (``waiting_capacity``). A graph in FalkorDB, or being loaded, is
-    left as it is (``loadRequested`` false)."""
-    await _graph_with_a_key(graph_id)
+    left as it is (``loadRequested`` false). A load asked for is recorded."""
+    meta = await _graph_with_a_key(graph_id)
     wm = await get_versioning_service().projection_watermark(graph_id)
     requested = wm["status"] in ("evicted", "waiting_capacity")
     if requested:
         await residency.request_load(graph_id)
+        await recorder.record_for_request(
+            session, "platform.versioning.load_requested",
+            details={"graphId": graph_id, "workspaceId": meta["workspace_id"],
+                     "dataSourceId": meta["data_source_id"], "state": wm["residency_state"]},
+            best_effort=True,   # the load is already asked for
+        )
     return {"graphId": graph_id, "state": wm["residency_state"], "loadRequested": requested}
 
 
