@@ -10,6 +10,7 @@ const openMrMutate = vi.fn()
 const listReviewerCandidates = vi.fn()
 
 vi.mock('../../hooks/useVersioning', () => ({
+  useDataSourceDraftsPolicy: () => ({ data: undefined }),
   usePublishBranch: () => ({ mutate: vi.fn(), isPending: false }),
   useOpenMergeRequest: () => ({ mutate: openMrMutate, isPending: false }),
   useLivePrForBranch: () => ({ livePr: undefined, pending: false }),
@@ -17,7 +18,7 @@ vi.mock('../../hooks/useVersioning', () => ({
 }))
 vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...(await importOriginal<typeof import('@/services/versioningApiService')>()),
-  listReviewerCandidates: (wsId: string) => listReviewerCandidates(wsId),
+  listReviewerCandidates: (wsId: string, dataSourceId?: string | null) => listReviewerCandidates(wsId, dataSourceId),
 }))
 vi.mock('@/store/auth', () => ({ usePermission: () => true }))
 vi.mock('@/components/ui/notifications', () => ({ useAppNotifications: () => ({ notify: vi.fn() }) }))
@@ -48,12 +49,12 @@ describe('CommitDialog — reviewers', () => {
   it('sends the reviewers picked with the review', async () => {
     render(
       <MemoryRouter>
-        <CommitDialog workspaceId="ws1" graphId="g1" branchId="br_1" changeSet={changeSet} onClose={() => {}} />
+        <CommitDialog workspaceId="ws1" graphId="g1" branchId="br_1" dataSourceId="ds1" changeSet={changeSet} onClose={() => {}} />
       </MemoryRouter>,
     )
     fireEvent.click(screen.getByRole('button', { name: /add reviewers/i }))
     fireEvent.click(await screen.findByRole('button', { name: /Carol Chen/ }))
-    expect(listReviewerCandidates).toHaveBeenCalledWith('ws1')
+    expect(listReviewerCandidates).toHaveBeenCalledWith('ws1', 'ds1')   // under its data source's policy
     fireEvent.click(screen.getByRole('button', { name: /submit for review/i }))
     expect(openMrMutate).toHaveBeenCalledTimes(1)
     expect(openMrMutate.mock.calls[0][0]).toMatchObject({ branchId: 'br_1', reviewers: ['u_carol'] })
@@ -62,7 +63,7 @@ describe('CommitDialog — reviewers', () => {
   it('sends no reviewers when none are picked', () => {
     render(
       <MemoryRouter>
-        <CommitDialog workspaceId="ws1" graphId="g1" branchId="br_1" changeSet={changeSet} onClose={() => {}} />
+        <CommitDialog workspaceId="ws1" graphId="g1" branchId="br_1" dataSourceId="ds1" changeSet={changeSet} onClose={() => {}} />
       </MemoryRouter>,
     )
     fireEvent.click(screen.getByRole('button', { name: /submit for review/i }))

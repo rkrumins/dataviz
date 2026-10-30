@@ -11,12 +11,14 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 const publishMutate = vi.fn()
 let canPublish = false
+let selfMerge = true
 
 vi.mock('../../hooks/useVersioning', () => ({
   usePublishBranch: () => ({ mutate: publishMutate, isPending: false }),
   useOpenMergeRequest: () => ({ mutate: vi.fn(), isPending: false }),
   useLivePrForBranch: () => ({ livePr: undefined, pending: false }),
   useBranchViewChanges: () => ({ data: undefined, isLoading: false }),
+  useDataSourceDraftsPolicy: () => ({ data: { effective: { selfMerge } } }),
 }))
 vi.mock('@/store/auth', () => ({
   usePermission: (perm: string) => perm !== 'workspace:datasource:publish' || canPublish,
@@ -46,6 +48,7 @@ const renderDialog = (canPublishDraft?: boolean) =>
 
 beforeEach(() => {
   publishMutate.mockClear()
+  selfMerge = true
 })
 
 describe('CommitDialog — publish permission', () => {
@@ -58,6 +61,17 @@ describe('CommitDialog — publish permission', () => {
     expect(publishMutate).not.toHaveBeenCalled()
     await userEvent.setup().hover(publish.parentElement!)
     expect(await screen.findByRole('tooltip')).toHaveTextContent(/needs the publish permission/i)
+    expect(screen.getByRole('button', { name: /submit for review/i })).toBeEnabled()
+  })
+
+  it('disables "Publish now" where nobody publishes their own changes, says why, and still offers review', async () => {
+    canPublish = true
+    selfMerge = false
+    renderDialog()
+    const publish = screen.getByRole('button', { name: /publish now/i })
+    expect(publish).toBeDisabled()
+    await userEvent.setup().hover(publish.parentElement!)
+    expect(await screen.findByRole('tooltip')).toHaveTextContent(/through a review that someone else merges/i)
     expect(screen.getByRole('button', { name: /submit for review/i })).toBeEnabled()
   })
 

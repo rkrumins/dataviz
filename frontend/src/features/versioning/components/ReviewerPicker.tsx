@@ -1,7 +1,8 @@
 /**
  * ReviewerPicker — choose who must approve a review before it can merge. The candidates are the
- * workspace's members who can approve; the server leaves out the caller, who is the review's author.
- * Like the share dialog's picker, it loads them only once opened.
+ * workspace's members who can approve; the server leaves out the caller, who opens the review, where
+ * the data source's policy has someone else approve it. Like the share dialog's picker, it loads them
+ * only once opened.
  */
 import { useEffect, useState } from 'react'
 import { Check, Loader2, UserPlus, X } from 'lucide-react'
@@ -10,8 +11,10 @@ import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { listReviewerCandidates, type ReviewerCandidate } from '@/services/versioningApiService'
 
-export function ReviewerPicker({ wsId, value, onChange }: {
+export function ReviewerPicker({ wsId, dataSourceId, value, onChange }: {
   wsId: string
+  /** The review's data source, whose policy says whether its opener may approve it. */
+  dataSourceId?: string | null
   value: string[]
   onChange: (userIds: string[]) => void
 }) {
@@ -22,12 +25,12 @@ export function ReviewerPicker({ wsId, value, onChange }: {
   useEffect(() => {
     if (!open || people) return
     let cancelled = false
-    listReviewerCandidates(wsId).then(
+    listReviewerCandidates(wsId, dataSourceId).then(
       (r) => { if (!cancelled) setPeople(r) },
       () => { if (!cancelled) { setFailed(true); setPeople([]) } },
     )
     return () => { cancelled = true }
-  }, [open, people, wsId])
+  }, [open, people, wsId, dataSourceId])
 
   const name = (id: string) => people?.find((p) => p.userId === id)?.displayName || id
   const toggle = (id: string) => onChange(value.includes(id) ? value.filter((v) => v !== id) : [...value, id])

@@ -11,6 +11,7 @@ const publishMutate = vi.fn()
 const openMrMutate = vi.fn()
 
 vi.mock('../../hooks/useVersioning', () => ({
+  useDataSourceDraftsPolicy: () => ({ data: undefined }),
   usePublishBranch: () => ({ mutate: publishMutate, isPending: false }),
   useOpenMergeRequest: () => ({ mutate: openMrMutate, isPending: false }),
   useLivePrForBranch: () => ({ livePr: undefined, pending: false }),

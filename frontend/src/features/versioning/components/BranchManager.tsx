@@ -321,7 +321,7 @@ export function BranchManager({
       )}
       {publishBranch && (
         <PublishDraftDialog
-          wsId={wsId} graphId={graphId} branchId={publishBranch.branchId}
+          wsId={wsId} graphId={graphId} branchId={publishBranch.branchId} dataSourceId={dataSourceId}
           onClose={() => setPublishBranch(null)}
           canPublishDraft={canManageDraft(publishBranch, me)}
         />

@@ -21,7 +21,9 @@ import { usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { usePublishReceiptStore } from '@/store/publishReceiptStore'
 import { useUnsavedCountOnBranch } from '@/store/stagedChangesStore'
-import { usePublishBranch, useOpenMergeRequest, useLivePrForBranch, useBranchViewChanges } from '../hooks/useVersioning'
+import {
+  usePublishBranch, useOpenMergeRequest, useLivePrForBranch, useBranchViewChanges, useDataSourceDraftsPolicy,
+} from '../hooks/useVersioning'
 import { invalidateViewVersions } from '@/hooks/useViewVersions'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
 import { queryClient } from '@/lib/queryClient'
@@ -44,10 +46,12 @@ export interface CommitDialogProps {
   onPublished?: () => void
   /** False for an editor of a shared draft: only its owner or a maintainer publishes it directly. */
   canPublishDraft?: boolean
+  /** The draft's data source: its policy may have drafts published only through a review. */
+  dataSourceId?: string | null
 }
 
 export function CommitDialog({
-  workspaceId, graphId, branchId, changeSet, onClose, onLeave, onPublished, canPublishDraft = true,
+  workspaceId, graphId, branchId, changeSet, onClose, onLeave, onPublished, canPublishDraft = true, dataSourceId,
 }: CommitDialogProps) {
   const [message, setMessage] = useState('')
   const [description, setDescription] = useState('')
@@ -64,6 +68,9 @@ export function CommitDialog({
   const canManage = usePermission('workspace:datasource:manage', workspaceId)
   // Publishing straight to the live version needs publish; without it, a draft goes through review.
   const canPublish = usePermission('workspace:datasource:publish', workspaceId)
+  // Where nobody merges their own changes, a draft is published only through a review someone
+  // else merges: a direct publish would be its publisher's own merge.
+  const reviewOnly = useDataSourceDraftsPolicy(workspaceId, dataSourceId).data?.effective.selfMerge === false
   const switchToMain = useBranchStore((s) => s.switchToMain)
   const setReceipt = usePublishReceiptStore((s) => s.setReceipt)
 
@@ -257,7 +264,7 @@ export function CommitDialog({
                 <label className="text-[11px] font-semibold text-ink-muted uppercase tracking-wider">
                   Reviewers <span className="text-ink-muted/50 normal-case font-normal">· optional, they must approve before it merges</span>
                 </label>
-                <ReviewerPicker wsId={workspaceId} value={reviewers} onChange={setReviewers} />
+                <ReviewerPicker wsId={workspaceId} dataSourceId={dataSourceId} value={reviewers} onChange={setReviewers} />
               </div>
             </>
           )}
@@ -314,14 +321,16 @@ export function CommitDialog({
                 ? 'Publishing straight to the live version needs the publish permission on this workspace'
                 : !canPublishDraft
                 ? 'Only the draft’s owner or a maintainer can publish a shared draft'
+                : reviewOnly
+                ? 'This data source publishes drafts through a review that someone else merges'
                 : inReview
                   ? 'Publish straight to the live version, bypassing the open review'
                   : 'Publish straight to the live version, skipping review'}
-              detail={canPublish && canPublishDraft ? 'Everyone sees the result immediately' : 'Submit it for review instead'}
+              detail={canPublish && canPublishDraft && !reviewOnly ? 'Everyone sees the result immediately' : 'Submit it for review instead'}
             >
             <button
               onClick={handlePublish}
-              disabled={busy || !hasChanges || unsaved > 0 || !canPublish || !canPublishDraft}
+              disabled={busy || !hasChanges || unsaved > 0 || !canPublish || !canPublishDraft || reviewOnly}
               className={cn(
                 'flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium transition-colors disabled:opacity-50',
                 confirmBypass
