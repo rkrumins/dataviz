@@ -10,7 +10,7 @@
 **TL;DR.** The Versioned Graph is **feature-complete and test-covered for the managed, single-node
 case**. Saves, pulls, previews, reviews and publishes are `O(change)`, not `O(graph)`, and a publish,
 its projection and a rebuild of millions hold a page at a time (§2). The remaining sharp edges are
-deliberately-deferred scale items — forks, which still read whole graphs; export jobs that start over
+deliberately-deferred scale items — a fork's FalkorDB copy, which is projected whole; export jobs that start over
 when interrupted (imports resume); no retention inside a live graph; and a partitioning key that doesn't
 help a single hot collaborative graph. Re-sync, separately, runs a bounded merge that has not been
 proven on a graph the bootstrap worker wrote ([11](11-resync-at-any-scale.md)). Read this chapter
@@ -69,7 +69,9 @@ Everything else above is flat in the graph's size.
 | `apply_ops` (direct write) | `O(ops)` | ontology + integrity gated |
 | Pull latest / publish preview / a review's open, preview, diff, summary | `O(changed)`: the draft's edits and what main changed since it branched | the bounded merge (`_compute_merge_bounded`) |
 | Publish / merge to `main` | `O(changed)` compose + **`O(changed)` incremental Merkle**; a page at a time above `GRAPHVER_SQUASH_PAGED_ABOVE` | advisory-locked, `O(delta)` |
-| Fork creation / fork merge / fork commit | **`O(graph)`**: whole states and a full `_merkle_root` | §4.1 |
+| Fork creation / a fork's draft work | `O(1)` / `O(changed)`: through the parent for what the fork has not changed | §4.1 |
+| A fork's review (open, preview, diff, merge) | `O(changed)` since its last merged review; merged in the request | §4.1 |
+| A fork's FalkorDB copy | **`O(graph)`**: its first projection reconciles its whole state in one pass | §4.1 |
 | Read `main` (fresh) | `O(neighborhood)` in FalkorDB | hot path |
 | Read `main` (lagging) / draft / as-of | `O(neighborhood)` compose in Postgres | + `O(delta)` overlay for drafts |
 | Incremental projection window | `O(window)` MERGE/DELETE; a page at a time above `GRAPHVER_PROJECTION_PAGED_ABOVE` | idempotent |
@@ -79,17 +81,27 @@ Everything else above is flat in the graph's size.
 
 ## 4. The sharp edges (`O(graph)` hotspots)
 
-### 4.1 Forks still read whole graphs
+### 4.1 A fork's FalkorDB copy is its parent's whole graph
 
-A draft's checkpoint reads only the entities it touches, and a draft commit gets no Merkle root.
-Forks are the exception: creating one builds the parent's full Merkle root, every commit on a fork's
-`main` builds the fork's (`_commit_merkle` falls back to `_merkle_root`), and a fork's pull request
-merges three whole states (`_compute_fork_merge`) under the parent's lock. A fork's checkpoint,
-revert and restore compose its whole state too, because the bounded reads (`_values_at`) don't yet
-look through to the parent's rows. See [03](03-branching-commits-merge.md).
+Forking, working on a fork and reviewing it cost what changes in the fork: the fork point copies the
+root its parent stored, a fork's commits carry no root, the bounded reads go through to the parent for
+what the fork has not changed, and a review merges what the fork changed since its last merged review
+([03](03-branching-commits-merge.md) §3.8). Two things still scale with the graph or the fork:
 
-> **Limitation.** Fine at thousands of entities; at millions a fork's creation and merge run out of
-> memory. Bounded fork merges are the next step (§10).
+- **A fork of a graph pinned to FalkorDB gets a key of its own** (`<parent's key>__fork_<id>`), and its
+  first projection reconciles its whole composed state in one pass (`_reconcile_in_place`; the streamed
+  reconcile composes no parent): every entity of the parent held in the projection worker, and a second
+  copy of the graph in FalkorDB that the eviction budget counts. Nothing in the product reads that copy —
+  the canvas, search and exports reach a fork only through Postgres; only
+  `GET …/graphs/{graphId}/graph/neighbors`, which no screen calls, and the admin "Check sync" read it.
+  Whether a fork gets a FalkorDB copy at all is open product decision 10 of the go-live review
+  (`docs/audits/versioning-go-live-review-2026-10.md`).
+- **A fork's review is merged inside the request**, holding what the fork changed since its last merged
+  review (about 1.5 KB a change); a draft that large is published by a job on the versioning worker.
+
+> **Limitation.** Forking a FalkorDB-backed graph of millions loads every entity of it into the
+> projection worker; reviewing a fork that changed hundreds of thousands of entities holds them in a web
+> process. Review a busy fork often: each review merges only what changed since the last.
 
 ### 4.2 A full re-projection holds the graph's ids in memory
 
@@ -248,7 +260,8 @@ Status as of 2026-10-09 in brackets.
    describes: bootstrap a small graph with the real worker, re-sync the unchanged source, assert
    almost nothing changes. *(Open. The bounded merge it guards is already live.)*
 2. **Incremental cross-branch Merkle** — remove the full-graph rebuild on draft checkpoints, pulls,
-   fork creation and fork mains (§4.1). *(Open.)*
+   fork creation and fork mains (§4.1). *(Done another way: draft and fork commits carry no root, and
+   nothing rebuilds a whole one; a fork has no fingerprint of its own after its fork point.)*
 3. **Keyset-streaming full re-projection & export** — bounded-memory `O(N)` for 5M+ graphs (§4.2,
    §8). *(Export done: it streams in flat memory. Re-projection reconciles in place but still holds
    `O(N + E)` ids.)*
