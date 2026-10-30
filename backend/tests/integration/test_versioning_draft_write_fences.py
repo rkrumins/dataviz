@@ -137,7 +137,7 @@ async def _save_during_pull(svc):
     # Main moves on, without touching N: the draft is behind.
     await svc.apply_ops(graph_id=gid, actor="u", ops=[_upd("M", displayName="M2")])
 
-    orig, race = svc._compute_merge, {}
+    orig, race = svc._compute_merge_bounded, {}
 
     async def merging(*a, **k):
         out = await orig(*a, **k)
@@ -148,11 +148,11 @@ async def _save_during_pull(svc):
             await _blocked(race["save"])
         return out
 
-    svc._compute_merge = merging
+    svc._compute_merge_bounded = merging
     try:
         assert (await svc.rebase_draft(graph_id=gid, branch_id=d, actor="u"))["clean"] is True
     finally:
-        svc._compute_merge = orig
+        svc._compute_merge_bounded = orig
         await asyncio.gather(*race.values(), return_exceptions=True)
     await race["save"]
     assert await svc.entity_value(graph_id=gid, branch_id=d, entity_id="Q") is not None
@@ -173,21 +173,21 @@ async def _save_during_checkpoint(svc):
     await svc.stage_changes(graph_id=gid, branch_id=d, actor="bob",
                             ops=[_upd("X", displayName="BOB")])
 
-    orig, race = svc._composed_state, {}
+    orig, race = svc._current_values, {}
 
-    async def composing(s, graph_id, branch_id):
-        out = await orig(s, graph_id, branch_id)
+    async def composing(s, graph_id, branch_id, ids, as_of_seq=None):
+        out = await orig(s, graph_id, branch_id, ids, as_of_seq)
         if "save" not in race:
             race["save"] = asyncio.create_task(svc.apply_ops(
                 graph_id=gid, branch_id=d, actor="carol", ops=[_upd("X", description="CAROL")]))
             await _blocked(race["save"])
         return out
 
-    svc._composed_state = composing
+    svc._current_values = composing
     try:
         assert await svc.checkpoint(graph_id=gid, branch_id=d, actor="bob")
     finally:
-        svc._composed_state = orig
+        svc._current_values = orig
         await asyncio.gather(*race.values(), return_exceptions=True)
     await race["save"]
     x = await svc.entity_value(graph_id=gid, branch_id=d, entity_id="X")

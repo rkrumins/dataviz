@@ -168,6 +168,15 @@ PROJECTION_VERIFY_DEEP_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_PROJECTION_VE
 # climb per window and the pair math is in memory, so tens of thousands of edges stay inline;
 # past this the aggregation batch job — which also writes only the difference — takes over.
 PROJECTION_ROLLUP_INLINE_CAP: int = int(os.getenv("GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP", "50000"))
+# A projection window of more version rows than this (a publish of millions) is written a page of
+# PROJECTION_PAGE rows at a time — all its nodes, then its edges — so the projector holds a page of
+# it, never all of it; and its rollups go to the aggregation job.
+PROJECTION_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGED_ABOVE", "200000"))
+PROJECTION_PAGE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGE", "20000"))
+# A full reconcile (a first seed, a rebuild, a heal) holds both sides of a graph — what Postgres
+# says and what FalkorDB holds. Above this many live entities it compares them a page at a time.
+PROJECTION_RECONCILE_STREAMED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE",
+                                                         "500000"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):
@@ -247,6 +256,11 @@ SYNC_PUBLISH_MAX_CHANGES: int = int(os.getenv("GRAPHVER_SYNC_PUBLISH_MAX_CHANGES
 # of every changed payload being loaded, merged and re-hashed in the worker. Off = always the full
 # merge. Temporary: removed one release after the narrow squash ships.
 NARROW_SQUASH: bool = os.getenv("GRAPHVER_NARROW_SQUASH", "1").lower() not in ("0", "false", "no")
+# A narrow squash holds about 1.7 KB in the worker for each entity the draft changed (200k changes:
+# ~340 MB). A draft that changed more than this many is squashed SQUASH_PAGE entities at a time
+# instead, in the same one commit and transaction, so a publish of millions fits the worker.
+SQUASH_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_SQUASH_PAGED_ABOVE", "200000"))
+SQUASH_PAGE: int = int(os.getenv("GRAPHVER_SQUASH_PAGE", "20000"))
 # Live (not tombstoned) forks one graph may have; one more is refused with 409 fork_limit. Each
 # fork gets its own FalkorDB key on the parent's instance, so this bounds that until FalkorDB
 # capacity management (E7) brings a real quota.

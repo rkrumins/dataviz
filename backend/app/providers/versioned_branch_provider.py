@@ -47,6 +47,16 @@ _NO_DEEP_SEARCH = (
 )
 
 
+def _by_label(counts: Dict[Optional[str], int], untyped: str) -> Dict[str, int]:
+    """Type counts keyed as the projector labels them (``_sanitize_label(type or untyped)``)."""
+    from .falkordb_provider import _sanitize_label
+    out: Dict[str, int] = {}
+    for typ, n in counts.items():
+        lbl = _sanitize_label(typ or untyped)
+        out[lbl] = out.get(lbl, 0) + n
+    return out
+
+
 def _node_payload(node: GraphNode) -> dict:
     return node.model_dump(by_alias=True, exclude_none=True)
 
@@ -556,6 +566,16 @@ class VersionedBranchProvider:
         as the projector labels them (``_sanitize_label(entityType or "Entity")`` / ``edgeType or
         "REL"``) so the counts are byte-identical to what FalkorDB reports once main projects."""
         from .falkordb_provider import _sanitize_label  # reuse the projector's label sanitiser
+        counted = await self._schema_counts()
+        if counted is not None:
+            entity_type_counts = _by_label(counted["nodes"], "Entity")
+            edge_type_counts = _by_label(counted["edges"], "REL")
+            return {
+                "nodeCount": sum(entity_type_counts.values()),
+                "edgeCount": sum(edge_type_counts.values()),
+                "entityTypeCounts": entity_type_counts,
+                "edgeTypeCounts": edge_type_counts,
+            }
         state = await self._svc.materialize_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of)
         entity_type_counts: Dict[str, int] = {}
@@ -580,6 +600,25 @@ class VersionedBranchProvider:
         counts + up-to-3 sample displayNames, per-edge-type counts, tag counts). Serves the insights
         deep facet + graph-schema build for a branch / stale-main, which have no projection to scan."""
         from .falkordb_provider import _sanitize_label
+        counted = await self._schema_counts()
+        if counted is not None:
+            ent_counts = _by_label(counted["nodes"], "Entity")
+            edge_counts = _by_label(counted["edges"], "REL")
+            ent_samples: Dict[str, List[str]] = {}
+            for typ, name in counted["names"]:
+                samples = ent_samples.setdefault(_sanitize_label(typ or "Entity"), [])
+                if len(samples) < 3:
+                    samples.append(name)
+            return GraphSchemaStats(
+                totalNodes=sum(ent_counts.values()),
+                totalEdges=sum(edge_counts.values()),
+                entityTypeStats=[
+                    EntityTypeSummary(id=lbl, name=lbl, count=c, sampleNames=ent_samples.get(lbl, []))
+                    for lbl, c in ent_counts.items()],
+                edgeTypeStats=[EdgeTypeSummary(id=t, name=t, count=c) for t, c in edge_counts.items()],
+                tagStats=[TagSummary(tag=t, count=c, entityTypes=["entity"])
+                          for t, c in counted["tags"].items()],
+            )
         state = await self._svc.materialize_state(
             graph_id=self._gid, branch_id=self._branch, as_of_seq=self._as_of)
         ent_counts: Dict[str, int] = {}
@@ -609,6 +648,13 @@ class VersionedBranchProvider:
             edgeTypeStats=[EdgeTypeSummary(id=t, name=t, count=c) for t, c in edge_counts.items()],
             tagStats=[TagSummary(tag=t, count=c, entityTypes=["entity"]) for t, c in tag_counts.items()],
         )
+
+    async def _schema_counts(self) -> Optional[Dict[str, Any]]:
+        """Counted in Postgres when this reads ``main`` at its head (``schema_counts``): its whole
+        state otherwise (an as-of read, a draft, a fork) — those come from the composed state."""
+        if self._as_of is not None:
+            return None
+        return await self._svc.schema_counts(graph_id=self._gid, branch_id=self._branch)
 
     async def get_ancestors(self, urn: str, limit: int = 100, offset: int = 0) -> List[GraphNode]:
         """An entity's ancestors on this branch, parent first, root last (as FalkorDB's reader)."""

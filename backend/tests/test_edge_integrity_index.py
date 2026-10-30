@@ -6,7 +6,8 @@ edge window held the CPU for minutes and a large publish for hours. It now index
 once and finds loops with one strongly-connected-components pass. These tests pin:
 
 * the loop finder on its own (chains, loops, a loop built inside one batch, a re-pointed edge);
-* the gate against the PREVIOUS algorithm, kept here verbatim, on randomised small graphs —
+* the gate against the PREVIOUS algorithm, kept here verbatim but for one rule since — an edge
+  the batch re-points counts where it now points, not where it was — on randomised small graphs:
   the same violations, in the same order;
 * the size it was slow at: 50k created edges into 50k live ones, well under a second.
 
@@ -63,8 +64,10 @@ class _Branch(GraphVersioningService):
 
 
 async def _old_gate(svc, edge_creates, deleted_edge_ids, containment_edge_types):
-    """The gate as it was before it was made linear — the reference the new one must match."""
+    """The gate as it was before it was made linear — the reference the new one must match — with
+    the edges the batch re-points left out of the stored ones, as the gate does since."""
     cset = {t.upper() for t in (containment_edge_types or [])}
+    rewritten = {eid for eid, _v in edge_creates}
 
     def _etype(p):
         return str(p.get("edgeType") or p.get("edge_type") or "").upper()
@@ -80,7 +83,7 @@ async def _old_gate(svc, edge_creates, deleted_edge_ids, containment_edge_types)
             continue
         etype = _etype(v)
         dup = (src, tgt, etype) in batch_seen or any(
-            oeid != eid and oeid not in deleted_edge_ids
+            oeid != eid and oeid not in deleted_edge_ids and oeid not in rewritten
             and _edge_src_tgt(op_) == (src, tgt) and _etype(op_) == etype
             for oeid, op_ in existing_incident.items())
         if dup:
@@ -89,7 +92,7 @@ async def _old_gate(svc, edge_creates, deleted_edge_ids, containment_edge_types)
         batch_seen.add((src, tgt, etype))
         if etype in cset:
             parents = {osrc for oeid, op_ in existing_incident.items()
-                       if oeid != eid and oeid not in deleted_edge_ids
+                       if oeid != eid and oeid not in deleted_edge_ids and oeid not in rewritten
                        and _etype(op_) in cset
                        for osrc, otgt in [_edge_src_tgt(op_)] if otgt == tgt and osrc}
             parents |= batch_parent.get(tgt, set())
@@ -108,7 +111,7 @@ async def _old_gate(svc, edge_creates, deleted_edge_ids, containment_edge_types)
                     break
                 inc = await svc._incident_live_edges(None, "g", "b", frontier, None)
                 cand = [(oeid, p) for oeid, p in inc.items()
-                        if oeid != skip and oeid not in deleted_edge_ids]
+                        if oeid != skip and oeid not in deleted_edge_ids and oeid not in rewritten]
                 cand += [(beid, bp) for beid, bp in batch_cont.items() if beid != skip]
                 nxt = set()
                 for _oeid, p in cand:

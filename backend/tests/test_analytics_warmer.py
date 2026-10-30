@@ -27,7 +27,19 @@ def _clean_cache():
     analytics_cache.clear()
 
 
-async def test_a_warm_pass_fills_the_keys_readers_look_up(db_session, monkeypatch):
+@pytest.fixture
+def one_slot(monkeypatch):
+    """Hold the epoch still for a test that warms and then reads.
+
+    The warmer stamps its keys with the slot it started in, and a reader
+    with the slot it reads in. A pass that crosses a grid line (every five
+    minutes by default) would otherwise look up a slot nobody warmed.
+    """
+    slot = analytics_cache.epoch_start()
+    monkeypatch.setattr(analytics_cache, "epoch_start", lambda at=None: slot)
+
+
+async def test_a_warm_pass_fills_the_keys_readers_look_up(db_session, monkeypatch, one_slot):
     """The whole point, stated as one assertion.
 
     The warmer and the reader must agree on the key. They share
@@ -47,7 +59,7 @@ async def test_a_warm_pass_fills_the_keys_readers_look_up(db_session, monkeypatc
             )
 
 
-async def test_a_warmed_reader_does_not_build(db_session, monkeypatch):
+async def test_a_warmed_reader_does_not_build(db_session, monkeypatch, one_slot):
     """A read after a warm pass costs nothing — that is the stall this removes."""
     await analytics_warmer.warm_once(db_session, ttl=900)
 
@@ -64,7 +76,7 @@ async def test_a_warmed_reader_does_not_build(db_session, monkeypatch):
     assert "totals" in doc
 
 
-async def test_one_window_failing_does_not_abandon_the_pass(db_session, monkeypatch):
+async def test_one_window_failing_does_not_abandon_the_pass(db_session, monkeypatch, one_slot):
     """A window that raises leaves its old entry alone and the others land.
 
     Dropping the whole pass would send every reader back to read-through at
@@ -260,7 +272,7 @@ async def test_a_view_that_breaks_the_session_costs_only_itself(db_session, monk
     assert built == len(summaries.WARM_DAYS) * len(summaries.LENSES) - 1
 
 
-async def test_a_document_that_breaks_the_session_costs_only_itself(db_session, monkeypatch):
+async def test_a_document_that_breaks_the_session_costs_only_itself(db_session, monkeypatch, one_slot):
     real = analytics_repo.platform_summary
 
     async def _one_times_out(session, **kwargs):
