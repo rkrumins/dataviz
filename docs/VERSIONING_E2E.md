@@ -323,11 +323,13 @@ and background projection keeps running. The frontend reads the flag from the pu
   routes at all (**403** `api_key_not_allowed`). `workspace_publisher`, `workspace_data_engineer` and the
   admins hold publish; `workspace_member` does not. Admin's `system:admin`
   implies all.
-- **Drafts**: a private draft is written only by its owner (**403**
-  `not_draft_owner`); a shared draft by its editors and maintainers (**403**
-  `not_owner_or_member` with the `required` role). A draft is read by its owner,
-  workspace managers, its members and the people on a PR raised from it; anyone
-  else gets **404**, as for a branch that does not exist.
+- **Drafts**: a public draft is read by everyone who reads its data source and
+  written by everyone who edits it; a private draft is read by its owner, its
+  members and the people on a PR raised from it, and written by its owner and its
+  editor and maintainer members (**403** `not_draft_owner`, or
+  `not_owner_or_member` with the `required` role). Anyone who may not read a
+  draft gets **404**, as for a branch that does not exist; managing the
+  workspace opens no private draft.
 - **Tenant isolation**: a graph must belong to `{ws_id}`; cross-tenant access
   returns **404** (existence isn't leaked across workspaces). A PR is visible to
   its author, its requested reviewers and workspace managers; anyone else gets

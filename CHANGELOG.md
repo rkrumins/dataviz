@@ -9,6 +9,110 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Versioning: public and private drafts, a drafts and reviews policy, and working together
+
+Drafts work like feature branches. A **public** draft is seen by everyone who can read its data
+source, and changed by everyone who can edit it. A **private** draft is seen only by its owner, the
+people added to it and the people on its review. A workspace sets where new drafts start, which
+levels a draft may have, and who may approve and merge a review; a data source can set its own.
+Nobody's unsaved work is lost when a draft changes level, members or hands. People see who else is
+working on a draft and are told what became of the drafts they worked on.
+
+### Added
+
+- **Public and private drafts.** A draft opens at the level its data source's policy says
+  (Public out of the box), or at the one asked for: the version switcher, **Manage all drafts**
+  and **Start editing** offer both and disable a level the policy rules out. Drafts are listed by
+  whose they are — yours, shared with you, public — each marked with its level, and Manage all
+  drafts narrows to each. A public draft is written by everyone who can edit its data source; a
+  private one by its owner and its editor and maintainer members.
+- **Changing a draft's level** (its owner or a maintainer, in **Draft settings**, `POST
+  …/branches/{id}/visibility`). Made private, the people it takes write access from have what they
+  had staged committed first, each under their own name in the order they staged it; the dialog
+  names them beforehand (`GET …/visibility-impact`). If some of it clashes with the draft, the
+  level stays as it was and the dialog says whose edits clash (409 `staged_changes_unsaved`).
+  Removing a member, or making them a viewer, saves what they staged the same way, where it used to
+  be withdrawn unsaved.
+- **A drafts and reviews policy** for the workspace (**Drafts and reviews** on the workspace page)
+  and, per data source, over it (its **Versioning** tab): where new drafts start, which levels a
+  draft may have (any, public only, private only), whether whoever opens a review may approve it,
+  and whether they may merge it. Each setting is the level's own or taken from above; only a
+  workspace admin changes them (`GET`/`PUT …/drafts-policy`, `…/data-sources/{id}/drafts-policy`),
+  and each change is recorded in the activity log.
+- **Handing a draft on** (`POST …/branches/{id}/transfer`): its owner hands it to someone else at
+  any time, staying on as a maintainer unless they untick it; a workspace admin hands on a draft
+  whose owner left the workspace (their account is gone or not active, or they no longer read its
+  data sources). **Drafts whose owner left** on the workspace page lists them for admins
+  (`GET …/drafts/owner-left`): their name, owner, level and status, never what they hold. The new
+  owner must be an active person who can edit the workspace's data sources (422
+  `ineligible_owner`).
+- **Who else is on a draft.** The canvas bar names who saved into the draft you're on, and says
+  when someone else saved into it since you caught up — "Bob saved 3 changes". With nothing unsaved
+  it shows their changes at once; with unsaved edits it offers **Refresh**. The draft's poll
+  (`GET …/freshness`) carries its head (`headCommitSeq`), its level, what you may do with it
+  (`access`), and, given `?sinceSeq=`, what others saved since (`savedSince`, capped). `GET
+  …/branches/{id}` names its contributors.
+- **Inbox notices** for a draft's people (its owner, its members and whoever committed to it), never
+  about their own doing: sent for review, published, discarded, made private (to those who lost
+  it), and handed to you.
+- **Every branch says what its reader may do with it** (`access` `{canRead, canWrite, canManage}`)
+  on the list and the branch read, and every review what its reader may do with it (`viewerCan`
+  `{approve, merge, approveReason, mergeReason}`). The canvas opens a draft you may not write
+  read-only instead of taking edits its save would refuse, and a draft you may no longer read moves
+  you to Published, saying why.
+
+### Changed
+
+- **Private drafts are private.** A private draft is read by its owner, its members and the people
+  on its review only. Managing a workspace no longer opens everyone's private drafts, or their
+  reviews.
+- **The review policy decides self-approval and self-merge**, and "author" means whoever opened the
+  review. By default they may approve and merge it, and the draft's owner may approve a review
+  someone else opened. With self-approval off, the opener's approval is 403 `self_review`; with
+  self-merge off, the opener's merge is 403 `self_merge` and publishing a draft directly is 409
+  `review_required` (a direct publish is its publisher's own merge). A service account still never
+  approves, and nobody approves through one they manage.
+- **The reviewer picker** lists the caller too where they may approve what they open
+  (`GET …/reviewers?dataSourceId=`).
+- **Publishing a draft directly** needs its owner or a maintainer, at either level; anyone else who
+  writes it asks for a review.
+
+### Upgrading
+
+- **Run the migrations.** Two follow `20261028_1000_gv_ps_unowned`: `20261029_1000_gv_branch_vis`
+  (graphver: `branches.visibility`, two indexes) and `20261029_1100_drafts_policy` (management:
+  nullable policy columns on workspaces and data sources). With a separate `GRAPHVER_DB_URL`, roll
+  the workers before the API pods: the worker adds the column on start if the migration hasn't.
+- **Existing drafts all become private**, and keep their members. Nothing becomes visible without
+  its owner choosing. Member rows left on drafts that weren't shared are deleted.
+- **New drafts are public by default.** To keep drafts private by default, set the workspace's
+  **New drafts start** to Private; to stop public drafts, set **Drafts may be** to Private only.
+- **Managers lose read access to other people's private drafts and their reviews** (404, the
+  Reviews inbox included). To have someone merge a private draft's review, ask them to review it.
+- **Self-approval is now allowed by default.** It used to be refused for both the author and the
+  draft's owner; turn it off per workspace or data source to keep that.
+- **API changes:**
+  - `isShared` on `PATCH …/branches/{id}` answers 422 `is_shared_retired`; change the level with
+    `POST …/visibility` and share a draft by adding members;
+  - `shared` on create is deprecated (it opens a private draft);
+  - branches gain `visibility` and `access`; `isShared` now means "public, or has members";
+  - new refusals: 409 `private_drafts_disabled` / `public_drafts_disabled`, 409
+    `staged_changes_unsaved`, 403 `self_merge`, 409 `review_required`, 422 `ineligible_owner`.
+- **API keys** may read a branch (`GET …/branches/{id}`); they may not read or change a drafts
+  policy, change a draft's level or owner, or list leavers' drafts.
+- **A downgrade** turns public drafts into their owners' private drafts.
+
+### Known limitations
+
+- "Author" is whoever opened the review: with self-merge off, someone else can open a review of
+  your draft and you can then merge it.
+- Reviewers of a closed review can still read its draft, and a published draft's commits stay
+  visible in history.
+- Revert, restore and re-sync aren't covered by the self-merge policy; they already need publish.
+- A closed draft can't be reopened.
+
+---
+
 ## [Unreleased] — Versioning: enabling version control on a graph that already exists
 
 Fixes for what went wrong after enabling version control on a FalkorDB graph that already existed,

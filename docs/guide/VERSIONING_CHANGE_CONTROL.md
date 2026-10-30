@@ -3,20 +3,23 @@
 *For Builders who change data, and anyone who reviews or rolls back changes.*
 
 Version control is how the graph's **data** changes safely: you edit in a
-private draft, someone can review it, it is published, and every published
+draft, someone can review it, it is published, and every published
 change stays in a history you can undo or roll back. This page explains what
 it gives you, how it is switched on, and the path through this part of the
 guide.
 
 > **Note:** *The one-sentence model* — editing a graph works like editing a
-> shared document with track changes: you draft privately, someone reviews, it
-> publishes, and nothing is ever silently lost.
+> shared document with track changes: you draft, someone reviews, it publishes,
+> and nothing is ever silently lost.
 
 ## What version control gives you
 
-- **Edit safely in drafts.** Your changes stay private until they are
+- **Edit safely in drafts.** Your changes stay in a draft until they are
   published. The live graph — what {brand} calls **Published**, the version
-  everyone sees — is never touched by work in progress.
+  everyone sees — is never touched by work in progress. A draft is **public**
+  (everyone who can see the data source sees it, and everyone who can edit it
+  can change it) or **private** (its owner, the people added to it and its
+  reviewers).
 - **Review before anything ships.** Raise a change for review, see exactly what
   moves, resolve conflicts, then merge.
 - **Full history, and a way back.** Every publish is a revision you can
@@ -216,20 +219,42 @@ View's sharing.
 
 | Action | Who |
 | --- | --- |
-| See a data source's history and its Review Center | Anyone who can read the workspace's data. People who can't manage its data sources see only the requests they raised or are named on |
-| Turn on version control for a data source | People who can manage the workspace's data sources — the **Workspace member**, **Data engineer** and **Workspace admin** roles |
-| Start a draft, edit, **Review & Save**, **Submit for review** | The same people |
-| **Publish now** (skip review) | The same people |
-| **Merge**, **Dismiss**, **Pull latest** in the Review Center | The same people |
-| **Approve** | The same people — and never the request's own author. Shown only on requests that name reviewers |
-| **Undo just this change**, **Restore graph to here**, **Revert this merge** | The same people |
+| See a data source's history, its public drafts and its Review Center | Anyone who can read the workspace's data. A private draft, and its review, only its owner, its members and its reviewers |
+| Turn on version control for a data source | People who can edit the workspace's data sources — the **Workspace member**, **Publisher**, **Data engineer** and **Workspace admin** roles |
+| Start a draft, and edit a public one: **Review & Save**, **Submit for review** | The same people. A private draft: its owner and its **Editor** and **Maintainer** members |
+| Rename a draft, change who can see it, add members, **Discard draft** | Its owner or a maintainer |
+| Hand a draft on | Its owner; a **Workspace admin** for someone who has left |
+| **Publish now** (skip review) | Its owner or a maintainer who can also publish — the **Publisher**, **Data engineer** and **Workspace admin** roles. Not where the data source has someone else merge |
+| **Merge**, **Pull latest** in the Review Center | People who can publish — and not whoever opened the request, where the data source has someone else merge |
+| **Dismiss** | People who can edit the data |
+| **Approve** | People who can edit the data, shown on requests that name them as reviewer — whoever opened the request too, unless the data source has someone else approve |
+| **Undo just this change**, **Restore graph to here**, **Revert this merge** | People who can publish |
+| **Drafts and reviews** settings | **Workspace admins** |
 | Switch version control or edit mode off for everyone | Administrators, in **Administration → Features** |
 
 Organisation-wide admin roles can do all of the above in every workspace.
 
-> **Note:** Review is a team habit, not a lock: anyone who can edit can also
-> **Publish now**. Agree in your team when a review is expected — see
-> [Ways of Working](/guide/ways-of-working).
+> **Note:** Review can be required. Where a data source has someone other than
+> whoever opened a review merge it, drafts are published only through a review
+> — see below.
+
+## Drafts and reviews settings
+
+On a workspace's page, **Drafts and reviews** sets, for every data source in it:
+
+- **New drafts start** — **Public** (the default) or **Private**;
+- **Drafts may be** — **Public or private**, **Public only** or **Private only**.
+  Turning private drafts off leaves existing private drafts as they are;
+- **Whoever opens a review may approve it** — **Yes** by default;
+- **Whoever opens a review may merge it** — **Yes** by default. With **No**,
+  drafts are published only through a review someone else merges.
+
+A data source can set its own on its **Versioning** tab; each setting is its
+own or **Use the workspace's setting**. Only workspace admins change them.
+
+**Drafts whose owner left**, below them, lists the open drafts of people who
+have left the workspace — their name, owner, level and when they last changed,
+never what they hold. Choose **Hand on** to give one a new owner.
 
 ## Where to next
 

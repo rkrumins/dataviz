@@ -181,7 +181,7 @@ Guide](/docs/api-guide#run-a-lineage-trace).
 | `2xx` | Done. | — |
 | `401` with `detail.error` | The key isn't accepted: mistyped, revoked, expired, paused, its owner inactive, or the wrong address. | Fix the key: [When a key is refused](/guide/api-keys#when-a-key-is-refused). |
 | `403` with `detail.error` | The key is accepted but may not do this: `api_key_not_allowed` (a route keys can't call), `api_key_read_only`, `api_key_out_of_scope`, `missing_permission`. | Widen the key, or the role it acts with, or use another route. |
-| `403` with `"type": "access_denied"` | Version control refuses it, and `detail.code` says why: `publish_required` (writing a published version directly without publish), `not_draft_owner` or `not_owner_or_member` (someone else's draft), `person_required` or `self_review` (a review). With no `code`, `detail.message` says why (cancelling an export someone else started). | Write to a draft instead, or ask its owner or a person with publish. |
+| `403` with `"type": "access_denied"` | Version control refuses it, and `detail.code` says why: `publish_required` (writing a published version directly without publish), `not_draft_owner` or `not_owner_or_member` (someone else's draft), `person_required`, `self_review` or `self_merge` (a review). With no `code`, `detail.message` says why (cancelling an export someone else started). | Write to a draft instead, or ask its owner or a person with publish. |
 | `404` | Not there, or not yours to see. | — |
 | `409` | It clashes with the current state. | Read it again, then decide. |
 | `422` | The request is malformed. | Fix it; the answer says which field. |

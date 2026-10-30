@@ -36,14 +36,15 @@ flowchart LR
 ## Start editing
 
 1. Open a Context View on the data source.
-2. In the View's toolbar, choose **Edit** (*Make changes in a private draft*).
-   The **Start editing** dialog opens: *Edits go to a private draft — the
-   published view stays untouched.*
+2. In the View's toolbar, choose **Edit** (*Make changes in a draft*).
+   The **Start editing** dialog opens: *Edits go to a draft — the published
+   view stays untouched.*
 3. Choose where your edits go:
-   - under **Continue a draft**, select an open draft on this View — yours or a
-     teammate's; or
-   - under **Start a new branch**, optionally type a name, then choose **Create &
-     edit**.
+   - under **Continue a draft**, select an open draft on this View that you can
+     change — yours, or a teammate's; or
+   - under **Start a new branch**, choose **Public** or **Private** (it starts
+     where your workspace's policy says), optionally type a name, then choose
+     **Create & edit**.
 4. You're now editing. An amber strip above the canvas shows the draft (*No
    changes yet* at first), and the toolbar shows **Undo**, **Redo**, **Review &
    Save** and **Done**.
@@ -191,18 +192,33 @@ with resolutions**.
 ## Your draft
 
 - **Switch versions.** The version menu in the toolbar shows **Published** or
-  your draft's name. It lists **Published** and **Your drafts**, and offers
-  **New draft** and **Manage all drafts**. An amber dot means Published has
-  moved on since the draft started.
+  your draft's name. It lists **Published**, then **Your drafts**, **Shared
+  with you** and **Public drafts**, each marked with a globe (public) or a lock
+  (private), and offers **New draft** and **Manage all drafts**. An amber dot
+  means Published has moved on since the draft started.
 - **Rename or describe it.** In the version menu, choose **Draft settings**
-  next to a draft: change its **Name** and **Description**, set its
-  **Visibility** (**Private** or **Shared**), or copy its **Shareable link**.
-  Choose **Save changes**.
+  next to a draft: change its **Name** and **Description**, or copy its
+  **Shareable link**. Choose **Save changes**.
+- **Choose who can see it.** Under **Who can see it** in **Draft settings**,
+  the owner or a maintainer makes the draft **Public** — everyone who can see
+  the data source sees it, and everyone who can edit it can change it — or
+  **Private** — only you, the people you add, and its reviewers. Making it
+  private first saves, under their own names, the unsaved edits of anyone who
+  would lose access; the dialog names them. If their edits clash with the
+  draft, nothing changes and the dialog says whose they are. Your workspace
+  may allow only one level.
 - **Share it.** **Draft settings** also lists the draft's **Members**. Its
   owner and maintainers add a person or group as a **Viewer**, **Editor** or
-  **Maintainer**, change a role, or remove someone; adding the first member
-  shares a private draft. Only the owner can change **Visibility**, and
-  making a draft **Private** removes its members.
+  **Maintainer**, change a role, or remove someone. Removing someone, or making
+  them a viewer, saves what they had staged first.
+- **Hand it on.** Under **Hand it on**, the owner picks a new owner and chooses
+  **Hand on**. They stay on as a maintainer unless they untick **Stay on as a
+  maintainer**. A workspace admin can hand on the drafts of someone who left
+  the workspace (see [Drafts and reviews](/guide/versioning-change-control)).
+- **See who else is on it.** The amber strip shows who saved into the draft,
+  and says when someone else saves into it — *Bob saved 3 changes*. If you
+  have nothing unsaved, their changes show at once; otherwise choose
+  **Refresh** when you're ready.
 - **Stop editing.** **Done** leaves the draft and returns you to Published.
   The draft is kept — nothing is discarded. If you still have staged edits,
   **Review & Save** opens instead: save or discard them first.
@@ -212,9 +228,11 @@ with resolutions**.
 - **Idle drafts.** By default, a draft nobody has saved to for 30 days is
   discarded automatically, just as if someone had chosen **Discard draft**.
 
-Everyone who can edit the workspace's data can find and continue the drafts on
-a View. People who can only read it never see them, and **Published** never
-shows a draft's changes until it's published.
+Everyone who can see the workspace's data sees its public drafts, and everyone
+who can edit it can continue them. A private draft is seen only by its owner,
+its members and its reviewers — managing the workspace doesn't open it. Someone
+else's draft that you can't change opens read-only. **Published** never shows
+a draft's changes until it's published.
 
 ## If you come back later
 

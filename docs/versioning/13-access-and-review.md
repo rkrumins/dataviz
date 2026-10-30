@@ -32,6 +32,18 @@ I re-checked these code claims for this revision:
 > `requires(...)`. They were enforced directly: the R1 fences and a subset of R3, with no R2. Each
 > section below that ships says how it differs; [03 §3.15](03-branching-commits-merge.md) describes the
 > shipped rules in one place.
+>
+> **Shipped since: two levels and a policy, not three.** `branches.visibility` is `public` or
+> `private`, not this spec's `private` / `members` / `workspace`. A public draft is this spec's
+> `workspace` level (read by R, written by M); a private one is read by its owner, its members and its
+> review's people only — the manager short-circuit is gone. A draft's members are on it at either
+> level; "shared" now means only "has members". The per-graph review policy is replaced by a workspace
+> **drafts and reviews policy**, overridable per data source (`drafts_policy.py`): the default level,
+> the allowed levels, and whether whoever *opened* a review may approve or merge it (`self_review`,
+> `self_merge`, and `review_required` on a direct publish) — no quorum, bypass or contributor rule.
+> Narrowing a draft, removing a member and handing a draft on commit the staged edits of whoever loses
+> write access first (`_settled_change`). See the CHANGELOG section "public and private drafts" and
+> [06 §2.3](06-api-reference.md#23-branches--drafts).
 
 ### One decision point
 Every versioning action is decided by:
