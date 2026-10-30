@@ -1075,9 +1075,16 @@ async def _carry_forks(session: AsyncSession, ds: WorkspaceDataSourceORM, ws_id:
                        now: str) -> list[str]:
     """File ``ds``'s forks' sources — forks of forks, and those in the trash, too — under
     ``ws_id`` with ``ds``'s governing settings, in the move's transaction (their graphs move with
-    its graph). Returns ``ds`` and them: the sources whose views go too."""
+    its graph). Returns ``ds`` and them: the sources whose views go too.
+
+    Their rows are locked first, after ``ds``'s: a view being made on a fork holds it FOR KEY
+    SHARE, which the UPDATE alone would not wait for, so the move waits for the view and takes it
+    along, or the view waits for the move and finds its source gone from the workspace."""
     forks = await fork_sources.forks_of(session, ds.id)
     if forks:
+        await session.execute(
+            select(WorkspaceDataSourceORM.id).where(WorkspaceDataSourceORM.id.in_(forks))
+            .order_by(WorkspaceDataSourceORM.id).with_for_update())
         await session.execute(
             update(WorkspaceDataSourceORM).where(WorkspaceDataSourceORM.id.in_(forks))
             .values(workspace_id=ws_id, updated_at=now, **fork_sources.governing(ds))

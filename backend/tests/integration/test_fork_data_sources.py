@@ -412,6 +412,52 @@ def test_a_fork_made_while_its_parents_settings_change_takes_the_new_ones():
         assert (await _row(legacy["data_source_id"])).review_self_merge is False
     _run(case)
 
+def test_a_view_made_on_a_fork_while_its_parent_moves_goes_with_it():
+    """A view is made holding its source's row FOR KEY SHARE. A move locked the parent's row
+    alone and changed its forks' with a plain UPDATE, which does not wait for a key share: a view
+    made on a fork meanwhile committed in the old workspace after the move had taken the views,
+    and stayed there, its fork gone. The move now locks the forks' rows, after the parent's, and
+    waits for the view, which it then takes along."""
+    from sqlalchemy import update
+
+    from backend.app.db.models import ViewORM, WorkspaceORM
+    from backend.app.db.repositories import data_source_repo, view_repo
+    from backend.common.models.management import ViewCreateRequest
+    from backend.app.services import data_source_transfer as T
+
+    async def move(parent_ds, to_ws):
+        """The move's own writes to the parent, its forks and the views on them."""
+        async with _mgmt() as m:
+            ds = await T._lock_live(m, parent_ds)
+            ds.workspace_id = to_ws
+            await m.flush()
+            sources = await T._carry_forks(m, ds, to_ws, "now")
+            await m.execute(update(ViewORM).where(ViewORM.data_source_id.in_(sources))
+                            .values(workspace_id=to_ws).execution_options(synchronize_session=False))
+            await m.commit()
+
+    async def case(svc):
+        parent_ds, gid = await _parent(svc)
+        async with _client() as c:
+            fork_ds = (await _fork(c, gid)).json()["dataSourceId"]
+        to_ws = "ws_forks_" + os.urandom(3).hex()
+        async with _mgmt() as s:
+            s.add(WorkspaceORM(id=to_ws, name="Elsewhere"))
+            await s.commit()
+        async with _mgmt() as v:                       # a view being made on the fork
+            assert await data_source_repo.hold_in_workspace(v, fork_ds, WS)
+            view = await view_repo.create_view(v, ViewCreateRequest(
+                name="On the fork", workspace_id=WS, data_source_id=fork_ds, view_type="graph",
+                visibility="private"), user_id="u1")
+            moving = asyncio.ensure_future(move(parent_ds, to_ws))
+            await asyncio.wait({moving}, timeout=0.5)
+            await v.commit()
+        await moving
+        async with _mgmt() as s:
+            assert (await s.get(ViewORM, view.id)).workspace_id == to_ws
+        assert (await _row(fork_ds)).workspace_id == to_ws
+    _run(case)
+
 def test_a_parents_permanent_delete_purges_its_trashed_forks_first():
     from backend.app.services.versioning.models import JobORM
 
