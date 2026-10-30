@@ -665,6 +665,8 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_RESYNC_MAX_ENTITIES` | `250000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SCHEMA` | `graphver` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SET_FIELDS` | `tags` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_SQUASH_PAGE` | `20000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_SQUASH_PAGED_ABOVE` | `200000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_DELETE_MAX_ABS` | `500` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_DELETE_MAX_FRACTION` | `0.05` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` | `20000` | `backend/app/services/versioning/config.py` |

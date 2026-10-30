@@ -246,6 +246,11 @@ SYNC_PUBLISH_MAX_CHANGES: int = int(os.getenv("GRAPHVER_SYNC_PUBLISH_MAX_CHANGES
 # of every changed payload being loaded, merged and re-hashed in the worker. Off = always the full
 # merge. Temporary: removed one release after the narrow squash ships.
 NARROW_SQUASH: bool = os.getenv("GRAPHVER_NARROW_SQUASH", "1").lower() not in ("0", "false", "no")
+# A narrow squash holds about 1.7 KB in the worker for each entity the draft changed (200k changes:
+# ~340 MB). A draft that changed more than this many is squashed SQUASH_PAGE entities at a time
+# instead, in the same one commit and transaction, so a publish of millions fits the worker.
+SQUASH_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_SQUASH_PAGED_ABOVE", "200000"))
+SQUASH_PAGE: int = int(os.getenv("GRAPHVER_SQUASH_PAGE", "20000"))
 # Live (not tombstoned) forks one graph may have; one more is refused with 409 fork_limit. Each
 # fork gets its own FalkorDB key on the parent's instance, so this bounds that until FalkorDB
 # capacity management (E7) brings a real quota.

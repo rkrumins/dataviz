@@ -1644,8 +1644,14 @@ class GraphVersioningService:
         main.head_commit_id = squash.id
         graph.main_head_commit_seq = new_seq       # advance head before merkle
         squash.merkle_root = await self._commit_merkle(s, graph.id, main_id, squash, deltas)
-        graph.updated_at = _now()
         squash.stats = _delta_stats(deltas)
+        return await self._squash_landed(s, graph, draft, squash, actor, merged_via)
+
+    async def _squash_landed(self, s, graph, draft, squash, actor, merged_via: str) -> str:
+        """What every squash does once ``main``'s head is at it: the draft is merged and the
+        projection is pointed at the new head."""
+        new_seq = squash.commit_seq
+        graph.updated_at = _now()
         draft.status = "merged"
         draft.base_commit_seq = new_seq            # rebased onto new main
 
@@ -1685,8 +1691,16 @@ class GraphVersioningService:
         the draft's inside Postgres, keeping their stored hashes. The one exception is a row whose
         type the ontology spells differently: its payload is canonicalized and re-hashed in Python,
         as the full path does. The outcome is the full path's: the same rows, heads, stats, Merkle
-        root, cascade and violations, in one transaction under ``_lock_graph``."""
+        root, cascade and violations, in one transaction under ``_lock_graph``. A draft that changed
+        more than ``SQUASH_PAGED_ABOVE`` entities goes a page at a time (:meth:`_squash_paged`)."""
         gid, head_seq = graph.id, graph.main_head_commit_seq
+        changed = (await s.execute(select(func.count()).select_from(EntityHeadORM).where(
+            EntityHeadORM.graph_id == gid, EntityHeadORM.branch_id == draft.id))).scalar_one()
+        if changed > config.SQUASH_PAGED_ABOVE:
+            return await self._squash_paged(
+                s, graph, draft, main_id, actor, message,
+                containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
+                merged_via=merged_via)
         heads = await self._head_index(s, gid, draft.id)
         main = await self._hashes_at(s, gid, main_id, list(heads), head_seq)
         live = {eid for eid, h in heads.items() if h.live and h.table}
@@ -1788,6 +1802,221 @@ class GraphVersioningService:
         deltas += [Delta(r.entity_id, r.op, None, r.prev_content_hash, r.content_hash) for r in copies]
         del rows, copies, kind_by_entity
         return await self._finish_squash(s, graph, draft, main_id, squash, deltas, actor, merged_via)
+
+    async def _squash_paged(
+        self, s, graph, draft, main_id, actor, message, *,
+        containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
+        merged_via: str = "review",
+    ) -> str:
+        """:meth:`_squash_up_to_date` for a draft that changed more than ``SQUASH_PAGED_ABOVE``
+        entities: the same plan, gates and rows, ``SQUASH_PAGE`` of the draft's heads at a time,
+        so the worker holds a page of the draft, never all of it. Still one commit, in one
+        transaction under ``_lock_graph``: a refusal on any page writes nothing.
+
+        Each page is written once judged, ``main``'s head already at the squash, so a page's gates
+        see what the pages before it wrote, as one batch's gates see the whole batch. For that to
+        judge what one batch would, nothing a page is judged by waits on a later page: the deletes
+        go first (with the edges on a deleted node the draft left alone), then the nodes, then the
+        edges re-pointed or changed, then the new edges. An edge's ends are typed from the draft's
+        own view of them — ``main`` at its base, which is the head, where it left them alone — and
+        whether a node is left outside every parent is asked last, of everything the squash wrote.
+        Above ``BOOTSTRAP_MERKLE_INLINE_MAX`` changes the commit's Merkle root is left unset, as an
+        enable of that size leaves its own."""
+        gid, base = graph.id, graph.main_head_commit_seq
+        strict = graph.ontology_enforcement == "strict"
+        ontology = Ontology.from_spec(graph.ontology_spec) if strict else None
+        cset = containment_edge_types or []
+        stats = _delta_stats([])
+        merkle: Optional[Dict[str, Optional[str]]] = {}
+        squash: Optional[CommitORM] = None
+
+        async def write(copies: List["_SquashRow"], deltas: List[Delta], kinds: Dict[str, str]):
+            nonlocal squash, merkle
+            if not copies and not deltas:
+                return
+            if squash is None:
+                squash = await self._squash_commit(s, graph, draft, main_id, actor, message)
+                (await s.get(BranchORM, main_id)).head_commit_id = squash.id
+                graph.main_head_commit_seq = squash.commit_seq   # what later pages read
+            await self._copy_versions(s, gid, main_id, squash, copies, actor)
+            await self._write_deltas(s, gid, main_id, squash, deltas, kinds, actor)
+            for op, eid, chash in ([(r.op, r.entity_id, r.content_hash) for r in copies]
+                                   + [(d.op, d.entity_id, d.content_hash) for d in deltas]):
+                stats[op] += 1
+                if merkle is not None:
+                    merkle[eid] = None if op == "delete" else chash
+            if merkle is not None and len(merkle) > config.BOOTSTRAP_MERKLE_INLINE_MAX:
+                merkle = None
+
+        async def lane(heads: Mapping[str, "_Head"], ids: List[str], main: Mapping[str, "_Stored"]):
+            """The Python lane (a type the ontology spells otherwise): payload read, canonicalized
+            and hashed, as :meth:`_squash_up_to_date` does."""
+            deltas: List[Delta] = []
+            payload_of = await self._payloads_by_version(
+                s, [(heads[eid].table, gid, heads[eid].version_id) for eid in ids])
+            for eid in ids:
+                p = payload_of.get(heads[eid].version_id)
+                if p:
+                    canonicalize_payload_types(p, ontology_rules)
+                b = main.get(eid)
+                if p and b is None:
+                    deltas.append(Delta(eid, "create", p, None, content_hash(p)))
+                elif not p and b is not None:
+                    deltas.append(Delta(eid, "delete", None, b.content_hash, _HASH_NONE))
+                elif p and content_hash(p) != b.content_hash:
+                    deltas.append(Delta(eid, "update", p, b.content_hash, content_hash(p)))
+            return deltas
+
+        def reread(h: _Head) -> bool:
+            if h.table == "edge" and not h.type:
+                return True
+            if ontology_rules is None or not h.type:
+                return False
+            canon = (ontology_rules.canonical_entity_type(h.type) if h.table == "node"
+                     else ontology_rules.canonical_edge_type(h.type))
+            return bool(canon) and canon != h.type
+
+        async def judge(heads, copies, deltas, kinds):
+            """The gates on what a page writes (:meth:`_squash_up_to_date`'s), against ``main`` as
+            the pages before it left it."""
+            written = await asyncio.to_thread(_written_values, copies, heads, deltas)
+            if not written:
+                return
+            prior = await self._skeletons_at(s, gid, main_id, list(written), base)
+            if ontology is not None:
+                viol = validate_entities(
+                    [(eid, kinds.get(eid, "node"), v) for eid, v in written.items() if v is not None],
+                    ontology)
+                if viol:
+                    raise OntologyViolation(viol)
+            await self._enforce_written(
+                s, gid, main_id, written, prior, kinds, containment_edge_types=cset,
+                ontology_rules=ontology_rules, strict=strict, also_writing=draft.id,
+                parentless=False)
+
+        # 1. What the draft deleted, and the edges on it that the draft left alone.
+        async for heads in self._head_pages(s, gid, draft.id, live=False):
+            main = await self._hashes_at(s, gid, main_id, list(heads), base)
+            deltas = [Delta(eid, "delete", None, main[eid].content_hash, _HASH_NONE)
+                      for eid in sorted(heads) if eid in main]
+            kinds = {eid: heads[eid].kind for eid in heads}
+            incident = await self._incident_live_edge_skeletons(s, gid, main_id, sorted(heads))
+            mine = await self._heads_present(s, gid, draft.id, list(incident))
+            cascaded = sorted(eid for eid, v in incident.items()
+                              if eid not in mine and v.get("sourceEntityId"))
+            for eid, b in (await self._hashes_at(s, gid, main_id, cascaded, base)).items():
+                deltas.append(Delta(eid, "delete", None, b.content_hash, _HASH_NONE))
+                kinds[eid] = "edge"
+            await write([], deltas, kinds)
+
+        # 2. The nodes it created or changed (and a head whose version row is missing: a delete).
+        async for heads in self._head_pages(s, gid, draft.id, live=True):
+            heads = {eid: h for eid, h in heads.items() if h.table != "edge"}
+            main = await self._hashes_at(s, gid, main_id, list(heads), base)
+            rows, slow = await asyncio.to_thread(_plan_squash, heads, main, (), reread)
+            deltas = (await lane(heads, slow, main) if slow else []) + [
+                Delta(r.entity_id, "delete", None, r.prev_content_hash, r.content_hash)
+                for r in rows if r.op == "delete"]
+            copies = [r for r in rows if r.op != "delete"]
+            kinds = {r.entity_id: r.kind for r in rows}
+            kinds.update({eid: heads[eid].table for eid in slow})
+            await judge(heads, copies, deltas, kinds)
+            await write(copies, deltas, kinds)
+
+        # 3 and 4. Its edges: re-pointed or changed ones (and those on a node it deleted, which go),
+        # then new ones — so a new edge is judged against where the changed ones now point.
+        for new in (False, True):
+            async for heads in self._head_pages(s, gid, draft.id, live=True):
+                heads = {eid: h for eid, h in heads.items() if h.table == "edge"}
+                main = await self._hashes_at(s, gid, main_id, list(heads), base)
+                heads = {eid: h for eid, h in heads.items() if (eid not in main) == new}
+                if not heads:
+                    continue
+                # Its ends as the squash leaves them: the draft's where it changed them, else main's.
+                ends = sorted({e for h in heads.values() for e in (h.src, h.tgt) if e})
+                drafted = await self._heads_live(s, gid, draft.id, ends)
+                outside = [e for e in ends if e not in drafted]
+                stored = await self._skeletons_at(s, gid, main_id, outside, base) if outside else {}
+                dead = {e for e, live in drafted.items() if not live}
+                gone = {eid for eid, h in heads.items() if h.src and (h.src in dead or h.tgt in dead)}
+                for eid, h in sorted(heads.items()):
+                    if eid in gone or not (h.src or h.tgt):
+                        continue
+                    for e in (h.src, h.tgt):
+                        if not (e and (drafted[e] if e in drafted else stored.get(e) is not None)):
+                            raise ConcurrencyError(
+                                f"edge {eid} would dangle (endpoint tombstoned): {h.src}->{h.tgt}")
+                rows, slow = await asyncio.to_thread(_plan_squash, heads, main, gone, reread)
+                deltas = (await lane(heads, slow, main) if slow else []) + [
+                    Delta(r.entity_id, "delete", None, r.prev_content_hash, r.content_hash)
+                    for r in rows if r.op == "delete"]
+                copies = [r for r in rows if r.op != "delete"]
+                kinds = {r.entity_id: r.kind for r in rows}
+                kinds.update({eid: heads[eid].table for eid in slow})
+                await judge(heads, copies, deltas, kinds)
+                await write(copies, deltas, kinds)
+
+        if squash is None:
+            return await self._merged_unchanged(s, graph, draft, actor, merged_via)
+
+        # 5. Nothing the squash created or un-nested is left outside every parent the ontology
+        # requires one of — asked of what it wrote, now that all of it is there.
+        if strict and ontology_rules is not None and ontology_rules.root_entity_types:
+            async for ids in self._commit_entity_pages(s, gid, main_id, squash.commit_seq):
+                written = await self._skeletons_at(s, gid, main_id, ids, squash.commit_seq)
+                written.update({eid: None for eid in ids if eid not in written})
+                prior = await self._skeletons_at(s, gid, main_id, ids, base)
+                kinds = {eid: ("edge" if _is_edge_payload(v or prior.get(eid) or {}) else "node")
+                         for eid, v in written.items()}
+                viol = await self._parentless_violations(
+                    s, gid, main_id, written, prior, kinds, ontology_rules)
+                if viol:
+                    raise OntologyViolation(viol)
+
+        squash.stats = stats
+        squash.merkle_root = (await self._merkle.commit_tree(
+            s, gid, main_id, squash.id, squash.commit_seq, merkle) if merkle is not None else None)
+        return await self._squash_landed(s, graph, draft, squash, actor, merged_via)
+
+    async def _head_pages(self, s, graph_id: str, branch_id: str, *, live: bool):
+        """A branch's heads, ``SQUASH_PAGE`` at a time in id order (a keyset on the primary key), as
+        :meth:`_head_index` gives them: the live ones, or the rest (deleted, or an empty payload)."""
+        conn = await s.connection()
+        dead = or_(EntityHeadORM.is_tombstone.is_(True),
+                   EntityHeadORM.content_hash.in_([_HASH_EMPTY, _HASH_NONE]))
+        after = ""
+        while True:
+            page = (await conn.execute(
+                select(EntityHeadORM.entity_id, EntityHeadORM.entity_kind,
+                       EntityHeadORM.head_version_id, EntityHeadORM.content_hash,
+                       EntityHeadORM.is_tombstone)
+                .where(EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+                       EntityHeadORM.entity_id > after, ~dead if live else dead)
+                .order_by(EntityHeadORM.entity_id).limit(config.SQUASH_PAGE)
+            )).all()
+            if page:
+                yield await self._heads_from_rows(conn, graph_id, page)
+            if len(page) < config.SQUASH_PAGE:
+                return
+            after = page[-1][0]
+
+    async def _commit_entity_pages(self, s, graph_id: str, branch_id: str, seq: int):
+        """The ids of the entities a commit wrote, ``SQUASH_PAGE`` at a time in id order."""
+        conn = await s.connection()
+        for model in (NodeVersionORM, EdgeVersionORM):
+            after = ""
+            while True:
+                ids = (await conn.execute(
+                    select(model.entity_id).where(
+                        model.graph_id == graph_id, model.branch_id == branch_id,
+                        model.commit_seq == seq, model.entity_id > after)
+                    .order_by(model.entity_id).limit(config.SQUASH_PAGE))).scalars().all()
+                if ids:
+                    yield list(ids)
+                if len(ids) < config.SQUASH_PAGE:
+                    break
+                after = ids[-1]
 
     async def _copy_versions(self, s, graph_id, branch_id, commit, rows: Sequence["_SquashRow"],
                              actor) -> None:
@@ -4339,7 +4568,7 @@ class GraphVersioningService:
         kind_by_entity: Mapping[str, str], *,
         containment_edge_types: Sequence[str], ontology_rules: Optional[OntologyRules],
         strict: bool, known: Optional[Mapping[str, Optional[dict]]] = None,
-        edited: Collection[str] = (),
+        edited: Collection[str] = (), also_writing: Optional[str] = None, parentless: bool = True,
     ) -> None:
         """The ONE gate every write path shares (canvas save, checkpoint, publish): it judges the
         state being WRITTEN (``written``: entity → new value, ``None`` = delete) against what it
@@ -4356,7 +4585,12 @@ class GraphVersioningService:
           re-judges its existing edges against its NEW type, so a retype cannot leave the graph
           holding relationships the ontology forbids.
         ``known`` adds values the caller already holds (e.g. a merge's composed state) for typing
-        edge ends; anything else is read from the branch."""
+        edge ends; anything else is read from the branch.
+
+        A write judged a page at a time (:meth:`_squash_paged`) names the branch whose heads its
+        other pages write (``also_writing``): an edge on a retyped node that one of them rewrites is
+        judged there, with its new value. ``parentless=False`` leaves the parent check to the
+        caller, once every page is written."""
         live = {eid: v for eid, v in written.items() if v is not None}
 
         untyped = _untyped_creations(
@@ -4385,8 +4619,11 @@ class GraphVersioningService:
                    if kind_by_entity.get(eid, "node") == "node" and judged[eid] == "create"
                    and prior.get(eid) is not None]
         if retyped:
-            for eid, v in (await self._incident_live_edges(s, graph_id, branch_id, retyped)).items():
-                if eid not in written:                  # edges written in this batch are judged already
+            incident = await self._incident_live_edges(s, graph_id, branch_id, retyped)
+            elsewhere = (await self._heads_present(s, graph_id, also_writing, list(incident))
+                         if also_writing and incident else set())
+            for eid, v in incident.items():
+                if eid not in written and eid not in elsewhere:   # judged with their new values
                     rich.append((eid, "edge", v, "create"))
         endpoint_types: Dict[str, str] = {}
         unknown: set = set()
@@ -4402,12 +4639,21 @@ class GraphVersioningService:
                 elif ep not in written:
                     unknown.add(ep)
         if unknown:
-            for ep, ev in (await self._current_skeletons(s, graph_id, branch_id, list(unknown))).items():
+            # A page types an end another page writes as the merged state holds it: the draft's own
+            # view (``main`` where the draft left it alone), canonical as ``known`` would hold it.
+            values = await self._current_skeletons(s, graph_id, also_writing or branch_id, list(unknown))
+            if also_writing:
+                for ep in await self._heads_present(s, graph_id, also_writing, list(values)):
+                    if values[ep]:
+                        canonicalize_payload_types(values[ep], ontology_rules)
+            for ep, ev in values.items():
                 if ev and ev.get("entityType"):
                     endpoint_types[ep] = ev["entityType"]
         viol = validate_entities_rich(rich, endpoint_types, ontology_rules)
         if viol:
             raise OntologyViolation(viol)
+        if not parentless:
+            return
         viol = await self._parentless_violations(
             s, graph_id, branch_id, written, prior, kind_by_entity, ontology_rules)
         if viol:
@@ -8260,6 +8506,11 @@ class GraphVersioningService:
             if len(page) < _HEAD_PAGE:
                 break
             after = page[-1][0]
+        return await self._heads_from_rows(conn, graph_id, heads)
+
+    async def _heads_from_rows(self, conn, graph_id: str, heads: Sequence[tuple]) -> Dict[str, "_Head"]:
+        """:meth:`_head_index`'s :class:`_Head` for each of ``heads`` (head-pointer rows: entity
+        id, kind, version id, content hash, tombstone), from their version rows."""
         # vid -> (table, urn, type, displayName, qualifiedName, source, target). A head is looked
         # for in its kind's table first, then the other one (a head whose kind went stale).
         rows: Dict[str, tuple] = {}
@@ -8278,6 +8529,27 @@ class GraphVersioningService:
                     for vid, *cols in (await conn.execute(stmt, {"vids": list(chunk)})).all():
                         rows[vid] = (table, *cols)
         return await asyncio.to_thread(_heads_of, heads, rows)
+
+    async def _heads_present(self, s, graph_id: str, branch_id: str, ids) -> set:
+        """Those of ``ids`` that have a head on ``branch_id`` (a draft changed them)."""
+        return set(await self._heads_live(s, graph_id, branch_id, ids))
+
+    async def _heads_live(self, s, graph_id: str, branch_id: str, ids) -> Dict[str, bool]:
+        """For each of ``ids`` with a head on ``branch_id``, whether that head is live (as
+        :class:`_Head` says: not deleted, and not an empty or null payload)."""
+        ids = list(ids)
+        if not ids:
+            return {}
+        conn = await s.connection()
+        stmt = select(EntityHeadORM.entity_id, EntityHeadORM.is_tombstone,
+                      EntityHeadORM.content_hash).where(
+            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == branch_id,
+            EntityHeadORM.entity_id == any_(bindparam("ids", type_=ARRAY(Text))))
+        out: Dict[str, bool] = {}
+        for chunk in _chunks(ids, _IN_LIST_MAX):
+            for eid, tomb, chash in (await conn.execute(stmt, {"ids": list(chunk)})).all():
+                out[eid] = not tomb and chash not in (_HASH_EMPTY, _HASH_NONE)
+        return out
 
     async def _current_values(
         self, s, graph_id: str, branch_id: str, ids, as_of_seq: Optional[int] = None,

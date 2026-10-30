@@ -117,6 +117,7 @@ tests/integration/test_versioning_neighbors_bounded.py
 tests/integration/test_versioning_nodes_paging.py
 tests/integration/test_versioning_occ_concurrency.py
 tests/integration/test_versioning_ontology.py
+tests/integration/test_versioning_paged_publish.py
 tests/integration/test_versioning_pr_close.py
 tests/integration/test_versioning_pr_gate.py
 tests/integration/test_versioning_projection.py
