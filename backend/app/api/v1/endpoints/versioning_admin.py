@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.models import PlatformSettingsORM
+from backend.app.db.models import PlatformSettingsORM, WorkspaceDataSourceORM
 from backend.app.db.repositories import data_source_repo
 from backend.app.providers import falkor_graph_registry
 from backend.app.services import managed_sources
@@ -24,7 +24,7 @@ from backend.app.services.aggregation.models import AggregationJobORM
 from backend.app.services.graph_store.topology import key_slot
 from backend.app.services.system_status import probes
 from backend.app.services.versioning import config as vconfig
-from backend.app.services.versioning import keymigrate, residency_policy
+from backend.app.services.versioning import keymigrate, residency, residency_policy
 from backend.app.services.versioning.errors import (JobActive, ProjectionKeyInUse,
                                                     ProjectionKeyInvalid, ProjectionNotAdopted)
 from backend.app.services.versioning.service import ConcurrencyError
@@ -233,11 +233,7 @@ async def put_residency_policy(
         row = PlatformSettingsORM(id=1)
         session.add(row)
     before = residency_policy.saved_values(row)
-    try:
-        residency_policy.validate(body, before)
-    except residency_policy.PolicyInvalid as exc:
-        raise HTTPException(status_code=422, detail={
-            "type": "invalid_residency_policy", "field": exc.field, "message": str(exc)})
+    _validate(body, before)
     residency_policy.apply(row, body)
     after = residency_policy.saved_values(row)
     changed = sorted(w for w in after if after[w] != before[w])
@@ -250,3 +246,53 @@ async def put_residency_policy(
     await session.commit()
     residency_policy.invalidate()
     return residency_policy.describe(await session.get(PlatformSettingsORM, 1))
+
+
+def _validate(body: Dict[str, Any], saved: Dict[str, Any]) -> None:
+    try:
+        residency_policy.validate(body, saved)
+    except residency_policy.PolicyInvalid as exc:
+        raise HTTPException(status_code=422, detail={
+            "type": "invalid_residency_policy", "field": exc.field, "message": str(exc)})
+
+
+@router.post("/residency-policy/preview",
+             summary="What the next capacity pass would do with these residency values")
+async def preview_residency_policy(
+    body: Dict[str, Any] = Body(default_factory=dict, examples=[{"highWaterPct": 70}]),
+    _user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """The capacity planner run on the proposed values (partial, as for PUT, and refused as PUT
+    refuses them) against current memory and graphs, acting on nothing: per master, what the
+    next pass would evict (graph, data source, label, bytes, reason), which waiting loads would
+    start, and which would still wait and why."""
+    saved = residency_policy.saved_values(await session.get(PlatformSettingsORM, 1))
+    _validate(body, saved)
+    policy = residency_policy.effective(residency_policy.merged(saved, body))
+    decided, snap = await residency.preview(policy)
+    sources = {r["data_source_id"] for r in snap.rows.values()}
+    labels = dict((await session.execute(
+        select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label)
+        .where(WorkspaceDataSourceORM.id.in_(sources)))).all()) if sources else {}
+
+    def item(x, **extra) -> dict:
+        ds = snap.rows.get(x.graph_id, {}).get("data_source_id")
+        return {"graphId": x.graph_id, "dataSourceId": ds, "label": labels.get(ds),
+                "bytes": x.bytes, **extra}
+
+    return {
+        "values": {wire: getattr(policy, attr)
+                   for wire, attr in residency_policy.WIRE_NAMES.items()},
+        "masters": [{
+            "endpoint": m.master.endpoint, "usedBytes": m.master.used,
+            "maxBytes": m.master.maxmemory or None, "reservedBytes": m.reserved,
+            "usedAfterBytes": m.used_after, "hold": m.master.hold,
+            "evictions": [item(e, reason=e.reason) for e in m.evictions],
+            "loads": [item(x) for x in m.loads],
+            "waits": [item(w, reason=w.reason, shortfallBytes=w.shortfall) for w in m.waits],
+        } for m in decided.masters],
+        "evictions": len(decided.evictions),
+        "evictedBytes": sum(e.bytes for e in decided.evictions),
+        "loads": len(decided.loads),
+    }

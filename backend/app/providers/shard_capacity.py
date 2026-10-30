@@ -919,6 +919,31 @@ async def read_query_mem_capacity(
         return None
 
 
+async def read_graph_memory(
+    db: Any, *, mode: Optional[str], graph_key: str, timeout: float,
+) -> Optional[int]:
+    """What one graph key holds on the node that owns it, in bytes (``GRAPH.MEMORY USAGE``,
+    sampled as the graph store's sweep samples it). None when the server has no such command,
+    or did not answer. Never raises."""
+    from backend.app.services.graph_store.discovery import (
+        GRAPH_MEMORY_SAMPLES, parse_graph_memory_reply,
+    )
+
+    conn = getattr(db, "connection", None)
+    if conn is None:
+        return None
+    args = ("GRAPH.MEMORY", "USAGE", graph_key, "SAMPLES", GRAPH_MEMORY_SAMPLES)
+    try:
+        async with asyncio.timeout(timeout):
+            _endpoint, node = await _owner(conn, mode, graph_key, refresh=False)
+            raw = await (conn.execute_command(*args, target_nodes=node) if node is not None
+                         else conn.execute_command(*args))
+    except Exception as exc:                          # noqa: BLE001 — by contract
+        logger.info("memory of graph %r unknown: %s", graph_key, exc)
+        return None
+    return parse_graph_memory_reply(raw)[0]
+
+
 # ── The allowance ────────────────────────────────────────────────────────
 
 

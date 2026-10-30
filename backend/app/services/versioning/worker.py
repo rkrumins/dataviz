@@ -13,7 +13,9 @@ the poll loop. Per-``graph_id`` serialization keeps the two mechanisms from
 projecting the same graph concurrently. Mirrors the aggregation worker runtime. A **liveness
 loop** (every ``LIVENESS_SECS``) lowers the watermark of an idle graph whose FalkorDB key is gone
 or restored behind it, so the poll reseeds it. A **retire loop** drops the old key a moved graph
-left, once its new key has caught up (``keymigrate.retire_moved_keys``).
+left, once its new key has caught up (``keymigrate.retire_moved_keys``). With residency on
+(``GRAPHVER_RESIDENCY_ENABLED``), a **capacity loop** decides which keys FalkorDB holds
+(``residency.CapacityLoop``) and the per-provider count budget is not used.
 
 The **transfer** lane (import / export / publish, and a dedicated package-inspect slot) and the
 **bootstrap** lane (bootstraps, purges) run jobs from ``graphver.jobs`` through one
@@ -192,7 +194,9 @@ class ProjectionWorker:
             loops += [self._poll_loop(), self._stream_loop()]
             if self._versioning is not None:
                 loops.append(self._sweep_loop())
-            if self._cache is not None:
+            if config.RESIDENCY_ENABLED:
+                loops.append(self._capacity_loop())     # the count budget is not used
+            elif self._cache is not None:
                 loops.append(self._evict_loop())
             if config.LIVENESS_SECS > 0:
                 loops.append(self._liveness_loop())
@@ -363,6 +367,25 @@ class ProjectionWorker:
                 logger.exception("eviction loop error")
             try:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._evict_secs)
+            except asyncio.TimeoutError:
+                pass
+
+    async def _capacity_loop(self) -> None:
+        """Residency (doc 17): a capacity pass every policy interval — evictions by class, idle
+        time and each master's memory, and the loads admission lets start. One leader across
+        workers: a pass another worker holds is skipped here."""
+        from .residency import CapacityLoop
+        from .residency_policy import resolve
+
+        capacity = CapacityLoop(self._proj)
+        while not self._stop.is_set():
+            try:
+                await capacity.run_once()
+            except Exception:
+                logger.exception("capacity loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(),
+                                       timeout=(await resolve()).capacity_interval_secs)
             except asyncio.TimeoutError:
                 pass
 

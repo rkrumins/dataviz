@@ -183,6 +183,13 @@ def _is_inherit(value: Any) -> bool:
     return type(value) is int and value == INHERIT
 
 
+def merged(saved: Mapping[str, Any], values: Mapping[str, Any]) -> Dict[str, Any]:
+    """What would be saved once ``values`` (``-1`` clears one, None leaves it) are applied."""
+    out = dict(saved)
+    out.update({w: None if _is_inherit(v) else v for w, v in values.items() if v is not None})
+    return out
+
+
 def validate(values: Mapping[str, Any], saved: Mapping[str, Any]) -> None:
     """Refuse a change (``values`` by wire name; ``-1`` clears one, None leaves it) that names an
     unknown value, gives one of the wrong kind or out of its range, or would contradict another
@@ -204,9 +211,7 @@ def validate(values: Mapping[str, Any], saved: Mapping[str, Any]) -> None:
             if type(value) is not int or not lo <= value <= hi:
                 raise PolicyInvalid(wire, f"must be a whole number from {lo:,} to {hi:,}, or -1 "
                                           "for the default")
-    merged = dict(saved)
-    merged.update({w: None if _is_inherit(v) else v for w, v in values.items() if v is not None})
-    after = _single(merged)
+    after = _single(merged(saved, values))
     standard, coldline = after["standardIdleSecs"], after["coldlineIdleSecs"]
     if coldline > standard and {"standardIdleSecs", "coldlineIdleSecs"} & set(values):
         raise PolicyInvalid(

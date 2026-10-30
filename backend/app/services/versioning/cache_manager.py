@@ -105,13 +105,18 @@ class CacheManager:
         return await is_pinned(graph_id)
 
     # ---- eviction --------------------------------------------------------- #
-    async def evict(self, graph_id: str, *, drop_graph: Callable[..., Awaitable]) -> bool:
+    async def evict(self, graph_id: str, *, drop_graph: Callable[..., Awaitable],
+                    reason: Optional[str] = None) -> bool:
         """Evict a cold ``main`` from FalkorDB. Skips a pinned graph, any graph that is not
         :func:`_evictable`, and one whose key anything besides the graph's own data source reads
         (:func:`purge_worker.graph_key_readers`, as purge and move ask) or whose readers cannot be
         asked. Marks ``status=evicted`` + ``projected_commit_seq=0`` (so the worker
         rebuilds it) and drops the FalkorDB graph via ``drop_graph(name, provider_id)`` — routed
         to the graph's pinned provider instance. Returns whether it evicted.
+
+        The capacity loop passes its ``reason`` (residency, doc 17): it is recorded as
+        ``evicted_reason``, and an Always graph is never evicted, whatever its class was when the
+        pass planned.
 
         Runs under the projector's own per-graph lock (``project_graph``'s): a projection in
         flight means the graph is not cold, and nothing writes the key between the re-check and
@@ -153,14 +158,16 @@ class CacheManager:
                     logger.info("not evicting graph %s: '%s' is still read by %d data source(s) "
                                 "or catalog entr(ies)", graph_id, name, len(readers))
                     return False
+            residency = ((ProjectionStateORM.residency != "always",) if reason else ())
             async with self._session() as s:
                 row = (await s.execute(
                     update(ProjectionStateORM)
-                    .where(ProjectionStateORM.graph_id == graph_id, *_evictable(),
+                    .where(ProjectionStateORM.graph_id == graph_id, *_evictable(), *residency,
                            ProjectionStateORM.falkor_graph_name.is_not_distinct_from(name),
                            ProjectionStateORM.falkor_provider.is_not_distinct_from(provider_id))
                     .values(status="evicted", projected_commit_seq=0, updated_at=_now(),
-                            epoch=ProjectionStateORM.epoch + 1)
+                            epoch=ProjectionStateORM.epoch + 1,
+                            **({"evicted_reason": reason} if reason else {}))
                     .returning(ProjectionStateORM.falkor_graph_name,
                                ProjectionStateORM.falkor_provider)
                     .execution_options(synchronize_session=False)
