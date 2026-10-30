@@ -75,6 +75,7 @@ tests/integration/test_versioning_apply_ops.py
 tests/integration/test_versioning_asof_reads.py
 tests/integration/test_versioning_batch_create_edge.py
 tests/integration/test_versioning_bootstrap.py
+tests/integration/test_versioning_bounded_reads.py
 tests/integration/test_versioning_branch_freshness.py
 tests/integration/test_versioning_branch_list.py
 tests/integration/test_versioning_branch_per_view.py

@@ -1275,8 +1275,14 @@ class GraphVersioningService:
             # Base = the draft's current effective state for each touched entity,
             # fork-aware (draft over this graph's main over any fork parent), so a
             # checkpoint on a fork classifies edits to inherited entities as
-            # updates (not creates) and keeps hash continuity intact.
-            composed = await self._composed_state(s, graph_id, branch_id)
+            # updates (not creates) and keeps hash continuity intact. Read for the touched
+            # entities alone: the whole state is every payload of the graph, on every save. A
+            # fork's inherited entities are only in its parent's rows, which the whole read composes.
+            graph = await s.get(GraphORM, graph_id)
+            if graph is not None and graph.fork_parent_graph_id:
+                composed = await self._composed_state(s, graph_id, branch_id)
+            else:
+                composed = await self._current_values(s, graph_id, branch_id, touched)
             base_state = {eid: composed.get(eid) for eid in touched}
             if branch.is_shared or branch.visibility == "public":
                 # Resolve the value each edit was STAGED against (per base_content_hash, first
@@ -1851,7 +1857,7 @@ class GraphVersioningService:
 
             # The draft's own edits, read once: the merge and the rewrite below use the same read.
             own = await self._branch_own_payloads(s, graph_id, draft.id)
-            merged_state, conflicts, _theirs = await self._compute_merge(
+            merged_state, conflicts, theirs = await self._compute_merge_bounded(
                 s, graph_id, graph, draft, main_id, dict(resolutions or {}), own=own
             )
             if conflicts:
@@ -1865,6 +1871,9 @@ class GraphVersioningService:
 
             # Rewrite ONLY the draft's own edits to the merged result, then re-base onto the new main
             # head — entities the draft never touched come from the advanced base automatically.
+            # The merge holds only what changed: the edges on what it deletes and the ends of the
+            # edges it keeps come from main, for the cascade and integrity checks below.
+            await self._hydrate_merge_neighborhood(s, graph_id, main_id, merged_state, theirs)
             self._cascade_incident_edges(merged_state)
             self._assert_referential_integrity(merged_state)
             deltas = net_delta(own, {eid: merged_state.get(eid) for eid in own})
@@ -2144,7 +2153,7 @@ class GraphVersioningService:
             if graph is None or draft is None:
                 raise ValueError("unknown graph/branch")
             main_id = await self._main_branch_id(s, graph_id)
-            merged_state, conflicts, theirs = await self._compute_merge(
+            merged_state, conflicts, theirs = await self._compute_merge_bounded(
                 s, graph_id, graph, draft, main_id, {}
             )
             return {
@@ -2963,7 +2972,7 @@ class GraphVersioningService:
             await self._require_edit(s, draft, actor, ())
             await self._assert_no_live_pr(s, branch_id)
             main_id = await self._main_branch_id(s, graph_id)
-            _merged, conflicts, _theirs = await self._compute_merge(
+            _merged, conflicts, _theirs = await self._compute_merge_bounded(
                 s, graph_id, graph, draft, main_id, {}
             )
             revs = list(dict.fromkeys(reviewers or []))      # dedup, keep order
@@ -2997,7 +3006,7 @@ class GraphVersioningService:
                 graph = await s.get(GraphORM, pr.target_graph_id)
                 draft = await s.get(BranchORM, pr.source_branch_id)
                 main_id = await self._main_branch_id(s, graph.id)
-                merged, conflicts, theirs = await self._compute_merge(
+                merged, conflicts, theirs = await self._compute_merge_bounded(
                     s, graph.id, graph, draft, main_id, {}
                 )
             else:
@@ -3009,17 +3018,27 @@ class GraphVersioningService:
                 "changes": _delta_stats(net_delta(theirs, merged)),
             }
 
-    async def _pr_merge_states(self, s, pr):
+    async def _pr_merge_states(self, s, pr, containment_edge_types=None):
         """``(merged, theirs)`` for a PR — the 3-way merge result and the target side, the
         shared basis for both the flat diff and the hierarchical summary. Dispatches
-        draft→main vs fork→parent (same as :meth:`diff_pr` / :meth:`preview_mr`)."""
+        draft→main vs fork→parent (same as :meth:`diff_pr` / :meth:`preview_mr`).
+
+        A draft's merge holds only what changed (:meth:`_compute_merge_bounded`), so the
+        unchanged entities a diff shows around it are added to both sides alike, where
+        ``net_delta`` nets them out: the ends of the edges it names, and with
+        ``containment_edge_types`` the containers each change nests under."""
         if self._is_draft_mr(pr):
             graph = await s.get(GraphORM, pr.target_graph_id)
             draft = await s.get(BranchORM, pr.source_branch_id)
             main_id = await self._main_branch_id(s, graph.id)
-            merged, _conflicts, theirs = await self._compute_merge(
+            merged, _conflicts, theirs = await self._compute_merge_bounded(
                 s, graph.id, graph, draft, main_id, {}
             )
+            changed = {d.entity_id for d in net_delta(theirs, merged)}
+            await self._hydrate_merge_neighborhood(s, graph.id, main_id, merged, theirs)
+            cset = {t.upper() for t in (containment_edge_types or [])}
+            await self._augment_containment_skeleton(
+                s, graph.id, draft.id, changed, merged, theirs, merged, cset)
         else:
             fork = await s.get(GraphORM, pr.graph_id)
             merged, _conflicts, theirs = await self._compute_fork_merge(s, fork, {})
@@ -3050,7 +3069,7 @@ class GraphVersioningService:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pull request {pr_id}")
-            merged, theirs = await self._pr_merge_states(s, pr)
+            merged, theirs = await self._pr_merge_states(s, pr, containment_edge_types)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_summary_view(index, limit)
 
@@ -3065,7 +3084,7 @@ class GraphVersioningService:
             pr = await s.get(MergeRequestORM, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pull request {pr_id}")
-            merged, theirs = await self._pr_merge_states(s, pr)
+            merged, theirs = await self._pr_merge_states(s, pr, containment_edge_types)
         index = _build_diff_hierarchy(merged, theirs, containment_edge_types)
         return _hierarchy_children_view(index, container_key, limit, offset)
 
@@ -6370,8 +6389,10 @@ class GraphVersioningService:
                 })
         return _collapse_empty_payloads(merged), conflicts, theirs
 
-    async def _compute_merge_bounded(self, s, graph_id, graph, draft, main_id, resolutions):
-        """Bounded (O(changed)) analogue of :meth:`_compute_merge` for the WRITE path.
+    async def _compute_merge_bounded(self, s, graph_id, graph, draft, main_id, resolutions,
+                                     own=None):
+        """Bounded (O(changed)) analogue of :meth:`_compute_merge` for the write path and every
+        read that previews it (pull latest, the publish preview, a review's diff).
 
         Composes base/theirs/ours only over the entities that actually changed — the draft's
         own edits ∪ entities main changed since the draft's branch point ∪ explicit
@@ -6380,15 +6401,17 @@ class GraphVersioningService:
         on all three sides, so they contribute nothing to ``net_delta(theirs, merged)``;
         excluding them is exact. Returns SPARSE ``(merged, conflicts, theirs)`` — the
         squash then hydrates the live neighborhood the cascade/integrity guards need
-        (:meth:`_hydrate_merge_neighborhood`).
+        (:meth:`_hydrate_merge_neighborhood`). ``own`` as for :meth:`_compute_merge`.
 
         Falls back to the full (fork-aware) :meth:`_compute_merge` for a fork graph, whose
         base/theirs need copy-on-write parent composition that ``_values_at`` doesn't do."""
         if graph.fork_parent_graph_id:
-            return await self._compute_merge(s, graph_id, graph, draft, main_id, resolutions)
+            return await self._compute_merge(s, graph_id, graph, draft, main_id, resolutions,
+                                              own=own)
         base_seq = draft.base_commit_seq or 0
         head_seq = graph.main_head_commit_seq
-        own = await self._branch_own_payloads(s, graph_id, draft.id)
+        if own is None:
+            own = await self._branch_own_payloads(s, graph_id, draft.id)
         changed = set(own) | set(resolutions)
         changed |= await self._changed_in_window(s, graph_id, main_id, base_seq, head_seq)
         base = await self._values_at(s, graph_id, main_id, changed, base_seq)
