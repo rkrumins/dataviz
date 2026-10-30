@@ -11,6 +11,9 @@
  * managers; a fork whose purge is queued can no longer be restored.
  * Its header says when editing is paused, and someone who both publishes and manages pauses or
  * resumes it, naming the revision they saw.
+ * Its Drafts and reviews section shows each setting as the workspace's, naming its value, or this
+ * data source's own; a workspace admin overrides one or goes back to the workspace's, and only
+ * those are sent. Anyone else reads it.
  * The data hooks are stubbed; the card itself has its own spec.
  */
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -19,6 +22,7 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 let canManage = true
 let canPublish = true
+let isAdmin = true
 let resolved: Record<string, unknown> | undefined
 let resolveError: Error | null
 let branches: Array<Record<string, unknown>>
@@ -35,8 +39,12 @@ const restoreFork = vi.fn()
 const useDataSourcePullRequests = vi.fn((..._args: unknown[]) => ({ data: openPrs, isLoading: false }))
 const freezeMutate = vi.fn()
 let freezeError: Error | null
+let dsPolicy: Record<string, unknown> | undefined
+const policyPut = vi.fn()
 
-vi.mock('@/store/auth', () => ({ usePermission: (p: string) => (p.endsWith(':publish') ? canPublish : canManage) }))
+vi.mock('@/store/auth', () => ({
+  usePermission: (p: string) => (p === 'workspace:admin' ? isAdmin : p.endsWith(':publish') ? canPublish : canManage),
+}))
 vi.mock('@/hooks/useDataSourceProviderMap', () => ({
   useDataSourceProviderMap: () => ({
     resolve: () => (providerType ? { providerType } : undefined),
@@ -51,6 +59,8 @@ vi.mock('../../hooks/useVersioning', () => ({
   useDataSourcePullRequests: (...args: unknown[]) => useDataSourcePullRequests(...args),
   useForks: () => ({ data: forks, refetch: refetchForks }),
   useSetGraphFrozen: () => ({ mutate: freezeMutate, isPending: false, error: freezeError }),
+  useDataSourceDraftsPolicy: () => ({ data: dsPolicy }),
+  useSetDataSourceDraftsPolicy: () => ({ mutateAsync: policyPut, isPending: false }),
 }))
 vi.mock('@/services/versioningApiService', async (importOriginal) => ({
   ...await importOriginal<typeof import('@/services/versioningApiService')>(),
@@ -87,6 +97,7 @@ const renderTab = () =>
 beforeEach(() => {
   canManage = true
   canPublish = true
+  isAdmin = true
   resolved = { graphId: 'g1', mainBranchId: 'b_main', mainHeadCommitSeq: 5, kind: 'bootstrap' }
   resolveError = null
   branches = []
@@ -102,6 +113,8 @@ beforeEach(() => {
   useDataSourcePullRequests.mockClear()
   freezeMutate.mockReset()
   freezeError = null
+  dsPolicy = undefined
+  policyPut.mockReset().mockResolvedValue({})
 })
 
 describe('DataSourceVersioningTab — projection health', () => {
@@ -319,5 +332,44 @@ describe('DataSourceVersioningTab — forks', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
     expect(await screen.findByText('Close its open pull request first.')).toBeInTheDocument()
     expect(refetchForks).not.toHaveBeenCalled()
+  })
+})
+
+describe('DataSourceVersioningTab — drafts and reviews', () => {
+  beforeEach(() => {
+    dsPolicy = {
+      overrides: { defaultVisibility: null, levels: 'public_only', selfApproval: null, selfMerge: null },
+      workspace: { defaultVisibility: 'private', levels: null, selfApproval: false, selfMerge: null },
+      effective: {
+        defaultVisibility: 'public', levels: 'public_only', selfApproval: false, selfMerge: true,
+        sources: { defaultVisibility: 'data_source', levels: 'data_source', selfApproval: 'workspace', selfMerge: 'default' },
+      },
+    }
+  })
+
+  it('shows each setting as the workspace’s, naming what it is, or as this data source’s own', () => {
+    renderTab()
+    expect(screen.getByLabelText('New drafts start')).toHaveDisplayValue('Use the workspace’s setting (Private)')
+    expect(screen.getByLabelText('Drafts may be')).toHaveDisplayValue('Public only')
+    expect(screen.getByLabelText('Whoever opens a review may approve it')).toHaveDisplayValue('Use the workspace’s setting (No)')
+    // The workspace sets none: it takes the default.
+    expect(screen.getByLabelText('Whoever opens a review may merge it')).toHaveDisplayValue('Use the workspace’s setting (Yes)')
+    expect(screen.getByText('Drafts may only be public, so new drafts start public.')).toBeInTheDocument()
+  })
+
+  it('lets a workspace admin override a setting, or go back to the workspace’s, sending only those', async () => {
+    renderTab()
+    fireEvent.change(screen.getByLabelText('Drafts may be'), { target: { value: 'inherit' } })
+    fireEvent.change(screen.getByLabelText('Whoever opens a review may merge it'), { target: { value: 'false' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(policyPut).toHaveBeenCalledWith({ levels: 'inherit', selfMerge: false }))
+  })
+
+  it('is read-only to someone who isn’t a workspace admin', () => {
+    isAdmin = false
+    renderTab()
+    expect(screen.getByLabelText('Drafts may be')).toBeDisabled()
+    expect(screen.getByLabelText('New drafts start')).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Save' })).toBeNull()
   })
 })

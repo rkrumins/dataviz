@@ -6,7 +6,7 @@
 import { useCallback } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, DraftLevel, DraftRole, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
@@ -155,6 +155,27 @@ export function useDataSourceDraftsPolicy(wsId?: string, dataSourceId?: string |
     queryFn: () => api.getDataSourceDraftsPolicy(wsId!, dataSourceId!),
     enabled: !!wsId && !!dataSourceId,
     staleTime: 60_000,
+  })
+}
+
+/** The workspace's own drafts and reviews settings, which its data sources follow unless they set
+ *  their own. Its key prefixes theirs, so invalidating it refreshes them too. */
+export function useWorkspaceDraftsPolicy(wsId?: string) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.all, 'draftsPolicy', wsId] as const,
+    queryFn: () => api.getWorkspaceDraftsPolicy(wsId!),
+    enabled: !!wsId,
+    staleTime: 60_000,
+  })
+}
+
+/** The workspace's open drafts whose owner left, for a workspace admin to hand on. No `wsId` for
+ *  anyone else: the server would refuse them. */
+export function useDraftsWhoseOwnerLeft(wsId?: string | null) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.all, 'ownerLeft', wsId] as const,
+    queryFn: () => api.listDraftsWhoseOwnerLeft(wsId!),
+    enabled: !!wsId,
   })
 }
 
@@ -718,6 +739,25 @@ function invalidateBranchMembers(qc: ReturnType<typeof useQueryClient>, wsId: st
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchMembers(wsId, graphId, branchId) })
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+}
+
+/** Change the workspace's drafts and reviews settings (workspace admins). Refreshes its policy and
+ *  every data source's, which follow it. */
+export function useSetWorkspaceDraftsPolicy(wsId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (change: DraftsPolicyChange) => api.putWorkspaceDraftsPolicy(wsId, change),
+    onSuccess: () => qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'draftsPolicy', wsId] }),
+  })
+}
+
+/** Change one data source's own drafts and reviews settings (workspace admins). */
+export function useSetDataSourceDraftsPolicy(wsId: string, dataSourceId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (change: DraftsPolicyChange) => api.putDataSourceDraftsPolicy(wsId, dataSourceId, change),
+    onSuccess: () => qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'draftsPolicy', wsId, dataSourceId] }),
+  })
 }
 
 /** Pull the latest main into a draft ("update branch"). Returns the RebaseResponse so the caller can
