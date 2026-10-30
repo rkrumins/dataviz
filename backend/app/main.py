@@ -3128,9 +3128,10 @@ app.add_middleware(
     # A list's full size (``X-Total-Count``), the id to quote about a request
     # (``X-Request-ID``) and when the calling key expires (``X-API-Key-Expires-At``):
     # a page calling the API from another origin reads them as the app does.
+    # ``X-Graph-Notice`` says why a node read came back flat (no ontology assigned).
     expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After", "Content-Disposition",
                     "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version", "X-Next-Cursor",
-                    "X-Total-Count", "X-Request-ID", "X-API-Key-Expires-At"],
+                    "X-Total-Count", "X-Request-ID", "X-API-Key-Expires-At", "X-Graph-Notice"],
 )
 
 # GZip compression for responses > 1 KB. WS1.4: compresslevel=1 (was 6, was

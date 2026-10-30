@@ -49,8 +49,9 @@ class _RecordingStubProvider(GraphDataProvider):
 
     Implements the strict-empty-state behaviour of the real FalkorDB
     provider — get_node, get_children etc. raise ProviderConfigurationError
-    until set_containment_edge_types has been called with a real ontology
-    or non-empty types.
+    until set_containment_edge_types has configured it: with an ontology's
+    types, with any non-empty types, or — on a provider nothing has
+    configured yet — with an empty set (a flat graph).
     """
 
     def __init__(self) -> None:
@@ -122,7 +123,7 @@ class _RecordingStubProvider(GraphDataProvider):
     # -- Injection points (record and apply) --
     def set_containment_edge_types(self, types, from_ontology=True):
         self.containment_types_calls.append({"types": list(types), "from_ontology": from_ontology})
-        if from_ontology or types:
+        if from_ontology or types or not self._sentinel_set:
             self._containment_types = {t.upper() for t in types}
             self._sentinel_set = True
 
@@ -250,3 +251,61 @@ async def test_injection_helper_is_idempotent_under_cache_hits():
 
     # Three calls, one injection (first call populated the cache).
     assert len(provider.containment_types_calls) == 1
+
+
+# ---------------------------------------------------------------------------
+# The real FalkorDB provider: an empty set is a flat graph, configured
+# ---------------------------------------------------------------------------
+
+class _NoRows:
+    result_set: List[Any] = []
+
+
+@pytest.mark.asyncio
+async def test_falkordb_configures_an_empty_introspection_only_set_as_flat():
+    """With no ontology assigned, introspection alone classifies no
+    containment: the set arrives empty, ``from_ontology=False``. The provider
+    ignored it and stayed unconfigured, so the reads that count children
+    raised ProviderConfigurationError — a 500 on ``/nodes/query``. An empty set
+    is a flat graph: configured, with no children counted. A provider nothing
+    has configured still raises."""
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = FalkorDBProvider(host="x", graph_name="g")
+    with pytest.raises(ProviderConfigurationError):
+        p._get_containment_edge_types()
+
+    p.set_containment_edge_types([], from_ontology=False)
+    assert p._get_containment_edge_types() == set()
+
+    cyphers: List[str] = []
+
+    async def _connected():
+        return None
+
+    async def _ro_query(cypher, params=None, **_kw):
+        cyphers.append(cypher)
+        return _NoRows()
+
+    p._ensure_connected = _connected
+    p._ro_query = _ro_query
+    assert await p.get_nodes(NodeQuery(entityTypes=["table"])) == []
+    assert "0 as childCount" in cyphers[-1]
+
+
+def test_an_empty_introspection_only_set_never_flattens_a_shared_provider():
+    """One provider instance serves every data source that reads the same graph
+    through the same provider. A source with no ontology assigned must not
+    flatten the hierarchy one with an ontology configured on it: its empty,
+    introspection-only set configures a provider nothing has configured yet,
+    and leaves a configured one as it is. An ontology that declares no
+    containment still replaces it."""
+    from backend.app.providers.falkordb_provider import FalkorDBProvider
+
+    p = FalkorDBProvider(host="x", graph_name="g")
+    p.set_containment_edge_types(["CONTAINS"], from_ontology=True)
+    p.set_containment_edge_types([], from_ontology=False)
+    assert p._get_containment_edge_types() == {"CONTAINS"}
+
+    p.set_containment_edge_types([], from_ontology=True)
+    assert p._get_containment_edge_types() == set()

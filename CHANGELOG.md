@@ -9,7 +9,7 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
-## [Unreleased] — Graph reads: a busy data source takes what idle ones leave
+## [Unreleased] — Graph reads: a busy data source takes what idle ones leave, and one with no ontology reads flat
 
 ### Fixed
 
@@ -24,6 +24,17 @@ limitations** — a changelog that only lists good news is not worth reading.
   the last 1.5 s — and only the part of their reserve they are not using, plus one reserve for a
   source nobody was reading, which still gets in at once. A source below its reserve is still
   never refused for its share, and the process ceiling is unchanged.
+- **A data source with no ontology assigned reads flat instead of failing.** The canvas's node read
+  (`POST …/graph/nodes/query`) answered 500 for such a source: with nothing to classify containment,
+  the graph store's containment set was left unset, and the reads that count an item's children
+  failed on it. The set is now configured empty, as when the ontology service is unreachable: no
+  item has children, and the node read says why in a header, `X-Graph-Notice: No ontology is
+  assigned to this data source. Assign one to see its hierarchy.` The canvas does not show it yet.
+  Another data source reading the same graph with an ontology keeps its hierarchy: an empty set
+  never replaces one already configured on the graph store's shared connection.
+  The source's top level, which answered 400 ("Ontology configuration error"), now lists every
+  item. With an ontology assigned nothing changes, and a connection or credential error answers as
+  before.
 
 ### Changed
 
