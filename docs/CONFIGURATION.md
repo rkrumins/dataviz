@@ -596,6 +596,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_LIVENESS_SECS` | `60` | How often, in seconds, the versioning worker checks that each versioned graph's FalkorDB key still holds what was projected into it, and reseeds one that was lost or restored to an older state. The same check asks for the first summaries build of a key no build has covered yet. `0` turns the check off. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_INPROCESS` | (empty) | Run the versioning worker lanes inside the API process (`1`, `true` or `yes`), only under `SYNODIC_ROLE=dev`, for a single-process development run; any other role ignores it. Off by default: the versioning worker lanes do it. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_WAIT_REPLICAS` | `0` | Replicas that must confirm a versioned graph's projection before reads are served from it. Fewer within `GRAPHVER_PROJECTION_WAIT_MS` hold it back as `replica_unconfirmed` and retry later. `0` waits for none; set it the same on the API and the versioning worker, which both project. | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_RESIDENCY_ENABLED` | (empty) | Turn on graph residency (`1`, `true` or `yes`): each versioned graph's class and each FalkorDB master's memory decide whether its key stays loaded, an evicted graph stays evicted until something asks for it, and the per-provider count budget (`GRAPHVER_FALKOR_MAX_RESIDENT`) is no longer used. Off by default; turn it on once every pod runs a release that has it. Its values are set in the admin UI. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_TRANSFER_INPROCESS` | — | No longer read: import, export and publish jobs always run on the versioning worker's transfer lane (`GRAPHVER_WORKER_LANES`). A process that still finds it set logs a warning; remove it. | `backend/app/services/versioning/config.py` |
 
 ### Internal tuning
@@ -614,6 +615,10 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_BOOTSTRAP_SCAN_WIDTH` | `100000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_SLOTS` | `2` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_WINDOW` | `50000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_BYTES_PER_ENTITY` | `550` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_CAPACITY_SECS` | `60` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_COLDLINE_CANVAS_LOAD_ABOVE` | `500000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_COLDLINE_IDLE_SECS` | `3600` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DB_URL` | — | `backend/app/services/system_status/probes.py`, `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DEFAULT_AUDIT_TIER` | `commit_only` | `backend/app/services/versioning/config.py` |
@@ -623,6 +628,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_DRAIN_SECS` | `40` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EPHEMERAL_MAX_GRAPHS` | `32` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EPHEMERAL_TTL_SECS` | `900` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_EVICTION_ENABLED` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EVICT_SECS` | `300` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_FALKOR_BUDGETS` | (empty) | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` | `0` | `backend/app/services/versioning/config.py` |
@@ -636,6 +642,9 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_JOBS_PER_WORKSPACE` | `2` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_JOB_WEDGE_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_LEASE_TTL` | `60` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_LOAD_MARGIN_PCT` | `130` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_MASTER_HIGH_WATER_PCT` | `80` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_MASTER_LOW_WATER_PCT` | `70` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_MAX_FORKS_PER_GRAPH` | `10` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_MERKLE_DEPTH` | `4` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_NARROW_SQUASH` | `1` | `backend/app/services/versioning/config.py` |
@@ -670,6 +679,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_SET_FIELDS` | `tags` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SQUASH_PAGE` | `20000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SQUASH_PAGED_ABOVE` | `200000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_STANDARD_IDLE_SECS` | `604800` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_DELETE_MAX_ABS` | `500` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_DELETE_MAX_FRACTION` | `0.05` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` | `20000` | `backend/app/services/versioning/config.py` |

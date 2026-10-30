@@ -1,20 +1,21 @@
 """Platform administration of the versioned graphs' FalkorDB projections, under
-``/admin/versioning``: the disaster-recovery reseed of a provider, the fleet inventory, and moving
-one graph's projection to another provider or key.
+``/admin/versioning``: the disaster-recovery reseed of a provider, the fleet inventory, moving
+one graph's projection to another provider or key, and the residency policy (doc 17).
 
 Every route needs ``system:admin``. None is on the API-key surface (``auth/api_key_surface``), so
 an API key is refused.
 """
 from datetime import datetime, timezone
-from typing import Literal, Optional
+from typing import Any, Dict, Literal, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session
+from backend.app.db.models import PlatformSettingsORM
 from backend.app.db.repositories import data_source_repo
 from backend.app.providers import falkor_graph_registry
 from backend.app.services import managed_sources
@@ -23,7 +24,7 @@ from backend.app.services.aggregation.models import AggregationJobORM
 from backend.app.services.graph_store.topology import key_slot
 from backend.app.services.system_status import probes
 from backend.app.services.versioning import config as vconfig
-from backend.app.services.versioning import keymigrate
+from backend.app.services.versioning import keymigrate, residency_policy
 from backend.app.services.versioning.errors import (JobActive, ProjectionKeyInUse,
                                                     ProjectionKeyInvalid, ProjectionNotAdopted)
 from backend.app.services.versioning.service import ConcurrencyError
@@ -203,3 +204,49 @@ async def _target_key(graph_id: str, body: ProjectionMoveRequest, current: dict,
         if body.key in keys:
             raise ProjectionKeyInUse(body.provider_id, body.key)
     return body.key
+
+
+@router.get("/residency-policy",
+            summary="The residency policy: each value as saved, its default and its effective value")
+async def get_residency_policy(
+    _user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """What the capacity loop evicts and loads by (doc 17), with ``enabled``: whether residency
+    applies on this deployment at all (``GRAPHVER_RESIDENCY_ENABLED``)."""
+    return residency_policy.describe(await session.get(PlatformSettingsORM, 1))
+
+
+@router.put("/residency-policy", summary="Change residency policy values")
+async def put_residency_policy(
+    body: Dict[str, Any] = Body(..., examples=[{"highWaterPct": 75, "coldlineIdleSecs": -1}]),
+    user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Partial: only the values named change, and ``-1`` clears one back to its default. A value
+    out of its range, of the wrong kind, or contradicting another (Coldline idle longer than
+    Standard idle; a stop mark less than 5 points under the start mark) is a 422 naming the
+    field, and nothing is saved. Recorded with each changed value's before and after; this
+    process applies the change at once, the others within 30 seconds."""
+    row = await session.get(PlatformSettingsORM, 1)
+    if row is None:
+        row = PlatformSettingsORM(id=1)
+        session.add(row)
+    before = residency_policy.saved_values(row)
+    try:
+        residency_policy.validate(body, before)
+    except residency_policy.PolicyInvalid as exc:
+        raise HTTPException(status_code=422, detail={
+            "type": "invalid_residency_policy", "field": exc.field, "message": str(exc)})
+    residency_policy.apply(row, body)
+    after = residency_policy.saved_values(row)
+    changed = sorted(w for w in after if after[w] != before[w])
+    if changed:
+        row.updated_at = datetime.now(timezone.utc).isoformat()
+        row.updated_by = user.id
+        await recorder.record_for_request(
+            session, "platform.residency_policy.updated",
+            details={"from": {w: before[w] for w in changed}, "to": {w: after[w] for w in changed}})
+    await session.commit()
+    residency_policy.invalidate()
+    return residency_policy.describe(await session.get(PlatformSettingsORM, 1))
