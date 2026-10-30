@@ -48,6 +48,10 @@ it 209 MB instead of 1,653 MB.
 - **Moving an edge, and putting a new one where it was, is no longer refused as a duplicate** — in
   one save, or published from a draft that did it in two. Likewise moving a containment link off a
   child and giving the child a new parent in the same save, and the cycle check.
+- **An edge re-pointed by a publish leaves no copy where it was in FalkorDB.** Its old relationship
+  stayed beside the new one: in a key the platform created, the projection then counted it as written
+  outside history and held every later publish back from FalkorDB until a rebuild; in a customer's
+  key it was flagged as an outside change. The old one is now deleted, as a deleted edge's is.
 
 ### Upgrading
 

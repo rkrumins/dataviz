@@ -6,7 +6,11 @@ it is computed and written ``PROJECTION_PAGE`` rows at a time (``_apply_paged``)
 then all its edges. Here the same window — creates, updates, a retype, a property dropped, deletes
 with the edges on them, an edge re-pointed, an edge onto a node made in the same window — is
 projected into twin keys, once in one pass and once in pages of two, and both keys must hold the
-same nodes and edges, and both passes publish.
+same nodes and edges, and both passes publish: in a key the platform minted and in a customer's.
+
+A re-pointed edge is written where it now points, and its relationship where it was goes, as a
+deleted edge's does: in a key the platform minted, the copy left behind was counted as written
+outside history and held every later pass back, and in a customer's it was flagged so.
 """
 import asyncio
 import os
@@ -14,6 +18,7 @@ import os
 import pytest
 
 from backend.app.services.versioning import config, db, models
+from backend.app.services.versioning.models import ProjectionStateORM
 from backend.app.services.versioning.projection import FalkorProjector, make_falkor_graph_factory
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -76,11 +81,12 @@ async def _held(graph):
     return sorted(tuple(map(str, n)) for n in nodes), sorted(tuple(map(str, e)) for e in edges)
 
 
-async def _projected(svc, factory, *, paged):
+async def _projected(svc, factory, *, paged, owned):
     name = f"gvt_paged_{os.getpid()}_{os.urandom(3).hex()}"
     graph = await factory(name)
     gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
-                                  actor="u", falkor_graph_name=name))["graph_id"]
+                                  actor="u", falkor_graph_name=name,
+                                  owns_falkor_graph=owned))["graph_id"]
     proj = FalkorProjector(graph_client_factory=factory)
     try:
         await _publish(svc, gid, BASE, "baseline")
@@ -94,6 +100,8 @@ async def _projected(svc, factory, *, paged):
             config.PROJECTION_PAGED_ABOVE, config.PROJECTION_PAGE = saved
         head = (await svc.get_graph(gid))["main_head_commit_seq"]
         assert out.get("projected") == head and not out.get("verify_error"), out
+        async with db.graphver_session() as s:
+            assert (await s.get(ProjectionStateORM, gid)).external_drift is None   # nothing left over
         return await _held(graph)
     finally:
         try:
@@ -106,14 +114,17 @@ async def _run() -> None:
     await models.create_schema_and_partitions()
     svc = GraphVersioningService()
     factory = make_falkor_graph_factory()
-    one = await _projected(svc, factory, paged=False)
-    paged = await _projected(svc, factory, paged=True)
-    assert paged == one, (paged, one)
-    nodes, edges = one
-    urns = {n[1] for n in nodes}
-    assert "urn:t:N4" not in urns and {"urn:t:A", "urn:t:B"} <= urns, urns
-    assert any(n[1] == "urn:t:N2" and "Table" in n[0] for n in nodes), nodes
-    assert {e[3] for e in edges} == {"E0", "E1", "E2", "E5", "EA", "EB"}, edges
+    for owned in (True, False):
+        one = await _projected(svc, factory, paged=False, owned=owned)
+        paged = await _projected(svc, factory, paged=True, owned=owned)
+        assert paged == one, (owned, paged, one)
+        nodes, edges = one
+        urns = {n[1] for n in nodes}
+        assert "urn:t:N4" not in urns and {"urn:t:A", "urn:t:B"} <= urns, urns
+        assert any(n[1] == "urn:t:N2" and "Table" in n[0] for n in nodes), nodes
+        assert sorted(e[3] for e in edges) == ["E0", "E1", "E2", "E5", "EA", "EB"], edges
+        assert [e[:4] for e in edges if e[3] == "E0"] == [
+            ("urn:t:N0", "FLOWS_TO", "urn:t:N7", "E0")], edges          # re-pointed, once
     await db.dispose_engine()
 
 

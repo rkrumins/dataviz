@@ -1205,7 +1205,9 @@ class FalkorProjector:
         """The window's four lists (:meth:`_compute_changes`) from ``last`` — each entity's final
         row in it, ``(kind, op, _Pending | None)`` by ``(kind, entity_id)`` — with the urns and
         labels of the deleted entities and of the edges' ends resolved (``urn_of``/``label_of``
-        filled in on the way)."""
+        filled in on the way). An edge the window re-points or retypes is written where it now
+        points, and deleted where it was, as a deleted edge is: the write MERGEs by its type and
+        ends, and would leave its old relationship there beside it."""
         node_upserts: List[NodeUpsert] = []
         edge_upserts: List[EdgeUpsert] = []
         node_deletes: List[Tuple[str, str]] = []
@@ -1235,12 +1237,21 @@ class FalkorProjector:
         # Unresolvable ids keep the legacy scan-delete fallback.
         before = (await self._svc._values_at(s, graph.id, main_id, deleted_edge_ids, from_seq)
                   if deleted_edge_ids else {})
+        # Where each written edge pointed before the window (its type and ends, no payload).
+        was = (await self._svc._skeletons_at(s, graph.id, main_id, [e for e, _p in live_edges],
+                                             from_seq) if live_edges else {})
+        moved = [(eid, was[eid]) for eid, p in live_edges
+                 if was.get(eid) and _is_edge_payload(was[eid])
+                 and not _is_derived_edge_payload(was[eid])
+                 and (_edge_endpoints(was[eid]) != _edge_endpoints(p)
+                      or spelled_type(was[eid].get("edgeType")) != spelled_type(p.get("edgeType")))]
         # Every urn/label the window's deletes and edge ends need that it does not itself say, in
         # a few batched reads rather than one per endpoint (``_endpoint`` remains the fallback).
         await self._prefetch_endpoints(
             s, graph, main_id,
             [*deleted_nodes, *(e for _eid, p in live_edges for e in _edge_endpoints(p)),
-             *(e for p in before.values() if p and _is_edge_payload(p) for e in _edge_endpoints(p))],
+             *(e for p in before.values() if p and _is_edge_payload(p) for e in _edge_endpoints(p)),
+             *(e for _eid, p in moved for e in _edge_endpoints(p))],
             urn_of, label_of)
         for eid in deleted_nodes:
             node_deletes.append(await self._endpoint(s, graph, main_id, eid, urn_of, label_of))
@@ -1265,6 +1276,12 @@ class FalkorProjector:
                     })
                 else:
                     edge_deletes.append(eid)
+        for eid, p in moved:
+            src, tgt = _edge_endpoints(p)
+            su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
+            tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
+            edge_deletes.append({"eid": eid, "src": su, "tgt": tu,
+                                 "rel": str(p.get("edgeType") or "REL"), "slb": slb, "tlb": tlb})
         return node_upserts, edge_upserts, node_deletes, edge_deletes
 
     async def _window_rows(self, s, graph, main_id, from_seq, to_seq) -> int:
