@@ -28,6 +28,7 @@ tests/integration/test_draft_transfer.py
 tests/integration/test_entity_summary_and_history.py
 tests/integration/test_export_roundtrip.py
 tests/integration/test_export_stream.py
+tests/integration/test_fork_data_sources.py
 tests/integration/test_graph_changes_freshness.py
 tests/integration/test_graph_changes_idempotent.py
 tests/integration/test_graph_changes_name_identity.py

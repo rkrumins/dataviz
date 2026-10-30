@@ -2690,6 +2690,22 @@ class GraphVersioningService:
             raise ForkLimit(config.MAX_FORKS_PER_GRAPH)
         return parent
 
+    async def fork_preflight(self, *, parent_graph_id: str, workspace_id: str) -> None:
+        """What :meth:`fork_graph` would refuse, read without its locks, so a route refuses before
+        it writes anything of its own: a parent that is missing, trashed or in another workspace
+        (``ValueError``), one whose editing is paused (:class:`GraphNotWritable`), or one at its
+        fork cap (:class:`ForkLimit`). fork_graph checks all of it again under the parent's lock."""
+        async with self._session() as s:
+            parent = await s.get(GraphORM, parent_graph_id)
+            if parent is None or parent.deleted_at is not None or parent.workspace_id != workspace_id:
+                raise ValueError(f"unknown parent graph {parent_graph_id}")
+            if parent.lifecycle_state != "live":
+                raise GraphNotWritable(parent.lifecycle_state)
+            live_forks = await s.scalar(select(func.count()).select_from(GraphORM).where(
+                GraphORM.fork_parent_graph_id == parent_graph_id, GraphORM.deleted_at.is_(None)))
+            if live_forks >= config.MAX_FORKS_PER_GRAPH:
+                raise ForkLimit(config.MAX_FORKS_PER_GRAPH)
+
     async def fork_graph(
         self,
         *,
@@ -2697,14 +2713,20 @@ class GraphVersioningService:
         workspace_id: str,
         actor: str,
         tenant_id: Optional[str] = None,
+        data_source_id: Optional[str] = None,
     ) -> Dict[str, object]:
         """Copy-on-write fork: a new graph whose ``main`` inherits the parent's
         state at its current head **without copying any rows**.  Divergence accrues
         only as the fork's own commits; reads compose parent@fork_base + own (plan
         §8 cross-team flow).
 
+        ``data_source_id`` is the fork's data source, the ``dsfork_…`` id of the row the route
+        made for it; one is minted when it is left out.
+
         At most ``config.MAX_FORKS_PER_GRAPH`` live forks per parent (:class:`ForkLimit`), and
         none of a trashed parent (:meth:`_fork_slot`)."""
+        if data_source_id is not None and not data_source_id.startswith("dsfork_"):
+            raise ValueError(f"a fork's data source id starts with dsfork_, not {data_source_id!r}")
         async with self._session() as s:
             await self._lock_graph(s, parent_graph_id)
             parent = await self._fork_slot(s, parent_graph_id)
@@ -2716,7 +2738,7 @@ class GraphVersioningService:
             base_seq = parent.main_head_commit_seq
             parent_main = await self._main_branch_id(s, parent_graph_id)
             fork = GraphORM(
-                data_source_id=prefixed_id("dsfork"),
+                data_source_id=data_source_id or prefixed_id("dsfork"),
                 workspace_id=workspace_id,
                 tenant_id=tenant_id,
                 kind=parent.kind,
@@ -2764,6 +2786,7 @@ class GraphVersioningService:
             ))
             return {
                 "graph_id": fork.id,
+                "data_source_id": fork.data_source_id,
                 "main_branch_id": main.id,
                 "fork_base_commit_seq": base_seq,
             }

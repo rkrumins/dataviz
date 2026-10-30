@@ -27,11 +27,11 @@ import inspect
 import json
 import logging
 from contextlib import contextmanager
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1228,15 +1228,26 @@ class ViewPrCountResponse(_ApiModel):
     on_data_source: int = Field(alias="onDataSource")
 
 
+class CreateForkRequest(_ApiModel):
+    """``name`` (1–80 characters once trimmed) names the fork's data source, labelled
+    ``"<parent label> · <name>"``; without it, ``Fork`` and the end of its id."""
+    name: Optional[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1,
+                                                    max_length=80)]] = None
+
+
 class ForkResponse(_ApiModel):
     graph_id: str = Field(alias="graphId")
+    data_source_id: str = Field(alias="dataSourceId")
     main_branch_id: str = Field(alias="mainBranchId")
     fork_base_commit_seq: int = Field(alias="forkBaseCommitSeq")
 
 
 class ForkSummaryResponse(GraphResponse):
-    """One of a graph's forks, live or in the trash (``deletedAt`` set). ``purging``: its purge
-    is queued, so it can no longer be restored; ``purgeAfter``: the end of its undo window."""
+    """One of a graph's forks, live or in the trash (``deletedAt`` set), with its data source and
+    that source's label. ``purging``: its purge is queued, so it can no longer be restored;
+    ``purgeAfter``: the end of its undo window."""
+    data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
+    label: Optional[str] = None
     deleted_at: Optional[str] = Field(default=None, alias="deletedAt")
     deleted_by: Optional[str] = Field(default=None, alias="deletedBy")
     purging: bool = False
@@ -3851,15 +3862,41 @@ async def cancel_export(
 @router.post("/graphs/{graph_id}/forks", response_model=ForkResponse, status_code=201)
 async def fork_graph(
     ws_id: str, graph_id: str,
+    body: Optional[CreateForkRequest] = None,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    """Fork a graph: a new versioned graph whose ``main`` starts as this one's, and a data source
+    of its own (``dataSourceId``) in this workspace, with this graph's data source's governing
+    settings. Management and graphver are separate databases (no 2PC), so the order is the
+    blank model's: what would refuse the fork is checked first, the data source commits, the
+    fork is made, and a fork that could not be made takes its data source with it."""
+    from backend.app.services.fork_sources import fork_row
+    from backend.app.services.versioning.ids import prefixed_id
+
     with _domain_errors():
-        return await svc.fork_graph(
-            parent_graph_id=graph_id, workspace_id=ws_id, actor=user.id,
-            tenant_id=meta.get("tenant_id"),
-        )
+        await svc.fork_preflight(parent_graph_id=graph_id, workspace_id=ws_id)
+    # FOR SHARE until the row commits: a move of the parent finishes first, and is seen.
+    parent = await data_source_repo.get_data_source_orm(session, meta["data_source_id"], lock="share")
+    if parent is None or parent.workspace_id != ws_id:
+        raise HTTPException(status_code=404, detail="data source not found in workspace")
+    ds_id = prefixed_id("dsfork")
+    name = body.name if body is not None and body.name else f"Fork {ds_id[-6:]}"
+    session.add(fork_row(parent, ds_id=ds_id, name=name, parent_graph_id=graph_id, actor=user.id))
+    await session.commit()
+    try:
+        with _domain_errors():
+            fork = await svc.fork_graph(
+                parent_graph_id=graph_id, workspace_id=ws_id, actor=user.id,
+                tenant_id=meta.get("tenant_id"), data_source_id=ds_id,
+            )
+    except Exception:
+        await drop_managed_data_source(session, ds_id)   # never a data source without its fork
+        raise
+    await _record_fork_event(session, "created", ws_id, fork["graph_id"], graph_id)
+    return fork
 
 
 @router.get("/graphs/{graph_id}/forks", response_model=List[ForkSummaryResponse])
@@ -3871,8 +3908,19 @@ async def list_forks(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """The graph's direct forks, newest first, those in the trash included."""
+    """The graph's direct forks, newest first, those in the trash included, each with the label
+    of its data source."""
+    from sqlalchemy import select
+
+    from backend.app.db.models import WorkspaceDataSourceORM
+
     forks = await svc.list_forks(graph_id=graph_id, workspace_id=ws_id, limit=limit)
+    ids = [f["data_source_id"] for f in forks]
+    labels = dict((await session.execute(
+        select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label)
+        .where(WorkspaceDataSourceORM.id.in_(ids)))).all()) if ids else {}
+    for f in forks:
+        f["label"] = labels.get(f["data_source_id"])
     await _attach_user_names(session, forks)
     return forks
 

@@ -154,8 +154,13 @@ def _client(perms: tuple):
 
 
 async def _parent(svc) -> str:
+    """A graph in ws1, with the data source a fork of it takes its own from."""
+    from backend.tests.integration.test_versioning_resolve import _seed_data_source
+
     await models.create_schema_and_partitions()
-    P = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="alice")
+    ds_id = "ds_" + os.urandom(4).hex()
+    await _seed_data_source(ds_id)
+    P = await svc.create_graph(data_source_id=ds_id, workspace_id="ws1", actor="alice")
     return P["graph_id"]
 
 

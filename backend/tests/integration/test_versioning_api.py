@@ -157,6 +157,8 @@ async def _run(data_sources: dict) -> None:
         assert "C" in (await c.get(f"{ws1}/graphs/{gid}/branches/{rb}/state", headers=h)).json()["nodes"]
 
         # ── fork/PR governance ───────────────────────────────────────────
+        from .test_versioning_resolve import _seed_data_source
+        await _seed_data_source(ds)            # a fork's data source is made from this one's
         # forking needs manage; a read-only caller may open a PR …
         assert (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=_hdr(R))).status_code == 403
         fork = (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=h)).json()
