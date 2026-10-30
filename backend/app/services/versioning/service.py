@@ -8665,12 +8665,18 @@ class GraphVersioningService:
     async def _parent_window(self, s, graph_id, branch_id, from_seq, to_seq):
         """``(parent graph, its main, lo, hi)`` when ``branch_id`` is a fork's ``main`` whose
         reads at ``from_seq`` and ``to_seq`` compose its parent at different seqs
-        (:func:`fork_base_at`), the window of the parent's history between them; else None."""
+        (:func:`fork_base_at`), the window of the parent's history between them; else None.
+
+        A window's ends are taken no earlier than the fork point (its first ``fork_seq``): the
+        fork's own history starts there, so its genesis commit's window (the seq before it, to it)
+        holds nothing of the parent's commit at that seq."""
         graph = await s.get(GraphORM, graph_id)
         if (graph is None or not graph.fork_parent_graph_id
                 or branch_id != await self._main_branch_id(s, graph_id)):
             return None
-        lo, hi = sorted((await fork_base_at(s, graph, from_seq), await fork_base_at(s, graph, to_seq)))
+        point = graph.fork_base_commit_seq or 0
+        lo, hi = sorted((await fork_base_at(s, graph, max(from_seq, point)),
+                         await fork_base_at(s, graph, max(to_seq, point))))
         if lo == hi:
             return None
         parent_id = graph.fork_parent_graph_id

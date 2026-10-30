@@ -170,6 +170,32 @@ async def _a_fork_with_no_base_row_reads_at_its_fork_point(svc):
     assert _names(await _read(svc, "_state_as_of", fg, fmain, f2)) == {"C": "C name"}
 
 
+async def _the_genesis_commit_changed_nothing(svc):
+    """A fork's genesis commit is its fork point: it changed nothing, whatever the parent's commit
+    at that seq changed. Its drill-down (the window just before it to it) took the parent's
+    commit at the base for the fork's, once the windows added the parent's between their bases;
+    a window between two bases still holds the parent's changes."""
+    pg = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                                 actor="alice"))["graph_id"]
+    p1 = await _publish(svc, pg, "alice", [_node("A", "one"), _node("B")], "A and B")
+    fork = await svc.fork_graph(parent_graph_id=pg, workspace_id="ws1", actor="bob")
+    fg, fmain = fork["graph_id"], fork["main_branch_id"]
+    async with db.graphver_session() as s:
+        genesis = (await s.execute(select(CommitORM.id).where(
+            CommitORM.graph_id == fg, CommitORM.commit_seq == p1))).scalar_one()
+    summary = await svc.diff_commit_summary(graph_id=fg, commit_id=genesis,
+                                            containment_edge_types=[])
+    assert summary["groups"] == [] and summary["groupTotal"] == 0, summary
+    assert await _read(svc, "_changed_in_window", fg, fmain, p1 - 1, p1) == set()
+    async with db.graphver_session() as s:
+        assert await svc._count_changed_in_window(s, fg, fmain, p1 - 1, p1) == 0
+
+    p2 = await _publish(svc, pg, "alice", [_upd("A", "two")], "A two")
+    f2 = await _publish(svc, fg, "bob", [_node("C")], "C")
+    await _take_base(fg, f2, p2)
+    assert await _read(svc, "_changed_in_window", fg, fmain, p1, f2) == {"A", "C"}
+    assert await _read(svc, "_changed_in_window", fg, fmain, p1 - 1, f2) == {"A", "C"}
+
 async def _run(case) -> None:
     await models.create_schema_and_partitions()
     try:
@@ -188,3 +214,7 @@ def test_a_fork_of_a_fork_reads_through_both_bases():
 
 def test_a_fork_with_no_base_row_reads_at_its_fork_point():
     asyncio.run(_run(_a_fork_with_no_base_row_reads_at_its_fork_point))
+
+
+def test_the_genesis_commit_changed_nothing():
+    asyncio.run(_run(_the_genesis_commit_changed_nothing))
