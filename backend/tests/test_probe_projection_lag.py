@@ -3,8 +3,10 @@
 * It counts only graphs whose data source is live, in six buckets that read consistently: in sync
   and failed never overlap, a graph behind with an error counts as failed, not catching up, and
   one waiting for an operator's reseed counts as rebuilding.
+* With residency (doc 17) it also counts the graphs being loaded and those waiting for room.
 * Its worst list holds at most 8 graphs, most behind first, and only ones that are behind, failing
-  or being projected; each row is named from the data-source directory.
+  or being projected — never an evicted one, which lags by design; each row is named from the
+  data-source directory.
 * Without the live data sources it says nothing rather than counting every orphan.
 """
 from contextlib import asynccontextmanager
@@ -57,7 +59,7 @@ def _graphver(agg, worst):
 
 async def test_the_rollup_counts_live_graphs_and_names_the_worst(monkeypatch):
     agg = SimpleNamespace(total=3, fresh=1, lagging=1, projecting=0, rebuilding=0, evicted=0,
-                          failed=1, max_lag=5)
+                          rehydrating=0, waiting_capacity=0, failed=1, max_lag=5)
     session, seen = _graphver(agg, [_worst_row()])
 
     async def present():
@@ -76,7 +78,7 @@ async def test_the_rollup_counts_live_graphs_and_names_the_worst(monkeypatch):
 
     assert {k: v for k, v in out.items() if k != "worst"} == {
         "totalGraphs": 3, "fresh": 1, "lagging": 1, "projecting": 0, "rebuilding": 0,
-        "evicted": 0, "failed": 1, "maxLag": 5}
+        "evicted": 0, "rehydrating": 0, "waitingCapacity": 0, "failed": 1, "maxLag": 5}
     assert out["worst"] == [{
         "graphId": "g1", "workspaceId": "ws1", "workspaceName": "Sales",
         "dataSourceId": "ds_live", "dataSourceLabel": "Customer 360",
@@ -98,13 +100,14 @@ async def test_the_rollup_counts_live_graphs_and_names_the_worst(monkeypatch):
     assert "= 'idle' AND graphver.projection_state.last_error IS NULL) AS lagging" in agg_sql
     assert "count(*) FILTER (WHERE graphver.projection_state.last_error IS NOT NULL) AS failed" \
         in agg_sql
-    for bucket in ("projecting", "evicted"):
+    for bucket in ("projecting", "evicted", "rehydrating", "waiting_capacity"):
         assert f"= '{bucket}') AS {bucket}" in agg_sql, bucket
     # A graph an operator reset waits for its reseed: rebuilding, not failed.
     assert "IN ('rebuilding', 'reseeding')) AS rebuilding" in agg_sql, agg_sql
     # The worst list: only graphs that need attention, most behind first, at most 8.
     assert "graphver.projection_state.last_error IS NOT NULL" in worst_sql
     assert "'projecting'" in worst_sql and "'rebuilding'" in worst_sql
+    assert "coalesce(graphver.projection_state.status, 'idle') != 'evicted'" in worst_sql, worst_sql
     assert worst_sql.rstrip().endswith(
         "ORDER BY graphver.graphs.main_head_commit_seq - "
         "coalesce(graphver.projection_state.projected_commit_seq, 0) DESC \n LIMIT 8"), worst_sql

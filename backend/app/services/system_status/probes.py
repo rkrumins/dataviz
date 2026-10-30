@@ -1306,6 +1306,9 @@ def _projection_rows():
         # reseeding = an operator reset the watermark; the pass that reseeds it is a rebuild.
         "rebuilding": status.in_(("rebuilding", "reseeding")),
         "evicted": status == "evicted",
+        # Residency (doc 17): a load in flight, and one whose master has no room for it yet.
+        "rehydrating": status == "rehydrating",
+        "waiting_capacity": status == "waiting_capacity",
         "failed": err,
     }
     rows = (
@@ -1319,6 +1322,8 @@ def _projection_rows():
             ProjectionStateORM.last_error, ProjectionStateORM.last_projected_at,
             ProjectionStateORM.progress_done, ProjectionStateORM.progress_total,
             ProjectionStateORM.updated_at, ProjectionStateORM.retired_keys,
+            ProjectionStateORM.residency, ProjectionStateORM.evicted_reason,
+            ProjectionStateORM.last_read_at, ProjectionStateORM.size_bytes,
         )
         .select_from(GraphORM)
         .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
@@ -1382,6 +1387,8 @@ async def probe_projection_lag() -> Optional[dict]:
         rows
         .where(present)
         .where(or_(lag > 0, buckets["failed"], buckets["projecting"], buckets["rebuilding"]))
+        # An evicted graph lags by design: its reads are on Postgres until something loads it.
+        .where(~buckets["evicted"])
         .order_by(lag.desc())
         .limit(8)
     )
@@ -1408,6 +1415,8 @@ async def probe_projection_lag() -> Optional[dict]:
         "projecting": agg.projecting,
         "rebuilding": agg.rebuilding,
         "evicted": agg.evicted,
+        "rehydrating": agg.rehydrating,
+        "waitingCapacity": agg.waiting_capacity,
         "failed": agg.failed,
         "maxLag": agg.max_lag,
         "worst": [_projection_row(r, directory.get(r.data_source_id) or {}) for r in worst_rows],
@@ -1477,6 +1486,14 @@ async def list_versioned_graphs(
             "retiredKeys": [{"name": e["name"], "provider": e.get("provider"),
                              "retireAfter": e["retireAfter"], "afterSeq": e["afterSeq"]}
                             for e in r.retired_keys or []],
+            # Residency (doc 17): its class, whether its key is in FalkorDB, why it was evicted,
+            # its last read and its measured size.
+            "residency": r.residency,
+            "residencyState": (r.status if r.status in ("evicted", "rehydrating",
+                                                        "waiting_capacity") else "resident"),
+            "evictedReason": r.evicted_reason,
+            "lastReadAt": r.last_read_at,
+            "sizeBytes": r.size_bytes,
         } for r in page],
         "nextCursor": page[-1].id if more else None,
     }

@@ -23,6 +23,12 @@ count for their root, whose key they read.
 Reads: each process notes the graphs people read (:func:`on_read`) and writes when, once a minute,
 to ``last_read_at`` (:func:`flush_reads`); a read FalkorDB serves takes the graph's read lease
 for ``GRAPHVER_TRACE_LEASE_TTL_SECS``, so no pass evicts a graph mid-read.
+
+Metrics (``jobs.metrics``), from the projection lane: each master's used and maximum memory
+(``versioning_residency_master_used_bytes`` / ``_max_bytes``), the graphs per class and state
+(``versioning_residency_graphs``), evictions by reason (``versioning_residency_evictions_total``),
+loads started and completed (``versioning_residency_loads_total``) and loads that began to wait,
+by why (``versioning_residency_load_waits_total``).
 """
 from __future__ import annotations
 
@@ -39,6 +45,8 @@ from sqlalchemy import func, literal, select, text, update
 from . import config, db, residency_policy
 from .messaging import get_broker_redis, nudge_projection
 from .models import GraphORM, ProjectionStateORM, _now
+from backend.app.jobs import metrics
+
 from .residency_plan import Graph, Master, Plan, admit, need, plan
 from .service import bootstrap_unfinished
 
@@ -77,6 +85,7 @@ class Reading:
 READING: ContextVar[Optional[Reading]] = ContextVar("residency_reading", default=None)
 
 _OUT = ("evicted", "waiting_capacity", "rehydrating")
+_STATES = ("resident", *_OUT)
 
 #: Reads this process noted since it last wrote them: graph id -> the latest.
 _READS: Dict[str, datetime] = {}
@@ -395,6 +404,7 @@ class CapacityLoop:
             await self._act(decided, snap)
             await self._finish_loads(snap)
             await _clear_spent(snap, full=graph_ids is None)
+            _report(snap)
             return decided
         finally:
             try:
@@ -409,12 +419,14 @@ class CapacityLoop:
         evictor = CacheManager(self._proj)
         for e in decided.evictions:
             if await evictor.evict(e.graph_id, drop_graph=self._proj.drop_graph, reason=e.reason):
+                metrics.increment("versioning_residency_evictions_total", reason=e.reason)
                 logger.info("residency: evicted graph %s from %s (%s, %d bytes)",
                             e.graph_id, e.endpoint, e.reason, e.bytes)
         used = {m.endpoint: m.used for m in snap.masters}
         for load in decided.loads:
             if await _start_load(load.graph_id):
                 self._started[load.graph_id] = (load.endpoint, used.get(load.endpoint))
+                metrics.increment("versioning_residency_loads_total", outcome="started")
                 logger.info("residency: loading graph %s onto %s (about %d bytes)",
                             load.graph_id, load.endpoint, load.bytes)
         for wait in decided.waits:
@@ -426,6 +438,8 @@ class CapacityLoop:
                     .values(status="waiting_capacity", updated_at=_now())
                     .returning(ProjectionStateORM.graph_id)
                     .execution_options(synchronize_session=False))).first()
+            if entered:
+                metrics.increment("versioning_residency_load_waits_total", reason=wait.reason)
             if entered and wait.reason == "capacity":
                 logger.warning("residency: graph %s waits for room on %s: its load needs %d bytes "
                                "more than the master has under its start mark",
@@ -462,6 +476,7 @@ class CapacityLoop:
                     .returning(ProjectionStateORM.graph_id)
                     .execution_options(synchronize_session=False))).first()
             if done:
+                metrics.increment("versioning_residency_loads_total", outcome="completed")
                 logger.info("residency: graph %s is loaded and serves reads again", r["graph_id"])
 
     async def _measure(self, snap: Snapshot, *, first: Collection[str]) -> None:
@@ -493,6 +508,22 @@ class CapacityLoop:
                                 .where(ProjectionStateORM.graph_id == r["graph_id"])
                                 .values(size_bytes=size, size_measured_at=func.now())
                                 .execution_options(synchronize_session=False))
+
+
+def _report(snap: Snapshot) -> None:
+    """What a pass read, as gauges: each master's memory, and the graphs per class and state."""
+    for m in snap.masters:
+        if m.used is not None:
+            metrics.gauge_set("versioning_residency_master_used_bytes", m.used, master=m.endpoint)
+        metrics.gauge_set("versioning_residency_master_max_bytes", m.maxmemory, master=m.endpoint)
+    counts: Dict[Tuple[str, str], int] = {}
+    for g in snap.graphs:
+        state = g.status if g.status in _OUT else "resident"
+        counts[(g.residency, state)] = counts.get((g.residency, state), 0) + 1
+    for cls in residency_policy.CLASSES:
+        for state in _STATES:
+            metrics.gauge_set("versioning_residency_graphs", counts.get((cls, state), 0),
+                              residency=cls, state=state)
 
 
 async def _clear_spent(snap: Snapshot, *, full: bool) -> None:

@@ -73,7 +73,7 @@ async def list_graphs(
     provider: Optional[str] = Query(
         None, min_length=1, description="FalkorDB provider id; 'default' for the env instance"),
     status: Optional[Literal["fresh", "lagging", "projecting", "rebuilding", "evicted",
-                             "failed"]] = None,
+                             "rehydrating", "waiting_capacity", "failed"]] = None,
     workspace_id: Optional[str] = Query(None, alias="workspaceId", min_length=1),
     kind: Optional[Literal["main", "fork", "orphan"]] = None,
     q: Optional[str] = Query(None, min_length=1, max_length=200),

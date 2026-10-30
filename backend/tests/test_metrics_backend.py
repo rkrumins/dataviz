@@ -276,6 +276,7 @@ def test_every_emitting_process_installs_the_backend():
         "main.py",
         "services/aggregation/__main__.py",
         "services/aggregation/controlplane.py",
+        "services/versioning/__main__.py",            # the capacity loop's (residency)
     ):
         src = (root / rel).read_text()
         assert "metrics_prometheus import install" in src, (
@@ -292,20 +293,25 @@ def test_every_emitting_process_installs_the_backend():
 # reach is the same as not counted.
 
 
-def test_the_worker_starts_nothing_when_the_switch_is_off(monkeypatch):
-    from backend.app.services.aggregation.__main__ import _serve_metrics
+@pytest.mark.parametrize("worker", ["aggregation", "versioning"])
+def test_the_worker_starts_nothing_when_the_switch_is_off(monkeypatch, worker):
+    import importlib
+
+    _serve_metrics = importlib.import_module(f"backend.app.services.{worker}.__main__")._serve_metrics
 
     monkeypatch.delenv("METRICS_ENABLED", raising=False)
     assert asyncio.run(_serve_metrics()) is None
 
 
-def test_the_worker_still_runs_when_its_metrics_port_cannot_be_served(monkeypatch):
+@pytest.mark.parametrize("worker", ["aggregation", "versioning"])
+def test_the_worker_still_runs_when_its_metrics_port_cannot_be_served(monkeypatch, worker):
     """Metrics are for watching the work, never a precondition for it. A
     worker that cannot bind — port taken, uvicorn absent, anything — must
     process jobs regardless."""
     import builtins
+    import importlib
 
-    from backend.app.services.aggregation import __main__ as worker_main
+    worker_main = importlib.import_module(f"backend.app.services.{worker}.__main__")
 
     monkeypatch.setenv("METRICS_ENABLED", "1")
     real_import = builtins.__import__

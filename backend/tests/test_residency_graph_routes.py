@@ -174,3 +174,20 @@ def test_the_activity_log_can_say_what_happened():
     assert severity == "info" and "g1" in summary and "always" in summary.lower()
     assert catalogue.LABELS["platform.versioning.residency_changed"]
     assert catalogue.category_of("platform.versioning.residency_changed") == "platform"
+
+
+# ── what the watermark says ──────────────────────────────────────────────────────────────────────
+async def test_the_watermark_says_the_class_and_the_state():
+    from datetime import datetime, timezone
+
+    from backend.app.api.v1.endpoints import versioning as V
+
+    read = datetime(2026, 10, 30, 9, 0, tzinfo=timezone.utc)
+    wm = {"committed": 7, "projected": 0, "fresh": False, "status": "evicted",
+          "read_route": {"main": "postgres", "drafts": "overlay"}, "falkor_provider": None,
+          "residency": "coldline", "residency_state": "evicted", "evicted_reason": "idle_coldline",
+          "last_read_at": read, "size_bytes": 4096}
+    out = (await V._watermark_model(None, wm)).model_dump(by_alias=True)
+    assert (out["residency"], out["residencyState"], out["evictedReason"]) == (
+        "coldline", "evicted", "idle_coldline")
+    assert out["lastReadAt"] == read and out["sizeBytes"] == 4096

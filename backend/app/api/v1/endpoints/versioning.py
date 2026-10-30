@@ -27,6 +27,7 @@ import inspect
 import json
 import logging
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
@@ -980,6 +981,15 @@ class WatermarkModel(_ApiModel):
     # `verify`, or a change notification), null when there is none. Bring it into history with
     # POST /graph/resync.
     external_drift: Optional[Dict[str, Any]] = Field(default=None, alias="externalDrift")
+    # Residency (doc 17): the class a system admin set (always | standard | coldline) and whether
+    # the key is in FalkorDB: resident | evicted | rehydrating (being loaded) | waiting_capacity
+    # (its master has no room for it yet). Then why it was evicted, when a person last read it and
+    # its measured size.
+    residency: str = "standard"
+    residency_state: str = Field(default="resident", alias="residencyState")
+    evicted_reason: Optional[str] = Field(default=None, alias="evictedReason")
+    last_read_at: Optional[datetime] = Field(default=None, alias="lastReadAt")
+    size_bytes: Optional[int] = Field(default=None, alias="sizeBytes")
 
 
 class SavedSinceModel(_ApiModel):
@@ -2340,7 +2350,12 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           failed_attempts=wm.get("failed_attempts", 0),
                           next_retry_at=wm.get("next_retry_at"),
                           liveness_error=wm.get("liveness_error"),
-                          external_drift=wm.get("external_drift"))
+                          external_drift=wm.get("external_drift"),
+                          residency=wm.get("residency", "standard"),
+                          residency_state=wm.get("residency_state", "resident"),
+                          evicted_reason=wm.get("evicted_reason"),
+                          last_read_at=wm.get("last_read_at"),
+                          size_bytes=wm.get("size_bytes"))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:

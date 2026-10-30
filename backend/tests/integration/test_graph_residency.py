@@ -254,6 +254,24 @@ def _evicted(p) -> list:
     return [(e.graph_id, e.reason) for e in p.evictions]
 
 
+def _counting(monkeypatch) -> dict:
+    """The counters a pass raises, by name and labels (gauges are not kept)."""
+    from backend.app.jobs import metrics
+
+    counted: dict = {}
+
+    class _Sink:
+        def increment(self, name, labels, value=1.0):
+            key = (name, tuple(sorted(labels.items())))
+            counted[key] = counted.get(key, 0) + value
+
+        def gauge_set(self, name, labels, value):
+            pass
+
+    monkeypatch.setattr(metrics, "_backend", _Sink())
+    return counted
+
+
 @live
 async def test_pressure_evicts_coldline_before_standard_and_never_always(
         store, falkor, mine, monkeypatch):
@@ -269,8 +287,10 @@ async def test_pressure_evicts_coldline_before_standard_and_never_always(
     await _set_ps(always, residency="always", size_bytes=used,
                   last_read_at=datetime.now(timezone.utc) - timedelta(days=30))
     await falkor.config_set("maxmemory", int(used / 0.85))
+    counted = _counting(monkeypatch)
     p = await CapacityLoop(proj).run_once(graph_ids=[cold, std, always])
     assert _evicted(p) == [(cold, "pressure")]
+    assert counted == {("versioning_residency_evictions_total", (("reason", "pressure"),)): 1}
     ps = await _ps(cold)
     assert (ps.status, ps.evicted_reason, ps.projected_commit_seq) == ("evicted", "pressure", 0)
     assert ps.falkor_graph_name not in await falkor.execute_command("GRAPH.LIST")
@@ -337,6 +357,7 @@ async def test_admission_holds_a_load_that_does_not_fit_and_starts_it_when_room_
     await falkor.config_set("maxmemory", used * 2)
     await residency.request_load(gid)
     loop = CapacityLoop(proj)
+    counted = _counting(monkeypatch)
     p = await loop.run_once(graph_ids=[gid])
     assert p.loads == [] and [(w.graph_id, w.reason) for w in p.waits] == [(gid, "capacity")]
     assert (await _ps(gid)).status == "waiting_capacity"
@@ -344,6 +365,9 @@ async def test_admission_holds_a_load_that_does_not_fit_and_starts_it_when_room_
     await falkor.config_set("maxmemory", used * 10)                       # room appears
     p = await loop.run_once(graph_ids=[gid])
     assert [x.graph_id for x in p.loads] == [gid]
+    assert counted == {                                      # one wait, counted as it began
+        ("versioning_residency_load_waits_total", (("reason", "capacity"),)): 1,
+        ("versioning_residency_loads_total", (("outcome", "started"),)): 1}
     ps = await _ps(gid)
     assert (ps.status, ps.projected_commit_seq) == ("rehydrating", 0)
     assert not await _load_requested(gid)
@@ -529,8 +553,10 @@ async def test_a_reloaded_key_serves_reads_only_once_its_summaries_are_built(
     assert (await svc.projection_watermark(gid))["fresh"] is False
     graph = await factory((await _ps(gid)).falkor_graph_name)
     await graph.query("MERGE (m:_AggMeta {id: 'singleton'})")      # the build's stamp
+    counted = _counting(monkeypatch)
     await loop.run_once(graph_ids=[gid])
     assert (await _ps(gid)).status == "idle"
+    assert counted == {("versioning_residency_loads_total", (("outcome", "completed"),)): 1}
     assert (await svc.projection_watermark(gid))["fresh"] is True
 
 

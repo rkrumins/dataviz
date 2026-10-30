@@ -62,6 +62,34 @@ def _get_agg_service():
     return _AGG_SERVICE
 
 
+async def _serve_metrics():
+    """The scrape endpoint (``METRICS_ENABLED``, ``METRICS_PORT``) for this process, which has no
+    HTTP server of its own, as the aggregation worker serves its own: the projection lane's
+    capacity loop counts here (residency, doc 17). Returns the running server, or None. Best
+    effort: a worker that cannot bind its metrics port still runs its lanes."""
+    from backend.app.api.v1.endpoints.metrics import metrics_enabled
+
+    if not metrics_enabled():
+        return None
+    try:
+        import uvicorn
+        from fastapi import FastAPI
+
+        from backend.app.api.v1.endpoints import metrics as metrics_endpoint
+
+        port = int(os.getenv("METRICS_PORT", "9100"))
+        app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+        app.include_router(metrics_endpoint.router)
+        server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port,
+                                               log_level="warning", access_log=False))
+        asyncio.create_task(server.serve(), name="versioning-metrics")
+        logger.info("metrics: worker scrape endpoint on :%d/metrics", port)
+        return server
+    except Exception as exc:              # noqa: BLE001 — never fail the worker
+        logger.warning("metrics: worker scrape endpoint not started: %s", exc)
+        return None
+
+
 def _import_export_service():
     """The API's own import/export service, with its view-scope, ontology and layout hooks, so a
     queued job runs here exactly as it would have in the API process that queued it."""
@@ -71,6 +99,14 @@ def _import_export_service():
 
 
 async def _amain() -> None:
+    # The metrics backend first, in every process that emits, and a way to read it.
+    try:
+        from backend.app.jobs.metrics_prometheus import install as _install_metrics
+
+        _install_metrics()
+    except Exception as exc:              # noqa: BLE001 — never fail startup
+        logger.warning("metrics backend not installed: %s", exc)
+    metrics_server = await _serve_metrics()
     lanes = config.worker_lanes()
     if not os.getenv("GRAPHVER_POOL_SIZE"):
         # Before the first session: the engine is built from this on first use.
@@ -137,6 +173,8 @@ async def _amain() -> None:
     try:
         await worker.run()
     finally:
+        if metrics_server is not None:
+            metrics_server.should_exit = True
         keeper.stop()
         monitor_stop.set()
         await asyncio.gather(monitor, return_exceptions=True)

@@ -316,3 +316,40 @@ async def test_with_residency_on_the_capacity_loop_runs_and_the_count_budget_doe
 
 async def test_with_residency_off_the_count_budget_runs_as_before(monkeypatch):
     assert await _lane_loops(monkeypatch, residency_on=False) == {"count budget"}
+
+
+# ── what a pass reports ──────────────────────────────────────────────────────────────────────────
+class _Metrics:
+    def __init__(self):
+        self.gauges, self.counters = {}, {}
+
+    def gauge_set(self, name, labels, value):
+        self.gauges[(name, tuple(sorted(labels.items())))] = value
+
+    def increment(self, name, labels, value=1.0):
+        key = (name, tuple(sorted(labels.items())))
+        self.counters[key] = self.counters.get(key, 0) + value
+
+
+def test_a_pass_reports_each_master_s_memory_and_the_graphs_by_class_and_state(monkeypatch):
+    from backend.app.jobs import metrics
+
+    sink = _Metrics()
+    monkeypatch.setattr(metrics, "_backend", sink)
+    snap = residency.Snapshot(
+        masters=[_master(used_pct=40), Master(endpoint="m2", used=None, maxmemory=0)],
+        graphs=[_graph("a"), _graph("b", status="evicted"), _graph("c", "coldline"),
+                _graph("d", "always", status="rehydrating", endpoint="m2"),
+                _graph("e", status="waiting_capacity")])
+    residency._report(snap)
+    g = sink.gauges
+    assert g[("versioning_residency_master_used_bytes", (("master", "m1"),))] == 400 * MB
+    assert g[("versioning_residency_master_max_bytes", (("master", "m1"),))] == 1000 * MB
+    assert ("versioning_residency_master_used_bytes", (("master", "m2"),)) not in g
+
+    def graphs(cls, state):
+        return g[("versioning_residency_graphs", (("residency", cls), ("state", state)))]
+
+    assert (graphs("standard", "resident"), graphs("standard", "evicted"),
+            graphs("standard", "waiting_capacity"), graphs("coldline", "resident"),
+            graphs("always", "rehydrating"), graphs("always", "resident")) == (1, 1, 1, 1, 1, 0)
