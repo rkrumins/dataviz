@@ -5,6 +5,7 @@ Each case puts the platform settings row back as it found it.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -370,3 +371,158 @@ async def test_one_pass_at_a_time_across_workers(store, monkeypatch):
         finally:
             await other.execute(select(func.pg_advisory_unlock(func.hashtext("gvresidency"))))
     assert await CapacityLoop(proj).run_once(graph_ids=[]) is not None
+
+
+# ── loading a graph again ──────────────────────────────────────────────────────────────────────
+class _LiveProvider:
+    """What the registry hands a read FalkorDB serves (the live provider), stubbed: only which
+    store serves the read is under test here."""
+    name = "live"
+
+    async def deep_search_discover(self, *, sample_per_label=200):
+        return {"labels": {}, "served": "falkordb"}
+
+
+class _Registry:
+    async def get_provider_for_workspace(self, workspace_id, session, data_source_id=None):
+        return _LiveProvider()
+
+    def admit_graph_request(self, source_key):
+        return None
+
+    def release_graph_request(self, source_key):
+        return None
+
+
+@pytest.fixture
+def plain_engine(monkeypatch):
+    """ContextEngine's routing with the management side stubbed: no ontology, no data source
+    row, no versioned write-through."""
+    from backend.app.db.repositories import data_source_repo
+    from backend.app.services.context_engine import ContextEngine
+
+    async def nothing(*a, **kw):
+        return None
+
+    monkeypatch.setattr(config, "VERSIONED_WRITES_ENABLED", False)
+    monkeypatch.setattr(ContextEngine, "_resolve_ontology", nothing)
+    monkeypatch.setattr(data_source_repo, "get_data_source_orm", nothing)
+    return ContextEngine
+
+
+async def _served_by(engine_cls, ds: str, viewer) -> str:
+    async with db.graphver_session() as session:
+        engine = await engine_cls.for_workspace("ws_res", _Registry(), session,
+                                                data_source_id=ds, viewer=viewer)
+    served = getattr(engine.provider, "_inner", engine.provider)     # write-through wraps it
+    return "falkordb" if isinstance(served, _LiveProvider) else "postgres"
+
+
+async def _loads(loop, proj, gid: str) -> None:
+    """The load the capacity loop admits, as the projection lane runs it: the pass that seeds the
+    key (the lane's nudge), then the pass that sees it done."""
+    await proj.project_graph(gid)
+    await loop.run_once(graph_ids=[gid])
+
+
+@live
+async def test_a_read_reloads_a_standard_graph(store, falkor, mine, plain_engine, monkeypatch):
+    """Reads are served from Postgres while the graph is evicted and while it loads, and from
+    FalkorDB once its key holds everything again."""
+    from backend.app.services.versioning.service import Viewer
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(svc, proj, mine, 1)
+    ds = (await svc.get_graph(gid))["data_source_id"]
+    reader = Viewer(actor="usr_reader", can_read=True)
+    assert await _served_by(plain_engine, ds, reader) == "falkordb"
+    assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+
+    assert await _served_by(plain_engine, ds, None) == "postgres"
+    assert not await _load_requested(gid)                  # a background read asks for nothing
+    assert await _served_by(plain_engine, ds, reader) == "postgres"
+    assert await _load_requested(gid)                      # a person's read does
+    loop = CapacityLoop(proj)
+    assert [x.graph_id for x in (await loop.run_once(graph_ids=[gid])).loads] == [gid]
+    await proj.project_graph(gid)                          # the seed: the key holds main again…
+    ps = await _ps(gid)
+    assert ps.status == "rehydrating" and ps.projected_commit_seq == ps.target_commit_seq
+    assert (await svc.projection_watermark(gid))["fresh"] is False
+    assert await _served_by(plain_engine, ds, reader) == "postgres"     # …but reads wait for it
+    await loop.run_once(graph_ids=[gid])
+    ps = await _ps(gid)
+    assert (ps.status, ps.evicted_reason) == ("idle", None) and ps.last_read_at is not None
+    assert await _served_by(plain_engine, ds, reader) == "falkordb"
+    graph = await make_falkor_graph_factory()(ps.falkor_graph_name)
+    rows = (await graph.ro_query("MATCH (n) WHERE n.urn IS NOT NULL RETURN count(n)")).result_set
+    assert rows[0][0] == 1
+
+
+@live
+async def test_a_deep_search_loads_a_coldline_graph(store, falkor, mine, plain_engine, monkeypatch):
+    """Coldline: a canvas read of a small graph stays on Postgres and loads nothing, but deep
+    search needs FalkorDB — 503 graph_loading with Retry-After, and the load asked for — and
+    answers once the graph is loaded."""
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.tests.integration.test_api_graph_draft_journey import _build_app
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(svc, proj, mine, 1)
+    await _set_ps(gid, residency="coldline")
+    ds = (await svc.get_graph(gid))["data_source_id"]
+    assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+    app, graph_routes = _build_app()
+    monkeypatch.setattr(graph_routes, "provider_manager", _Registry())
+    path = f"/api/v1/ws_res/graph/search/discover?dataSourceId={ds}"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        r = await client.get(path)
+        assert r.status_code == 503, r.text
+        assert r.json()["detail"]["type"] == "graph_loading" and r.headers["Retry-After"]
+        for _ in range(50):
+            if await _load_requested(gid):
+                break
+            await asyncio.sleep(0.02)
+        assert await _load_requested(gid)
+        loop = CapacityLoop(proj)
+        await loop.run_once(graph_ids=[gid])
+        await _loads(loop, proj, gid)
+        r = await client.get(path)
+        assert r.status_code == 200 and r.json()["served"] == "falkordb"
+
+
+@live
+async def test_a_reloaded_key_serves_reads_only_once_its_summaries_are_built(
+        store, falkor, mine, monkeypatch):
+    """A graph whose ontology has lineage needs the summaries a build stamps into its key: its
+    load stays rehydrating (reads on Postgres) until the stamp is there, and the build is asked
+    for meanwhile."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    asked: list = []
+
+    async def lineage(svc, gid):
+        return ({"CONTAINS"}, {"FLOWS_TO"}, {}, "shared")
+
+    async def build(gid):
+        asked.append(gid)
+
+    factory = make_falkor_graph_factory()
+    plain = FalkorProjector(graph_client_factory=factory)
+    svc = store
+    (gid,) = await _live_graphs(svc, plain, mine, 1)
+    proj = FalkorProjector(graph_client_factory=factory, edge_types_resolver=lineage,
+                           on_rollups_stale=build)
+    assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+    await residency.request_load(gid)
+    loop = CapacityLoop(proj)
+    await loop.run_once(graph_ids=[gid])
+    await _loads(loop, proj, gid)
+    assert (await _ps(gid)).status == "rehydrating" and gid in asked
+    assert (await svc.projection_watermark(gid))["fresh"] is False
+    graph = await factory((await _ps(gid)).falkor_graph_name)
+    await graph.query("MERGE (m:_AggMeta {id: 'singleton'})")      # the build's stamp
+    await loop.run_once(graph_ids=[gid])
+    assert (await _ps(gid)).status == "idle"
+    assert (await svc.projection_watermark(gid))["fresh"] is True

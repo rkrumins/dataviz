@@ -2864,7 +2864,8 @@ async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction
     is_head_main = as_of_seq is None and (
         branch_id is None or branch_id == await svc.main_branch_id(graph_id))
     can_falkor = bool(
-        is_head_main and read_factory is not None and wm["status"] != "evicted" and wm["falkor_graph_name"]
+        is_head_main and read_factory is not None and wm["falkor_graph_name"]
+        and wm["status"] not in ("evicted", "rehydrating")  # a load serves once it is ready
         and wm["projected"] >= wm["committed"] - vconfig.READ_MAX_LAG
         and wm["projected"] > 0       # at 0 the key is empty or mid-reconcile (moved, reseeding)
     )

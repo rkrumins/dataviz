@@ -198,6 +198,9 @@ class ContextEngine:
                         getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
                         wm.get("falkor_graph_name"), gid)
                     gap = {}
+                # Residency (doc 17): a person's read of a graph out of FalkorDB asks for its load.
+                from .versioning.residency import on_read
+                await on_read(svc, graph, viewer=viewer, wm=None if fork else wm)
                 read_provider = None
                 read_branch: Optional[str] = None
                 if is_draft:

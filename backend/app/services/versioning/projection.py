@@ -475,6 +475,15 @@ def _retry_at(attempts: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
 
 
+def _unless_loading(status: str):
+    """``status`` for a pass to write, except over a load in flight: with residency on, a
+    ``rehydrating`` graph stays so until the capacity loop finds its key ready to serve reads
+    (``residency.CapacityLoop``)."""
+    if not config.RESIDENCY_ENABLED:
+        return status
+    return case((ProjectionStateORM.status == "rehydrating", "rehydrating"), else_=status)
+
+
 class FalkorProjector:
     """Projects committed `main` state of a graph into its FalkorDB graph."""
 
@@ -590,9 +599,10 @@ class FalkorProjector:
         neither the epoch nor the watermark moved since they were read. Returns ``(epoch,
         failed_attempts)``, or None when something else got there first."""
         # Honest lifecycle label: a full replay (explicit rebuild, first seed, repin)
-        # reports "rebuilding"; an incremental window reports "projecting".
-        values = {"epoch": ProjectionStateORM.epoch + 1,
-                  "status": "rebuilding" if from_seq <= 0 else "projecting"}
+        # reports "rebuilding"; an incremental window reports "projecting". A load (residency,
+        # doc 17) stays "rehydrating" through its passes.
+        status = "rebuilding" if from_seq <= 0 else "projecting"
+        values = {"epoch": ProjectionStateORM.epoch + 1, "status": _unless_loading(status)}
         if from_seq <= 0:
             values.update(progress_done=0, progress_total=None)
         async with self._session() as s:
@@ -619,7 +629,7 @@ class FalkorProjector:
         hold: ``surplus`` (nodes, edges) becomes ``external_drift``, and none clears the count it
         recorded before. A flag a change notification raised stays (its ``via`` says so) until
         the changes are brought into history."""
-        values = {"status": "idle", "last_error": error,
+        values = {"status": _unless_loading("idle"), "last_error": error,
                   "progress_done": None, "progress_total": None}      # progress is over either way
         if published:
             values.update(projected_commit_seq=to_seq, last_projected_at=_now(),
@@ -1071,6 +1081,31 @@ class FalkorProjector:
         except Exception as exc:                          # pragma: no cover - app-layer hooks
             logger.warning("liveness: the first summaries build of %s was not asked for: %s",
                            graph_id, exc)
+
+    async def summaries_built(self, graph_id: str, name: str, provider_id: Optional[str],
+                              projected: int) -> bool:
+        """Whether a graph's key holds the summaries its readers need: a summaries build stamped
+        it, or it needs none here (no lineage in its ontology, its summaries kept in a dedicated
+        key, or no aggregation wired into this projector). A key still without them has the build
+        asked for, once per watermark. A key that cannot be read has not got them."""
+        if self._on_rollups_stale is None or self._edge_types_resolver is None:
+            return True
+        sets = await self._edge_types_resolver(self._svc, graph_id)
+        if not (sets and sets[1]) or "dedicated" in sets[3:]:
+            return True
+        try:
+            res = await _q(await self._graph_client(name, provider_id), _SUMMARIES_BUILT,
+                           read_only=True, timeout_ms=5000)
+        except Exception as exc:
+            logger.warning("cannot read whether %s was summarised: %s", graph_id, exc)
+            return False
+        rows = getattr(res, "result_set", None) or []
+        if rows and rows[0] and int(rows[0][0] or 0) > 0:
+            return True
+        if self._summaries_checked.get(graph_id) != projected:
+            self._summaries_checked[graph_id] = projected
+            await self._on_rollups_stale(graph_id)
+        return False
 
     async def run_publish_hooks(self, graph_id: str, *, full_seed: bool = False,
                                 rollups_stale: bool = False) -> None:

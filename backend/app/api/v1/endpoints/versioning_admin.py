@@ -21,6 +21,7 @@ from backend.app.providers import falkor_graph_registry
 from backend.app.services import managed_sources
 from backend.app.services.activity import recorder
 from backend.app.services.aggregation.models import AggregationJobORM
+from backend.app.providers.shard_capacity import human_bytes
 from backend.app.services.graph_store.topology import key_slot
 from backend.app.services.system_status import probes
 from backend.app.services.versioning import config as vconfig
@@ -296,3 +297,70 @@ async def preview_residency_policy(
         "evictedBytes": sum(e.bytes for e in decided.evictions),
         "loads": len(decided.loads),
     }
+
+
+async def _graph_with_a_key(graph_id: str) -> dict:
+    meta = await get_versioning_service().get_graph(graph_id)
+    if meta is None:
+        raise HTTPException(status_code=404, detail=f"unknown graph {graph_id}")
+    if meta.get("fork_parent_graph_id"):
+        raise HTTPException(status_code=409, detail={
+            "type": "not_for_forks",
+            "message": "a fork has no FalkorDB key of its own: it reads through its root, "
+                       "whose residency applies"})
+    return meta
+
+
+@router.post("/graphs/{graph_id}/load",
+             summary="Load an evicted versioned graph into FalkorDB again (Load now)")
+async def load_graph(graph_id: str, _user: User = Depends(requires("system:admin"))) -> dict:
+    """Asks for the graph's load (residency, doc 17), which the capacity loop admits like any
+    other: it may wait for room (``waiting_capacity``). A graph in FalkorDB, or being loaded, is
+    left as it is (``loadRequested`` false)."""
+    await _graph_with_a_key(graph_id)
+    wm = await get_versioning_service().projection_watermark(graph_id)
+    requested = wm["status"] in ("evicted", "waiting_capacity")
+    if requested:
+        await residency.request_load(graph_id)
+    return {"graphId": graph_id, "state": wm["residency_state"], "loadRequested": requested}
+
+
+class ResidencyClassRequest(BaseModel):
+    residency_class: Literal["always", "standard", "coldline"] = Field(..., alias="class")
+
+
+@router.put("/graphs/{graph_id}/residency", summary="Set a versioned graph's residency class")
+async def set_graph_residency(
+    graph_id: str,
+    body: ResidencyClassRequest,
+    user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Always (never evicted), Standard or Coldline (doc 17). Always on a graph whose key is not
+    in FalkorDB is admission-checked now: 409 ``capacity_insufficient``, naming the master and the
+    shortfall, when its load would not fit there; otherwise the class is set and its load asked
+    for. Recorded with the class before and after."""
+    meta = await _graph_with_a_key(graph_id)
+    wm = await get_versioning_service().projection_watermark(graph_id)
+    cls, out = body.residency_class, wm["residency_state"] in ("evicted", "waiting_capacity")
+    if cls == "always" and out:
+        fits, master, shortfall = await residency.admission(graph_id)
+        if not fits:
+            raise HTTPException(status_code=409, detail={
+                "type": "capacity_insufficient", "master": master, "shortfallBytes": shortfall,
+                "message": (f"master {master or '?'} has no room for this graph: it needs "
+                            f"{human_bytes(shortfall)} more under its start mark"
+                            if shortfall is not None else
+                            f"master {master or '?'} could not be measured, so this graph's load "
+                            "cannot be admitted now")})
+    before = await residency.set_class(graph_id, cls)
+    if cls == "always" and out:
+        await residency.request_load(graph_id)
+    if before != cls:
+        await recorder.record_for_request(
+            session, "platform.versioning.residency_changed",
+            details={"graphId": graph_id, "workspaceId": meta["workspace_id"],
+                     "dataSourceId": meta["data_source_id"], "from": before, "to": cls},
+            best_effort=True,   # the class is already set
+        )
+    return {"graphId": graph_id, "residency": cls, "state": wm["residency_state"]}

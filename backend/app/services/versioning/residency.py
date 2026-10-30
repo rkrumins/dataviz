@@ -3,7 +3,11 @@
 With ``GRAPHVER_RESIDENCY_ENABLED`` on, an evicted graph stays evicted: no projection pass reseeds
 it (``FalkorProjector.project_graph``'s gate), and its reads are served from Postgres. It comes
 back only through a load, which is asked for here (:func:`request_load`) and admitted by the
-capacity loop, in the order the loads were first asked for.
+capacity loop, in the order the loads were first asked for. What asks: a person's read of a
+Standard or Always graph, and of a Coldline graph larger than the canvas-load threshold
+(:func:`on_read`, which ContextEngine calls); FalkorDB-only work on a Coldline graph (deep search,
+node degrees, native queries answer 503 ``graph_loading`` meanwhile, by :data:`READING`); an
+administrator's "Load now" or Always; an operator's rebuild.
 
 The capacity loop (:class:`CapacityLoop`: the projection lane, every policy interval, one leader
 across workers) reads each cluster master's memory and every graph with a key of its own
@@ -11,23 +15,26 @@ across workers) reads each cluster master's memory and every graph with a key of
 through ``CacheManager.evict`` (its guarded UPDATE and drop) with its reason, after which the graph
 stays evicted; a load by marking the graph ``rehydrating`` and nudging the projection lane, whose
 full seed of the graph's key is the load; a load that does not fit by marking the graph
-``waiting_capacity``, to be tried again on the next pass. It measures what keys hold as it goes.
-Forks are outside residency: they have no key of their own to evict, load or count.
+``waiting_capacity``, to be tried again on the next pass. A loaded key serves reads once its
+summaries are built too; then the graph is ``idle``. It measures what keys hold as it goes. Forks
+are outside residency: they have no key of their own to evict, load or count, and their reads
+count for their root, whose key they read.
 """
 from __future__ import annotations
 
 import logging
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Collection, Dict, List, Optional, Tuple
+from typing import Any, Collection, Dict, List, Mapping, Optional, Tuple
 
 from sqlalchemy import func, literal, select, update
 
 from . import config, db, residency_policy
 from .messaging import get_broker_redis, nudge_projection
 from .models import GraphORM, ProjectionStateORM, _now
-from .residency_plan import Graph, Master, Plan, plan
+from .residency_plan import Graph, Master, Plan, admit, need, plan
 from .service import bootstrap_unfinished
 
 logger = logging.getLogger(__name__)
@@ -49,6 +56,86 @@ async def request_load(graph_id: str) -> None:
         await get_broker_redis().zadd(LOAD_REQUESTS, {graph_id: time.time()}, nx=True)
     except Exception:  # noqa: BLE001 — a read must never fail over it
         logger.warning("could not ask for graph %s to be loaded", graph_id, exc_info=True)
+
+
+@dataclass(frozen=True)
+class Reading:
+    """A read of a graph whose key is not in FalkorDB: the graph whose key it needs (a fork's
+    root), its state, and when to try FalkorDB-only work again (the capacity loop's interval)."""
+    graph_id: str
+    state: str                        # evicted | waiting_capacity | rehydrating
+    retry_after: int
+
+
+#: The request's read of a graph out of FalkorDB, set by :func:`on_read`; None when FalkorDB holds
+#: it, or for a read that is not a person's.
+READING: ContextVar[Optional[Reading]] = ContextVar("residency_reading", default=None)
+
+_OUT = ("evicted", "waiting_capacity", "rehydrating")
+
+
+async def _root(svc, graph: Mapping) -> Mapping:
+    """The graph whose key serves ``graph``'s reads: itself, or a fork's root parent."""
+    while graph.get("fork_parent_graph_id"):
+        parent = await svc.get_graph(graph["fork_parent_graph_id"])
+        if parent is None:
+            break
+        graph = parent
+    return graph
+
+
+async def on_read(svc, graph: Mapping, *, viewer, wm: Optional[Mapping] = None) -> None:
+    """What a read of a versioned graph does for residency — ContextEngine's one call, made for
+    every engine it builds over a versioned graph (``wm``: its watermark of a graph that is not a
+    fork, which it already read). For a person's read (``viewer``; a background job has none) with
+    residency on, of a graph — a fork's root, for a fork — whose key is not in FalkorDB:
+    :data:`READING` says so for the rest of the request, and a Standard or Always graph's load is
+    asked for, as is a Coldline graph's that is larger than the canvas-load threshold. Its read
+    itself is served from Postgres."""
+    if not config.RESIDENCY_ENABLED or viewer is None:
+        return
+    root = await _root(svc, graph)
+    if wm is None or root is not graph:
+        wm = await svc.projection_watermark(root["graph_id"])
+    if wm["status"] not in _OUT:
+        READING.set(None)
+        return
+    policy = await residency_policy.resolve()
+    READING.set(Reading(root["graph_id"], wm["status"], policy.capacity_interval_secs))
+    if wm["status"] == "rehydrating":
+        return
+    if wm["residency"] == "coldline":
+        entities = (await _entities([root["data_source_id"]])).get(root["data_source_id"])
+        if entities is None:
+            entities = (wm.get("size_bytes") or 0) // policy.bytes_per_entity
+        if entities <= policy.coldline_canvas_load_above:
+            return
+    await request_load(root["graph_id"])
+
+
+async def set_class(graph_id: str, residency: str) -> Optional[str]:
+    """Set a graph's residency class; returns the class it had (None: no projection row)."""
+    async with db.graphver_session() as s:
+        ps = await s.get(ProjectionStateORM, graph_id)
+        if ps is None:
+            return None
+        before, ps.residency = ps.residency, residency
+        return before
+
+
+async def non_resident(data_source_id: str) -> Optional[str]:
+    """The graph of a data source (not a fork's) whose key is not in FalkorDB under residency,
+    else None."""
+    from .service import GraphVersioningService
+
+    if not config.RESIDENCY_ENABLED:
+        return None
+    svc = GraphVersioningService()
+    graph = await svc.get_graph_by_data_source(data_source_id)
+    if graph is None:
+        return None
+    gid = graph["graph_id"]
+    return gid if (await svc.projection_watermark(gid))["status"] in _OUT else None
 
 
 @dataclass
@@ -201,6 +288,22 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None) -> Snapshot:
     return snap
 
 
+async def admission(graph_id: str) -> Tuple[bool, Optional[str], Optional[int]]:
+    """Whether a load of ``graph_id`` fits on its master now, as the planner's admission decides
+    (its estimate times the headroom under the start mark, after what is held there):
+    ``(fits, master, shortfall in bytes)``; a master that could not be read never fits, and its
+    shortfall is None."""
+    policy = await residency_policy.resolve()
+    snap = await gather()
+    graph = next((g for g in snap.graphs if g.graph_id == graph_id), None)
+    if graph is None:
+        return False, None, None
+    decided = plan(policy, snap.masters, snap.graphs, datetime.now(timezone.utc))
+    master = next(m for m in decided.masters if m.master.endpoint == graph.endpoint)
+    fits, shortfall = admit(master.master, need(graph, policy), policy, master.reserved)
+    return fits, graph.endpoint, shortfall
+
+
 async def preview(policy, *, graph_ids: Optional[Collection[str]] = None) -> Tuple[Plan, Snapshot]:
     """What the next pass would do under ``policy``, acting on nothing."""
     snap = await gather(graph_ids=graph_ids)
@@ -232,6 +335,7 @@ class CapacityLoop:
             decided = plan(policy, snap.masters, snap.graphs, datetime.now(timezone.utc))
             await self._measure(snap, first={e.graph_id for e in decided.evictions})
             await self._act(decided, snap)
+            await self._finish_loads(snap)
             await _clear_spent(snap, full=graph_ids is None)
             return decided
         finally:
@@ -268,6 +372,39 @@ class CapacityLoop:
                 logger.warning("residency: graph %s waits for room on %s: its load needs %d bytes "
                                "more than the master has under its start mark",
                                wait.graph_id, wait.endpoint, wait.shortfall or 0)
+
+    async def _finish_loads(self, snap: Snapshot) -> None:
+        """A load whose seed has published (its watermark holds the head) serves reads once its
+        key has the summaries its readers need (``FalkorProjector.summaries_built``, which asks
+        for the build meanwhile): then it is ``idle``, no longer evicted, and its idle time starts
+        again from now. The key is measured on a later pass, as everything projected since its
+        last measurement is."""
+        for r in snap.rows.values():
+            head = max(r["target_commit_seq"], r["main_head_commit_seq"])
+            projected = r["projected_commit_seq"]
+            if r["status"] != "rehydrating" or projected <= 0 or projected < head:
+                continue
+            try:
+                ready = await self._proj.summaries_built(r["graph_id"], r["key"],
+                                                         r["falkor_provider"], projected)
+            except Exception:  # noqa: BLE001 — looked at again on the next pass
+                logger.warning("residency: whether %s's load is ready is unknown", r["graph_id"],
+                               exc_info=True)
+                continue
+            if not ready:
+                continue
+            async with db.graphver_session() as s:
+                done = (await s.execute(
+                    update(ProjectionStateORM)
+                    .where(ProjectionStateORM.graph_id == r["graph_id"],
+                           ProjectionStateORM.status == "rehydrating",
+                           ProjectionStateORM.projected_commit_seq == projected)
+                    .values(status="idle", evicted_reason=None, last_read_at=func.now(),
+                            updated_at=_now())
+                    .returning(ProjectionStateORM.graph_id)
+                    .execution_options(synchronize_session=False))).first()
+            if done:
+                logger.info("residency: graph %s is loaded and serves reads again", r["graph_id"])
 
     async def _measure(self, snap: Snapshot, *, first: Collection[str]) -> None:
         """Measure what resident keys hold — those about to be evicted (``first``) and the

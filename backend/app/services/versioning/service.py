@@ -3733,20 +3733,24 @@ class GraphVersioningService:
                     "commit_id": c.id, "created_at": c.created_at,
                     "actor": c.actor, "message": c.message,
                 }
+            status = ps.status if ps else "idle"
+            # A load's key serves reads only once it is ready, summaries and all (residency).
+            fresh = projected >= committed and not (config.RESIDENCY_ENABLED
+                                                    and status == "rehydrating")
             return {
                 "committed_revision": _rev(committed),
                 "projected_revision": _rev(projected),
                 "committed": committed,
                 "projected": projected,
                 "target": ps.target_commit_seq if ps else 0,
-                "status": ps.status if ps else "idle",
+                "status": status,
                 "falkor_graph_name": ps.falkor_graph_name if ps else None,
                 "falkor_provider": ps.falkor_provider if ps else None,
-                "fresh": projected >= committed,
+                "fresh": fresh,
                 # Where reads go, by ContextEngine.for_workspace's rule: main from FalkorDB only
                 # while the projection holds the head, else Postgres; a draft always overlays
                 # whatever serves main.
-                "read_route": {"main": "falkordb" if projected >= committed else "postgres",
+                "read_route": {"main": "falkordb" if fresh else "postgres",
                                "drafts": "overlay"},
                 # Failure reason + last success + live full-reseed progress — the Data
                 # health UI needs these to converge to an honest done/failed state.
@@ -3767,6 +3771,15 @@ class GraphVersioningService:
                 "retired_keys": list(ps.retired_keys or []) if ps else [],
                 # What a customer's key holds that history doesn't, kept and flagged.
                 "external_drift": ps.external_drift if ps else None,
+                # Residency (doc 17): the class a system admin set, whether the key is in
+                # FalkorDB (resident, evicted, rehydrating: being loaded, waiting_capacity: its
+                # master has no room for it yet), why it was evicted, its last read and its size.
+                "residency": ps.residency if ps else "standard",
+                "residency_state": (status if status in ("evicted", "rehydrating",
+                                                         "waiting_capacity") else "resident"),
+                "evicted_reason": ps.evicted_reason if ps else None,
+                "last_read_at": ps.last_read_at if ps else None,
+                "size_bytes": ps.size_bytes if ps else None,
             }
 
     async def clear_external_changes(self, graph_id: str, seen_at: Optional[str] = None) -> None:
