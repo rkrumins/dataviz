@@ -28,7 +28,8 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from sqlalchemy import case, func, literal, null, or_, select, update
+from sqlalchemy import Text, any_, bindparam, case, func, literal, null, or_, select, update
+from sqlalchemy.dialects.postgresql import ARRAY
 
 from . import config, db
 from .errors import AmbiguousSpelling
@@ -721,12 +722,16 @@ class FalkorProjector:
                 main_id = await self._svc._main_branch_id(s, graph_id)
                 # A full replay (first seed, explicit rebuild, repin) is an in-place
                 # reconcile against what the graph already holds — its writes are known
-                # only once the diff runs, so it computes (and reports) them itself.
+                # only once the diff runs, so it computes (and reports) them itself. A window
+                # too large to hold is computed a page at a time as it is written (_apply_paged).
+                paged = False
                 if from_seq > 0:
                     changes = await self._compute_changes(s, graph, main_id, from_seq, to_seq)
+                    paged = changes is None
+                    changes = changes or ([], [], [], [])
                 total_items = sum(len(c) for c in changes)
                 prior = None
-                if from_seq > 0:
+                if from_seq > 0 and not paged:
                     structural, retypes = await self._window_meta(s, graph, main_id, from_seq,
                                                                   changes)
                     if not owned:
@@ -750,7 +755,7 @@ class FalkorProjector:
             # save_custom_graph). Best-effort: {} when unavailable, leaving level unset.
             level_map = await self._resolve_level_map(graph_id)
             reconciled: Optional[Dict[str, object]] = None
-            dropped = 0
+            dropped = paged_writes = 0
             if from_seq <= 0:
                 # Probe BEFORE writing anything. Deliberately NOT ``read_only``: it is a proof
                 # that this node takes the writes below — under ``min-replicas-to-write`` a read
@@ -766,6 +771,10 @@ class FalkorProjector:
                 # "everything", so a first seed is the same code path.
                 reconciled = await self._reconcile_in_place(
                     client, graph_id, main_id, to_seq, is_fork, level_map, track_progress=True,
+                    provider_id=provider_id, owned=owned)
+            elif paged:
+                dropped, structural, paged_writes = await self._apply_paged(
+                    client, graph_id, main_id, from_seq, to_seq, level_map=level_map,
                     provider_id=provider_id, owned=owned)
             else:
                 await self._relabel_in_place(client, retypes)
@@ -937,8 +946,8 @@ class FalkorProjector:
 
         await asyncio.shield(asyncio.ensure_future(_after_publish()))
 
-        applied = sum(len(c) for c in changes) + int((reconciled or {}).get("writes") or 0) \
-            + int(heal_outcome.get("writes") or 0)
+        applied = sum(len(c) for c in changes) + paged_writes \
+            + int((reconciled or {}).get("writes") or 0) + int(heal_outcome.get("writes") or 0)
         # Report the seq actually PUBLISHED: to_seq when verified, else the held-back from_seq
         # (the watermark did not advance — reads stay on Postgres).
         result = {"projected": to_seq if published else from_seq, "applied": applied,
@@ -1131,7 +1140,10 @@ class FalkorProjector:
 
     async def _compute_changes(
         self, s, graph: GraphORM, main_id: str, from_seq: int, to_seq: int
-    ) -> Tuple[List[NodeUpsert], List[EdgeUpsert], List[Tuple[str, str]], List[object]]:
+    ) -> Optional[Tuple[List[NodeUpsert], List[EdgeUpsert], List[Tuple[str, str]], List[object]]]:
+        """The window ``(from_seq, to_seq]``'s ``(node upserts, edge upserts, node deletes, edge
+        deletes)``; None for a window of more than ``PROJECTION_PAGED_ABOVE`` version rows, which
+        is too large to hold and is written a page at a time instead (:meth:`_apply_paged`)."""
         node_upserts: List[NodeUpsert] = []
         edge_upserts: List[EdgeUpsert] = []
         node_deletes: List[Tuple[str, str]] = []   # (urn, label)
@@ -1158,6 +1170,8 @@ class FalkorProjector:
                 edge_upserts.append((eid, su, tu, p, slb, tlb))
             return node_upserts, edge_upserts, node_deletes, edge_deletes
 
+        if await self._window_rows(s, graph, main_id, from_seq, to_seq) > config.PROJECTION_PAGED_ABOVE:
+            return None
         # Incremental: net of each entity's rows in (from_seq, to_seq]. Key the fold by
         # (kind, entity_id) — NOT entity_id alone — so a node and an edge that ever share
         # an entity_id can never overwrite each other (which would silently drop a node
@@ -1179,6 +1193,22 @@ class FalkorProjector:
                 last[(kind, eid)] = (kind, op, None if op == "delete" else _Pending(
                     (kind, graph.id, vid),
                     (("urn", urn), (type_key, typ), ("sourceEntityId", src), ("targetEntityId", tgt))))
+        node_upserts, edge_upserts, node_deletes, edge_deletes = await self._changes_of(
+            s, graph, main_id, from_seq, last, urn_of, label_of)
+        await self._merkle_augment_upserts(
+            s, graph, main_id, from_seq, to_seq, last, urn_of, label_of,
+            node_upserts, edge_upserts)
+        return node_upserts, edge_upserts, node_deletes, edge_deletes
+
+    async def _changes_of(self, s, graph, main_id, from_seq, last, urn_of, label_of):
+        """The window's four lists (:meth:`_compute_changes`) from ``last`` — each entity's final
+        row in it, ``(kind, op, _Pending | None)`` by ``(kind, entity_id)`` — with the urns and
+        labels of the deleted entities and of the edges' ends resolved (``urn_of``/``label_of``
+        filled in on the way)."""
+        node_upserts: List[NodeUpsert] = []
+        edge_upserts: List[EdgeUpsert] = []
+        node_deletes: List[Tuple[str, str]] = []
+        edge_deletes: List[object] = []
         deleted_nodes: List[str] = []
         for (kind, eid), (_, op, p) in last.items():
             if kind != "node":
@@ -1234,11 +1264,48 @@ class FalkorProjector:
                     })
                 else:
                     edge_deletes.append(eid)
-
-        await self._merkle_augment_upserts(
-            s, graph, main_id, from_seq, to_seq, last, urn_of, label_of,
-            node_upserts, edge_upserts)
         return node_upserts, edge_upserts, node_deletes, edge_deletes
+
+    async def _window_rows(self, s, graph, main_id, from_seq, to_seq) -> int:
+        """How many version rows the window ``(from_seq, to_seq]`` holds, nodes and edges."""
+        n = 0
+        for model in (NodeVersionORM, EdgeVersionORM):
+            n += (await s.execute(select(func.count()).select_from(model).where(
+                model.graph_id == graph.id, model.branch_id == main_id,
+                model.commit_seq > from_seq, model.commit_seq <= to_seq))).scalar_one()
+        return n
+
+    async def _window_pages(self, s, graph, main_id, from_seq, to_seq, kind: str):
+        """:meth:`_compute_changes` of the window's ``kind`` entities (``node`` or ``edge``), a page
+        of ``PROJECTION_PAGE`` version rows at a time (a keyset on their ids): each page's entities
+        at their final row in the window. An entity with rows on two pages comes up on both, at
+        the same final value — written twice, never stale."""
+        model = NodeVersionORM if kind == "node" else EdgeVersionORM
+        named = ((model.urn, model.entity_type, null(), null()) if kind == "node" else
+                 (null(), model.edge_type, model.source_entity_id, model.target_entity_id))
+        type_key = "entityType" if kind == "node" else "edgeType"
+        window = (model.graph_id == graph.id, model.branch_id == main_id,
+                  model.commit_seq > from_seq, model.commit_seq <= to_seq)
+        final = (select(model.entity_id, model.id, model.op, *named)
+                 .where(*window, model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))))
+                 .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                 .distinct(model.entity_id))
+        after = ""
+        while True:
+            page = (await s.execute(select(model.id, model.entity_id).where(*window, model.id > after)
+                                    .order_by(model.id).limit(config.PROJECTION_PAGE))).all()
+            if not page:
+                return
+            last: Dict[Tuple[str, str], Tuple[str, str, Optional[dict]]] = {}
+            for eid, vid, op, urn, typ, src, tgt in (await s.execute(
+                    final, {"ids": sorted({e for _v, e in page})})).all():
+                last[(kind, eid)] = (kind, op, None if op == "delete" else _Pending(
+                    (kind, graph.id, vid),
+                    (("urn", urn), (type_key, typ), ("sourceEntityId", src), ("targetEntityId", tgt))))
+            yield await self._changes_of(s, graph, main_id, from_seq, last, {}, {})
+            if len(page) < config.PROJECTION_PAGE:
+                return
+            after = page[-1][0]
 
     async def _merkle_augment_upserts(
         self, s, graph, main_id, from_seq, to_seq, last, urn_of, label_of,
@@ -2456,6 +2523,30 @@ class FalkorProjector:
                 logger.debug("progress write failed for %s", graph_id, exc_info=True)
 
         return _on_chunk
+
+    async def _apply_paged(self, client, graph_id, main_id, from_seq, to_seq, *, level_map,
+                           provider_id, owned) -> Tuple[int, bool, int]:
+        """:meth:`_apply` of a window too large to hold (more than ``PROJECTION_PAGED_ABOVE``
+        version rows), computed and written a page at a time (:meth:`_window_pages`): every page
+        of its nodes, each relabelled first as one window's are, then every page of its edges, so
+        an edge's ends are there when it is written. Its Merkle cross-check is left out (the
+        verify that follows counts what landed). Returns ``(dropped, structural, written)``:
+        the first two as the one-batch pass has them, and how many changes it wrote."""
+        dropped, structural, written = 0, False, 0
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            for kind in ("node", "edge"):
+                async for changes in self._window_pages(s, graph, main_id, from_seq, to_seq, kind):
+                    moved, retypes = await self._window_meta(s, graph, main_id, from_seq, changes)
+                    structural = structural or moved
+                    prior = None if owned else await self._properties_before(
+                        s, graph, main_id, from_seq, changes[0])
+                    await self._relabel_in_place(client, retypes)
+                    dropped += await self._apply(client, *changes, level_map=level_map,
+                                                 provider_id=provider_id, owned=owned,
+                                                 prior=prior) or 0
+                    written += sum(len(c) for c in changes)
+        return dropped, structural, written
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
                      progress=None, level_map: Optional[Dict[str, int]] = None,

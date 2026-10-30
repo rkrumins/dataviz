@@ -24,6 +24,7 @@ FALKORDB_PORT; OBJECT_STORE_BACKEND picks the store, ``database`` by default)::
   python -m backend.scripts.bench_versioning run inspect --package /tmp/p100k.zip --check
   python -m backend.scripts.bench_versioning run import --target empty --check
   python -m backend.scripts.bench_versioning run publish --check
+  python -m backend.scripts.bench_versioning run project --check
   python -m backend.scripts.bench_versioning run export --check
   python -m backend.scripts.bench_versioning gen-package --nodes 100000 --edges 100000 \\
       --offset 100000 --out /tmp/p100k_b.zip
@@ -97,6 +98,8 @@ TARGETS: Dict[str, List[Tuple[str, str, Any, str]]] = {
     "publish": [("total_s", "<=", 120, "publish of 200k ≤120 s"),
                 ("lock_hold_s", "<=", 60, "lock held ≤60 s"),
                 ("rss_peak_mb", "<=", 300, "RSS ≤300 MB")],
+    "project": [("rss_peak_mb", "<", 300, "RSS <300 MB"),
+                ("falkor_eq_pg", "==", True, "FalkorDB == Postgres")],
     "seed": [("total_s", "<=", 240, "seed ≤4 min"),
              ("rss_peak_mb", "<", 300, "RSS <300 MB"),
              ("falkor_eq_pg", "==", True, "FalkorDB == Postgres"),
@@ -1055,6 +1058,43 @@ async def run_seed(*, upload_key: str, store: CountingStore, keep: bool = False,
                            "collapsed": status.get("collapsed")})
 
 
+async def run_project(*, graph_id: str, keep: bool = False, factory=None) -> Dict[str, Any]:
+    """The projector's pass over the graph's last commit — the window a publish leaves it — into a
+    new ``gvt_bench_*`` key (deleted after unless ``keep``): the graph is pinned there, owned and
+    projected up to the commit before, so the pass writes that one window and verifies it."""
+    from backend.app.services.versioning import db, models
+    from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
+    from backend.app.services.versioning.projection import FalkorProjector, _write_marker
+
+    await models.create_schema_and_partitions()
+    factory = factory or falkor_factory()
+    name = _new_id("gvt_bench")
+    async with db.graphver_session() as s, s.begin():
+        head = (await s.get(GraphORM, graph_id)).main_head_commit_seq
+        ps = await s.get(ProjectionStateORM, graph_id)
+        if ps is None:
+            ps = ProjectionStateORM(graph_id=graph_id)
+            s.add(ps)
+        ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = name, None, True
+        ps.projected_commit_seq, ps.target_commit_seq = head - 1, head
+        ps.status, ps.last_error, ps.failed_attempts, ps.next_retry_at = "idle", None, 0, None
+    client = await _client(factory, name)
+    await _write_marker(client, head - 1, 0)       # the key as the pass before left it
+    try:
+        async with probing() as probes:
+            out = await FalkorProjector(factory, on_rollups_stale=_noop).project_graph(graph_id)
+        pg, fc = await _counts(graph_id, client, owned=True)
+    finally:
+        if not keep:
+            with contextlib.suppress(Exception):
+                await client.delete()
+    done = out.get("projected") == head and not out.get("verify_error")
+    return _result("project", probes.summary(), {"falkor_eq_pg": pg == fc, "pg": list(pg), "falkor": list(fc)},
+                   status="completed" if done else "failed", error=out.get("verify_error"),
+                   projected={"graphId": graph_id, "seq": out.get("projected"),
+                              "falkorGraph": name if keep else None})
+
+
 async def run_bootstrap(*, graph: str, auto_decide: bool = True, factory=None) -> Dict[str, Any]:
     """"Enable version control" on the FalkorDB graph ``graph``: the pre-flight's pause on its
     duplicates (time to it, and the version rows written by then: none), the decision to collapse
@@ -1255,6 +1295,11 @@ async def _run(args) -> int:
                                        containment=args.containment_types.split(","))
             if result["status"] == "completed":
                 state["published"] = result["published"]
+        elif args.kind == "project":
+            graph_id = args.graph_id or (state.get("published") or {}).get("graphId")
+            if not graph_id:
+                raise SystemExit("run project needs a published graph: run publish first, or pass --graph-id")
+            result = await run_project(graph_id=graph_id, keep=args.keep)
         elif args.kind == "export":
             graph_id = args.graph_id or (state.get("published") or {}).get("graphId")
             if not graph_id:
@@ -1436,17 +1481,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         parser.add_argument("--state", default=DEFAULT_STATE)
         parser.add_argument("--json", help="also write the result(s) as JSON here")
         parser.add_argument("--md", help="also write the Markdown here (run: appended)")
-    run.add_argument("kind", choices=("export", "inspect", "import", "publish", "seed", "bootstrap"))
+    run.add_argument("kind", choices=("export", "inspect", "import", "project", "publish", "seed", "bootstrap"))
     run.add_argument("--package", help="a package to upload (and inspect) first")
     run.add_argument("--upload", help="an inspected upload's record key (default: the state's)")
     run.add_argument("--target", default="empty",
                      help="import into: empty (a new graph), published (the last published one), graph:<id>")
-    run.add_argument("--graph-id", help="publish/export: the graph (default: the state's)")
+    run.add_argument("--graph-id", help="publish/project/export: the graph (default: the state's)")
     run.add_argument("--branch-id", help="publish: the draft (default: the last import's)")
     run.add_argument("--containment-types", default=CONTAINS, help="publish: comma-separated")
     run.add_argument("--graph", help="bootstrap: the FalkorDB source graph")
     run.add_argument("--auto-decide", action="store_true", help="bootstrap: collapse the duplicates it pauses on")
-    run.add_argument("--keep", action="store_true", help="seed: keep the new FalkorDB key")
+    run.add_argument("--keep", action="store_true", help="seed, project: keep the new FalkorDB key")
     run.add_argument("--out", help="export: save the package here")
     run.add_argument("--label", help="the result's name in reports")
     run.add_argument("--check", action="store_true", help="exit 1 when a target is missed")

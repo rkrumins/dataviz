@@ -167,6 +167,11 @@ PROJECTION_VERIFY_DEEP_MAX_ENTITIES: int = int(os.getenv("GRAPHVER_PROJECTION_VE
 # climb per window and the pair math is in memory, so tens of thousands of edges stay inline;
 # past this the aggregation batch job — which also writes only the difference — takes over.
 PROJECTION_ROLLUP_INLINE_CAP: int = int(os.getenv("GRAPHVER_PROJECTION_ROLLUP_INLINE_CAP", "50000"))
+# A projection window of more version rows than this (a publish of millions) is written a page of
+# PROJECTION_PAGE rows at a time — all its nodes, then its edges — so the projector holds a page of
+# it, never all of it; and its rollups go to the aggregation job.
+PROJECTION_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGED_ABOVE", "200000"))
+PROJECTION_PAGE: int = int(os.getenv("GRAPHVER_PROJECTION_PAGE", "20000"))
 WORKER_HEALTH_PORT: int = int(os.getenv("GRAPHVER_WORKER_HEALTH_PORT", "8092"))
 PROJECTION_INPROCESS: bool = os.getenv("GRAPHVER_PROJECTION_INPROCESS", "").lower() in ("1", "true", "yes")
 # Ceiling for an EXPLICIT operator rebuild run in-process (Data health → "Rebuild"):
