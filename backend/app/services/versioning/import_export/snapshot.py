@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from .. import db
 from ..models import BranchORM, EdgeVersionORM, EntityHeadORM, GraphORM, NodeVersionORM
+from ..service import fork_base_at
 
 #: Rows per page. Big enough that per-page overhead is noise, small enough to hold comfortably.
 PAGE_SIZE = int(os.getenv("GRAPH_EXPORT_PAGE_SIZE", "2000"))
@@ -393,13 +394,14 @@ class Snapshot:
 
 
 async def _main_layers(s, graph_id: str, seq: int) -> List[Layer]:
-    """A graph's ``main`` at ``seq``: its fork parent's ``main`` at the fork point first (recursively)."""
+    """A graph's ``main`` at ``seq``: its fork parent's ``main`` at the base the fork read at ``seq``
+    first (``fork_base_at``; recursively)."""
     graph = await s.get(GraphORM, graph_id)
     main_id = (await s.execute(select(BranchORM.id).where(
         BranchORM.graph_id == graph_id, BranchORM.kind == "main"))).scalar_one()
     layers: List[Layer] = []
     if graph is not None and graph.fork_parent_graph_id:
-        layers += await _main_layers(s, graph.fork_parent_graph_id, graph.fork_base_commit_seq or 0)
+        layers += await _main_layers(s, graph.fork_parent_graph_id, await fork_base_at(s, graph, seq))
     layers.append(VersionLayer(graph_id, main_id, seq))
     return layers
 

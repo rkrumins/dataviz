@@ -67,6 +67,7 @@ from .models import (
     CommitORM,
     EdgeVersionORM,
     EntityHeadORM,
+    ForkBaseORM,
     GraphORM,
     JobORM,
     MergeRequestORM,
@@ -467,6 +468,26 @@ def bootstrap_unfinished(graph_id) -> tuple:
     column, so the same test correlates into a query over many graphs."""
     return (JobORM.job_type == "bootstrap", JobORM.graph_id == graph_id,
             JobORM.status.in_(_UNFINISHED_ENABLEMENT))
+
+
+async def fork_base_at(s, fork: GraphORM, seq: int) -> int:
+    """The seq of its parent's ``main`` a fork's ``main`` reads at ``seq``: the ``parent_seq`` of
+    the latest base it took at or before ``seq`` (``fork_bases``), or ``seq`` itself before the
+    first — a fork shares its parent's history up to its fork point. A fork with no base row (one
+    forked before the table, not yet given its row) reads at its fork point, as it always did."""
+    latest = (select(ForkBaseORM.parent_seq)
+              .where(ForkBaseORM.fork_graph_id == fork.id, ForkBaseORM.fork_seq <= seq)
+              .order_by(ForkBaseORM.fork_seq.desc()).limit(1).scalar_subquery())
+    based = select(ForkBaseORM.fork_seq).where(ForkBaseORM.fork_graph_id == fork.id).exists()
+    parent_seq, has_base = (await s.execute(select(latest, based))).one()
+    if parent_seq is not None:
+        return parent_seq
+    if has_base:
+        return seq
+    if fork.fork_base_commit_seq is None:
+        logger.warning("fork %s has no fork_base_commit_seq; reading its parent at genesis (0)",
+                       fork.id)
+    return min(seq, fork.fork_base_commit_seq or 0)
 
 
 @dataclass(frozen=True)
@@ -2633,7 +2654,8 @@ class GraphVersioningService:
     async def _count_changed_in_window(self, s, graph_id, branch_id, from_seq, to_seq) -> int:
         """How many entities commits in ``(from_seq, to_seq]`` touched — the size of the
         restore, WITHOUT materializing the id set (which for a restore-to-genesis on a
-        freshly-enabled graph is every entity in it)."""
+        freshly-enabled graph is every entity in it). A fork's ``main`` counts its parent's
+        between its bases too, as :meth:`_changed_in_window` takes them."""
         total = 0
         for model in (NodeVersionORM, EdgeVersionORM):
             total += int(await s.scalar(
@@ -2642,6 +2664,9 @@ class GraphVersioningService:
                     model.commit_seq > from_seq, model.commit_seq <= to_seq,
                 )
             ) or 0)
+        parent = await self._parent_window(s, graph_id, branch_id, from_seq, to_seq)
+        if parent is not None:
+            total += await self._count_changed_in_window(s, *parent)
         return total
 
     # ------------------------------------------------------------------ #
@@ -2704,6 +2729,8 @@ class GraphVersioningService:
             )
             s.add(fork)
             await s.flush()
+            s.add(ForkBaseORM(fork_graph_id=fork.id, fork_seq=base_seq, parent_seq=base_seq,
+                              created_by=actor))
             main = BranchORM(graph_id=fork.id, kind="main", name="main", visibility="public",
                              created_by=actor)
             s.add(main)
@@ -3479,6 +3506,9 @@ class GraphVersioningService:
             MergeRequestORM.graph_id == fork.id,
             MergeRequestORM.target_graph_id == fork.fork_parent_graph_id,
             MergeRequestORM.status == "merged"))
+        # One base per fork until Update from parent (F2): it adds rows to ``fork_bases`` after the
+        # fork point, and an update moves the common ancestor too, so the base will then be the
+        # later of this and the fork seq of the latest update (:func:`fork_base_at`).
         return fork.fork_base_commit_seq if took is None else took
 
     async def _fork_merge(self, s, fork, resolutions):
@@ -8296,8 +8326,9 @@ class GraphVersioningService:
         """Reconstruct a branch's state at ``commit_seq <= seq`` from version rows.
 
         Copy-on-write fork aware: a fork's ``main`` is seeded from its parent's
-        state at the fork point (recursively, so a fork-of-a-fork resolves) before
-        the fork's own divergence is overlaid — no parent rows are ever copied.
+        state at the base it read at ``seq`` (:func:`fork_base_at`; recursively, so a
+        fork-of-a-fork resolves) before the fork's own divergence is overlaid — no
+        parent rows are ever copied.
 
         Two-phase, O(live state) not O(history): phase 1 picks each entity's WINNING
         version at the seq via a NARROW ``DISTINCT ON`` over ``ix_*_entity_hist``
@@ -8312,12 +8343,8 @@ class GraphVersioningService:
             main_id = await self._main_branch_id(s, graph_id)
             if branch_id == main_id:
                 parent_main = await self._main_branch_id(s, graph.fork_parent_graph_id)
-                if graph.fork_base_commit_seq is None:
-                    logger.warning("fork %s has no fork_base_commit_seq; reconstructing base at "
-                                   "genesis (0)", graph_id)
                 state.update(await self._state_as_of(
-                    s, graph.fork_parent_graph_id, parent_main,
-                    graph.fork_base_commit_seq or 0,
+                    s, graph.fork_parent_graph_id, parent_main, await fork_base_at(s, graph, seq),
                 ))
         for model in (NodeVersionORM, EdgeVersionORM):
             winners = (await s.execute(
@@ -8356,7 +8383,7 @@ class GraphVersioningService:
             if branch_id == main_id:
                 parent_main = await self._main_branch_id(s, graph.fork_parent_graph_id)
                 heads.update(await self._heads_as_of(
-                    s, graph.fork_parent_graph_id, parent_main, graph.fork_base_commit_seq or 0))
+                    s, graph.fork_parent_graph_id, parent_main, await fork_base_at(s, graph, seq)))
         for model, kind in ((NodeVersionORM, "node"), (EdgeVersionORM, "edge")):
             cols = ((model.entity_id, model.id, model.op, model.content_hash,
                      model.urn, model.entity_type) if kind == "node" else
@@ -8392,7 +8419,8 @@ class GraphVersioningService:
     async def _changed_in_window(self, s, graph_id, branch_id, from_seq, to_seq) -> set:
         """Entity ids touched by commits in ``(from_seq, to_seq]`` — O(changed),
         index-backed by ``ix_*_branch_changeset`` (a commit writes rows only for
-        the entities it changed)."""
+        the entities it changed). A fork's ``main`` adds what its parent's changed between
+        the bases it read at either end (:meth:`_parent_window`), up a fork of a fork too."""
         changed: set = set()
         for model in (NodeVersionORM, EdgeVersionORM):
             rows = (await s.execute(
@@ -8402,22 +8430,37 @@ class GraphVersioningService:
                 ).distinct()
             )).scalars().all()
             changed.update(rows)
+        parent = await self._parent_window(s, graph_id, branch_id, from_seq, to_seq)
+        if parent is not None:
+            changed |= await self._changed_in_window(s, *parent)
         return changed
+
+    async def _parent_window(self, s, graph_id, branch_id, from_seq, to_seq):
+        """``(parent graph, its main, lo, hi)`` when ``branch_id`` is a fork's ``main`` whose
+        reads at ``from_seq`` and ``to_seq`` compose its parent at different seqs
+        (:func:`fork_base_at`), the window of the parent's history between them; else None."""
+        graph = await s.get(GraphORM, graph_id)
+        if (graph is None or not graph.fork_parent_graph_id
+                or branch_id != await self._main_branch_id(s, graph_id)):
+            return None
+        lo, hi = sorted((await fork_base_at(s, graph, from_seq), await fork_base_at(s, graph, to_seq)))
+        if lo == hi:
+            return None
+        parent_id = graph.fork_parent_graph_id
+        return parent_id, await self._main_branch_id(s, parent_id), lo, hi
 
     async def _layers(self, s, graph_id: str, branch_id: str, seq: int) -> List[Tuple[str, str, int]]:
         """The ``(graph, branch, seq)`` a read of ``branch_id`` at ``seq`` composes, nearest first:
-        the branch itself and, for a fork's ``main``, its parent's ``main`` at the fork point (or
-        at ``seq``, before it), and so up a fork of a fork — a fork copies no row of its parent's."""
+        the branch itself and, for a fork's ``main``, its parent's ``main`` at the base the fork read
+        at ``seq`` (:func:`fork_base_at`: at ``seq``, before the fork point), and so up a fork of a
+        fork — a fork copies no row of its parent's."""
         layers = [(graph_id, branch_id, seq)]
         graph = await s.get(GraphORM, graph_id)
         while graph is not None and graph.fork_parent_graph_id:
             if branch_id != await self._main_branch_id(s, graph.id):
                 break
-            if graph.fork_base_commit_seq is None:
-                logger.warning("fork %s has no fork_base_commit_seq; reading its parent at "
-                               "genesis (0)", graph.id)
             branch_id = await self._main_branch_id(s, graph.fork_parent_graph_id)
-            seq = min(seq, graph.fork_base_commit_seq or 0)
+            seq = await fork_base_at(s, graph, seq)
             layers.append((graph.fork_parent_graph_id, branch_id, seq))
             graph = await s.get(GraphORM, graph.fork_parent_graph_id)
         return layers

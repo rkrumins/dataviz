@@ -233,9 +233,11 @@ async def entity_summary(
         inherited = False
         if created is None and graph.fork_parent_graph_id:
             # A fork holds only its divergence: an entity it never changed is its parent's.
+            from .service import fork_base_at
+
             pgraph = graph.fork_parent_graph_id
             pmain = await svc._main_branch_id(s, pgraph)
-            fork_seq = graph.fork_base_commit_seq or 0
+            fork_seq = await fork_base_at(s, graph, base_seq)
             pq = select(model).where(model.graph_id == pgraph, model.entity_id == entity_id,
                                      model.branch_id == pmain, model.commit_seq <= fork_seq)
             created, updated = await first(pq), await last(pq)

@@ -101,6 +101,8 @@ _ON_LIVE_TABLES = {
     "20261029_1100_drafts_policy.py": ("upgrade", "downgrade"),
     # graphver.merge_requests again: the fork's head a merged review took.
     "20261030_1000_gv_mr_merged_seq.py": ("upgrade", "downgrade"),
+    # graphver.graphs again: the foreign key of the forks' bases.
+    "20261030_1100_gv_fork_bases.py": ("upgrade", "downgrade"),
 }
 
 
