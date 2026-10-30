@@ -448,3 +448,16 @@ async def test_the_backlog_reports_each_lanes_oldest_claimable_job(pg):
     assert 290 <= backlog["transfer"]["oldestClaimableSecs"] <= 400
     assert backlog["bootstrap"]["claimable"] == 1
     assert 110 <= backlog["bootstrap"]["oldestClaimableSecs"] <= 200
+
+
+@e2e
+async def test_the_backlog_counts_each_lanes_running_jobs_apart_from_dead_ones(pg):
+    for job_type in ("ingest", "publish", "package_inspect"):
+        await _job(job_type, status="running", phase=None, updated=1)
+    await _job("export", status="running", phase=None,                  # its worker died
+               updated=config.INGEST_STALE_SECS + 5)
+    await _job("bootstrap", status="running", phase="nodes", updated=1)
+    async with db.graphver_session() as s:
+        backlog = await job_lease.claimable_backlog(s)
+    assert (backlog["transfer"]["running"], backlog["transfer"]["claimable"]) == (3, 1)
+    assert (backlog["bootstrap"]["running"], backlog["bootstrap"]["claimable"]) == (1, 0)

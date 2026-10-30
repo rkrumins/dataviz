@@ -409,23 +409,29 @@ async def _failed_in_place(s, row: JobORM) -> bool:
 
 async def claimable_backlog(s) -> Dict[str, Dict[str, Any]]:
     """Per lane, what a worker of it could claim right now: ``claimable`` jobs, and how long the
-    oldest has waited (``oldestClaimableSecs``, since it was queued or last beat). A backlog that
-    only grows means the lane's workers are not running."""
+    oldest has waited (``oldestClaimableSecs``, since it was queued or last beat); and the jobs its
+    workers are running (``running``, beating — one silent past ``INGEST_STALE_SECS`` is claimable
+    instead). A backlog that only grows means the lane's workers are not running."""
     out: Dict[str, Dict[str, Any]] = {}
     for lane, groups in LANE_CLAIMS.items():
         where = " OR ".join(f"(j.job_type = ANY(:types{i}) AND {_claimable(pred)})"
                             for i, (_types, pred) in enumerate(groups))
-        stmt = text(f"SELECT count(*), min(coalesce(j.updated_at, j.created_at)) FROM {_JOBS} j "
-                    f"WHERE {where}").bindparams(
+        ours = " OR ".join(f"j.job_type = ANY(:types{i})" for i in range(len(groups)))
+        stmt = text(f"SELECT count(*) FILTER (WHERE {where}), "
+                    f"min(coalesce(j.updated_at, j.created_at)) FILTER (WHERE {where}), "
+                    "count(*) FILTER (WHERE j.status = 'running' AND j.updated_at >= :stale) "
+                    f"FROM {_JOBS} j WHERE ({ours}) AND j.status IN ('pending', 'running')"
+                    ).bindparams(
             *(bindparam(f"types{i}", type_=ARRAY(Text)) for i in range(len(groups))))
         params: Dict[str, Any] = {f"types{i}": list(t) for i, (t, _pred) in enumerate(groups)}
         params["stale"] = _ago(config.INGEST_STALE_SECS)
-        count, oldest = (await s.execute(stmt, params)).one()
+        count, oldest, running = (await s.execute(stmt, params)).one()
         age = None
         if oldest:
             age = round((datetime.now(timezone.utc) - datetime.fromisoformat(oldest))
                         .total_seconds())
-        out[lane] = {"claimable": int(count or 0), "oldestClaimableSecs": age}
+        out[lane] = {"claimable": int(count or 0), "oldestClaimableSecs": age,
+                     "running": int(running or 0)}
     return out
 
 
