@@ -43,23 +43,67 @@ These were real hotspots that were fixed and measured (see [03](03-branching-com
 | **Bulk inserts / large reads** | Chunked to stay under asyncpg's 32767 / Postgres' 65535 bind-param cap (`_IN_LIST_MAX=20000`) | no param-overflow crashes at scale |
 | **Reconciling projection** | Stalest-first, bounded concurrency (`PROJECTION_CONCURRENCY=8`), unpinned graphs excluded from the batch | catches up across hundreds of graphs |
 
-### Measured at 300,000 nodes and 300,000 edges
+### Measured up to 1,000,000 nodes and 1,000,000 edges
 
 `backend/scripts/bench_versioning.py` (one job per process, peak RSS of that process; Postgres 16 and
 FalkorDB 4.18 on one 4-CPU machine). The graph is imported into a new graph's draft, published,
 projected and exported; "one pass" is the same step with the paging threshold raised past it.
 
-| Step | 100k + 100k | 300k + 300k | 300k + 300k, one pass |
-|------|------------:|------------:|----------------------:|
-| Import into a draft (windowed) | 117 s, 192 MB | 214 s, 198 MB | — |
-| Publish (paged above 200,000 changes) | 24 s, 436 MB (one batch) | 111 s, 369 MB | ~1 GB, est. (1.7 KB a change) |
-| Projection of the published window (paged above 200,000 rows) | — | 112 s, 182 MB | 92 s, 956 MB |
-| Rebuild from nothing (paged above 500,000 entities) | — | 84 s, 209 MB | 77 s, 1,653 MB |
-| Export (NDJSON, streamed) | 12 s, 154 MB | 31 s, 150 MB | — |
+| Step | 100k + 100k | 300k + 300k | 1M + 1M | 300k + 300k, one pass |
+|------|------------:|------------:|--------:|----------------------:|
+| Import into a draft (windowed) | 117 s, 192 MB | 214 s, 198 MB | 727 s, 197 MB | — |
+| Publish (paged above 200,000 changes) | 24 s, 436 MB (one batch) | 111 s, 369 MB | 367 s, 399 MB | ~1 GB, est. (1.7 KB a change) |
+| Projection of the published window (paged above 200,000 rows) | — | 112 s, 182 MB | 426 s, 206 MB | 92 s, 956 MB |
+| Rebuild from nothing (paged above 500,000 entities) | — | 84 s, 209 MB | 286 s, 216 MB | 77 s, 1,653 MB |
+| Export (NDJSON, streamed) | 12 s, 154 MB | 31 s, 150 MB | 101 s, 166 MB | — |
 
 A paged publish holds at most the Merkle fingerprint's list of changes besides its page — up to
 1,000,000 entries, past which the fingerprint is left unset — so its peak stops growing there.
-Everything else above is flat in the graph's size.
+Everything else above is flat in the graph's size. Time is not: for 3.3 times the entities, 1M + 1M
+took 3.3 to 3.4 times as long as 300k + 300k (the projection 3.8 times).
+
+What 1M + 1M left behind: 6.1 GB of graphver in Postgres (each entity's version on the draft and on
+`main`, and both branches' heads) and 2.7 GB of the import's staged rows until they are swept
+([08](08-import-export.md) §3c); 1.05 GB for the graph in FalkorDB (`GRAPH.MEMORY USAGE`).
+
+### At 10 million (derived)
+
+Not measured: the 1M + 1M run times five, for a graph of 5,000,000 nodes and 5,000,000 edges.
+
+| Step | Time | Peak memory |
+|------|-----:|------------:|
+| Import into a draft | about 1 h | about 200 MB |
+| Publish | about 30 min, holding the graph's publish lock | about 400 MB |
+| Projection of that publish | 35–45 min | about 200 MB |
+| Rebuild from nothing | about 25 min | about 220 MB |
+| Export (NDJSON) | about 8 min | about 170 MB |
+
+It takes about 30 GB of graphver in Postgres (plus about 13 GB of staged import rows until they are
+swept) and about 5 GB in FalkorDB. While the publish runs, other publishes and merges into that graph
+wait for its lock and answer 503 `lock_busy` past their wait; saves into drafts don't wait.
+
+### Measuring at your size
+
+CI runs the 1M + 1M graph end to end every week (`.github/workflows/versioning-scale.yml`, also on
+demand at any size). It fails when a step does not complete, when its peak memory passes its ceiling
+(512 MB, 1 GB for a publish), or when FalkorDB and Postgres disagree after it. To measure at your own
+size, point the harness at a staging Postgres and FalkorDB sized like production
+(`MANAGEMENT_DB_URL`, `FALKORDB_HOST`, `FALKORDB_PORT`) and run each step in a process of its own:
+
+```bash
+B="python -m backend.scripts.bench_versioning"
+$B gen-package --nodes 5000000 --edges 5000000 --out /data/p10m.zip
+$B run inspect --package /data/p10m.zip --state s.json --label inspect
+$B run import --target empty --state s.json --label import
+$B run publish --state s.json --label publish
+$B run project --state s.json --label project
+$B run project --full --state s.json --label rebuild
+$B run export --state s.json --label export
+$B report --state s.json --md report.md
+```
+
+Watch each step's peak memory (flat in the graph's size), its time (linear), how long the publish
+held the graph's publish lock, and how much Postgres and FalkorDB grew.
 
 ## 3. Complexity reference
 
