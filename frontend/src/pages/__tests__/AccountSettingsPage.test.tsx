@@ -203,8 +203,10 @@ describe('AccountSettingsPage', () => {
 
         renderPage()
 
-        // Owned field is locked and attributed...
-        expect(await screen.findByLabelText(/First name/i)).toBeDisabled()
+        // Owned field is locked and attributed. The form renders from the
+        // session before the profile arrives, so wait for the lock to land.
+        const first = await screen.findByLabelText(/First name/i)
+        await waitFor(() => expect(first).toBeDisabled())
         // ...the one the IdP did not assert stays editable...
         expect(screen.getByLabelText(/Last name/i)).not.toBeDisabled()
         // ...and display name is never IdP-owned, which is what keeps
