@@ -199,7 +199,7 @@ async def non_resident(data_source_id: str) -> Optional[str]:
         return None
     svc = GraphVersioningService()
     graph = await svc.get_graph_by_data_source(data_source_id)
-    if graph is None:
+    if graph is None or graph.get("fork_parent_graph_id"):
         return None
     gid = graph["graph_id"]
     return gid if (await svc.projection_watermark(gid))["status"] in _OUT else None

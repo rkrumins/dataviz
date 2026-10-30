@@ -183,6 +183,24 @@ async def test_a_move_keeps_an_evicted_graph_evicted(store, monkeypatch):
     assert await _pending(proj, gid) is False
 
 
+async def test_a_fork_stays_outside_residency_and_is_reseeded_as_before(store, monkeypatch):
+    """A fork the count budget evicted (before residency was on, or on a pod still without it)
+    is not held evicted: the poll picks it and reseeds it as before, and a native query on it is
+    not told its graph is loading."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
+    svc, fake = store, FakeFalkor()
+    proj = FalkorProjector(graph_client_factory=fake)
+    root = await _resident(svc, proj)
+    fork = await svc.fork_graph(parent_graph_id=root, workspace_id="ws_res", actor="a")
+    assert not (await proj.project_graph(fork["graph_id"])).get("skipped")
+    assert await CacheManager(proj).evict(fork["graph_id"], drop_graph=_dropped) is True
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    assert await residency.non_resident(fork["data_source_id"]) is None
+    assert await _pending(proj, fork["graph_id"]) is True
+    ps = await _ps(fork["graph_id"])
+    assert ps.status == "idle" and ps.projected_commit_seq == ps.target_commit_seq > 0
+
+
 async def test_with_residency_off_an_evicted_graph_is_reseeded_as_before(store, monkeypatch):
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
     svc, fake = store, FakeFalkor()
