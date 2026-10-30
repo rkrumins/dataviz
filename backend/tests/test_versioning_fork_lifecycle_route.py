@@ -67,6 +67,17 @@ class _Svc:
 
     delete_fork = restore_fork = _call
 
+    async def get_graph(self, _graph_id):
+        return {"data_source_id": "dsfork_f1"}
+
+
+class _Session:
+    """The management session the routes take the fork's data source along in: here it has
+    none (a fork made before forks had data sources), which they leave as it is."""
+
+    async def get(self, *_args):
+        return None
+
 
 @pytest.fixture
 def recorded(monkeypatch):
@@ -84,13 +95,14 @@ _USER = SimpleNamespace(id="u1")
 
 
 async def _delete(answer):
-    return await V.delete_fork(ws_id="ws1", graph_id="f1", user=_USER, _meta={},
-                               svc=_Svc(answer), session=None)
+    return await V.delete_fork(ws_id="ws1", graph_id="f1", user=_USER,
+                               _meta={"data_source_id": "dsfork_f1"}, svc=_Svc(answer),
+                               session=_Session())
 
 
 async def _restore(answer):
     return await V.restore_fork(ws_id="ws1", graph_id="f1", _user=_USER, svc=_Svc(answer),
-                                session=None)
+                                session=_Session())
 
 
 @pytest.mark.asyncio

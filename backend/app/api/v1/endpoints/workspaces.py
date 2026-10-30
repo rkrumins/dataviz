@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -1003,6 +1003,7 @@ async def remove_data_source(
     ds = await data_source_repo.get_data_source_orm(session, ds_id, lock="update")
     if not ds or ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+    fork_sources.refuse_lifecycle(ds)          # a fork goes with its graph (409)
 
     count = await data_source_repo.count_data_sources(session, workspace_id)
     if count <= 1:
@@ -1011,6 +1012,16 @@ async def remove_data_source(
     from backend.app.services.versioning import purge_worker
 
     if permanent:
+        # A live fork holds it back, whatever its graph holds: the fork's row names this one as
+        # its parent. Nothing is queued or deleted.
+        forks = await fork_sources.forks_of(session, ds_id)
+        live = len((await session.execute(select(WorkspaceDataSourceORM.id).where(
+            WorkspaceDataSourceORM.id.in_(forks), WorkspaceDataSourceORM.deleted_at.is_(None)
+        ))).all()) if forks else 0
+        if live:
+            raise HTTPException(status_code=409, detail={
+                "type": "live_forks",
+                "message": f"{live} live fork(s) read this data source; delete them first"})
         try:
             jobs = await purge_worker.purge_graph_for_data_source(
                 data_source_id=ds_id, workspace_id=workspace_id, actor=_user.id)
@@ -1035,6 +1046,11 @@ async def remove_data_source(
         await data_source_transfer.cancel_open_for_source(
             session, ds_id, actor=_user.id, note="The data source was deleted.",
         )
+        # Its forks are all in the trash, and their purges are queued with its: their rows go
+        # with it, as its own does before its graph is gone.
+        if forks:
+            await session.execute(
+                delete(WorkspaceDataSourceORM).where(WorkspaceDataSourceORM.id.in_(forks)))
         await data_source_repo.delete_data_source(session, ds_id)
         return
 
@@ -1081,6 +1097,7 @@ async def restore_data_source(
     # there is nothing left to restore, and we must not hand back a data source pointing at a
     # graph that is being dismantled.
     row = await data_source_repo.get_data_source_orm(session, ds_id, include_deleted=True)
+    fork_sources.refuse_lifecycle(row)         # a fork comes back with its graph (409)
     purge = await purge_worker.restore_graphs_for_data_source(
         data_source_id=ds_id, workspace_id=workspace_id,
         deleted_at=row.deleted_at if row is not None else None)

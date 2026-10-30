@@ -3944,10 +3944,14 @@ async def delete_fork(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Move a fork to the trash, restorable until its purge is queued. Only a fork: a data
-    source's graph goes with its data source (409 ``not_a_fork``)."""
+    """Move a fork to the trash, restorable until its purge is queued, and its data source with
+    it, after the graph. Only a fork: a data source's graph goes with its data source (409
+    ``not_a_fork``)."""
+    from backend.app.services.fork_sources import trash_row
+
     with _domain_errors():
         parent_id = await svc.delete_fork(graph_id=graph_id, workspace_id=ws_id, actor=user.id)
+    await trash_row(session, _meta["data_source_id"], user.id)
     await _record_fork_event(session, "deleted", ws_id, graph_id, parent_id)
 
 
@@ -3959,9 +3963,15 @@ async def restore_fork(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Bring a trashed fork back. A fork that is not in the trash is left as it is."""
+    """Bring a trashed fork back, and its data source with it, after the graph. A fork that is not
+    in the trash is left as it is."""
+    from backend.app.services.fork_sources import restore_row
+
     with _domain_errors():
         parent_id = await svc.restore_fork(graph_id=graph_id, workspace_id=ws_id)
+    meta = await svc.get_graph(graph_id)
+    if meta is not None:
+        await restore_row(session, meta["data_source_id"])
     if parent_id is not None:
         await _record_fork_event(session, "restored", ws_id, graph_id, parent_id)
 

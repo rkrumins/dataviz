@@ -4,7 +4,9 @@ A fork of a versioned graph is a data source of its own, keyed by the fork graph
 id, in its parent's workspace and on its parent's provider. It names no FalkorDB graph
 (``ck_ds_fork_no_key``): it reads through versioning, never a key of its own. Its governing
 settings (:data:`GOVERNING`) are its parent's: copied when it is made, kept in step when the
-parent's change (:func:`follow_parent`), and never changed on the fork's row itself.
+parent's change (:func:`follow_parent`), and never changed on the fork's row itself. It goes to the
+trash, back and away with its graph, through the fork routes, and moves with its parent: never on
+its own through the data-source routes (:func:`refuse_lifecycle`).
 """
 from __future__ import annotations
 
@@ -137,3 +139,29 @@ class ForkReadOnlyProvider:
                 raise ForkHasNoStore(self._data_source_id)
             return _refused
         return getattr(self._inner, name)
+
+
+def refuse_lifecycle(row: Optional[WorkspaceDataSourceORM]) -> None:
+    """409 ``use_fork_endpoints`` for a fork's row, which the data-source routes never trash,
+    restore, delete or move: it goes with its graph, and moves with its parent."""
+    if row is not None and getattr(row, "fork_of_data_source_id", None):
+        raise HTTPException(status_code=409, detail={
+            "type": "use_fork_endpoints",
+            "message": "A fork's data source goes to the trash and back with the fork, and moves "
+                       "with the data source it was forked from."})
+
+
+async def trash_row(session, ds_id: str, actor: Optional[str]) -> None:
+    """Tombstone a fork's row after its graph went to the trash. A row already there, or none
+    (a fork made before forks had rows), is left as it is."""
+    row = await session.get(WorkspaceDataSourceORM, ds_id)
+    if row is not None and row.fork_of_data_source_id and row.deleted_at is None:
+        row.deleted_at, row.deleted_by = datetime.now(timezone.utc).isoformat(), actor
+
+
+async def restore_row(session, ds_id: str) -> None:
+    """Bring a fork's row back after its graph came back. A live row, or none, is left as it is."""
+    row = await session.get(WorkspaceDataSourceORM, ds_id)
+    if row is not None and row.fork_of_data_source_id and row.deleted_at is not None:
+        row.deleted_at = row.deleted_by = None
+        row.updated_at = datetime.now(timezone.utc).isoformat()

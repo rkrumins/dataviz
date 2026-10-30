@@ -79,7 +79,7 @@ from backend.app.db.repositories import (
     view_activity_repo,
 )
 from backend.app.db.repositories.binding_repo import _is_expired
-from backend.app.services import workspace_access
+from backend.app.services import fork_sources, workspace_access
 from backend.app.services.activity import recorder
 from backend.app.services.aggregation.models import (
     AggregationDataSourceStateORM,
@@ -334,12 +334,14 @@ class Preflight:
 
 async def _views_on(session: AsyncSession, ds: WorkspaceDataSourceORM,
                     was_default: bool) -> list[_View]:
-    """Every view that moves: those on the source (trashed ones too) and, when the source is its
-    workspace's default, the views with no source of their own — they read it today."""
+    """Every view that moves: those on the source and on its forks' sources, which move with it
+    (trashed ones too), and, when the source is its workspace's default, the views with no
+    source of their own — they read it today."""
     cols = (ViewORM.id, ViewORM.name, ViewORM.visibility, ViewORM.created_by, ViewORM.deleted_at,
             ViewORM.publish_requested_at, ViewORM.context_model_id, ViewORM.draft_branch_id)
+    sources = [ds.id, *await fork_sources.forks_of(session, ds.id)]
     rows = [(r, False) for r in (await session.execute(
-        select(*cols).where(ViewORM.data_source_id == ds.id).order_by(ViewORM.name)
+        select(*cols).where(ViewORM.data_source_id.in_(sources)).order_by(ViewORM.name)
     )).all()]
     if was_default:
         rows += [(r, True) for r in (await session.execute(
@@ -653,8 +655,10 @@ async def preflight(
     changing anything.
 
     ``purpose`` is ``'move'``, ``'propose'`` or ``'accept'`` (with ``transfer``); ``None`` is a
-    preview, which reads the purpose from what the caller may do.
+    preview, which reads the purpose from what the caller may do. A fork's data source never
+    moves on its own (409 ``use_fork_endpoints``): it moves with its parent.
     """
+    fork_sources.refuse_lifecycle(ds)
     source = await _live_workspace(session, ds.workspace_id)
     target = await _live_workspace(session, to_ws_id)
     if transfer is None and not await _can_see(session, claims, target):
@@ -1009,6 +1013,8 @@ async def _apply(session: AsyncSession, pre: Preflight, *, actor: str,
         setattr(ds, column, value)
     ds.updated_at = now
     await session.flush()
+    # Its forks' sources, trashed ones too, live where it does and are governed as it is.
+    sources = await _carry_forks(session, ds, target.id, now)
 
     pinned = [v.id for v in pre.views if v.follows_default]
     for chunk in _chunks(pinned):
@@ -1020,18 +1026,18 @@ async def _apply(session: AsyncSession, pre: Preflight, *, actor: str,
             .execution_options(synchronize_session=False))
     await session.execute(
         update(ViewORM)
-        .where(ViewORM.data_source_id == ds.id)
+        .where(ViewORM.data_source_id.in_(sources))
         .values(workspace_id=target.id, updated_at=ViewORM.updated_at)
         .execution_options(synchronize_session=False))
     # Their history goes with them, so the old workspace's feed stops listing them.
     await session.execute(
         update(ViewActivityLogORM)
         .where(ViewActivityLogORM.view_id.in_(
-            select(ViewORM.id).where(ViewORM.data_source_id == ds.id)))
+            select(ViewORM.id).where(ViewORM.data_source_id.in_(sources))))
         .values(workspace_id=target.id)
         .execution_options(synchronize_session=False))
     moved = list((await session.execute(
-        select(ViewORM.id).where(ViewORM.data_source_id == ds.id))).scalars().all())
+        select(ViewORM.id).where(ViewORM.data_source_id.in_(sources)))).scalars().all())
     summary = f"Moved from {source.name} to {target.name} with {_label(ds)}"
     changes = {"from": source.id, "to": target.id, "transferId": transfer_id}
     await view_activity_repo.record_view_activity_many(
@@ -1063,6 +1069,20 @@ async def _apply(session: AsyncSession, pre: Preflight, *, actor: str,
         "lostAccess": _lost_counts(t for t, _ in pre.losers),
         "lost": [loser.recorded() for _, loser in sorted(pre.losers.items())],
     }
+
+
+async def _carry_forks(session: AsyncSession, ds: WorkspaceDataSourceORM, ws_id: str,
+                       now: str) -> list[str]:
+    """File ``ds``'s forks' sources — forks of forks, and those in the trash, too — under
+    ``ws_id`` with ``ds``'s governing settings, in the move's transaction (their graphs move with
+    its graph). Returns ``ds`` and them: the sources whose views go too."""
+    forks = await fork_sources.forks_of(session, ds.id)
+    if forks:
+        await session.execute(
+            update(WorkspaceDataSourceORM).where(WorkspaceDataSourceORM.id.in_(forks))
+            .values(workspace_id=ws_id, updated_at=now, **fork_sources.governing(ds))
+            .execution_options(synchronize_session=False))
+    return [ds.id, *forks]
 
 
 async def _ask_new_publishers(session: AsyncSession, pre: Preflight, actor: str) -> None:
@@ -1451,8 +1471,9 @@ async def undo_state(session: AsyncSession, row: DataSourceTransferORM,
     if ds is None or ds.workspace_id != row.to_workspace_id:
         return False, "The data source has been deleted or moved since."
     known = set(_load(row.manifest).get("viewIds") or [])
+    sources = [ds.id, *await fork_sources.forks_of(session, ds.id)]
     on_it = set((await session.execute(
-        select(ViewORM.id).where(ViewORM.data_source_id == ds.id))).scalars().all())
+        select(ViewORM.id).where(ViewORM.data_source_id.in_(sources)))).scalars().all())
     new = len(on_it - known)
     if not new:
         defaults = await data_source_repo.default_data_source_ids(session, [row.to_workspace_id])
@@ -1565,6 +1586,7 @@ async def _apply_undo(session: AsyncSession, row: DataSourceTransferORM,
             setattr(ds, column, None)
     ds.updated_at = now
     await session.flush()
+    sources = await _carry_forks(session, ds, source.id, now)
 
     pinned_default = manifest.get("pinnedDestinationDefault")
     if pinned_default:
@@ -1579,7 +1601,7 @@ async def _apply_undo(session: AsyncSession, row: DataSourceTransferORM,
     for chunk in _chunks(view_ids):
         await session.execute(
             update(ViewORM)
-            .where(ViewORM.id.in_(chunk), ViewORM.data_source_id == ds.id)
+            .where(ViewORM.id.in_(chunk), ViewORM.data_source_id.in_(sources))
             .values(workspace_id=source.id, updated_at=ViewORM.updated_at)
             .execution_options(synchronize_session=False))
         await session.execute(

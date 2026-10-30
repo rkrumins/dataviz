@@ -349,3 +349,29 @@ async def test_a_fork_is_never_rolled_up(monkeypatch):
     agg.trigger = AsyncMock()
     await projection_target.make_rollup_rebuild_hook(lambda: agg)("g_fork")
     agg.trigger.assert_not_awaited()
+
+
+# ── lifecycle: a fork goes to the trash, back and away with its graph ────────────────────────
+async def test_the_generic_lifecycle_routes_refuse_a_fork(test_client, db_session, forks):
+    """A fork's data source is trashed, restored and purged with its graph, through the fork
+    endpoints, and moves with its parent: never on its own through the data-source routes."""
+    db_session.add(WorkspaceORM(id="ws_f2", name="Elsewhere"))
+    await db_session.commit()
+
+    def refused(r):
+        assert r.status_code == 409, r.text
+        assert r.json()["detail"]["type"] == "use_fork_endpoints", r.text
+
+    refused(await test_client.delete(f"{_DS}/dsfork_a"))
+    refused(await test_client.delete(f"{_DS}/dsfork_a", params={"permanent": "true"}))
+    refused(await test_client.post(f"{_DS}/dsfork_a/move", json={"targetWorkspaceId": "ws_f2"}))
+    refused(await test_client.get(f"{_DS}/dsfork_a/move-preview", params={"to": "ws_f2"}))
+    refused(await test_client.post(f"{_DS}/dsfork_a/transfer-requests",
+                                   json={"targetWorkspaceId": "ws_f2"},
+                                   headers={"X-Activity-Reason": "Reorganising"}))
+    (a,) = await _rows(db_session, "dsfork_a")
+    a.deleted_at = "2026-10-30T00:00:00+00:00"
+    await db_session.commit()
+    refused(await test_client.post(f"{_DS}/dsfork_a/restore"))
+    (a,) = await _rows(db_session, "dsfork_a")
+    assert a.workspace_id == WS and a.deleted_at is not None

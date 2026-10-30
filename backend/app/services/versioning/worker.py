@@ -321,6 +321,10 @@ class ProjectionWorker:
             except Exception:
                 logger.exception("reaper error")
             try:
+                await self._reaper.fork_rows()          # each fork's data source, with its graph
+            except Exception:
+                logger.exception("reaper fork rows error")
+            try:
                 await asyncio.wait_for(self._stop.wait(), timeout=config.REAP_POLL_SECS)
             except asyncio.TimeoutError:
                 pass

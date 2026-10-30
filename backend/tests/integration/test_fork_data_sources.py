@@ -52,8 +52,11 @@ def _client(perms=(R, M), ws=WS):
     async def _claims():
         return PermissionClaims(sid="", global_perms=(), ws_perms={ws: perms})
 
+    from backend.app.api.v1.endpoints import workspaces as W
+
     app = FastAPI()
     app.include_router(V.router, prefix="/api/v1/{ws_id}/versioning")
+    app.include_router(W.router, prefix="/api/v1/admin/workspaces")
     app.dependency_overrides[get_current_user] = _user
     app.dependency_overrides[get_permission_claims] = _claims
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
@@ -271,6 +274,119 @@ def test_a_fork_is_read_and_written_through_version_control_never_falkordb(monke
         assert set(state["nodes"]) == {"urn:fk:A", "urn:fk:B"}, state
         # Nothing reached FalkorDB: neither the parent's key nor the fork's was ever written.
         assert await _falkor_keys(parent.graph_name) == []
+    _run(case)
+
+
+# ── the lifecycle: a fork's data source goes where its graph goes ────────────────────────────
+def test_the_fork_endpoints_take_its_data_source_through_the_trash_and_away():
+    from backend.app.services.versioning.purge_worker import PurgeRunner, create_purge_job
+    from backend.tests.integration.test_graph_lifecycle_purge import _nobody, _take
+
+    async def case(svc):
+        _parent_ds, gid = await _parent(svc)
+        async with _client() as c:
+            fork = (await _fork(c, gid)).json()
+            ds_id, url = fork["dataSourceId"], f"/api/v1/{WS}/versioning/graphs/{fork['graphId']}"
+            assert (await c.delete(url)).status_code == 204
+            row = await _row(ds_id)
+            assert row.deleted_at is not None and row.deleted_by == "u_forker"
+            assert (await c.post(url + "/restore")).status_code == 204
+            row = await _row(ds_id)
+            assert row.deleted_at is None and row.deleted_by is None
+            assert (await c.delete(url)).status_code == 204
+        # Its purge takes the row once the graph is gone, never before.
+        job = await create_purge_job(graph_id=fork["graphId"], workspace_id=WS, actor="reaper",
+                                     require_tombstoned=True)
+        assert await _row(ds_id) is not None
+        done = await PurgeRunner(None, key_in_use=_nobody).run_job(await _take(job))
+        assert done["status"] == "completed", done
+        assert await _row(ds_id) is None
+    _run(case)
+
+
+def test_the_reaper_keeps_each_forks_data_source_in_step_with_its_graph():
+    from datetime import datetime, timedelta, timezone
+
+    from backend.app.services import fork_sources
+    from backend.app.services.versioning.purge_worker import Reaper
+
+    async def case(svc):
+        parent_ds, gid = await _parent(svc, **GOVERNING)
+        reaper = Reaper()
+        # A fork made before forks had data sources gets its own, made as the route makes one.
+        legacy = await svc.fork_graph(parent_graph_id=gid, workspace_id=WS, actor="bob")
+        ds_id, fork_gid = legacy["data_source_id"], legacy["graph_id"]
+        assert (await reaper.fork_rows())["created"] >= 1
+        parent, row = await _row(parent_ds), await _row(ds_id)
+        assert row.label == f"Sales · Fork {ds_id[-6:]}" and row.graph_name is None
+        assert (row.fork_of_data_source_id, row.workspace_id, row.provider_id) == (
+            parent_ds, WS, parent.provider_id)
+        assert row.created_by == "bob" and json.loads(row.extra_config)["origin"] == {
+            "kind": "fork", "parentDataSourceId": parent_ds, "parentGraphId": gid}
+        assert {c: getattr(row, c) for c in fork_sources.GOVERNING} == {
+            c: getattr(parent, c) for c in fork_sources.GOVERNING}
+        await reaper.fork_rows()                                   # and only once
+        async with _mgmt() as s:
+            from backend.app.db.models import WorkspaceDataSourceORM as DS
+            assert await s.scalar(select(sa.func.count()).select_from(DS).where(
+                DS.id == ds_id)) == 1
+
+        # A graph trashed or restored some other way takes its row along on the next pass.
+        await svc.delete_fork(graph_id=fork_gid, workspace_id=WS, actor="bob")
+        await reaper.fork_rows()
+        assert (await _row(ds_id)).deleted_at is not None
+        await svc.restore_fork(graph_id=fork_gid, workspace_id=WS)
+        await reaper.fork_rows()
+        assert (await _row(ds_id)).deleted_at is None
+
+        # A row whose graph is gone — never made (a crash while forking), or purged — goes once
+        # it is ten minutes old: one younger may be a fork still being made.
+        old = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+        async with _mgmt() as s:
+            for orphan, created in (("dsfork_orphan_young_" + os.urandom(3).hex(), None),
+                                    ("dsfork_orphan_old_" + os.urandom(3).hex(), old)):
+                row = fork_sources.fork_row(parent, ds_id=orphan, name="X", parent_graph_id=gid,
+                                            actor="u")
+                if created:
+                    row.created_at = created
+                s.add(row)
+            await s.commit()
+        await reaper.fork_rows()
+        async with _mgmt() as s:
+            left = set((await s.execute(select(DS.id).where(
+                DS.id.like("dsfork_orphan_%")))).scalars())
+        assert any(i.startswith("dsfork_orphan_young_") for i in left)
+        assert not any(i.startswith("dsfork_orphan_old_") for i in left)
+    _run(case)
+
+
+def test_a_parents_permanent_delete_purges_its_trashed_forks_first():
+    from backend.app.services.versioning.models import JobORM
+
+    async def jobs_of(*gids):
+        async with db.graphver_session() as s:
+            return {j.graph_id: j.id for j in (await s.execute(select(JobORM).where(
+                JobORM.job_type == "purge", JobORM.graph_id.in_(gids)))).scalars()}
+
+    async def case(svc):
+        parent_ds, gid = await _parent(svc)
+        held_ds, held = await _parent(svc)
+        async with _client() as c:
+            fork = (await _fork(c, gid)).json()
+            assert (await c.delete(f"/api/v1/{WS}/versioning/graphs/{fork['graphId']}")).status_code == 204
+            r = await c.delete(f"/api/v1/admin/workspaces/{WS}/data-sources/{parent_ds}",
+                               params={"permanent": "true"})
+            assert r.status_code == 204, r.text
+            jobs = await jobs_of(gid, fork["graphId"])
+            assert set(jobs) == {gid, fork["graphId"]} and jobs[fork["graphId"]] < jobs[gid]
+            assert await _row(fork["dataSourceId"]) is None and await _row(parent_ds) is None
+
+            # A live fork still holds its parent back, rows and all.
+            live = (await _fork(c, held)).json()
+            r = await c.delete(f"/api/v1/admin/workspaces/{WS}/data-sources/{held_ds}",
+                               params={"permanent": "true"})
+            assert r.status_code == 409 and r.json()["detail"]["type"] == "live_forks", r.text
+            assert await _row(live["dataSourceId"]) is not None and await _row(held_ds) is not None
     _run(case)
 
 

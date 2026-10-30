@@ -51,7 +51,7 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.orm import aliased
 
 from . import config, db, job_lease
@@ -167,6 +167,22 @@ async def graph_key_readers(provider_id: Optional[str], graph_name: str,
         return await graph_key_bindings(s, provider_id, graph_name, exclude_ds=exclude_ds)
 
 
+async def _drop_fork_row(ds_id: Optional[str]) -> None:
+    """After a fork's purge, its data-source row (``fork_sources``) goes too: the graph it named is
+    gone. Best effort, after the purge committed — a row left behind is the reaper's
+    (:meth:`Reaper.fork_rows`). The management database never commits on context exit."""
+    if not ds_id or not ds_id.startswith("dsfork_"):
+        return
+    from backend.app.db.engine import get_session_factory
+    from backend.app.db.models import WorkspaceDataSourceORM as DS
+    try:
+        async with get_session_factory()() as s:
+            await s.execute(delete(DS).where(DS.id == ds_id, DS.fork_of_data_source_id.isnot(None)))
+            await s.commit()
+    except Exception:  # noqa: BLE001 — the reaper removes it on a later pass
+        logger.exception("purge: removing fork %s's data source failed; the reaper will", ds_id)
+
+
 class PurgeRunner:
     """Executes `job_type='purge'` jobs. Hosted by the versioning worker's bootstrap lane, on the
     job lease (``job_lease``) like every other job."""
@@ -207,7 +223,7 @@ class PurgeRunner:
                     if job is None or job.status != "running" or job.retry_count != lease.epoch:
                         raise Superseded("the job was cancelled or taken over")
                     phase = job.current_phase or "count"
-                    graph_id, deleted = job.graph_id, job.processed
+                    graph_id, deleted, ds_id = job.graph_id, job.processed, job.data_source_id
                 # A Postgres failover or a dropped connection is waited out, not failed: every
                 # unit is idempotent (DELETEs, a count), so a retry re-runs one that rolled back
                 # or finds its rows already gone. A refusal is never retried.
@@ -220,6 +236,7 @@ class PurgeRunner:
                     if not await lease.finish("completed", current_phase=None, progress=100):
                         raise Superseded("the job was cancelled or taken over")
                     logger.info("purge %s completed (graph=%s, %s rows)", job_id, graph_id, deleted)
+                    await _drop_fork_row(ds_id)
                     return {"job_id": job_id, "status": "completed", "deleted": deleted}
                 async with self._session() as s:
                     await lease.checkpoint(s, current_phase=nxt, progress=_PHASE_FLOOR[nxt])
@@ -793,6 +810,10 @@ async def rehome_graph_for_data_source(*, data_source_id: str, to_workspace_id: 
 #: reaper tombstones it: the request that made it died before queueing the seed, and nobody retried.
 ORPHAN_PACKAGE_SOURCE_SECS = 3600
 
+#: How old a fork's data-source row with no graph must be before the reaper deletes it: the fork
+#: route commits the row before it makes the graph, so a younger one may be a fork being made.
+ORPHAN_FORK_ROW_SECS = 600
+
 #: Expired data sources whose graph the reaper left standing, so it says so once, not every pass.
 _LEFT_STANDING: set = set()
 
@@ -815,8 +836,9 @@ class Reaper:
     workspace where the two disagree (:meth:`_misplaced_graphs`), so the stages find the graphs
     they look for.
 
-    A trashed fork has no data-source row (its ``dsfork_`` id is minted, not stored), so its own
-    tombstone's age is its schedule (:meth:`_expired_forks`).
+    A trashed fork's own tombstone's age is its schedule (:meth:`_expired_forks`); its data-source
+    row, tombstoned with it, goes with its purge. :meth:`fork_rows`, run beside this, keeps each
+    fork's row in step with its graph.
     """
 
     def __init__(self, *, app_session_factory=None, graphver_session_factory=None):
@@ -919,6 +941,88 @@ class Reaper:
                         revived, reaped, orphans, rehomed)
         return {"queued": queued, "reaped": reaped, "orphans": orphans, "revived": revived,
                 "rehomed": rehomed}
+
+    async def fork_rows(self) -> Dict[str, int]:
+        """Keep each fork's data-source row (``fork_sources``) in step with its graph.
+
+        The fork routes take the row along with the graph across two databases, with no
+        transaction between them: made before the graph, tombstoned and restored after it, deleted
+        after its purge. This puts right what a crash in between left, and what came before forks
+        had rows: a live fork graph with no row gets one, made from its parent's row as the fork
+        route makes one; a row whose graph is trashed is tombstoned, and one whose graph is live
+        is restored; a row whose graph is gone — never made, or purged — is deleted once it is
+        ``ORPHAN_FORK_ROW_SECS`` old (a younger one may be a fork still being made). Every step is
+        idempotent. The rows are read before the graphs, so a trash or a restore in flight (graph
+        first, then row) is only ever carried forward, never undone."""
+        from sqlalchemy.exc import IntegrityError
+
+        from backend.app.db.models import WorkspaceDataSourceORM as DS
+        from backend.app.services import fork_sources
+
+        Session = self._app_sessions()
+        async with Session() as s:
+            rows = {r.id: r for r in (await s.execute(select(
+                DS.id, DS.deleted_at, DS.created_at).where(DS.fork_of_data_source_id.isnot(None))
+            )).all()}
+        parent = aliased(GraphORM)
+        async with self._gv() as gs:
+            graphs = {g.data_source_id: g for g in (await gs.execute(select(
+                GraphORM.data_source_id, GraphORM.fork_parent_graph_id, GraphORM.created_at,
+                GraphORM.created_by, GraphORM.deleted_at, GraphORM.deleted_by,
+                parent.data_source_id.label("parent_data_source_id"),
+            ).outerjoin(parent, parent.id == GraphORM.fork_parent_graph_id)
+                .where(_minted(GraphORM)))).all()}
+        out = {"created": 0, "trashed": 0, "restored": 0, "removed": 0}
+
+        # A fork is made after the graph it forks: oldest first, a fork's parent row comes first.
+        missing = sorted((g for ds_id, g in graphs.items() if ds_id not in rows
+                          and g.deleted_at is None and g.parent_data_source_id),
+                         key=lambda g: g.created_at)
+        for g in missing:
+            try:
+                async with Session() as s:
+                    parent_row = await s.get(DS, g.parent_data_source_id)
+                    if parent_row is None:
+                        continue
+                    s.add(fork_sources.fork_row(
+                        parent_row, ds_id=g.data_source_id, name=f"Fork {g.data_source_id[-6:]}",
+                        parent_graph_id=g.fork_parent_graph_id, actor=g.created_by))
+                    await s.commit()
+                out["created"] += 1
+                logger.info("reaper: fork %s had no data source — made one", g.data_source_id)
+            except IntegrityError:
+                pass                                       # the fork route made it meanwhile
+            except Exception:
+                logger.exception("reaper: making fork %s's data source failed; carrying on",
+                                 g.data_source_id)
+
+        now = _now()
+        async with Session() as s:
+            for ds_id, row in rows.items():
+                g = graphs.get(ds_id)
+                if g is not None and g.deleted_at is not None and row.deleted_at is None:
+                    out["trashed"] += (await s.execute(update(DS).where(
+                        DS.id == ds_id, DS.deleted_at.is_(None)).values(
+                        deleted_at=g.deleted_at, deleted_by=g.deleted_by, updated_at=now))).rowcount
+                elif g is not None and g.deleted_at is None and row.deleted_at is not None:
+                    out["restored"] += (await s.execute(update(DS).where(
+                        DS.id == ds_id, DS.deleted_at.isnot(None)).values(
+                        deleted_at=None, deleted_by=None, updated_at=now))).rowcount
+            await s.commit()                           # the app session doesn't commit on exit
+
+        cutoff = _now_minus(ORPHAN_FORK_ROW_SECS)
+        orphans = [ds_id for ds_id, row in rows.items()
+                   if ds_id not in graphs and row.created_at < cutoff]
+        if orphans:
+            async with Session() as s:                 # one statement: a fork's fork goes with it
+                out["removed"] = (await s.execute(delete(DS).where(
+                    DS.id.in_(orphans), DS.fork_of_data_source_id.isnot(None),
+                    DS.created_at < cutoff))).rowcount
+                await s.commit()
+        if any(out.values()):
+            logger.info("reaper: fork data sources — %s made, %s trashed, %s restored, %s "
+                        "removed", out["created"], out["trashed"], out["restored"], out["removed"])
+        return out
 
     async def _expired_forks(self, cutoff: str) -> int:
         """Queue the purge of each trashed fork whose grace ran out by ``cutoff``. One whose purge
