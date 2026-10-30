@@ -9,6 +9,102 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Versioning: graph residency
+
+FalkorDB holds a copy of every versioned graph, and until now nothing chose which: a graph stayed
+loaded however long it went unread, and the per-provider count budget's evictions were undone by
+the projection poll within seconds. Residency decides, per graph by a class a system administrator
+sets and per cluster master by its memory, which copies FalkorDB keeps. Postgres stays the only
+source of truth: an evicted graph is read from it, and loaded again when it is needed. Behind
+`GRAPHVER_RESIDENCY_ENABLED` until every pod runs this release. See
+`docs/versioning/17-forks-and-residency.md` §8–§14.
+
+### Added
+
+- **Residency classes.** **Always** (never evicted), **Standard** (evicted when unread for 7 days, or
+  earlier under memory pressure, and loaded again on its next read) and **Coldline** (evicted after
+  an hour unread, and loaded only when a request needs FalkorDB, or on a canvas read of a graph
+  larger than 500,000 entities). Only keys the platform minted are evicted; a customer's own graph
+  behaves as Always, and forks are outside residency (their reads count for their root). A new graph
+  gets the policy's default class, Standard unless changed.
+- **The capacity loop**, on the projection lane, every minute, one worker leading. Per master it
+  evicts Standard and Coldline graphs past their idle time, and from 80 % of the master's memory the
+  idle-longest Coldline graphs and then Standard graphs by oldest read, down to 70 %; never an Always
+  graph, a customer's key, a graph being read or one with a projection pass in flight. Each eviction
+  records why (`idle_standard`, `idle_coldline`, `pressure`), and the graph stays evicted until it is
+  loaded.
+- **Loading a graph again goes through admission.** A load starts when the graph's measured size (or
+  its entities times 550 bytes) times 1.3 fits under its master's 80 % mark, after what the
+  aggregation write governor and the loads and full projections in flight there hold; one per master
+  at a time, none while the master forks for persistence, loads its dataset or cannot be read, in
+  the order the loads were asked for. One that does not fit waits (`waiting_capacity`) and is tried
+  again each pass. A loaded key serves reads only once its summaries are rebuilt too.
+- **What asks for a load:** a person's read of a Standard or Always graph; a request only FalkorDB
+  can answer — deep search, node degrees, a native query, which answer **503** `graph_loading` with
+  `Retry-After` meanwhile; `POST /api/v1/admin/versioning/graphs/{gid}/load` (Load now); setting a
+  graph to Always; an operator's rebuild.
+- **The residency policy**, every value changed live, with no redeploy, by a system administrator:
+  `GET` and `PUT /api/v1/admin/versioning/residency-policy` (each value as saved, its default and the
+  value in force; `-1` clears one; **422** `invalid_residency_policy` `{field}` for a value out of its
+  range or contradicting another; recorded as `platform.residency_policy.updated`), and
+  `POST …/residency-policy/preview`: what the next pass would evict, load and hold on each master
+  with the proposed values, acting on nothing.
+- **A graph's class** is set by `PUT /api/v1/admin/versioning/graphs/{gid}/residency {"class"}`
+  (system administrators). Always on a graph out of FalkorDB is admission-checked first: **409**
+  `capacity_insufficient` `{master, shortfallBytes}` when it would not fit. Recorded as
+  `platform.versioning.residency_changed`. Both graph routes answer **409** `not_for_forks` for a
+  fork.
+- **The watermark and the fleet inventory say the class and the state** (`residency`,
+  `residencyState`: `resident`, `evicted`, `rehydrating` or `waiting_capacity`, with `evictedReason`,
+  `lastReadAt`, `sizeBytes`), the inventory filters by the two new states, and the projection-lag
+  probe counts them.
+- **Metrics**: each master's used and maximum memory, graphs per class and state, evictions by
+  reason, loads started and completed, and loads that began to wait (`versioning_residency_*`). The
+  standalone versioning worker serves its metrics on `METRICS_PORT` when `METRICS_ENABLED`.
+
+### Changed
+
+- **With residency on, when a person reads a graph is recorded** (`last_read_at`, written by each
+  process once a minute), and a read FalkorDB serves takes the graph's read lease for 120 seconds,
+  so nothing evicts a graph mid-read. Background reads count for neither.
+- **The projection-lag probe's worst list leaves evicted graphs out**: they lag by design.
+
+### Upgrading
+
+- **Run the migrations.** `20261030_1300_gv_ps_residency` (graphver: `projection_state`'s `residency`,
+  Standard for every graph, `last_read_at`, `evicted_reason`, `size_bytes`, `size_measured_at`, and the
+  `rehydrating` and `waiting_capacity` statuses) follows `20261030_1200_ds_fork_of`; with a separate
+  `GRAPHVER_DB_URL` the versioning worker adds it on start. `20261030_1400_residency_policy`
+  (management: the policy's values on `platform_settings`, all unset) follows it. Both wait at most
+  five seconds for their locks and can be run again. Downgrading the first turns a graph waiting for
+  room or being loaded into an evicted one, which the code before reseeds.
+- **Residency is off until you set `GRAPHVER_RESIDENCY_ENABLED=true`.** Until then eviction is the
+  count budget's, as before, and the policy and the classes can be set but nothing acts on them. Set
+  it on every API and versioning worker pod at once, after all of them run this release: a pod
+  without it reseeds an evicted graph within seconds, and loads without admission.
+- **With residency on, the per-provider count budget is not used.** `GRAPHVER_FALKOR_MAX_RESIDENT`,
+  `GRAPHVER_FALKOR_BUDGETS` and a provider's `falkorMaxResident` no longer evict anything; the
+  capacity loop replaces that loop.
+- **Give every FalkorDB master a `maxmemory`.** Without one there is no memory pressure to measure:
+  idle eviction still runs, and loads are admitted without a limit.
+- **Scrape the versioning worker** on `METRICS_PORT` if you collect metrics.
+
+### Known limitations
+
+- **No admin screens yet**: the policy, a graph's class and Load now are API routes for now. Adopting
+  a customer's key onto a platform key, and placing a reloaded key on the master with the most free
+  memory, come next; until then a graph is loaded back onto the key it had.
+- **Only masters holding a versioned graph's key are read**, and only they are reported.
+- **Forks' keys are outside residency**: it never evicts, loads or counts them, though the memory
+  they take is part of their master's use. A fork's reads count for its root.
+- **A load waits for the graph's summaries.** It asks for their build once per watermark; while the
+  aggregation worker cannot build them, the graph keeps reading from Postgres.
+- **The read lease is not released at the end of a request**: it lapses 120 seconds after the
+  graph's last read FalkorDB served. A process that stops loses up to a minute of noted reads.
+- **The policy's `updatedBy` and `updatedAt` are the platform settings'**, shared with the other
+  platform-wide settings saved on the same row.
+- **A load restarts its graph's idle time**, as a read does.
+
 ## [Unreleased] — Versioning: forks you can work in
 
 A fork used to be a graph and nothing else: its data source id was minted for the graph and stored

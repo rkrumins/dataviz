@@ -796,8 +796,8 @@ Logs, metrics, health probes and the system status checks.
 | Variable | Default | Description | Read in |
 |---|---|---|---|
 | `LOG_LEVEL` | (empty) / `INFO` / `info` *(differs by call site)* | Log level for every backend service: `DEBUG`, `INFO`, `WARNING` or `ERROR`. | `backend/app/middleware/logging.py`, `backend/app/services/aggregation/__main__.py`, `backend/app/services/aggregation/controlplane.py` +2 more |
-| `METRICS_ENABLED` | — | Serve Prometheus metrics: `true`, `1`, `yes` or `on`. The API serves them at `/api/v1/metrics`, the control plane at `/metrics` on its port 8091, and the aggregation worker at `/metrics` on `METRICS_PORT`. Also needs `METRICS_TOKEN`: without one the endpoint answers 404. | `backend/app/api/v1/endpoints/metrics.py` |
-| `METRICS_PORT` | `9100` | the aggregation worker's own scrape port | `backend/app/services/aggregation/__main__.py` |
+| `METRICS_ENABLED` | — | Serve Prometheus metrics: `true`, `1`, `yes` or `on`. The API serves them at `/api/v1/metrics`, the control plane at `/metrics` on its port 8091, and the aggregation and versioning workers at `/metrics` on `METRICS_PORT`. Also needs `METRICS_TOKEN`: without one the endpoint answers 404. | `backend/app/api/v1/endpoints/metrics.py` |
+| `METRICS_PORT` | `9100` | the aggregation and versioning workers' own scrape port | `backend/app/services/aggregation/__main__.py`, `backend/app/services/versioning/__main__.py` |
 | `METRICS_TOKEN` | — (secret, set your own) | Bearer token a scraper must present to read the metrics. | `backend/app/api/v1/endpoints/metrics.py` |
 
 ### Internal tuning
