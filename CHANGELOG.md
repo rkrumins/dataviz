@@ -14,8 +14,9 @@ limitations** — a changelog that only lists good news is not worth reading.
 A fork used to be a graph and nothing else: its data source id was minted for the graph and stored
 nowhere, so views, the canvas and the data-source routes could not name it. Forking now makes a data
 source as well, governed by its parent's settings, which goes to the trash, back and away with the
-fork and moves with its parent. It reads and writes through version control and never has a
-FalkorDB graph of its own. Each of a fork's commits records which parent commit it reads, the base
+fork and moves with its parent. It reads its root's published graph with its own changes laid over
+it, as a draft reads main's, and never has a FalkorDB graph of its own: the copies earlier releases
+made of forks can be dropped. Each of a fork's commits records which parent commit it reads, the base
 the next step — taking the parent's newer commits into a fork — builds on. See
 `docs/versioning/17-forks-and-residency.md`.
 
@@ -34,6 +35,11 @@ the next step — taking the parent's newer commits into a fork — builds on. S
   point). Every as-of read of a fork follows it — its state, heads, bounded values, what changed in a
   window, time travel, restore and export — so a fork can later take its parent's newer commits by
   adding a row, and every earlier commit of the fork still reads what it read.
+- **A fork says how far it is from its parent.** Each live fork in `GET …/forks` carries `ahead` (the
+  entities it changed since its last merged review, or its fork point), `behind` (those its parent
+  changed that it has not taken in), `updateRecommended` (`behind` reaches
+  `GRAPHVER_FORK_REWIND_WARN`, default 50,000, or its reads are past the ceiling), `readsFrom`
+  (`overlay` or `postgres`) and `countsCapped` (a count stopped at `GRAPHVER_FORK_REWIND_MAX`).
 
 ### Changed
 
@@ -50,18 +56,39 @@ the next step — taking the parent's newer commits into a fork — builds on. S
   keeps each fork's data source in step with its graph, and deletes one left without a graph after
   ten minutes (a fork whose making crashed). When a fork's data source is deleted, the views on it
   go to its nearest live parent, losing the fork's draft they were pinned to.
-- **No fork's data source reaches a FalkorDB graph of its own.** Its reads compose its own rows over
-  its parent's in Postgres, and its writes are commits; the provider registry hands out its parent's
-  graph read only. Anything that needs a data source's own store — an aggregation trigger, a
-  dedicated rollup graph or projection mode, a projection move, bringing outside changes into
-  history — is **409** `fork_has_no_store`. Native queries on a fork are **501**
-  `native_query_unavailable`, and deep search is **501**: run them on the parent. Probes, stats,
-  silent-source alerts, the reconcile sweeper and the capacity views leave forks out.
+- **A fork reads through its root's published graph.** Its `main` is read as a draft's is: the
+  FalkorDB graph of the data source at the top of its fork chain, with a patch set of what either
+  side changed since they parted laid over it, classified from content hashes, loaded a page at a
+  time, kept per fork head and extended when only the root moved. A root still catching up, evicted
+  or in the trash is read from Postgres instead, the same data more slowly, and so is a fork whose
+  patch set would pass `GRAPHVER_FORK_REWIND_MAX` (default 200,000) entities. Looking up an entity
+  the fork never changed by its URN finds it. Deep search on a fork runs in the root's graph, without
+  the fork's own changes, and its notes say so (**501** while the root catches up, or past the
+  ceiling); native queries are **501** `native_query_unavailable`: run them on the parent.
+- **No fork's data source reaches a FalkorDB graph of its own.** Its writes are commits; the provider
+  registry hands out its parent's graph read only. Anything that needs a data source's own store — an
+  aggregation trigger, a dedicated rollup graph or projection mode, a projection move, bringing
+  outside changes into history — is **409** `fork_has_no_store`, and making one the workspace's
+  default is **409** `fork_not_primary`. Probes, stats, silent-source alerts, the reconcile sweeper
+  and the capacity views leave forks out.
+- **A fork gets no FalkorDB copy.** Forking pins no key, and the projector never projects a fork: a
+  fork's rebuild is **409** (no target), and Check sync answers `skippedReason` for it. A fork's
+  watermark is its root's, the graph it reads through (`readsThrough`), and the fleet inventory no
+  longer shows a fork without a key as behind.
+- **A fork has no stats.** Nothing polls them — they would compose the whole graph — and a stats read
+  of a fork's data source answers `status: "unavailable"` (`missing_fields:
+  ["not_available_for_a_fork"]`) instead of "computing" for a poll that never lands.
 
 ### Fixed
 
 - **A managed data source that names no graph no longer reads its provider's default graph**: the
   provider registry refuses it, where it used to hand out whatever graph the provider defaulted to.
+- **An edge a draft changed only in its properties is counted once.** The draft's overlay added it
+  where the published graph already had it, so rollups, degrees and its source's child count were one
+  too many. It now serves the draft's value and counts the edge where it runs.
+- **A draft no longer shows main's later edit of an edge's properties.** The draft reads main as it
+  was when the draft branched, but an edge main changed only in its properties since read as main
+  has it now.
 
 ### Upgrading
 
@@ -78,18 +105,28 @@ the next step — taking the parent's newer commits into a fork — builds on. S
 - **The data-source routes refuse a fork's data source.** Delete, permanent delete, restore, move,
   move preview and transfer requests on one are **409** `use_fork_endpoints`: trash and restore a fork
   through `DELETE …/graphs/{fork}` and `POST …/graphs/{fork}/restore`, and move its parent. Its
-  settings change on the parent.
+  settings change on the parent. Set-primary on one is **409** `fork_not_primary`.
 - **Data-source lists leave forks out unless asked**: the workspace's list (pass `includeForks=true`),
   the data sources in workspace answers, the workspace's default source and its last-source count.
+  The trash always does: a fork comes back with its graph.
+- **Set `GRAPHVER_DROP_FORK_COPIES=true` after the rollout**, once every pod runs this release, to
+  free the memory of the FalkorDB copies earlier releases made of forks (`<parent key>__fork_<id>`).
+  The versioning worker's reaper then drops each copy that is the fork's own and that nothing else
+  projects into or reads, and clears the fork's pin. Until then the copies stay, neither read nor
+  projected; a pod on an earlier release still reads them, which is why it is off by default.
+- **New settings**, whose defaults fit: `GRAPHVER_FORK_REWIND_MAX` (200,000),
+  `GRAPHVER_FORK_REWIND_WARN` (50,000) and `GRAPHVER_OVERLAY_CACHE_ENTRIES` (1,000,000 entries for
+  every overlay delta a process keeps, drafts' included).
 
 ### Known limitations
 
 - **A fork still reads its parent as of its fork point.** Taking the parent's newer commits into a
   fork comes next, as a new base row.
-- **A fork's reads are served from Postgres**, composing its rows over its parent's, so deep search
-  and native queries are unavailable on it, and looking up, by its URN, an entity the fork has not
-  changed finds nothing (its `gv:` id finds it). Reading a fork as an overlay on its parent's
-  published graph comes next.
+- **A fork's own changes are not searchable.** Deep search on a fork answers from its root's
+  published graph, and native queries are unavailable on it.
+- **A fork far behind its parent reads from Postgres.** Past `GRAPHVER_FORK_REWIND_MAX` entities
+  changed on either side since they parted, its reads are slower and search does not reach it, until
+  it takes its parent's newer commits.
 
 ## [Unreleased] — Forks: merged right, and costing what changes in them
 

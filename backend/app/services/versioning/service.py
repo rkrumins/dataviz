@@ -2975,7 +2975,7 @@ class GraphVersioningService:
         """How far a fork is from its parent: ``ahead``, the entities it changed since its last
         merged review, or its fork point (:meth:`_fork_merge_base`); ``behind``, those its parent
         changed that it has not taken in — the parent's window since the base the fork reads
-        (:func:`fork_base_at`); ``update_recommended`` when that is past
+        (:func:`fork_base_at`); ``update_recommended`` when that reaches
         ``config.FORK_REWIND_WARN``, or the fork's reads are past the ceiling, which
         ``reads_from`` says (``overlay`` | ``postgres``, as :meth:`fork_reads_from`). Each count
         stops at the ceiling, ``config.FORK_REWIND_MAX`` (``counts_capped``)."""

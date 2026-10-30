@@ -267,7 +267,7 @@ SQUASH_PAGE: int = int(os.getenv("GRAPHVER_SQUASH_PAGE", "20000"))
 MAX_FORKS_PER_GRAPH: int = int(os.getenv("GRAPHVER_MAX_FORKS_PER_GRAPH", "10"))
 # A fork's main reads its root's store with its patch set laid over it, which classifies every
 # entity either side changed since they parted. Past this many, its reads go to Postgres instead
-# (layered reads) and the fork recommends an update from its parent; past the warning, the
+# (layered reads) and the fork recommends an update from its parent; at the warning, the
 # parent's changes it has not taken in recommend one too.
 FORK_REWIND_MAX: int = int(os.getenv("GRAPHVER_FORK_REWIND_MAX", "200000"))
 FORK_REWIND_WARN: int = int(os.getenv("GRAPHVER_FORK_REWIND_WARN", "50000"))
