@@ -2833,20 +2833,10 @@ class GraphVersioningService:
             s.add(fork_point)
             await s.flush()                      # materialise fork_point.id before linking
             main.head_commit_id = fork_point.id
-            parent_ps = await s.get(ProjectionStateORM, parent_graph_id)
-            # Forks get their own FalkorDB graph — but ONLY when the parent has a real one.
-            # An unpinned parent (test-created, or pre-injection) has no FalkorDB readers, so
-            # its fork must stay unpinned too: deriving a synthetic "gv_<parent>__fork_<id>"
-            # name would make the projection worker materialise an orphan key nothing reads.
-            parent_name = parent_ps.falkor_graph_name if parent_ps else None
-            s.add(ProjectionStateORM(
-                graph_id=fork.id, projected_commit_seq=0, target_commit_seq=base_seq,
-                falkor_graph_name=(f"{parent_name}__fork_{fork.id}" if parent_name else None),
-                falkor_provider=(parent_ps.falkor_provider if parent_ps else None),  # same instance as parent
-                # WE minted this name (`…__fork_<id>`), so the key is ours and nobody else's — the
-                # one case where ownership is provable rather than merely asserted.
-                owns_falkor_graph=bool(parent_name),
-            ))
+            # A fork has no FalkorDB copy: it reads through its root's store, its patch set over
+            # it. Its row names no key, as every graph has one (the watermark reads its root's).
+            s.add(ProjectionStateORM(graph_id=fork.id, projected_commit_seq=0,
+                                     target_commit_seq=base_seq, owns_falkor_graph=False))
             return {
                 "graph_id": fork.id,
                 "data_source_id": fork.data_source_id,
@@ -3768,7 +3758,21 @@ class GraphVersioningService:
 
     async def projection_watermark(self, graph_id: str) -> Dict[str, object]:
         """Read freshness for a graph's FalkorDB projection — attached to reads so
-        a client knows whether it's seeing the latest committed `main`."""
+        a client knows whether it's seeing the latest committed `main`.
+
+        A fork has no projection: it reads through its root's store (``reads_through``, the root's
+        graph id), so its watermark is its root's — the root's revisions, freshness and state —
+        naming no key, owning none: nothing reads a fork's key through it, and no screen shows a
+        fork behind on a projection it does not have."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            root = graph
+            while root is not None and root.fork_parent_graph_id:
+                root = await s.get(GraphORM, root.fork_parent_graph_id)
+        if root is not None and root.id != graph_id:
+            return {**await self.projection_watermark(root.id), "reads_through": root.id,
+                    "falkor_graph_name": None, "falkor_provider": None,
+                    "owns_falkor_graph": False, "retired_keys": [], "external_drift": None}
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
@@ -3855,7 +3859,7 @@ class GraphVersioningService:
         the full committed ``main`` window ``(0, target]`` into the real graph — idempotent
         MERGE/DETACH DELETE, so it converges to exactly committed main (deletes included), once.
         Returns the OLD name when it changed (so the caller can drop the now-orphaned graph), else
-        ``None``. A fork is left untouched — it legitimately owns its ``__fork_`` graph.
+        ``None``. A fork is left untouched — it has no FalkorDB graph of its own.
 
         Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
         unfinished, and when another versioned graph already projects into ``falkor_graph_name``
@@ -3898,13 +3902,13 @@ class GraphVersioningService:
 
         Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
         unfinished: a rebuild would wipe the data source's own FalkorDB graph and reseed it from a
-        main parked at genesis."""
+        main parked at genesis. ``False`` for a fork, which has no FalkorDB copy to rebuild."""
         async with self._session() as s:
             await self._lock_graph(s, graph_id)
             await self._assert_not_bootstrapping(s, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
             graph = await s.get(GraphORM, graph_id)
-            if ps is None or graph is None:
+            if ps is None or graph is None or graph.fork_parent_graph_id:
                 return False
             if ps.status in ("projecting", "rebuilding") and ps.projected_commit_seq < ps.target_commit_seq:
                 return False

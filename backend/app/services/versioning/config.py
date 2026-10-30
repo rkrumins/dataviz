@@ -261,9 +261,9 @@ NARROW_SQUASH: bool = os.getenv("GRAPHVER_NARROW_SQUASH", "1").lower() not in ("
 # instead, in the same one commit and transaction, so a publish of millions fits the worker.
 SQUASH_PAGED_ABOVE: int = int(os.getenv("GRAPHVER_SQUASH_PAGED_ABOVE", "200000"))
 SQUASH_PAGE: int = int(os.getenv("GRAPHVER_SQUASH_PAGE", "20000"))
-# Live (not tombstoned) forks one graph may have; one more is refused with 409 fork_limit. Each
-# fork gets its own FalkorDB key on the parent's instance, so this bounds that until FalkorDB
-# capacity management (E7) brings a real quota.
+# Live (not tombstoned) forks one graph may have; one more is refused with 409 fork_limit. A fork
+# has no FalkorDB key of its own (it reads through its root's), so this bounds the readers' patch
+# sets and the forks' rows, until capacity management (E7) brings a real quota.
 MAX_FORKS_PER_GRAPH: int = int(os.getenv("GRAPHVER_MAX_FORKS_PER_GRAPH", "10"))
 # A fork's main reads its root's store with its patch set laid over it, which classifies every
 # entity either side changed since they parted. Past this many, its reads go to Postgres instead
@@ -271,6 +271,9 @@ MAX_FORKS_PER_GRAPH: int = int(os.getenv("GRAPHVER_MAX_FORKS_PER_GRAPH", "10"))
 # parent's changes it has not taken in recommend one too.
 FORK_REWIND_MAX: int = int(os.getenv("GRAPHVER_FORK_REWIND_MAX", "200000"))
 FORK_REWIND_WARN: int = int(os.getenv("GRAPHVER_FORK_REWIND_WARN", "50000"))
+# Drop the FalkorDB copies earlier releases made of forks (Reaper.fork_copies). Off by default:
+# pods still running such a release read and project them. Turn it on once every pod runs this one.
+DROP_FORK_COPIES: bool = os.getenv("GRAPHVER_DROP_FORK_COPIES", "false").lower() in ("1", "true", "yes")
 # Entries the overlay deltas a process keeps for drafts' and forks' reads may hold together; the
 # least recently read go first, the newest is kept whatever its size.
 OVERLAY_CACHE_ENTRIES: int = int(os.getenv("GRAPHVER_OVERLAY_CACHE_ENTRIES", "1000000"))

@@ -186,6 +186,83 @@ async def _drop_fork_row(ds_id: Optional[str]) -> None:
         logger.exception("purge: removing fork %s's data source failed; the reaper will", ds_id)
 
 
+async def drop_if_ours(session_factory, factory, key_in_use, *, graph_id: str,
+                       name: Optional[str], provider: Optional[str], owned: bool,
+                       ds_id: Optional[str], who: str, marked: bool = False) -> Tuple[bool, str]:
+    """Drop ``graph_id``'s FalkorDB key ``(provider, name)`` — if, and only if, it is ours to drop
+    and nothing else reads it — and say what became of it: ``(gone, verdict)``, ``gone`` when the
+    key was dropped or was already gone. ``marked``: a key we only vouch for while it carries the
+    projector's pass marker (or is one of the graph's own platform keys). ``who`` names the caller
+    in the log. The purge's rules, which nothing else may loosen (``PurgeRunner._phase_falkor``)."""
+    shared_with = 0
+    if name:
+        async with session_factory() as s:
+            # Belt and braces: even a graph we minted must not be dropped while another
+            # SURVIVING graph still projects into it. Ownership answers "did we make this?";
+            # this answers "is anyone still using it?".
+            shared_with = int(await s.scalar(text(
+                f'SELECT count(*) FROM "{_sch()}"."projection_state" p '
+                f'JOIN "{_sch()}"."graphs" g ON g.id = p.graph_id '
+                f'WHERE p.falkor_graph_name = :n AND p.graph_id <> :g '
+                f'  AND g.deleted_at IS NULL'
+            ), {"n": name, "g": graph_id}) or 0)
+
+    # Ownership says we made the key; it does not say nobody else reads it now — another
+    # data source bound to the same name, or a catalog entry publishing it. Asked last (only
+    # of a key we would otherwise drop), and an answer we cannot get keeps the key: fail
+    # closed.
+    readers: Optional[List[dict]] = []
+    if name and owned and not shared_with:
+        try:
+            readers = await key_in_use(provider, name, ds_id)
+        except Exception:                               # noqa: BLE001 — fail closed
+            logger.warning("%s: could not ask who reads '%s'", who, name, exc_info=True)
+            readers = None
+
+    if not name:
+        return False, "no projected graph"
+    if not owned:
+        return False, f"PROTECTED: '{name}' is not ours (we did not create it) — left untouched"
+    if shared_with:
+        return False, f"PROTECTED: '{name}' is still projected by {shared_with} live graph(s)"
+    if readers is None:
+        return False, f"PROTECTED: could not check what else reads '{name}' — left untouched"
+    if readers:
+        return False, (f"PROTECTED: '{name}' is still read by {len(readers)} data source(s) or "
+                       "catalog entr(ies) — left untouched")
+    if factory is None:
+        return False, f"skipped: no graph client configured — '{name}' left in place"
+    try:
+        client = factory(name, provider)
+        if inspect.isawaitable(client):
+            client = await client
+        if marked:
+            # A key the projector wrote carries its pass marker; one without it is not
+            # a key we can vouch for, unless it is one of the graph's own platform keys,
+            # which a reseed cut short leaves without one.
+            from . import keymigrate
+            from .projection import read_projection_marker
+            exists, seq = await read_projection_marker(client)
+            if exists is False:
+                return True, f"'{name}' was already gone"
+            if seq is None and not keymigrate.is_owned_key(graph_id, name):
+                return False, (f"PROTECTED: '{name}' holds no projection marker of ours — "
+                               "left untouched")
+        await client.delete()
+        logger.warning("%s DROPPED FalkorDB graph %s (we created it)", who, name)
+        # A graph later written under the same name gets a new id catalogue;
+        # every long-lived reader must drop its old one (graph_generation).
+        from backend.app.providers.graph_generation import bump_graph_generation
+        await bump_graph_generation(name, reason=who)
+        return True, f"dropped '{name}'"
+    except Exception as exc:                            # pragma: no cover - infra
+        # A leaked FalkorDB graph is recoverable (cleanup script). Failing the whole
+        # purge over it — and stranding millions of SQL rows — is not an improvement.
+        verdict = f"could not drop '{name}': {exc}"
+        logger.warning("%s: %s", who, verdict)
+        return False, verdict
+
+
 class PurgeRunner:
     """Executes `job_type='purge'` jobs. Hosted by the versioning worker's bootstrap lane, on the
     job lease (``job_lease``) like every other job."""
@@ -356,75 +433,10 @@ class PurgeRunner:
             ds_id = getattr(await s.get(JobORM, lease.job_id), "data_source_id", None)
 
         async def verdict_for(name, provider, owned, *, marked: bool = False) -> str:
-            shared_with = 0
-            if name:
-                async with self._session() as s:
-                    # Belt and braces: even a graph we minted must not be dropped while another
-                    # SURVIVING graph still projects into it. Ownership answers "did we make this?";
-                    # this answers "is anyone still using it?".
-                    shared_with = int(await s.scalar(text(
-                        f'SELECT count(*) FROM "{_sch()}"."projection_state" p '
-                        f'JOIN "{_sch()}"."graphs" g ON g.id = p.graph_id '
-                        f'WHERE p.falkor_graph_name = :n AND p.graph_id <> :g '
-                        f'  AND g.deleted_at IS NULL'
-                    ), {"n": name, "g": graph_id}) or 0)
-
-            # Ownership says we made the key; it does not say nobody else reads it now — another
-            # data source bound to the same name, or a catalog entry publishing it. Asked last (only
-            # of a key we would otherwise drop), and an answer we cannot get keeps the key: fail
-            # closed.
-            readers: Optional[List[dict]] = []
-            if name and owned and not shared_with:
-                try:
-                    readers = await self._key_in_use(provider, name, ds_id)
-                except Exception:                               # noqa: BLE001 — fail closed
-                    logger.warning("purge %s: could not ask who reads '%s'", lease.job_id, name,
-                                   exc_info=True)
-                    readers = None
-
-            if not name:
-                return "no projected graph"
-            if not owned:
-                return f"PROTECTED: '{name}' is not ours (we did not create it) — left untouched"
-            if shared_with:
-                return f"PROTECTED: '{name}' is still projected by {shared_with} live graph(s)"
-            if readers is None:
-                return f"PROTECTED: could not check what else reads '{name}' — left untouched"
-            if readers:
-                return (f"PROTECTED: '{name}' is still read by {len(readers)} data source(s) or "
-                        "catalog entr(ies) — left untouched")
-            if self._factory is None:
-                return f"skipped: no graph client configured — '{name}' left in place"
-            try:
-                client = self._factory(name, provider)
-                if inspect.isawaitable(client):
-                    client = await client
-                if marked:
-                    # A key the projector wrote carries its pass marker; one without it is not
-                    # a key we can vouch for, unless it is one of the graph's own platform keys,
-                    # which a reseed cut short leaves without one.
-                    from . import keymigrate
-                    from .projection import read_projection_marker
-                    exists, seq = await read_projection_marker(client)
-                    if exists is False:
-                        return f"'{name}' was already gone"
-                    if seq is None and not keymigrate.is_owned_key(graph_id, name):
-                        return (f"PROTECTED: '{name}' holds no projection marker of ours — "
-                                "left untouched")
-                await client.delete()
-                logger.warning("purge %s DROPPED FalkorDB graph %s (we created it)",
-                               lease.job_id, name)
-                # A graph later written under the same name gets a new id catalogue;
-                # every long-lived reader must drop its old one (graph_generation).
-                from backend.app.providers.graph_generation import bump_graph_generation
-                await bump_graph_generation(name, reason=f"purge {lease.job_id}")
-                return f"dropped '{name}'"
-            except Exception as exc:                            # pragma: no cover - infra
-                # A leaked FalkorDB graph is recoverable (cleanup script). Failing the whole
-                # purge over it — and stranding millions of SQL rows — is not an improvement.
-                verdict = f"could not drop '{name}': {exc}"
-                logger.warning("purge %s: %s", lease.job_id, verdict)
-                return verdict
+            return (await drop_if_ours(
+                self._session, self._factory, self._key_in_use, graph_id=graph_id, name=name,
+                provider=provider, owned=owned, ds_id=ds_id, marked=marked,
+                who=f"purge {lease.job_id}"))[1]
 
         verdict = await verdict_for(name, provider, owned)
         # Every key a move left is one we owned: the move refuses any other.
@@ -844,9 +856,13 @@ class Reaper:
     fork's row in step with its graph.
     """
 
-    def __init__(self, *, app_session_factory=None, graphver_session_factory=None):
+    def __init__(self, *, app_session_factory=None, graphver_session_factory=None,
+                 graph_factory=None,
+                 key_in_use: Optional[Callable[..., Awaitable[List[dict]]]] = None):
         self._app = app_session_factory
         self._gv = graphver_session_factory or db.graphver_session
+        self._factory = graph_factory          # FalkorDB keys, for the forks' old copies
+        self._key_in_use = key_in_use or graph_key_readers
 
     def _app_sessions(self):
         if self._app is not None:
@@ -1070,6 +1086,51 @@ class Reaper:
             logger.info("reaper: fork data sources — %s made, %s trashed, %s restored, %s "
                         "removed", out["created"], out["trashed"], out["restored"], out["removed"])
         return out
+
+    async def fork_copies(self) -> int:
+        """Drop the FalkorDB copies earlier releases made of forks (``<parent key>__fork_<id>``),
+        which nothing reads now that a fork reads through its root's store — only once
+        ``GRAPHVER_DROP_FORK_COPIES`` says every process runs a release that neither reads nor
+        projects them. A copy goes by the purge's rules for a key (:func:`drop_if_ours`): ours,
+        the name minted for the fork, its projector's marker in it, nothing else projecting into
+        it or reading it; then the fork's pin is cleared. One kept is kept with its pin, and asked
+        about again on the next pass. Returns how many it dropped (or found gone)."""
+        if not config.DROP_FORK_COPIES:
+            return 0
+        async with self._gv() as gs:
+            copies = (await gs.execute(
+                select(ProjectionStateORM.graph_id, ProjectionStateORM.falkor_graph_name,
+                       ProjectionStateORM.falkor_provider, ProjectionStateORM.owns_falkor_graph,
+                       GraphORM.data_source_id)
+                .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
+                .where(GraphORM.fork_parent_graph_id.isnot(None),
+                       ProjectionStateORM.falkor_graph_name.isnot(None)))).all()
+        dropped = 0
+        for gid, name, provider, owned, ds_id in copies:
+            try:
+                gone, verdict = await drop_if_ours(
+                    self._gv, self._factory, self._key_in_use, graph_id=gid, name=name,
+                    provider=provider, owned=bool(owned) and name.endswith(f"__fork_{gid}"),
+                    ds_id=ds_id, marked=True, who="reaper")
+                if not gone:
+                    logger.info("reaper: fork %s's copy %s kept: %s", gid, name, verdict)
+                    continue
+                async with self._gv() as gs:
+                    await gs.execute(
+                        update(ProjectionStateORM)
+                        .where(ProjectionStateORM.graph_id == gid,
+                               ProjectionStateORM.falkor_graph_name == name)
+                        .values(falkor_graph_name=None, falkor_provider=None,
+                                owns_falkor_graph=False, projected_commit_seq=0, status="idle",
+                                epoch=ProjectionStateORM.epoch + 1, updated_at=_now())
+                        .execution_options(synchronize_session=False))
+                dropped += 1
+            except Exception:
+                logger.exception("reaper: dropping fork %s's copy %s failed; carrying on",
+                                 gid, name)
+        if dropped:
+            logger.info("reaper: dropped %d fork cop(ies) nothing reads", dropped)
+        return dropped
 
     async def _expired_forks(self, cutoff: str) -> int:
         """Queue the purge of each trashed fork whose grace ran out by ``cutoff``. One whose purge

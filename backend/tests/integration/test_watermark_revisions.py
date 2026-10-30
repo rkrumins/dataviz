@@ -102,15 +102,17 @@ async def _projection_fields() -> None:
         "projectionKey": f"blank_{sfx}", "providerId": prov, "providerName": "Falkor West", "owned": True}
     assert {k: wm[pinned][k] for k in ("projectionKey", "providerId", "providerName", "owned")} == {
         "projectionKey": f"customer_{sfx}", "providerId": prov, "providerName": "Falkor West", "owned": False}
+    # A fork has no projection of its own: its watermark is its root's, naming no key.
     assert {k: wm[fork][k] for k in ("projectionKey", "providerId", "providerName", "owned")} == {
-        "projectionKey": f"customer_{sfx}__fork_{fork}", "providerId": prov,
-        "providerName": "Falkor West", "owned": True}
+        "projectionKey": None, "providerId": None, "providerName": None, "owned": False}
+    assert (wm[fork]["readsThrough"], wm[pinned]["readsThrough"]) == (pinned, None)
     # Retry and liveness state: a liveness reset names itself; any other failure is not one.
     assert {k: wm[pinned][k] for k in ("epoch", "failedAttempts", "nextRetryAt", "livenessError")} == {
         "epoch": 7, "failedAttempts": 3, "nextRetryAt": "2026-10-17T12:00:00Z",
         "livenessError": "liveness: projection key missing"}
     assert wm[blank]["failedAttempts"] == 0 and wm[blank]["nextRetryAt"] is None
-    assert wm[fork]["lastError"] == "FalkorDB unreachable" and wm[fork]["livenessError"] is None
+    assert {k: wm[fork][k] for k in ("lastError", "livenessError", "epoch", "committed")} == {
+        k: wm[pinned][k] for k in ("lastError", "livenessError", "epoch", "committed")}
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")

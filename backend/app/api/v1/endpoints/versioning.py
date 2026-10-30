@@ -976,6 +976,9 @@ class WatermarkModel(_ApiModel):
     # `verify`, or a change notification), null when there is none. Bring it into history with
     # POST /graph/resync.
     external_drift: Optional[Dict[str, Any]] = Field(default=None, alias="externalDrift")
+    # A fork has no projection: the root graph whose store it reads through, whose watermark this
+    # is (no key of its own). Null for a graph that is no fork.
+    reads_through: Optional[str] = Field(default=None, alias="readsThrough")
 
 
 class SavedSinceModel(_ApiModel):
@@ -2336,7 +2339,8 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           failed_attempts=wm.get("failed_attempts", 0),
                           next_retry_at=wm.get("next_retry_at"),
                           liveness_error=wm.get("liveness_error"),
-                          external_drift=wm.get("external_drift"))
+                          external_drift=wm.get("external_drift"),
+                          reads_through=wm.get("reads_through"))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:

@@ -1284,16 +1284,21 @@ async def probe_graph_providers(app_state) -> Optional[list]:
     return out or None
 
 
-def _projection_rows():
+def _projection_rows(forks: bool = False):
     """Every versioned graph's projection row — its FalkorDB key, watermark and how far behind it
     is — plus the status buckets the rollup counts (``{bucket: predicate}``). Shared by the lag
-    probe and the fleet inventory, so a graph reads the same in both."""
-    from sqlalchemy import and_, func, select
+    probe and the fleet inventory, so a graph reads the same in both. ``forks``: the rows include
+    forks, and one with no key of its own (it reads through its root's store) is behind on
+    nothing."""
+    from sqlalchemy import and_, case, func, select
 
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
 
     lag = GraphORM.main_head_commit_seq - func.coalesce(
         ProjectionStateORM.projected_commit_seq, 0)
+    if forks:
+        lag = case((and_(GraphORM.fork_parent_graph_id.isnot(None),
+                         ProjectionStateORM.falkor_graph_name.is_(None)), 0), else_=lag)
     status = func.coalesce(ProjectionStateORM.status, "idle")
 
     err = ProjectionStateORM.last_error.isnot(None)
@@ -1435,7 +1440,7 @@ async def list_versioned_graphs(
     present = GraphORM.data_source_id.in_(present_ids)
     is_fork = GraphORM.fork_parent_graph_id.isnot(None)
 
-    rows, _lag, buckets = _projection_rows()
+    rows, _lag, buckets = _projection_rows(forks=True)
     stmt = rows.where(GraphORM.deleted_at.is_(None))
     if provider:
         stmt = stmt.where(func.coalesce(func.nullif(ProjectionStateORM.falkor_provider, ""),

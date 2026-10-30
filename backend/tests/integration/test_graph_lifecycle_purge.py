@@ -573,7 +573,7 @@ async def test_the_reaper_purges_an_expired_trashed_fork_dropping_only_its_own_k
 
     runner = PurgeRunner(lambda name, provider_id=None: _Key(name), key_in_use=_nobody)
     assert (await runner.run_job(await _take(job.id)))["status"] == "completed"
-    assert dropped == [f"{key}__fork_{fid}"]
+    assert dropped == []            # a fork has no key of its own, and its parent's is not ours
 
     assert await _row(gid) is not None and await _row(kept) is not None
     assert await _rows_of(gid, "node_versions") > 0

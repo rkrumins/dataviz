@@ -685,6 +685,10 @@ class FalkorProjector:
             # by ``project_graph``); a customer's graph that recorded none is read for it below.
             SPELLING.set(None if owned else spelling(ps.physical_types))
             unspelled = not owned and ps.physical_types is None
+            if is_fork:
+                # A fork has no FalkorDB copy: it reads through its root's store. A key an earlier
+                # release pinned for one is never written again (the reaper drops it, when asked).
+                return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "fork"}
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
             if name == self.default_graph_name(graph_id):
@@ -1142,6 +1146,8 @@ class FalkorProjector:
                     != literal("gv_").concat(ProjectionStateORM.graph_id),
                     # A tombstoned graph keeps its pin for the undo window and must not reseed it.
                     GraphORM.deleted_at.is_(None),
+                    # A fork has no FalkorDB copy (project_graph skips one whatever its row says).
+                    GraphORM.fork_parent_graph_id.is_(None),
                 ).order_by(
                     (func.greatest(ProjectionStateORM.target_commit_seq,
                                    GraphORM.main_head_commit_seq)

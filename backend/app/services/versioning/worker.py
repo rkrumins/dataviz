@@ -325,6 +325,10 @@ class ProjectionWorker:
             except Exception:
                 logger.exception("reaper fork rows error")
             try:
+                await self._reaper.fork_copies()        # earlier releases' copies of forks
+            except Exception:
+                logger.exception("reaper fork copies error")
+            try:
                 await asyncio.wait_for(self._stop.wait(), timeout=config.REAP_POLL_SECS)
             except asyncio.TimeoutError:
                 pass
@@ -474,7 +478,7 @@ def build_worker(projector: FalkorProjector, graph_factory, *, lanes: Iterable[s
             projector=projector,
         ) if bootstrap else None,
         purge=PurgeRunner(graph_factory, consumer=consumer or "purge-1") if bootstrap else None,
-        reaper=Reaper() if bootstrap else None,
+        reaper=Reaper(graph_factory=graph_factory) if bootstrap else None,
         transfers=TransferRunner(import_export) if transfer else None,
         inspections=TransferRunner(import_export, types=INSPECT_TYPES) if transfer else None,
         job_reaper=JobReaper() if transfer else None,
