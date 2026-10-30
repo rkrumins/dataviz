@@ -186,7 +186,7 @@ smoke-mixed:
 smoke-versioning-collab:
 	@mkdir -p $(SMOKE_DIR)/versioning_collab
 	$(LOCUST) -f runners/versioning_collab.py $(SMOKE_LOCUST_ARGS) --csv $(SMOKE_DIR)/versioning_collab/run
-	$(PYTHON) -m lib.slo --smoke $(SMOKE_DIR)/versioning_collab/run_stats.csv
+	$(PYTHON) -m scenarios.versioning_collab $(SMOKE_DIR)/versioning_collab/run_stats.csv
 
 smoke-clean:
 	rm -rf $(SMOKE_DIR)

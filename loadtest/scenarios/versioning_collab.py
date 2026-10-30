@@ -12,7 +12,8 @@ users read canvases. An editor:
   100 a request) then ``POST …/graph/edges/between``, with ``dataSourceId`` and ``branchId``;
 * saves what it staged in the canvas as ONE commit, as the canvas's Save does:
   ``POST /api/v1/{ws}/graph/changes?dataSourceId=&branchId=``, a few node updates, each with the
-  ``baseVersion`` it last read, under an ``Idempotency-Key`` its retries reuse;
+  ``baseVersion`` it last read when the read gave one (a node read from FalkorDB carries none: then
+  a plain patch), under an ``Idempotency-Key`` its retries reuse;
 * now and then saves through the API's other path instead: stage
   (``POST …/branches/{bid}/changes``), then checkpoint (``POST …/branches/{bid}/commit``);
 * polls its draft every ``SYNODIC_COLLAB_FRESHNESS_SECS`` (10, the UI's cadence while the draft
@@ -396,20 +397,30 @@ class CollabEditorTasks(TaskSet):
                                     json={"message": "loadtest collab publish"},
                                     on_success=lambda r: answer.update(r.json()) or True)
         if resp.status_code == 409:
-            kind = answer["detail"].get("type") if isinstance(answer.get("detail"), dict) else None
-            _note(f"versioning-collab:publish:409:{kind}")
-            if kind == "not_up_to_date":                 # a colleague published first: pull again
-                self.behind = True
-            else:                                        # e.g. its policy wants a review: keep
-                self.publishable = False                 # editing it, unpublished
+            self._refused("versioning-collab:publish", answer.get("detail"))
             return
         if resp.status_code == 202:                      # queued on the transfer lane
-            self._follow(answer["graphId"], answer["jobId"])
+            job = self._follow(answer["graphId"], answer["jobId"])
+            if job.get("status") == "failed" and (job.get("error") or {}).get("status") == 409:
+                # Main moved while it waited, or its policy changed: as a refusal inside the
+                # request, which the job answers in its place.
+                self._refused("versioning-collab:publish-job", job["error"].get("detail"))
+                return
         if resp.status_code in (200, 202):
             self._next_draft()
 
-    def _follow(self, graph_id: str, job_id: str) -> None:
-        """A queued publish, followed as the publish dialog follows it, for as long as it does."""
+    def _refused(self, row: str, detail) -> None:
+        """A publish refused with a 409, inside the request or by its job."""
+        kind = detail.get("type") if isinstance(detail, dict) else None
+        _note(f"{row}:409:{kind}")
+        if kind == "not_up_to_date":                     # a colleague published first: pull again
+            self.behind = True
+        else:                                            # e.g. its policy wants a review: keep
+            self.publishable = False                     # editing it, unpublished
+
+    def _follow(self, graph_id: str, job_id: str) -> dict:
+        """A queued publish, followed as the publish dialog follows it, for as long as it does: the
+        job as it ended, or ``{}`` while it is still queued."""
         ws = self.graph[0]
         started, n = time.monotonic(), 0
         while time.monotonic() - started < _FOLLOW_SECS:
@@ -422,8 +433,9 @@ class CollabEditorTasks(TaskSet):
                                  on_success=lambda r: job.update(r.json()) or True)
             if job.get("status") in ("completed", "failed", "cancelled"):
                 _note(f"versioning-collab:publish-job:{job['status']}")
-                return
+                return job
         _note("versioning-collab:publish-job:still-queued")
+        return {}
 
 
 class CollabReaderTasks(TaskSet):

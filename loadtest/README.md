@@ -289,17 +289,26 @@ Readers' rows are `canvas-nodes` and `canvas-edges`.
   change, as an account that may edit and publish there. Drafts are named `loadtest-collab` and
   are resumed by the next run rather than opened again.
 - **What collaboration answers is not a failure.** A publish refused because main moved since the
-  pull, or by the data source's drafts policy (409), a save whose base moved (409
-  `merge_conflict`) and a pull with conflicts (the draft is abandoned for a new one) each count as
-  a `COLLAB` row of their own, such as `versioning-collab:publish:409:not_up_to_date`.
+  pull, or by the data source's drafts policy (409, inside the request or by its job), a save whose
+  base moved (409 `merge_conflict`) and a pull with conflicts (the draft is abandoned for a new one)
+  each count as a `COLLAB` row of their own, such as `versioning-collab:publish:409:not_up_to_date`
+  or `versioning-collab:publish-job:409:not_up_to_date`.
+- **The transfer lane only gets publishes too large for the request.** A publish runs as a job when
+  its draft changes more than `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` entities (20,000 by default);
+  this test's drafts change about 20, so at the default every publish is answered inside the
+  request. To load the lane too, run the API under test with a lower value (6 sends nearly every
+  publish there).
+- **One sign-in per Locust process, never refreshed.** Keep a run shorter than the API's
+  access-token lifetime (`JWT_EXPIRY_MINUTES`: 15 in the shipped configs, 5 by default), or run the
+  API with a longer one; past it, every request answers 401.
 - **The gate at the end** fails the run (exit code 1) when freshness p99 passes 300 ms, a save or
   checkpoint p95 passes 1 s, a publish p95 passes 5 s, or any request met a database pool timeout.
   These are starting points: tune them from a baseline.
 - Editors are counted per Locust process in the share `SYNODIC_COLLAB_EDITORS` gives them, so a
   distributed run spreads the hot graph's editors across its workers.
-- `make smoke-versioning-collab` runs it alone with the smoke settings. It is not part of
-  `make smoke`, because it publishes. Set `SYNODIC_COLLAB_EDITORS` below `SMOKE_USERS` to have
-  readers too.
+- `make smoke-versioning-collab` runs it alone with the smoke settings and checks the run with the
+  scenario's own gate. It is not part of `make smoke`, because it publishes. Set
+  `SYNODIC_COLLAB_EDITORS` below `SMOKE_USERS` to have readers too.
 
 ## Validate the run — SLO check
 
