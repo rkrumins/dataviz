@@ -458,6 +458,118 @@ def test_a_view_made_on_a_fork_while_its_parent_moves_goes_with_it():
         assert (await _row(fork_ds)).workspace_id == to_ws
     _run(case)
 
+def test_the_reaper_never_undoes_a_trash_and_a_restore_it_did_not_see(monkeypatch):
+    """The reaper read a fork's row live and its graph trashed (a trash between its two writes),
+    and tombstoned the row where it was still live. When the trash's row and then a restore of
+    graph and row landed between those reads and that write, it tombstoned a restored fork. It now
+    decides each row under the row's lock, from its graph as it is then."""
+    from backend.app.services.versioning import purge_worker
+
+    async def case(svc):
+        _parent_ds, gid = await _parent(svc)
+        async with _client() as c:
+            fork = (await _fork(c, gid)).json()
+        ds_id, fgid = fork["dataSourceId"], fork["graphId"]
+        await svc.delete_fork(graph_id=fgid, workspace_id=WS, actor="u")    # the row: not yet
+
+        url = os.environ["MANAGEMENT_DB_URL"].replace("+asyncpg", "+psycopg2")
+        gv_url = os.environ.get("GRAPHVER_DB_URL", url).replace("+asyncpg", "+psycopg2")
+        real_now = purge_worker._now
+
+        def landed_meanwhile():
+            """The trash's row, then a restore — graph, then row: after the reads, before the
+            write (the reaper takes ``now`` between the two)."""
+            with sa.create_engine(url).begin() as m:
+                m.execute(sa.text("UPDATE workspace_data_sources SET deleted_at = :t WHERE id = :i"),
+                          {"t": real_now(), "i": ds_id})
+            with sa.create_engine(gv_url).begin() as g:
+                g.execute(sa.text(f'UPDATE "{config.graphver_schema()}".graphs SET deleted_at = NULL, '
+                                  "deleted_by = NULL WHERE id = :i"), {"i": fgid})
+            with sa.create_engine(url).begin() as m:
+                m.execute(sa.text("UPDATE workspace_data_sources SET deleted_at = NULL WHERE id = :i"),
+                          {"i": ds_id})
+            monkeypatch.setattr(purge_worker, "_now", real_now)
+            return real_now()
+
+        monkeypatch.setattr(purge_worker, "_now", landed_meanwhile)
+        await purge_worker.Reaper().fork_rows()
+        assert (await svc.get_graph(fgid))["deleted_at"] is None
+        assert (await _row(ds_id)).deleted_at is None
+    _run(case)
+
+
+def test_the_reaper_removes_orphan_rows_one_at_a_time_deepest_first():
+    """Orphan rows (no graph, ten minutes old) went in one statement: a row another fork's row
+    still names failed it on RESTRICT, every pass, and a fork's fork could be deleted after its
+    parent. Each now goes on its own, the deepest first, and one that fails is left alone."""
+    from datetime import datetime, timedelta, timezone
+
+    from backend.app.db.models import WorkspaceDataSourceORM as DS
+    from backend.app.services import fork_sources
+    from backend.app.services.versioning.purge_worker import Reaper
+
+    async def case(svc):
+        parent_ds, gid = await _parent(svc)
+        parent = await _row(parent_ds)
+        old = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+        tag = os.urandom(3).hex()
+        held, holds, alone, top, under = (f"dsfork_orph_{n}_{tag}" for n in
+                                          ("held", "holds", "alone", "top", "under"))
+        async with _mgmt() as s:
+            for ds_id, of in ((held, parent), (alone, parent), (top, parent)):
+                row = fork_sources.fork_row(of, ds_id=ds_id, name="X", parent_graph_id=gid, actor="u")
+                row.created_at = old
+                s.add(row)
+            await s.flush()
+            for ds_id, of in ((holds, held), (under, top)):
+                row = fork_sources.fork_row(await s.get(DS, of), ds_id=ds_id, name="Y",
+                                            parent_graph_id=gid, actor="u")
+                row.created_at = old
+                s.add(row)
+            await s.commit()
+        await svc.create_graph(data_source_id=holds, workspace_id=WS, actor="u")   # not an orphan
+
+        out = await Reaper().fork_rows()
+        assert out["removed"] >= 3
+        assert [await _row(i) is None for i in (alone, under, top, held, holds)] == [
+            True, True, True, False, False]
+    _run(case)
+
+
+def test_an_expired_parent_waits_for_the_fork_rows_that_name_it(caplog):
+    """A parent's graph with nothing past its genesis is purged whatever forks it has: they read
+    nothing of it. Its expired row was then deleted while fork rows still named it, and failed on
+    RESTRICT on every pass of the reaper. It now waits for them."""
+    import logging
+    from datetime import datetime, timedelta, timezone
+
+    from backend.app.services.versioning.purge_worker import (
+        PurgeRunner, Reaper, create_purge_job, tombstone_graphs_for_data_source)
+    from backend.tests.integration.test_graph_lifecycle_purge import _nobody, _take
+
+    async def case(svc):
+        parent_ds, gid = await _parent(svc)
+        async with _client() as c:
+            fork = (await _fork(c, gid)).json()
+        assert (await svc.get_graph(gid))["main_head_commit_seq"] <= 1
+        await tombstone_graphs_for_data_source(data_source_id=parent_ds, workspace_id=WS, actor="u")
+        expired = (datetime.now(timezone.utc) - timedelta(days=config.PURGE_GRACE_DAYS + 1)).isoformat()
+        async with _mgmt() as s:
+            row = await s.get(__import__("backend.app.db.models", fromlist=["x"])
+                              .WorkspaceDataSourceORM, parent_ds)
+            row.deleted_at, row.deleted_by = expired, "u"
+            await s.commit()
+        job = await create_purge_job(graph_id=gid, workspace_id=WS, actor="u",
+                                     require_tombstoned=True)
+        assert (await PurgeRunner(None, key_in_use=_nobody).run_job(await _take(job)))[
+            "status"] == "completed"
+
+        with caplog.at_level(logging.ERROR, logger="backend.app.services.versioning.purge_worker"):
+            await Reaper().run_once()
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR], caplog.text
+        assert await _row(parent_ds) is not None and await _row(fork["dataSourceId"]) is not None
+    _run(case)
+
 def test_a_parents_permanent_delete_purges_its_trashed_forks_first():
     from backend.app.services.versioning.models import JobORM
 

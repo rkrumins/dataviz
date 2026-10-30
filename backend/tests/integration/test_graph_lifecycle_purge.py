@@ -95,6 +95,9 @@ def _app(expired):
         async def execute(self, _stmt):
             return _Rows([(ds, WS, "alice") for ds in expired])
 
+        async def scalar(self, _stmt):
+            return None                                  # no fork's data source names one
+
         async def get(self, _model, ident):
             if ident in expired and ident not in gone:
                 return SimpleNamespace(id=ident, deleted_at="2020-01-01T00:00:00+00:00")

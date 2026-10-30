@@ -907,6 +907,17 @@ class Reaper:
                 # that lies about what it reclaimed is worse than one that does nothing.
                 async with Session() as s:
                     row = await s.get(WorkspaceDataSourceORM, ds_id)
+                    named = await s.scalar(select(WorkspaceDataSourceORM.id).where(
+                        WorkspaceDataSourceORM.fork_of_data_source_id == ds_id).limit(1))
+                    if named is not None:
+                        # Its forks' rows still name it (a parent with nothing past its genesis is
+                        # purged whatever forks it has): it waits for them to go, as they will
+                        # with their graphs.
+                        if ds_id not in _LEFT_STANDING:
+                            _LEFT_STANDING.add(ds_id)
+                            logger.warning("reaper: %s is past its grace period, but forks' data "
+                                           "sources still name it; it waits for them", ds_id)
+                        continue
                     if row is not None and row.deleted_at is not None:
                         await s.delete(row)
                         await s.commit()
@@ -952,8 +963,10 @@ class Reaper:
         route makes one; a row whose graph is trashed is tombstoned, and one whose graph is live
         is restored; a row whose graph is gone — never made, or purged — is deleted once it is
         ``ORPHAN_FORK_ROW_SECS`` old (a younger one may be a fork still being made). Every step is
-        idempotent. The rows are read before the graphs, so a trash or a restore in flight (graph
-        first, then row) is only ever carried forward, never undone."""
+        idempotent. Each row out of step is put right under its lock, from its graph as it is
+        then: a trash or a restore that lands meanwhile (graph first, then row) is only ever
+        carried forward, never undone. Orphans go one at a time, a fork's fork before its fork: a
+        row another still names is left, and the rest go."""
         from sqlalchemy.exc import IntegrityError
 
         from backend.app.db.models import WorkspaceDataSourceORM as DS
@@ -962,8 +975,8 @@ class Reaper:
         Session = self._app_sessions()
         async with Session() as s:
             rows = {r.id: r for r in (await s.execute(select(
-                DS.id, DS.deleted_at, DS.created_at).where(DS.fork_of_data_source_id.isnot(None))
-            )).all()}
+                DS.id, DS.deleted_at, DS.created_at, DS.fork_of_data_source_id).where(
+                DS.fork_of_data_source_id.isnot(None)))).all()}
         parent = aliased(GraphORM)
         async with self._gv() as gs:
             graphs = {g.data_source_id: g for g in (await gs.execute(select(
@@ -1001,28 +1014,54 @@ class Reaper:
                                  g.data_source_id)
 
         now = _now()
-        async with Session() as s:
-            for ds_id, row in rows.items():
-                g = graphs.get(ds_id)
-                if g is not None and g.deleted_at is not None and row.deleted_at is None:
-                    out["trashed"] += (await s.execute(update(DS).where(
-                        DS.id == ds_id, DS.deleted_at.is_(None)).values(
-                        deleted_at=g.deleted_at, deleted_by=g.deleted_by, updated_at=now))).rowcount
-                elif g is not None and g.deleted_at is None and row.deleted_at is not None:
-                    out["restored"] += (await s.execute(update(DS).where(
-                        DS.id == ds_id, DS.deleted_at.isnot(None)).values(
-                        deleted_at=None, deleted_by=None, updated_at=now))).rowcount
-            await s.commit()                           # the app session doesn't commit on exit
+        for ds_id, row in rows.items():
+            g = graphs.get(ds_id)
+            if g is None or (g.deleted_at is None) == (row.deleted_at is None):
+                continue                               # no graph, or in step
+            try:
+                async with Session() as s:
+                    held = (await s.execute(select(DS.deleted_at).where(DS.id == ds_id)
+                                            .with_for_update())).one_or_none()
+                    async with self._gv() as gs:
+                        g = (await gs.execute(select(GraphORM.deleted_at, GraphORM.deleted_by)
+                                              .where(GraphORM.data_source_id == ds_id))).one_or_none()
+                    if held is None or g is None:
+                        continue
+                    if g.deleted_at is not None and held.deleted_at is None:
+                        await s.execute(update(DS).where(DS.id == ds_id).values(
+                            deleted_at=g.deleted_at, deleted_by=g.deleted_by, updated_at=now))
+                        out["trashed"] += 1
+                    elif g.deleted_at is None and held.deleted_at is not None:
+                        await s.execute(update(DS).where(DS.id == ds_id).values(
+                            deleted_at=None, deleted_by=None, updated_at=now))
+                        out["restored"] += 1
+                    await s.commit()                   # the app session doesn't commit on exit
+            except Exception:
+                logger.exception("reaper: putting fork %s's data source in step failed; carrying "
+                                 "on", ds_id)
+
+        def depth(ds_id: str) -> int:
+            n = 0
+            while ds_id in rows and n <= len(rows):
+                ds_id, n = rows[ds_id].fork_of_data_source_id, n + 1
+            return n
 
         cutoff = _now_minus(ORPHAN_FORK_ROW_SECS)
-        orphans = [ds_id for ds_id, row in rows.items()
-                   if ds_id not in graphs and row.created_at < cutoff]
-        if orphans:
-            async with Session() as s:                 # one statement: a fork's fork goes with it
-                out["removed"] = (await s.execute(delete(DS).where(
-                    DS.id.in_(orphans), DS.fork_of_data_source_id.isnot(None),
-                    DS.created_at < cutoff))).rowcount
-                await s.commit()
+        orphans = sorted((ds_id for ds_id, row in rows.items()
+                          if ds_id not in graphs and row.created_at < cutoff), key=depth, reverse=True)
+        for ds_id in orphans:
+            try:
+                async with Session() as s:
+                    out["removed"] += (await s.execute(delete(DS).where(
+                        DS.id == ds_id, DS.fork_of_data_source_id.isnot(None),
+                        DS.created_at < cutoff))).rowcount
+                    await s.commit()
+            except IntegrityError:
+                logger.warning("reaper: fork %s's data source has no graph, but another fork's "
+                               "still names it; left for a later pass", ds_id)
+            except Exception:
+                logger.exception("reaper: removing fork %s's data source failed; carrying on",
+                                 ds_id)
         if any(out.values()):
             logger.info("reaper: fork data sources — %s made, %s trashed, %s restored, %s "
                         "removed", out["created"], out["trashed"], out["restored"], out["removed"])
