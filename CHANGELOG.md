@@ -9,6 +9,62 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Versioning at millions of entities
+
+On a graph of millions of entities, everyday work on drafts no longer reads the whole graph, and
+a publish, its projection and a rebuild hold a page of the graph at a time instead of all of it.
+Measured on a graph of 300,000 nodes and 300,000 edges (the numbers in
+`docs/versioning/09-scale-limits-and-roadmap.md` §2): publishing it took 369 MB of the worker where
+the same publish of a third of it took 436 MB; projecting it 182 MB instead of 956 MB; rebuilding
+it 209 MB instead of 1,653 MB.
+
+### Changed
+
+- **Saves, pulls, previews and reviews read only what changed.** Every save in a draft read the
+  whole graph's state to find the touched entities' current values; Pull latest, the publish
+  dialog's preview and a review's open, preview, diff and summary each ran a three-way merge of the
+  whole graph. Each now reads the entities its change touches, and the edges and containers its
+  checks and views need around them. A fork still reads whole (forks are next).
+- **A graph's schema read from Postgres is counted there.** The schema panel and the insights
+  collector, reading `main` from Postgres (a graph with no FalkorDB key always does, any graph
+  until its projection catches up with a publish), counted every entity in the web process; they
+  are now counted in Postgres, once per commit.
+- **A publish of more than 200,000 changes goes a page at a time** (`GRAPHVER_SQUASH_PAGED_ABOVE`,
+  `GRAPHVER_SQUASH_PAGE`): still one commit in one transaction, with the same gates and the same
+  result, so a draft of millions can be published by the 4 GiB transfer worker. Above 1,000,000
+  changes the commit's Merkle fingerprint is left unset, as an enable that large leaves its own.
+- **A projection window of more than 200,000 rows is written a page at a time**
+  (`GRAPHVER_PROJECTION_PAGED_ABOVE`, `GRAPHVER_PROJECTION_PAGE`), nodes before edges; its
+  summaries go to the aggregation job.
+- **A full reconcile of more than 500,000 entities goes a page at a time**
+  (`GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE`): a first seed, a rebuild, a reseed after a lost
+  key and the heal after a count mismatch, so a graph of millions can recover from losing its key.
+  Its summaries are rebuilt by the aggregation job rather than moved inline.
+- **A projection window too large to maintain summaries for inline is handed to the aggregation
+  job before it is read**, rather than after reading every edge of it.
+
+### Fixed
+
+- **Moving an edge, and putting a new one where it was, is no longer refused as a duplicate** — in
+  one save, or published from a draft that did it in two. Likewise moving a containment link off a
+  child and giving the child a new parent in the same save, and the cycle check.
+
+### Upgrading
+
+- Nothing to do. Every threshold above is an environment setting with a default; below them
+  everything works as before.
+
+### Known limitations
+
+- **Forks still read whole graphs**: creating one, merging one and every commit on one. See
+  `docs/versioning/09-scale-limits-and-roadmap.md` §4.
+- **A view's export holds the ids of the view's entities** (about 100 bytes each: about 1 GB for a
+  10-million-entity view, within the transfer worker's 4 GiB).
+- **A very large publish holds its graph's publish lock while it runs** (measured: 111 s for
+  600,000 changes): other publishes to that graph wait, then answer 503 `lock_busy`.
+- **A graph with no FalkorDB key is read from Postgres**: listing its top-level entities and
+  searching it are bounded by page, but a graph of millions belongs on a FalkorDB projection.
+
 ## [Unreleased] — Versioning: public and private drafts, a drafts and reviews policy, and working together
 
 Drafts work like feature branches. A **public** draft is seen by everyone who can read its data
