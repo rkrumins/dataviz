@@ -685,6 +685,11 @@ class FalkorProjector:
             # by ``project_graph``); a customer's graph that recorded none is read for it below.
             SPELLING.set(None if owned else spelling(ps.physical_types))
             unspelled = not owned and ps.physical_types is None
+            if ps.status in ("evicted", "waiting_capacity") and config.RESIDENCY_ENABLED:
+                # Residency (doc 17): an evicted graph stays evicted, its reads on Postgres, until
+                # the capacity loop admits its load. Fenced: an eviction after this read bumped
+                # the epoch the claim below compares.
+                return {"projected": from_seq, "applied": 0, "noop": True, "skipped": ps.status}
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
             if name == self.default_graph_name(graph_id):
@@ -1142,6 +1147,9 @@ class FalkorProjector:
                     != literal("gv_").concat(ProjectionStateORM.graph_id),
                     # A tombstoned graph keeps its pin for the undo window and must not reseed it.
                     GraphORM.deleted_at.is_(None),
+                    # With residency on, an evicted graph waits for its load (project_graph's gate).
+                    *((ProjectionStateORM.status.notin_(("evicted", "waiting_capacity")),)
+                      if config.RESIDENCY_ENABLED else ()),
                 ).order_by(
                     (func.greatest(ProjectionStateORM.target_commit_seq,
                                    GraphORM.main_head_commit_seq)

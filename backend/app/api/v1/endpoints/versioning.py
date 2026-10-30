@@ -274,7 +274,8 @@ async def rebuild_now(graph_id: str) -> None:
     whose 10s ceiling exists to keep post-write catch-ups snappy but cancels any non-trivial
     full reseed. NEVER raises: on failure/timeout `project_graph`'s own handler has already
     reset status→idle and recorded `last_error`, which the watermark endpoint now surfaces —
-    the Data health UI converges to a terminal failed state instead of spinning forever."""
+    the Data health UI converges to a terminal failed state instead of spinning forever. An
+    evicted graph's rebuild is a request for its load (residency, doc 17)."""
     if graph_id in _rebuild_inflight:
         return
     _rebuild_inflight.add(graph_id)
@@ -288,6 +289,9 @@ async def rebuild_now(graph_id: str) -> None:
         if result.get("skipped") in ("in-flight", "superseded"):
             # Another pass held the graph, or overtook this one: the rebuild still has to run.
             await nudge_projection(graph_id)
+        elif result.get("skipped") in ("evicted", "waiting_capacity"):
+            from backend.app.services.versioning.residency import request_load
+            await request_load(graph_id)
     except (Exception, asyncio.CancelledError) as exc:
         # `except Exception` alone would let the wait_for timeout (CancelledError, a
         # BaseException) escape into the BackgroundTasks runner unlogged — the old

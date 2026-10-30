@@ -3838,7 +3838,11 @@ class GraphVersioningService:
 
         Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
         unfinished: a rebuild would wipe the data source's own FalkorDB graph and reseed it from a
-        main parked at genesis."""
+        main parked at genesis.
+
+        With residency on, an evicted graph (or one waiting for room) is left as it is and its
+        load asked for instead, for the capacity loop to admit (``residency.request_load``); a
+        load in flight is a rebuild already running."""
         async with self._session() as s:
             await self._lock_graph(s, graph_id)
             await self._assert_not_bootstrapping(s, graph_id)
@@ -3846,6 +3850,12 @@ class GraphVersioningService:
             graph = await s.get(GraphORM, graph_id)
             if ps is None or graph is None:
                 return False
+            if config.RESIDENCY_ENABLED and ps.status == "rehydrating":
+                return False
+            if config.RESIDENCY_ENABLED and ps.status in ("evicted", "waiting_capacity"):
+                from .residency import request_load
+                await request_load(graph_id)
+                return True
             if ps.status in ("projecting", "rebuilding") and ps.projected_commit_seq < ps.target_commit_seq:
                 return False
             ps.projected_commit_seq = 0
@@ -3873,7 +3883,9 @@ class GraphVersioningService:
         (:class:`ProjectionKeyInvalid`), and no other graph's pin (:class:`ProjectionKeyInUse`).
         Moving to the current pin changes nothing (``changed: False``). Refused
         (:class:`ConcurrencyError`) while the graph's "enable version control" job is unfinished.
-        No FalkorDB I/O: the caller checks the key is free there and schedules the reseed."""
+        No FalkorDB I/O: the caller checks the key is free there and schedules the reseed. With
+        residency on, an evicted graph (or one waiting for room) only changes its pin: it stays
+        evicted, and its load seeds the new key once admitted."""
         default = config.DEFAULT_FALKOR_PROVIDER
         try:
             async with self._session() as s:
@@ -3915,7 +3927,8 @@ class GraphVersioningService:
                 ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
                 ps.projected_commit_seq = 0
                 ps.target_commit_seq = graph.main_head_commit_seq
-                ps.status = "reseeding"
+                if not (config.RESIDENCY_ENABLED and ps.status in ("evicted", "waiting_capacity")):
+                    ps.status = "reseeding"
                 ps.last_error = None
                 ps.failed_attempts = 0
                 ps.next_retry_at = None
