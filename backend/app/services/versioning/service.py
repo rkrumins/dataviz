@@ -3034,9 +3034,10 @@ class GraphVersioningService:
         semantics as draft publish, across graphs (plan §8, §12.5).
 
         Non-overlapping edits auto-merge; genuine conflicts raise
-        :class:`MergeConflict` (resubmit with ``resolutions``).  Already-merged
-        divergence nets to zero on any later PR, so the fork keeps its base and
-        can keep diverging. ``self_merge`` as for :meth:`merge_mr`."""
+        :class:`MergeConflict` (resubmit with ``resolutions``), and leave the PR marked
+        ``conflicts``. A merge records the fork's head it took, even when it changed nothing: the
+        fork's next PR merges what it changed since (:meth:`_fork_merge_base`), so the fork can
+        keep diverging. ``self_merge`` as for :meth:`merge_mr`."""
         async def _once():
             async with self._session() as s:
                 pr = await s.get(MergeRequestORM, pr_id)
@@ -3052,16 +3053,21 @@ class GraphVersioningService:
                     raise ValueError("pr endpoints missing")
                 await self._lock_graph(s, parent.id)      # serialize merges into this parent's main
                 await s.refresh(parent)                   # head may have advanced before the lock
+                # Read again under the lock: a merge of the same PR may have landed while we waited.
+                pr = (await s.execute(select(MergeRequestORM).where(MergeRequestORM.id == pr_id)
+                                      .with_for_update().execution_options(populate_existing=True))
+                      ).scalar_one()
+                if pr.status in ("merged", "closed"):
+                    raise ValueError(f"pr {pr_id} is {pr.status}")
                 await self._assert_writable(s, parent.id)   # the target; a frozen fork may propose
                 parent_main = await self._main_branch_id(s, parent.id)
                 fork_main = await self._main_branch_id(s, fork.id)
 
+                took = fork.main_head_commit_seq          # what _compute_fork_merge reads as ours
                 merged, conflicts, theirs = await self._compute_fork_merge(
                     s, fork, dict(resolutions or {})
                 )
                 if conflicts:
-                    pr.status = "conflicts"
-                    pr.conflicts = conflicts
                     raise MergeConflict(conflicts)
                 self._cascade_incident_edges(merged)
                 self._assert_referential_integrity(merged)
@@ -3069,6 +3075,9 @@ class GraphVersioningService:
                 deltas = net_delta(theirs, merged)
                 if not deltas:
                     pr.status = "merged"
+                    pr.merged_at = pr.updated_at = _now()
+                    pr.merged_by = actor
+                    pr.merged_source_seq = took
                     return ""
 
                 # PR gates (P8): re-validate the merged result against the target's
@@ -3118,11 +3127,21 @@ class GraphVersioningService:
                 pr.merged_at = _now()
                 pr.merged_by = actor
                 pr.updated_at = _now()
+                pr.merged_source_seq = took
                 ps = await s.get(ProjectionStateORM, parent.id)
                 if ps is not None:
                     ps.target_commit_seq = new_seq
                 return squash.id
-        return await self._retry_seq(f"merge_pr {pr_id}", _once)
+        try:
+            return await self._retry_seq(f"merge_pr {pr_id}", _once)
+        except MergeConflict as exc:
+            # The refusal rolled the attempt back: mark the PR on its own.
+            async with self._session() as s:
+                pr = (await s.execute(select(MergeRequestORM).where(MergeRequestORM.id == pr_id)
+                                      .with_for_update())).scalar_one_or_none()
+                if pr is not None and pr.status not in ("merged", "closed"):
+                    pr.status, pr.conflicts = "conflicts", exc.conflicts
+            raise
 
     # ---- the one-live-PR-per-branch invariant ----------------------------- #
     async def _resolve_live_prs(self, s, branch_id: str, commit_id: Optional[str], actor: str,
@@ -3369,6 +3388,7 @@ class GraphVersioningService:
         if not is_draft:
             return await self.merge_pr(
                 pr_id=mr_id, actor=actor, message=message, resolutions=resolutions,
+                containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
                 self_merge=self_merge,
             )
         if not self_merge and actor == opener:
@@ -3468,10 +3488,21 @@ class GraphVersioningService:
         if pending:
             raise ApprovalRequired(pr.id, pending, stale=sorted(set(pending) & set(stale)))
 
+    async def _fork_merge_base(self, s, fork) -> int:
+        """The seq of the fork's ``main`` its next PR merges from: the fork's head its last merged
+        PR took, as git merges from the last merged commit, else its fork point. A merge that
+        recorded none (merged before the column existed, with no change) leaves the one before."""
+        took = await s.scalar(select(func.max(MergeRequestORM.merged_source_seq)).where(
+            MergeRequestORM.graph_id == fork.id,
+            MergeRequestORM.target_graph_id == fork.fork_parent_graph_id,
+            MergeRequestORM.status == "merged"))
+        return fork.fork_base_commit_seq if took is None else took
+
     async def _compute_fork_merge(self, s, fork, resolutions):
         """3-way merge a fork's divergence into its parent's current main.
 
-        base   = parent main at the fork point (common ancestor)
+        base   = the fork's main where its last merged PR took it (:meth:`_fork_merge_base`) — at
+                 the fork point, parent main there, the common ancestor
         ours   = the fork's current main (parent@fork_base + fork divergence)
         theirs = the parent's current main
         Returns ``(merged_state, conflicts, theirs_state)``.
@@ -3486,7 +3517,7 @@ class GraphVersioningService:
                 f"fork {fork.id} missing fork_base_commit_seq — refusing merge against empty base")
         parent_main = await self._main_branch_id(s, parent.id)
         fork_main = await self._main_branch_id(s, fork.id)
-        base = await self._state_as_of(s, parent.id, parent_main, fork.fork_base_commit_seq)
+        base = await self._state_as_of(s, fork.id, fork_main, await self._fork_merge_base(s, fork))
         ours = await self._composed_state(s, fork.id, fork_main)
         theirs = await self._composed_state(s, parent.id, parent_main)
 
