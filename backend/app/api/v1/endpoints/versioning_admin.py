@@ -6,7 +6,7 @@ Every route needs ``system:admin``. None is on the API-key surface (``auth/api_k
 an API key is refused.
 """
 from datetime import datetime, timezone
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, Literal, Optional, Tuple
 
 from fastapi import APIRouter, BackgroundTasks, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -155,11 +155,11 @@ async def move_projection(
             and keymigrate.is_owned_key(graph_id, pin)):
         res = {"changed": False, "from": current, "to": current, "retiring": None}
     else:
-        key = await _target_key(graph_id, body, current, wm["retired_keys"])
+        key, master = await _target_key(graph_id, body, current, wm["retired_keys"])
         shard_map = {"tag": key[key.index("{") + 1:-1]
                      if keymigrate.is_owned_key(graph_id, key) else None,
                      "slot": key_slot(key), "chosenAt": datetime.now(timezone.utc).isoformat(),
-                     "chosenBy": user.id}
+                     "chosenBy": user.id, **({"master": master} if master else {})}
         with _domain_errors():
             try:
                 res = await svc.move_projection(graph_id=graph_id, provider=body.provider_id,
@@ -181,11 +181,12 @@ async def move_projection(
 
 
 async def _target_key(graph_id: str, body: ProjectionMoveRequest, current: dict,
-                      retired: list) -> str:
-    """The key a move goes to: ``body.key``, or the graph's first platform key that neither
-    exists on the provider nor is one of its retired keys. An explicit key must be this graph's
-    platform key, one of its retired keys on that provider or its current key, and must not
-    exist there unless it is one of those."""
+                      retired: list) -> Tuple[str, Optional[str]]:
+    """The key a move goes to, and the master it was placed on: ``body.key``, or a platform key
+    of the graph's that neither exists on the provider nor is one of its retired keys — with
+    residency on, placed on the provider's master with the most room (doc 17), else the first.
+    An explicit key must be this graph's platform key, one of its retired keys on that provider
+    or its current key, and must not exist there unless it is one of those."""
     keys = await falkor_graph_registry.list_graph_keys(body.provider_id)
     if keys is None:        # cannot verify, never "free"
         raise HTTPException(status_code=503, detail={
@@ -194,17 +195,21 @@ async def _target_key(graph_id: str, body: ProjectionMoveRequest, current: dict,
     ours = {((e.get("provider") or vconfig.DEFAULT_FALKOR_PROVIDER), e["name"]) for e in retired}
     if body.key is None:
         taken = keys | {name for _p, name in ours}
+        placed = (await residency.place_key(graph_id, body.provider_id, taken)
+                  if vconfig.RESIDENCY_ENABLED else None)
+        if placed is not None:
+            return placed
         n = 1
         while keymigrate.owned_key(graph_id, n) in taken:
             n += 1
-        return keymigrate.owned_key(graph_id, n)
+        return keymigrate.owned_key(graph_id, n), None
     ours.add((current["providerId"], current["key"]))
     if (body.provider_id, body.key) not in ours:
         if not keymigrate.is_owned_key(graph_id, body.key):
             raise ProjectionKeyInvalid(body.key)
         if body.key in keys:
             raise ProjectionKeyInUse(body.provider_id, body.key)
-    return body.key
+    return body.key, None
 
 
 @router.get("/residency-policy",

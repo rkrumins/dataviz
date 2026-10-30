@@ -194,6 +194,7 @@ async def test_a_move_of_a_graph_out_of_falkordb_changes_only_its_pin(
         assert await _pending(proj, gid) is False
     finally:
         await get_broker_redis().zrem(residency.LOAD_REQUESTS, gid)
+        await _set_ps(gid, status="evicted")     # the schema tests narrow ck_proj_status here
 
 
 async def test_the_watermark_reset_sends_a_load_in_flight_back_to_the_queue(store, monkeypatch):
@@ -220,6 +221,8 @@ async def test_the_watermark_reset_sends_a_load_in_flight_back_to_the_queue(stor
         ps = await _ps(loading)
         assert (ps.status, ps.projected_commit_seq, ps.rehydrating_since) == ("evicted", 0, None)
         assert await _load_requested(loading) and not await _load_requested(out)
+        assert not (await proj.project_graph(resident)).get("skipped")    # reseeded in place
+        assert (await _ps(resident)).status == "idle"
     finally:
         await get_broker_redis().zrem(residency.LOAD_REQUESTS, resident, loading, out)
 
@@ -432,6 +435,36 @@ async def test_admission_holds_a_load_that_does_not_fit_and_starts_it_when_room_
     assert ps.rehydrating_since is not None                  # how long it has been loading
     assert (await svc.projection_watermark(gid))["rehydrating_since"] == ps.rehydrating_since
     assert not await _load_requested(gid)
+
+
+@live
+async def test_a_reload_seeds_a_fresh_key_placed_on_the_master_with_the_most_room(
+        store, falkor, mine, monkeypatch):
+    """Its key went with its eviction: the load pins a fresh platform key that hashes to the
+    master the plan chose — here one master, so the first free one — and the key it had goes to
+    retired_keys, for the retire pass to drop should the eviction not have. Reads then serve the
+    new key."""
+    from backend.app.services.versioning import keymigrate
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(svc, proj, mine, 1)
+    old = (await _ps(gid)).falkor_graph_name
+    assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+    await residency.request_load(gid)
+    loop = CapacityLoop(proj)
+    p = await loop.run_once(graph_ids=[gid])
+    assert [x.graph_id for x in p.loads] == [gid]
+    ps = await _ps(gid)
+    assert (ps.falkor_graph_name, ps.status) == (keymigrate.owned_key(gid, 1), "rehydrating")
+    assert ps.shard_map["chosenBy"] == "residency" and ps.shard_map["master"] == p.loads[0].endpoint
+    assert [(e["name"], e["movedBy"]) for e in ps.retired_keys] == [(old, "residency")]
+    await _loads(loop, proj, gid)
+    ps = await _ps(gid)
+    assert ps.status == "idle" and ps.projected_commit_seq == ps.target_commit_seq
+    names = await falkor.execute_command("GRAPH.LIST")
+    assert keymigrate.owned_key(gid, 1) in names and old not in names
+    assert (await svc.projection_watermark(gid))["read_route"]["main"] == "falkordb"
 
 
 @live

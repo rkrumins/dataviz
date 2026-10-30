@@ -154,6 +154,36 @@ async def test_a_minted_key_skips_keys_that_exist_and_the_graphs_retired_keys():
 
 
 @pytest.mark.asyncio
+async def test_with_residency_on_a_minted_key_is_placed_on_the_master_with_the_most_room(
+        monkeypatch):
+    """Placement (doc 17): the new key hashes to the provider's master with the most room. With
+    no master to read, the first free key, as without residency."""
+    placed, asked = keymigrate.owned_key(GID, 5), []
+
+    async def place_key(graph_id, provider, taken):
+        asked.append((graph_id, provider, set(taken)))
+        return placed, "10.0.0.3:6379"
+
+    monkeypatch.setattr(va.vconfig, "RESIDENCY_ENABLED", True)
+    monkeypatch.setattr(va.residency, "place_key", place_key)
+    svc = _Svc(retired=[{"name": keymigrate.owned_key(GID, 2), "provider": "prov_C"}])
+    await _move(svc, {"providerId": "prov_B"}, keys={keymigrate.owned_key(GID, 1)})
+    (move,) = svc.moves
+    assert move["key"] == placed and move["shard_map"]["master"] == "10.0.0.3:6379"
+    assert move["shard_map"]["slot"] == key_slot(placed)
+    assert asked == [(GID, "prov_B", {keymigrate.owned_key(GID, 1), keymigrate.owned_key(GID, 2)})]
+
+    async def nowhere(graph_id, provider, taken):
+        return None
+
+    monkeypatch.setattr(va.residency, "place_key", nowhere)
+    svc = _Svc()
+    await _move(svc, {"providerId": "prov_B"})
+    assert svc.moves[0]["key"] == keymigrate.owned_key(GID, 1)
+    assert "master" not in svc.moves[0]["shard_map"]
+
+
+@pytest.mark.asyncio
 async def test_a_retry_without_a_key_changes_nothing():
     """Already on a platform key of that provider: no new key is minted and nothing moves."""
     key = keymigrate.owned_key(GID, 1)

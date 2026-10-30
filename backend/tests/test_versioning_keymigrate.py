@@ -57,3 +57,45 @@ def test_the_projection_lane_retires_old_keys_even_with_liveness_off(monkeypatch
 
     asyncio.run(go())
     assert calls == [proj]
+
+
+# ── placement (residency, doc 17): a new platform key goes onto a chosen master ──────────────────
+_THREE = {"10.0.0.1:6379": [(0, 5460)], "10.0.0.2:6379": [(5461, 10922)],
+          "10.0.0.3:6379": [(10923, 16383)]}
+
+
+def _on(key, ranges) -> bool:
+    from backend.app.services.graph_store.topology import key_slot
+
+    return any(lo <= key_slot(key) <= hi for lo, hi in ranges)
+
+
+def test_a_placed_key_hashes_to_the_master_chosen_for_it():
+    """The hash tag is the only thing that decides a key's slot, so a key is placed by trying the
+    graph's platform keys in turn until one's slot is the chosen master's."""
+    for master, ranges in _THREE.items():
+        key = keymigrate.placed_key(_GID, ranges, taken=set())
+        assert keymigrate.is_owned_key(_GID, key) and _on(key, ranges), master
+
+
+def test_the_tag_search_skips_taken_keys_and_is_bounded(monkeypatch):
+    ranges = _THREE["10.0.0.2:6379"]
+    first = keymigrate.placed_key(_GID, ranges, taken=set())
+    second = keymigrate.placed_key(_GID, ranges, taken={first})
+    assert second != first and _on(second, ranges)
+    from backend.app.services.graph_store.topology import key_slot
+
+    hit = {key_slot(keymigrate.owned_key(_GID, n)) for n in range(1, 9)}
+    missed = next(s for s in range(16384) if s not in hit)        # no early tag hashes here
+    tried = []
+    real = keymigrate.owned_key
+    monkeypatch.setattr(keymigrate, "owned_key", lambda gid, n: tried.append(n) or real(gid, n))
+    assert keymigrate.placed_key(_GID, [(missed, missed)], taken=set(), limit=8) is None
+    assert tried == list(range(1, 9))
+
+
+def test_one_master_takes_the_next_free_key():
+    """Standalone (or Sentinel): one master, every slot its own — the first free key."""
+    assert keymigrate.placed_key(_GID, None, taken=set()) == keymigrate.owned_key(_GID, 1)
+    taken = {keymigrate.owned_key(_GID, 1), keymigrate.owned_key(_GID, 2)}
+    assert keymigrate.placed_key(_GID, None, taken=taken) == keymigrate.owned_key(_GID, 3)

@@ -155,13 +155,111 @@ def test_a_load_that_does_not_fit_waits_with_its_shortfall(size, used_pct, reser
         assert p.waits[0].shortfall > 0
 
 
-def test_loads_start_one_per_master_in_the_order_they_were_asked_for():
+def test_loads_start_in_the_order_asked_one_per_master_each_on_the_roomiest_free_one():
+    """A load seeds a fresh key wherever there is most room, so the order the loads were asked
+    for is the provider's, not a master's: the first goes to the roomiest master, the next to the
+    roomiest of the rest, and once every master has its load the others wait their turn."""
     graphs = [_graph("second", status="evicted", requested_at=20.0),
               _graph("first", status="waiting_capacity", requested_at=10.0),
-              _graph("other_master", status="evicted", requested_at=30.0, endpoint="m2")]
-    p = plan(POLICY, [_master(), _master(endpoint="m2")], graphs, NOW)
-    assert sorted(l.graph_id for l in p.loads) == ["first", "other_master"]
-    assert [(w.graph_id, w.reason) for w in p.waits] == [("second", "queued")]
+              _graph("third", status="evicted", requested_at=30.0, endpoint="m2")]
+    p = plan(POLICY, [_master(used_pct=40), _master(endpoint="m2", used_pct=50)], graphs, NOW)
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("first", "m1"), ("second", "m2")]
+    assert [(w.graph_id, w.reason) for w in p.waits] == [("third", "queued")]
+
+
+# ── placement: where a load goes ─────────────────────────────────────────────────────────────────
+def test_a_load_goes_to_the_master_with_the_most_room_not_where_its_key_was():
+    """Its key went with its eviction: the load seeds a fresh key on the master with the most
+    room under its start mark, after what is held there — often one that holds no graph."""
+    graphs = [_graph("g", status="evicted", requested_at=1.0, endpoint="m1")]
+    masters = [_master(used_pct=70), _master(endpoint="m2", used_pct=60, reserved=150 * MB),
+               _master(endpoint="m3", used_pct=30)]
+    p = plan(POLICY, masters, graphs, NOW)
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("g", "m3")]
+    assert [m.loads for m in p.masters[:2]] == [[], []]
+
+
+def test_placement_counts_what_is_held_on_each_master():
+    graphs = [_graph("g", status="evicted", requested_at=1.0)]
+    masters = [_master(used_pct=50), _master(endpoint="m2", used_pct=20, reserved=400 * MB)]
+    assert plan(POLICY, masters, graphs, NOW).loads[0].endpoint == "m1"     # 300 MB beats 200 MB
+
+
+def test_a_busy_or_held_master_is_passed_over_for_another():
+    graphs = [_graph("g", status="evicted", requested_at=1.0),
+              _graph("loading", status="rehydrating", seeding=True, endpoint="m3")]
+    masters = [_master(used_pct=10, hold="fork"), _master(endpoint="m2", used_pct=60),
+               _master(endpoint="m3", used_pct=0)]
+    assert plan(POLICY, masters, graphs, NOW).loads[0].endpoint == "m2"
+
+
+def test_when_the_first_load_fits_on_no_master_the_rest_wait_their_turn():
+    graphs = [_graph("big", status="evicted", requested_at=1.0, size=500 * MB),
+              _graph("small", status="evicted", requested_at=2.0, size=1 * MB)]
+    p = plan(POLICY, [_master(used_pct=60), _master(endpoint="m2", used_pct=70)], graphs, NOW)
+    assert p.loads == []
+    assert [(w.graph_id, w.reason, w.endpoint) for w in p.waits] == [
+        ("big", "capacity", "m1"), ("small", "queued", "m1")]
+    assert p.waits[0].shortfall == 650 * MB - 200 * MB
+
+
+def test_a_graph_whose_rollup_graph_is_named_from_its_key_loads_back_onto_its_own_master():
+    """A dedicated rollup graph is named from the graph's key, so that key never changes: its
+    load goes back onto it, on its own master."""
+    graphs = [_graph("dedicated", status="evicted", requested_at=1.0, placed=False)]
+    p = plan(POLICY, [_master(used_pct=70), _master(endpoint="m2", used_pct=10)], graphs, NOW)
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("dedicated", "m1")]
+
+
+def test_a_load_goes_only_to_a_master_of_its_own_provider():
+    graphs = [_graph("g", status="evicted", requested_at=1.0, provider="p1")]
+    masters = [_master(used_pct=70, providers=("p1",)),
+               _master(endpoint="m9", used_pct=0, providers=("p2",))]
+    assert plan(POLICY, masters, graphs, NOW).loads[0].endpoint == "m1"
+    # A master two providers reach (the same server) serves both.
+    shared = [_master(used_pct=70, providers=("p1",)),
+              _master(endpoint="m2", used_pct=0, providers=("p2", "p1"))]
+    assert plan(POLICY, shared, graphs, NOW).loads[0].endpoint == "m2"
+
+
+async def test_admission_answers_for_the_master_the_load_would_go_to(monkeypatch):
+    snap = residency.Snapshot(masters=[_master(used_pct=70), _master(endpoint="m2", used_pct=10)],
+                              graphs=[_graph("g", status="evicted", size=100 * MB)])
+
+    async def gather(**kw):
+        return snap
+
+    monkeypatch.setattr(residency, "gather", gather)
+    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
+    try:
+        assert await residency.admission("g") == (True, "m2", 0)
+        snap.graphs[0] = _graph("g", status="evicted", size=600 * MB)        # 780 MB > 700 MB
+        assert await residency.admission("g") == (False, "m2", 80 * MB)
+    finally:
+        residency_policy.invalidate()
+
+
+async def test_a_new_key_is_placed_on_the_roomiest_master_of_its_provider(monkeypatch):
+    from backend.app.services.graph_store.topology import key_slot
+
+    snap = residency.Snapshot(
+        masters=[_master(used_pct=70), _master(endpoint="m2", used_pct=10)],
+        slots={"m1": [(0, 8191)], "m2": [(8192, 16383)]})
+    asked = []
+
+    async def gather(**kw):
+        asked.append(kw)
+        return snap
+
+    monkeypatch.setattr(residency, "gather", gather)
+    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
+    gid = "graph_01JA2B3C4D5E6F7G8H9JKMNPQR"
+    try:
+        key, master = await residency.place_key(gid, "default", taken=set())
+        assert master == "m2" and key_slot(key) >= 8192 and key.startswith(f"gvp_{gid}")
+        assert asked == [{"providers": ["default"]}]
+    finally:
+        residency_policy.invalidate()
 
 
 def test_a_load_in_flight_on_the_master_holds_the_next_and_reserves_its_room():

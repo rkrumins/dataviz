@@ -12,7 +12,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Collection, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import func, null, select, update
 
@@ -26,6 +26,28 @@ def owned_key(graph_id: str, n: int) -> str:
     """The ``n``-th platform key of ``graph_id``. Graph ids are ``graph_<ULID>``, so the tag is
     the ULID's random tail."""
     return f"gvp_{graph_id}{{{graph_id[-8:].lower()}.{n}}}"
+
+
+#: How many of a graph's platform keys :func:`placed_key` tries before it gives up.
+PLACEMENT_TRIES = 4096
+
+
+def placed_key(graph_id: str, slots: Optional[Sequence[Tuple[int, int]]],
+               taken: Collection[str], *, limit: int = PLACEMENT_TRIES) -> Optional[str]:
+    """The first of ``graph_id``'s platform keys, in turn, that is not ``taken`` and whose cluster
+    slot is one of ``slots`` — the ranges the chosen master owns (residency, doc 17: a new key
+    goes to the master with the most room). The hash tag alone decides the slot. ``slots`` None:
+    one master owns every slot (standalone, Sentinel), so the first free key. None when no key
+    within ``limit`` tries lands there."""
+    from backend.app.services.graph_store.topology import key_slot
+
+    for n in range(1, limit + 1):
+        key = owned_key(graph_id, n)
+        if key in taken:
+            continue
+        if slots is None or any(lo <= key_slot(key) <= hi for lo, hi in slots):
+            return key
+    return None
 
 
 def is_owned_key(graph_id: str, name: str) -> bool:

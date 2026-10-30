@@ -16,6 +16,13 @@ Per cluster master:
   under the start mark, after what the aggregation write governor and the loads and full
   projections already in flight on it hold; one at a time per master, none while it forks for
   persistence or cannot be read, in the order the loads were asked for. The rest wait.
+
+**Placement** — a load seeds a fresh key, so it goes to the master of the graph's provider with the
+most room under its start mark after what is held there (:func:`roomiest`), among those free to
+take a load, whichever master its key was on; the loop then picks a key that hashes there. A graph
+whose dedicated rollup graph is named from its key keeps the key, and loads back onto its own
+master. Loads start in the order they were asked for, per provider: when the first does not fit,
+the rest wait their turn.
 """
 from __future__ import annotations
 
@@ -24,6 +31,9 @@ from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from .residency_policy import ResidencyPolicy
+
+#: The room of a master that sets no memory limit: more than any that does.
+_UNLIMITED = 1 << 62
 
 
 @dataclass(frozen=True)
@@ -34,6 +44,7 @@ class Master:
     maxmemory: int                    # 0: the master sets no limit
     hold: Optional[str] = None        # why no load may start on it now ("fork", "loading", ...)
     reserved: int = 0                 # what the aggregation write governor holds on it
+    providers: Tuple[str, ...] = ("default",)   # the FalkorDB providers it is reached through
 
 
 @dataclass(frozen=True)
@@ -51,6 +62,9 @@ class Graph:
     entities: Optional[int] = None            # for the estimate, when never measured
     seeding: bool = False             # a load or full projection is writing it into its key
     requested_at: Optional[float] = None      # when its load was first asked for
+    provider: str = "default"
+    placed: bool = True               # its load goes onto a fresh key on the roomiest master;
+                                      # False: back onto its key (a rollup graph is named from it)
 
     def bytes(self, policy: ResidencyPolicy) -> int:
         if self.size_bytes is not None:
@@ -87,6 +101,7 @@ class MasterPlan:
     master: Master
     reserved: int                     # the governor's, and the loads and full projections in flight
     used_after: Optional[int]         # its use once this pass's evictions are done
+    seeding: bool = False             # a load or full projection is in flight on it
     evictions: List[Eviction] = field(default_factory=list)
     loads: List[Load] = field(default_factory=list)
     waits: List[Wait] = field(default_factory=list)
@@ -127,6 +142,22 @@ def admit(master: Master, needed: int, policy: ResidencyPolicy,
     return shortfall <= 0, max(0, shortfall)
 
 
+def room(plan: MasterPlan, policy: ResidencyPolicy) -> Optional[int]:
+    """What a master has left under its start mark after what is held there; None when it could
+    not be read."""
+    m = plan.master
+    if m.used is None:
+        return None
+    mark = m.maxmemory * policy.high_water_pct // 100 if m.maxmemory > 0 else _UNLIMITED
+    return mark - m.used - plan.reserved
+
+
+def roomiest(plans: Sequence[MasterPlan], policy: ResidencyPolicy) -> Optional[MasterPlan]:
+    """The master with the most room (the first of equals), of those that could be read."""
+    readable = [p for p in plans if p.master.used is not None]
+    return max(readable, key=lambda p: room(p, policy)) if readable else None
+
+
 def _candidates(graphs: Sequence[Graph]) -> List[Graph]:
     return [g for g in graphs
             if g.status == "idle" and g.owned and g.evictable and not g.leased
@@ -137,7 +168,8 @@ def _plan_master(policy: ResidencyPolicy, master: Master, graphs: Sequence[Graph
                  now: datetime) -> MasterPlan:
     seeding = [g for g in graphs if g.seeding]
     reserved = master.reserved + sum(need(g, policy) for g in seeding)
-    out = MasterPlan(master=master, reserved=reserved, used_after=master.used)
+    out = MasterPlan(master=master, reserved=reserved, used_after=master.used,
+                     seeding=bool(seeding))
     if policy.eviction_enabled:
         idle_for = {"standard": timedelta(seconds=policy.standard_idle_secs),
                     "coldline": timedelta(seconds=policy.coldline_idle_secs)}
@@ -161,37 +193,59 @@ def _plan_master(policy: ResidencyPolicy, master: Master, graphs: Sequence[Graph
                 freed += g.bytes(policy)
         if master.used is not None:
             out.used_after = master.used - freed
+    return out
+
+
+def _plan_loads(policy: ResidencyPolicy, plans: Sequence[MasterPlan],
+                graphs: Sequence[Graph]) -> None:
+    """The loads asked for, in the order they were asked for: each onto the roomiest master free
+    to take one (see the module's placement), or a wait, and once one waits for room the rest of
+    its provider's wait their turn."""
+    by_endpoint = {p.master.endpoint: p for p in plans}
+    busy = {p.master.endpoint for p in plans if p.seeding}      # one load per master at a time
+    blocked = set()
     asked = sorted((g for g in graphs
                     if g.requested_at is not None and g.status in ("evicted", "waiting_capacity")),
                    key=lambda g: g.requested_at)
-    for i, g in enumerate(asked):
-        reason, shortfall = None, None
-        if i > 0 or seeding:
-            reason = "queued"                  # one load per master at a time
-        elif master.used is None:
+    for g in asked:
+        pool = ([p for p in plans if g.provider in p.master.providers] if g.placed
+                else [by_endpoint[g.endpoint]])
+        readable = [p for p in pool if p.master.used is not None]
+        free = [p for p in readable if p.master.endpoint not in busy and not p.master.hold]
+        target, reason, shortfall = roomiest(free, policy), None, None
+        if g.provider in blocked:
+            reason = "queued"                  # the first in line waits for room
+        elif not readable:
             reason = "unmeasured"
-        elif master.hold:
-            reason = master.hold
+        elif target is None:
+            held = [p.master.hold for p in readable if p.master.endpoint not in busy]
+            reason = held[0] if held else "queued"
         else:
-            fits, shortfall = admit(master, need(g, policy), policy, reserved)
+            fits, shortfall = admit(target.master, need(g, policy), policy, target.reserved)
             reason = None if fits else "capacity"
+        at = target or roomiest(readable, policy) or by_endpoint[g.endpoint]
         if reason is None:
-            out.loads.append(Load(g.graph_id, master.endpoint, g.bytes(policy)))
-        else:
-            out.waits.append(Wait(g.graph_id, master.endpoint, g.bytes(policy), reason,
-                                  shortfall if reason == "capacity" else None))
-    return out
+            at.loads.append(Load(g.graph_id, at.master.endpoint, g.bytes(policy)))
+            busy.add(at.master.endpoint)
+            continue
+        if reason == "capacity":
+            blocked.add(g.provider)
+        at.waits.append(Wait(g.graph_id, at.master.endpoint, g.bytes(policy), reason,
+                             shortfall if reason == "capacity" else None))
 
 
 def plan(policy: ResidencyPolicy, masters: Sequence[Master], graphs: Sequence[Graph],
          now: datetime) -> Plan:
     """One pass's decisions: per master (in the order given, then any a graph names that was not
-    read, which counts as unreadable), its evictions, the load it starts and the loads that
-    wait."""
+    read, which counts as unreadable), its evictions, the loads it starts and the loads that
+    wait there."""
     by_master: Dict[str, List[Graph]] = {}
     for g in graphs:
         by_master.setdefault(g.endpoint, []).append(g)
     known = {m.endpoint for m in masters}
-    unread = [Master(endpoint=e, used=None, maxmemory=0) for e in by_master if e not in known]
-    return Plan(masters=[_plan_master(policy, m, by_master.get(m.endpoint, []), now)
-                         for m in [*masters, *unread]])
+    unread = [Master(endpoint=e, used=None, maxmemory=0, providers=(gs[0].provider,))
+              for e, gs in by_master.items() if e not in known]
+    plans = [_plan_master(policy, m, by_master.get(m.endpoint, []), now)
+             for m in [*masters, *unread]]
+    _plan_loads(policy, plans, graphs)
+    return Plan(masters=plans)

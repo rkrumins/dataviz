@@ -37,18 +37,18 @@ import asyncio
 import logging
 import time
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from typing import Any, Collection, Dict, List, Mapping, Optional, Tuple
 
 from sqlalchemy import func, literal, select, text, update
 
-from . import config, db, residency_policy
+from . import config, db, keymigrate, residency_policy
 from .messaging import get_broker_redis, nudge_projection
 from .models import GraphORM, ProjectionStateORM, _now
 from backend.app.jobs import metrics
 
-from .residency_plan import Graph, Master, Plan, admit, need, plan
+from .residency_plan import Graph, Master, MasterPlan, Plan, admit, need, plan, roomiest
 from .service import bootstrap_unfinished
 
 logger = logging.getLogger(__name__)
@@ -209,13 +209,14 @@ async def non_resident(data_source_id: str) -> Optional[str]:
 @dataclass
 class Snapshot:
     """What a pass read: the masters, the graphs as the planner sees them, each graph's row
-    (``key``, ``provider``, ``data_source_id``, ...), each provider's FalkorDB client, and the
-    graphs the load queue held."""
+    (``key``, ``provider``, ``data_source_id``, ...), each provider's FalkorDB client, the graphs
+    the load queue held, and the cluster slots each master owns (None: every slot)."""
     masters: List[Master] = field(default_factory=list)
     graphs: List[Graph] = field(default_factory=list)
     rows: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     clients: Dict[str, Tuple[Any, Optional[str]]] = field(default_factory=dict)
     queued: List[str] = field(default_factory=list)
+    slots: Dict[str, Optional[List[Tuple[int, int]]]] = field(default_factory=dict)
 
 
 def _ts(value) -> Optional[datetime]:
@@ -259,21 +260,92 @@ async def _entities(data_source_ids: Collection[str]) -> Dict[str, int]:
     return {ds: int(n or 0) for ds, n in rows}
 
 
-async def gather(*, graph_ids: Optional[Collection[str]] = None) -> Snapshot:
-    """Read what a pass decides from: every live graph that is not a fork and has a key of its
-    own (only ``graph_ids``, when given), when each load was asked for, which graphs a read
-    lease holds, and each master's memory, its hold and what the aggregation write governor
-    holds on it. Waiting graphs whose request the broker lost go to the end of the queue, and so
-    does an Always graph that is not resident."""
-    from backend.app.providers.shard_capacity import hold_reason, owner_endpoint, read_shard_memory
+async def _dedicated(data_source_ids: Collection[str]) -> Optional[set]:
+    """The data sources whose rollups live in a dedicated graph, which is named from the graph's
+    key (``<key>_proj``): their keys never change. None when that cannot be read."""
+    if not data_source_ids:
+        return set()
+    from backend.app.db.engine import get_readonly_session
+    from backend.app.db.models import WorkspaceDataSourceORM as DS
+
+    try:
+        async with get_readonly_session() as s:
+            return set((await s.execute(
+                select(DS.id).where(DS.id.in_(list(data_source_ids)),
+                                    DS.projection_mode == "dedicated"))).scalars().all())
+    except Exception:  # noqa: BLE001 — every key then stays where it is
+        logger.warning("residency: data sources' projection modes unreadable", exc_info=True)
+        return None
+
+
+def _probe_key(slots: Optional[List[Tuple[int, int]]]) -> str:
+    """A key that hashes to one of ``slots`` — what a master's memory is read through, as the
+    reading finds its node by a key's slot."""
+    from backend.app.services.graph_store.topology import key_slot
+
+    for i in range(1 << 16):
+        key = f"gvresidency{{{i}}}"
+        if slots is None or any(lo <= key_slot(key) <= hi for lo, hi in slots):
+            return key
+    return "gvresidency"
+
+
+def _master_of(slots: Dict[str, Optional[List[Tuple[int, int]]]], key: str) -> str:
+    """The master that owns ``key``'s slot; "unknown" when the map has none."""
+    from backend.app.services.graph_store.topology import key_slot
+
+    slot = None
+    for endpoint, ranges in slots.items():
+        if ranges is None:
+            return endpoint
+        slot = key_slot(key) if slot is None else slot
+        if any(lo <= slot <= hi for lo, hi in ranges):
+            return endpoint
+    return "unknown"
+
+
+async def _read_masters(provider: str, client, mode) -> Tuple[List[Master], Dict[str, Any]]:
+    """Every master of ``provider``'s topology — not only those holding a versioned graph's key:
+    the one with the most room often holds none — with its memory, its hold and what the
+    aggregation write governor holds on it, and the slots each owns."""
+    from backend.app.providers.shard_capacity import hold_reason, master_slots, read_shard_memory
     from backend.app.services.aggregation.capacity import reserved_on
+
+    slots = await master_slots(client, mode=mode, timeout=_READ_TIMEOUT_S) or {}
+    masters = []
+    for endpoint, ranges in slots.items():
+        reading = await read_shard_memory(client, mode=mode, graph_key=_probe_key(ranges),
+                                          timeout=_READ_TIMEOUT_S, include_config=False,
+                                          refresh=False)
+        hold = hold_reason(reading, expected_replicas=None, watch_replicas=False)
+        try:
+            reserved = (await reserved_on(reading.endpoint))[0]
+        except Exception:  # noqa: BLE001 — loads wait until it can be read again
+            logger.warning("residency: reservations on %s unreadable", endpoint, exc_info=True)
+            reserved, hold = 0, ("unmeasured", "")
+        masters.append(Master(
+            endpoint=endpoint, used=reading.used if reading.source == "measured" else None,
+            maxmemory=int(reading.maxmemory or 0), hold=hold[0] if hold else None,
+            reserved=reserved, providers=(provider,)))
+    return masters, slots
+
+
+async def gather(*, graph_ids: Optional[Collection[str]] = None,
+                 providers: Optional[Collection[str]] = None) -> Snapshot:
+    """Read what a pass decides from: every live graph that is not a fork and has a key of its
+    own (only ``graph_ids``, when given; only those on ``providers``, when given), when each load
+    was asked for, which graphs a read lease holds, whether each graph's key may change, and every
+    master of each of their providers (and of ``providers``): its memory, its hold, what the
+    aggregation write governor holds on it and its slots. Waiting graphs whose request the broker
+    lost go to the end of the queue, and so does an Always graph that is not resident."""
     from .cache_manager import is_pinned
 
     ps, head = ProjectionStateORM, GraphORM.main_head_commit_seq
+    provider_of = func.coalesce(func.nullif(ps.falkor_provider, ""), config.DEFAULT_FALKOR_PROVIDER)
     query = (
         select(ps.graph_id, ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph,
                ps.status, ps.residency, ps.last_read_at, ps.last_projected_at, ps.size_bytes,
-               ps.size_measured_at, ps.rehydrating_since,
+               ps.size_measured_at, ps.rehydrating_since, ps.retired_keys,
                ps.projected_commit_seq, ps.target_commit_seq, head,
                GraphORM.data_source_id,
                (head > 1).label("past_genesis"),
@@ -285,6 +357,8 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None) -> Snapshot:
                ps.falkor_graph_name != literal("gv_").concat(ps.graph_id)))
     if graph_ids is not None:
         query = query.where(ps.graph_id.in_(list(graph_ids)))
+    if providers is not None:
+        query = query.where(provider_of.in_(list(providers)))
     async with db.graphver_session() as s:
         found = (await s.execute(query)).all()
 
@@ -301,49 +375,43 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None) -> Snapshot:
                                         (r.status == "evicted" and r.residency == "always")):
             asked[r.graph_id] = now
     estimate = await _entities({r.data_source_id for r in found if r.size_bytes is None})
-    by_provider: Dict[str, List[Any]] = {}
+    dedicated = await _dedicated({r.data_source_id for r in found})
+    by_provider: Dict[str, List[Any]] = {p: [] for p in providers or ()}
     for r in found:
         by_provider.setdefault(r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, []).append(r)
     endpoint_of: Dict[str, str] = {}
-    read: set = set()
+    seen: Dict[str, int] = {}                 # a master two providers reach is read once
     for provider, rows in by_provider.items():
         try:
-            client, mode = await _provider_client(provider, rows[0].falkor_graph_name)
+            client, mode = await _provider_client(
+                provider, rows[0].falkor_graph_name if rows else "gvresidency")
         except Exception:  # noqa: BLE001 — its graphs count as on a master that cannot be read
             logger.warning("residency: FalkorDB provider %s unreachable", provider, exc_info=True)
             for r in rows:
                 endpoint_of[r.graph_id] = f"{provider}:unreachable"
             continue
         snap.clients[provider] = (client, mode)
+        masters, slots = await _read_masters(provider, client, mode)
+        for m in masters:
+            if m.endpoint in seen:
+                i = seen[m.endpoint]
+                snap.masters[i] = replace(snap.masters[i],
+                                          providers=(*snap.masters[i].providers, provider))
+            else:
+                seen[m.endpoint] = len(snap.masters)
+                snap.masters.append(m)
+        snap.slots.update(slots)
         for r in rows:
-            endpoint_of[r.graph_id] = await owner_endpoint(
-                client, mode=mode, graph_key=r.falkor_graph_name, timeout=_READ_TIMEOUT_S)
-        for r in rows:
-            endpoint = endpoint_of[r.graph_id]
-            if endpoint in read or endpoint == "unknown":
-                continue
-            read.add(endpoint)
-            reading = await read_shard_memory(client, mode=mode, graph_key=r.falkor_graph_name,
-                                              timeout=_READ_TIMEOUT_S, include_config=False,
-                                              refresh=False)
-            hold = hold_reason(reading, expected_replicas=None, watch_replicas=False)
-            try:
-                reserved = (await reserved_on(reading.endpoint))[0]
-            except Exception:  # noqa: BLE001 — loads wait until it can be read again
-                logger.warning("residency: reservations on %s unreadable", endpoint, exc_info=True)
-                reserved, hold = 0, ("unmeasured", "")
-            snap.masters.append(Master(
-                endpoint=endpoint,
-                used=reading.used if reading.source == "measured" else None,
-                maxmemory=int(reading.maxmemory or 0), hold=hold[0] if hold else None,
-                reserved=reserved))
+            endpoint_of[r.graph_id] = (_master_of(slots, r.falkor_graph_name) if slots
+                                       else f"{provider}:unreachable")
 
     for r in found:
         candidate = r.owns_falkor_graph and r.status == "idle" and r.residency != "always"
         target = max(r.target_commit_seq, r.main_head_commit_seq)
+        placed = dedicated is not None and r.data_source_id not in dedicated
         snap.rows[r.graph_id] = dict(r._mapping, key=r.falkor_graph_name,
                                      provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER,
-                                     endpoint=endpoint_of[r.graph_id])
+                                     endpoint=endpoint_of[r.graph_id], placed=placed)
         snap.graphs.append(Graph(
             graph_id=r.graph_id, endpoint=endpoint_of[r.graph_id], residency=r.residency,
             status=r.status, owned=bool(r.owns_falkor_graph),
@@ -353,24 +421,51 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None) -> Snapshot:
             size_bytes=r.size_bytes, entities=estimate.get(r.data_source_id),
             seeding=(r.status == "rehydrating" and r.projected_commit_seq < target)
             or (r.status in ("rebuilding", "reseeding") and r.projected_commit_seq == 0),
-            requested_at=asked.get(r.graph_id)))
+            requested_at=asked.get(r.graph_id),
+            provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=placed))
     return snap
 
 
+def _pool(decided: Plan, graph: Graph) -> List[MasterPlan]:
+    """The masters a load of ``graph`` may go to: its provider's, or its own when its key stays."""
+    return [p for p in decided.masters
+            if (graph.provider in p.master.providers if graph.placed
+                else p.master.endpoint == graph.endpoint)]
+
+
 async def admission(graph_id: str) -> Tuple[bool, Optional[str], Optional[int]]:
-    """Whether a load of ``graph_id`` fits on its master now, as the planner's admission decides
-    (its estimate times the headroom under the start mark, after what is held there):
-    ``(fits, master, shortfall in bytes)``; a master that could not be read never fits, and its
-    shortfall is None."""
+    """Whether a load of ``graph_id`` fits now on the master it would go to (the roomiest of its
+    provider's, or its own when its key stays), as the planner's admission decides (its estimate
+    times the headroom under the start mark, after what is held there): ``(fits, master,
+    shortfall in bytes)``; a master that could not be read never fits, and its shortfall is
+    None."""
     policy = await residency_policy.resolve()
     snap = await gather()
     graph = next((g for g in snap.graphs if g.graph_id == graph_id), None)
     if graph is None:
         return False, None, None
     decided = plan(policy, snap.masters, snap.graphs, datetime.now(timezone.utc))
-    master = next(m for m in decided.masters if m.master.endpoint == graph.endpoint)
-    fits, shortfall = admit(master.master, need(graph, policy), policy, master.reserved)
-    return fits, graph.endpoint, shortfall
+    target = roomiest(_pool(decided, graph), policy)
+    if target is None:
+        return False, graph.endpoint, None
+    fits, shortfall = admit(target.master, need(graph, policy), policy, target.reserved)
+    return fits, target.master.endpoint, shortfall
+
+
+async def place_key(graph_id: str, provider: str,
+                    taken: Collection[str]) -> Optional[Tuple[str, str]]:
+    """A new platform key for ``graph_id`` on ``provider``, placed (doc 17): on the master with
+    the most room after what is held there, the first of the graph's keys not ``taken`` that hashes
+    to it. ``(key, master)``; None when no master of the provider could be read, or no key lands
+    there within the search's bound."""
+    policy = await residency_policy.resolve()
+    snap = await gather(providers=[provider])
+    decided = plan(policy, snap.masters, snap.graphs, datetime.now(timezone.utc))
+    target = roomiest([p for p in decided.masters if provider in p.master.providers], policy)
+    if target is None:
+        return None
+    key = keymigrate.placed_key(graph_id, snap.slots.get(target.master.endpoint), taken)
+    return (key, target.master.endpoint) if key else None
 
 
 async def preview(policy, *, graph_ids: Optional[Collection[str]] = None) -> Tuple[Plan, Snapshot]:
@@ -426,7 +521,10 @@ class CapacityLoop:
                             e.graph_id, e.endpoint, e.reason, e.bytes)
         used = {m.endpoint: m.used for m in snap.masters}
         for load in decided.loads:
-            if await _start_load(load.graph_id):
+            chosen = await _load_key(load, snap)
+            if chosen is None:
+                continue
+            if await _start_load(load.graph_id, key=chosen[0], shard_map=chosen[1]):
                 self._started[load.graph_id] = (load.endpoint, used.get(load.endpoint))
                 metrics.increment("versioning_residency_loads_total", outcome="started")
                 logger.info("residency: loading graph %s onto %s (about %d bytes)",
@@ -548,21 +646,71 @@ async def _clear_spent(snap: Snapshot, *, full: bool) -> None:
         logger.debug("residency: spent load requests not taken off the queue", exc_info=True)
 
 
-async def _start_load(graph_id: str) -> bool:
-    """Start an admitted load: the graph becomes ``rehydrating`` at watermark 0 (a status CAS, so
-    one load per graph; the projection lock then makes its pass single-flight), leaves the queue,
-    and the projection lane is nudged to seed its key."""
-    async with db.graphver_session() as s:
-        row = (await s.execute(
-            update(ProjectionStateORM)
-            .where(ProjectionStateORM.graph_id == graph_id,
-                   ProjectionStateORM.status.in_(("evicted", "waiting_capacity")))
-            .values(status="rehydrating", projected_commit_seq=0, last_error=None,
-                    failed_attempts=0, next_retry_at=None, updated_at=_now(),
-                    rehydrating_since=func.now(), epoch=ProjectionStateORM.epoch + 1)
-            .returning(ProjectionStateORM.graph_id)
-            .execution_options(synchronize_session=False))).first()
-    if row is None:
+async def _load_key(load, snap: Snapshot) -> Optional[Tuple[str, Optional[dict]]]:
+    """The key an admitted load seeds, with its ``shard_map``: a fresh platform key placed on the
+    master the plan chose (``keymigrate.placed_key``: the first of the graph's keys that exists
+    nowhere on the provider, is none of its retired keys, and hashes there); or the graph's own,
+    when its key must stay (a dedicated rollup graph is named from it). None when no key can be
+    chosen now — the provider's keys cannot be listed, or none lands there — and the load waits
+    for the next pass."""
+    from backend.app.providers import falkor_graph_registry
+    from backend.app.services.graph_store.topology import key_slot
+
+    row = snap.rows[load.graph_id]
+    if not row["placed"]:
+        return row["key"], None
+    provider = row["provider"]
+    try:
+        keys = await falkor_graph_registry.list_graph_keys(provider)
+    except Exception:  # noqa: BLE001 — cannot verify a key is free: never assume it
+        keys = None
+    if keys is None:
+        logger.warning("residency: the keys on provider %s cannot be listed; graph %s's load "
+                       "waits for the next pass", provider, load.graph_id)
+        return None
+    retired = {e["name"] for e in row.get("retired_keys") or []
+               if (e.get("provider") or config.DEFAULT_FALKOR_PROVIDER) == provider}
+    key = keymigrate.placed_key(load.graph_id, snap.slots.get(load.endpoint), keys | retired)
+    if key is None:
+        logger.warning("residency: no key of graph %s hashes to %s; its load waits", load.graph_id,
+                       load.endpoint)
+        return None
+    return key, {"tag": key[key.index("{") + 1:-1], "slot": key_slot(key), "master": load.endpoint,
+                 "chosenAt": datetime.now(timezone.utc).isoformat(), "chosenBy": "residency"}
+
+
+async def _start_load(graph_id: str, *, key: Optional[str] = None,
+                      shard_map: Optional[dict] = None) -> bool:
+    """Start an admitted load: the graph becomes ``rehydrating`` at watermark 0 (a status CAS
+    under the row's lock, so one load per graph; the projection lock then makes its pass
+    single-flight), pinned to ``key`` (None: its own), leaves the queue, and the projection lane
+    is nudged to seed its key. A key it leaves goes to ``retired_keys``, for the retire pass to
+    drop should its eviction not have."""
+    from sqlalchemy.exc import IntegrityError
+
+    try:
+        async with db.graphver_session() as s:
+            ps = (await s.execute(
+                select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+                .with_for_update().execution_options(populate_existing=True)
+            )).scalar_one_or_none()
+            if ps is None or ps.status not in ("evicted", "waiting_capacity"):
+                return False
+            if key is not None and key != ps.falkor_graph_name:
+                head = await s.scalar(select(GraphORM.main_head_commit_seq)
+                                      .where(GraphORM.id == graph_id))
+                ps.retired_keys = [*(ps.retired_keys or []), {
+                    "name": ps.falkor_graph_name, "provider": ps.falkor_provider,
+                    "retireAfter": datetime.now(timezone.utc).isoformat(), "afterSeq": head,
+                    "movedBy": "residency"}]
+                ps.falkor_graph_name, ps.shard_map = key, shard_map
+            ps.status, ps.projected_commit_seq, ps.last_error = "rehydrating", 0, None
+            ps.failed_attempts, ps.next_retry_at, ps.updated_at = 0, None, _now()
+            ps.rehydrating_since = func.now()
+            ps.epoch = ProjectionStateORM.epoch + 1
+    except IntegrityError:          # uq_ps_key: another graph claimed the key meanwhile
+        logger.warning("residency: key %s of graph %s was claimed meanwhile; its load waits",
+                       key, graph_id)
         return False
     try:
         await get_broker_redis().zrem(LOAD_REQUESTS, graph_id)
