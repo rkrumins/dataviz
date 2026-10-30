@@ -421,11 +421,12 @@ async def restore_data_source(
 async def list_deleted_data_sources(
     session: AsyncSession, workspace_id: str
 ) -> List[WorkspaceDataSourceORM]:
-    """The trash, newest first."""
+    """The trash, newest first. A fork's row is not in it: it comes back with its graph, through
+    the fork endpoints."""
     result = await session.execute(
         select(WorkspaceDataSourceORM)
         .where(WorkspaceDataSourceORM.workspace_id == workspace_id,
-               WorkspaceDataSourceORM.deleted_at.isnot(None))
+               WorkspaceDataSourceORM.deleted_at.isnot(None), not_a_fork())
         .order_by(WorkspaceDataSourceORM.deleted_at.desc())
     )
     return list(result.scalars().all())

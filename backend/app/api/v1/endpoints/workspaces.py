@@ -1173,7 +1173,8 @@ async def set_primary_data_source(
     _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Promote a data source to primary within its workspace."""
+    """Promote a data source to primary within its workspace. Never a fork's (409)."""
+    fork_sources.refuse_primary(await data_source_repo.get_data_source_orm(session, ds_id))
     success = await data_source_repo.set_primary(session, workspace_id, ds_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")

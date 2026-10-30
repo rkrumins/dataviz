@@ -375,3 +375,28 @@ async def test_the_generic_lifecycle_routes_refuse_a_fork(test_client, db_sessio
     refused(await test_client.post(f"{_DS}/dsfork_a/restore"))
     (a,) = await _rows(db_session, "dsfork_a")
     assert a.workspace_id == WS and a.deleted_at is not None
+
+
+async def test_the_trash_leaves_a_fork_out(test_client, db_session, forks):
+    """A trashed fork's row was listed in the trash as restorable, and its Restore button answered
+    409 use_fork_endpoints: a fork comes back through the fork endpoints, with its graph."""
+    db_session.add(WorkspaceDataSourceORM(id="ds_gone", workspace_id=WS, provider_id="prov_f",
+                                          graph_name="gone", label="Gone",
+                                          deleted_at="2026-10-30T00:00:00+00:00"))
+    (a,) = await _rows(db_session, "dsfork_a")
+    a.deleted_at = "2026-10-30T00:00:00+00:00"
+    await db_session.commit()
+    r = await test_client.get(f"{_DS}/deleted")
+    assert r.status_code == 200, r.text
+    assert [d["id"] for d in r.json()] == ["ds_gone"]
+
+
+async def test_a_fork_is_never_made_the_workspaces_default(test_client, db_session, forks):
+    """Set-primary made a fork's row the default, which every default lookup skips: the workspace
+    fell back to its oldest source, and the views that follow the default with it."""
+    r = await test_client.post(f"{_DS}/dsfork_b/set-primary")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["type"] == "fork_not_primary", r.text
+    (b,) = await _rows(db_session, "dsfork_b")
+    assert not b.is_primary
+    assert (await test_client.post(f"{_DS}/ds_parent/set-primary")).status_code == 200

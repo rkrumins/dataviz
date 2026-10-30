@@ -156,6 +156,16 @@ def refuse_lifecycle(row: Optional[WorkspaceDataSourceORM]) -> None:
                        "with the data source it was forked from."})
 
 
+def refuse_primary(row: Optional[WorkspaceDataSourceORM]) -> None:
+    """409 ``fork_not_primary`` for a fork's row, which is never a workspace's default: every
+    lookup of the default skips forks, so the workspace would fall back to another source."""
+    if row is not None and getattr(row, "fork_of_data_source_id", None):
+        raise HTTPException(status_code=409, detail={
+            "type": "fork_not_primary",
+            "message": "A fork can't be the workspace's default data source. Make the data source "
+                       "it was forked from the default instead."})
+
+
 async def trash_row(session, ds_id: str, actor: Optional[str]) -> None:
     """Tombstone a fork's row after its graph went to the trash. A row already there, or none
     (a fork made before forks had rows), is left as it is."""
