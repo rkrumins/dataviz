@@ -13,6 +13,7 @@ import os
 
 import pytest
 
+from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
 from backend.app.services.versioning import db, models
 from backend.app.services.versioning.service import GraphVersioningService
 
@@ -128,11 +129,54 @@ async def _run() -> None:
     await db.dispose_engine()
 
 
+async def _stats() -> None:
+    """``main`` read from Postgres — a graph with no FalkorDB key always is, any graph is until
+    its projection catches up with a publish — counts its schema without reading every entity."""
+    await models.create_schema_and_partitions()
+    svc = GraphVersioningService()
+    G = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                               actor="u")
+    gid, main = G["graph_id"], G["main_branch_id"]
+
+    def table(eid, tags):
+        return {"op": "create", "entity_kind": "node", "entity_id": eid,
+                "payload": {"displayName": f"{eid} name", "entityType": "Table", "tags": tags}}
+
+    seed = await _draft(svc, gid, "u", [
+        _node("D", "Domain one"), table("T1", ["pii", "gold"]), table("T2", ["pii"]),
+        table("T3", []), table("T4", ["", "pii"]), _edge("C1", "D", "T1", "CONTAINS"),
+        _edge("C2", "D", "T2", "CONTAINS"), _edge("F12", "T1", "T2")])
+    await svc.publish(graph_id=gid, branch_id=seed, actor="u", message="seed",
+                      containment_edge_types=CONT)
+    gone = await _draft(svc, gid, "u", [_del("T4"), _del("F12", "edge")])
+    await svc.publish(graph_id=gid, branch_id=gone, actor="u", message="drop T4",
+                      containment_edge_types=CONT)
+
+    reader = VersionedBranchProvider(svc, graph_id=gid, branch_id=main)
+    with _whole_graph_reads_refused():
+        stats = await reader.get_stats()
+        schema = await reader.get_schema_stats()
+    assert stats == {"nodeCount": 4, "edgeCount": 2, "entityTypeCounts": {"Dataset": 1, "Table": 3},
+                     "edgeTypeCounts": {"CONTAINS": 2}}, stats
+    assert (schema.total_nodes, schema.total_edges) == (4, 2)
+    assert {(t.id, t.count, tuple(t.sample_names)) for t in schema.entity_type_stats} == {
+        ("Dataset", 1, ("Domain one",)), ("Table", 3, ("T1 name", "T2 name", "T3 name"))}
+    assert {(t.id, t.count) for t in schema.edge_type_stats} == {("CONTAINS", 2)}
+    assert {(t.tag, t.count) for t in schema.tag_stats} == {("pii", 2), ("gold", 1)}
+    await db.dispose_engine()
+
+
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
 def test_everyday_paths_never_read_the_whole_graph():
     asyncio.run(_run())
 
 
+@pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
+def test_the_schema_of_main_read_from_postgres_is_counted_there():
+    asyncio.run(_stats())
+
+
 if __name__ == "__main__":
     asyncio.run(_run())
+    asyncio.run(_stats())
     print("versioning bounded reads e2e: OK")

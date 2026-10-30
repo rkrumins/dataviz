@@ -27,6 +27,7 @@ import contextlib
 import logging
 import random
 import sys
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import (Any, Awaitable, Callable, Collection, Dict, Iterable, List, Mapping, NamedTuple,
@@ -219,6 +220,29 @@ _ADVANCE_HEADS = text(
     "AND (h.content_hash = v.pre OR (v.pre = :absent AND h.content_hash = :empty)) "
     "RETURNING h.entity_id",
 ).bindparams(*_head_arrays(), bindparam("pres", type_=ARRAY(Text)))
+
+
+def _live_heads_sql(model, kind: str, join: str = "") -> str:
+    """``FROM … WHERE`` of a branch's live head versions of one kind: its head pointers joined to
+    the version rows they name (and to ``join``), the tombstones left out."""
+    return (f"FROM {EntityHeadORM.__table__.fullname} AS h JOIN {model.__table__.fullname} AS v "
+            f"ON v.graph_id = :graph_id AND v.id = h.head_version_id {join}"
+            f"WHERE h.graph_id = :graph_id AND h.branch_id = :branch_id AND h.entity_kind = '{kind}' "
+            "AND NOT h.is_tombstone ")
+
+
+# What a schema panel counts on a branch, in Postgres (:meth:`GraphVersioningService.schema_counts`).
+_NODE_TYPE = "coalesce(v.entity_type, v.payload->>'entityType')"
+_COUNT_NODE_TYPES = text(f"SELECT {_NODE_TYPE}, count(*) {_live_heads_sql(NodeVersionORM, 'node')}"
+                         "GROUP BY 1")
+_COUNT_EDGE_TYPES = text("SELECT coalesce(v.edge_type, v.payload->>'edgeType'), count(*) "
+                         f"{_live_heads_sql(EdgeVersionORM, 'edge')}GROUP BY 1")
+_NAMES_BY_ID = text(f"SELECT {_NODE_TYPE}, coalesce(v.display_name, v.payload->>'displayName') "
+                    f"{_live_heads_sql(NodeVersionORM, 'node')}ORDER BY h.entity_id LIMIT :rows")
+_TAGS_OF_V = ("CROSS JOIN LATERAL jsonb_array_elements_text(CASE WHEN jsonb_typeof(v.payload->'tags') "
+              "= 'array' THEN v.payload->'tags' ELSE '[]'::jsonb END) AS t(tag) ")
+_COUNT_TAGS = text(f"SELECT t.tag, count(*) {_live_heads_sql(NodeVersionORM, 'node', _TAGS_OF_V)}"
+                   "AND t.tag <> '' GROUP BY 1")
 
 
 def _copy_versions_sql(model, columns: str) -> "TextClause":
@@ -3288,6 +3312,45 @@ class GraphVersioningService:
                     continue
                 (edges if _is_edge_payload(p) else nodes)[eid] = p
             return {"nodes": nodes, "edges": edges}
+
+    async def schema_counts(self, *, graph_id: str, branch_id: str) -> Optional[Dict[str, object]]:
+        """``main``'s live nodes and edges by type, its nodes' names by type and the tags they
+        carry, counted in Postgres from its head pointers — what a schema panel shows, without
+        loading every entity into this process as :meth:`materialize_state` does:
+        ``{"nodes": {type: n}, "edges": {type: n}, "names": [(type, name)], "tags": {tag: n}}``.
+
+        ``names`` holds the first three names of each type among the first
+        ``_SCHEMA_SAMPLE_ROWS`` nodes by id, in id order: on a smaller graph, exactly the names the
+        whole state gives first. ``None`` where the head pointers don't hold the whole state: a
+        draft's fall back to ``main`` for what it didn't change, and a fork's to its parent. The
+        answer is kept for the head it counted (``_schema_counts_cache``): every reader between two
+        commits asks the same question."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if (graph is None or graph.fork_parent_graph_id
+                    or branch_id != await self._main_branch_id(s, graph_id)):
+                return None
+            key = (graph_id, graph.main_head_commit_seq)
+            if key in _schema_counts_cache:
+                _schema_counts_cache.move_to_end(key)
+                return _schema_counts_cache[key]
+            conn = await s.connection()
+            at = {"graph_id": graph_id, "branch_id": branch_id}
+            nodes = dict((await conn.execute(_COUNT_NODE_TYPES, at)).all())
+            edges = dict((await conn.execute(_COUNT_EDGE_TYPES, at)).all())
+            tags = dict((await conn.execute(_COUNT_TAGS, at)).all())
+            names: List[Tuple[Optional[str], str]] = []
+            named: Dict[Optional[str], int] = {}
+            for typ, name in (await conn.execute(
+                    _NAMES_BY_ID, {**at, "rows": _SCHEMA_SAMPLE_ROWS})).all():
+                if name and named.get(typ, 0) < 3:
+                    named[typ] = named.get(typ, 0) + 1
+                    names.append((typ, name))
+        counts = {"nodes": nodes, "edges": edges, "names": names, "tags": tags}
+        _schema_counts_cache[key] = counts
+        while len(_schema_counts_cache) > _SCHEMA_COUNTS_KEPT:
+            _schema_counts_cache.popitem(last=False)
+        return counts
 
     async def state_at_commit(
         self, *, graph_id: str, commit_id: str, viewer: Optional[Viewer] = None,
@@ -9019,6 +9082,11 @@ _PG_MAX_BIND_PARAMS = 32000
 # Max ids in a single ``... IN (:ids)`` predicate (the list dominates the param count;
 # a handful of fixed predicates add the rest) — keeps a cascade's bounded reads safe.
 _IN_LIST_MAX = 20000
+# Nodes, by id, whose names :meth:`GraphVersioningService.schema_counts` samples per type.
+_SCHEMA_SAMPLE_ROWS = 50_000
+# Graphs whose schema counts this process keeps, for their head at the time (least recent out first).
+_SCHEMA_COUNTS_KEPT = 64
+_schema_counts_cache: "OrderedDict[Tuple[str, int], Dict[str, object]]" = OrderedDict()
 
 # Data sources per round of ``main_heads``: its head-commit read binds four parameters per graph.
 _HEADS_PER_READ = _PG_MAX_BIND_PARAMS // 5
