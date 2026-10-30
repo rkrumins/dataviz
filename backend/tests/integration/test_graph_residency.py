@@ -437,6 +437,12 @@ async def test_a_read_reloads_a_standard_graph(store, falkor, mine, plain_engine
     ds = (await svc.get_graph(gid))["data_source_id"]
     reader = Viewer(actor="usr_reader", can_read=True)
     assert await _served_by(plain_engine, ds, reader) == "falkordb"
+    # The read FalkorDB served holds the graph's read lease: no eviction while it may be reading.
+    lease = f"versioning:lease:{gid}"
+    assert await CacheManager(proj).is_pinned(gid)
+    assert 0 < await get_broker_redis().ttl(lease) <= config.TRACE_LEASE_TTL_SECS
+    assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is False
+    await get_broker_redis().delete(lease)                 # its time runs out
     assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
 
     assert await _served_by(plain_engine, ds, None) == "postgres"
@@ -526,3 +532,18 @@ async def test_a_reloaded_key_serves_reads_only_once_its_summaries_are_built(
     await loop.run_once(graph_ids=[gid])
     assert (await _ps(gid)).status == "idle"
     assert (await svc.projection_watermark(gid))["fresh"] is True
+
+
+# ── read tracking ──────────────────────────────────────────────────────────────────────────────
+async def test_reads_are_flushed_in_one_update_that_never_moves_a_read_back(store):
+    svc = store
+    g1, g2 = [(await svc.create_graph(data_source_id="ds_" + _hex(), workspace_id="ws_res",
+                                      actor="a"))["graph_id"] for _ in range(2)]
+    now = datetime.now(timezone.utc).replace(microsecond=0)
+    await _set_ps(g2, last_read_at=now + timedelta(minutes=1))
+    residency._READS.clear()
+    residency._READS.update({g1: now, g2: now - timedelta(hours=1)})
+    assert await residency.flush_reads() == 2 and residency._READS == {}
+    assert (await _ps(g1)).last_read_at == now
+    assert (await _ps(g2)).last_read_at == now + timedelta(minutes=1)
+    assert await residency.flush_reads() == 0

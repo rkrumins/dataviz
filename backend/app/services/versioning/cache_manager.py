@@ -64,11 +64,11 @@ def _evictable() -> tuple:
 # Module-level lease helpers so a read path can pin a graph without holding a
 # CacheManager (which needs a projector). Best-effort: a broker outage must never
 # fail a read — it just means the lease isn't held for that request.
-async def acquire_lease(graph_id: str) -> bool:
+async def acquire_lease(graph_id: str, ttl: Optional[int] = None) -> bool:
     try:
         r = get_broker_redis()
         await r.incr(_lease_key(graph_id))
-        await r.expire(_lease_key(graph_id), config.LEASE_TTL)
+        await r.expire(_lease_key(graph_id), ttl or config.LEASE_TTL)
         return True
     except Exception:   # pragma: no cover - infra
         return False

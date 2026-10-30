@@ -1,8 +1,11 @@
 """Reads and residency (doc 17): what a person's read of a versioned graph out of FalkorDB asks
 for, and what FalkorDB-only work answers meanwhile.
 
-ContextEngine calls ``residency.on_read`` once per engine. For a person's read (a background job
-passes no viewer) of a graph whose key is not in FalkorDB — evicted, waiting for room or being
+ContextEngine calls ``residency.on_read`` once per engine. A person's read (a background job
+passes no viewer) is noted for the graph whose key serves it — a fork's root — and each process
+flushes what it noted once a minute, in one UPDATE that never moves a read back; a read FalkorDB
+serves also takes the graph's read lease, so a graph mid-read is never evicted. For a read of a
+graph whose key is not in FalkorDB — evicted, waiting for room or being
 loaded — the read is served from Postgres and the request remembers which graph it is
 (``residency.READING``): deep search, node degrees and native queries then answer 503
 ``graph_loading`` with Retry-After and ask for the load. A Standard or Always graph's load is asked
@@ -17,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 
 from backend.app.api.v1.endpoints import graph as G
-from backend.app.services.versioning import config, residency, residency_policy
+from backend.app.services.versioning import cache_manager, config, residency, residency_policy
 from backend.app.services.versioning.service import Viewer
 
 _VIEWER = Viewer(actor="usr_1", can_read=True)
@@ -35,8 +38,13 @@ class _Svc:
         return self.wms[gid]
 
 
-def _wm(status="idle", residency_class="standard", size=None):
-    return {"status": status, "residency": residency_class, "size_bytes": size}
+def _wm(status="idle", residency_class="standard", size=None, fresh=None):
+    return {"status": status, "residency": residency_class, "size_bytes": size,
+            "fresh": status == "idle" if fresh is None else fresh}
+
+
+def _loads(asked) -> list:
+    return [x for x in asked if isinstance(x, str)]
 
 
 @pytest.fixture
@@ -50,9 +58,15 @@ def asked(monkeypatch):
     async def no_entities(ids):
         return {}
 
+    async def lease(gid, ttl=None):
+        out.append(("lease", gid, ttl))
+        return True
+
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     monkeypatch.setattr(residency, "request_load", request_load)
     monkeypatch.setattr(residency, "_entities", no_entities)
+    monkeypatch.setattr(cache_manager, "acquire_lease", lease)
+    monkeypatch.setattr(residency, "_note_read", lambda gid: out.append(("read", gid)))
     residency_policy._MEMO.update(policy=residency_policy.defaults(), at=residency_policy._clock())
     residency.READING.set(None)
     yield out
@@ -76,7 +90,7 @@ async def test_a_read_of_a_graph_out_of_falkordb_and_the_load_it_asks_for(
         asked, status, residency_class, size, loads):
     reading = await _read(_Svc({"g": _wm(status, residency_class, size)}))
     assert reading == residency.Reading(graph_id="g", state=status, retry_after=60)
-    assert asked == (["g"] if loads else [])
+    assert _loads(asked) == (["g"] if loads else [])
 
 
 async def test_a_coldline_graph_whose_statistics_count_past_the_threshold_loads(asked, monkeypatch):
@@ -85,11 +99,11 @@ async def test_a_coldline_graph_whose_statistics_count_past_the_threshold_loads(
 
     monkeypatch.setattr(residency, "_entities", entities)
     await _read(_Svc({"g": _wm("evicted", "coldline")}))
-    assert asked == ["g"]
+    assert _loads(asked) == ["g"]
 
 
 async def test_a_resident_graph_asks_for_nothing_and_says_nothing(asked):
-    assert await _read(_Svc({"g": _wm()})) is None and asked == []
+    assert await _read(_Svc({"g": _wm()})) is None and _loads(asked) == []
 
 
 async def test_a_background_read_neither_asks_nor_marks_the_request(asked):
@@ -104,12 +118,12 @@ async def test_with_residency_off_nothing_changes(asked, monkeypatch):
 async def test_a_fork_reads_through_its_root(asked):
     svc = _Svc({"root": _wm("evicted")}, parents={"fork2": "fork1", "fork1": "root"})
     reading = await _read(svc, "fork2")
-    assert reading.graph_id == "root" and asked == ["root"]
+    assert reading.graph_id == "root" and _loads(asked) == ["root"]
 
 
 async def test_the_engine_s_own_watermark_is_used_for_a_graph_that_is_not_a_fork(asked):
     reading = await _read(_Svc({}), wm=_wm("evicted"))
-    assert reading.graph_id == "g" and asked == ["g"]
+    assert reading.graph_id == "g" and _loads(asked) == ["g"]
 
 
 # ── what FalkorDB-only work answers meanwhile ────────────────────────────────────────────────────
@@ -119,7 +133,7 @@ async def test_deep_search_on_a_graph_out_of_falkordb_is_a_503_that_asks_for_the
     assert exc.status_code == 503 and exc.headers == {"Retry-After": "45"}
     assert exc.detail["type"] == "graph_loading" and exc.detail["retryAfter"] == 45
     await asyncio.sleep(0)
-    assert asked == ["g"]
+    assert _loads(asked) == ["g"]
 
 
 async def test_deep_search_on_a_graph_in_falkordb_is_refused_as_before(asked):
@@ -143,4 +157,57 @@ async def test_node_degrees_on_a_graph_out_of_falkordb_is_a_503(asked, monkeypat
         await G.get_node_degrees(SimpleNamespace(headers={}), query, engine=_Engine())
     assert caught.value.status_code == 503 and caught.value.detail["type"] == "graph_loading"
     await asyncio.sleep(0)
-    assert asked == ["g"]
+    assert _loads(asked) == ["g"]
+
+
+# ── read tracking and the read lease ─────────────────────────────────────────────────────────────
+async def test_a_person_s_read_is_noted_and_a_read_falkordb_serves_takes_the_lease(asked):
+    await _read(_Svc({"g": _wm()}))
+    assert asked == [("read", "g"), ("lease", "g", config.TRACE_LEASE_TTL_SECS)]
+
+
+async def test_a_read_postgres_serves_is_noted_and_takes_no_lease(asked):
+    await _read(_Svc({"g": _wm("idle", fresh=False)}))             # the projection lags
+    await _read(_Svc({"g": _wm("evicted")}))
+    assert [x for x in asked if isinstance(x, tuple)] == [("read", "g"), ("read", "g")]
+
+
+async def test_a_fork_s_read_counts_for_its_root_and_leases_the_root(asked):
+    svc = _Svc({"root": _wm()}, parents={"fork2": "fork1", "fork1": "root"})
+    await _read(svc, "fork2")
+    assert asked == [("read", "root"), ("lease", "root", config.TRACE_LEASE_TTL_SECS)]
+
+
+async def test_a_background_read_is_not_noted(asked):
+    await _read(_Svc({"g": _wm()}), viewer=None)
+    assert asked == []
+
+
+async def test_with_residency_off_no_read_is_noted(asked, monkeypatch):
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
+    await _read(_Svc({"g": _wm()}))
+    assert asked == []
+
+
+async def test_reads_are_noted_once_a_graph_and_kept_when_a_flush_fails(monkeypatch):
+    """The map keeps each graph's latest read; a flush that cannot write puts the reads back,
+    keeping a later one noted meanwhile, for the next flush."""
+    residency._READS.clear()
+    monkeypatch.setattr(residency, "_ensure_flusher", lambda: None)
+    residency._note_read("g1")
+    first = residency._READS["g1"]
+    residency._note_read("g1")
+    residency._note_read("g2")
+    assert set(residency._READS) == {"g1", "g2"} and residency._READS["g1"] >= first
+
+    class _Broken:
+        async def __aenter__(self):
+            raise RuntimeError("graphver is down")
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(residency.db, "graphver_session", lambda: _Broken())
+    assert await residency.flush_reads() == 0
+    assert set(residency._READS) == {"g1", "g2"}
+    residency._READS.clear()

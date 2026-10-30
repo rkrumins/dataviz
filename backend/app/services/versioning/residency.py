@@ -19,9 +19,14 @@ full seed of the graph's key is the load; a load that does not fit by marking th
 summaries are built too; then the graph is ``idle``. It measures what keys hold as it goes. Forks
 are outside residency: they have no key of their own to evict, load or count, and their reads
 count for their root, whose key they read.
+
+Reads: each process notes the graphs people read (:func:`on_read`) and writes when, once a minute,
+to ``last_read_at`` (:func:`flush_reads`); a read FalkorDB serves takes the graph's read lease
+for ``GRAPHVER_TRACE_LEASE_TTL_SECS``, so no pass evicts a graph mid-read.
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from contextvars import ContextVar
@@ -29,7 +34,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Collection, Dict, List, Mapping, Optional, Tuple
 
-from sqlalchemy import func, literal, select, update
+from sqlalchemy import func, literal, select, text, update
 
 from . import config, db, residency_policy
 from .messaging import get_broker_redis, nudge_projection
@@ -73,6 +78,54 @@ READING: ContextVar[Optional[Reading]] = ContextVar("residency_reading", default
 
 _OUT = ("evicted", "waiting_capacity", "rehydrating")
 
+#: Reads this process noted since it last wrote them: graph id -> the latest.
+_READS: Dict[str, datetime] = {}
+_FLUSH_SECS = 60
+_flusher: Optional[asyncio.Task] = None
+
+
+def _note_read(graph_id: str) -> None:
+    _READS[graph_id] = datetime.now(timezone.utc)
+    _ensure_flusher()
+
+
+def _ensure_flusher() -> None:
+    """Write this process's reads once a minute, from its first read on (in the running loop)."""
+    global _flusher
+    loop = asyncio.get_running_loop()
+    if _flusher is None or _flusher.done() or _flusher.get_loop() is not loop:
+        _flusher = loop.create_task(_flush_every_minute(), name="residency read flush")
+
+
+async def _flush_every_minute() -> None:
+    while True:
+        await asyncio.sleep(_FLUSH_SECS)
+        await flush_reads()
+
+
+async def flush_reads() -> int:
+    """Write the reads noted since the last flush to ``last_read_at``: one UPDATE, which never
+    moves a graph's read back. Returns how many graphs it wrote; a flush that fails keeps the reads
+    for the next."""
+    if not _READS:
+        return 0
+    batch = dict(_READS)
+    _READS.clear()
+    try:
+        async with db.graphver_session() as s:
+            await s.execute(text(
+                f'UPDATE "{config.graphver_schema()}".projection_state ps SET last_read_at = r.at '
+                "FROM unnest(CAST(:ids AS text[]), CAST(:ats AS timestamptz[])) AS r(graph_id, at) "
+                "WHERE ps.graph_id = r.graph_id "
+                "AND (ps.last_read_at IS NULL OR ps.last_read_at < r.at)"),
+                {"ids": list(batch), "ats": list(batch.values())})
+    except Exception:  # noqa: BLE001 — the next flush writes them
+        logger.warning("residency: reads not written; the next flush tries again", exc_info=True)
+        for gid, at in batch.items():
+            _READS[gid] = max(at, _READS.get(gid, at))
+        return 0
+    return len(batch)
+
 
 async def _root(svc, graph: Mapping) -> Mapping:
     """The graph whose key serves ``graph``'s reads: itself, or a fork's root parent."""
@@ -87,18 +140,23 @@ async def _root(svc, graph: Mapping) -> Mapping:
 async def on_read(svc, graph: Mapping, *, viewer, wm: Optional[Mapping] = None) -> None:
     """What a read of a versioned graph does for residency — ContextEngine's one call, made for
     every engine it builds over a versioned graph (``wm``: its watermark of a graph that is not a
-    fork, which it already read). For a person's read (``viewer``; a background job has none) with
-    residency on, of a graph — a fork's root, for a fork — whose key is not in FalkorDB:
-    :data:`READING` says so for the rest of the request, and a Standard or Always graph's load is
-    asked for, as is a Coldline graph's that is larger than the canvas-load threshold. Its read
-    itself is served from Postgres."""
+    fork, which it already read). Only a person's read counts (``viewer``; a background job has
+    none), with residency on, and it counts for the graph whose key serves it: a fork's root, for
+    a fork. It is noted for ``last_read_at``. One FalkorDB serves takes the graph's read lease. For
+    a graph whose key is not in FalkorDB: :data:`READING` says so for the rest of the request, and
+    a Standard or Always graph's load is asked for, as is a Coldline graph's that is larger than the
+    canvas-load threshold. Its read itself is served from Postgres."""
     if not config.RESIDENCY_ENABLED or viewer is None:
         return
     root = await _root(svc, graph)
+    _note_read(root["graph_id"])
     if wm is None or root is not graph:
         wm = await svc.projection_watermark(root["graph_id"])
     if wm["status"] not in _OUT:
         READING.set(None)
+        if wm["fresh"]:
+            from .cache_manager import acquire_lease
+            await acquire_lease(root["graph_id"], ttl=config.TRACE_LEASE_TTL_SECS)
         return
     policy = await residency_policy.resolve()
     READING.set(Reading(root["graph_id"], wm["status"], policy.capacity_interval_secs))
