@@ -4465,10 +4465,13 @@ async def put_data_source_drafts_policy(
 ):
     """Override the workspace's drafts and reviews policy for one data source (workspace admins),
     field by field; ``"inherit"`` goes back to the workspace's. A change is recorded once."""
-    from backend.app.services import drafts_policy
+    from backend.app.services import drafts_policy, fork_sources
     from backend.app.services.activity import recorder
     ds = await _policy_source(session, ws_id, data_source_id)
+    governing = fork_sources.governing(ds)
     before, after = drafts_policy.apply(ds, drafts_policy.changes_from(body))
+    # A fork's policy is its parent's (409 here); a parent's forks take its new one.
+    await fork_sources.follow_parent(session, ds, governing)
     if after:
         await _record_policy_change(session, "data_source", before, after,
                                     **recorder.data_source_target(ds))

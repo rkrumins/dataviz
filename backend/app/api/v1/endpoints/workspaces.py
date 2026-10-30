@@ -39,7 +39,7 @@ from backend.app.db.repositories import (
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services import (
-    data_source_transfer, profiling_series, template_access, workspace_visibility,
+    data_source_transfer, fork_sources, profiling_series, template_access, workspace_visibility,
 )
 from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
@@ -877,6 +877,7 @@ async def update_data_source(
     old_identity = await load_node_identity(session, old_ds)
     # Read before the write: the update below changes ``old_ds`` in place.
     old_ontology_id = old_ds.ontology_id
+    old_governing = fork_sources.governing(old_ds)
 
     # Evict old cache entry if provider/graph config changed
     if req.projection_mode is not None or req.dedicated_graph_name is not None:
@@ -885,6 +886,8 @@ async def update_data_source(
     ds = await data_source_repo.update_data_source(session, ds_id, req)
     if not ds:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found")
+    # A fork's governing settings are its parent's (409 here); a parent's forks take its new ones.
+    forks = await fork_sources.follow_parent(session, old_ds, old_governing)
     # Which fields were sent, never their values: an extraConfig can be large.
     await recorder.record_for_request(
         session, "workspace.data_source.updated", **recorder.data_source_target(ds),
@@ -922,14 +925,16 @@ async def update_data_source(
         # Ontology (re)assignment / projection changes alter how reads
         # resolve — invalidate the process-wide resolved-ontology cache.
         from backend.app.services.resolved_ontology_cache import bump_ontology_generation
-        await bump_ontology_generation(workspace_id, ds_id)
+        for changed_id in (ds_id, *forks):
+            await bump_ontology_generation(workspace_id, changed_id)
         # Cached hierarchy reads were answered under the old ontology / name
         # mapping (entity types, display names) — drop them. Only when one of
         # them really moved: the edit form re-sends the current ontologyId with
         # a rename. Never raises.
         if ds.ontology_id != old_ontology_id or mapping_changed:
             from backend.app.services.graph_cache import invalidate_hierarchy_reads
-            await invalidate_hierarchy_reads(workspace_id, ds_id)
+            for changed_id in (ds_id, *forks):
+                await invalidate_hierarchy_reads(workspace_id, changed_id)
 
     # A mapping change makes the materialized AGGREGATED edges stale, and the
     # stamp's NULL-only fill means a re-run is required to rewrite them.
