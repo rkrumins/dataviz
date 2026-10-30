@@ -237,6 +237,23 @@ working on a draft and are told what became of the drafts they worked on.
 
 ---
 
+## [Unreleased] — Versioning: summaries for version-controlled graphs
+
+### Fixed
+
+- **A version-controlled graph gets its connection summaries built.** The canvas said
+  "Connections between collapsed items haven't been summarised for this source yet" on a
+  version-controlled data source whose graph no summaries build had ever covered, and kept saying
+  it: nothing ever started one. Reads never start a build, the reconciliation sweep leaves a
+  version-controlled source to its projector, and the projector only adjusts summaries a build has
+  laid down. A blank model made where the web tier hands summaries to the control plane (Compose
+  and Kubernetes) never had its first build queued at all. The versioning worker's liveness check
+  now asks for the first build of any such graph, once per commit, so the banner clears on its own
+  once the build has run, for graphs already in this state too. A data source whose summaries are
+  kept in a dedicated graph, or whose ontology has no lineage, is left as it was.
+
+---
+
 ## [Unreleased] — Versioning: enabling version control on a graph that already exists
 
 Fixes for what went wrong after enabling version control on a FalkorDB graph that already existed,
