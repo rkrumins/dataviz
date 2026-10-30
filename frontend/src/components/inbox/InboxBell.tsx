@@ -26,9 +26,12 @@ import {
     CheckCircle2,
     ClipboardCheck,
     Clock,
+    GitMerge,
+    GitPullRequestArrow,
     KeyRound,
     KeySquare,
     LayoutTemplate,
+    Lock,
     Megaphone,
     Share2,
     RotateCcw,
@@ -217,6 +220,33 @@ const KIND_VISUALS: Record<string, KindVisual> = {
         Icon: Clock,
         icon: 'text-slate-500',
         tile: 'bg-slate-500/10',
+    },
+    // What became of a draft you worked on: up for review, published,
+    // discarded, made private (so you lost access to it), or handed to you.
+    'draft.sent_for_review': {
+        Icon: GitPullRequestArrow,
+        icon: 'text-sky-500',
+        tile: 'bg-sky-500/10',
+    },
+    'draft.published': {
+        Icon: GitMerge,
+        icon: 'text-emerald-500',
+        tile: 'bg-emerald-500/10',
+    },
+    'draft.discarded': {
+        Icon: Trash2,
+        icon: 'text-rose-500',
+        tile: 'bg-rose-500/10',
+    },
+    'draft.made_private': {
+        Icon: Lock,
+        icon: 'text-amber-500',
+        tile: 'bg-amber-500/10',
+    },
+    'draft.transferred': {
+        Icon: ArrowRightLeft,
+        icon: 'text-indigo-500',
+        tile: 'bg-indigo-500/10',
     },
     'reconcile.suspended': {
         Icon: ShieldAlert,

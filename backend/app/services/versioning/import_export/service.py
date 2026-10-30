@@ -117,6 +117,7 @@ class ImportExportService:
         idempotency_key: Optional[str] = None,
         name: Optional[str] = None,
         originating_view_id: Optional[str] = None,
+        draft_visibility: Optional[str] = None,
     ) -> Dict[str, str]:
         """Open/append the working draft and create the import job.
 
@@ -124,7 +125,8 @@ class ImportExportService:
         from the traceable ``{ws}/{ds}/{graph}/{job}/source.<fmt>`` layout (the caller then streams
         the upload to it). ``branch_id`` supplied -> stack onto that existing draft (multiple
         imports per branch, like successive manual edits); omitted -> open a fresh import draft
-        (for ``originating_view_id``), in the job's transaction once the graph is known to be in
+        (for ``originating_view_id``, at ``draft_visibility``: the caller passes its data source's
+        policy, private when it passes none), in the job's transaction once the graph is known to be in
         ``workspace_id``: an import refused or rolled back leaves no empty draft behind.
         A supplied branch must be an open draft of this graph: main is :class:`MainWriteForbidden`,
         a closed draft :class:`BranchNotOpen`, someone else's private draft :class:`NotDraftOwner`,
@@ -152,7 +154,8 @@ class ImportExportService:
                 if draft_id is None:
                     draft_id = await self._svc._add_draft(
                         s, graph_id=graph_id, owner=actor, name=name or "Import",
-                        originating_view_id=originating_view_id)
+                        originating_view_id=originating_view_id,
+                        visibility=draft_visibility or "private")
                 branch = await self._svc._lock_branch(s, graph_id, draft_id)
                 if branch.kind == "main":
                     raise MainWriteForbidden()

@@ -1,6 +1,7 @@
 /**
  * BranchMembersSection — who else can see or change a draft, inside BranchSettingsModal. The owner
- * and maintainers change roles, remove and add people or groups; everyone else reads the list.
+ * and maintainers change roles, remove and add people or groups; everyone else reads the list. On a
+ * public draft, members are who may manage it (maintainers) or still keep it once it is private.
  */
 import { Eye, Loader2, Pencil, ShieldCheck, Trash2, Users2 } from 'lucide-react'
 import { HoverTip } from '@/components/ui/HoverTip'
@@ -8,7 +9,7 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { Segmented } from '@/components/ui/Segmented'
 import { UserAvatar } from '@/components/ui/UserAvatar'
 import { AddGrantPicker, type SubjectType } from '@/components/access/AddGrantPicker'
-import type { BranchMember, BranchMembersResponse, DraftRole } from '@/services/versioningApiService'
+import type { BranchMember, BranchMembersResponse, DraftLevel, DraftRole } from '@/services/versioningApiService'
 import { useAddBranchMember, useRemoveBranchMember } from '../hooks/useVersioning'
 
 const DRAFT_ROLES: { id: DraftRole; label: string; icon: typeof Eye }[] = [
@@ -23,6 +24,7 @@ export function BranchMembersSection({
   branchId,
   members,
   myRole,
+  level = 'private',
   onAdded,
 }: {
   wsId: string
@@ -31,8 +33,10 @@ export function BranchMembersSection({
   /** Undefined while loading. */
   members?: BranchMember[]
   myRole?: BranchMembersResponse['myRole']
-  /** A member was added — which also makes a private draft shared. */
-  onAdded: () => void
+  /** The draft's level: who sees it without being added. */
+  level?: DraftLevel
+  /** A member was added. */
+  onAdded?: () => void
 }) {
   const { notify } = useAppNotifications()
   const add = useAddBranchMember(wsId, graphId, branchId)
@@ -43,7 +47,7 @@ export function BranchMembersSection({
   const addMember = async (subjectType: SubjectType, subjectId: string, role: DraftRole) => {
     try {
       await add.mutateAsync({ subjectType, subjectId, role })
-      onAdded()
+      onAdded?.()
     } catch (e) {
       onError(e)
     }
@@ -58,7 +62,8 @@ export function BranchMembersSection({
         </div>
       ) : members.length === 0 ? (
         <p className="rounded-lg border border-dashed border-glass-border px-3 py-3 text-center text-xs text-ink-muted">
-          Only you can see this draft
+          {level === 'public' ? 'Nobody added yet — everyone who can see this data source sees it'
+            : 'Only you can see this draft'}
         </p>
       ) : (
         <div className="rounded-lg border border-glass-border divide-y divide-glass-border">

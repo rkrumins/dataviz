@@ -1,8 +1,9 @@
 """Who is asking, for a draft or review read (``viewer_ctx``), and where their teams come from.
 
 A draft can be shared with a team. ``viewer_ctx`` reads no teams: the service looks the caller's up
-itself (``_load_actor_groups``), only when a team's row could decide. A manager's draft reads never
-need them, and a service account — in no team — costs no query.
+itself (``_load_actor_groups``), only when a team's row could decide. A public draft's reads never
+need them, and a service account — in no team — costs no query. Managing the workspace doesn't
+open a private draft: only its owner, its members and its review's people read it.
 """
 from __future__ import annotations
 
@@ -15,7 +16,9 @@ from backend.app.db import engine
 from backend.app.services.versioning import service
 from backend.app.services.versioning.service import GraphVersioningService, Viewer
 
-_TEAM_SHARED = SimpleNamespace(id="br_1", kind="draft", owner="usr_owner", is_shared=True)
+_TEAM_SHARED = SimpleNamespace(id="br_1", kind="draft", owner="usr_owner", is_shared=True,
+                               visibility="private")
+_PUBLIC = SimpleNamespace(id="br_2", kind="draft", owner="usr_owner", is_shared=False, visibility="public")
 
 
 def _no_lookup(*args, **kwargs):
@@ -33,12 +36,13 @@ async def test_viewer_ctx_reads_no_teams(monkeypatch, manages, actor):
     _lookups_fail(monkeypatch)
     monkeypatch.setattr(versioning, "has_permission", lambda claims, permission, workspace_id=None: manages)
     viewer = await versioning.viewer_ctx("ws1", SimpleNamespace(id=actor), claims=None)
-    assert viewer == Viewer(actor, manages, ())
+    assert viewer == Viewer(actor, manages, (), can_read=manages)
 
 
-async def test_a_manager_reads_a_team_shared_draft_without_reading_teams(monkeypatch):
+async def test_a_public_draft_is_read_by_whoever_reads_its_source_without_reading_teams(monkeypatch):
     _lookups_fail(monkeypatch)
-    assert await GraphVersioningService()._branch_readable(None, _TEAM_SHARED, Viewer("usr_ada", True))
+    svc = GraphVersioningService()
+    assert await svc._branch_readable(None, _PUBLIC, Viewer("usr_ada", False, can_read=True))
 
 
 async def test_a_service_account_is_in_no_team_and_costs_no_query(monkeypatch):
@@ -55,6 +59,9 @@ class _Rows:
 
     def all(self):
         return self._rows
+
+    def first(self):
+        return None                         # no review names the caller
 
 
 class _Session:
@@ -75,3 +82,12 @@ async def test_someone_who_doesnt_manage_reads_through_their_team(monkeypatch):
     monkeypatch.setattr(service, "_load_actor_groups", groups)
     assert await GraphVersioningService()._branch_readable(_Session(), _TEAM_SHARED, Viewer("usr_bob", False))
     assert asked == ["usr_bob"], "looked up once, as the team's row could decide"
+
+
+async def test_managing_the_workspace_does_not_open_a_private_draft(monkeypatch):
+    async def groups(actor):
+        return ()
+
+    monkeypatch.setattr(service, "_load_actor_groups", groups)
+    ada = Viewer("usr_ada", True, can_read=True)        # a manager, on neither the draft nor its team
+    assert not await GraphVersioningService()._branch_readable(_Session(), _TEAM_SHARED, ada)

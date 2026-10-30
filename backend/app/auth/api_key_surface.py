@@ -167,7 +167,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
     **_entries(
         "versioning", RESOURCE,
         "resolve_graph_get", "get_graph", "get_watermark", "graph_neighbors",
-        "list_branches", "open_draft", "update_branch", "abandon_draft",
+        "list_branches", "get_branch", "open_draft", "update_branch", "abandon_draft",
         "stage_changes", "checkpoint", "rebase_draft",
         "get_state", "get_diff", "get_diff_vs_main", "get_diff_vs_main_summary",
         "get_diff_vs_main_children", "get_diff_window", "get_branch_freshness",

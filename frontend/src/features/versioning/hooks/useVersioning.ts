@@ -3,9 +3,10 @@
  * with the invalidation fan-out that keeps the BranchSwitcher, diff overlay, and
  * history in sync after a save / publish / merge.
  */
+import { useCallback } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
-import type { BranchStatusFilter, DraftRole, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import type { BranchStatusFilter, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
@@ -134,6 +135,50 @@ export function useBranchMembers(wsId?: string, graphId?: string | null, branchI
   })
 }
 
+/** What making a draft `visibility` would do — whose staged edits are saved first. Asked only
+ *  while a change of level is being confirmed (`visibility` set). */
+export function useDraftLevelImpact(
+  wsId?: string, graphId?: string | null, branchId?: string | null, visibility?: DraftLevel | null,
+) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.all, 'levelImpact', wsId, graphId, branchId, visibility] as const,
+    queryFn: () => api.getDraftLevelImpact(wsId!, graphId!, branchId!, visibility!),
+    enabled: !!wsId && !!graphId && !!branchId && !!visibility,
+    staleTime: 0,
+  })
+}
+
+/** The drafts and reviews policy a data source works under. */
+export function useDataSourceDraftsPolicy(wsId?: string, dataSourceId?: string | null) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.all, 'draftsPolicy', wsId, dataSourceId] as const,
+    queryFn: () => api.getDataSourceDraftsPolicy(wsId!, dataSourceId!),
+    enabled: !!wsId && !!dataSourceId,
+    staleTime: 60_000,
+  })
+}
+
+/** The workspace's own drafts and reviews settings, which its data sources follow unless they set
+ *  their own. Its key prefixes theirs, so invalidating it refreshes them too. */
+export function useWorkspaceDraftsPolicy(wsId?: string) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.all, 'draftsPolicy', wsId] as const,
+    queryFn: () => api.getWorkspaceDraftsPolicy(wsId!),
+    enabled: !!wsId,
+    staleTime: 60_000,
+  })
+}
+
+/** The workspace's open drafts whose owner left, for a workspace admin to hand on. No `wsId` for
+ *  anyone else: the server would refuse them. */
+export function useDraftsWhoseOwnerLeft(wsId?: string | null) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.all, 'ownerLeft', wsId] as const,
+    queryFn: () => api.listDraftsWhoseOwnerLeft(wsId!),
+    enabled: !!wsId,
+  })
+}
+
 /** When main last advanced here (publish / merge / rollback), per graph. Right after that the
  *  projection has not started yet — the watermark reads idle-and-behind for a moment — and the
  *  status-gated poll below would stop on exactly that reading and never see it catch up. So for a
@@ -184,14 +229,65 @@ export function useProjectionWatermark(
 /** Live "is this draft behind main?" — the "notified right away" signal. Isolated by design: its OWN
  *  query key (never shared), a CONSTANT poll interval (not a function that can thrash), and it only
  *  runs while a draft is open (`enabled` on branchId). Structurally cannot cause a render loop. */
+/** Per draft: the head its reader last caught up with — others' saves since are news
+ *  (`savedSince`) — and when the draft or main last moved. One reader per tab, so module-level. */
+const caughtUpTo = new Map<string, number>()
+const lastMoved = new Map<string, { at: number; seen: string }>()
+
+/** The reader caught up with a draft at `headCommitSeq` (they refreshed it). */
+export function markDraftCaughtUp(branchId: string, headCommitSeq: number) {
+  caughtUpTo.set(branchId, headCommitSeq)
+}
+
+/** Every 10 s while the draft or main is moving; every 60 s once both were still for two minutes. */
+export function freshnessPollInterval(lastMovedAt: number, now: number = Date.now()): number {
+  return now - lastMovedAt > 120_000 ? 60_000 : 10_000
+}
+
+/** The draft poll: is main ahead of it, is it still open, what may its reader do with it, and what
+ *  did others save into it since the reader last caught up (the first poll learns the head). Polls
+ *  faster while things move; a hidden tab doesn't poll (react-query's default). */
 export function useBranchFreshness(wsId?: string, graphId?: string | null, branchId?: string | null) {
   return useQuery({
     queryKey: VERSIONING_KEYS.branchFreshness(wsId, graphId, branchId),
-    queryFn: () => api.getBranchFreshness(wsId!, graphId!, branchId!),
+    queryFn: async () => {
+      const f = await api.getBranchFreshness(wsId!, graphId!, branchId!, caughtUpTo.get(branchId!) ?? null)
+      if (!caughtUpTo.has(branchId!) && f.headCommitSeq != null) caughtUpTo.set(branchId!, f.headCommitSeq)
+      const seen = `${f.headCommitSeq}:${f.mainHeadCommitSeq}:${f.status}`
+      if (lastMoved.get(branchId!)?.seen !== seen) lastMoved.set(branchId!, { at: Date.now(), seen })
+      return f
+    },
     enabled: !!wsId && !!graphId && !!branchId,
-    refetchInterval: 15_000,
+    refetchInterval: () => freshnessPollInterval(lastMoved.get(branchId ?? '')?.at ?? Date.now()),
     refetchOnWindowFocus: true,
     staleTime: 5_000,
+  })
+}
+
+/** Show what others saved into a draft: its reader is caught up with `headCommitSeq`, and the canvas
+ *  and the draft's own views reload, as after a pull. */
+export function useRefreshDraftFromOthers(wsId?: string, graphId?: string | null) {
+  const qc = useQueryClient()
+  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
+  return useCallback((branchId: string, headCommitSeq: number) => {
+    markDraftCaughtUp(branchId, headCommitSeq)
+    qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchState(wsId, graphId, branchId) })
+    qc.invalidateQueries({ queryKey: VERSIONING_KEYS.diffVsMain(wsId, graphId, branchId) })
+    qc.invalidateQueries({ queryKey: VERSIONING_KEYS.commitLog(wsId, graphId, branchId) })
+    qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'branch', wsId, graphId, branchId] })
+    qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchFreshness(wsId, graphId, branchId) })
+    bumpMainEpoch()
+    invalidateAggregatedEdges()
+  }, [qc, bumpMainEpoch, wsId, graphId])
+}
+
+/** One branch as the lists show it, with who committed to it (`contributors`). */
+export function useBranch(wsId?: string, graphId?: string | null, branchId?: string | null) {
+  return useQuery({
+    queryKey: [...VERSIONING_KEYS.all, 'branch', wsId, graphId, branchId] as const,
+    queryFn: () => api.getBranch(wsId!, graphId!, branchId!),
+    enabled: !!wsId && !!graphId && !!branchId,
+    staleTime: 30_000,
   })
 }
 
@@ -566,7 +662,7 @@ export function useSetGraphFrozen(wsId?: string) {
 export function useOpenDraft(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (v: { name?: string; originatingViewId?: string; shared?: boolean } = {}) =>
+    mutationFn: (v: { name?: string; originatingViewId?: string; shared?: boolean; visibility?: DraftLevel } = {}) =>
       api.openDraft(wsId, graphId, v),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
@@ -586,18 +682,36 @@ export function useAbandonDraft(wsId: string, graphId: string) {
   })
 }
 
-/** Edit a draft's name / description / shared-visibility. Refreshes the branch list + resolve. */
+/** Edit a draft's name / description. Refreshes the branch list + resolve. */
 export function useUpdateBranch(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (v: { branchId: string; name?: string; description?: string; isShared?: boolean }) =>
-      api.updateBranch(wsId, graphId, v.branchId, { name: v.name, description: v.description, isShared: v.isShared }),
-    onSuccess: (_d, v) => {
+    mutationFn: (v: { branchId: string; name?: string; description?: string }) =>
+      api.updateBranch(wsId, graphId, v.branchId, { name: v.name, description: v.description }),
+    onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
-      // Making a draft private removes its members.
-      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchMembers(wsId, graphId, v.branchId) })
     },
+  })
+}
+
+/** Make a draft public or private. Refreshes who it lists, its members and its level everywhere. */
+export function useSetDraftLevel(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { branchId: string; visibility: DraftLevel }) =>
+      api.setDraftLevel(wsId, graphId, v.branchId, v.visibility),
+    onSuccess: (_d, v) => invalidateBranchMembers(qc, wsId, graphId, v.branchId),
+  })
+}
+
+/** Hand a draft to someone else. Refreshes its owner and members everywhere. */
+export function useTransferDraft(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { branchId: string; to: string; keepPrevious: boolean }) =>
+      api.transferDraft(wsId, graphId, v.branchId, { to: v.to, keepPrevious: v.keepPrevious }),
+    onSuccess: (_d, v) => invalidateBranchMembers(qc, wsId, graphId, v.branchId),
   })
 }
 
@@ -625,6 +739,25 @@ function invalidateBranchMembers(qc: ReturnType<typeof useQueryClient>, wsId: st
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branchMembers(wsId, graphId, branchId) })
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })
   qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+}
+
+/** Change the workspace's drafts and reviews settings (workspace admins). Refreshes its policy and
+ *  every data source's, which follow it. */
+export function useSetWorkspaceDraftsPolicy(wsId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (change: DraftsPolicyChange) => api.putWorkspaceDraftsPolicy(wsId, change),
+    onSuccess: () => qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'draftsPolicy', wsId] }),
+  })
+}
+
+/** Change one data source's own drafts and reviews settings (workspace admins). */
+export function useSetDataSourceDraftsPolicy(wsId: string, dataSourceId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (change: DraftsPolicyChange) => api.putDataSourceDraftsPolicy(wsId, dataSourceId, change),
+    onSuccess: () => qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'draftsPolicy', wsId, dataSourceId] }),
+  })
 }
 
 /** Pull the latest main into a draft ("update branch"). Returns the RebaseResponse so the caller can

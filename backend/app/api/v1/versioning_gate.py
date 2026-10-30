@@ -110,7 +110,8 @@ async def require_branch_scope(session: AsyncSession, svc, view: ViewORM, branch
             primary = await data_source_repo.get_primary_data_source(session, view.workspace_id)
             ds_id = primary.id if primary else None
         viewer = Viewer(actor=actor, can_manage=has_permission(
-            claims, "workspace:datasource:manage", workspace_id=view.workspace_id))
+            claims, "workspace:datasource:manage", workspace_id=view.workspace_id),
+            can_read=has_permission(claims, "workspace:datasource:read", workspace_id=view.workspace_id))
         await svc.check_view_branch(data_source_id=ds_id, branch_id=branch_id, viewer=viewer, write=write)
 
 

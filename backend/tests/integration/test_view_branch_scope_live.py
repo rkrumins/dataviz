@@ -2,8 +2,8 @@
 
 A view's branchId must be a branch of the view's own (live) graph that the caller can read, else
 it is unknown (404). Main reads as the published view and refuses a write; a draft write needs the
-draft open (branch_closed) and the caller able to edit it (access_denied): a manager reads someone
-else's private draft but does not write it (not_draft_owner).
+draft open (branch_closed) and the caller able to edit it (access_denied). Someone else's private
+draft is unknown to a manager too.
 """
 import asyncio
 import os
@@ -12,7 +12,7 @@ import pytest
 from sqlalchemy import update
 
 from backend.app.services.versioning import db, models
-from backend.app.services.versioning.errors import BranchNotOpen, MainWriteForbidden, NotDraftOwner
+from backend.app.services.versioning.errors import BranchNotOpen, MainWriteForbidden
 from backend.app.services.versioning.models import GraphORM
 from backend.app.services.versioning.service import AccessDenied, GraphVersioningService, Viewer
 
@@ -45,12 +45,11 @@ async def _run() -> None:
     with pytest.raises(MainWriteForbidden):
         await check(main, write=True)
 
-    # ── someone else's private draft is unknown, except to a manager ────────
-    with pytest.raises(ValueError):
-        await check(d, BOB, write=False)
-    await check(d, Viewer("bob", can_manage=True), write=False)
-    with pytest.raises(NotDraftOwner):                # …who reads it, but does not write it
-        await check(d, Viewer("bob", can_manage=True), write=True)
+    # ── someone else's private draft is unknown, to a manager too ───────────
+    for who in (BOB, Viewer("bob", can_manage=True, can_read=True)):
+        for write in (False, True):
+            with pytest.raises(ValueError):
+                await check(d, who, write=write)
 
     # ── a shared draft: a viewer reads it, an editor writes it ──────────────
     sd = await svc.open_draft(graph_id=ga, owner="alice", shared=True)

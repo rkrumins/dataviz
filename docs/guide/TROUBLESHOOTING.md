@@ -202,7 +202,7 @@ store's time limit looks the same.
    role that edits views. Ask the owner to select **Share** and add you — see
    [Managing & Sharing Views](/guide/managing-views).
 2. To change the data, select **Edit** in a Context View's header; your edits go
-   to a private draft. **Edit** appears only when version control is on and
+   to a draft. **Edit** appears only when version control is on and
    your workspace role isn't **Viewer**. See
    [Editing in a Draft](/guide/editing-in-a-draft).
 3. If **Edit** is greyed out with "Version control isn't set up for this data
@@ -385,6 +385,24 @@ before it can be merged.").
 3. Select **Merge**.
 
 See [The Review Center](/guide/review-center).
+
+### A draft is read-only, or I was moved to Published
+
+**Likely cause:** the draft isn't yours to change, or you lost access to it.
+
+1. Someone else's private draft opens read-only unless they add you as an
+   **Editor** or **Maintainer**. Ask its owner, or start a draft of your own.
+2. If the strip said *You no longer have access to this draft*, its owner made
+   it private or removed you. Anything you'd saved is in the draft, and edits
+   you'd staged but not saved are still in this browser: start a new draft and
+   save them there.
+
+### "Publish now" is greyed out: "publishes drafts through a review"
+
+**Likely cause:** your data source has someone other than whoever opened a
+review merge it. Choose **Submit for review** and ask a teammate who can publish
+to merge it. A workspace admin sets this under **Drafts and reviews** — see
+[Versioning & Change Control](/guide/versioning-change-control).
 
 ### A script's API key is refused
 

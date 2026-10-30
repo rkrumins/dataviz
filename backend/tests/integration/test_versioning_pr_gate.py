@@ -63,8 +63,8 @@ async def _run() -> None:
     with pytest.raises(ApprovalRequired) as ei:                  # unapproved → blocked
         await svc.merge_pr(pr_id=pr, actor="dave", message="merge")
     assert ei.value.pending == ["carol"]
-    with pytest.raises(AccessDenied):                            # author can't self-approve
-        await svc.approve_pr(pr_id=pr, actor="bob")
+    with pytest.raises(AccessDenied):                            # self-approval off: not its author
+        await svc.approve_pr(pr_id=pr, actor="bob", self_approval=False)
     meta = await svc.approve_pr(pr_id=pr, actor="carol")
     assert meta["approval_status"] == "approved" and meta["status"] == "approved"
     assert await svc.merge_pr(pr_id=pr, actor="dave", message="merge")   # now allowed
@@ -201,17 +201,18 @@ async def _run_head_bound_approvals() -> None:
     assert meta["approval_status"] == "pending" and meta["stale_approved_by"] == ["carol"], meta
     assert meta["head_commit_id"] == await head(d5) != seen, meta
 
-    # ── The draft's owner can't approve a review of it, any more than its author can ──
+    # ── Self-approval off: whoever opened a review can't approve it; its draft's owner can ──
     from backend.app.services.versioning.errors import SelfReview
     d6 = await draft("bob", [_upd("B", f=6)])
     await svc.add_branch_member(graph_id=gid, branch_id=d6, subject_type="user", subject_id="alice",
                                 role="editor", actor="bob")
     mr6 = await svc.open_draft_mr(graph_id=gid, branch_id=d6, actor="alice", reviewers=["bob", "carol"])
-    for who in ("bob", "alice"):
-        with pytest.raises(SelfReview) as sr:
-            await svc.approve_pr(pr_id=mr6, actor=who)
-        assert (sr.value.status_code, sr.value.detail["code"]) == (403, "self_review")
-    assert (await svc.approve_pr(pr_id=mr6, actor="carol"))["approved_by"] == ["carol"]
+    with pytest.raises(SelfReview) as sr:
+        await svc.approve_pr(pr_id=mr6, actor="alice", self_approval=False)
+    assert (sr.value.status_code, sr.value.detail["code"]) == (403, "self_review")
+    assert (await svc.approve_pr(pr_id=mr6, actor="bob", self_approval=False))["approved_by"] == ["bob"]
+    # Allowed, as by default: the opener's approval counts like anyone's.
+    assert (await svc.approve_pr(pr_id=mr6, actor="alice"))["approved_by"] == ["bob", "alice"]
 
     await db.dispose_engine()
 
@@ -277,10 +278,11 @@ async def _run_publish_permission() -> None:
                 assert (await c.post(f"{V1}/graphs/{gid}/branches/{d}/commit", json={}, headers=who)).status_code == 200
                 return d
 
-            # Mia edits and raises a review, but nothing she does advances main.
+            # Mia edits and asks Pat to review it, but nothing she does advances main.
             d = await draft(mia, "urn:t:mia")
             needs_publish(await c.post(f"{V1}/graphs/{gid}/branches/{d}/publish", json={"message": "m"}, headers=mia))
-            r = await c.post(f"{V1}/graphs/{gid}/branches/{d}/merge-requests", json={}, headers=mia)
+            r = await c.post(f"{V1}/graphs/{gid}/branches/{d}/merge-requests", json={"reviewers": ["pat"]},
+                             headers=mia)
             assert r.status_code == 201, r.text
             mr = r.json()["prId"]
             needs_publish(await c.post(f"{V1}/merge-requests/{mr}/merge", json={"message": "m"}, headers=mia))
@@ -290,7 +292,11 @@ async def _run_publish_permission() -> None:
             needs_publish(await c.post("/api/v1/ws1/graph/resync", params={"dataSourceId": ds}, headers=mia))
             assert (await c.get(f"{V1}/graphs/{gid}/commits", headers=pat)).json()["commits"][0]["commit_id"] == seed
 
-            # Pat merges her review, publishes his own draft, and reverts and restores main.
+            # Pat, who sees her private draft as its reviewer, approves and merges her review,
+            # publishes his own draft, and reverts and restores main.
+            head = (await c.get(f"{V1}/merge-requests/{mr}", headers=pat)).json()["headCommitId"]
+            r = await c.post(f"{V1}/merge-requests/{mr}/approve", json={"expectedHeadCommitId": head}, headers=pat)
+            assert r.status_code == 200, r.text
             r = await c.post(f"{V1}/merge-requests/{mr}/merge", json={"message": "m"}, headers=pat)
             assert r.status_code == 200, r.text
             merged = r.json()["commitId"]
@@ -316,9 +322,9 @@ async def _run_publish_permission() -> None:
             head = r.json()["detail"]["headCommitId"]
             r = await c.get(f"{V1}/merge-requests/{mr3}", headers=pat)
             assert r.status_code == 200 and head and r.json()["headCommitId"] == head, r.text
-            # The draft's owner (mia raised it, too) is refused with a code that says why.
+            # Mia, who raised it, approves it too (self-approval is on by default); Pat's is still asked for.
             r = await c.post(f"{V1}/merge-requests/{mr3}/approve", json={"expectedHeadCommitId": head}, headers=mia)
-            assert r.status_code == 403 and r.json()["detail"]["code"] == "self_review", r.text
+            assert r.status_code == 200 and r.json()["approvalStatus"] == "pending", r.text
             r = await c.post(f"{V1}/merge-requests/{mr3}/approve", json={"expectedHeadCommitId": head}, headers=pat)
             assert r.status_code == 200 and r.json()["approvalStatus"] == "approved", r.text
             r = await c.post(f"{V1}/merge-requests/{mr3}/approve", headers=pat)      # no body: as before

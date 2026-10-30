@@ -1,11 +1,11 @@
 """Draft & PR read visibility (RBAC scoping) — needs Postgres.
 
-Drafts are PRIVATE: a draft's individual commits, state and diff are visible only to its owner and
-to workspace managers (and explicit members of a shared draft). Once a draft is submitted as a merge
-request, its commits become visible to the PR's author, its assigned reviewers, and managers — so a
-reviewer can see exactly what (and who) is in the change before merging, while uninvolved readers
-can't browse it. Managers (``Viewer.can_manage``) see everything; ``main`` stays readable to any
-``datasource:read`` caller. A read called WITHOUT a Viewer (internal/tests) is unscoped.
+A private draft's individual commits, state and diff are visible only to its owner (and explicit
+members of a shared draft). Once a draft is submitted as a merge request, its commits become visible
+to the PR's author and its assigned reviewers — so a reviewer can see exactly what (and who) is in
+the change before merging, while uninvolved readers can't browse it. Managing the workspace
+(``Viewer.can_manage``) opens none of it; ``main`` stays readable to any ``datasource:read`` caller.
+A read called WITHOUT a Viewer (internal/tests) is unscoped.
 """
 import asyncio
 import os
@@ -58,25 +58,26 @@ async def _run() -> None:
     with pytest.raises(AccessDenied):
         await svc.diff_branch_vs_base(graph_id=gid, branch_id=dA, viewer=bob)
 
-    # ── a manager sees everything; main is readable by any datasource:read caller ──
-    assert len(await svc.commit_log(graph_id=gid, branch_id=dA, viewer=mgr)) == 2
+    # ── a manager on none of it is blocked too; main is readable by any datasource:read caller ──
+    with pytest.raises(AccessDenied):
+        await svc.commit_log(graph_id=gid, branch_id=dA, viewer=mgr)
     assert len(await svc.commit_log(graph_id=gid, branch_id=main, viewer=bob)) >= 1
 
-    # ── list_branches is filtered: bob sees only main; alice + manager see the draft ──
+    # ── list_branches is filtered: bob and the manager see only main; alice sees the draft ──
     assert dA not in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=bob))[0]]
     assert dA in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=alice))[0]]
-    assert dA in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=mgr))[0]]
+    assert dA not in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=mgr))[0]]
 
     # ── submit a PR with a reviewer; the source-branch owner is surfaced on the single-PR read ──
     mr = await svc.open_draft_mr(graph_id=gid, branch_id=dA, actor="alice", reviewers=["rev"])
     pr = await svc.get_pr(mr)
     assert pr["source_branch_owner"] == "alice" and pr["source_branch_name"] == "feature-x"
 
-    # ── PR visibility: uninvolved bob doesn't see it; reviewer / author / manager do ──
+    # ── PR visibility: uninvolved bob and the manager don't see it; reviewer / author do ──
     assert mr not in _ids(await svc.list_pulls(target_graph_id=gid, viewer=bob))
     assert mr in _ids(await svc.list_pulls(target_graph_id=gid, viewer=rev))
     assert mr in _ids(await svc.list_pulls(target_graph_id=gid, viewer=alice))
-    assert mr in _ids(await svc.list_pulls(target_graph_id=gid, viewer=mgr))
+    assert mr not in _ids(await svc.list_pulls(target_graph_id=gid, viewer=mgr))
 
     # ── the reviewer may read the draft's commits via the PR-participant rule (not a draft member) ──
     assert len(await svc.commit_log(graph_id=gid, branch_id=dA, viewer=rev)) == 2
@@ -109,8 +110,9 @@ async def _run() -> None:
     with pytest.raises(AccessDenied):
         await svc.commit_log(graph_id=gid, branch_id=for_team, viewer=bob)
 
-    # ── unshared, a draft is neither listed nor readable; going private removes its members ──
-    await svc.update_branch(graph_id=gid, branch_id=for_bob, actor="alice", is_shared=False)
+    # ── once its last member goes, a draft is neither listed nor readable to them ──
+    await svc.remove_branch_member(graph_id=gid, branch_id=for_bob, subject_type="user", subject_id="bob",
+                                   actor="alice")
     assert for_bob not in [b["branch_id"] for b in (await svc.list_branches(graph_id=gid, viewer=bob))[0]]
     with pytest.raises(AccessDenied):
         await svc.commit_log(graph_id=gid, branch_id=for_bob, viewer=bob)

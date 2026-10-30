@@ -1,7 +1,9 @@
 /**
  * Approve is of what the reviewer saw: it sends the head the review was loaded at, the diff is read
- * again when a new head arrives, and a "draft moved on" refusal reloads the review and says so. The
- * draft's owner is not offered Approve, as its author is not.
+ * again when a new head arrives, and a "draft moved on" refusal reloads the review and says so.
+ * Who may approve and merge is the server's word (`viewerCan`): whoever opened a review approves it
+ * where the policy lets them, and a Merge they may not make says why. Without that word, the
+ * draft's owner and author are not offered Approve.
  */
 import { render, screen, fireEvent } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
@@ -15,13 +17,15 @@ const notify = vi.fn()
 const idle = { mutate: vi.fn(), mutateAsync: vi.fn(), isPending: false }
 let head = 'cmt_h1'
 let owner = 'u_author'
+let actor = 'u_author'
+let viewerCan: Record<string, unknown> | undefined
 
 vi.mock('../../versioning/hooks/useVersioning', () => ({
   useMergeRequest: () => ({
     data: {
       prId: 'pr_1', graphId: 'g1', sourceBranchId: 'br_1', targetBranch: 'main', status: 'mergeable',
-      actor: 'u_author', sourceBranchOwner: owner, title: 'Tidy', reviewers: ['u_me'], approvedBy: [],
-      behind: false, headCommitId: head,
+      actor, sourceBranchOwner: owner, title: 'Tidy', reviewers: ['u_me'], approvedBy: [],
+      behind: false, headCommitId: head, viewerCan,
     },
     isLoading: false,
     refetch: refetchPr,
@@ -57,6 +61,8 @@ beforeEach(() => {
   for (const f of [approveMutate, refetchPr, refetchDiff, notify]) f.mockReset()
   head = 'cmt_h1'
   owner = 'u_author'
+  actor = 'u_author'
+  viewerCan = undefined
 })
 
 describe('PrDetailDrawer — Approve', () => {
@@ -89,5 +95,29 @@ describe('PrDetailDrawer — Approve', () => {
     owner = 'u_me'
     render(drawer())
     expect(screen.queryByRole('button', { name: /Approve/ })).toBeNull()
+  })
+
+  it('is offered to whoever opened the review where the policy lets them approve it', () => {
+    actor = 'u_me'
+    viewerCan = { approve: true, merge: true, approveReason: null, mergeReason: null }
+    render(drawer())
+    expect(screen.getByRole('button', { name: /Approve/ })).toBeEnabled()
+  })
+
+  it('is not offered where the server says the reader may not approve', () => {
+    viewerCan = { approve: false, merge: true, approveReason: 'self_review', mergeReason: null }
+    render(drawer())
+    expect(screen.queryByRole('button', { name: /Approve/ })).toBeNull()
+  })
+})
+
+describe('PrDetailDrawer — Merge', () => {
+  it('is off, saying why, where someone other than whoever opened it merges', () => {
+    actor = 'u_me'
+    viewerCan = { approve: true, merge: false, approveReason: null, mergeReason: 'self_merge' }
+    render(drawer())
+    const merge = screen.getByRole('button', { name: /^Merge$/ })
+    expect(merge).toBeDisabled()
+    expect(merge).toHaveAttribute('title', expect.stringMatching(/someone other than whoever opened/))
   })
 })

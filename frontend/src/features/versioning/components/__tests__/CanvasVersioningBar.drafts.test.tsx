@@ -4,13 +4,17 @@
  *     its own draft was closed from that one draft's status (its freshness), for the guard;
  *   • it offers Publish and Discard only on a draft the user can write, and names the owner of one
  *     they can only look at; an editor of a shared draft gets Publish (to request review) but not
- *     Discard, which needs its owner or a maintainer.
+ *     Discard, which needs its owner or a maintainer;
+ *   • a draft its reader may no longer read (the poll's 404) is gone, for the guard;
+ *   • it says when someone else saved into the draft, and who saved into it.
  */
 import { render, screen } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 let branchesData: unknown[] = []
 let freshness: Record<string, unknown> | undefined
+let freshnessError: unknown = null
+let branchData: Record<string, unknown> | undefined
 const useBranches = vi.fn((..._args: unknown[]) => ({ data: branchesData, isFetching: false }))
 const guard = vi.fn()
 
@@ -31,7 +35,9 @@ vi.mock('@/store/stagedChangesStore', () => ({ useStagedChangeCount: () => 0 }))
 vi.mock('../../hooks/useVersioning', () => ({
   useResolveGraph: () => ({ data: { graphId: 'g1', mainHeadCommitSeq: 5, kind: 'bootstrap' }, isLoading: false }),
   useBranches: (...args: unknown[]) => useBranches(...args),
-  useBranchFreshness: () => ({ data: freshness }),
+  useBranchFreshness: () => ({ data: freshness, error: freshnessError }),
+  useBranch: () => ({ data: branchData }),
+  useRefreshDraftFromOthers: () => vi.fn(),
   useDiffVsMain: () => ({ data: undefined, isLoading: false }),
   useBranchViewChanges: () => ({ data: undefined }),
   useAbandonDraft: () => ({ mutate: vi.fn(), isPending: false }),
@@ -64,6 +70,25 @@ describe('CanvasVersioningBar on a draft', () => {
     useBranches.mockClear()
     guard.mockClear()
     freshness = { behind: false, behindBy: 0, mainHeadCommitSeq: 5, baseCommitSeq: 5, status: 'open' }
+    freshnessError = null
+    branchData = undefined
+  })
+
+  it('tells the guard a draft its reader may no longer read is gone', () => {
+    branchesData = [draft({})]
+    freshnessError = Object.assign(new Error('unknown branch'), { status: 404 })
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+    expect(guard).toHaveBeenLastCalledWith(expect.objectContaining({ currentBranchId: 'br_1', status: 'gone' }))
+  })
+
+  it('says who else saved into the draft, and who saved into it', () => {
+    branchesData = [draft({})]
+    freshness = { ...freshness, headCommitSeq: 9, userNames: { bob: 'Bob Stone' },
+                  savedSince: { commits: 2, changes: 3, by: ['bob'], capped: false } }
+    branchData = { contributors: ['bob', 'ana'], userNames: { bob: 'Bob Stone', ana: 'Ana A' } }
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="ds1" />)
+    expect(screen.getByText(/Bob Stone saved 3 changes/)).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: 'Saved into this draft by Bob Stone and Ana A' })).toBeInTheDocument()
   })
 
   it('reads only the drafts in play, and hands the guard its own draft\'s status', () => {

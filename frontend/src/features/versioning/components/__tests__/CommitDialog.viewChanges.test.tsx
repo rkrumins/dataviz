@@ -12,6 +12,7 @@ const publishMutate = vi.fn()
 let viewChanges: BranchViewChanges | undefined
 
 vi.mock('../../hooks/useVersioning', () => ({
+  useDataSourceDraftsPolicy: () => ({ data: undefined }),
   usePublishBranch: () => ({ mutate: publishMutate, isPending: false }),
   useOpenMergeRequest: () => ({ mutate: vi.fn(), isPending: false }),
   useLivePrForBranch: () => ({ livePr: undefined, pending: false }),

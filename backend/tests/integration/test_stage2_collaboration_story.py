@@ -2,14 +2,14 @@
 over HTTP, needs Postgres and FalkorDB (GRAPHVER_E2E=1).
 
 Pat publishes; Alice, Bob, Carol and Rita manage. Pat seeds main. Alice and Bob each open a private
-draft: Bob may not write Alice's (403 ``not_draft_owner``), and reading it without manage he is
-told it doesn't exist (404); Pat, a manager, reads it. Bob, who can't publish, may not write main
-directly (403 ``publish_required``). Alice shares her draft with ``grp_eng``: Carol, through the
-group, edits it, Bob, no member, is refused (403 ``not_owner_or_member``). Pat publishes a change to
-the field Alice edited; her pull conflicts and she resolves it. Alice asks Rita to review; Carol's
-edit after Rita's approval makes it stale, so Pat's merge is 409 ``approval_required`` naming Rita
-as stale. Rita's approval of the head she saw is 409 ``head_moved``; she approves the new head. Bob,
-without publish, may not merge; Pat merges. The merged node's history, the watermark and the
+draft: to Bob and to Pat, managers both, Alice's doesn't exist (404), written or read. Bob, who
+can't publish, may not write main directly (403 ``publish_required``). Alice shares her draft with
+``grp_eng``, and with Pat as a viewer so he can merge it: Carol, through the group, edits it; to
+Bob, no member, it still doesn't exist. Pat publishes a change to the field Alice edited; her pull
+conflicts and she resolves it. Alice asks Rita to review; Carol's edit after Rita's approval makes
+it stale, so Pat's merge is 409 ``approval_required`` naming Rita as stale. Rita's approval of the
+head she saw is 409 ``head_moved``; she approves the new head. Bob, without publish, may not merge;
+Pat merges. The merged node's history, the watermark and the
 graph-store placement then say who changed it and where it lives.
 
 Faked: the data source row (pinned to a ``gvt_`` key on a provider row for this run's FalkorDB),
@@ -26,6 +26,7 @@ from backend.app.services.versioning import db, models, service
 from .test_api_graph_draft_journey import _IMPORT_NDJSON, _StubCache, _StubManager
 from .test_graph_store_placement_by_graph import _snapshot
 from .test_private_draft_read import _app
+from . import test_shared_draft_members as SDM
 from .test_shared_draft_members import directory  # noqa: F401  (autouse: users, groups, names)
 
 _PUBLISHERS = {"pat"}
@@ -78,7 +79,8 @@ async def _story(prov: str, key: str) -> None:
             # 2. Alice and Bob each open a private draft; Alice edits hers.
             drafts = {}
             for who in ("alice", "bob"):
-                r = await c.post(f"{V1}/graphs/{gid}/branches", json={}, headers=_as(who))
+                r = await c.post(f"{V1}/graphs/{gid}/branches", json={"visibility": "private"},
+                                 headers=_as(who))
                 assert r.status_code in (200, 201), r.text
                 drafts[who] = r.json()["branchId"]
             d = drafts["alice"]
@@ -86,16 +88,16 @@ async def _story(prov: str, key: str) -> None:
             r = await c.post(f"{GP}/changes", params=qd, json=_save("urn:t:child", "Alice's child"),
                              headers=_as("alice"))
             assert r.status_code == 200, r.text
-            _denied(await c.post(f"{GP}/changes", params=qd, json=_save("urn:t:child", "Bob's"),
-                                 headers=_as("bob")), "not_draft_owner", branchId=d, owner="alice")
-            # A manager reads every draft (doc 13 READ_DRAFT), so Bob is told it isn't there only
-            # when he reads without manage.
-            for h, status in ((_as("bob", manage=False), 404), (_as("pat"), 200)):
+            r = await c.post(f"{GP}/changes", params=qd, json=_save("urn:t:child", "Bob's"), headers=_as("bob"))
+            assert r.status_code == 404, r.text
+            # Managing the workspace opens no private draft: whoever reads it, with manage or
+            # without, is told it isn't there.
+            for h in (_as("bob", manage=False), _as("bob"), _as("pat")):
                 r = await c.get(f"{B}/state", headers=h)
-                assert r.status_code == status, r.text
+                assert r.status_code == 404, r.text
                 r = await c.post(f"{GP}/nodes/query", params=qd, json={"query": {}}, headers=h)
-                assert r.status_code == status, r.text
-            st = (await c.get(f"{B}/state", headers=_as("pat"))).json()["nodes"]
+                assert r.status_code == 404, r.text
+            st = (await c.get(f"{B}/state", headers=_as("alice"))).json()["nodes"]
             assert st["urn:t:child"]["displayName"] == "Alice's child", st
 
             # 3. Bob can't publish, so he may not write main directly.
@@ -103,17 +105,19 @@ async def _story(prov: str, key: str) -> None:
                              json={"entityType": "Table", "displayName": "Bob on main", "parentUrn": "urn:t:root"})
             _denied(r, "publish_required", required="workspace:datasource:publish")
 
-            # 4. Alice shares her draft with grp_eng as editors: Carol edits it, Bob is no member.
-            r = await c.patch(B, json={"isShared": True}, headers=_as("alice"))
-            assert r.status_code == 200 and r.json()["isShared"] is True, r.text
-            r = await c.post(f"{B}/members", headers=_as("alice"),
-                             json={"subjectType": "group", "subjectId": "grp_eng", "role": "editor"})
-            assert r.status_code == 200, r.text
+            # 4. Alice shares her draft with grp_eng as editors and with Pat, who will merge it, as a
+            #    viewer: Carol edits it, Bob is no member.
+            for subject, kind, role in (("grp_eng", "group", "editor"), ("pat", "user", "viewer")):
+                r = await c.post(f"{B}/members", headers=_as("alice"),
+                                 json={"subjectType": kind, "subjectId": subject, "role": role})
+                assert r.status_code == 200, r.text
+            r = await c.get(B, headers=_as("alice"))
+            assert (r.json()["visibility"], r.json()["isShared"]) == ("private", True), r.text
             r = await c.post(f"{GP}/changes", params=qd, json=_save("urn:t:root", "Carol's root"),
                              headers=_as("carol"))
             assert r.status_code == 200, r.text
-            _denied(await c.post(f"{GP}/changes", params=qd, json=_save("urn:t:root", "Bob's root"),
-                                 headers=_as("bob")), "not_owner_or_member", required="editor", branchId=d)
+            r = await c.post(f"{GP}/changes", params=qd, json=_save("urn:t:root", "Bob's root"), headers=_as("bob"))
+            assert r.status_code == 404, r.text
 
             # 5. Pat publishes a change to the field Alice edited; her pull conflicts, she keeps hers.
             r = await c.post(f"{V1}/graphs/{gid}/branches", json={}, headers=_as("pat"))
@@ -173,7 +177,7 @@ async def _story(prov: str, key: str) -> None:
                 "Alice's child", "Carol's root v2"), st
 
             # 7. Who changed it: Pat merged Alice's PR, Alice and Carol wrote it.
-            pr_now = (await c.get(pr, headers=_as("bob"))).json()
+            pr_now = (await c.get(pr, headers=_as("pat"))).json()
             assert (pr_now["actor"], pr_now["mergedBy"], pr_now["mergedVia"], pr_now["resultingCommitId"]) == (
                 "alice", "pat", "review", merged), pr_now
             r = await c.get(f"{V1}/graphs/{gid}/entities/urn:t:child/history", headers=_as("bob"))
@@ -233,6 +237,7 @@ def test_stage2_collaboration_story(monkeypatch):
     async def snapshot(*, fresh=False, wait_s=0.0):
         return _snapshot(prov, [key]), False
 
+    monkeypatch.setattr(SDM, "_USERS", SDM._USERS | {"pat"})          # Pat is shared the draft
     monkeypatch.setattr(data_source_repo, "get_data_source_orm", get_data_source_orm)
     monkeypatch.setattr(service, "_load_actor_groups", groups)
     monkeypatch.setattr(topology, "snapshot_for_request", snapshot)

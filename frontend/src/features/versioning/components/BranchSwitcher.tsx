@@ -2,9 +2,10 @@
  * BranchSwitcher — the canvas-toolbar control for "which branch am I on".
  *
  * Resolves the active data source to its versioned graph (syncing the result into
- * `branchStore`), lists main + open and publishing drafts with a per-draft up-to-date status, and
- * lets the user create a NAMED draft, switch between them, or pull the latest main into a behind
- * draft.
+ * `branchStore`), lists main + open and publishing drafts — the user's own, those shared with
+ * them, the public ones — with each one's level and up-to-date status, and lets the user create a
+ * NAMED draft at a level (its data source's policy decides where it starts), switch between them,
+ * or pull the latest main into a behind draft.
  * Shared across all three canvases via the toolbars. Renders nothing when the data source has
  * no versioned graph (the common case until a graph is created).
  */
@@ -18,15 +19,18 @@ import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore, usePermission } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
 import { useActiveView } from '@/store/schema'
-import { useBranches, useMergeRequests, useOpenDraft, useResolveGraph } from '../hooks/useVersioning'
+import { useBranches, useDataSourceDraftsPolicy, useMergeRequests, useOpenDraft, useResolveGraph } from '../hooks/useVersioning'
 import { useBranchDeepLink } from '../hooks/useBranchDeepLink'
-import type { Branch } from '@/services/versioningApiService'
+import type { Branch, DraftLevel } from '@/services/versioningApiService'
 import { BRANCH_VOCAB, canManageDraft, canWriteDraft, draftStatus, ownerName, type DraftStatus } from '../model/branchVocab'
+import { groupDrafts } from '../model/draftGroups'
 import { isLivePr } from '../model/prStatus'
 import { DraftStatusPill, OwnerAvatar, PublishingBadge } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
 import { BranchSettingsModal } from './BranchSettingsModal'
 import { BranchManager } from './BranchManager'
+import { DraftLevelChip } from './DraftLevelChip'
+import { DraftLevelPicker } from './DraftLevelPicker'
 
 /** 21rem — the menu's fixed width, in px, so the anchor can keep it on-screen. */
 const MENU_WIDTH = 336
@@ -58,6 +62,8 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const [open, setOpen] = useState(false)
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
+  // The level asked for; null: the data source's policy decides (shown as its default).
+  const [newLevel, setNewLevel] = useState<DraftLevel | null>(null)
   const [settingsBranch, setSettingsBranch] = useState<Branch | null>(null)
   const [managerOpen, setManagerOpen] = useState(false)
   // Callback ref: the trigger lands in state on mount so the menu's position can be
@@ -85,6 +91,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   // guard reads its own draft's status from that draft (CanvasVersioningBar).
   const branchesQ = useBranches(workspaceId, originatingViewId ? graphId : null, originatingViewId)
   const openDraft = useOpenDraft(workspaceId, graphId ?? '')
+  const policyQ = useDataSourceDraftsPolicy(workspaceId, dataSourceId)
 
   // Which drafts already have an OPEN review (PR)? Badge them in the list so it's clear at a glance.
   const mrsQ = useMergeRequests(workspaceId, graphId)
@@ -171,15 +178,18 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
   const activeDraft = drafts.find((b) => b.branchId === currentBranchId)
   const isBehind = (b: Branch) => (b.baseCommitSeq ?? 0) < mainHead
 
+  const shownLevel = newLevel ?? policyQ.data?.effective.defaultVisibility ?? 'public'
   const handleCreate = () => {
     openDraft.mutate(
-      { name: newName.trim() || undefined, originatingViewId: originatingViewId ?? undefined },
+      { name: newName.trim() || undefined, originatingViewId: originatingViewId ?? undefined,
+        visibility: newLevel ?? undefined },
       {
         onSuccess: (r) => {
           switchToDraft(r.branchId, originatingViewId)
           setOpen(false)
-          notify('success', `Draft "${newName.trim() || 'Untitled'}" created — your edits stay private until you publish.`)
+          notify('success', `Draft "${newName.trim() || 'Untitled'}" created — the published version stays as it is until you publish.`)
           setNewName('')
+          setNewLevel(null)
           setCreating(false)
         },
         onError: (e) => notify('error', (e as Error).message),
@@ -264,10 +274,10 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                 setOpen(false)
               }}
             />
-            {drafts.length > 0 && (
-              <p className="px-3 pt-2 pb-1 text-[10px] font-semibold text-ink-muted uppercase tracking-wider">{BRANCH_VOCAB.yourDrafts}</p>
-            )}
-            {drafts.map((b) => {
+            {groupDrafts(drafts, me).map((group) => (
+              <div key={group.key}>
+              <p className="px-3 pt-2 pb-1 text-[10px] font-semibold text-ink-muted uppercase tracking-wider">{group.label}</p>
+            {group.drafts.map((b) => {
               const status = draftStatus(b.baseCommitSeq, mainHead)
               // Someone else's draft opens to look at; what would change it is offered to writers only,
               // its settings to its owner or a maintainer.
@@ -277,6 +287,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                   key={b.branchId}
                   icon={<OwnerAvatar owner={b.owner} userNames={b.userNames} size="sm" />}
                   title={b.name || BRANCH_VOCAB.untitled}
+                  levelChip={<DraftLevelChip level={b.visibility} />}
                   subtitle={draftSubtitle(b, canWrite)}
                   active={b.branchId === currentBranchId}
                   statusPill={status}
@@ -318,6 +329,8 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                 />
               )
             })}
+              </div>
+            ))}
             {branchesQ.isLoading && (
               <div className="px-3 py-2 flex items-center gap-2 text-xs text-ink-muted">
                 <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading drafts…
@@ -335,14 +348,16 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
           </div>
           {canManage && (
             creating ? (
-              <div className="flex items-center gap-2 px-3 py-2.5 border-t border-glass-border">
+              <div className="px-3 py-2.5 border-t border-glass-border space-y-2">
+              <DraftLevelPicker value={shownLevel} onChange={setNewLevel} levels={policyQ.data?.effective.levels} />
+              <div className="flex items-center gap-2">
                 <input
                   autoFocus
                   value={newName}
                   onChange={(e) => setNewName(e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') handleCreate()
-                    if (e.key === 'Escape') { e.stopPropagation(); setCreating(false); setNewName('') }
+                    if (e.key === 'Escape') { e.stopPropagation(); setCreating(false); setNewName(''); setNewLevel(null) }
                   }}
                   placeholder="Draft name (optional)"
                   className="flex-1 min-w-0 px-2 py-1 rounded-md bg-canvas-overlay border border-glass-border text-sm text-ink outline-none focus:border-accent-lineage"
@@ -354,6 +369,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
                 >
                   {openDraft.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Create'}
                 </button>
+              </div>
               </div>
             ) : (
               <button
@@ -374,6 +390,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
           wsId={workspaceId}
           graphId={graphId}
           viewId={originatingViewId}
+          dataSourceId={dataSourceId}
           branch={settingsBranch}
           onClose={() => setSettingsBranch(null)}
         />
@@ -384,6 +401,7 @@ export function BranchSwitcher({ workspaceId, dataSourceId, className }: BranchS
           wsId={workspaceId}
           graphId={graphId}
           viewId={originatingViewId}
+          dataSourceId={dataSourceId}
           mainHead={mainHead}
           currentBranchId={currentBranchId}
           canManage={canManage}
@@ -403,6 +421,7 @@ function draftSubtitle(b: Branch, canWrite: boolean): string {
 function BranchRow({
   icon,
   title,
+  levelChip,
   subtitle,
   active,
   statusPill,
@@ -413,6 +432,7 @@ function BranchRow({
 }: {
   icon: React.ReactNode
   title: string
+  levelChip?: React.ReactNode
   subtitle: string
   active: boolean
   statusPill?: DraftStatus
@@ -428,6 +448,7 @@ function BranchRow({
         <span className="flex-1 min-w-0">
           <span className="flex items-center gap-1.5 min-w-0">
             <span className="text-sm text-ink truncate">{title}</span>
+            {levelChip}
             {prBadge}
           </span>
           <span className="block text-[11px] text-ink-muted truncate">{subtitle}</span>

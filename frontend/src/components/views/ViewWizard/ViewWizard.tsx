@@ -1905,7 +1905,8 @@ function ViewWizardBody({
     const [reviewing, setReviewing] = useState(false)
     const stagedBranch = importResult?.staged?.branchId
     const reviewDraft = stagedBranch && importStaging.graphId && importStaging.allowed
-        ? { workspaceId: importResult.view.workspaceId, graphId: importStaging.graphId, branchId: stagedBranch }
+        ? { workspaceId: importResult.view.workspaceId, graphId: importStaging.graphId, branchId: stagedBranch,
+            dataSourceId: importResult.view.dataSourceId }
         : null
 
     // Auto-open: the view is saved and there is nowhere else to go, so open it for
@@ -2075,6 +2076,7 @@ function ViewWizardBody({
                         )}
                         {reviewing && reviewDraft && (
                             <PublishDraftDialog wsId={reviewDraft.workspaceId} graphId={reviewDraft.graphId} branchId={reviewDraft.branchId}
+                                dataSourceId={reviewDraft.dataSourceId}
                                 onClose={() => setReviewing(false)}
                                 // Sent for review, or gone to a view on the draft: the dialog went there, so close.
                                 onLeave={handleStayHere}

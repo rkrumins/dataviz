@@ -1,11 +1,12 @@
 """A private draft is written only by its owner (doc 13 visibility table, Stage 2) — over HTTP, needs
 Postgres.
 
-Alice owns a private draft. Bob holds workspace manage, so he may read it, but every write to it is
-403 ``access_denied`` with code ``not_draft_owner``: a canvas save (``/graph/changes``), a node
+Alice owns a private draft. Bob reviews her merge request, so he may read it, but every write to it
+is 403 ``access_denied`` with code ``not_draft_owner``: a canvas save (``/graph/changes``), a node
 create through the graph routes with ``branchId``, a stage, a checkpoint, a pull, an import into it,
 a publish (in the request or queued as a job), opening a merge request from it and abandoning it.
-None of these writes anything, and Alice can do every one.
+Carol manages the workspace but is on neither the draft nor its review: to her the draft doesn't
+exist, a write as much as a read (404). None of these writes anything, and Alice can do every one.
 """
 import asyncio
 import os
@@ -26,7 +27,7 @@ def _app():
 
     app, G = _build_app()
 
-    async def header_user(request: Request):         # X-User picks the caller; both hold manage
+    async def header_user(request: Request):         # X-User picks the caller; all hold manage
         uid = request.headers.get("X-User", "alice")
         return SimpleNamespace(id=uid, email=f"{uid}@example.com")
     app.dependency_overrides[get_current_user] = header_user
@@ -56,15 +57,25 @@ async def _run() -> None:
             gid = r.json()["graphId"]
             r = await c.post(f"{V1}/graphs/{gid}/bulk-ingest", content=_IMPORT_NDJSON, headers=alice)
             assert r.status_code == 200, r.text
-            d = (await c.post(f"{V1}/graphs/{gid}/branches", json={}, headers=alice)).json()["branchId"]
+            d = (await c.post(f"{V1}/graphs/{gid}/branches", json={"visibility": "private"},
+                              headers=alice)).json()["branchId"]
             qd = {"dataSourceId": ds, "branchId": d}
             save = {"ops": [{"op": "update", "kind": "node", "id": "urn:t:child",
                              "payload": {"displayName": "Child v2"}}]}
             r = await c.post(f"{GP}/changes", params=qd, json=save, headers=alice)
             assert r.status_code == 200, r.text
-            # Bob may read it: he holds workspace manage.
+            r = await c.post(f"{V1}/graphs/{gid}/branches/{d}/merge-requests", json={"reviewers": ["bob"]},
+                             headers=alice)
+            assert r.status_code == 201, r.text
+            pr = r.json()["prId"]
+            # Bob may read it: he reviews it. Carol, on neither, may not even write it.
             r = await c.get(f"{V1}/graphs/{gid}/branches/{d}/state", headers=bob)
             assert r.status_code == 200, r.text
+            carol = {"X-User": "carol"}
+            for r in (await c.get(f"{V1}/graphs/{gid}/branches/{d}/state", headers=carol),
+                      await c.post(f"{GP}/changes", params=qd, json=save, headers=carol),
+                      await c.post(f"{V1}/graphs/{gid}/branches/{d}/commit", json={}, headers=carol)):
+                assert r.status_code == 404, r.text
             log = {"branchId": d}
             commits = len((await c.get(f"{V1}/graphs/{gid}/commits", params=log, headers=alice)).json()["commits"])
 
@@ -96,7 +107,7 @@ async def _run() -> None:
             assert len((await c.get(f"{V1}/graphs/{gid}/commits", params=log, headers=alice)).json()["commits"]) == commits
             st = (await c.get(f"{V1}/graphs/{gid}/branches/{d}/state", headers=alice)).json()["nodes"]
             assert "urn:t:bob" not in st and not any(n.get("displayName") == "Bob Node" for n in st.values())
-            assert (await c.get(f"{V1}/graphs/{gid}/merge-requests", headers=alice)).json() == []
+            assert [p["prId"] for p in (await c.get(f"{V1}/graphs/{gid}/merge-requests", headers=alice)).json()] == [pr]
             branches = {b["branchId"]: b for b in (await c.get(f"{V1}/graphs/{gid}/branches", headers=alice)).json()}
             assert branches[d]["status"] == "open", branches[d]
 
@@ -110,8 +121,6 @@ async def _run() -> None:
             assert r.status_code == 200 and r.json()["commitId"], r.text
             r = await c.post(f"{V1}/graphs/{gid}/branches/{d}/rebase", json={}, headers=alice)
             assert r.status_code == 200, r.text
-            r = await c.post(f"{V1}/graphs/{gid}/branches/{d}/merge-requests", json={}, headers=alice)
-            assert r.status_code == 201, r.text
             r = await c.post(f"{V1}/graphs/{gid}/branches/{d}/publish", json={"message": "ship"}, headers=alice)
             assert r.status_code == 200, r.text
             d2 = (await c.post(f"{V1}/graphs/{gid}/branches", json={}, headers=alice)).json()["branchId"]

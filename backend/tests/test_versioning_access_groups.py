@@ -4,7 +4,8 @@
 and only when a group row could decide the answer: the owner, a private draft and a direct member
 whose own row already meets the role asked for never touch the management DB. A lookup that fails
 is ``GroupsUnavailable`` (503), never "no groups", so an outage can't read as a refusal. Rows left
-on a private draft grant nothing, and so does a deleted group. The draft's member rows and the group
+on a private draft grant nothing, and so does a deleted group. A refusal names the role to someone
+who reads the draft; to anyone else the draft is unknown (``DraftNotReadable``, 404). The draft's member rows and the group
 lookup are faked here, except where a deleted group is looked up.
 """
 from types import SimpleNamespace
@@ -13,20 +14,22 @@ import pytest
 from sqlalchemy.exc import OperationalError
 
 from backend.app.services.versioning import service
-from backend.app.services.versioning.errors import DraftRoleRequired, GroupsUnavailable
+from backend.app.services.versioning.errors import DraftNotReadable, DraftRoleRequired, GroupsUnavailable
 from backend.app.services.versioning.service import GraphVersioningService
 
 pytestmark = pytest.mark.asyncio
 
 
 class _Session:
-    """Answers the member-rows query with ``rows``."""
+    """Answers the member-rows query with ``rows``, and the probe for a review naming the caller
+    with none."""
 
     def __init__(self, rows):
         self._rows = rows
 
     async def execute(self, _stmt):
-        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(self._rows)))
+        return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: list(self._rows)),
+                               first=lambda: None)
 
 
 def _row(subject_type, subject_id, role):
@@ -34,7 +37,7 @@ def _row(subject_type, subject_id, role):
 
 
 def _draft(shared=True):
-    return SimpleNamespace(id="br_1", kind="draft", owner="alice", is_shared=shared)
+    return SimpleNamespace(id="br_1", kind="draft", owner="alice", is_shared=shared, visibility="private")
 
 
 @pytest.fixture
@@ -87,10 +90,17 @@ async def test_the_exact_role_looks_up_a_group_that_ranks_higher(loads):
 
 async def test_a_group_row_below_the_role_asked_for_is_never_looked_up(loads):
     s = _Session([_row("group", "grp", "viewer")])
-    with pytest.raises(DraftRoleRequired) as info:
+    assert await _SVC._branch_role(s, _draft(), "erin", (), need="editor") is None
+    assert loads.calls == []
+
+
+async def test_a_refusal_names_the_role_only_to_who_reads_the_draft(loads):
+    s = _Session([_row("group", "grp", "viewer")])
+    with pytest.raises(DraftRoleRequired) as info:      # Erin reads it through grp
         await _SVC._require_edit(s, _draft(), "erin", ())
     assert info.value.detail["required"] == "editor"
-    assert loads.calls == []
+    with pytest.raises(DraftNotReadable):               # Dave, in no group of it, doesn't
+        await _SVC._require_edit(s, _draft(), "dave", ())
 
 
 async def test_an_editor_who_manages_is_refused_naming_maintainer(loads):
@@ -148,5 +158,5 @@ async def test_a_deleted_group_grants_its_ex_members_nothing(db_session, monkeyp
     assert await service._load_actor_groups("erin") == (live.id,)
     s = _Session([_row("group", gone.id, "maintainer")])
     assert await _SVC._branch_role(s, _draft(), "erin", need="viewer") is None
-    with pytest.raises(DraftRoleRequired):
+    with pytest.raises(DraftNotReadable):               # not even reading it
         await _SVC._require_manage(s, _draft(), "erin", ())

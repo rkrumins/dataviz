@@ -122,3 +122,24 @@ describe('empty state', () => {
         expect(await screen.findByText(/all caught up/i)).toBeTruthy()
     })
 })
+
+describe('what became of a draft', () => {
+    // Each with a glyph of its own, not the plain bell an unknown kind falls back to.
+    it.each([
+        ['draft.sent_for_review', 'lucide-git-pull-request-arrow'],
+        ['draft.published', 'lucide-git-merge'],
+        ['draft.discarded', 'lucide-trash-2'],
+        ['draft.made_private', 'lucide-lock'],
+        ['draft.transferred', 'lucide-arrow-right-left'],
+    ])('shows %s with its own icon', async (kind, icon) => {
+        mockList.mockResolvedValue({
+            items: [message({ kind, title: '"Q3 pricing"', resourceType: 'branch', resourceId: 'br_1' })],
+            unread: 1,
+        })
+        renderBell()
+        fireEvent.click(await screen.findByLabelText('Inbox, 1 unread'))
+        const row = (await screen.findByText('"Q3 pricing"')).closest('[role="button"]')!
+        expect(row.querySelector(`.${icon}`)).not.toBeNull()
+        expect(row.querySelector('.lucide-bell')).toBeNull()
+    })
+})

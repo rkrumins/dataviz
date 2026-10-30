@@ -492,7 +492,7 @@ export function ViewerActions({ canManage, canEnterEdit, onEnterEdit, ...tools }
           <HoverTip
             className="inline-flex"
             label={canEnterEdit
-              ? 'Make changes in a private draft'
+              ? 'Make changes in a draft'
               : "Version control isn't set up for this data source yet"}
             detail={canEnterEdit ? 'The published version stays untouched until you publish' : undefined}
           >

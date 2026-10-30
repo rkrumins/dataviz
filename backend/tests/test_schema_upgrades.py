@@ -998,3 +998,168 @@ async def test_the_customer_key_migration_round_trips(store, caplog):
             await conn.run_sync(run("upgrade"))                     # idempotent
         finally:
             await trans.rollback()
+
+
+# ── branches.visibility: a draft is public or private (20261029_1000_gv_branch_vis) ──
+_BRANCH_VIS = _VERSIONS / "20261029_1000_gv_branch_vis.py"
+_BRANCHES = f'"{models._SCHEMA}"."branches"'
+_MEMBERS = f'"{models._SCHEMA}"."branch_members"'
+
+
+def test_the_draft_visibility_is_declared_and_migrated():
+    """A store ``create_all`` builds must equal the migrated one: the column carries its default on
+    the server too, only public and private are ever stored, and the listing and the lookup of a
+    person's drafts each have their index."""
+    table = models.BranchORM.__table__
+    assert not table.c.visibility.nullable
+    assert str(table.c.visibility.server_default.arg) == "'private'"
+    check = next(c for c in table.constraints if getattr(c, "name", "") == "ck_branches_visibility")
+    assert str(check.sqltext) == "visibility IN ('public','private')"
+    assert [c.name for c in next(i for i in table.indexes if i.name == "ix_branches_graph_vis").columns] \
+        == ["graph_id", "visibility", "status"]
+    members = models.BranchMemberORM.__table__
+    assert [c.name for c in next(i for i in members.indexes if i.name == "ix_bm_subject").columns] \
+        == ["subject_type", "subject_id"]
+    migration = _migration(_BRANCH_VIS)
+    assert migration.revision == _BRANCH_VIS.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261028_1000_gv_ps_unowned"
+    assert "ensure_branch_visibility" in _BRANCH_VIS.read_text()
+
+
+async def _branch_columns(conn) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        "SELECT column_name FROM information_schema.columns "
+        "WHERE table_schema = :s AND table_name = 'branches'"),
+        {"s": models._SCHEMA})).all()}
+
+
+async def _index_names(conn, table: str) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        "SELECT indexname FROM pg_indexes WHERE schemaname = :s AND tablename = :t"),
+        {"s": models._SCHEMA, "t": table})).all()}
+
+
+async def _seed_drafts(conn) -> None:
+    """A graph with its main, a private draft that still holds a member row (it granted nothing),
+    a draft marked shared with no members left, and a shared draft with a member."""
+    await _insert_graph(conn, "g_schema_vis")
+    for bid, kind, shared in (("br_vis_main", "main", False), ("br_vis_private", "draft", False),
+                              ("br_vis_empty", "draft", True), ("br_vis_shared", "draft", True)):
+        await conn.execute(text(
+            f"INSERT INTO {_BRANCHES} (id, graph_id, kind, owner, is_shared, status, created_at, "
+            "updated_at) VALUES (:id, 'g_schema_vis', :kind, 'ana', :shared, 'open', '2026-10-29', "
+            "'2026-10-29')"), {"id": bid, "kind": kind, "shared": shared})
+    for mid, bid in (("bm_vis_left", "br_vis_private"), ("bm_vis_kept", "br_vis_shared")):
+        await conn.execute(text(
+            f"INSERT INTO {_MEMBERS} (id, branch_id, subject_type, subject_id, role, created_at) "
+            "VALUES (:id, :bid, 'user', 'bo', 'editor', '2026-10-29')"), {"id": mid, "bid": bid})
+
+
+async def _drafts(conn) -> dict:
+    return {r[0]: (r[1], r[2]) for r in (await conn.execute(text(
+        f"SELECT id, visibility, is_shared FROM {_BRANCHES} WHERE graph_id = 'g_schema_vis'"))).all()}
+
+
+async def _member_ids(conn) -> set:
+    return {r[0] for r in (await conn.execute(text(
+        f"SELECT id FROM {_MEMBERS} WHERE id LIKE 'bm_vis_%'"))).all()}
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_draft_visibility(store):
+    """Every existing draft reads private and ``main`` public. A member row left on a draft that
+    isn't shared is deleted, since it granted nothing and would grant access from now on; a draft
+    marked shared with no members left is unmarked, so ``is_shared`` means "has members"."""
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f'DROP INDEX IF EXISTS "{models._SCHEMA}"."ix_bm_subject"'))
+            await conn.execute(text(f'DROP INDEX IF EXISTS "{models._SCHEMA}"."ix_branches_graph_vis"'))
+            await conn.execute(text(f"ALTER TABLE {_BRANCHES} DROP COLUMN visibility"))
+            await _seed_drafts(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert "visibility" in await _branch_columns(conn)
+            assert await _drafts(conn) == {
+                "br_vis_main": ("public", False), "br_vis_private": ("private", False),
+                "br_vis_empty": ("private", False), "br_vis_shared": ("private", True)}
+            assert await _member_ids(conn) == {"bm_vis_kept"}
+            assert "ix_branches_graph_vis" in await _index_names(conn, "branches")
+            assert "ix_bm_subject" in await _index_names(conn, "branch_members")
+            with pytest.raises(DBAPIError, match="ck_branches_visibility"):
+                async with conn.begin_nested():
+                    await conn.execute(text(
+                        f"UPDATE {_BRANCHES} SET visibility = 'team' WHERE id = 'br_vis_private'"))
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+            assert await _member_ids(conn) == {"bm_vis_kept"}
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_draft_visibility_migration_round_trips(store, caplog):
+    """Down drops the column, its check and both indexes, saying how many public drafts go back
+    to their owner alone; the drafts stay."""
+    migration = _migration(_BRANCH_VIS)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await _seed_drafts(conn)
+            await conn.execute(text(
+                f"UPDATE {_BRANCHES} SET visibility = 'public' WHERE id = 'br_vis_shared'"))
+            public = (await conn.execute(text(
+                f"SELECT count(*) FROM {_BRANCHES} WHERE visibility = 'public' AND kind <> 'main'"
+            ))).scalar()
+            caplog.set_level("WARNING", logger="alembic.runtime.migration")
+            await conn.run_sync(run("downgrade"))
+            assert f"{public} draft(s) were public" in caplog.text
+            assert "visibility" not in await _branch_columns(conn)
+            assert "ix_branches_graph_vis" not in await _index_names(conn, "branches")
+            assert "ix_bm_subject" not in await _index_names(conn, "branch_members")
+            assert (await conn.execute(text(
+                f"SELECT count(*) FROM {_BRANCHES} WHERE graph_id = 'g_schema_vis'"))).scalar() == 4
+            await conn.run_sync(run("upgrade"))
+            assert "visibility" in await _branch_columns(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_draft_visibility_step_never_stalls_draft_reads_for_long(store):
+    """Every draft request reads ``branches``, and queues behind the step's lock request while it
+    waits. Each try waits half a second, so a read waits about that long rather than the step's
+    whole bound, and the step tries again until the long holder lets go."""
+    async with store.begin() as conn:
+        await conn.execute(text(f"ALTER TABLE {_BRANCHES} DROP COLUMN visibility"))
+    async with store.connect() as holder, store.connect() as conn, store.connect() as reader:
+        held = await holder.begin()
+        await holder.execute(text(f"LOCK TABLE {_BRANCHES} IN ACCESS SHARE MODE"))
+
+        async def upgrade():
+            async with conn.begin():
+                await conn.execute(text("SET LOCAL statement_timeout = '20s'"))
+                await conn.run_sync(models._ensure_schema_upgrades)
+                assert "visibility" in await _branch_columns(conn)
+
+        async def read():
+            await asyncio.sleep(1)
+            started = time.monotonic()
+            async with reader.begin():
+                await reader.execute(text("SET LOCAL statement_timeout = '20s'"))
+                await reader.execute(text(f"SELECT count(*) FROM {_BRANCHES}"))
+            return time.monotonic() - started
+
+        async def release():
+            await asyncio.sleep(2.5)
+            await held.rollback()
+
+        _, waited, _ = await asyncio.gather(upgrade(), read(), release())
+    assert waited < 1, f"a draft read waited {waited:.1f}s behind the schema step"

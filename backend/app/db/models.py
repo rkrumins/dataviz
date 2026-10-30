@@ -677,6 +677,18 @@ class WorkspaceORM(Base):
     # anyone may join as a Viewer at once (more still needs approval);
     # 'closed' — no requests, its admins add people.
     request_policy = Column(Text, nullable=False, default="approval", server_default="approval")
+    # Drafts and reviews on this workspace's versioned data sources. NULL = the built-in default,
+    # and a data source may override each one (``WorkspaceDataSourceORM``); resolved by
+    # ``backend.app.services.drafts_policy``.
+    #   draft_default_visibility — 'public' | 'private': the level a new draft starts at.
+    #   draft_levels             — 'any' | 'public_only' | 'private_only': the levels a new draft
+    #                              may have. Drafts that already exist keep theirs.
+    #   review_self_approval     — whether the person who opened a review may approve it.
+    #   review_self_merge        — whether they may merge it, and publish a draft without one.
+    draft_default_visibility = Column(Text, nullable=True)
+    draft_levels = Column(Text, nullable=True)
+    review_self_approval = Column(Boolean, nullable=True)
+    review_self_merge = Column(Boolean, nullable=True)
     # Audit-only attribution; does not grant any permission. Resolved
     # access lives in role_bindings.
     created_by = Column(Text, nullable=True, default=None)
@@ -702,6 +714,14 @@ class WorkspaceORM(Base):
         CheckConstraint("access_mode IN ('app', 'idp')", name="ck_workspaces_access_mode"),
         CheckConstraint(
             "request_policy IN ('approval', 'open', 'closed')", name="ck_workspaces_request_policy",
+        ),
+        CheckConstraint(
+            "draft_default_visibility IS NULL OR draft_default_visibility IN ('public', 'private')",
+            name="ck_workspaces_draft_visibility",
+        ),
+        CheckConstraint(
+            "draft_levels IS NULL OR draft_levels IN ('any', 'public_only', 'private_only')",
+            name="ck_workspaces_draft_levels",
         ),
     )
 
@@ -750,6 +770,12 @@ class WorkspaceDataSourceORM(Base):
     # A restricted source overrides an 'open' workspace policy: views
     # over it always need ``workspace:view:publish`` (or a request).
     is_restricted = Column(Boolean, nullable=False, default=False)
+    # This source's override of its workspace's drafts and reviews policy, field by field
+    # (``WorkspaceORM.draft_default_visibility`` and the rest). NULL = the workspace's.
+    draft_default_visibility = Column(Text, nullable=True)
+    draft_levels = Column(Text, nullable=True)
+    review_self_approval = Column(Boolean, nullable=True)
+    review_self_merge = Column(Boolean, nullable=True)
     extra_config = Column(Text, nullable=True)  # JSON — per-data-source config (schema mapping overrides, etc.)
     # Node-identity property — the physical graph property that plays the role
     # the platform's canonical ``urn`` does (universal node identity). NULL means
@@ -825,6 +851,14 @@ class WorkspaceDataSourceORM(Base):
         Index("idx_ds_catalog_item", "catalog_item_id"),
         Index("idx_ds_ontology", "ontology_id"),
         Index("idx_ds_deleted_at", "deleted_at"),
+        CheckConstraint(
+            "draft_default_visibility IS NULL OR draft_default_visibility IN ('public', 'private')",
+            name="ck_ds_draft_visibility",
+        ),
+        CheckConstraint(
+            "draft_levels IS NULL OR draft_levels IN ('any', 'public_only', 'private_only')",
+            name="ck_ds_draft_levels",
+        ),
         CheckConstraint(
             "aggregation_status IN ('none', 'pending', 'running', 'ready', 'failed', 'skipped')",
             name="ck_ds_aggregation_status",

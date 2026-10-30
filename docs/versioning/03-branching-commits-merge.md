@@ -576,38 +576,46 @@ is the fuller design; this section is what ships.
 
 ### Draft visibility and write rules
 
-A draft is **private** (`is_shared = false`, the default) or **shared**. Its owner is an implicit
-maintainer; a shared draft's members hold `viewer`, `editor` or `maintainer`, directly or through a
-group (`_branch_role`).
+A draft is **public** or **private** (`branches.visibility`); it opens at the level asked for, else
+where its data source's drafts and reviews policy says (`drafts_policy`, public out of the box; a level
+the policy rules out is 409 `private_drafts_disabled` / `public_drafts_disabled`). Its owner is an
+implicit maintainer; its members hold `viewer`, `editor` or `maintainer`, directly or through a group
+(`_branch_role`), at either level. `is_shared` means "has members".
 
-| Action | Private draft | Shared draft |
+| Action | Public draft | Private draft |
 |---|---|---|
-| Read (state, diffs, commit log, history, freshness, members, exports, a `?branchId=` graph read) | owner, workspace managers, the author or a requested reviewer of any PR raised from it | the same, plus every member |
-| Write: save, stage, checkpoint, pull, import, open a merge request | owner | owner, editors, maintainers |
-| Publish it directly | owner | owner, maintainers |
-| Abandon, rename, add or remove members | owner | owner, maintainers |
-| Make it private or shared (`isShared`) | owner | owner |
+| Read (state, diffs, commit log, history, freshness, members, exports, a `?branchId=` graph read) | everyone with `workspace:datasource:read` | owner, members, the author or a requested reviewer of any PR raised from it |
+| Write: save, stage, checkpoint, pull, import, open a merge request | everyone with `workspace:datasource:manage` | owner, editors, maintainers |
+| Publish it directly | owner, maintainers (and publish, and the policy) | the same |
+| Abandon, rename, add or remove members, change its level | owner, maintainers | the same |
+| Hand it on | owner; a workspace admin once its owner left | the same |
 
 - Anyone else gets **403** `{type: "access_denied", code: "not_draft_owner", branchId, owner}` on a
-  private draft, and **403** `{…, code: "not_owner_or_member", required: "editor" | "maintainer"}` on a
-  shared one. Workspace managers read every draft but write only their own, or a shared one on which
-  they are an editor or maintainer.
-- A draft the caller may not read answers **404**, as for a branch that does not exist
-  (`_branch_readable`, `service.py:5535`). Write routes need `workspace:datasource:manage`, and managers
-  read every draft, so a refused write is a 403, not a 404.
-- Member rows left on a private draft grant nothing, and a deleted group grants nothing. When a group
-  row could decide and the groups cannot be looked up, the answer is **503** `groups_unavailable`, never
-  a refusal.
-- Adding the first member shares a private draft; making a draft private deletes every member row.
+  draft with no members, and **403** `{…, code: "not_owner_or_member", required: "editor" |
+  "maintainer"}` on one with members — but only if they may read it; otherwise the write is a **404**
+  too, as for a branch that does not exist (`_unknown_unless_readable`). Managing the workspace opens no
+  private draft.
+- Every branch carries `access` `{canRead, canWrite, canManage}` for its reader, computed from the role
+  already loaded (`_access`), so a client renders the server's decision.
+- A draft the caller may not read answers **404** (`_branch_readable`; `_readable_draft_clause` is the
+  same rule in SQL, for lists).
+- A deleted group grants nothing. When a group row could decide and the groups cannot be looked up, the
+  answer is **503** `groups_unavailable`, never a refusal.
+- **Nobody's staged work is lost to a change of who writes a draft.** Making a draft private, removing a
+  member, lowering one to viewer, or handing a draft on without keeping its previous owner first commits
+  what each person losing write access staged, under their own name, in the order they staged it
+  (`_settled_change`, `checkpoint(only_actor=…)`), then re-checks under the draft's lock (three rounds,
+  then 503 `lock_busy`). Edits that clash with the draft leave everything as it was: **409**
+  `staged_changes_unsaved {actors}`. `…/visibility-impact` says beforehand whose edits will be saved.
 - At every checkpoint — so at every publish and merge too, which fold pending edits through one — edits
-  staged by someone who may no longer write the draft (removed, un-shared, out of the group) are
-  withdrawn, not folded in (`service.py:970-983`).
+  staged by someone who may no longer write the draft another way (they left a group) are withdrawn, not
+  folded in.
 - Merging a review does not check the merger's role on the draft: the merger needs
   `workspace:datasource:manage` and `workspace:datasource:publish` at the route, not ownership of or
-  membership in the draft.
-- The idle-draft sweep (`sweep_idle_drafts`, `service.py:1752`) abandons an open draft idle past
-  `GRAPHVER_DRAFT_TTL_DAYS`, but not one with a live PR or staged edits, nor one on a graph that is
-  deleted, not live, or was unfrozen within the TTL.
+  membership in the draft — and, where the policy has someone else merge, not to have opened it.
+- The idle-draft sweep (`sweep_idle_drafts`) abandons an open draft idle past `GRAPHVER_DRAFT_TTL_DAYS`,
+  but not one with a live PR or staged edits, nor one on a graph that is deleted, not live, or was
+  unfrozen within the TTL.
 
 ### Publish permission
 
@@ -629,8 +637,11 @@ not.
 `approve_pr` (`service.py:2329`) records each approval in `merge_requests.approvals` as `{actor:
 {headCommitId, headSeq, at}}`: the source draft's head at that moment, and that commit's own seq. It
 takes an optional `expectedHeadCommitId` (the head the reviewer loaded) and answers **409**
-`head_moved {prId, headCommitId}` when the draft has moved on. The PR's author and the source draft's
-owner get **403** `self_review`; a merged or closed PR is 404. The PR row is locked for the
+`head_moved {prId, headCommitId}` when the draft has moved on. Whoever opened the PR gets **403**
+`self_review` only where its data source's policy has someone else approve (`selfApproval` off); the
+draft's owner, when someone else opened it, approves either way. Where the policy has someone else
+merge (`selfMerge` off), whoever opened it gets **403** `self_merge` on merge, and a direct publish is
+**409** `review_required`. A merged or closed PR is 404. The PR row is locked for the
 transaction (bounded), so two reviewers approving at once both land.
 
 An approval holds until a content commit lands on the draft after its `headSeq` (`_approvals`,

@@ -198,7 +198,8 @@ async def get_context_engine(
     try:
         if ws_id:
             viewer = Viewer(actor=user.id if user else "",
-                            can_manage=has_permission(claims, "workspace:datasource:manage", workspace_id=ws_id))
+                            can_manage=has_permission(claims, "workspace:datasource:manage", workspace_id=ws_id),
+                            can_read=has_permission(claims, "workspace:datasource:read", workspace_id=ws_id))
             return await ContextEngine.for_workspace(
                 ws_id, provider_manager, session, data_source_id=dataSourceId,
                 actor=(user.id if user else None), branch_id=branchId, viewer=viewer,

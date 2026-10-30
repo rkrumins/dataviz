@@ -62,6 +62,13 @@ function Section({ icon: Icon, title, right, children }: {
   )
 }
 
+/** Why the reader may not merge a review, by the server's reason code (`viewerCan.mergeReason`). */
+const MERGE_REFUSALS: Record<string, string> = {
+  publish_required: 'Merging into main needs the publish permission on this workspace',
+  manage_required: 'Merging needs edit access to this data source',
+  self_merge: 'This data source has someone other than whoever opened a review merge it',
+}
+
 export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: string; onClose: () => void }) {
   const navigate = useNavigate()
   const { pathname } = useLocation()
@@ -148,15 +155,21 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   const [reverting, setReverting] = useState(false)
 
   const terminal = isTerminalPr(pr?.status)
+  // Who may approve and merge is the server's word (`viewerCan`): whoever opened a review approves
+  // or merges it where its data source's policy lets them. Without it, its author and its draft's
+  // owner are not offered Approve.
+  const viewerCan = pr?.viewerCan
   const isAuthor = !!user && pr?.actor === user.id
-  // Nor does the draft's owner approve its review (doc 13 PR_REVIEW): the server refuses both.
   const isOwner = !!user && pr?.sourceBranchOwner === user.id
   const alreadyApproved = !!user && (pr?.approvedBy ?? []).includes(user.id)
   const hasReviewers = (pr?.reviewers?.length ?? 0) > 0
   // Approve is asked of the requested reviewers. An approval gone stale is not in approvedBy, so
   // its reviewer is offered Approve again.
   const isRequested = !!user && (pr?.reviewers ?? []).includes(user.id)
-  const showApprove = canManage && !terminal && !isAuthor && !isOwner && !alreadyApproved && isRequested
+  const showApprove = canManage && !terminal && !alreadyApproved && isRequested
+    && (viewerCan ? viewerCan.approve : !isAuthor && !isOwner)
+  const canMerge = viewerCan ? viewerCan.merge : canPublish
+  const mergeBlockedWhy = MERGE_REFUSALS[viewerCan?.mergeReason ?? (canPublish ? '' : 'publish_required')]
   const busy = approve.isPending || closePr.isPending || merge.isPending || pullLatest.isPending
 
   // Proactive gate: the server flags a draft MR that lags main head. Mirror it into needsPull so the
@@ -527,10 +540,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
             ) : (
               <button
                 onClick={() => runMerge()}
-                disabled={busy || unsaved > 0 || !canPublish}
-                title={canPublish
-                  ? 'Apply these changes to main'
-                  : 'Merging into main needs the publish permission on this workspace'}
+                disabled={busy || unsaved > 0 || !canMerge}
+                title={canMerge ? 'Apply these changes to main' : mergeBlockedWhy ?? 'You can’t merge this review'}
                 className="flex-1 inline-flex items-center justify-center gap-1.5 px-3.5 py-2 rounded-xl text-sm font-semibold text-white bg-gradient-to-r from-indigo-500 to-violet-600 hover:from-indigo-600 hover:to-violet-700 shadow-sm disabled:opacity-60"
               >
                 {merge.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}

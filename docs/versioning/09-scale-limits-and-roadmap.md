@@ -134,9 +134,9 @@ refuses `main` (409 `main_write_forbidden`) and a closed draft (409 `branch_clos
 Stage 2 added who may do what on a draft and on `main` (see [03 §3.15](03-branching-commits-merge.md)
 and [13](13-access-and-review.md)):
 
-- **Drafts.** A private draft is written only by its owner (403 `not_draft_owner`), a shared one by
-  its editors and maintainers (403 `not_owner_or_member`). A draft the caller cannot read answers 404
-  on every read path.
+- **Drafts.** A public draft is written by everyone who can edit its data source; a private one by
+  its owner and its editor and maintainer members (403 `not_draft_owner` / `not_owner_or_member`). A
+  draft the caller cannot read answers 404 on every path, writes included.
 - **`main`.** Publish, merge, revert, restore, sync and `/graph/resync` need
   `workspace:datasource:publish` on top of manage (403 `missing_permission`). A person's direct write
   to a versioned graph's `main` (the graph routes with no draft, and bulk ingest) needs it too (403
@@ -270,8 +270,10 @@ The item-by-item record, with commits, is the gap audit in the repository,
 - *Lifecycle:* a data source's move carries its graph, forks and jobs; fork delete, restore, list and
   purge; a projection move to another FalkorDB provider or key (admin); freeze and unfreeze; the
   trash says why a purge is blocked; provider delete and move account for versioned graphs.
-- *Collaboration:* private drafts are their owner's, shared drafts their members', unreadable drafts
-  404; advancing `main` needs `workspace:datasource:publish`; approvals are bound to the head;
+- *Collaboration:* public and private drafts under a workspace drafts and reviews policy (overridable
+  per data source), unreadable drafts 404; a change of level, member or owner saves the staged edits of
+  whoever loses write access first; advancing `main` needs `workspace:datasource:publish`; approvals
+  are bound to the head;
   reviewers can be asked for; the branch list pages and shows group-shared drafts; the review inbox
   keeps every open PR.
 

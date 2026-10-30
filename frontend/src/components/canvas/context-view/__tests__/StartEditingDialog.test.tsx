@@ -5,12 +5,14 @@
  *
  * A new branch refused because editing is paused says so in the server's words, not "try again".
  */
-import { render, screen } from '@testing-library/react'
+import { fireEvent, render, screen } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 import { GraphNotWritableError } from '@/services/versioningApiService'
 
 let branchesData: unknown[] = []
 let openDraftError: Error | null = null
+const openMutate = vi.fn()
+let policy: { effective: { defaultVisibility: string; levels: string } } | undefined
 
 vi.mock('@/store/auth', () => ({
   useAuthStore: (sel: (s: unknown) => unknown) => sel({ user: { id: 'ana' } }),
@@ -21,7 +23,8 @@ vi.mock('@/store/branchStore', () => ({
 vi.mock('@tanstack/react-query', () => ({ useQueryClient: () => ({ invalidateQueries: vi.fn() }) }))
 vi.mock('@/features/versioning/hooks/useVersioning', () => ({
   useBranches: () => ({ data: branchesData }),
-  useOpenDraft: () => ({ mutate: vi.fn(), isPending: false, isError: openDraftError != null, error: openDraftError }),
+  useOpenDraft: () => ({ mutate: openMutate, isPending: false, isError: openDraftError != null, error: openDraftError }),
+  useDataSourceDraftsPolicy: () => ({ data: policy }),
   VERSIONING_KEYS: { all: ['versioning'] },
 }))
 
@@ -32,6 +35,25 @@ const draft = (over: Record<string, unknown>) => ({
 })
 
 describe('StartEditingDialog', () => {
+  it('starts a new branch where the data source’s policy says, or at the level chosen', () => {
+    branchesData = []
+    openDraftError = null
+    policy = { effective: { defaultVisibility: 'private', levels: 'any' } }
+    render(<StartEditingDialog wsId="ws1" graphId="g1" viewId="v1" dataSourceId="ds1" onClose={vi.fn()} />)
+    expect(screen.getByRole('radio', { name: /Private/ })).toHaveAttribute('aria-checked', 'true')
+    fireEvent.click(screen.getByRole('radio', { name: /Public/ }))
+    expect(screen.getByText('Everyone who can see this data source sees it.')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: /Create & edit/ }))
+    expect(openMutate.mock.calls[0][0]).toMatchObject({ originatingViewId: 'v1', visibility: 'public' })
+  })
+
+  it('offers no level the policy rules out', () => {
+    branchesData = []
+    policy = { effective: { defaultVisibility: 'private', levels: 'private_only' } }
+    render(<StartEditingDialog wsId="ws1" graphId="g1" viewId="v1" dataSourceId="ds1" onClose={vi.fn()} />)
+    expect(screen.getByRole('radio', { name: /Public/ })).toBeDisabled()
+  })
+
   it('offers to continue only the drafts the user can write', () => {
     branchesData = [
       draft({ branchId: 'br_own', name: 'Mine' }),

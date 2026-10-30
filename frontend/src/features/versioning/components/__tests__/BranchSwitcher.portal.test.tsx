@@ -40,6 +40,7 @@ vi.mock('../../hooks/useVersioning', () => ({
   },
   useMergeRequests: () => ({ data: [{ sourceBranchId: 'br_1', status: 'open' }] }),
   useOpenDraft: () => ({ mutate: vi.fn(), isPending: false }),
+  useDataSourceDraftsPolicy: () => ({ data: undefined }),
 }))
 vi.mock('../PullLatestButton', () => ({
   PullLatestButton: ({ branchId }: { branchId: string }) => <span data-testid={`pull-${branchId}`} />,

@@ -15,11 +15,12 @@ import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { CommitDialog, type CommitDialogProps } from './CommitDialog'
 
 export function PublishDraftDialog({
-  wsId, graphId, branchId, onClose, onLeave, onPublished, canPublishDraft,
+  wsId, graphId, branchId, onClose, onLeave, onPublished, canPublishDraft, dataSourceId,
 }: {
   wsId: string
   graphId: string
   branchId: string
+  dataSourceId?: CommitDialogProps['dataSourceId']
   onClose: () => void
   onLeave?: CommitDialogProps['onLeave']
   onPublished?: CommitDialogProps['onPublished']
@@ -53,6 +54,7 @@ export function PublishDraftDialog({
       onLeave={onLeave}
       onPublished={onPublished}
       canPublishDraft={canPublishDraft}
+      dataSourceId={dataSourceId}
     />,
     document.body,
   )

@@ -1,9 +1,9 @@
 """The branch list (2B-3): who sees what, which statuses, and paging — needs Postgres.
 
-The read filter runs in SQL before LIMIT, so a non-manager's first page holds their own drafts
-even when a graph has hundreds of branches they cannot read. A non-manager sees ``main``, their
-own drafts, shared drafts they are a member of, and drafts with a PR they raised or review — the
-``_branch_readable`` rule. ``status`` defaults to open + publishing. Order is ``main`` first, then
+The read filter runs in SQL before LIMIT, so a reader's first page holds their own drafts even
+when a graph has hundreds of branches they cannot read. A reader sees ``main``, their own drafts,
+shared drafts they are a member of, and drafts with a PR they raised or review — the
+``_branch_readable`` rule, which managing the workspace adds nothing to. ``status`` defaults to open + publishing. Order is ``main`` first, then
 drafts newest first, paged by a keyset cursor (the HTTP route returns it as ``X-Next-Cursor``).
 """
 import asyncio
@@ -107,9 +107,9 @@ async def _run() -> None:
             assert {b["branch_id"]: b["my_role"] for b in page}[bob["shared"]] == role
     finally:
         svc_mod._load_actor_groups = real
-    # A manager reads every draft but holds no role on anyone else's.
+    # Managing the workspace opens none of them: a manager on none is listed main alone.
     page, _ = await svc.list_branches(graph_id=gid, viewer=mgr, limit=500)
-    assert len(page) > 100 and all(b["my_role"] is None for b in page)
+    assert [b["branch_id"] for b in page] == [main]
 
     # ── status filter: default is open + publishing; any other set by name; "all" lifts it ──
     page, _ = await svc.list_branches(graph_id=gid, viewer=viewer_bob, status=["merged", "abandoned"])
@@ -128,11 +128,10 @@ async def _run() -> None:
             break
     assert walked == [main, bob["newest"], bob["publishing"], bob["reviewing"], bob["shared"], bob["oldest"]]
 
-    # ── a manager pages through all of them: no row twice, none missed, newest first ──
+    # ── an unscoped read pages through all of them: no row twice, none missed, newest first ──
     walked, cursor, rows = [], None, []
     while True:
-        page, cursor = await svc.list_branches(graph_id=gid, viewer=mgr, limit=40, cursor=cursor,
-                                               status=["all"])
+        page, cursor = await svc.list_branches(graph_id=gid, limit=40, cursor=cursor, status=["all"])
         rows += page
         if cursor is None:
             break

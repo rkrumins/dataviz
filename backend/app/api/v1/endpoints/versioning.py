@@ -27,7 +27,7 @@ import inspect
 import json
 import logging
 from contextlib import contextmanager
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
@@ -47,7 +47,7 @@ from backend.app.api.v1.versioning_gate import (SyncOverrides, require_publish_f
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
-from backend.app.db.repositories import (data_source_repo, group_repo, provider_repo,
+from backend.app.db.repositories import (data_source_repo, group_repo, notification_repo, provider_repo,
                                          service_account_repo, user_repo)
 from backend.app.db.repositories.view_repo import resolve_user_ids
 from backend.auth_service.interface import User
@@ -68,6 +68,7 @@ from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning.cache_manager import acquire_lease, release_lease
 from backend.app.services.versioning.errors import (HTTP_MAPPED, DraftNotReadable, IneligibleMember,
+                                                   IneligibleOwner, ReviewRequired, SelfMerge,
                                                    ServiceAccountMember)
 from backend.app.services.versioning.messaging import nudge_projection
 from backend.app.services.versioning.service import (
@@ -123,11 +124,12 @@ async def viewer_ctx(
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> Viewer:
     """Who is asking, for scoping draft/PR reads: the caller's id + whether they hold
-    ``datasource:manage`` in this workspace (managers see everything). Cheap — claims come from
-    the token; no DB hit. Teams aren't read here: the service looks them up when a team's row
-    could decide (``_load_actor_groups``). Endpoints still keep their ``requires(_READ)`` gate
-    for the baseline."""
-    return Viewer(actor=user.id, can_manage=has_permission(claims, _MANAGE, workspace_id=ws_id))
+    ``datasource:manage`` and ``datasource:read`` in this workspace (read opens public drafts;
+    neither opens a private one). Cheap — claims come from the token; no DB hit. Teams aren't read
+    here: the service looks them up when a team's row could decide (``_load_actor_groups``).
+    Endpoints still keep their ``requires(_READ)`` gate for the baseline."""
+    return Viewer(actor=user.id, can_manage=has_permission(claims, _MANAGE, workspace_id=ws_id),
+                  can_read=has_permission(claims, _READ, workspace_id=ws_id))
 
 
 # --------------------------------------------------------------------------- #
@@ -459,20 +461,33 @@ async def pr_in_workspace(
     svc: GraphVersioningService = Depends(get_versioning_service),
 ) -> dict:
     """Resolve a PR and assert its **base** graph lives in ``ws_id`` (the merge is governed by the
-    base owner's workspace) AND that the caller may see it — its author, an assigned reviewer, or a
-    manager. A non-participant gets 404 (don't leak that the PR exists). An API key must also
-    cover the base graph's data source."""
+    base owner's workspace) AND that the caller may see it: its author, an assigned reviewer, or,
+    for a draft's review, whoever may read the draft; a fork's PR, a manager. Anyone else gets 404
+    (don't leak that the PR exists). An API key must also cover the base graph's data source."""
     pr = await svc.get_pr(pr_id)
     if pr is None:
         raise HTTPException(status_code=404, detail="pull request not found")
     base = await svc.get_graph(str(pr["target_graph_id"]))
     if base is None or base.get("deleted_at") or base["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="pull request not found in workspace")
-    if not (viewer.can_manage or pr.get("actor") == viewer.actor
-            or viewer.actor in (pr.get("reviewers") or [])):
+    if not await _sees_pr(svc, pr, viewer):
         raise HTTPException(status_code=404, detail="pull request not found in workspace")
     await api_key_auth.hold_to_data_source(request, base.get("data_source_id"), ws_id)
     return pr
+
+
+async def _sees_pr(svc: GraphVersioningService, pr: dict, viewer: Viewer) -> bool:
+    """:meth:`GraphVersioningService._pulls_filtered`'s rule for one PR."""
+    if pr.get("actor") == viewer.actor or viewer.actor in (pr.get("reviewers") or []):
+        return True
+    if not (pr.get("source_graph_id") and pr["source_graph_id"] == pr.get("target_graph_id")):
+        return viewer.can_manage
+    try:
+        await svc.assert_branch_readable(graph_id=str(pr["target_graph_id"]),
+                                         branch_id=str(pr["source_branch_id"]), viewer=viewer)
+    except (AccessDenied, ValueError):
+        return False
+    return True
 
 
 async def view_in_workspace(
@@ -671,7 +686,11 @@ class CreateGraphRequest(_ApiModel):
 class OpenDraftRequest(_ApiModel):
     name: Optional[str] = None
     originating_view_id: Optional[str] = Field(default=None, alias="originatingViewId")
+    # Deprecated: a draft is shared by adding members. Kept so older clients still open one; it
+    # opens a private draft unless ``visibility`` says otherwise.
     shared: bool = False
+    # Omitted: the data source's policy decides (``drafts_policy``).
+    visibility: Optional[Literal["public", "private"]] = None
 
 
 class BranchMemberRequest(_ApiModel):
@@ -681,7 +700,9 @@ class BranchMemberRequest(_ApiModel):
 
 
 class UpdateBranchRequest(_ApiModel):
-    """Patch a draft's metadata. Omitted fields are left unchanged; ``""`` clears name/description."""
+    """Patch a draft's metadata. Omitted fields are left unchanged; ``""`` clears name/description.
+    ``isShared`` is refused (422): a draft is shared through its members, and its level changes
+    through its own route."""
     name: Optional[str] = None
     description: Optional[str] = None
     is_shared: Optional[bool] = Field(default=None, alias="isShared")
@@ -863,6 +884,13 @@ class BranchResponse(_ApiModel):
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
     # The caller's role on the draft (the list sets it): 'owner', a member role, or null.
     my_role: Optional[str] = Field(default=None, alias="myRole")
+    # public | private: who reads and writes it (``main`` is public).
+    visibility: str = "private"
+    # What the caller may do with it (the list and the branch read set it): {canRead, canWrite,
+    # canManage}. A client renders this rather than working it out.
+    access: Optional[Dict[str, bool]] = None
+    # The branch read only: who committed to it, most commits first, then the latest (50 at most).
+    contributors: Optional[List[str]] = None
 
 
 class OpenDraftResponse(_ApiModel):
@@ -950,13 +978,28 @@ class WatermarkModel(_ApiModel):
     external_drift: Optional[Dict[str, Any]] = Field(default=None, alias="externalDrift")
 
 
+class SavedSinceModel(_ApiModel):
+    """What others committed to a draft since the head a client last saw."""
+    commits: int
+    changes: int
+    by: List[str]                      # most commits first, then the latest
+    capped: bool                       # more than the newest ones read: at least this many
+
+
 class BranchFreshnessModel(_ApiModel):
-    """Live collaboration signal: has main advanced under this draft (must it pull before publishing)?"""
+    """Live collaboration signal: has main advanced under this draft (must it pull before publishing)?
+    And who else is saving into it."""
     behind: bool
     behind_by: int = Field(alias="behindBy")
     main_head_commit_seq: int = Field(alias="mainHeadCommitSeq")
     base_commit_seq: int = Field(alias="baseCommitSeq")
     status: str
+    # The branch's own latest commit: sent back as ``sinceSeq`` on the next poll.
+    head_commit_seq: int = Field(default=0, alias="headCommitSeq")
+    visibility: Optional[str] = None
+    access: Optional[Dict[str, bool]] = None
+    saved_since: Optional[SavedSinceModel] = Field(default=None, alias="savedSince")
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
 
 
 class RebuildResponse(_ApiModel):
@@ -1270,6 +1313,9 @@ class PrResponse(_ApiModel):
     closed_by: Optional[str] = Field(default=None, alias="closedBy")
     # id → display name for every actor id this item references (see _attach_user_names).
     user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+    # Single-PR reads only: whether the reader may approve it and merge it, and why not
+    # (``_viewer_can``). What it still waits for — approvals, a pull of latest — is above.
+    viewer_can: Optional[Dict[str, Any]] = Field(default=None, alias="viewerCan")
 
 
 # --------------------------------------------------------------------------- #
@@ -1490,6 +1536,8 @@ async def list_branches(
     branch_status: List[Literal["open", "publishing", "merged", "abandoned", "all"]] = Query(
         ["open", "publishing"], alias="status"),
     view_id: Optional[str] = Query(None, alias="viewId"),
+    scope: Literal["all", "mine", "shared", "public"] = Query("all"),
+    visibility: Optional[Literal["public", "private"]] = Query(None),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
@@ -1498,12 +1546,14 @@ async def list_branches(
 ):
     """Branches on the graph — graph-wide (every view) by default; ``viewId`` narrows to
     that view's own branches (the Data-Source rollup stays the default, unfiltered).
-    ``status`` (repeatable; default open + publishing) filters by status. ``main`` comes
+    ``status`` (repeatable; default open + publishing) filters by status. ``scope`` keeps the
+    caller's own drafts (``mine``), the drafts shared with them (``shared``) or the public ones
+    (``public``), and ``visibility`` one level; either leaves ``main`` out. ``main`` comes
     first, then drafts newest first; ``X-Next-Cursor`` is set when another page follows."""
     try:
         branches, next_cursor = await svc.list_branches(
             graph_id=graph_id, limit=limit, cursor=cursor, viewer=viewer,
-            originating_view_id=view_id, status=branch_status)
+            originating_view_id=view_id, status=branch_status, scope=scope, visibility=visibility)
     except ValueError:
         raise HTTPException(status_code=422, detail="malformed cursor")
     if next_cursor is not None:
@@ -1565,11 +1615,14 @@ async def resolve_graph_open(
     ws_id: str, body: ResolveRequest,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
-    """Resolve and ensure the caller has an open draft to edit on (opens one if none)."""
+    """Resolve and ensure the caller has an open draft to edit on (opens one if none, at the level
+    its data source's policy starts a draft at)."""
     res = await svc.resolve_graph(
         data_source_id=body.data_source_id, actor=user.id, workspace_id=ws_id,
         open_draft_if_absent=True, originating_view_id=body.originating_view_id,
+        draft_visibility=await draft_level(session, body.data_source_id),
     )
     if res is None:
         raise HTTPException(status_code=404, detail="no versioned graph for data source")
@@ -1582,20 +1635,122 @@ async def resolve_graph_open(
 # --------------------------------------------------------------------------- #
 # Draft editing                                                                #
 # --------------------------------------------------------------------------- #
+# What a draft's people are told, by kind: title (``{name}``: the draft's) and body.
+_DRAFT_NEWS = {
+    "draft.sent_for_review": ('"{name}" is up for review', "A draft you worked on is waiting for approval."),
+    "draft.published": ('"{name}" was published',
+                        "The changes in a draft you worked on are in the published version now."),
+    "draft.discarded": ('"{name}" was discarded',
+                        "A draft you worked on was abandoned. Its changes weren't published."),
+    "draft.made_private": ('"{name}" was made private',
+                           "You no longer have access to it. Anything you had staged in it was saved "
+                           "first, under your name."),
+    "draft.transferred": ('You own "{name}" now', "A draft was handed to you."),
+}
+
+
+async def _tell_draft_people(session: AsyncSession, svc: GraphVersioningService, kind: str, *,
+                             ws_id: str, meta: dict, graph_id: str, branch_id: str, actor: str,
+                             to: Optional[str] = None, pr_id: Optional[str] = None) -> None:
+    """Tell a draft's people (``draft_people``) what became of it, in their Inbox: its readers;
+    for ``draft.made_private`` the ones who read it no longer; else just ``to``. Never its actor,
+    and not again while an earlier notice of it is unread. Best-effort: failing to tell anyone
+    never fails the change."""
+    try:
+        people = await svc.draft_people(graph_id=graph_id, branch_id=branch_id)
+        if to is not None:
+            recipients = {to}
+        elif kind == "draft.made_private":
+            recipients = set(people["people"]) - set(people["readers"])
+        else:
+            recipients = set(people["readers"])
+        view = people["originating_view_id"]
+        if pr_id:
+            link = f"/workspaces/{ws_id}/reviews?pr={pr_id}"
+        elif kind == "draft.made_private":
+            link = None                                  # nowhere they can go
+        elif view:
+            link = f"/views/{view}" + (f"?branch={branch_id}" if kind == "draft.transferred" else "")
+        else:
+            link = f"/workspaces/{ws_id}?ds={meta.get('data_source_id')}&dstab=versioning"
+        title, body = _DRAFT_NEWS[kind]
+        await notification_repo.notify(
+            session, user_ids=recipients, kind=kind, title=title.format(name=people["name"] or "Untitled draft"),
+            body=body, link=link, actor_id=actor, resource_type="branch", resource_id=branch_id,
+            dedupe_unread=True)
+    except Exception:  # noqa: BLE001 — telling people never fails the change it tells of
+        logger.warning("could not tell the people of draft %s (%s)", branch_id, kind, exc_info=True)
+
+
+async def _drafts_policy_of(session: AsyncSession, data_source_id: Optional[str]):
+    """The drafts and reviews policy ``data_source_id`` works under (``drafts_policy``). A graph
+    whose data source row is gone follows the built-in policy."""
+    from backend.app.services import drafts_policy
+    if data_source_id:
+        try:
+            return await drafts_policy.load(session, data_source_id)
+        except LookupError:
+            pass
+    return drafts_policy.resolve()
+
+
+async def _pr_policy(svc: GraphVersioningService, session: AsyncSession, pr: dict):
+    """The policy of the data source a review merges into."""
+    target = await svc.get_graph(str(pr["target_graph_id"]))
+    return await _drafts_policy_of(session, (target or {}).get("data_source_id"))
+
+
+async def draft_level(session: AsyncSession, data_source_id: Optional[str],
+                      asked: Optional[str] = None) -> str:
+    """The level a new draft of ``data_source_id`` starts at: ``asked``, else its policy's default
+    (``drafts_policy``). A level the policy rules out is a 409 ``private_drafts_disabled`` or
+    ``public_drafts_disabled``. A graph whose data source row is gone follows the built-in policy."""
+    policy = await _drafts_policy_of(session, data_source_id)
+    level = asked or policy.default_visibility
+    if not policy.allows(level):
+        raise HTTPException(status_code=409, detail={
+            "type": f"{level}_drafts_disabled",
+            "message": f"This data source doesn't allow {level} drafts: start a "
+                       f"{policy.default_visibility} one."})
+    return level
+
+
 @router.post("/graphs/{graph_id}/branches", response_model=OpenDraftResponse, status_code=201)
 async def open_draft(
     ws_id: str, graph_id: str, body: OpenDraftRequest,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    """Open a draft at ``visibility``, else at the level its data source's policy starts one. The
+    deprecated ``shared`` asks for a private draft, as it always opened one only its people see."""
+    asked = body.visibility or ("private" if body.shared else None)
+    level = await draft_level(session, _meta.get("data_source_id"), asked)
     with _domain_errors():
         branch_id = await svc.open_draft(
             graph_id=graph_id, owner=user.id, name=body.name,
-            originating_view_id=body.originating_view_id, shared=body.shared,
+            originating_view_id=body.originating_view_id, visibility=level,
         )
     await _ensure_view_layout_overlay(body.originating_view_id, branch_id)
     return {"branch_id": branch_id}
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}", response_model=BranchResponse)
+async def get_branch(
+    ws_id: str, graph_id: str, branch_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """One branch as the list shows it: its level, the caller's role on it and what they may do
+    with it. 404 for a draft the caller may not read, as for one that doesn't exist."""
+    with _domain_errors():
+        branch = await svc.get_branch(graph_id=graph_id, branch_id=branch_id, viewer=viewer)
+    await _attach_user_names(session, [branch])
+    return branch
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/members")
@@ -1657,6 +1812,7 @@ async def add_branch_member(
             subject_id=body.subject_id, role=body.role, actor=user.id,
             check_eligible=lambda: _assert_member_eligible(
                 session, ws_id, body.subject_type, body.subject_id, body.role),
+            **await _settle_as_checkpoint(session, ws_id, _meta),
         )
 
 
@@ -1666,13 +1822,154 @@ async def remove_branch_member(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    """Remove a member: whoever loses write access with them has what they staged committed
+    first, under their own name (409 ``staged_changes_unsaved`` when it clashes with the draft)."""
     with _domain_errors():
         await svc.remove_branch_member(
             graph_id=graph_id, branch_id=branch_id, subject_type=subject_type,
-            subject_id=subject_id, actor=user.id,
+            subject_id=subject_id, actor=user.id, **await _settle_as_checkpoint(session, ws_id, _meta),
         )
     return {"removed": True}
+
+
+async def _owners_who_left(session: AsyncSession, ws_id: str, owners) -> set:
+    """Which of ``owners`` have left the workspace: their account is gone, deleted or not active,
+    or they no longer read its data sources."""
+    owners = list(dict.fromkeys(o for o in owners if o))
+    idents = await user_repo.get_identities_by_ids(session, owners)
+    left = set()
+    for owner in owners:
+        ident = idents.get(owner)
+        if ident is None or ident["deleted"] or ident["status"] != "active" or not has_permission(
+                await permission_service.resolve(session, owner), _READ, workspace_id=ws_id):
+            left.add(owner)
+    return left
+
+
+async def _assert_owner_eligible(session: AsyncSession, ws_id: str, user_id: str) -> None:
+    """Who a draft is handed to: an active person who changes this workspace's data sources."""
+    if is_service_account(user_id):
+        raise IneligibleOwner(user_id, "service_account")
+    user = await user_repo.get_user_by_id(session, user_id)
+    if user is None:
+        raise IneligibleOwner(user_id, "unknown_user")
+    if user.status != "active":
+        raise IneligibleOwner(user_id, "inactive")
+    if not has_permission(await permission_service.resolve(session, user_id), _MANAGE, workspace_id=ws_id):
+        raise IneligibleOwner(user_id, "no_manage")
+
+
+class TransferDraftRequest(_ApiModel):
+    to: str
+    # The previous owner stays on as a maintainer; false: they keep nothing.
+    keep_previous: bool = Field(default=True, alias="keepPrevious")
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/transfer", response_model=BranchResponse)
+async def transfer_draft(
+    ws_id: str, graph_id: str, branch_id: str, body: TransferDraftRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Hand a draft to someone else: its owner does, at any time; a workspace admin does once its
+    owner has left the workspace. It goes to an active person who changes the workspace's data
+    sources (422 ``ineligible_owner``). The previous owner stays on as a maintainer unless
+    ``keepPrevious`` is false; then, if that takes their write access, what they staged is
+    committed first, under their name (409 ``staged_changes_unsaved`` when it clashes)."""
+    admin = has_permission(claims, "workspace:admin", workspace_id=ws_id)
+
+    async def owner_left(owner: str) -> bool:
+        return owner in await _owners_who_left(session, ws_id, [owner])
+
+    with _domain_errors():
+        branch = await svc.transfer_branch(
+            graph_id=graph_id, branch_id=branch_id, to=body.to, actor=user.id,
+            keep_previous=body.keep_previous, owner_left=owner_left if admin else None,
+            check_eligible=lambda: _assert_owner_eligible(session, ws_id, body.to),
+            **await _settle_as_checkpoint(session, ws_id, _meta))
+    previous = branch.pop("previous_owner")
+    if branch["owner"] != previous:
+        from backend.app.api.v1.endpoints.graph import _record_versioning
+        await _record_versioning(session, "workspace.versioning.draft_transferred",
+                                 _meta.get("data_source_id"), {"graphId": graph_id, "branchId": branch_id,
+                                                               "from": previous, "to": branch["owner"]})
+        await _tell_draft_people(session, svc, "draft.transferred", ws_id=ws_id, meta=_meta,
+                                 graph_id=graph_id, branch_id=branch_id, actor=user.id, to=branch["owner"])
+    await _attach_user_names(session, [branch])
+    return branch
+
+
+async def _settle_as_checkpoint(session: AsyncSession, ws_id: str, meta: dict) -> dict:
+    """What a checkpoint is checked against (containment, ontology rules, node identity), for the
+    commits that save someone's staged edits before they lose write access."""
+    return {"containment_edge_types": await _live_containment_types(session, ws_id, meta.get("data_source_id")),
+            "ontology_rules": await _rules_for_meta(session, ws_id, meta),
+            "node_identity": await _node_identity_for_meta(session, meta)}
+
+
+class DraftLevelRequest(_ApiModel):
+    visibility: Literal["public", "private"]
+
+
+class DraftLevelImpactResponse(_ApiModel):
+    visibility: str
+    # Who the change takes write access from, with edits staged: committed under their names first.
+    saved: List[Dict[str, Any]]
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+
+
+@router.post("/graphs/{graph_id}/branches/{branch_id}/visibility", response_model=BranchResponse)
+async def set_draft_visibility(
+    ws_id: str, graph_id: str, branch_id: str, body: DraftLevelRequest,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Make a draft public or private (its owner or a maintainer), within its data source's policy
+    (409 ``private_drafts_disabled`` / ``public_drafts_disabled``). Made private, the writers it
+    loses have what they staged committed first, under their own names; edits that clash with the
+    draft leave it as it was (409 ``staged_changes_unsaved``, naming whose)."""
+    await draft_level(session, _meta.get("data_source_id"), body.visibility)
+    with _domain_errors():
+        before = (await svc.get_branch(graph_id=graph_id, branch_id=branch_id, viewer=viewer))["visibility"]
+        branch = await svc.set_visibility(
+            graph_id=graph_id, branch_id=branch_id, visibility=body.visibility, actor=user.id,
+            **await _settle_as_checkpoint(session, ws_id, _meta))
+    if branch["visibility"] != before:
+        from backend.app.api.v1.endpoints.graph import _record_versioning
+        await _record_versioning(session, "workspace.versioning.draft_visibility_changed",
+                                 _meta.get("data_source_id"), {"graphId": graph_id, "branchId": branch_id,
+                                                               "from": before, "to": branch["visibility"]})
+    if (before, branch["visibility"]) == ("public", "private"):
+        await _tell_draft_people(session, svc, "draft.made_private", ws_id=ws_id, meta=_meta,
+                                 graph_id=graph_id, branch_id=branch_id, actor=user.id)
+    await _attach_user_names(session, [branch])
+    return branch
+
+
+@router.get("/graphs/{graph_id}/branches/{branch_id}/visibility-impact", response_model=DraftLevelImpactResponse)
+async def draft_visibility_impact(
+    ws_id: str, graph_id: str, branch_id: str,
+    visibility: Literal["public", "private"] = Query(...),
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """What making the draft ``visibility`` would do, for its owner or a maintainer to see first:
+    whose staged edits are committed under their names before it changes, and how many."""
+    with _domain_errors():
+        impact = await svc.visibility_impact(graph_id=graph_id, branch_id=branch_id,
+                                             visibility=visibility, actor=user.id)
+    resolved = await resolve_user_ids(session, {s["actor"] for s in impact["saved"]}) if impact["saved"] else {}
+    return {**impact, "user_names": {uid: disp for uid, (disp, _email) in resolved.items() if disp}}
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/changes", response_model=StageResponse)
@@ -1776,9 +2073,13 @@ async def publish(
     ie=Depends(get_import_export_service),
 ):
     """Publish a draft. One that changes more than ``SYNC_PUBLISH_MAX_CHANGES`` entities is
-    published by a job instead: 202 with the job to poll (``GET …/publish-jobs/{jobId}``)."""
+    published by a job instead: 202 with the job to poll (``GET …/publish-jobs/{jobId}``). Where
+    the data source's policy says nobody merges their own changes, 409 ``review_required``."""
+    policy = await _drafts_policy_of(session, _meta.get("data_source_id"))
     if await svc.branch_change_count(graph_id=graph_id, branch_id=branch_id) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
         with _domain_errors():                   # queuing takes the draft: closed → 409, unknown → 404
+            if not policy.self_merge:            # refused now, rather than by the job
+                raise ReviewRequired(branch_id)
             return await _queue_publish(ie, workspace_id=ws_id, meta=_meta, graph_id=graph_id,
                                         branch_id=branch_id, actor=user.id, body=body)
     cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
@@ -1789,10 +2090,13 @@ async def publish(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
             message=body.message, resolutions=body.resolutions,
             containment_edge_types=cset, ontology_rules=rules, node_identity=identity,
+            self_merge=policy.self_merge,
         )
     await _bump_main_cache(graph_id)             # main advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(graph_id, user.id)   # views' "data updated" freshness
     await _promote_view_layout_overlay(branch_id, user.id)   # fold the draft's layer/assignment edits into the published view
+    await _tell_draft_people(session, svc, "draft.published", ws_id=ws_id, meta=_meta, graph_id=graph_id,
+                             branch_id=branch_id, actor=user.id)
     background.add_task(project_now, graph_id)   # refresh FalkorDB in-process after commit (async); read-fallback + badge cover the window
     return {"commit_id": commit_id}
 
@@ -1844,22 +2148,28 @@ async def _publish_from_job(job: dict) -> dict:
                     cset = await _live_containment_types(session, job["workspaceId"], (meta or {}).get("data_source_id"))
                     rules = await _rules_for_meta(session, job["workspaceId"], meta)
                     identity = await _node_identity_for_meta(session, meta)
+                    # As it is now: a rule tightened since the job was queued holds.
+                    policy = await _drafts_policy_of(session, (meta or {}).get("data_source_id"))
                 if job.get("mergeRequestId"):
                     commit_id = await svc.merge_mr(
                         mr_id=job["mergeRequestId"], actor=actor, message=job["message"],
                         resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
-                        queued=True, node_identity=identity)
+                        queued=True, node_identity=identity, self_merge=policy.self_merge)
                 else:
                     commit_id = await svc.publish(
                         graph_id=graph_id, branch_id=branch_id, actor=actor, message=job["message"],
                         resolutions=job.get("resolutions"), containment_edge_types=cset, ontology_rules=rules,
-                        queued=True, node_identity=identity)
+                        queued=True, node_identity=identity, self_merge=policy.self_merge)
         except HTTPException as exc:
             return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
     await _bump_main_cache(graph_id)
     await _touch_views_data_updated(graph_id, actor)
     await _promote_view_layout_overlay(branch_id, actor)
     await nudge_projection(graph_id)
+    async with get_async_session() as session:
+        await _tell_draft_people(session, svc, "draft.published", ws_id=job["workspaceId"],
+                                 meta=await svc.get_graph(graph_id) or {}, graph_id=graph_id,
+                                 branch_id=branch_id, actor=actor)
     return {"commitId": commit_id}
 
 
@@ -1889,10 +2199,13 @@ async def abandon_draft(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     with _domain_errors():
         result = await svc.abandon_draft(graph_id=graph_id, branch_id=branch_id, actor=user.id)
     await _drop_view_layout_overlays(branch_id)   # layout edits vanish with the draft (Git-like)
+    await _tell_draft_people(session, svc, "draft.discarded", ws_id=ws_id, meta=_meta, graph_id=graph_id,
+                             branch_id=branch_id, actor=user.id)
     return result
 
 
@@ -1903,11 +2216,17 @@ async def update_branch(
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """Edit a draft's name / description (owner or maintainer) or visibility (owner only)."""
+    """Edit a draft's name / description (owner or maintainer). ``isShared`` is 422: a draft is
+    shared by adding members, and its level changes through ``…/visibility``."""
+    if body.is_shared is not None:
+        raise HTTPException(status_code=422, detail={
+            "type": "is_shared_retired",
+            "message": "A draft is shared by adding members, and made public or private with "
+                       "POST …/visibility."})
     with _domain_errors():
         return await svc.update_branch(
             graph_id=graph_id, branch_id=branch_id, actor=user.id,
-            name=body.name, description=body.description, is_shared=body.is_shared,
+            name=body.name, description=body.description,
         )
 
 
@@ -1956,19 +2275,32 @@ async def get_watermark(
 @router.get("/graphs/{graph_id}/branches/{branch_id}/freshness", response_model=BranchFreshnessModel)
 async def get_branch_freshness(
     ws_id: str, graph_id: str, branch_id: str,
+    since_seq: Optional[int] = Query(None, alias="sinceSeq", ge=0,
+                                     description="the headCommitSeq of the last poll"),
     _user: User = Depends(requires(_READ, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     viewer: Viewer = Depends(viewer_ctx),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Live "is this draft behind main?" signal — O(1), safe to poll frequently while editing so a
-    branch owner learns RIGHT AWAY (not at merge) that a teammate published and they must pull."""
+    branch owner learns RIGHT AWAY (not at merge) that a teammate published and they must pull.
+    Also the draft's own head, level and what the caller may do with it; with ``sinceSeq``, what
+    others committed to it since, and who (``savedSince``). A draft the caller may no longer read
+    is a 404."""
     await _assert_draft_visible(svc, graph_id, branch_id, viewer)
     with _domain_errors():
-        f = await svc.branch_freshness(graph_id=graph_id, branch_id=branch_id)
+        f = await svc.branch_freshness(graph_id=graph_id, branch_id=branch_id, since_seq=since_seq,
+                                       viewer=viewer)
+    names = {}
+    if f["saved_since"] and f["saved_since"]["by"]:
+        resolved = await resolve_user_ids(session, set(f["saved_since"]["by"]))
+        names = {uid: disp for uid, (disp, _email) in resolved.items() if disp}
     return BranchFreshnessModel(behind=f["behind"], behind_by=f["behind_by"],
                                 main_head_commit_seq=f["main_head_commit_seq"],
-                                base_commit_seq=f["base_commit_seq"], status=f["status"])
+                                base_commit_seq=f["base_commit_seq"], status=f["status"],
+                                head_commit_seq=f["head_commit_seq"], visibility=f["visibility"],
+                                access=f["access"], saved_since=f["saved_since"], user_names=names)
 
 
 async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
@@ -2927,7 +3259,8 @@ async def create_import(
                     workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
                     actor=user.id, import_format=format, provider_id=meta.get("provider_id"),
                     branch_id=branch_id, reconcile_mode=reconcile_mode, scope_view_id=view_id,
-                    idempotency_key=key)
+                    idempotency_key=key, draft_visibility=(
+                        await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
         except IntegrityError:
             # A request with the same key got there first: answer with its job.
             job = await _job_for_key(ie, graph_id, key, "ingest")
@@ -3084,7 +3417,8 @@ async def complete_import_upload(
             workspace_id=ws_id, data_source_id=meta.get("data_source_id"), graph_id=graph_id,
             actor=user.id, import_format=record["format"], provider_id=meta.get("provider_id"),
             source_uri=uploads.record_key(record), branch_id=branch_id, reconcile_mode=reconcile_mode,
-            scope_view_id=view_id)
+            scope_view_id=view_id, draft_visibility=(
+                await draft_level(session, meta.get("data_source_id")) if branch_id is None else None))
     try:
         await uploads.save(ie.store, {**record, "jobId": created["job_id"], "branchId": created["branch_id"]})
         status = await ie.start_import(created["job_id"])
@@ -3637,11 +3971,14 @@ async def list_pull_requests(
 @router.get("/pulls/{pr_id}", response_model=PrResponse)
 async def get_pull_request(
     ws_id: str, pr_id: str,
-    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
     pr: dict = Depends(pr_in_workspace),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     await _attach_user_names(session, [pr])
+    pr["viewer_can"] = await _viewer_can(svc, session, pr, user.id, claims, ws_id)
     return pr
 
 
@@ -3730,6 +4067,40 @@ async def _not_their_own(session: AsyncSession, pr: dict, approver_id: str) -> N
             })
 
 
+def _first_refusal(*refusals) -> Optional[str]:
+    """The code of the first ``(applies, code)`` refusal that applies, in the order given."""
+    return next((code for applies, code in refusals if applies), None)
+
+
+async def _viewer_can(svc: GraphVersioningService, session: AsyncSession, pr: dict, viewer: str,
+                      claims: PermissionClaims, ws_id: str) -> dict:
+    """Whether ``viewer`` may approve a review and merge it, with the code a refusal would carry
+    (``None`` where they may), decided as the approve and merge routes decide: a settled review
+    takes neither; approving needs a person with manage; merging needs manage and publish; and
+    the data source's policy may leave both to someone other than whoever opened it."""
+    settled = pr.get("status") if pr.get("status") in ("merged", "closed") else None
+    policy = await _pr_policy(svc, session, pr)
+    opened = pr.get("actor") == viewer
+    manages = has_permission(claims, _MANAGE, workspace_id=ws_id)
+    approve = _first_refusal(
+        (settled is not None, settled),
+        (is_service_account(viewer), "person_required"),
+        (not manages, "manage_required"),
+        (opened and not policy.self_approval, "self_review"))
+    if approve is None:
+        try:
+            await _not_their_own(session, pr, viewer)
+        except HTTPException:
+            approve = "self_review"
+    merge = _first_refusal(
+        (settled is not None, settled),
+        (not manages, "manage_required"),
+        (not has_permission(claims, _PUBLISH, workspace_id=ws_id), "publish_required"),
+        (opened and not policy.self_merge, "self_merge"))
+    return {"approve": approve is None, "merge": merge is None,
+            "approveReason": approve, "mergeReason": merge}
+
+
 @router.post("/pulls/{pr_id}/approve", response_model=PrResponse)
 async def approve_pull_request(
     ws_id: str, pr_id: str,
@@ -3740,9 +4111,11 @@ async def approve_pull_request(
     session: AsyncSession = Depends(get_db_session),
 ):
     await _not_their_own(session, _pr, user.id)
+    policy = await _pr_policy(svc, session, _pr)
     with _domain_errors():
         return await svc.approve_pr(pr_id=pr_id, actor=user.id,
-                                    expected_head_commit_id=body.expected_head_commit_id if body else None)
+                                    expected_head_commit_id=body.expected_head_commit_id if body else None,
+                                    self_approval=policy.self_approval)
 
 
 @router.post("/pulls/{pr_id}/close", response_model=PrResponse)
@@ -3769,10 +4142,11 @@ async def merge_pull_request(
     target = await svc.get_graph(str(_pr["target_graph_id"]))     # judged by the TARGET's ontology
     cset = await _live_containment_types(session, ws_id, (target or {}).get("data_source_id"))
     rules = await _rules_for_meta(session, ws_id, target)
+    policy = await _drafts_policy_of(session, (target or {}).get("data_source_id"))
     with _domain_errors():
         commit_id = await svc.merge_pr(
             pr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
-            containment_edge_types=cset, ontology_rules=rules,
+            containment_edge_types=cset, ontology_rules=rules, self_merge=policy.self_merge,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # base advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
@@ -3786,14 +4160,18 @@ async def merge_pull_request(
 @router.get("/reviewers", response_model=List[ReviewerCandidate])
 async def list_reviewer_candidates(
     ws_id: str,
+    data_source_id: Optional[str] = Query(None, alias="dataSourceId"),
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
     """Who the caller can ask to review: the workspace's active members, bound directly or
     through a group, whose role here grants manage (approve needs it; workspace admin implies
-    it). Never the caller: they are the PR's author, and an author cannot approve. Nor a service
-    account, which never reviews."""
+    it). The caller, who opens the review, too, unless the policy — of ``dataSourceId``, else the
+    workspace's — says someone else approves. Never a service account, which never reviews."""
     from backend.app.db.repositories import binding_repo, group_repo, permission_repo, user_repo
+    from backend.app.services import drafts_policy
+    ws = await _policy_workspace(session, ws_id)
+    ds = await _policy_source(session, ws_id, data_source_id) if data_source_id else None
     bindings = await binding_repo.list_for_scope(session, scope_type="workspace", scope_id=ws_id)
     role_perms = await permission_repo.get_role_permissions_for_roles(
         session, sorted({b.role_name for b in bindings}))
@@ -3805,7 +4183,8 @@ async def list_reviewer_candidates(
             ids.add(b.subject_id)
         elif b.subject_type == "group":
             ids.update(m.user_id for m in await group_repo.list_group_members(session, b.subject_id))
-    ids.discard(user.id)
+    if not drafts_policy.resolve(ws, ds).self_approval:
+        ids.discard(user.id)
     idents = await user_repo.get_identities_by_ids(session, sorted(ids))
     people = [{"user_id": uid, "display_name": i["name"] or None, "email": i["email"]}
               for uid, i in idents.items()
@@ -3821,6 +4200,7 @@ async def open_merge_request(
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),     # the draft owner raises the MR
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
     """Raise a formal merge request from a per-user draft to its graph's ``main``."""
     with _domain_errors():
@@ -3830,6 +4210,8 @@ async def open_merge_request(
             description=body.description if body else None,
             reviewers=body.reviewers if body else None,
         )
+    await _tell_draft_people(session, svc, "draft.sent_for_review", ws_id=ws_id, meta=_meta,
+                             graph_id=graph_id, branch_id=branch_id, actor=user.id, pr_id=pr_id)
     return {"pr_id": pr_id}
 
 
@@ -3890,6 +4272,161 @@ async def count_view_pull_requests(
     return {"fromView": from_view, "onDataSource": on_ds}
 
 
+# --------------------------------------------------------------------------- #
+# Drafts and reviews policy                                                    #
+# --------------------------------------------------------------------------- #
+class DraftsPolicySettings(_ApiModel):
+    """One level's own drafts and reviews settings, on a write: a field left out stays as it is,
+    and ``"inherit"`` clears it, so the next level's holds (``drafts_policy``)."""
+    default_visibility: Optional[Literal["public", "private", "inherit"]] = Field(
+        default=None, alias="defaultVisibility")
+    levels: Optional[Literal["any", "public_only", "private_only", "inherit"]] = None
+    self_approval: Optional[Union[bool, Literal["inherit"]]] = Field(default=None, alias="selfApproval")
+    self_merge: Optional[Union[bool, Literal["inherit"]]] = Field(default=None, alias="selfMerge")
+
+
+class EffectiveDraftsPolicyModel(_ApiModel):
+    default_visibility: str = Field(alias="defaultVisibility")
+    levels: str
+    self_approval: bool = Field(alias="selfApproval")
+    self_merge: bool = Field(alias="selfMerge")
+    sources: Dict[str, str]
+
+
+class WorkspaceDraftsPolicyResponse(_ApiModel):
+    settings: Dict[str, Any]
+    effective: EffectiveDraftsPolicyModel
+
+
+class DataSourceDraftsPolicyResponse(_ApiModel):
+    overrides: Dict[str, Any]
+    workspace: Dict[str, Any]
+    effective: EffectiveDraftsPolicyModel
+
+
+async def _policy_workspace(session: AsyncSession, ws_id: str):
+    from backend.app.db.models import WorkspaceORM
+    ws = await session.get(WorkspaceORM, ws_id)
+    if ws is None or ws.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="workspace not found")
+    return ws
+
+
+async def _policy_source(session: AsyncSession, ws_id: str, data_source_id: str):
+    from backend.app.db.models import WorkspaceDataSourceORM
+    ds = await session.get(WorkspaceDataSourceORM, data_source_id)
+    if ds is None or ds.workspace_id != ws_id or ds.deleted_at is not None:
+        raise HTTPException(status_code=404, detail="data source not found in workspace")
+    return ds
+
+
+async def _record_policy_change(session: AsyncSession, scope: str, before: dict, after: dict,
+                                **target) -> None:
+    """A real change, once, with what it was and what it became: in the same transaction as the
+    change, since both are in this database."""
+    from backend.app.services.activity import recorder
+    await recorder.record_for_request(
+        session, "workspace.versioning.drafts_policy_updated", **target,
+        details={"scope": scope, "from": before, "to": after})
+
+
+class OwnerLeftDraft(_ApiModel):
+    graph_id: str = Field(alias="graphId")
+    branch_id: str = Field(alias="branchId")
+    data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
+    name: Optional[str] = None
+    owner: str
+    visibility: str
+    status: str
+    updated_at: str = Field(alias="updatedAt")
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+
+
+@router.get("/drafts/owner-left", response_model=List[OwnerLeftDraft])
+async def list_drafts_whose_owner_left(
+    ws_id: str,
+    limit: int = Query(200, ge=1, le=1000),
+    _admin: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The workspace's open drafts whose owner has left it (their account is gone or not active,
+    or they no longer read its data sources), for a workspace admin to hand on: where each is, its
+    name, owner, level and status — never what it holds. The latest changed first."""
+    left = await _owners_who_left(session, ws_id, await svc.draft_owners(workspace_id=ws_id))
+    drafts = await svc.drafts_owned_by(workspace_id=ws_id, owners=sorted(left), limit=limit)
+    await _attach_user_names(session, drafts)
+    return drafts
+
+
+@router.get("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse)
+async def get_workspace_drafts_policy(
+    ws_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """The workspace's own drafts and reviews settings, and the policy its data sources start
+    from: the level a new draft starts at, the levels it may have, and whether a review's opener
+    may approve and merge it."""
+    from backend.app.services import drafts_policy
+    ws = await _policy_workspace(session, ws_id)
+    return {"settings": drafts_policy.settings_of(ws), "effective": drafts_policy.resolve(ws).as_dict()}
+
+
+@router.put("/drafts-policy", response_model=WorkspaceDraftsPolicyResponse)
+async def put_workspace_drafts_policy(
+    ws_id: str, body: DraftsPolicySettings,
+    _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Set the workspace's drafts and reviews policy (workspace admins). A data source's own
+    override still wins. A change is recorded in the activity log; drafts already open keep their
+    level."""
+    from backend.app.services import drafts_policy
+    ws = await _policy_workspace(session, ws_id)
+    before, after = drafts_policy.apply(ws, drafts_policy.changes_from(body))
+    if after:
+        await _record_policy_change(session, "workspace", before, after, workspace_id=ws_id,
+                                    target_type="workspace", target_id=ws_id, target_label=ws.name)
+    return {"settings": drafts_policy.settings_of(ws), "effective": drafts_policy.resolve(ws).as_dict()}
+
+
+def _source_policy(drafts_policy, ws, ds) -> dict:
+    return {"overrides": drafts_policy.settings_of(ds), "workspace": drafts_policy.settings_of(ws),
+            "effective": drafts_policy.resolve(ws, ds).as_dict()}
+
+
+@router.get("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse)
+async def get_data_source_drafts_policy(
+    ws_id: str, data_source_id: str,
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """A data source's drafts and reviews policy: its own overrides, its workspace's settings, and
+    what holds for it, with the level each field came from."""
+    from backend.app.services import drafts_policy
+    ds = await _policy_source(session, ws_id, data_source_id)
+    return _source_policy(drafts_policy, await _policy_workspace(session, ws_id), ds)
+
+
+@router.put("/data-sources/{data_source_id}/drafts-policy", response_model=DataSourceDraftsPolicyResponse)
+async def put_data_source_drafts_policy(
+    ws_id: str, data_source_id: str, body: DraftsPolicySettings,
+    _user: User = Depends(requires("workspace:admin", workspace="ws_id")),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Override the workspace's drafts and reviews policy for one data source (workspace admins),
+    field by field; ``"inherit"`` goes back to the workspace's. A change is recorded once."""
+    from backend.app.services import drafts_policy
+    from backend.app.services.activity import recorder
+    ds = await _policy_source(session, ws_id, data_source_id)
+    before, after = drafts_policy.apply(ds, drafts_policy.changes_from(body))
+    if after:
+        await _record_policy_change(session, "data_source", before, after,
+                                    **recorder.data_source_target(ds))
+    return _source_policy(drafts_policy, await _policy_workspace(session, ws_id), ds)
+
+
 @router.get("/data-sources/{data_source_id}/pull-requests", response_model=List[PrResponse])
 async def list_data_source_pull_requests(
     ws_id: str, data_source_id: str,
@@ -3916,11 +4453,14 @@ async def list_data_source_pull_requests(
 @router.get("/merge-requests/{pr_id}", response_model=PrResponse)
 async def get_merge_request(
     ws_id: str, pr_id: str,
-    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    user: User = Depends(requires(_READ, workspace="ws_id")),
     pr: dict = Depends(pr_in_workspace),
+    claims: PermissionClaims = Depends(get_permission_claims),
+    svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
     await _attach_user_names(session, [pr])
+    pr["viewer_can"] = await _viewer_can(svc, session, pr, user.id, claims, ws_id)
     return pr
 
 
@@ -4005,9 +4545,11 @@ async def approve_merge_request(
     session: AsyncSession = Depends(get_db_session),
 ):
     await _not_their_own(session, _pr, user.id)
+    policy = await _pr_policy(svc, session, _pr)
     with _domain_errors():
         return await svc.approve_pr(pr_id=pr_id, actor=user.id,
-                                    expected_head_commit_id=body.expected_head_commit_id if body else None)
+                                    expected_head_commit_id=body.expected_head_commit_id if body else None,
+                                    self_approval=policy.self_approval)
 
 
 @router.post("/merge-requests/{pr_id}/close", response_model=PrResponse)
@@ -4035,9 +4577,12 @@ async def merge_merge_request(
     """Merge a merge request. A draft that changes more than ``SYNC_PUBLISH_MAX_CHANGES``
     entities is merged by a job instead: 202 with the job to poll, as for publish."""
     target, source = str(_pr["target_graph_id"]), _pr.get("source_branch_id")
+    policy = await _pr_policy(svc, session, _pr)
     if source and await svc.branch_change_count(
             graph_id=target, branch_id=str(source)) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
         with _domain_errors():
+            if not policy.self_merge and user.id == _pr.get("actor"):   # refused now, not by the job
+                raise SelfMerge(pr_id)
             return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),
                                         graph_id=target, branch_id=str(source), actor=user.id,
                                         body=body, merge_request_id=pr_id)
@@ -4048,10 +4593,15 @@ async def merge_merge_request(
         commit_id = await svc.merge_mr(
             mr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
             containment_edge_types=cset, ontology_rules=rules, node_identity=identity,
+            self_merge=policy.self_merge,
         )
     await _bump_main_cache(str(_pr["target_graph_id"]))            # target advanced — invalidate stale canvas reads now
     await _touch_views_data_updated(str(_pr["target_graph_id"]), user.id)   # views' "data updated" freshness
     _src_branch = _pr.get("source_branch_id")   # the merged draft — fold its layout overlay into the published view
     await _promote_view_layout_overlay(str(_src_branch) if _src_branch else None, user.id)
+    if _src_branch and _pr.get("source_graph_id") == target:                 # a draft's, not a fork's
+        await _tell_draft_people(session, svc, "draft.published", ws_id=ws_id,
+                                 meta=await svc.get_graph(target) or {}, graph_id=target,
+                                 branch_id=str(_src_branch), actor=user.id)
     background.add_task(project_now, str(_pr["target_graph_id"]))   # target graph advanced; refresh FalkorDB in-process (async)
     return {"commit_id": commit_id}

@@ -31,6 +31,8 @@ import { useWorkspaceDetailData } from '@/components/admin/workspace/useWorkspac
 import { WorkspaceHeroHeader } from '@/components/admin/workspace/WorkspaceHeroHeader'
 import { DataSourceGridCard } from '@/components/admin/workspace/DataSourceGridCard'
 import { WorkspaceNodeIdentityDefaults } from '@/components/admin/workspace/WorkspaceNodeIdentityDefaults'
+import { WorkspaceDraftsPolicy } from '@/components/admin/workspace/WorkspaceDraftsPolicy'
+import { DraftsWhoseOwnerLeft } from '@/components/admin/workspace/DraftsWhoseOwnerLeft'
 import { WorkspaceCardSkeleton } from '@/components/admin/workspace/WorkspaceCardSkeleton'
 import { DataSourceDetailPanel } from '@/components/admin/workspace/DataSourceDetailPanel'
 import WorkspaceViewsSection from '@/components/admin/workspace/WorkspaceViewsSection'
@@ -588,6 +590,15 @@ export function WorkspaceDetailPage() {
                         canEdit={canManageDataSources}
                         onSaved={reload}
                     />
+
+                    {/* How drafts and reviews work across the sources below; and, for an admin,
+                        the drafts whose owner left, to hand on. */}
+                    {versioningEnabled && (
+                        <>
+                            <WorkspaceDraftsPolicy wsId={wsId!} canEdit={canManageMembers} />
+                            <DraftsWhoseOwnerLeft wsId={wsId!} />
+                        </>
+                    )}
 
                     <div className="flex items-center justify-between mb-4">
                         <h3 className="text-lg font-bold text-ink">Data Sources</h3>

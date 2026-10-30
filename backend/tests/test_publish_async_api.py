@@ -5,6 +5,7 @@ seconds of the web process's event loop. Past ``SYNC_PUBLISH_MAX_CHANGES`` the p
 merge of the draft's review — is queued as a job (202, the job to poll); smaller drafts publish in
 the request as before. The job's status says what the request would have said: its commit, or the
 refusal the route gives (``{status, detail}``), so the client raises the same errors either way.
+A publish the data source's policy rules out is refused by the request, not queued.
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ CHANGES = {"br_small": 10, "br_big": 50_000}
 class _Versioning:
     def __init__(self):
         self.published = []
+        self.opener = "someone"
 
     async def get_graph(self, graph_id):
         return {"graph_id": graph_id, "workspace_id": "ws1", "data_source_id": "ds1", "provider_id": None}
@@ -32,7 +34,7 @@ class _Versioning:
         return "cmt_1"
 
     async def get_pr(self, pr_id):
-        return {"pr_id": pr_id, "target_graph_id": "g1", "source_branch_id": "br_big", "actor": "someone"}
+        return {"pr_id": pr_id, "target_graph_id": "g1", "source_branch_id": "br_big", "actor": self.opener}
 
 
 class _Jobs:
@@ -122,6 +124,30 @@ async def test_the_review_of_a_large_draft_merges_as_a_job(test_client, services
     assert (created["graph_id"], created["branch_id"], created["merge_request_id"]) == ("g1", "br_big", "mr_1")
 
 
+async def test_where_someone_else_merges_a_large_draft_is_refused_rather_than_queued(
+        test_client, services, monkeypatch, fake_user):
+    """Self-merge off: publishing the draft directly is 409 review_required, and merging a review
+    you opened is 403 self_merge, from the request — not from a job that fails afterwards."""
+    from types import SimpleNamespace
+
+    from backend.app.services import drafts_policy
+
+    svc, jobs = services
+
+    async def someone_else_merges(_session, _ds):
+        return drafts_policy.resolve(None, SimpleNamespace(review_self_merge=False))
+    monkeypatch.setattr(drafts_policy, "load", someone_else_merges)
+    r = await test_client.post(f"{BASE}/graphs/g1/branches/br_big/publish", json={"message": "m"})
+    assert (r.status_code, r.json()["detail"]["type"]) == (409, "review_required"), r.text
+    svc.opener = fake_user.id
+    r = await test_client.post(f"{BASE}/merge-requests/mr_1/merge", json={"message": "m"})
+    assert (r.status_code, r.json()["detail"]["code"]) == (403, "self_merge"), r.text
+    assert jobs.created == []
+    svc.opener = "someone"                                     # someone else's review: queued
+    r = await test_client.post(f"{BASE}/merge-requests/mr_1/merge", json={"message": "m"})
+    assert r.status_code == 202, r.text
+
+
 @pytest.mark.parametrize("path", ["/graphs/g1/branches/br_big/publish", "/merge-requests/mr_1/merge"])
 async def test_a_publish_that_cannot_be_queued_answers_like_one_in_the_request(test_client, services, path):
     """Queuing takes the draft (``publishing``), so it is refused as a publish is: a draft that is
@@ -176,10 +202,15 @@ async def test_a_refused_publish_job_keeps_a_bounded_refusal(monkeypatch):
     async def _nothing(*_args):
         return None
 
+    async def _builtin(*_args):
+        from backend.app.services import drafts_policy
+        return drafts_policy.resolve()
+
     monkeypatch.setattr(ep, "get_versioning_service", lambda: _Refusing())
     monkeypatch.setattr("backend.app.db.engine.get_async_session", _session)
     monkeypatch.setattr(ep, "_live_containment_types", _nothing)
     monkeypatch.setattr(ep, "_rules_for_meta", _nothing)
+    monkeypatch.setattr(ep, "_drafts_policy_of", _builtin)
     out = await ep._publish_from_job({"graphId": "g1", "branchId": "br_big", "actor": "a",
                                       "workspaceId": "ws1", "message": "m"})
     assert out["error"]["status"] == 422

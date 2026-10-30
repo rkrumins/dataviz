@@ -2,8 +2,8 @@
 
 Alice owns a shared draft. Bob is a member editor, Dave a member viewer, and the group ``grp_eng``
 (Erin is in it) a member editor; Carol holds workspace manage but is no member. Bob and Erin write
-it through every draft-write route; Carol and Dave are refused with 403 ``not_owner_or_member``
-naming the role they lack, and nothing they send lands. Publishing and abandoning need maintainer,
+it through every draft-write route; Dave is refused with 403 ``not_owner_or_member`` naming the role
+he lacks, and to Carol the draft doesn't exist (404, as on a read). Nothing they send lands. Publishing and abandoning need maintainer,
 so an editor is refused those, a queued publish at request time. Frank is a maintainer only through
 ``grp_ops``: he manages members, renames and publishes, in the request or as a queued job.
 
@@ -11,12 +11,13 @@ Groups are looked up by the service itself, only when a group row could decide t
 that lookup fails the answer is 503 ``groups_unavailable``, never a refusal, while the owner and a
 direct member write on without it. A member only through a group finds the draft in the branch list.
 
-An edit staged by someone who may no longer write the draft (removed, un-shared, out of the group)
-is withdrawn at the owner's next checkpoint: never committed, never published.
+A member removed, or made a viewer, has what they staged saved first, under their own name. An edit
+staged by someone who stopped writing the draft without a change to it (they left the group) is
+withdrawn at the next checkpoint: never committed, never published.
 
-Only the owner changes who a draft is shared with, and every change starts from no members: making
-it private removes them, and member rows left on a private draft grant nothing, not even after it is
-shared again. Whoever is added must exist and, to write, hold workspace manage; that is checked only
+A draft is shared by adding members: removing the last one leaves it no longer shared, and member
+rows left on a draft that isn't shared grant nothing, not even reading it (404), nor once it is
+shared again. ``isShared`` is no longer a field a PATCH changes (422). Whoever is added must exist and, to write, hold workspace manage; that is checked only
 for a caller allowed to manage members, under the draft's lock. The group lookup, users, groups and
 their permissions are faked here.
 """
@@ -119,10 +120,9 @@ def _refused(r, required, branch_id):
     assert (detail["required"], detail["branchId"]) == (required, branch_id), detail
 
 
-def _not_owner(r, branch_id):
-    assert r.status_code == 403, (r.request.url, r.text)
-    detail = r.json()["detail"]
-    assert (detail["code"], detail["branchId"], detail["owner"]) == ("not_draft_owner", branch_id, "alice"), detail
+def _unknown(r):
+    """A private draft the caller may not read: 404, the same answer as a branch that isn't there."""
+    assert r.status_code == 404, (r.request.url, r.text)
 
 
 def _ineligible(r, subject_id, reason):
@@ -192,15 +192,16 @@ async def _write_matrix(c, V, ds, gid, shared_draft) -> None:
     d = await shared_draft(bob="editor", dave="viewer", grp_eng="editor")
     qd, B = {"dataSourceId": ds, "branchId": d}, f"{V1}/graphs/{gid}/branches/{d}"
 
-    # Carol (a manager, no member) and Dave (a viewer) are refused every write, naming editor.
-    for who in ("carol", "dave"):
+    # Dave (a viewer) is refused every write, naming editor; to Carol (a manager, no member) the
+    # draft isn't there.
+    for who, refused in (("dave", lambda r: _refused(r, "editor", d)), ("carol", _unknown)):
         h = _as(who)
-        _refused(await c.post(f"{GP}/changes", params=qd, json=_save(who), headers=h), "editor", d)
-        _refused(await c.post(f"{GP}/nodes/create", params=qd, json=_node(who), headers=h), "editor", d)
-        _refused(await c.post(f"{B}/changes", json=_stage(who), headers=h), "editor", d)
-        _refused(await c.post(f"{B}/commit", json={}, headers=h), "editor", d)
-        _refused(await c.post(f"{B}/rebase", json={}, headers=h), "editor", d)
-        _refused(await c.post(f"{B}/merge-requests", json={}, headers=h), "editor", d)
+        refused(await c.post(f"{GP}/changes", params=qd, json=_save(who), headers=h))
+        refused(await c.post(f"{GP}/nodes/create", params=qd, json=_node(who), headers=h))
+        refused(await c.post(f"{B}/changes", json=_stage(who), headers=h))
+        refused(await c.post(f"{B}/commit", json={}, headers=h))
+        refused(await c.post(f"{B}/rebase", json={}, headers=h))
+        refused(await c.post(f"{B}/merge-requests", json={}, headers=h))
     st = (await c.get(f"{B}/state", headers=_as("alice"))).json()["nodes"]
     assert not {"urn:t:carol", "urn:t:dave"} & set(st), st
     assert not any(n.get("displayName") in ("carol", "dave", "carol node", "dave node") for n in st.values())
@@ -252,7 +253,8 @@ async def _group_maintainer(c, V, ds, gid, shared_draft) -> None:
     assert r.status_code == 200, r.text
     r = await c.patch(B, json={"name": "renamed by frank"}, headers=_as("frank"))
     assert r.status_code == 200, r.text
-    _not_owner(await c.patch(B, json={"isShared": False}, headers=_as("frank")), d)   # visibility: owner only
+    r = await c.patch(B, json={"isShared": False}, headers=_as("frank"))        # shared through members
+    assert (r.status_code, r.json()["detail"]["type"]) == (422, "is_shared_retired"), r.text
     _refused(await c.delete(f"{B}/members/user/dave", headers=_as("bob")), "maintainer", d)
     r = await c.post(f"{GP}/changes", params={"dataSourceId": ds, "branchId": d}, json=_save("frank"),
                      headers=_as("frank"))
@@ -330,30 +332,33 @@ async def _revoked_staging_is_withdrawn(c, V, ds, gid, shared_draft, monkeypatch
     for who in ("bob", "erin", "alice"):
         r = await c.post(f"{B}/changes", json=_stage(who), headers=_as(who))
         assert r.status_code == 200, r.text
-    # Bob is removed and Erin leaves grp_eng before either commits: what they staged is not Alice's to save.
+    # Bob is removed: what he staged is saved first, under his name. Erin leaves grp_eng outside the
+    # draft, so nothing saves hers first: it is not Alice's to save, and her checkpoint withdraws it.
     r = await c.delete(f"{B}/members/user/bob", headers=_as("alice"))
     assert r.status_code == 200, r.text
+    log = (await c.get(f"{V1}/graphs/{gid}/commits", params={"branchId": d}, headers=_as("alice"))).json()
+    assert log["commits"][0]["actor"] == "bob", log
     monkeypatch.setitem(_GROUPS, "erin", ())
     r = await c.post(f"{B}/commit", json={}, headers=_as("alice"))
     assert r.status_code == 200 and r.json()["stagedChanges"] is True, r.text
     st = (await c.get(f"{B}/state", headers=_as("alice"))).json()["nodes"]
-    assert "urn:t:alice" in st and not {"urn:t:bob", "urn:t:erin"} & set(st), st
+    assert {"urn:t:alice", "urn:t:bob"} <= set(st) and "urn:t:erin" not in st, st
     r = await c.post(f"{B}/commit", json={}, headers=_as("alice"))     # nothing of theirs is left staged
     assert r.status_code == 200 and r.json()["stagedChanges"] is False, r.text
 
-    # Made private with Bob's edit staged: Alice's publish leaves it out of main.
+    # Bob removed with his edit staged: it was saved under his name, so Alice's publish carries it.
     p = await shared_draft(bob="editor")
     P = f"{V1}/graphs/{gid}/branches/{p}"
     r = await c.post(f"{P}/changes", json=_stage("bob"), headers=_as("bob"))
     assert r.status_code == 200, r.text
-    r = await c.patch(P, json={"isShared": False}, headers=_as("alice"))
+    r = await c.delete(f"{P}/members/user/bob", headers=_as("alice"))
     assert r.status_code == 200, r.text
     r = await c.post(f"{P}/publish", json={"message": "m"}, headers=_as("alice"))
     assert r.status_code == 200, r.text
     main = next(b["branchId"] for b in (await c.get(f"{V1}/graphs/{gid}/branches", headers=_as("alice"))).json()
                 if b["kind"] == "main")
     st = (await c.get(f"{V1}/graphs/{gid}/branches/{main}/state", headers=_as("alice"))).json()["nodes"]
-    assert "urn:t:bob" not in st, st
+    assert "urn:t:bob" in st, st
 
 
 def _add(c, branch_url, who, subject, role, kind="user"):
@@ -361,47 +366,45 @@ def _add(c, branch_url, who, subject, role, kind="user"):
                   headers=_as(who))
 
 
-async def _unshare_and_reshare(c, V, ds, gid, shared_draft) -> None:
+async def _last_member_removed(c, V, ds, gid, shared_draft) -> None:
     GP = "/api/v1/ws1/graph"
     d = await shared_draft(bob="editor")
     B, qd = f"/api/v1/ws1/versioning/graphs/{gid}/branches/{d}", {"dataSourceId": ds, "branchId": d}
 
-    # The modal sends isShared with every save: the same value changes nothing.
+    # isShared is not patched: a name still is.
     r = await c.patch(B, json={"name": "x", "isShared": True}, headers=_as("alice"))
-    assert r.status_code == 200, r.text
+    assert (r.status_code, r.json()["detail"]["type"]) == (422, "is_shared_retired"), r.text
+    r = await c.patch(B, json={"name": "x"}, headers=_as("alice"))
+    assert r.status_code == 200 and r.json()["isShared"] is True, r.text
     assert [m["subjectId"] for m in (await _members(c, B))["members"]] == ["bob"]
 
-    r = await c.patch(B, json={"isShared": False}, headers=_as("alice"))
-    assert r.status_code == 200 and r.json()["isShared"] is False, r.text
+    # Removing its last member leaves it no longer shared, and Bob is gone from it.
+    r = await c.delete(f"{B}/members/user/bob", headers=_as("alice"))
+    assert r.status_code == 200, r.text
+    assert (await c.get(B, headers=_as("alice"))).json()["isShared"] is False
     assert (await _members(c, B))["members"] == []
-    _not_owner(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), d)
-
-    # Sharing it again starts from no members: Bob is not back.
-    r = await c.patch(B, json={"isShared": True}, headers=_as("alice"))
-    assert r.status_code == 200 and r.json()["isShared"] is True, r.text
-    assert (await _members(c, B))["members"] == []
-    _refused(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), "editor", d)
+    _unknown(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")))
 
 
 async def _leftover_rows_grant_nothing(c, V, ds, gid, shared_draft) -> None:
     V1, GP = "/api/v1/ws1/versioning", "/api/v1/ws1/graph"
-    r = await c.post(f"{V1}/graphs/{gid}/branches", json={}, headers=_as("alice"))
+    r = await c.post(f"{V1}/graphs/{gid}/branches", json={"visibility": "private"}, headers=_as("alice"))
     assert r.status_code in (200, 201), r.text
     d = r.json()["branchId"]
     B, qd = f"{V1}/graphs/{gid}/branches/{d}", {"dataSourceId": ds, "branchId": d}
     async with db.graphver_session() as s:          # left by an un-share before members were removed
         s.add(models.BranchMemberORM(branch_id=d, subject_type="user", subject_id="bob", role="maintainer"))
 
-    _not_owner(await _add(c, B, "bob", "carol", "editor"), d)
+    _unknown(await _add(c, B, "bob", "carol", "editor"))
     branches = {b["branchId"]: b for b in (await c.get(f"{V1}/graphs/{gid}/branches", headers=_as("alice"))).json()}
     assert branches[d]["isShared"] is False, branches[d]
-    _not_owner(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), d)
+    _unknown(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")))
 
     # Alice shares it by adding Carol: the leftover row goes, it does not come back to life.
     r = await _add(c, B, "alice", "carol", "editor")
     assert r.status_code == 200, r.text
     assert [m["subjectId"] for m in (await _members(c, B))["members"]] == ["carol"]
-    _refused(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")), "editor", d)
+    _unknown(await c.post(f"{GP}/changes", params=qd, json=_save("bob"), headers=_as("bob")))
 
 
 async def _eligibility(c, V, ds, gid, shared_draft, directory) -> None:
@@ -421,14 +424,16 @@ async def _eligibility(c, V, ds, gid, shared_draft, directory) -> None:
 
     # Authorization comes first: a caller who may not manage members costs no lookup.
     directory.resolved[:] = []
-    _refused(await _add(c, B, "carol", "viola", "editor"), "maintainer", d)
+    _refused(await _add(c, B, "bob", "viola", "editor"), "maintainer", d)
+    _unknown(await _add(c, B, "carol", "viola", "editor"))
     assert directory.resolved == []
 
     listed = await _members(c, B)
     assert {m["subjectId"]: (m["role"], m["name"]) for m in listed["members"]} == {
         "bob": ("editor", "Bob"), "grp_eng": ("editor", "Eng"), "viola": ("viewer", "Viola")}
-    roles = {who: (await _members(c, B, who))["myRole"] for who in ("alice", "bob", "erin", "carol")}
-    assert roles == {"alice": "owner", "bob": "editor", "erin": "editor", "carol": None}, roles
+    roles = {who: (await _members(c, B, who))["myRole"] for who in ("alice", "bob", "erin", "viola")}
+    assert roles == {"alice": "owner", "bob": "editor", "erin": "editor", "viola": "viewer"}, roles
+    _unknown(await c.get(f"{B}/members", headers=_as("carol")))
 
 
 async def _membership_takes_the_branch_lock(c, V, ds, gid, shared_draft) -> None:
@@ -438,16 +443,17 @@ async def _membership_takes_the_branch_lock(c, V, ds, gid, shared_draft) -> None
         await holder.execute(select(models.BranchORM.id).where(models.BranchORM.id == d)
                              .with_for_update(key_share=True))
         for send in (lambda: _add(c, B, "alice", "carol", "viewer"),
-                     lambda: c.patch(B, json={"isShared": False}, headers=_as("alice"))):
+                     lambda: c.delete(f"{B}/members/user/bob", headers=_as("alice"))):
             r = await asyncio.wait_for(send(), 10)
             assert r.status_code == 503 and r.json()["detail"]["type"] == "lock_busy", r.text
         await holder.rollback()
 
     r = await _add(c, B, "alice", "carol", "viewer")
     assert r.status_code == 200, r.text
-    r = await c.patch(B, json={"isShared": False}, headers=_as("alice"))
-    assert r.status_code == 200, r.text
-    async with db.graphver_session() as s:          # a private draft keeps no members
+    for who in ("bob", "carol"):
+        r = await c.delete(f"{B}/members/user/{who}", headers=_as("alice"))
+        assert r.status_code == 200, r.text
+    async with db.graphver_session() as s:          # a draft without members isn't shared
         assert (await s.get(models.BranchORM, d)).is_shared is False
         assert (await s.execute(select(models.BranchMemberORM).where(
             models.BranchMemberORM.branch_id == d))).scalars().all() == []
@@ -487,9 +493,9 @@ def test_revoked_staging_is_withdrawn(data_sources, monkeypatch):
 
 
 @_E2E
-def test_unshare_and_reshare(data_sources, monkeypatch):
+def test_the_last_member_removed_leaves_it_unshared(data_sources, monkeypatch):
     _groups(monkeypatch)
-    asyncio.run(_scenario(_unshare_and_reshare))
+    asyncio.run(_scenario(_last_member_removed))
 
 
 @_E2E

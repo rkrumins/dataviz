@@ -1,12 +1,13 @@
-"""A private draft is read only by its owner, workspace managers and PR participants (doc 13
+"""A private draft is read only by its owner, its members and its PR's participants (doc 13
 READ_DRAFT) — over HTTP, needs Postgres.
 
 Alice owns a private draft. Bob holds ``datasource:read`` but not manage: every read of it naming
 ``branchId`` is 404, the same answer as a branch that doesn't exist, so he can't learn it is there
 — the graph routes (through the context engine), neighbors, freshness, members, merge-preview,
 view-changes, state, diff-vs-main, the commit log and entity history. An import into it is left out
-of his import list, and the job and its preview are 404. Carol (a manager) reads it, Alice reads it
-without manage, and Dave reads it once he reviews her PR.
+of his import list, and the job and its preview are 404. Carol manages the workspace and is answered
+the same: managing a workspace doesn't open its private drafts. Alice reads it without manage, and
+Dave reads it once he reviews her PR.
 """
 import asyncio
 import os
@@ -62,7 +63,8 @@ async def _run() -> None:
             gid = r.json()["graphId"]
             r = await c.post(f"{V1}/graphs/{gid}/bulk-ingest", content=_IMPORT_NDJSON, headers=setup)
             assert r.status_code == 200, r.text
-            d = (await c.post(f"{V1}/graphs/{gid}/branches", json={}, headers=setup)).json()["branchId"]
+            d = (await c.post(f"{V1}/graphs/{gid}/branches", json={"visibility": "private"},
+                              headers=setup)).json()["branchId"]
             save = {"ops": [{"op": "update", "kind": "node", "id": "urn:t:child",
                              "payload": {"displayName": "Child v2"}}]}
             r = await c.post(f"{GP}/changes", params={"dataSourceId": ds, "branchId": d}, json=save, headers=setup)
@@ -100,7 +102,7 @@ async def _run() -> None:
             hidden(await reads("bob", branch="br_bogus"))
             hidden(await reads("bob"))
             hidden(await reads("dave"))
-            shown(await reads("carol", manage=True))
+            hidden(await reads("carol", manage=True))
             shown(await reads("alice"))
 
             # An import into Alice's draft: its job and the rows it resolved.
@@ -120,7 +122,7 @@ async def _run() -> None:
                         (await c.get(f"{V1}/graphs/{gid}/imports/{job}/preview", headers=h)).status_code]
 
             assert await imports("bob") == [False, 404, 404]
-            assert await imports("carol", manage=True) == [True, 200, 200]
+            assert await imports("carol", manage=True) == [False, 404, 404]
             assert await imports("alice") == [True, 200, 200]
 
             r = await c.post(f"{V1}/graphs/{gid}/branches/{d}/merge-requests",
@@ -128,11 +130,12 @@ async def _run() -> None:
             assert r.status_code == 201, r.text
             shown(await reads("dave"))
             hidden(await reads("bob"))
+            hidden(await reads("carol", manage=True))
     finally:
         G.provider_manager, G.get_graph_cache = orig_pm, orig_cache
         await db.dispose_engine()
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_private_draft_read_only_by_owner_managers_and_reviewers(data_sources):
+def test_private_draft_read_only_by_owner_members_and_reviewers(data_sources):
     asyncio.run(_run())

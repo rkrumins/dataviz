@@ -1,10 +1,9 @@
 /**
  * BranchSettingsModal — a draft's members:
  *   • the owner sees each member's name and role, can remove one and add someone as any role;
- *   • choosing Private names who loses access and says so on the Save button;
- *   • after the first member is added, a Save sends no visibility, so a stale "Private" can't
- *     un-share the draft and drop that member;
- *   • a maintainer manages members but not visibility; an editor only reads the list.
+ *   • a private draft with nobody added says only its owner sees it;
+ *   • a maintainer manages members, and who sees the draft; an editor only reads the list.
+ * (Its level, and handing it on: BranchSettingsModal.level.test.tsx.)
  */
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -27,6 +26,10 @@ vi.mock('../../hooks/useVersioning', () => ({
   useBranchMembers: () => ({ data: membersData, isLoading: false }),
   useAddBranchMember: () => ({ mutate: addMutate, mutateAsync: addMutateAsync, isPending: false }),
   useRemoveBranchMember: () => ({ mutate: removeMutate, isPending: false }),
+  useSetDraftLevel: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDraftLevelImpact: () => ({ data: undefined, isLoading: false }),
+  useTransferDraft: () => ({ mutateAsync: vi.fn(), isPending: false }),
+  useDataSourceDraftsPolicy: () => ({ data: undefined }),
 }))
 
 import { searchDirectory } from '@/services/userDirectoryService'
@@ -82,45 +85,32 @@ describe('BranchSettingsModal members', () => {
       { subjectType: 'user', subjectId: 'dave', role: 'maintainer' }))
   })
 
-  it('names who loses access when the owner makes the draft private', () => {
-    membersData = { members: bobAndEng, myRole: 'owner' }
-    renderModal()
-    fireEvent.click(screen.getByRole('button', { name: /Private/ }))
-    expect(screen.getByText('Making this draft private removes Bob B, Eng')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Make private and remove 2' }))
-    expect(updateMutate.mock.calls[0][0]).toMatchObject({ branchId: 'br_1', isShared: false })
-  })
-
-  it('sends no visibility on a Save after the first member is added to a private draft', async () => {
+  it('says only its owner sees a private draft with nobody added', async () => {
     membersData = { members: [], myRole: 'owner' }
-    renderModal(branch({ isShared: false }))
+    renderModal(branch({ isShared: false, visibility: 'private' }))
     expect(screen.getByText('Only you can see this draft')).toBeInTheDocument()
     await addDave('editor')
     await waitFor(() => expect(addMutateAsync).toHaveBeenCalled())
-
-    fireEvent.change(screen.getByPlaceholderText('Untitled draft'), { target: { value: 'Q4 pricing' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
-    expect(updateMutate).toHaveBeenCalledTimes(1)
-    expect(updateMutate.mock.calls[0][0].name).toBe('Q4 pricing')
-    expect(updateMutate.mock.calls[0][0].isShared).toBeUndefined()
   })
 
-  it('lets a maintainer manage members but not who the draft is shared with', () => {
+  it('lets a maintainer manage members, and who sees the draft', () => {
     membersData = { members: bobAndEng, myRole: 'maintainer' }
-    renderModal(branch())
+    const access = { canRead: true, canWrite: true, canManage: true }
+    renderModal(branch({ owner: 'bob', visibility: 'private', access }))
     expect(screen.getByPlaceholderText('Add a user…')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Remove Bob B' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Private/ })).toBeDisabled()
-    expect(screen.getByRole('button', { name: /Shared/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Public/ })).toBeEnabled()
+    expect(screen.queryByLabelText('New owner')).not.toBeInTheDocument()   // handing on is the owner's
   })
 
   it('shows an editor the members read-only', () => {
     membersData = { members: bobAndEng, myRole: 'editor' }
-    renderModal(branch())
+    const access = { canRead: true, canWrite: true, canManage: false }
+    renderModal(branch({ owner: 'bob', visibility: 'private', access }))
     expect(screen.getByText('Bob B')).toBeInTheDocument()
     expect(screen.queryByPlaceholderText('Add a user…')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Remove Bob B' })).not.toBeInTheDocument()
     expect(screen.queryByRole('radiogroup', { name: 'Role of Bob B' })).not.toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Private/ })).toBeDisabled()
+    expect(screen.getByRole('button', { name: /Public/ })).toBeDisabled()
   })
 })

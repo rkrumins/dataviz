@@ -197,12 +197,12 @@ async def _reads(svc):
     await svc.approve_pr(pr_id=g["mr"], actor="w")
     await svc.update_pr(pr_id=g["mr"], title="paused", reviewers=["w"])
     assert (await svc.close_pr(pr_id=g["mr"], actor="u"))["status"] == "closed"
-    # So are a draft's members and visibility; abandoning it is a way out.
+    # So are a draft's members and name; abandoning it is a way out.
     await svc.add_branch_member(graph_id=gid, branch_id=other, subject_type="user", subject_id="w",
                                 role="editor", actor="u")
     await svc.remove_branch_member(graph_id=gid, branch_id=other, subject_type="user", subject_id="w",
                                    actor="u")
-    await svc.update_branch(graph_id=gid, branch_id=other, actor="u", name="kept", is_shared=False)
+    await svc.update_branch(graph_id=gid, branch_id=other, actor="u", name="kept")
     assert (await svc.abandon_draft(graph_id=gid, branch_id=other, actor="u"))["status"] == "abandoned"
     # Moving its data source moves no content; open drafts and reviews go with it.
     assert await svc.move_graph_workspace(g["ds"], "ws2", from_workspace_id="ws1")

@@ -52,8 +52,8 @@ class DraftNotReadable(AccessDenied):
 
 
 class NotDraftOwner(_HttpMapped, AccessDenied):
-    """A write reached someone else's private draft. Only its owner writes it;
-    workspace managers may read it, but not write it."""
+    """A write reached someone else's private draft. Only its owner writes it; the people on
+    its review may read it, but not write it. To anyone else it is :class:`DraftNotReadable`."""
 
     status_code = 403
 
@@ -79,15 +79,27 @@ class DraftRoleRequired(_HttpMapped, AccessDenied):
 
 
 class SelfReview(_HttpMapped, AccessDenied):
-    """PR_REVIEW (doc 13): a PR's author, or its source draft's owner, approved it. An
-    approval is someone else's review of the changes."""
+    """PR_REVIEW (doc 13): the person who opened a review approved it, where its data source's
+    policy says someone else approves (``drafts_policy``, self-approval off)."""
 
     status_code = 403
 
     def __init__(self, pr_id: str):
         self.pr_id = pr_id
-        super().__init__(f"the author or the draft's owner cannot approve pr {pr_id}",
+        super().__init__(f"whoever opened pr {pr_id} cannot approve it: someone else approves it",
                          {"type": "access_denied", "code": "self_review", "prId": pr_id})
+
+
+class SelfMerge(_HttpMapped, AccessDenied):
+    """The person who opened a review merged it, where its data source's policy says someone else
+    merges (``drafts_policy``, self-merge off)."""
+
+    status_code = 403
+
+    def __init__(self, pr_id: str):
+        self.pr_id = pr_id
+        super().__init__(f"whoever opened pr {pr_id} cannot merge it: someone else merges it",
+                         {"type": "access_denied", "code": "self_merge", "prId": pr_id})
 
 
 class PersonRequired(_HttpMapped, AccessDenied):
@@ -155,6 +167,24 @@ class ServiceAccountMember(IneligibleMember):
 
     def __init__(self, subject_id: str):
         super().__init__(subject_id, "service_account")
+
+
+class IneligibleOwner(_HttpMapped, RuntimeError):
+    """Who a draft was to be handed to can't own it: no such person, not active, a service
+    account, or someone who doesn't change this workspace's data sources."""
+
+    status_code = 422
+    _MESSAGES = {
+        "unknown_user": "no such user",
+        "inactive": "their account isn't active",
+        "service_account": "a service account doesn't own drafts",
+        "no_manage": "they can't edit this workspace's data sources",
+    }
+
+    def __init__(self, user_id: str, reason: str):
+        self.user_id, self.reason = user_id, reason
+        super().__init__(f"can't hand the draft to {user_id}: {self._MESSAGES[reason]}",
+                         {"type": "ineligible_owner", "userId": user_id, "reason": reason})
 
 
 class HeadMoved(_HttpMapped, RuntimeError):
@@ -348,9 +378,38 @@ class VersionConflict(_HttpMapped, RuntimeError):
                           "currentVersion": current})
 
 
+class StagedChangesUnsaved(_HttpMapped, RuntimeError):
+    """A draft's level or members could not change: what ``actors`` staged, who would lose it, could
+    not be committed first (it clashes with what is already in the draft). Nothing about the draft's
+    access changed; what the others staged was saved."""
+
+    status_code = 409
+
+    def __init__(self, actors):
+        self.actors = list(actors)
+        super().__init__(
+            "Unsaved edits of " + ", ".join(self.actors) + " clash with the draft and could not be "
+            "saved first. They can save them (settling the clash), or discard them, then try again.",
+            {"type": "staged_changes_unsaved", "actors": self.actors})
+
+
+class ReviewRequired(_HttpMapped, RuntimeError):
+    """A draft was published directly where its data source's policy says nobody merges their own
+    changes (``drafts_policy``, self-merge off): a direct publish is its publisher's own merge.
+    Open a review, and someone else merges it."""
+
+    status_code = 409
+
+    def __init__(self, branch_id: str):
+        self.branch_id = branch_id
+        super().__init__("this data source publishes drafts through a review that someone else "
+                         "merges: open a review instead", {"type": "review_required", "branchId": branch_id})
+
+
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
                LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
-               AmbiguousSpelling, NotAnEdge)
+               AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
+               IneligibleOwner)

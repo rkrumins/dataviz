@@ -25,18 +25,22 @@ import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, Layo
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
-import { useAuthStore, usePermission } from '@/store/auth'
+import { usePermission } from '@/store/auth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
-import { useAbandonDraft, useBranchFreshness, useBranches, useDiffVsMain, useResolveGraph, useBranchViewChanges } from '../hooks/useVersioning'
+import {
+  useAbandonDraft, useBranch, useBranchFreshness, useDiffVsMain, useRefreshDraftFromOthers, useResolveGraph,
+  useBranchViewChanges,
+} from '../hooks/useVersioning'
+import { useActiveDraftAccess } from '../hooks/useActiveDraftAccess'
 import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBranchGuard'
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
-import { BRANCH_VOCAB, canManageDraft, canWriteDraft, ownerName } from '../model/branchVocab'
+import { BRANCH_VOCAB, ownerName } from '../model/branchVocab'
 import { AggregationSyncChip } from './AggregationSyncChip'
 import { BootstrapProgress } from './BootstrapProgress'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
@@ -45,6 +49,8 @@ import { PullBeforeMergeBanner } from './PullBeforeMergeBanner'
 import { ReadRouteChip } from './ReadRouteChip'
 import { RefreshingBadge } from './RefreshingBadge'
 import { ChangeCountChips } from './ChangesPanel'
+import { ContributorsStack } from './ContributorsStack'
+import { OthersSavedChip } from './OthersSavedChip'
 import { CommitDialog } from './CommitDialog'
 import { PublishReceiptBanner } from './PublishReceiptBanner'
 import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
@@ -128,20 +134,15 @@ export function CanvasVersioningBar({
 
   const abandon = useAbandonDraft(workspaceId, graphId ?? '')
 
-  // Is the active draft behind main? Drives the toolbar "Pull latest" — derived locally (like the switcher).
-  // View-scoped, matching BranchSwitcher's key EXACTLY. It used to fetch the graph-wide list (no
-  // viewId) while the switcher fetched the view-scoped one — two cache entries and two requests for
-  // the same data, with `behindMain` derived from the wrong (graph-wide) one.
-  // Open and publishing drafts only (shares BranchSwitcher's query): the guard below reads the
-  // active draft's status from that draft alone.
-  const branchesQ = useBranches(workspaceId, viewId ? graphId : null, viewId)
   const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
-  // Someone else's draft is open to look at: no Publish or Discard on it. Unlisted ⇒ left to the server.
-  const me = useAuthStore((s) => s.user?.id)
-  const activeDraft = branchesQ.data?.find((b) => b.branchId === branchId)
-  const readOnlyDraft = activeDraft && !canWriteDraft(activeDraft, me) ? activeDraft : null
+  // Someone else's draft is open to look at: no Publish or Discard on it. Unlisted ⇒ left to the
+  // server. What the caller may do is the server's word — the freshness poll's, live, once it has it,
+  // else the view-scoped version list's (BranchSwitcher's query, shared).
+  const draftAccess = useActiveDraftAccess(workspaceId, graphId, viewId, isDraft ? branchId : null)
+  const activeDraft = draftAccess.draft
+  const readOnlyDraft = activeDraft && !draftAccess.canWrite ? activeDraft : null
   // Discarding or directly publishing it is its owner's or a maintainer's; an editor requests review.
-  const manageable = !activeDraft || canManageDraft(activeDraft, me)
+  const manageable = draftAccess.canManage
 
   // "Is this draft behind Published?" from the O(1) freshness endpoint, which POLLS — so a teammate
   // publishing under you shows up promptly instead of whenever the bar happens to re-render. This
@@ -149,6 +150,15 @@ export function CanvasVersioningBar({
   // what let the two contradictory banners become one.
   const freshness = useBranchFreshness(workspaceId, graphId, isDraft ? branchId : null)
   const behindMain = freshness.data?.behind === true
+  // Who else is on it: who saved into it, and what they saved since the reader last caught up.
+  const branchQ = useBranch(workspaceId, graphId, isDraft ? branchId : null)
+  const refreshDraft = useRefreshDraftFromOthers(workspaceId, graphId)
+  const headSeq = freshness.data?.headCommitSeq
+  const refreshFromOthers = useCallback(() => {
+    if (branchId && headSeq != null) refreshDraft(branchId, headSeq)
+  }, [refreshDraft, branchId, headSeq])
+  // A draft its reader may no longer read — made private, or they were removed from it — is a 404.
+  const accessLost = (freshness.error as { status?: number } | null)?.status === 404
 
   // A draft can die under you — you published it, its review was merged (possibly from the Reviews
   // inbox, with no canvas mounted), a teammate merged the shared draft, someone discarded it. The
@@ -158,6 +168,12 @@ export function CanvasVersioningBar({
   const onBranchEvicted = useCallback(
     ({ status, hadUnsavedEdits }: BranchEviction) => {
       const merged = status === 'merged'
+      if (status === 'gone') {
+        notify('warning', hadUnsavedEdits
+          ? 'You no longer have access to this draft, so your unsaved edits weren’t saved to it. You’re now on Published; start a new draft to save them.'
+          : 'You no longer have access to this draft — it was made private, or you were removed from it. You’re now on the Published version.')
+        return
+      }
       if (hadUnsavedEdits) {
         // Never silently drop the optimistic canvas — the edits are still in the staged store and
         // can be re-saved onto a fresh draft, but the user has to know they didn't land.
@@ -177,7 +193,7 @@ export function CanvasVersioningBar({
   )
   useActiveBranchGuard({
     enabled: !!graphId,
-    status: freshness.data?.status,
+    status: accessLost ? 'gone' : freshness.data?.status,
     currentBranchId: branchId,
     unsavedCount: uncommitted,
     onEvict: onBranchEvicted,
@@ -345,6 +361,10 @@ export function CanvasVersioningBar({
                     </span>
                   </HoverTip>
                 )}
+                <OthersSavedChip
+                  savedSince={freshness.data?.savedSince} userNames={freshness.data?.userNames}
+                  unsavedCount={uncommitted} onRefresh={refreshFromOthers}
+                />
               </>
             )}
           </div>
@@ -363,6 +383,10 @@ export function CanvasVersioningBar({
             held this whole band for as long as it stood open, above a toolbar,
             which read as a dead strip. It now sits under the actions it points
             at, and this row is empty again on main. */}
+
+        {isDraft && branchId && (
+          <ContributorsStack contributors={branchQ.data?.contributors ?? []} userNames={branchQ.data?.userNames} />
+        )}
 
         {isDraft && branchId && readOnlyDraft && (
           <span className="text-xs text-ink-muted">
@@ -436,6 +460,7 @@ export function CanvasVersioningBar({
           changeSet={changeSet}
           onClose={() => setShowPublish(false)}
           canPublishDraft={manageable}
+          dataSourceId={dataSourceId}
         />
       )}
 

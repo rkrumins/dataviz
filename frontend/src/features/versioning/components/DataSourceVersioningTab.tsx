@@ -1,23 +1,29 @@
 /**
  * DataSourceVersioningTab — the data-source-level versioning hub (a tab in
  * DataSourceDetailPanel). Shows whether version control is on, lets a manager enable
- * it, and surfaces the branch list, the graph's forks + recent commit history. Read-only overview
- * apart from deleting and restoring a fork and pausing editing; the editing loop lives on the canvas.
+ * it, and surfaces the branch list, the graph's forks + recent commit history, and the data source's
+ * drafts and reviews settings over its workspace's. Read-only overview apart from deleting and
+ * restoring a fork, pausing editing and (workspace admins) those settings; the editing loop lives on
+ * the canvas.
  */
 import { useState } from 'react'
 import { Link } from 'react-router-dom'
-import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw, Pause, Play } from 'lucide-react'
+import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw, Pause, Play, ShieldCheck } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { DateTime } from '@/components/ui/DateTime'
 import { usePermission } from '@/store/auth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
-import { useBranches, useCommitLog, useDataSourcePullRequests, useForks, useResolveGraph, useSetGraphFrozen } from '../hooks/useVersioning'
+import {
+  useBranches, useCommitLog, useDataSourceDraftsPolicy, useDataSourcePullRequests, useForks, useResolveGraph,
+  useSetDataSourceDraftsPolicy, useSetGraphFrozen,
+} from '../hooks/useVersioning'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
 import { deleteFork, restoreFork, PullRequestExistsError, type Branch, type BranchStatusFilter, type ForkSummary } from '@/services/versioningApiService'
 import { PrListRow } from '@/features/reviews/components/PrListRow'
 import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
 import { BootstrapProgress } from './BootstrapProgress'
+import { DraftsPolicyFields } from './DraftsPolicyFields'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
 import { ProjectionHealthCard } from './ProjectionHealthCard'
 import { kindMeta } from '../model/commitKind'
@@ -52,6 +58,7 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
 }) {
   const canManage = usePermission('workspace:datasource:manage', wsId)
   const canPublish = usePermission('workspace:datasource:publish', wsId)
+  const isAdmin = usePermission('workspace:admin', wsId)
   const resolve = useResolveGraph(wsId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
   const frozen = resolve.data?.lifecycleState === 'frozen'
@@ -65,6 +72,8 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   // older one awaiting review off the page.
   const mrsQ = useDataSourcePullRequests(wsId, dataSourceId, 'open', !!graphId)
   const forksQ = useForks(wsId, graphId)
+  const policyQ = useDataSourceDraftsPolicy(wsId, graphId ? dataSourceId : null)
+  const setPolicy = useSetDataSourceDraftsPolicy(wsId, dataSourceId)
   const [openPrId, setOpenPrId] = useState<string | null>(null)
   const [showEnable, setShowEnable] = useState(false)
   // Only a FalkorDB graph can be copied into version history (the server refuses the rest). A
@@ -272,6 +281,21 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
           )
         })()}
       </section>
+
+      {/* Drafts and reviews — this data source's own settings over its workspace's; a failed read hides it */}
+      {policyQ.data && (
+        <section>
+          <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider mb-2">
+            <ShieldCheck className="w-3.5 h-3.5" /> Drafts and reviews
+          </h4>
+          <DraftsPolicyFields
+            own={policyQ.data.overrides}
+            workspace={policyQ.data.workspace}
+            canEdit={isAdmin}
+            onSave={(change) => setPolicy.mutateAsync(change)}
+          />
+        </section>
+      )}
 
       {/* History */}
       <section>
