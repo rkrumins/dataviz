@@ -48,6 +48,7 @@ import { graphStoreLimitsPath } from '@/components/admin/shared/aggregationKnobs
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
 import { saveStagedChangesToDraft } from '@/features/versioning/model/saveStagedChangesToDraft'
 import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/features/versioning/hooks/useVersioning'
+import { useActiveDraftAccess } from '@/features/versioning/hooks/useActiveDraftAccess'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
 import { edgeTypeCopy } from '@/lib/relationshipLabel'
@@ -917,7 +918,6 @@ export function ContextViewCanvas({
   // so node/edge mutation affordances need isDraft AND this, even though layer/view-config actions
   // (which never touch those routes) still only need isDraft.
   const editModeEnabled = useFeature('editModeEnabled')
-  const canEditGraph = isDraft && editModeEnabled
   const versioningEnabled = useFeature('versioningEnabled')
   // One Placement Contract (Admin → Features, experimental). On: every placement surface on this
   // canvas reads ONE spec compiled from the rendered layers (placementSpec below), and the backend
@@ -928,6 +928,11 @@ export function ContextViewCanvas({
   useDeletionGhosts(isDraft)
   const canManage = usePermission('workspace:datasource:manage', scopeWsId ?? undefined)
   const graphId = useGraphId()
+  // And the draft must be the caller's to write: someone else's, or one made private under them,
+  // opens read-only rather than taking edits its save would refuse.
+  const { canWrite: draftWritable } = useActiveDraftAccess(
+    scopeWsId ?? undefined, graphId, activeView?.id ?? null, effectiveBranchId)
+  const canEditGraph = isDraft && editModeEnabled && draftWritable
   // Capability context: readOnly means the data plane rejects every write
   // for this caller (shared/enterprise view opened without membership).
   const viewExecCtx = useViewExecutionContext()
@@ -6427,6 +6432,7 @@ export function ContextViewCanvas({
             wsId={scopeWsId}
             graphId={graphId}
             viewId={activeView?.id ?? null}
+            dataSourceId={dataSourceId}
             onClose={() => setShowStartEditing(false)}
           />
         )}

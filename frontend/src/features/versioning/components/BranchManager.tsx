@@ -1,8 +1,9 @@
 /**
  * BranchManager — a premium slide-over for overseeing every draft in plain language.
  *
- * Opened from the BranchSwitcher ("Manage all drafts"). Lists open drafts with status, owner and
- * last activity, and exposes the full lifecycle per draft: Open, Get latest updates, Publish,
+ * Opened from the BranchSwitcher ("Manage all drafts"). Lists open drafts with status, level, owner
+ * and last activity — all of them, or the user's own, those shared with them or the public ones —
+ * and exposes the full lifecycle per draft: Open, Get latest updates, Publish,
  * Settings, Archive. A draft being published stays listed, badged; the Archived tab lists the
  * published and archived drafts, read-only. All wording comes from `branchVocab` (presentational only — no API/URL change).
  * Reuses the existing mutations and the CommitDialog/BranchSettingsModal/PullLatestButton so the
@@ -21,11 +22,15 @@ import { HoverTip } from '@/components/ui/HoverTip'
 import { timeAgo } from '@/lib/timeAgo'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { useAuthStore } from '@/store/auth'
-import type { Branch, BranchStatusFilter } from '@/services/versioningApiService'
+import type { Branch, BranchStatusFilter, DraftLevel } from '@/services/versioningApiService'
+import { Segmented } from '@/components/ui/Segmented'
 import {
-  useBranches, useOpenDraft, useAbandonDraft,
+  useBranches, useDataSourceDraftsPolicy, useOpenDraft, useAbandonDraft,
 } from '../hooks/useVersioning'
 import { BRANCH_VOCAB, canManageDraft, canWriteDraft, draftStatus, ownerName } from '../model/branchVocab'
+import { draftGroupOf, groupDrafts, type DraftGroupKey } from '../model/draftGroups'
+import { DraftLevelChip } from './DraftLevelChip'
+import { DraftLevelPicker } from './DraftLevelPicker'
 import { DraftStatusPill, OwnerAvatar, PublishingBadge } from './BranchStatusBits'
 import { PullLatestButton } from './PullLatestButton'
 import { BranchSettingsModal } from './BranchSettingsModal'
@@ -71,8 +76,12 @@ export function BranchManager({
     wsId, graphId, hasView && !allDataSource ? viewId : undefined, tab === 'archived' ? ARCHIVED : undefined,
   )
   const openDraft = useOpenDraft(wsId, graphId)
+  const policyQ = useDataSourceDraftsPolicy(wsId, dataSourceId)
 
   const [query, setQuery] = useState('')
+  const [whose, setWhose] = useState<'all' | DraftGroupKey>('all')
+  // The level asked for; null: the data source's policy decides (shown as its default).
+  const [newLevel, setNewLevel] = useState<DraftLevel | null>(null)
   const [sort, setSort] = useState<SortKey>('recent')
   const [creating, setCreating] = useState(false)
   const [newName, setNewName] = useState('')
@@ -83,7 +92,7 @@ export function BranchManager({
   // The server sends open + publishing drafts, or on the Archived tab merged + abandoned ones.
   const listed = useMemo(() => (branchesQ.data ?? []).filter((b) => b.kind !== 'main'), [branchesQ.data])
   const drafts = useMemo(() => {
-    const all = listed
+    const all = whose === 'all' ? listed : listed.filter((b) => draftGroupOf(b, me) === whose)
     const q = query.trim().toLowerCase()
     const filtered = q
       ? all.filter((b) =>
@@ -95,18 +104,22 @@ export function BranchManager({
         ? (a.name || BRANCH_VOCAB.untitled).localeCompare(b.name || BRANCH_VOCAB.untitled)
         : (b.updatedAt || '').localeCompare(a.updatedAt || ''),
     )
-  }, [listed, query, sort])
+  }, [listed, query, sort, whose, me])
 
   const totalOpen = listed.length
+  const groupCounts = useMemo(
+    () => Object.fromEntries(groupDrafts(listed, me).map((g) => [g.key, g.drafts.length])) as Partial<Record<DraftGroupKey, number>>,
+    [listed, me])
 
   const handleCreate = () => {
     openDraft.mutate(
-      { name: newName.trim() || undefined, originatingViewId: viewId ?? undefined },
+      { name: newName.trim() || undefined, originatingViewId: viewId ?? undefined, visibility: newLevel ?? undefined },
       {
         onSuccess: (r) => {
           switchToDraft(r.branchId, viewId)
-          notify('success', `Draft "${newName.trim() || 'Untitled'}" created — your edits stay private until you publish.`)
+          notify('success', `Draft "${newName.trim() || 'Untitled'}" created — the published version stays as it is until you publish.`)
           setNewName('')
+          setNewLevel(null)
           setCreating(false)
           onClose()
         },
@@ -137,7 +150,7 @@ export function BranchManager({
                 <p className="text-[11px] text-ink-muted">
                   {tab === 'archived'
                     ? 'Published and archived drafts'
-                    : totalOpen === 0 ? 'No drafts yet' : `${totalOpen} ${totalOpen === 1 ? BRANCH_VOCAB.draft.toLowerCase() : BRANCH_VOCAB.draftPlural.toLowerCase()} · everything stays private until published`}
+                    : totalOpen === 0 ? 'No drafts yet' : `${totalOpen} ${totalOpen === 1 ? BRANCH_VOCAB.draft.toLowerCase() : BRANCH_VOCAB.draftPlural.toLowerCase()} · nothing reaches ${BRANCH_VOCAB.published} until it’s published`}
                 </p>
               </div>
             </div>
@@ -180,6 +193,20 @@ export function BranchManager({
               <option value="recent">Recent</option>
               <option value="name">Name</option>
             </select>
+          </div>
+
+          <div className="px-5 py-2 border-b border-glass-border/40">
+            <Segmented
+              label="Whose drafts"
+              value={whose}
+              onChange={setWhose}
+              options={[
+                { value: 'all', label: 'All', count: totalOpen },
+                { value: 'mine', label: 'Yours', count: groupCounts.mine ?? 0 },
+                { value: 'shared', label: 'Shared with you', count: groupCounts.shared ?? 0 },
+                { value: 'public', label: 'Public', count: groupCounts.public ?? 0 },
+              ]}
+            />
           </div>
 
           {hasView && (
@@ -244,6 +271,11 @@ export function BranchManager({
           {canManage && (
             <div className="border-t border-glass-border/60 p-3">
               {creating ? (
+                <div className="space-y-2">
+                <DraftLevelPicker
+                  value={newLevel ?? policyQ.data?.effective.defaultVisibility ?? 'public'}
+                  onChange={setNewLevel} levels={policyQ.data?.effective.levels}
+                />
                 <div className="flex items-center gap-2">
                   <input
                     autoFocus
@@ -251,7 +283,7 @@ export function BranchManager({
                     onChange={(e) => setNewName(e.target.value)}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') handleCreate()
-                      if (e.key === 'Escape') { setCreating(false); setNewName('') }
+                      if (e.key === 'Escape') { setCreating(false); setNewName(''); setNewLevel(null) }
                     }}
                     placeholder="Name your draft (optional)"
                     className="flex-1 min-w-0 px-3 py-2 rounded-lg bg-canvas-elevated border border-glass-border text-sm text-ink placeholder:text-ink-muted/60 focus:outline-none focus:border-accent-lineage/50"
@@ -263,6 +295,7 @@ export function BranchManager({
                   >
                     {openDraft.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Create'}
                   </button>
+                </div>
                 </div>
               ) : (
                 <button
@@ -341,6 +374,7 @@ function DraftCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h3 className="text-sm font-semibold text-ink truncate">{branch.name || BRANCH_VOCAB.untitled}</h3>
+            <DraftLevelChip level={branch.visibility} />
             {isCurrent && (
               <span className="shrink-0 text-[9px] font-bold uppercase tracking-wide text-accent-lineage bg-accent-lineage/10 px-1.5 py-0.5 rounded">Open now</span>
             )}
@@ -510,7 +544,7 @@ function EmptyState({ hasAny, archived, canManage, onCreate }: {
       <p className="text-[12px] text-ink-muted mt-1 max-w-[16rem]">
         {hasAny
           ? 'Try a different search.'
-          : 'Create a draft to edit safely. Your changes stay private until you publish.'}
+          : 'Create a draft to edit safely. The published version stays as it is until you publish.'}
       </p>
       {!hasAny && canManage && (
         <button

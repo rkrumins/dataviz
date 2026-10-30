@@ -13,7 +13,7 @@ export const BRANCH_VOCAB = {
   /** `main` — the live version everyone sees. */
   published: 'Published',
   publishedSub: 'The live version everyone sees',
-  /** a private working copy. */
+  /** a working copy, public or private. */
   draft: 'Draft',
   draftPlural: 'Drafts',
   yourDrafts: 'Your drafts',

@@ -3,9 +3,10 @@
  *
  * Replaces the old silent behaviour where clicking Edit resumed whatever draft the server happened to
  * return (or auto-created an unnamed one). Now the user explicitly EITHER continues one of this view's
- * existing open drafts OR names a new branch. Reuses the versioning primitives: `useBranches` (list,
- * already view- + visibility-scoped by the backend), `useOpenDraft` (create, optional name),
- * `switchToDraft` (enter). Being on a draft IS edit mode, so entering + closing is all it takes.
+ * existing open drafts OR names a new branch, public or private (starting where its data source's
+ * policy says). Reuses the versioning primitives: `useBranches` (list, already view- + visibility-
+ * scoped by the backend), `useOpenDraft` (create, optional name and level), `switchToDraft` (enter).
+ * Being on a draft IS edit mode, so entering + closing is all it takes.
  */
 import { useState } from 'react'
 import { createPortal } from 'react-dom'
@@ -17,21 +18,30 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { timeAgo } from '@/lib/timeAgo'
 import { useAuthStore } from '@/store/auth'
 import { useBranchStore } from '@/store/branchStore'
-import { useBranches, useOpenDraft, VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
-import { GraphNotWritableError } from '@/services/versioningApiService'
+import { useBranches, useDataSourceDraftsPolicy, useOpenDraft, VERSIONING_KEYS } from '@/features/versioning/hooks/useVersioning'
+import { GraphNotWritableError, type DraftLevel } from '@/services/versioningApiService'
 import { BRANCH_VOCAB, canWriteDraft, ownerName } from '@/features/versioning/model/branchVocab'
 import { OwnerAvatar } from '@/features/versioning/components/BranchStatusBits'
+import { DraftLevelChip } from '@/features/versioning/components/DraftLevelChip'
+import { DRAFT_LEVEL_WORDS } from '@/features/versioning/model/draftLevels'
+import { DraftLevelPicker } from '@/features/versioning/components/DraftLevelPicker'
 
 export interface StartEditingDialogProps {
   wsId: string
   graphId: string
   viewId: string | null
+  /** The view's data source: its policy says where a new draft starts. */
+  dataSourceId?: string | null
   onClose: () => void
 }
 
-export function StartEditingDialog({ wsId, graphId, viewId, onClose }: StartEditingDialogProps) {
+export function StartEditingDialog({ wsId, graphId, viewId, dataSourceId, onClose }: StartEditingDialogProps) {
   const branchesQ = useBranches(wsId, graphId, viewId)
   const openDraft = useOpenDraft(wsId, graphId)
+  const policyQ = useDataSourceDraftsPolicy(wsId, dataSourceId)
+  // The level asked for; null: the policy decides (shown as its default).
+  const [level, setLevel] = useState<DraftLevel | null>(null)
+  const shownLevel = level ?? policyQ.data?.effective.defaultVisibility ?? 'public'
   const switchToDraft = useBranchStore((s) => s.switchToDraft)
   const qc = useQueryClient()
   const [name, setName] = useState('')
@@ -48,7 +58,7 @@ export function StartEditingDialog({ wsId, graphId, viewId, onClose }: StartEdit
   const createNew = () => {
     if (openDraft.isPending) return
     openDraft.mutate(
-      { name: name.trim() || undefined, originatingViewId: viewId ?? undefined },
+      { name: name.trim() || undefined, originatingViewId: viewId ?? undefined, visibility: level ?? undefined },
       { onSuccess: (r) => enter(r.branchId, viewId) },
     )
   }
@@ -72,7 +82,7 @@ export function StartEditingDialog({ wsId, graphId, viewId, onClose }: StartEdit
             </div>
             <div>
               <h2 className="text-xl font-display font-semibold text-ink leading-tight">Start editing</h2>
-              <p className="text-[13px] text-ink-muted mt-0.5">Edits go to a private draft — the published view stays untouched.</p>
+              <p className="text-[13px] text-ink-muted mt-0.5">Edits go to a draft — the published view stays untouched.</p>
             </div>
           </div>
           <button
@@ -99,7 +109,10 @@ export function StartEditingDialog({ wsId, graphId, viewId, onClose }: StartEdit
                   >
                     <OwnerAvatar owner={b.owner} userNames={b.userNames} size="sm" />
                     <span className="flex-1 min-w-0">
-                      <span className="block text-[14px] font-medium text-ink truncate">{b.name || BRANCH_VOCAB.untitled}</span>
+                      <span className="flex items-center gap-1.5 min-w-0">
+                        <span className="text-[14px] font-medium text-ink truncate">{b.name || BRANCH_VOCAB.untitled}</span>
+                        <DraftLevelChip level={b.visibility} />
+                      </span>
                       <span className="block text-[12px] text-ink-muted truncate">
                         {ownerName(b.owner, b.userNames)}{b.updatedAt ? ` · edited ${timeAgo(b.updatedAt)}` : ''}
                       </span>
@@ -118,9 +131,13 @@ export function StartEditingDialog({ wsId, graphId, viewId, onClose }: StartEdit
 
           {/* Start a new branch */}
           <div>
-            <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted/70 mb-2">
-              Start a new branch
-            </p>
+            <div className="flex items-center justify-between gap-3 mb-2">
+              <p className="text-[11px] font-semibold uppercase tracking-wider text-ink-muted/70">
+                Start a new branch
+              </p>
+              <DraftLevelPicker value={shownLevel} onChange={setLevel} levels={policyQ.data?.effective.levels} />
+            </div>
+            <p className="text-[12px] text-ink-muted mb-2">{DRAFT_LEVEL_WORDS[shownLevel].who}.</p>
             <div className="flex items-center gap-2.5">
               <input
                 autoFocus={drafts.length === 0}

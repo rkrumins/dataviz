@@ -589,7 +589,7 @@ export function useSetGraphFrozen(wsId?: string) {
 export function useOpenDraft(wsId: string, graphId: string) {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (v: { name?: string; originatingViewId?: string; shared?: boolean } = {}) =>
+    mutationFn: (v: { name?: string; originatingViewId?: string; shared?: boolean; visibility?: DraftLevel } = {}) =>
       api.openDraft(wsId, graphId, v),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, graphId) })

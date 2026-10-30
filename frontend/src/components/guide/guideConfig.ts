@@ -146,7 +146,7 @@ export const guidePersonas: GuidePersona[] = [
     icon: History,
     tagline: 'Draft, review, and roll back safely',
     intro:
-      'Change data in a private draft, get it reviewed in the Review Center, and undo one change or restore an earlier point when you need to.',
+      'Change data in a draft, get it reviewed in the Review Center, and undo one change or restore an earlier point when you need to.',
     startSlug: 'versioning-change-control',
     path: ['versioning-change-control', 'editing-in-a-draft', 'review-center', 'import-export'],
     accent: {
@@ -629,7 +629,7 @@ export const guideFaqs: GuideFAQ[] = [
     category: 'Using {brand}',
     question: 'Can I break anything by clicking around?',
     answer:
-      'No. Reading, searching and tracing never change data, and changes to the data go into your own private draft — nothing reaches the published version until it’s reviewed or published; see [Versioning & Change Control](/guide/versioning-change-control).',
+      'No. Reading, searching and tracing never change data, and changes to the data go into a draft — nothing reaches the published version until it’s reviewed or published; see [Versioning & Change Control](/guide/versioning-change-control).',
   },
   {
     category: 'Using {brand}',

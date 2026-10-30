@@ -38,6 +38,7 @@ vi.mock('../../hooks/useVersioning', () => ({
   useOpenDraft: () => ({ mutate: openMutate, isPending: false }),
   useAbandonDraft: () => ({ mutate: abandonMutate, isPending: false }),
   useDiffVsMain: () => ({ data: undefined, isLoading: false }),
+  useDataSourceDraftsPolicy: () => ({ data: undefined }),
 }))
 
 import { BranchManager } from '../BranchManager'
@@ -78,6 +79,22 @@ describe('BranchManager', () => {
     // Toggling back to "This view" restores the per-view filter.
     fireEvent.click(screen.getByText('This view'))
     expect(useBranchesMock).toHaveBeenLastCalledWith('ws1', 'g1', 'v1', undefined)
+  })
+
+  it('narrows the list to the reader’s own drafts, those shared with them or the public ones, each marked by level', () => {
+    branchesData = [
+      draft({ branchId: 'br_mine', name: 'Mine', owner: 'ana@acme.com', visibility: 'private' }),
+      draft({ branchId: 'br_team', name: 'Team', owner: 'bob', visibility: 'private', myRole: 'editor' }),
+      draft({ branchId: 'br_pub', name: 'Open to all', owner: 'bob', visibility: 'public' }),
+    ]
+    renderManager()
+    expect(screen.getAllByRole('img', { name: 'Private draft' })).toHaveLength(2)
+    fireEvent.click(screen.getByRole('radio', { name: /Public/ }))
+    expect(screen.getByText('Open to all')).toBeInTheDocument()
+    expect(screen.queryByText('Team')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('radio', { name: /Shared with you/ }))
+    expect(screen.getByText('Team')).toBeInTheDocument()
+    expect(screen.queryByText('Mine')).not.toBeInTheDocument()
   })
 
   it('lists open drafts by name', () => {

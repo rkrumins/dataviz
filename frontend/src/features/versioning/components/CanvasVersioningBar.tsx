@@ -25,18 +25,19 @@ import { Eye, EyeOff, GitPullRequest, Trash2, Loader2, GitBranch, Sparkles, Layo
 import { cn } from '@/lib/utils'
 import { HoverTip } from '@/components/ui/HoverTip'
 import { useAppNotifications } from '@/components/ui/notifications'
-import { useAuthStore, usePermission } from '@/store/auth'
+import { usePermission } from '@/store/auth'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import { useActiveView } from '@/store/schema'
 import { useBranchStore, useEffectiveBranchId } from '@/store/branchStore'
 import { useStagedChangeCount } from '@/store/stagedChangesStore'
 import { useVersioningPanelStore } from '@/store/versioningPanelStore'
-import { useAbandonDraft, useBranchFreshness, useBranches, useDiffVsMain, useResolveGraph, useBranchViewChanges } from '../hooks/useVersioning'
+import { useAbandonDraft, useBranchFreshness, useDiffVsMain, useResolveGraph, useBranchViewChanges } from '../hooks/useVersioning'
+import { useActiveDraftAccess } from '../hooks/useActiveDraftAccess'
 import { useActiveBranchGuard, type BranchEviction } from '../hooks/useActiveBranchGuard'
 import { fromDiffVsMain } from '../model/changeAdapters'
 import { EMPTY_CHANGE_SET } from '../model/changeModel'
 import { useBootstrapWatch } from '../model/useBootstrapWatch'
-import { BRANCH_VOCAB, canManageDraft, canWriteDraft, ownerName } from '../model/branchVocab'
+import { BRANCH_VOCAB, ownerName } from '../model/branchVocab'
 import { AggregationSyncChip } from './AggregationSyncChip'
 import { BootstrapProgress } from './BootstrapProgress'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
@@ -128,20 +129,15 @@ export function CanvasVersioningBar({
 
   const abandon = useAbandonDraft(workspaceId, graphId ?? '')
 
-  // Is the active draft behind main? Drives the toolbar "Pull latest" — derived locally (like the switcher).
-  // View-scoped, matching BranchSwitcher's key EXACTLY. It used to fetch the graph-wide list (no
-  // viewId) while the switcher fetched the view-scoped one — two cache entries and two requests for
-  // the same data, with `behindMain` derived from the wrong (graph-wide) one.
-  // Open and publishing drafts only (shares BranchSwitcher's query): the guard below reads the
-  // active draft's status from that draft alone.
-  const branchesQ = useBranches(workspaceId, viewId ? graphId : null, viewId)
   const mainHead = resolve.data?.mainHeadCommitSeq ?? 0
-  // Someone else's draft is open to look at: no Publish or Discard on it. Unlisted ⇒ left to the server.
-  const me = useAuthStore((s) => s.user?.id)
-  const activeDraft = branchesQ.data?.find((b) => b.branchId === branchId)
-  const readOnlyDraft = activeDraft && !canWriteDraft(activeDraft, me) ? activeDraft : null
+  // Someone else's draft is open to look at: no Publish or Discard on it. Unlisted ⇒ left to the
+  // server. What the caller may do is the server's word — the freshness poll's, live, once it has it,
+  // else the view-scoped version list's (BranchSwitcher's query, shared).
+  const draftAccess = useActiveDraftAccess(workspaceId, graphId, viewId, isDraft ? branchId : null)
+  const activeDraft = draftAccess.draft
+  const readOnlyDraft = activeDraft && !draftAccess.canWrite ? activeDraft : null
   // Discarding or directly publishing it is its owner's or a maintainer's; an editor requests review.
-  const manageable = !activeDraft || canManageDraft(activeDraft, me)
+  const manageable = draftAccess.canManage
 
   // "Is this draft behind Published?" from the O(1) freshness endpoint, which POLLS — so a teammate
   // publishing under you shows up promptly instead of whenever the bar happens to re-render. This

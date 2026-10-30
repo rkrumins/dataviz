@@ -22,7 +22,7 @@ const BENEFITS = [
   {
     Icon: GitBranch,
     title: 'Edit safely in drafts',
-    body: 'Your changes stay private until you publish them. The live graph is never touched by a work-in-progress.',
+    body: 'Your changes stay in a draft until you publish them. The live graph is never touched by a work-in-progress.',
   },
   {
     Icon: ShieldCheck,
