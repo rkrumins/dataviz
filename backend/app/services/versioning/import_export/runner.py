@@ -15,7 +15,8 @@ import logging
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Dict, Optional, Sequence
 
-from sqlalchemy import and_, update
+from sqlalchemy import and_, exists, or_, select, update
+from sqlalchemy.orm import aliased
 
 from .. import config, db, job_lease
 from ..job_lease import INSPECT_TYPES, QUEUED, Lease  # QUEUED: callers import it from here
@@ -66,11 +67,28 @@ class TransferRunner:
         await getattr(ie, entry)(lease.job_id, lease)
 
 
+def _waited():
+    """Queued ``TRANSFER_QUEUE_TIMEOUT_SECS`` ago or more (or last handed back then)."""
+    return and_(JobORM.current_phase == QUEUED,
+                JobORM.updated_at < _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS))
+
+
+def _lane_quiet():
+    """No transfer job claimed or beating in ``TRANSFER_QUEUE_TIMEOUT_SECS``: only a claim writes
+    ``started_at``, and only the worker holding a running job its ``updated_at`` (the heartbeat).
+    A running job is looked for first, by ``ix_jobs_type_status``; ``started_at``, which no index
+    covers, is read only when none is — between jobs, or with no worker at all."""
+    since = _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS)
+    lane = aliased(JobORM)
+    ours = lane.job_type.in_(JOB_TYPES + INSPECT_TYPES)
+    return ~or_(exists().where(ours, lane.status == "running", lane.updated_at >= since),
+                exists().where(ours, lane.started_at >= since))
+
+
 def never_runs() -> tuple:
-    """:class:`JobReaper`'s rules, as conditions on a pending job: queued too long, and never
-    queued. A job matching either is failed at the reaper's next round."""
-    return (and_(JobORM.current_phase == QUEUED,
-                 JobORM.updated_at < _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS)),
+    """:class:`JobReaper`'s rules, as conditions on a pending job: queued too long while the lane
+    showed no life, and never queued. A job matching either is failed at the reaper's next round."""
+    return (and_(_waited(), _lane_quiet()),
             and_(JobORM.current_phase.is_(None),
                  JobORM.created_at < _ago(config.JOB_NEVER_QUEUED_SECS)))
 
@@ -79,7 +97,8 @@ class JobReaper:
     """Fails the transfer jobs nothing will ever run, so their dialogs stop waiting.
 
     * QUEUED too long — no worker took it in ``TRANSFER_QUEUE_TIMEOUT_SECS`` (counted from when it
-      was queued, or last handed back): the transfer lane is not running.
+      was queued, or last handed back), and in all that time no job of the lane was claimed or
+      beat: the transfer lane is not running. A job waiting behind busy workers waits its turn.
     * NEVER QUEUED — pending with no phase for an hour: its creator never finished storing the
       input (the upload was cut off, the API pod died), so it will never be queued.
 
@@ -98,10 +117,14 @@ class JobReaper:
             (JobORM.id == job_id,) if job_id else ())
         queued_too_long, never_queued = never_runs()
         async with self._session() as s:
-            timed_out = (await s.execute(
-                update(JobORM).where(*which, queued_too_long)
-                .values(error_message=config.JOB_NOT_STARTED, **failed)
-                .execution_options(synchronize_session=False))).rowcount
+            timed_out = 0
+            # Asked only once a job has waited that long: Postgres answers whether the lane is
+            # quiet before it looks for one, reading every job's start if it must.
+            if (await s.execute(select(exists().where(*which, _waited())))).scalar_one():
+                timed_out = (await s.execute(
+                    update(JobORM).where(*which, queued_too_long)
+                    .values(error_message=config.JOB_NOT_STARTED, **failed)
+                    .execution_options(synchronize_session=False))).rowcount
             abandoned = (await s.execute(
                 update(JobORM).where(*which, never_queued)
                 .values(error_message=config.JOB_NEVER_QUEUED, **failed)

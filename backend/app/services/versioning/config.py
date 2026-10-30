@@ -346,7 +346,8 @@ if os.getenv("GRAPHVER_TRANSFER_INPROCESS"):
 TRANSFER_SLOTS: int = int(os.getenv("GRAPHVER_TRANSFER_SLOTS", "2"))
 # How often an idle worker looks for a queued job: about how long a queued job waits for a free one.
 TRANSFER_POLL_SECS: float = float(os.getenv("GRAPHVER_TRANSFER_POLL_SECS", "1"))
-# A queued job no worker has started in this long reads as failed: none may be running.
+# A queued job no worker has started in this long reads as failed, when no job of the lane was
+# claimed or beat in that time either: none is running. Behind busy workers it waits its turn.
 TRANSFER_QUEUE_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS", str(6 * 3600)))
 # The transfer lane's JobReaper rules (import_export/runner.py), here so the schema upgrade that
 # fails such jobs before building uq_jobs_ingest_active (models.py) applies the same ones.

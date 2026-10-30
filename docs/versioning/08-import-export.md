@@ -131,10 +131,11 @@ before it in the same slot, and the dialogs say "Waiting to start… 2 jobs are 
 every job it reports `phase`, `progress`, `processed`/`total`, `attempt` (the epoch) and `stale`:
 running, but silent past `GRAPHVER_INGEST_STALE_SECS`, so its worker died and another will take it
 over. A silent job is no longer reported failed. The transfer lane's `JobReaper` runs every minute
-and fails what nothing will run: a job queued past `GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS` (6 hours,
-meaning no transfer lane is running), and a job whose upload never finished (pending with no phase
-for an hour). An export job also takes one of its pod's export turns (`GRAPH_EXPORT_CONCURRENCY`,
-2), so raise the two together.
+and fails what nothing will run: a job queued past `GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS` (6 hours)
+while no job of the lane was claimed or beat in that time (meaning no transfer lane is running; a
+job waiting behind busy workers waits its turn), and a job whose upload never finished (pending
+with no phase for an hour). An export job also takes one of its pod's export turns
+(`GRAPH_EXPORT_CONCURRENCY`, 2), so raise the two together.
 
 `_run_safe` wraps every run. An exception other than losing the lease marks the job `failed` with
 an `error_message`, through the same fenced write, so the failure is durable on the job row and a

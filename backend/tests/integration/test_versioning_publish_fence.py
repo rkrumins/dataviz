@@ -69,6 +69,20 @@ async def _set_job(job_id, **values):
         await s.execute(update(JobORM).where(JobORM.id == job_id).values(**values))
 
 
+async def _quiet_lane():
+    """Nothing on the transfer lane claimed or beating for the whole queue timeout, as when no
+    worker runs: earlier claims are moved back past it, and running jobs fall silent."""
+    from backend.app.services.versioning.import_export.runner import INSPECT_TYPES, JOB_TYPES
+
+    long_ago = _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS + 60)
+    lane = JobORM.job_type.in_(JOB_TYPES + INSPECT_TYPES)
+    async with db.graphver_session() as s:
+        await s.execute(update(JobORM).where(lane, JobORM.started_at >= long_ago)
+                        .values(started_at=long_ago))
+        await s.execute(update(JobORM).where(lane, JobORM.status == "running")
+                        .values(updated_at=long_ago))
+
+
 def _e2e(coro_fn):
     async def run():
         from backend.app.api.v1.endpoints.versioning import get_import_export_service
@@ -161,6 +175,7 @@ async def _release(svc, ie):
     timed_out = await _draft(svc, gid)
     job = await _queue(ie, gid, timed_out)
     await _set_job(job["job_id"], updated_at=_ago(config.TRANSFER_QUEUE_TIMEOUT_SECS + 60))
+    await _quiet_lane()                                     # ...nor any other job
     assert (await JobReaper().run_once())["timedOut"] >= 1
     assert timed_out in await svc.release_publishing(graph_id=gid)
     assert await _status(svc, timed_out) == "open"

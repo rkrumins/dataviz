@@ -7,9 +7,9 @@ two creates racing on it are settled even where a worker start left ``uq_jobs_in
 unbuilt; the index settles them too.
 
 A job nothing will run does not hold the draft: the refusal applies the transfer lane's reaper
-rules to that job first (never queued for an hour, or queued past the queue timeout), and a job
-whose upload broke off inside the request is failed there and then, keyed or not; the same key sent
-again takes it back under the rules a new import meets. A running job whose worker went quiet still
+rules to that job first (never queued for an hour, or queued past the queue timeout while no
+worker ran), and a job whose upload broke off inside the request is failed there and then, keyed
+or not; the same key sent again takes it back under the rules a new import meets. A running job whose worker went quiet still
 holds it: it is taken over and resumed, not dead. A publish does not wait on a job nothing will run
 either.
 
@@ -27,7 +27,7 @@ from backend.app.api.v1.endpoints.versioning import _domain_errors, create_impor
 from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.errors import JobActive
-from backend.app.services.versioning.import_export.runner import JobReaper
+from backend.app.services.versioning.import_export.runner import INSPECT_TYPES, JOB_TYPES, JobReaper
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.job_lease import QUEUED
 from backend.app.services.versioning.models import BranchORM, JobORM
@@ -54,6 +54,18 @@ def _create(ie, gid, branch_id=None):
 async def _set(job_id, **values):
     async with db.graphver_session() as s:
         await s.execute(update(JobORM).where(JobORM.id == job_id).values(**values))
+
+
+async def _quiet_lane():
+    """Nothing on the transfer lane claimed or beating for the whole queue timeout, as when no
+    worker runs: earlier claims are moved back past it, and running jobs fall silent."""
+    long_ago = _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS + 60)
+    lane = JobORM.job_type.in_(JOB_TYPES + INSPECT_TYPES)
+    async with db.graphver_session() as s:
+        await s.execute(update(JobORM).where(lane, JobORM.started_at >= long_ago)
+                        .values(started_at=long_ago))
+        await s.execute(update(JobORM).where(lane, JobORM.status == "running")
+                        .values(updated_at=long_ago))
 
 
 async def _jobs_on(branch_id):
@@ -136,6 +148,7 @@ async def _a_job_nothing_will_run_lets_go(svc, ie):
 
     await ie.start_import(after["job_id"])                   # queued, and no worker took it
     await _set(after["job_id"], updated_at=_ago(config.TRANSFER_QUEUE_TIMEOUT_SECS + 60))
+    await _quiet_lane()                                      # ...nor any other job
     third = await _create(ie, gid, cut_off["branch_id"])
     assert (await ie.get_job(after["job_id"]))["errorMessage"] == config.JOB_NOT_STARTED
 
@@ -168,8 +181,8 @@ async def _a_retry_waits_its_turn_without_the_index(svc, ie):
 
 
 async def _a_publish_never_waits_on_a_job_nothing_will_run(svc, ie):
-    """Not one whose upload broke off an hour ago, nor one queued past the queue timeout: the
-    reaper fails both at its next round. Until then each holds the draft."""
+    """Not one whose upload broke off an hour ago, nor one queued past the queue timeout with no
+    worker running: the reaper fails both at its next round. Until then each holds the draft."""
     for phase, aged in ((None, {"created_at": _ago(config.JOB_NEVER_QUEUED_SECS + 60)}),
                         (QUEUED, {"updated_at": _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS + 60)})):
         gid = await _graph(svc)
@@ -182,6 +195,7 @@ async def _a_publish_never_waits_on_a_job_nothing_will_run(svc, ie):
         with pytest.raises(JobActive):
             await svc.publish(graph_id=gid, branch_id=draft, actor="u", message="m")
         await _set(job["job_id"], **aged)
+        await _quiet_lane()
         assert await svc.publish(graph_id=gid, branch_id=draft, actor="u", message="m")
 
 
