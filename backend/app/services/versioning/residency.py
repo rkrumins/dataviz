@@ -338,6 +338,34 @@ async def _dedicated(data_source_ids: Collection[str]) -> Optional[set]:
         return None
 
 
+async def _held(rows) -> set:
+    """Of these eviction candidates, the graphs no eviction may take now, in two reads of the
+    management database for them all: a key another data source or catalog entry reads (the
+    evictor would refuse it, and the plan would count it freed), and a graph whose data source a
+    rollup job is pending or running for (it would write the dropped key back). All of them when
+    that cannot be read."""
+    if not rows:
+        return set()
+    from backend.app.db.engine import get_readonly_session
+    from backend.app.services.aggregation.models import AggregationJobORM
+    from backend.app.services.managed_sources import keys_read_elsewhere
+
+    try:
+        async with get_readonly_session() as s:
+            shared = await keys_read_elsewhere(s, [(r.falkor_provider, r.falkor_graph_name,
+                                                    r.data_source_id) for r in rows])
+            busy = set((await s.execute(select(AggregationJobORM.data_source_id).where(
+                AggregationJobORM.data_source_id.in_({r.data_source_id for r in rows}),
+                AggregationJobORM.status.in_(("pending", "running"))))).scalars().all())
+    except Exception:  # noqa: BLE001 — fail closed: nothing is evicted this pass
+        logger.warning("residency: who else reads the keys is unknown; nothing is evicted",
+                       exc_info=True)
+        return {r.graph_id for r in rows}
+    return {r.graph_id for r in rows
+            if ((r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER), r.falkor_graph_name)
+            in shared or r.data_source_id in busy}
+
+
 def _probe_key(slots: Optional[List[Tuple[int, int]]]) -> str:
     """A key that hashes to one of ``slots`` — what a master's memory is read through, as the
     reading finds its node by a key's slot."""
@@ -444,6 +472,8 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             except _Unread:
                 snap.sized = False
     dedicated = await _dedicated({r.data_source_id for r in found})
+    held = await _held([r for r in found
+                        if r.owns_falkor_graph and r.status == "idle" and r.residency != "always"])
     by_provider: Dict[str, List[Any]] = {p: [] for p in providers or ()}
     for r in found:
         by_provider.setdefault(r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, []).append(r)
@@ -483,7 +513,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
         snap.graphs.append(Graph(
             graph_id=r.graph_id, endpoint=endpoint_of[r.graph_id], residency=r.residency,
             status=r.status, owned=bool(r.owns_falkor_graph),
-            evictable=bool(r.past_genesis and r.enable_finished),
+            evictable=bool(r.past_genesis and r.enable_finished) and r.graph_id not in held,
             leased=candidate and await is_pinned(r.graph_id),
             last_read=_ts(r.last_read_at),       # none on record: its clock starts this pass
             size_bytes=r.size_bytes, entities=estimate.get(r.graph_id),
@@ -601,16 +631,26 @@ class CapacityLoop:
 
         evictor = CacheManager(self._proj)
         evicted_on = set()
-        for e in decided.evictions:
-            if await evictor.evict(e.graph_id, drop_graph=self._proj.drop_graph, reason=e.reason):
-                evicted_on.add(e.endpoint)
-                metrics.increment("versioning_residency_evictions_total", reason=e.reason)
-                logger.info("residency: evicted graph %s from %s (%s, %s bytes)",
-                            e.graph_id, e.endpoint, e.reason, e.bytes)
+        for m in decided.masters:
+            freed, spare = 0, list(m.spare)
+            for e in m.evictions:
+                if await self._evict(evictor, e):
+                    freed += e.bytes or 0
+                    evicted_on.add(e.endpoint)
+            # An eviction the evictor refused freed nothing: carry on down the master's
+            # candidates until the stop mark is actually reached.
+            while spare and freed < m.to_free:
+                e = spare.pop(0)
+                if await self._evict(evictor, e):
+                    freed += e.bytes or 0
+                    evicted_on.add(e.endpoint)
         used = {m.endpoint: m.used for m in snap.masters}
         for load in decided.loads:
             chosen = await _load_key(load, snap)
             if chosen is None:
+                continue
+            row = snap.rows.get(load.graph_id, {})
+            if chosen[0] == row.get("key") and not await self._drop_stale(row):
                 continue
             if await _start_load(load.graph_id, key=chosen[0], shard_map=chosen[1]):
                 if load.endpoint not in evicted_on:     # a delta across evictions means nothing
@@ -633,6 +673,29 @@ class CapacityLoop:
                 logger.warning("residency: graph %s waits for room on %s: its load needs %d bytes "
                                "more than the master has under its start mark",
                                wait.graph_id, wait.endpoint, wait.shortfall or 0)
+
+    async def _drop_stale(self, row) -> bool:
+        """A load back onto the key the graph had starts from nothing: whatever is there now (a
+        rollup job may have written it after the eviction, summaries stamp and all) is dropped
+        first. False when it could not be: the load waits for the next pass."""
+        from backend.app.providers.falkordb_provider import _is_missing_graph_error
+
+        try:
+            await self._proj.drop_graph(row["key"], row["falkor_provider"])
+        except Exception as exc:  # noqa: BLE001
+            if not _is_missing_graph_error(exc):
+                logger.warning("residency: graph %s's old key %s could not be dropped before "
+                               "its load", row["graph_id"], row["key"], exc_info=True)
+                return False
+        return True
+
+    async def _evict(self, evictor, e) -> bool:
+        if not await evictor.evict(e.graph_id, drop_graph=self._proj.drop_graph, reason=e.reason):
+            return False
+        metrics.increment("versioning_residency_evictions_total", reason=e.reason)
+        logger.info("residency: evicted graph %s from %s (%s, %s bytes)",
+                    e.graph_id, e.endpoint, e.reason, e.bytes)
+        return True
 
     async def _finish_loads(self, snap: Snapshot) -> None:
         """A load whose seed has published (its watermark holds the head) serves reads once its

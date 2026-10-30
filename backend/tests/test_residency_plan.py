@@ -108,6 +108,26 @@ def test_a_graph_with_no_read_on_record_is_never_idle_nor_first_under_pressure()
     assert plan(POLICY, [_master(used_pct=50)], graphs[:1], NOW).evictions == []
 
 
+@pytest.mark.parametrize("master", [
+    Master(endpoint="m1", used=None, maxmemory=1000 * MB),     # cannot be read
+    _master(used_pct=90, hold="loading"),                       # replaying its dataset
+])
+def test_a_master_that_cannot_be_read_or_is_loading_plans_no_eviction(master):
+    """Its drop would fail, leaving the key in memory while the graph reads evicted."""
+    graphs = [_graph("idle", "coldline", read=_ago(hours=3)),
+              _graph("pressed", read=_ago(days=1), size=300 * MB)]
+    assert plan(POLICY, [master], graphs, NOW).evictions == []
+
+
+def test_the_plan_keeps_the_next_pressure_candidates_and_what_must_be_freed():
+    """So the pass can make up for an eviction the evictor refuses, in the same order."""
+    graphs = [_graph(g, "coldline", read=_ago(minutes=50 - i), size=100 * MB)
+              for i, g in enumerate(("a", "b", "c", "d"))]
+    (m,) = plan(POLICY, [_master(used_pct=85)], graphs, NOW).masters    # 150 MB to free
+    assert [e.graph_id for e in m.evictions] == ["a", "b"]
+    assert [e.graph_id for e in m.spare] == ["c", "d"] and m.to_free == 150 * MB
+
+
 def test_pressure_stops_when_nothing_evictable_is_left():
     graphs = [_graph("a", "always", size=900 * MB), _graph("b", leased=True, size=10 * MB)]
     p = plan(POLICY, [_master(used_pct=95)], graphs, NOW)
@@ -355,6 +375,26 @@ async def test_a_load_s_size_is_not_taken_from_a_master_that_evicted_in_the_same
     loop = residency.CapacityLoop(SimpleNamespace(drop_graph=None))
     await loop._act(decided, snap)
     assert set(loop._started) == {"l2"}
+
+
+async def test_a_refused_eviction_is_made_up_from_the_next_candidates(monkeypatch):
+    """An eviction the evictor refuses frees nothing: the pass carries on down that master's
+    candidates until the stop mark is actually reached."""
+    from backend.app.services.versioning import cache_manager
+
+    tried = []
+
+    async def evict(self, graph_id, *, drop_graph, reason=None):
+        tried.append(graph_id)
+        return graph_id != "a"                  # another data source reads a's key
+
+    monkeypatch.setattr(cache_manager.CacheManager, "evict", evict)
+    graphs = [_graph(g, "coldline", read=_ago(minutes=50 - i), size=100 * MB)
+              for i, g in enumerate(("a", "b", "c", "d"))]
+    decided = plan(POLICY, [_master(used_pct=85)], graphs, NOW)
+    await residency.CapacityLoop(SimpleNamespace(drop_graph=None))._act(
+        decided, residency.Snapshot(masters=[_master(used_pct=85)]))
+    assert tried == ["a", "b", "c"]
 
 
 def test_a_resident_graph_asks_for_no_load():

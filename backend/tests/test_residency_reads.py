@@ -170,6 +170,34 @@ async def test_node_degrees_on_a_graph_out_of_falkordb_is_a_503(asked, monkeypat
     assert _loads(asked) == ["g"]
 
 
+# ── who else reads a key ─────────────────────────────────────────────────────────────────────────
+async def test_the_keys_other_readers_hold_are_found_in_two_reads(monkeypatch):
+    """A key another live data source reads (by name, or as its dedicated key) through the same
+    server, or a catalog entry publishes, is held; the graph's own data source is not another."""
+    from backend.app.services import managed_sources
+
+    async def servers(session, provider_id):
+        return {None: ["default", "prov_alias"], "default": ["default", "prov_alias"],
+                "prov_b": ["prov_b"]}[provider_id]
+
+    reads = []
+
+    class _Session:
+        async def execute(self, stmt):
+            reads.append(stmt)
+            rows = ([("ds_own", "default", "k_own", None), ("ds_other", "prov_alias", None, "k_ded"),
+                     ("ds_far", "prov_far", "k_far", None)] if len(reads) == 1
+                    else [("prov_b", "k_cat")])
+            return SimpleNamespace(all=lambda: rows)
+
+    monkeypatch.setattr(managed_sources, "same_server_providers", servers)
+    held = await managed_sources.keys_read_elsewhere(_Session(), [
+        (None, "k_own", "ds_own"), ("default", "k_ded", "ds_mine"), ("default", "k_far", "ds_x"),
+        ("prov_b", "k_cat", "ds_y"), ("prov_b", "k_free", "ds_z")])
+    assert held == {("default", "k_ded"), ("prov_b", "k_cat")} and len(reads) == 2
+    assert await managed_sources.keys_read_elsewhere(_Session(), []) == set()
+
+
 # ── the stats probe ──────────────────────────────────────────────────────────────────────────────
 async def test_the_stats_probe_skips_a_graph_out_of_falkordb(monkeypatch):
     """Its key is gone: a probe would read an empty graph and record 0 nodes and 0 edges."""

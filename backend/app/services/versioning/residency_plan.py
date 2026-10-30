@@ -103,6 +103,8 @@ class MasterPlan:
     reserved: int                     # the governor's, and the loads and full projections in flight
     used_after: Optional[int]         # its use once this pass's evictions are done
     seeding: bool = False             # a load or full projection is in flight on it
+    to_free: int = 0                  # what pressure eviction must free to reach the stop mark
+    spare: List[Eviction] = field(default_factory=list)   # the next pressure candidates, in order
     evictions: List[Eviction] = field(default_factory=list)
     loads: List[Load] = field(default_factory=list)
     waits: List[Wait] = field(default_factory=list)
@@ -173,7 +175,9 @@ def _plan_master(policy: ResidencyPolicy, master: Master, graphs: Sequence[Graph
     reserved = master.reserved + sum(need(g, policy) or 0 for g in seeding)
     out = MasterPlan(master=master, reserved=reserved, used_after=master.used,
                      seeding=bool(seeding))
-    if policy.eviction_enabled:
+    # A master that cannot be read, or is replaying its dataset, would fail the drop and keep the
+    # key in memory while its graph reads evicted: nothing is evicted there.
+    if policy.eviction_enabled and master.used is not None and master.hold != "loading":
         idle_for = {"standard": timedelta(seconds=policy.standard_idle_secs),
                     "coldline": timedelta(seconds=policy.coldline_idle_secs)}
         left = []
@@ -187,14 +191,17 @@ def _plan_master(policy: ResidencyPolicy, master: Master, graphs: Sequence[Graph
         if sized and master.used is not None and master.maxmemory > 0 \
                 and master.used * 100 >= master.maxmemory * policy.high_water_pct:
             stop = master.maxmemory * policy.low_water_pct // 100
+            out.to_free = max(0, master.used - stop)
             # No read on record sorts as read now: its idle clock has not started. A graph of
-            # unknown size is no candidate: its eviction would count as freeing nothing.
+            # unknown size is no candidate: its eviction would count as freeing nothing. Those
+            # past the stop mark are kept, in order, for the pass to make up a refusal with.
             for g in sorted((g for g in left if g.bytes(policy) is not None),
                             key=lambda g: (g.residency != "coldline", g.last_read or now)):
+                e = Eviction(g.graph_id, master.endpoint, g.bytes(policy), "pressure")
                 if master.used - freed <= stop:
-                    break
-                out.evictions.append(Eviction(g.graph_id, master.endpoint, g.bytes(policy),
-                                              "pressure"))
+                    out.spare.append(e)
+                    continue
+                out.evictions.append(e)
                 freed += g.bytes(policy)
         if master.used is not None:
             out.used_after = master.used - freed

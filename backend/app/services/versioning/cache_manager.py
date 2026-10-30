@@ -42,6 +42,25 @@ def _lease_key(graph_id: str) -> str:
     return f"versioning:lease:{graph_id}"
 
 
+async def _rollups_running(data_source_id: Optional[str]) -> bool:
+    """Whether a rollup job for the data source is pending or running; True when that cannot be
+    read (fail closed)."""
+    if not data_source_id:
+        return False
+    from backend.app.db.engine import get_readonly_session
+    from backend.app.services.aggregation.models import AggregationJobORM
+
+    try:
+        async with get_readonly_session() as s:
+            return (await s.execute(select(AggregationJobORM.id).where(
+                AggregationJobORM.data_source_id == data_source_id,
+                AggregationJobORM.status.in_(("pending", "running"))).limit(1))
+            ).scalar_one_or_none() is not None
+    except Exception:  # noqa: BLE001
+        logger.warning("could not ask whether rollups run for %s", data_source_id, exc_info=True)
+        return True
+
+
 def _evictable() -> tuple:
     """The resident graphs eviction may drop — one predicate for the budget count, the LRU order
     and :meth:`CacheManager.evict`'s own re-check. A key we did not mint is the customer's, so it
@@ -145,6 +164,12 @@ class CacheManager:
             if key is None:
                 return False
             name, provider_id, ds_id = key
+            if reason and await _rollups_running(ds_id):
+                # A rollup job writes the key: evicted under it, the key would come back with a
+                # summaries stamp the next load would trust (residency, doc 17).
+                logger.info("not evicting graph %s: a rollup job for its data source is pending "
+                            "or running", graph_id)
+                return False
             if name:
                 # A key we minted can still be read by another data source or a catalog entry.
                 # An answer we cannot get keeps it: fail closed.
@@ -178,9 +203,16 @@ class CacheManager:
             if name:
                 try:
                     await drop_graph(name, provider_id)
-                except Exception:   # pragma: no cover - infra
-                    logger.warning("dropping FalkorDB graph %s failed (will be overwritten on rebuild)",
-                                   name)
+                except Exception:   # noqa: BLE001 - infra
+                    if not reason:
+                        logger.warning("dropping FalkorDB graph %s failed (will be overwritten on "
+                                       "rebuild)", name)
+                    else:
+                        # Under residency the graph stays evicted and nothing would write the key
+                        # again: the retire pass drops it later.
+                        logger.warning("dropping FalkorDB graph %s failed; the retire pass will",
+                                       name, exc_info=True)
+                        await self._retire_later(graph_id, name, provider_id)
             return True
         finally:
             try:
@@ -188,6 +220,20 @@ class CacheManager:
                     await lock_s.execute(select(func.pg_advisory_unlock(lock_arg)))
             finally:
                 await lock_scope.__aexit__(None, None, None)
+
+    async def _retire_later(self, graph_id: str, name: str, provider_id: Optional[str]) -> None:
+        """Put a key whose drop failed in the graph's ``retired_keys``, due now, for the retire
+        pass (``keymigrate.retire_moved_keys``) to drop."""
+        entry = {"name": name, "provider": provider_id, "retireAfter": _now(), "afterSeq": 0,
+                 "movedBy": "eviction"}
+        async with self._session() as s:
+            ps = (await s.execute(
+                select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+                .with_for_update().execution_options(populate_existing=True)
+            )).scalar_one_or_none()
+            if ps is not None and not any(e.get("name") == name and e.get("provider") == provider_id
+                                          for e in ps.retired_keys or []):
+                ps.retired_keys = [*(ps.retired_keys or []), entry]
 
     # ---- single-flight rebuild ------------------------------------------- #
     async def ensure_rebuilt(self, graph_id: str) -> bool:

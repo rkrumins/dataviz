@@ -282,6 +282,24 @@ async def test_adopt_moves_the_pin_onto_a_platform_key_and_leaves_the_customer_s
     assert (await _ps(gid)).status == "idle"
 
 
+async def test_a_drop_that_fails_leaves_the_key_to_be_dropped_later(store, monkeypatch):
+    """The graph reads evicted, so nothing would ever drop its key again: it is marked to be
+    dropped by the retire pass."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, fake = store, FakeFalkor()
+    proj = FalkorProjector(graph_client_factory=fake)
+    gid = await _resident(svc, proj)
+    key = (await _ps(gid)).falkor_graph_name
+
+    async def broken(name, provider_id=None):
+        raise RuntimeError("LOADING Redis is loading the dataset in memory")
+
+    assert await CacheManager(proj).evict(gid, drop_graph=broken, reason="pressure") is True
+    ps = await _ps(gid)
+    assert ps.status == "evicted"
+    assert [(e["name"], e["movedBy"]) for e in ps.retired_keys] == [(key, "eviction")]
+
+
 async def test_with_residency_off_an_evicted_graph_is_reseeded_as_before(store, monkeypatch):
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
     svc, fake = store, FakeFalkor()
@@ -459,6 +477,72 @@ async def test_idle_graphs_go_by_class_and_eviction_off_stops_it(store, falkor, 
         assert (await _ps(std)).status == "idle"
     finally:
         await _set_policy(**before)
+
+
+@live
+async def test_no_eviction_while_a_rollup_job_for_the_source_is_pending_or_running(
+        store, falkor, mine, monkeypatch):
+    """A rollup job writes the graph's key; evicted under it, the key comes back with a summaries
+    stamp the next load would trust. Neither the plan nor the evictor takes such a graph."""
+    from backend.app.services.aggregation.models import AggregationJobORM
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(svc, proj, mine, 1)
+    await _set_ps(gid, residency="coldline",
+                  last_read_at=datetime.now(timezone.utc) - timedelta(hours=2))
+    ds = (await svc.get_graph(gid))["data_source_id"]
+    async with get_async_session() as s:
+        job = AggregationJobORM(data_source_id=ds, status="running")
+        s.add(job)
+        await s.commit()
+        job_id = job.id
+    try:
+        assert (await CapacityLoop(proj).run_once(graph_ids=[gid])).evictions == []
+        assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph,
+                                              reason="idle_coldline") is False
+        async with get_async_session() as s:
+            (await s.get(AggregationJobORM, job_id)).status = "completed"
+            await s.commit()
+        assert _evicted(await CapacityLoop(proj).run_once(graph_ids=[gid])) == [
+            (gid, "idle_coldline")]
+    finally:
+        async with get_async_session() as s:
+            await s.delete(await s.get(AggregationJobORM, job_id))
+            await s.commit()
+
+
+@live
+async def test_a_reload_never_trusts_a_summaries_stamp_left_in_a_key_it_had(
+        store, falkor, mine, monkeypatch):
+    """A rollup job that ran against the evicted key put it back, stamp and all: the load seeds a
+    key without it, so the stamp is not taken for this load's summaries."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+
+    async def lineage(svc, gid):
+        return ({"CONTAINS"}, {"FLOWS_TO"}, {}, "shared")
+
+    async def build(gid):
+        pass
+
+    factory = make_falkor_graph_factory()
+    svc = store
+    (gid,) = await _live_graphs(svc, FalkorProjector(graph_client_factory=factory), mine, 1)
+    proj = FalkorProjector(graph_client_factory=factory, edge_types_resolver=lineage,
+                           on_rollups_stale=build)
+    old = (await _ps(gid)).falkor_graph_name
+    assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+    stale = await factory(old)
+    await stale.query("MERGE (m:_AggMeta {id: 'singleton'})")         # the job's stamp
+    await residency.request_load(gid)
+    loop = CapacityLoop(proj)
+    await loop.run_once(graph_ids=[gid])
+    await _loads(loop, proj, gid)
+    ps = await _ps(gid)
+    assert ps.status == "rehydrating" and ps.falkor_graph_name != old
+    names = await falkor.execute_command("GRAPH.LIST")
+    if old in names:
+        await stale.delete()
 
 
 @live
