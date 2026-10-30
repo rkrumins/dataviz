@@ -222,6 +222,7 @@ from backend.app.services.versioned_sources import physical_key as _real_physica
 
 def test_a_fork_is_read_and_written_through_version_control_never_falkordb(monkeypatch):
     from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
     from backend.app.providers.manager import provider_manager
     from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
     from backend.app.services import fork_sources, versioned_sources
@@ -253,13 +254,16 @@ def test_a_fork_is_read_and_written_through_version_control_never_falkordb(monke
         assert await versioned_sources.physical_key(fork_ds, parent.provider_id, None) == (
             parent.provider_id, parent.graph_name)
         async with _mgmt() as session:
-            # Through the engine: its main is version control's, and a write is a commit on it.
+            # Through the engine: its main is its parent's store with its changes over it — the
+            # parent's Postgres reader while its projection lags — and a write is a commit on it.
             engine = await ContextEngine.for_workspace(WS, provider_manager, session,
                                                        data_source_id=fork_ds, actor="u_forker")
-            assert type(engine.provider) is VersionedBranchProvider and engine._writes_main
+            assert type(engine.provider) is DraftOverlayProvider and engine._writes_main
+            assert type(engine.provider._base) is VersionedBranchProvider
             await engine.provider.create_node(node("urn:fk:B", "B"))
             assert (await engine.provider.get_node("urn:fk:B")).display_name == "B"
-            with pytest.raises(NotImplementedError, match="a fork reads through its parent"):
+            # Search runs in the parent's store, which is catching up here.
+            with pytest.raises(NotImplementedError, match="catching up"):
                 await engine.provider.deep_search(None)
             # Through the registry, outside the engine: the parent's key, read only.
             provider = await provider_manager.get_provider(WS, session, fork_ds)

@@ -271,6 +271,9 @@ MAX_FORKS_PER_GRAPH: int = int(os.getenv("GRAPHVER_MAX_FORKS_PER_GRAPH", "10"))
 # parent's changes it has not taken in recommend one too.
 FORK_REWIND_MAX: int = int(os.getenv("GRAPHVER_FORK_REWIND_MAX", "200000"))
 FORK_REWIND_WARN: int = int(os.getenv("GRAPHVER_FORK_REWIND_WARN", "50000"))
+# Entries the overlay deltas a process keeps for drafts' and forks' reads may hold together; the
+# least recently read go first, the newest is kept whatever its size.
+OVERLAY_CACHE_ENTRIES: int = int(os.getenv("GRAPHVER_OVERLAY_CACHE_ENTRIES", "1000000"))
 
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.
 DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only")

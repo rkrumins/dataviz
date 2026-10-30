@@ -28,7 +28,7 @@ def _lag(monkeypatch):
     monkeypatch.setattr(V, "_falkor_neighbors", falkor_neighbors)
 
 
-def _serve(projected: int, status: str):
+def _serve(projected: int, status: str, fork: bool = False):
     opened = []
 
     async def watermark(graph_id):
@@ -48,7 +48,7 @@ def _serve(projected: int, status: str):
     svc = SimpleNamespace(projection_watermark=watermark, main_branch_id=main_branch_id,
                           neighbors_from_state=from_state)
     out = asyncio.run(V._serve_neighbors(svc, read_factory, "g1", urn="u", depth=1,
-                                         direction="both", edge_types=None, limit=10))
+                                         direction="both", edge_types=None, limit=10, fork=fork))
     return out["source"], opened
 
 
@@ -59,3 +59,9 @@ def test_a_key_at_projected_zero_is_not_read():
 def test_a_key_within_the_lag_is_still_read():
     # Regression guard: within the lag and published, the key serves as before.
     assert _serve(1, "idle") == ("falkordb", [("prov_b", "gvp_k")])
+
+
+def test_a_fork_reads_its_neighbors_from_postgres_whatever_its_key():
+    """A fork has no projection of its own: a key its row still names (a copy an earlier release
+    made) is never read, however fresh it says it is."""
+    assert _serve(3, "idle", fork=True) == ("postgres", [])

@@ -21,6 +21,7 @@ import logging
 from collections import ChainMap, OrderedDict
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, TypeVar
 
+from backend.app.services.versioning import config as vconfig
 from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
@@ -35,6 +36,14 @@ _TraceT = TypeVar("_TraceT", bound=TraceResult)
 
 logger = logging.getLogger(__name__)
 
+#: The scope notes a search through an overlay carries (``search_scope_note``): the base answers it.
+DRAFT_SEARCH_NOTE = ("draft-only changes are not searchable yet: results come from the "
+                     "published graph")
+FORK_SEARCH_NOTE = ("the fork's own changes are not searchable yet: results come from the "
+                    "parent data source's published graph")
+DRAFT_ON_FORK_SEARCH_NOTE = ("draft-only changes and the fork's own changes are not searchable "
+                             "yet: results come from the parent data source's published graph")
+
 
 class _OverlayDelta:
     """Indexed, reader-shaped view of a draft's patch set vs its main base.
@@ -47,6 +56,11 @@ class _OverlayDelta:
 
     def __init__(self, raw: Dict[str, Any], containment_types: List[str]):
         cset = {t.upper() for t in (containment_types or [])}
+        # What the cache counts this delta as holding; and a fork's patch set itself, which the
+        # next build of the fork extends when only its root moved (``since`` says what it is of).
+        self.size = max(1, sum(len(raw.get(k) or ()) for k in (
+            "nodesUpsert", "nodesModified", "nodesRemove", "edgesUpsert", "edgesRemove")))
+        self.raw: Optional[Dict[str, Any]] = raw if raw.get("since") else None
         self.node_upsert: Dict[str, GraphNode] = {}         # values to serve, by urn
         # Every node the patch set gives a value or a skeleton for, by urn: what listings, matches
         # and searches read. A skeleton is served once loaded.
@@ -207,16 +221,35 @@ class _OverlayDelta:
         return self.with_child_count(up)
 
 
-class _DeltaCache:
-    """This process's recent draft deltas, keyed by what a delta depends on
-    (``GraphVersioningService.overlay_version``): a draft's reads share one delta until the draft or
-    main moves, instead of each read rebuilding it — at 100k changed entities a rebuild costs a read
-    seconds. Built once per key, however many reads ask at the same time."""
+def _line(key: tuple) -> tuple:
+    """The draft or fork a cache key is of — its graph, branch and containment types — whatever
+    version of it."""
+    return key[0], key[1], key[3]
 
-    def __init__(self, size: int = 2):
-        self._size = size
+
+class _DeltaCache:
+    """This process's recent overlay deltas, keyed by what a delta depends on
+    (``GraphVersioningService.overlay_version``): a draft's or fork's reads share one delta until it
+    or what it overlays moves, instead of each read rebuilding it — at 100k changed entities a
+    rebuild costs a read seconds. Built once per key, however many reads ask at the same time.
+
+    Bounded by the entries its deltas hold together (``GRAPHVER_OVERLAY_CACHE_ENTRIES``), not by
+    their number: many drafts and forks read at once each keep theirs, and the newest is kept
+    whatever its size. A delta supersedes the older ones of its draft or fork."""
+
+    def __init__(self, max_entries: Optional[int] = None):
+        self._max = max_entries
+        self._held = 0
         self._items: "OrderedDict[tuple, _OverlayDelta]" = OrderedDict()
         self._building: Dict[tuple, asyncio.Task] = {}
+
+    def latest(self, line: tuple) -> Optional[Dict[str, Any]]:
+        """The patch set of the newest delta held of ``line`` (:func:`_line`) that the next build
+        may extend — a fork's — or None."""
+        for key in reversed(self._items):
+            if _line(key) == line and self._items[key].raw is not None:
+                return self._items[key].raw
+        return None
 
     async def get(self, key: tuple, build: Callable[[], Awaitable[_OverlayDelta]]) -> _OverlayDelta:
         hit = self._items.get(key)
@@ -235,10 +268,13 @@ class _DeltaCache:
             del self._building[key]
         if task.cancelled() or task.exception() is not None:
             return
-        self._items[key] = task.result()
-        self._items.move_to_end(key)
-        while len(self._items) > self._size:
-            self._items.popitem(last=False)
+        for old in [k for k in self._items if _line(k) == _line(key)]:
+            self._held -= self._items.pop(old).size
+        delta = self._items[key] = task.result()
+        self._held += delta.size
+        limit = vconfig.OVERLAY_CACHE_ENTRIES if self._max is None else self._max
+        while self._held > limit and len(self._items) > 1:
+            self._held -= self._items.popitem(last=False)[1].size
 
 
 _DELTAS = _DeltaCache()
@@ -246,14 +282,19 @@ _DELTAS = _DeltaCache()
 
 class DraftOverlayProvider:
     """A ``GraphDataProvider`` for a live draft: reads = ``base`` (main) ⊕ the draft's sparse delta,
-    writes = a commit on the draft. Empty delta ⇒ every read is a pure pass-through to ``base``."""
+    writes = a commit on the draft. Empty delta ⇒ every read is a pure pass-through to ``base``.
 
-    def __init__(self, base, *, svc, graph_id: str, branch_id: str, actor: Optional[str] = None):
+    ``fork``: this is a fork's ``main``, read the same way over its root's store (``base``) with
+    the fork's patch set; a draft on the fork overlays this one in turn."""
+
+    def __init__(self, base, *, svc, graph_id: str, branch_id: str, actor: Optional[str] = None,
+                 fork: bool = False):
         self._base = base
         self._svc = svc
         self._gid = graph_id
         self._branch = branch_id
         self._actor = actor or "system"
+        self._fork = fork
         self._containment_types: List[str] = []
         self._delta: Optional[_OverlayDelta] = None
         # Writes (and as-of-free branch ops) reuse the ordinary branch provider — no duplication.
@@ -301,13 +342,17 @@ class DraftOverlayProvider:
         if self._delta is None:
             version = await self._svc.overlay_version(graph_id=self._gid, branch_id=self._branch)
             cset = list(self._containment_types)
+            key = (self._gid, self._branch, version, tuple(cset))
 
             async def build() -> _OverlayDelta:
-                raw = await self._svc.branch_overlay_delta(graph_id=self._gid, branch_id=self._branch)
+                # A fork's patch set as it was before its root moved, for the service to extend.
+                prev = _DELTAS.latest(_line(key))
+                raw = await self._svc.branch_overlay_delta(
+                    graph_id=self._gid, branch_id=self._branch, **({"extend": prev} if prev else {}))
                 # Indexing a large draft's patch set is pure CPU: off the event loop.
                 return await asyncio.to_thread(_OverlayDelta, raw, cset)
 
-            shared = await _DELTAS.get((self._gid, self._branch, version, tuple(cset)), build)
+            shared = await _DELTAS.get(key, build)
             self._delta = shared.for_request(self._load_modified, self._load_edges)
         return self._delta
 
@@ -770,6 +815,16 @@ class DraftOverlayProvider:
     #: service layer.
     is_overlay = True
 
+    @property
+    def search_scope_note(self) -> str:
+        """What the scope diagnostics say a search here left out: the draft's changes, a fork's
+        own (its base is its parent's published graph), or both, for a draft on a fork."""
+        if self._fork:
+            return FORK_SEARCH_NOTE
+        if getattr(self._base, "is_overlay", False):
+            return DRAFT_ON_FORK_SEARCH_NOTE
+        return DRAFT_SEARCH_NOTE
+
     # The ontology's edge classification, as the base reads it (the scope
     # diagnostics report it).
     def _get_containment_edge_types(self):
@@ -785,8 +840,9 @@ class DraftOverlayProvider:
         predicate tree compiles to Cypher inside the base provider, and
         there is no seam to overlay a sparse Postgres patch set onto a
         result page without re-implementing the whole compiler over it.
-        So a draft searches what it is a draft OF, and the response says
-        so — ``is_overlay`` drives the scope-diagnostics note, so the gap
+        So a draft searches what it is a draft OF — and a fork its parent's
+        published graph — and the response says so: ``is_overlay`` and
+        ``search_scope_note`` drive the scope-diagnostics note, so the gap
         is disclosed rather than silently narrowing someone's results.
 
         Pure delegation also means the provider's match-set cache entry

@@ -30,6 +30,7 @@ tests/integration/test_export_roundtrip.py
 tests/integration/test_export_stream.py
 tests/integration/test_fork_data_sources.py
 tests/integration/test_fork_overlay_delta.py
+tests/integration/test_fork_overlay_reads.py
 tests/integration/test_graph_changes_freshness.py
 tests/integration/test_graph_changes_idempotent.py
 tests/integration/test_graph_changes_name_identity.py

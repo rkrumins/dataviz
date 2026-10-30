@@ -4126,28 +4126,42 @@ class GraphVersioningService:
         filter, so a stale revision can never shadow the current one. Bounded by ``limit`` and
         ordered by entity_id for a stable window — or, ``by_name``, by (display name, entity_id)
         in BYTE order with a missing name as "": exactly the order a caller then sorts in
-        Python, so a window of the first N ids holds the first N rows a page can need."""
-        latest = (
-            select(model)
-            .where(model.graph_id == graph_id, model.branch_id == branch_id,
-                   model.commit_seq <= seq)
-            .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
-            .distinct(model.entity_id)
-            .subquery()
-        )
-        stmt = select(latest.c.entity_id).where(latest.c.op != "delete")
-        if where is not None:
-            preds = where(latest.c)
-            if preds:
-                stmt = stmt.where(*preds)
-        if by_name:
-            stmt = stmt.order_by(func.coalesce(latest.c.display_name, "").collate("C"),
-                                 latest.c.entity_id.collate("C"))
-        else:
-            stmt = stmt.order_by(latest.c.entity_id)
-        if limit is not None:
-            stmt = stmt.limit(limit)
-        return list((await s.execute(stmt)).scalars().all())
+        Python, so a window of the first N ids holds the first N rows a page can need.
+
+        A fork's ``main`` lists what it inherited too: each graph its reads compose
+        (:meth:`_layers`), an entity decided by the nearest that has a row of it; the window is
+        the first rows of each, merged."""
+        layers = await self._layers(s, graph_id, branch_id, seq)
+        found: List[tuple] = []
+        for i, (gid, bid, at) in enumerate(layers):
+            latest = (
+                select(model)
+                .where(model.graph_id == gid, model.branch_id == bid, model.commit_seq <= at)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id)
+                .subquery()
+            )
+            name = func.coalesce(latest.c.display_name, "").collate("C") if by_name else null()
+            stmt = select(latest.c.entity_id, name).where(latest.c.op != "delete")
+            for near_gid, near_bid, near_at in layers[:i]:      # a nearer layer's row decides
+                near = aliased(model)
+                stmt = stmt.where(~select(near.id).where(
+                    near.graph_id == near_gid, near.branch_id == near_bid,
+                    near.entity_id == latest.c.entity_id, near.commit_seq <= near_at).exists())
+            if where is not None:
+                preds = where(latest.c)
+                if preds:
+                    stmt = stmt.where(*preds)
+            if by_name:
+                stmt = stmt.order_by(name, latest.c.entity_id.collate("C"))
+            else:
+                stmt = stmt.order_by(latest.c.entity_id)
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            found.extend((await s.execute(stmt)).all())
+        if len(layers) > 1:
+            found.sort(key=lambda r: (r[1], r[0]) if by_name else r[0])
+        return [eid for eid, _name in found[:limit]]
 
     async def _eids_for_urns(
         self, s, graph_id: str, branch_id: str, urns, as_of_seq: Optional[int] = None,
@@ -5977,6 +5991,15 @@ class GraphVersioningService:
                 select(GraphORM).where(GraphORM.data_source_id == data_source_id,
                                        GraphORM.deleted_at.is_(None))
             )).scalar_one_or_none()
+            return None if g is None else self._graph_meta(g)
+
+    async def fork_root(self, graph_id: str) -> Optional[Dict[str, object]]:
+        """The graph whose store a fork reads through: up ``fork_parent_graph_id`` to the first that
+        is no fork (``graph_id``'s own, when it is none). Trashed or not, as it is."""
+        async with self._session() as s:
+            g = await s.get(GraphORM, graph_id)
+            while g is not None and g.fork_parent_graph_id:
+                g = await s.get(GraphORM, g.fork_parent_graph_id)
             return None if g is None else self._graph_meta(g)
 
     async def move_graph_workspace(self, data_source_id: str, new_workspace_id: str, *,
@@ -9103,11 +9126,18 @@ class GraphVersioningService:
         self, s, graph_id: str, branch_id: str, urn: str, as_of_seq: Optional[int] = None,
     ) -> Optional[str]:
         """Resolve a seed urn to its live node's entity_id on a branch (bounded via
-        ix_nv_urn + the ``gv:<eid>`` fast path); ``None`` if absent/tombstoned/not a node."""
+        ix_nv_urn + the ``gv:<eid>`` fast path); ``None`` if absent/tombstoned/not a node. A fork
+        (its ``main``, or a draft on it) finds a node it only inherited: the candidates come from
+        the rows of every graph its reads compose (:meth:`_layers`)."""
         cand: List[str] = [urn[3:]] if urn.startswith("gv:") else []
+        graphs = [graph_id]
+        graph = await s.get(GraphORM, graph_id)
+        if graph is not None and graph.fork_parent_graph_id:
+            main_id = await self._main_branch_id(s, graph_id)
+            graphs = [gid for gid, _b, _at in await self._layers(s, graph_id, main_id, 0)]
         cand.extend((await s.execute(
             select(NodeVersionORM.entity_id).where(
-                NodeVersionORM.graph_id == graph_id, NodeVersionORM.urn == urn,
+                NodeVersionORM.graph_id.in_(graphs), NodeVersionORM.urn == urn,
             ).distinct()
         )).scalars().all())
         if not cand:

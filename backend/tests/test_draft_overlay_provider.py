@@ -15,7 +15,9 @@ from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphNode,
     NodeQuery, TopLevelNodesResult, TraceFocus, TraceResult,
 )
-from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+from backend.app.providers.draft_overlay_provider import (
+    DraftOverlayProvider, _DeltaCache, _OverlayDelta,
+)
 
 
 class StubMain:
@@ -438,6 +440,73 @@ def test_reads_share_one_delta_until_the_draft_moves():
         assert svc.builds == 2
     asyncio.run(run())
 
+
+# ── The cache: bounded by what its deltas hold, a fork's next delta extending its last ──────
+def _sized(n: int):
+    async def build():
+        return _OverlayDelta({"nodesRemove": [{"urn": f"u{i}", "entityId": f"e{i}"}
+                                              for i in range(n)]}, [])
+    return build
+
+
+def test_the_cache_holds_as_many_deltas_as_their_entries_allow():
+    """Two deltas were all a process kept: many drafts and forks read at once evicted each other
+    on every read. It keeps what fits GRAPHVER_OVERLAY_CACHE_ENTRIES together, the least recently
+    read going first, and always the newest, whatever its size."""
+    async def run():
+        cache = _DeltaCache(max_entries=10)
+        for g in ("a", "b", "c"):
+            await cache.get((g, "d", 1, ()), _sized(3))
+        assert [k[0] for k in cache._items] == ["a", "b", "c"]
+        await cache.get(("a", "d", 1, ()), _sized(3))            # read again: the most recent
+        await cache.get(("e", "d", 1, ()), _sized(3))            # 12 > 10: b, the coldest, goes
+        assert [k[0] for k in cache._items] == ["c", "a", "e"]
+        await cache.get(("f", "d", 1, ()), _sized(50))           # alone past the bound: kept
+        assert [k[0] for k in cache._items] == ["f"]
+    asyncio.run(run())
+
+
+def test_a_newer_delta_of_a_draft_takes_its_older_ones_place():
+    async def run():
+        cache = _DeltaCache(max_entries=100)
+        await cache.get(("g", "d", 1, ()), _sized(3))
+        await cache.get(("g", "d2", 1, ()), _sized(3))
+        await cache.get(("g", "d", 2, ()), _sized(3))
+        assert list(cache._items) == [("g", "d2", 1, ()), ("g", "d", 2, ())]
+    asyncio.run(run())
+
+
+class _ForkSvc(FakeSvc):
+    """A fork's main: each patch set says what it is of, and the service is handed the last."""
+
+    def __init__(self):
+        super().__init__(_EMPTY)
+        self.handed = []
+
+    async def branch_overlay_delta(self, *, graph_id, branch_id, extend=None):
+        self.handed.append(extend)
+        self.builds += 1
+        return {**_EMPTY, "since": {"rootHead": self.builds}}
+
+
+def test_a_forks_next_delta_is_handed_its_last_to_extend():
+    """When only its root moved, a fork's patch set is the last one extended by the root's
+    window: the build is handed the patch set the cache holds of the fork. A draft's is built
+    afresh, as before (its patch set says nothing of what it is of)."""
+    async def run():
+        svc = _ForkSvc()
+
+        def fork():
+            return DraftOverlayProvider(StubMain(), svc=svc, graph_id="g_ext", branch_id="m",
+                                        fork=True)
+        await fork().get_node("A")
+        svc.version = (object(),)                                # its root moved
+        await fork().get_node("A")
+        assert svc.handed == [None, {**_EMPTY, "since": {"rootHead": 1}}]
+        draft = FakeSvc(_EMPTY)
+        await DraftOverlayProvider(StubMain(), svc=draft, graph_id="g_ext", branch_id="d").get_node("A")
+        assert draft.builds == 1                                 # no extend handed (none to give)
+    asyncio.run(run())
 
 if __name__ == "__main__":
     asyncio.run(_run())

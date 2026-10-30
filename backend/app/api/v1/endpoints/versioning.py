@@ -2848,16 +2848,17 @@ async def graph_neighbors(
     return await _serve_neighbors(
         svc, read_factory, graph_id, urn=urn, depth=depth,
         direction=direction, edge_types=ets, limit=limit,
-        branch_id=branch_id, as_of_seq=as_of_seq,
+        branch_id=branch_id, as_of_seq=as_of_seq, fork=bool(_meta.get("fork_parent_graph_id")),
     )
 
 
 async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction,
-                           edge_types, limit, branch_id=None, as_of_seq=None):
+                           edge_types, limit, branch_id=None, as_of_seq=None, fork=False):
     wm = await svc.projection_watermark(graph_id)
     wm_out = {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}
-    # FalkorDB projection is main@head only; drafts / as-of reads must use Postgres.
-    is_head_main = as_of_seq is None and (
+    # FalkorDB projection is main@head only; drafts / as-of reads must use Postgres, and so does a
+    # fork, which has no projection of its own (it reads through its parent's, with its changes).
+    is_head_main = as_of_seq is None and not fork and (
         branch_id is None or branch_id == await svc.main_branch_id(graph_id))
     can_falkor = bool(
         is_head_main and read_factory is not None and wm["status"] != "evicted" and wm["falkor_graph_name"]
