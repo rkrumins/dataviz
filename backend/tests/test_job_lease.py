@@ -200,6 +200,15 @@ def test_the_claim_sql_caps_providers_only_when_asked():
     assert plain.index("package_inspect") < plain.index(":ws_cap") < plain.index("j.created_at")
 
 
+def test_the_claim_sql_runs_publishes_next_and_shares_per_person():
+    order = str(job_lease._claim_sql(TRANSFER_READY, provider_capped=False)).split("ORDER BY")[1]
+    # Inspections, then publishes (a person waits on each), then the workspace's share, the
+    # person's, the workspace running fewest, the person running fewest, the oldest.
+    keys = ["'package_inspect'", "'publish'", ":ws_cap", ":person_cap", "coalesce(r.n, 0),",
+            "coalesce(u.n, 0),", "j.created_at"]
+    assert [order.index(k) for k in keys] == sorted(order.index(k) for k in keys)
+
+
 # ── The claim, on Postgres ───────────────────────────────────────────────────
 
 e2e = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres")
@@ -219,13 +228,13 @@ async def pg():
 
 async def _job(job_type="export", *, status="pending", phase=QUEUED, ws="ws1", provider=None,
                created=0.0, updated=None, epoch=0, cursor=None, summary=None,
-               max_retries=3) -> str:
+               max_retries=3, actor=None) -> str:
     async with db.graphver_session() as s:
         job = JobORM(job_type=job_type, graph_id="g_lease", workspace_id=ws, provider_id=provider,
                      status=status, current_phase=phase, created_at=_ago(created),
                      updated_at=_ago(updated) if updated is not None else _ago(created),
                      retry_count=epoch, last_cursor=cursor, summary=summary,
-                     max_retries=max_retries)
+                     max_retries=max_retries, field_scope={"actor": actor} if actor else None)
         s.add(job)
         await s.flush()
         return job.id
@@ -347,11 +356,40 @@ async def test_claims_are_fair_per_workspace_and_work_conserving(pg):
 
 
 @e2e
+async def test_claims_are_fair_per_person_and_work_conserving(pg):
+    await _job(status="running", phase=None, actor="ann", updated=1)   # ann runs one already
+    ann = [await _job(actor="ann", created=60 - i) for i in range(2)]   # and queued two first
+    bob = await _job(actor="bob", created=10)
+    assert (await _claim()).job_id == bob, "a colleague under their share goes first"
+    assert (await _claim()).job_id == ann[0], "a soft share: nobody else waits, so hers run"
+    assert (await _claim()).job_id == ann[1]
+
+
+@e2e
+async def test_at_their_shares_the_person_running_fewer_goes_first(pg):
+    for actor in ("ann", "ann", "bob"):
+        await _job(status="running", phase=None, actor=actor, updated=1)
+    await _job(actor="ann", created=60)
+    bob = await _job(actor="bob", created=10)
+    assert (await _claim()).job_id == bob
+
+
+@e2e
 async def test_an_inspection_is_claimed_before_older_imports(pg):
     await _job("ingest", created=60)
     inspect = await _job("package_inspect", created=1)
     lease = await _claim(job_lease.TRANSFER_TYPES + job_lease.INSPECT_TYPES)
     assert lease.job_id == inspect and lease.job_type == "package_inspect"
+
+
+@e2e
+async def test_a_publish_is_claimed_right_after_inspections(pg):
+    await _job("ingest", created=90)
+    await _job("export", ws="quiet", created=60)
+    publish = await _job("publish", created=1)
+    inspect = await _job("package_inspect", created=2)
+    types = job_lease.TRANSFER_TYPES + job_lease.INSPECT_TYPES
+    assert [(await _claim(types)).job_id for _ in range(2)] == [inspect, publish]
 
 
 @e2e

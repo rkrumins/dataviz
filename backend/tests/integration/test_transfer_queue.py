@@ -2,7 +2,8 @@
 
 The API only queues a job, and transfer runners claim it through ``job_lease.claim``. Proven here:
 runners claiming at once never take the same job; a job is claimed only once its creator queued it,
-oldest first within a workspace and fairly across workspaces; a queued job reports how many are
+oldest first within a workspace and fairly across workspaces and the people in one, a publish
+before the rest; a queued job reports how many are
 ahead of it in its own slot, and package inspections have a slot of their own; two runners on one
 job — a zombie and its successor — never both land a write: the zombie's window rolls back and its
 finish is a no-op, while the successor runs at the next epoch; a job whose worker keeps dying fails
@@ -133,6 +134,32 @@ async def _fair_claims() -> None:
     order = [(await runner.claim_one()).job_id for _ in range(3)]
     assert order == [big[0], small, big[1]], "the second tenant doesn't wait behind the first's"
     await _tidy(graph_id)
+
+
+async def _fair_claims_per_person() -> None:
+    svc = GraphVersioningService()
+    ie = ImportExportService(versioning=svc, store=object())
+    gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                                  actor="ann"))["graph_id"]
+    imports = []
+    for _ in range(3):                  # one person queues three imports, each on a draft of hers...
+        job = await ie.create_import_job(workspace_id="ws1", data_source_id=gid, graph_id=gid,
+                                         actor="ann", import_format="ndjson")
+        await ie.start_import(job["job_id"])
+        imports.append(job["job_id"])
+    export = (await ie.create_export_job(workspace_id="ws1", data_source_id=gid, graph_id=gid,
+                                         actor="bob"))["job_id"]
+    await ie.start_export(export)       # ...and a colleague exports after them
+    runner = TransferRunner(lambda: ie)
+    order = [(await runner.claim_one()).job_id for _ in range(3)]
+    assert order == [imports[0], export, imports[1]], "her imports don't hold the workspace's share"
+
+    # A publish queued last runs next: someone waits on it, their draft closed until it lands.
+    draft = await svc.open_draft(graph_id=gid, owner="cat")
+    publish = (await ie.create_publish_job(workspace_id="ws1", data_source_id=gid, graph_id=gid,
+                                           branch_id=draft, actor="cat", message="m"))["job_id"]
+    assert (await runner.claim_one()).job_id == publish
+    await _tidy(gid)
 
 
 async def _a_zombie_and_its_successor() -> None:
@@ -426,6 +453,7 @@ async def _run() -> None:
     await _clear_queue()
     await _claims()
     await _fair_claims()
+    await _fair_claims_per_person()
     await _a_zombie_and_its_successor()
     await _jobs_that_must_not_run_again()
     await _the_inspect_slot()

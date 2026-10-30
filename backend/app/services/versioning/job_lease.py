@@ -19,9 +19,9 @@ import_export/runner):
 * **Liveness** — a heartbeat THREAD (:class:`LeaseKeeper`), not an asyncio task: a window that holds
   the event loop for a minute of CPU must not look dead and have its job stolen. And because a loop
   that never comes back would hold its leases forever, the keeper exits a wedged process.
-* **Fairness** — a claim prefers the workspace running the fewest jobs of its kind (a soft cap of
-  ``JOBS_PER_WORKSPACE``), runs ``package_inspect`` first, and can cap how many bootstraps scan one
-  FalkorDB provider at once.
+* **Fairness** — a claim prefers the workspace, then the person, running the fewest jobs of its
+  kind (soft caps of ``JOBS_PER_WORKSPACE`` and ``JOBS_PER_USER``), runs ``package_inspect`` first
+  and ``publish`` next, and can cap how many bootstraps scan one FalkorDB provider at once.
 
 What a worker does with a :class:`Lease`: ``check()`` between units of work; end each unit's
 transaction with ``checkpoint(s, ...)``; ``finish``/``fail`` at the end; ``release()`` when told to
@@ -51,7 +51,7 @@ from backend.app.observability import event_loop_monitor
 
 from . import config, db
 from .errors import LockBusy
-from .models import ImportRowORM, JobORM
+from .models import BranchORM, ImportRowORM, JobORM
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +96,7 @@ INTERRUPTED = ("The job stopped before it finished (the server restarted or it w
 _CLAIM_SKIPS = 10
 
 _JOBS = JobORM.__table__.fullname
+_BRANCHES = BranchORM.__table__.fullname
 
 
 def _now() -> str:
@@ -270,14 +271,25 @@ def _claimable(phase_pred: str) -> str:
             "OR (j.status = 'running' AND j.updated_at < :stale))")
 
 
+def _person(job: str, branch: str) -> str:
+    """Whose the jobs row ``job`` is, its branch joined as ``branch``: who asked for it (an export's
+    or a publish's ``field_scope.actor``), else its draft's owner (an import's, whose commits the
+    import worker writes as that owner). Nobody's for a bootstrap (main has no owner), a purge or
+    an inspection (no branch): those have no per-person share."""
+    return f"coalesce({job}.field_scope->>'actor', {branch}.owner)"
+
+
 def _claim_sql(phase_pred: str, *, provider_capped: bool):
-    """The next job for this claimer, locked. ``running`` counts each workspace's (and provider's,
-    per origin) LIVE jobs of these types, so the order is:
+    """The next job for this claimer, locked. ``running`` counts each workspace's, person's (and
+    provider's, per origin) LIVE jobs of these types, so the order is:
 
     1. ``package_inspect`` first — a person is waiting on the upload dialog;
-    2. workspaces under their fair share before those at it (a soft cap: when every waiting
-       workspace is at its share, the oldest job still runs — no slot idles while work waits);
-    3. the workspace running fewest, then the oldest job.
+    2. ``publish`` (a draft's publish, or its review's merge) next — a person is waiting on it too,
+       their draft closed (``publishing``) until it lands;
+    3. workspaces under their fair share before those at it, then people under theirs (soft caps:
+       when every waiting job is at a share, the oldest job still runs — no slot idles while work
+       waits);
+    4. the workspace running fewest, then the person running fewest, then the oldest job.
 
     With a provider cap, a job whose (provider, origin) already has that many live is skipped."""
     cap = ("AND (SELECT coalesce(sum(p.n), 0) FROM running p "
@@ -286,16 +298,20 @@ def _claim_sql(phase_pred: str, *, provider_capped: bool):
            if provider_capped else "")
     stmt = text(
         "WITH running AS ("
-        "SELECT workspace_id, provider_id, coalesce(summary->>'origin', 'graph') AS origin, "
-        "count(*) AS n "
-        f"FROM {_JOBS} WHERE job_type = ANY(:types) AND status = 'running' "
-        "AND updated_at >= :stale GROUP BY 1, 2, 3) "
-        f"SELECT j.* FROM {_JOBS} j "
+        "SELECT x.workspace_id, x.provider_id, coalesce(x.summary->>'origin', 'graph') AS origin, "
+        f"{_person('x', 'xb')} AS person, count(*) AS n "
+        f"FROM {_JOBS} x LEFT JOIN {_BRANCHES} xb ON xb.id = x.branch_id "
+        "WHERE x.job_type = ANY(:types) AND x.status = 'running' "
+        "AND x.updated_at >= :stale GROUP BY 1, 2, 3, 4) "
+        f"SELECT j.* FROM {_JOBS} j LEFT JOIN {_BRANCHES} b ON b.id = j.branch_id "
         "LEFT JOIN (SELECT workspace_id, sum(n) AS n FROM running GROUP BY 1) r "
         "ON r.workspace_id IS NOT DISTINCT FROM j.workspace_id "
+        f"LEFT JOIN (SELECT person, sum(n) AS n FROM running GROUP BY 1) u ON u.person = "
+        f"{_person('j', 'b')} "
         f"WHERE j.job_type = ANY(:types) AND {_claimable(phase_pred)} {cap}"
-        "ORDER BY (j.job_type = 'package_inspect') DESC, (coalesce(r.n, 0) >= :ws_cap), "
-        "coalesce(r.n, 0), j.created_at "
+        "ORDER BY (j.job_type = 'package_inspect') DESC, (j.job_type = 'publish') DESC, "
+        "(coalesce(r.n, 0) >= :ws_cap), (coalesce(u.n, 0) >= :person_cap), "
+        "coalesce(r.n, 0), coalesce(u.n, 0), j.created_at "
         "LIMIT 1 FOR UPDATE OF j SKIP LOCKED"
     ).bindparams(bindparam("types", type_=ARRAY(Text)))
     return select(JobORM).from_statement(stmt)
@@ -303,16 +319,18 @@ def _claim_sql(phase_pred: str, *, provider_capped: bool):
 
 async def claim(session_factory, types: Sequence[str], *, phase_pred: str,
                 stale_secs: Optional[float] = None, ws_cap: Optional[int] = None,
-                provider_cap: Optional[int] = None, lane: str = "transfer") -> Optional[Lease]:
+                person_cap: Optional[int] = None, provider_cap: Optional[int] = None,
+                lane: str = "transfer") -> Optional[Lease]:
     """Claim the next job of ``types`` and return its :class:`Lease`, or None when there is none.
 
     One transaction: pick (``FOR UPDATE OF jobs SKIP LOCKED``, ordered as :func:`_claim_sql`
     says), bump the epoch, mark it running. ``phase_pred`` says which pending rows are ready
     (``TRANSFER_READY``, ``BOOTSTRAP_READY``, ``PURGE_READY``). ``stale_secs`` (default
     ``INGEST_STALE_SECS``) is how long a running job may be silent before it is taken over;
-    ``ws_cap`` (default ``JOBS_PER_WORKSPACE``) the soft per-workspace share. With ``provider_cap``
-    the lane's claims are serialized by an advisory lock, so two claimers can't both see a
-    (provider, origin) under its cap and both take one.
+    ``ws_cap`` (default ``JOBS_PER_WORKSPACE``) the soft per-workspace share, ``person_cap``
+    (default ``JOBS_PER_USER``) the soft per-person one. With ``provider_cap`` the lane's claims
+    are serialized by an advisory lock, so two claimers can't both see a (provider, origin) under
+    its cap and both take one.
 
     Some rows are failed in place instead of claimed, and the claim looks again:
 
@@ -326,8 +344,10 @@ async def claim(session_factory, types: Sequence[str], *, phase_pred: str,
     """
     stale_secs = config.INGEST_STALE_SECS if stale_secs is None else stale_secs
     ws_cap = config.JOBS_PER_WORKSPACE if ws_cap is None else ws_cap
+    person_cap = config.JOBS_PER_USER if person_cap is None else person_cap
     stmt = _claim_sql(phase_pred, provider_capped=provider_cap is not None)
-    params: Dict[str, Any] = {"types": list(types), "stale": _ago(stale_secs), "ws_cap": ws_cap}
+    params: Dict[str, Any] = {"types": list(types), "stale": _ago(stale_secs), "ws_cap": ws_cap,
+                              "person_cap": person_cap}
     if provider_cap is not None:
         params["provider_cap"] = provider_cap
     async with session_factory() as s:

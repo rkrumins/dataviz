@@ -3,9 +3,9 @@
 An API process only queues the jobs it creates (:meth:`ImportExportService.start_import` /
 ``start_export`` / ``start_publish``): the job row stays ``pending``, in phase ``queued``, once its
 inputs are stored. The transfer lane claims queued jobs here through :func:`job_lease.claim` —
-``FOR UPDATE SKIP LOCKED``, fair per workspace, every claim a new epoch — and runs them
-``GRAPHVER_TRANSFER_SLOTS`` at a time, plus one slot of its own for ``package_inspect`` so a person
-waiting on an upload never queues behind a 10-minute import. A job whose worker dies is taken over
+``FOR UPDATE SKIP LOCKED``, publishes first, fair per workspace and person, every claim a new
+epoch — and runs them ``GRAPHVER_TRANSFER_SLOTS`` at a time, plus one slot of its own for
+``package_inspect`` so a person waiting on an upload never queues behind a 10-minute import. A job whose worker dies is taken over
 once its heartbeat is stale and resumed from its cursor; a stopping worker releases its jobs.
 :class:`JobReaper` fails the jobs nothing will ever run.
 """

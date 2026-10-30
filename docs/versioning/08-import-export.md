@@ -91,10 +91,14 @@ neither a web restart nor gunicorn's 120 s worker timeout touches it.
 **Claim.** Each transfer-lane process runs `GRAPHVER_TRANSFER_SLOTS` (2) jobs at a time, plus one
 slot kept for `package_inspect` jobs so an inspection never waits behind a long import. A slot
 claims through `job_lease.claim`: one transaction, `FOR UPDATE … SKIP LOCKED`, so a job goes to one
-worker however many pods poll. Inspections go first, then the oldest job of a workspace running
+worker however many pods poll. Inspections go first and publishes (a draft's, or its review's
+merge) next, since someone is waiting on each. Then comes the oldest job of a workspace running
 fewer than `GRAPHVER_JOBS_PER_WORKSPACE` (2), so one tenant queueing fifty imports does not hold
-every slot. The share is soft: with nobody else waiting, that tenant's jobs still run. Every claim
-adds one to the job's `retry_count`, its **epoch**, so (job id, epoch) names exactly one owner.
+every slot, and within it of a person running fewer than `GRAPHVER_JOBS_PER_USER` (1), so one
+person's ten large imports do not hold the workspace's share while a colleague's export waits. A
+job is the person's who asked for it (an export, a publish), or, for an import, its draft owner's.
+Both shares are soft: with nobody else waiting, those jobs still run. Every claim adds one to the
+job's `retry_count`, its **epoch**, so (job id, epoch) names exactly one owner.
 
 **Lease and fencing.** While a job runs, a heartbeat thread in its process (`LeaseKeeper`) touches
 its `updated_at` every `GRAPHVER_INGEST_HEARTBEAT_SECS` (30 s), off the event loop, so a busy
