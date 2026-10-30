@@ -1003,6 +1003,36 @@ package inspections run on the transfer lane. Saves, checkpoints and small publi
   on the others save, pull and publish their drafts while the rest read canvases
   (`loadtest/README.md`, "People editing drafts together").
 
+**Measured on one machine (2026-10-30).** The collaboration load test against the real API and
+versioning workers, on 50 versioned graphs of 300 nodes and 500 edges, one of them hot. Everything
+shared one 4-CPU machine: the API (uvicorn, 2 processes), the projection and transfer lanes (a
+process each), Postgres, FalkorDB and Locust. `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES=6`, so every
+publish went through the transfer lane.
+
+| Run | Requests | Gave up (429 after its retries) | p50 / p95 | Shed mostly by |
+|---|---:|---:|---|---|
+| 100 users: 40 editors, 20 on the hot graph, 6 min | 42,472 | 1,511 (3.6 %) | 180 / 640 ms | the hot graph's share (13,921) |
+| The same with `PROVIDER_SOURCE_RESERVED=8` | 32,608 | 100 (0.3 %) | 430 / 1,100 ms | the process ceiling (4,580; share 2,683) |
+| 300 users: 60 editors, 20 on the hot graph, 12 min | 141,769 | 6,340 (4.5 %) | 680 / 2,100 ms | the process ceiling (63,330; share 978) |
+
+- **Correct throughout:** no 5xx and no pool timeout in any run.
+  - Every publish landed, or was refused as it should be. At 300 users: 41 publish jobs completed;
+    one job and three inline publishes were refused `not_up_to_date` and pulled.
+  - A publish job waited at most 1.0 s for the lane and ran in at most 0.85 s.
+  - All 50 projections caught up, without an error, and no draft was left `publishing`.
+- **The limit was the API's CPU.** Both API processes ran at about 95 % while Postgres and FalkorDB
+  stayed near idle: one process served about 100 requests a second of this mix. A profile of one
+  spent about 16 % of its time matching the URL against the app's routes, a third in SQLAlchemy and
+  asyncpg, and 4 % decoding the session token.
+- **Size viz-service by that** *(derived)*. 300 people at this test's pace send 200–300 requests a
+  second, which 4 processes carry at the 70 % CPU target. The shipped production minimum is 12
+  (3 pods × `GUNICORN_WORKERS` 4).
+- **A hot graph's share.** In each process, a graph over its reserve (`PROVIDER_SOURCE_RESERVED`,
+  the pool ÷ 8: 2) is shed while the room left is held for every other graph read in the last
+  minute. With 50 graphs that is always the case, so the hot graph gets 2 concurrent reads per
+  process: 24 across 12 processes. A larger reserve trades its 429s for slower answers while the
+  processes are busy (the second row): add processes first.
+
 ---
 
 ## 11. Known gaps

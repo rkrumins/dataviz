@@ -9,6 +9,58 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Versioning with hundreds of people at once
+
+Sized for about 300 people on about 50 versioned graphs, 20 of them editing one graph at once: the
+versioning worker's transfer lane — imports, exports and queued publishes — is shared fairly and
+can be watched and scaled on its queue, and a load test puts that collaboration under load.
+
+### Changed
+
+- **A waiting publish runs next.** A queued publish, or a review's merge, holds its draft closed until
+  it lands and its person is waiting on it; it queued behind every older import and export. It now
+  runs right after package inspections.
+- **The transfer lane is shared between colleagues.** Beside each workspace's share, a worker now
+  prefers someone running fewer than `GRAPHVER_JOBS_PER_USER` (1) jobs, then whoever runs fewest, so
+  one person's ten large imports no longer hold a colleague's export back. Both shares are soft: when
+  every waiting job is at one, the oldest still runs.
+- **The job lanes' queues are metrics.** `/api/v1/metrics` reports, per lane, the jobs running, the
+  jobs waiting and how long the oldest has waited (`versioning_jobs_running`,
+  `versioning_jobs_claimable`, `versioning_jobs_oldest_claimable_seconds`). The Helm chart can scale
+  the transfer lane on them with KEDA (`services.versioning.transfer.autoscaling.keda`, off by default).
+- **A script whose import is too large for one request is told how to send it**: the 413 names
+  NDJSON and CSV, and uploading in parts, as the uploads API does.
+
+### Fixed
+
+- **A job queued behind busy transfer workers waits its turn.** One queued for
+  `GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS` (6 hours) was failed with a message blaming a stopped worker,
+  even while the lane was busy with other jobs. It now times out only when nothing on the lane
+  started or ran for that whole time.
+- **A large draft behind main is refused before its publish is queued** (409 `not_up_to_date`, as a
+  publish inside the request is), instead of being closed for a job that then failed. The job still
+  checks again: main can move while it waits.
+
+### Added
+
+- **A load test of people editing drafts together** (`loadtest/runners/versioning_collab.py`):
+  editors open drafts, save, pull, poll and publish through the canvas's own endpoints, some on one
+  hot graph, while the other users read published canvases. See `loadtest/README.md`. Run against
+  the real API at 100 and 300 users on one machine, it found no error but shed load
+  (`docs/SCALING_CONCURRENT_USERS.md` §10.4).
+
+### Upgrading
+
+- Nothing to do. The KEDA scaler is off unless enabled, and needs KEDA and a Prometheus that scrapes
+  viz-service.
+
+### Known limitations
+
+- **An API process serves about 100 requests a second** of the collaboration load test's mix, then
+  sheds with 429: size viz-service's processes by it (§10.4).
+- **A hot graph gets 2 concurrent reads per API process** once many graphs are in use (each graph's
+  reserved share, `PROVIDER_SOURCE_RESERVED`), and its users' reads past that are shed and retried.
+
 ## [Unreleased] — Versioning: public and private drafts, a drafts and reviews policy, and working together
 
 Drafts work like feature branches. A **public** draft is seen by everyone who can read its data
