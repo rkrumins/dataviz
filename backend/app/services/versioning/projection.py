@@ -1418,10 +1418,14 @@ class FalkorProjector:
             select(EdgeVersionORM.entity_id, EdgeVersionORM.op, EdgeVersionORM.payload)
             .where(EdgeVersionORM.graph_id == graph.id, EdgeVersionORM.branch_id == main_id,
                    EdgeVersionORM.commit_seq > from_seq, EdgeVersionORM.commit_seq <= to_seq)
-            .order_by(EdgeVersionORM.commit_seq)
+            .order_by(EdgeVersionORM.commit_seq).limit(self._MOVE_EDGE_CAP + 1)
         )).all()
         if not rows:
             return None
+        if len(rows) > self._MOVE_EDGE_CAP:
+            # More edge rows than the inline cap allows changes: the job takes the window over
+            # before any more of it is read (a publish of millions is that many payloads).
+            return "stale"
         final: Dict[str, Optional[dict]] = {}
         for eid, op, payload in rows:                    # last row in window wins
             final[eid] = None if op == "delete" else payload
