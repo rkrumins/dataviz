@@ -113,6 +113,12 @@ The fork routes take the row along with the graph, after the graph:
 The data-source routes never act on a fork's row on its own: delete, permanent delete, restore,
 move, move preview and transfer requests answer **409** `use_fork_endpoints`.
 
+**The views on a fork outlive its row.** When the row is deleted — its purge completes, the reaper
+removes it, or its parent's permanent delete takes it — the views on it go to its nearest live
+ancestor (its parent; up a fork of a fork), losing the fork's draft they were pinned to; one in the
+trash stays there. With no ancestor left (a parent's permanent delete), they read the workspace's
+default, as the parent's own views do.
+
 **A parent's permanent delete** queues the purges of its trashed forks before its own, and deletes
 their rows with its own. A live fork refuses it (**409** `live_forks`) before anything is queued —
 also when the parent has nothing published, whose graph purge would not wait for its forks: the

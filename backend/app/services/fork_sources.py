@@ -12,12 +12,12 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Collection, Dict, List, Optional
 
 from fastapi import HTTPException
 from sqlalchemy import select, update
 
-from backend.app.db.models import WorkspaceDataSourceORM
+from backend.app.db.models import ViewORM, WorkspaceDataSourceORM
 from backend.common.interfaces.provider import ProviderConfigurationError
 
 #: The settings a fork takes from its parent: what it is governed by, never its own to change.
@@ -164,6 +164,32 @@ def refuse_primary(row: Optional[WorkspaceDataSourceORM]) -> None:
             "type": "fork_not_primary",
             "message": "A fork can't be the workspace's default data source. Make the data source "
                        "it was forked from the default instead."})
+
+
+async def views_to_parent(session, fork_ids: Collection[str], *,
+                          going: Collection[str] = ()) -> None:
+    """Before the fork rows ``fork_ids`` (and ``going``, other rows deleted with them) are deleted,
+    in the same transaction: the views on each fork go to its nearest live ancestor left
+    (``fork_of_data_source_id``, up a fork of a fork) — none when no ancestor is left, as the views
+    on any deleted source — and lose the fork's draft they were pinned to. Their place in the
+    trash is left as it is."""
+    gone = set(fork_ids) | set(going)
+    for ds_id in fork_ids:
+        row = await session.get(WorkspaceDataSourceORM, ds_id)
+        target = None
+        up = row.fork_of_data_source_id if row is not None else None
+        while up is not None and target is None:
+            above = await session.get(WorkspaceDataSourceORM, up)
+            if above is None:
+                break
+            if above.id not in gone and above.deleted_at is None:
+                target = above.id
+            up = above.fork_of_data_source_id
+        await session.execute(
+            update(ViewORM).where(ViewORM.data_source_id == ds_id)
+            # Assigning updated_at to itself keeps this from passing for an edit.
+            .values(data_source_id=target, draft_branch_id=None, updated_at=ViewORM.updated_at)
+            .execution_options(synchronize_session=False))
 
 
 async def trash_row(session, ds_id: str, actor: Optional[str]) -> None:

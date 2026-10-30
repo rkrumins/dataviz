@@ -48,7 +48,8 @@ the next step — taking the parent's newer commits into a fork — builds on. S
   back. A permanent delete purges the source's trashed forks first, and a live fork refuses it
   (**409** `live_forks`) — now also when the source has nothing published. The versioning reaper
   keeps each fork's data source in step with its graph, and deletes one left without a graph after
-  ten minutes (a fork whose making crashed).
+  ten minutes (a fork whose making crashed). When a fork's data source is deleted, the views on it
+  go to its nearest live parent, losing the fork's draft they were pinned to.
 - **No fork's data source reaches a FalkorDB graph of its own.** Its reads compose its own rows over
   its parent's in Postgres, and its writes are commits; the provider registry hands out its parent's
   graph read only. Anything that needs a data source's own store — an aggregation trigger, a

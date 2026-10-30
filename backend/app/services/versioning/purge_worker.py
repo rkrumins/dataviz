@@ -175,8 +175,11 @@ async def _drop_fork_row(ds_id: Optional[str]) -> None:
         return
     from backend.app.db.engine import get_session_factory
     from backend.app.db.models import WorkspaceDataSourceORM as DS
+    from backend.app.services import fork_sources
     try:
         async with get_session_factory()() as s:
+            if (await s.get(DS, ds_id)) is not None:
+                await fork_sources.views_to_parent(s, [ds_id])     # its views go to its parent
             await s.execute(delete(DS).where(DS.id == ds_id, DS.fork_of_data_source_id.isnot(None)))
             await s.commit()
     except Exception:  # noqa: BLE001 — the reaper removes it on a later pass
@@ -1052,6 +1055,7 @@ class Reaper:
         for ds_id in orphans:
             try:
                 async with Session() as s:
+                    await fork_sources.views_to_parent(s, [ds_id])  # its views go to its parent
                     out["removed"] += (await s.execute(delete(DS).where(
                         DS.id == ds_id, DS.fork_of_data_source_id.isnot(None),
                         DS.created_at < cutoff))).rowcount

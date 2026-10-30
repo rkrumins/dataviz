@@ -1047,8 +1047,9 @@ async def remove_data_source(
             session, ds_id, actor=_user.id, note="The data source was deleted.",
         )
         # Its forks are all in the trash, and their purges are queued with its: their rows go
-        # with it, as its own does before its graph is gone.
+        # with it, as its own does before its graph is gone, and the views on them as its own.
         if forks:
+            await fork_sources.views_to_parent(session, forks, going=[ds_id])
             await session.execute(
                 delete(WorkspaceDataSourceORM).where(WorkspaceDataSourceORM.id.in_(forks)))
         await data_source_repo.delete_data_source(session, ds_id)

@@ -570,6 +570,90 @@ def test_an_expired_parent_waits_for_the_fork_rows_that_name_it(caplog):
         assert await _row(parent_ds) is not None and await _row(fork["dataSourceId"]) is not None
     _run(case)
 
+async def _view_on(ds_id, name, draft=None):
+    """A view on ``ds_id``, pinned to ``draft`` (one of its drafts) when given: its id."""
+    from backend.app.db.models import ViewORM
+    from backend.app.db.repositories import view_repo
+    from backend.common.models.management import ViewCreateRequest
+
+    async with _mgmt() as s:
+        view = await view_repo.create_view(s, ViewCreateRequest(
+            name=name, workspace_id=WS, data_source_id=ds_id, view_type="graph",
+            visibility="private"), user_id="u1")
+        (await s.get(ViewORM, view.id)).draft_branch_id = draft
+        await s.commit()
+        return view.id
+
+
+async def _view(view_id):
+    from backend.app.db.models import ViewORM
+    async with _mgmt() as s:
+        v = await s.get(ViewORM, view_id)
+        return v.data_source_id, v.draft_branch_id, v.deleted_at
+
+
+def test_the_views_on_a_fork_go_to_its_parent_when_its_row_goes():
+    """When a fork's row was deleted — its purge done, the reaper's orphan pass, its parent's
+    permanent delete — the views on it fell to no data source, so they read the workspace's
+    default. They now go to the fork's nearest live ancestor (its parent; up a fork of a fork),
+    losing the fork's draft they were pinned to; a view in the trash stays there."""
+    from datetime import datetime, timedelta, timezone
+
+    from backend.app.db.models import ViewORM
+    from backend.app.services import fork_sources
+    from backend.app.services.versioning.purge_worker import PurgeRunner, Reaper, create_purge_job
+    from backend.tests.integration.test_graph_lifecycle_purge import _nobody, _take
+
+    async def case(svc):
+        parent_ds, gid = await _parent(svc)
+        async with _client() as c:
+            fork = (await _fork(c, gid)).json()
+            fork_ds, fgid = fork["dataSourceId"], fork["graphId"]
+            draft = await svc.open_draft(graph_id=fgid, owner="u1")
+            pinned, trashed = await _view_on(fork_ds, "Pinned", draft), await _view_on(fork_ds, "Old")
+            async with _mgmt() as s:
+                (await s.get(ViewORM, trashed)).deleted_at = "2026-10-01T00:00:00+00:00"
+                await s.commit()
+            assert (await c.delete(f"/api/v1/{WS}/versioning/graphs/{fgid}")).status_code == 204
+        job = await create_purge_job(graph_id=fgid, workspace_id=WS, actor="u",
+                                     require_tombstoned=True)
+        assert (await PurgeRunner(None, key_in_use=_nobody).run_job(await _take(job)))[
+            "status"] == "completed"
+        assert await _row(fork_ds) is None
+        assert await _view(pinned) == (parent_ds, None, None)
+        assert await _view(trashed) == (parent_ds, None, "2026-10-01T00:00:00+00:00")
+
+        # A fork of a fork whose row the reaper removes (no graph, ten minutes old): its views go
+        # to the fork above it, the nearest that is live.
+        async with _client() as c:
+            mid = (await _fork(c, gid)).json()["dataSourceId"]
+        old = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat()
+        leaf = "dsfork_leaf_" + os.urandom(3).hex()
+        async with _mgmt() as s:
+            from backend.app.db.models import WorkspaceDataSourceORM as DS
+            row = fork_sources.fork_row(await s.get(DS, mid), ds_id=leaf, name="L",
+                                        parent_graph_id="g", actor="u")
+            row.created_at = old
+            s.add(row)
+            await s.commit()
+        on_leaf = await _view_on(leaf, "On the leaf", "draft_of_the_leaf")
+        await Reaper().fork_rows()
+        assert await _row(leaf) is None
+        assert await _view(on_leaf) == (mid, None, None)
+
+        # A parent's permanent delete takes its trashed forks' rows with its own: their views
+        # lose the forks' drafts and, with no live ancestor left, read the default as its own do.
+        held_ds, held = await _parent(svc)
+        async with _client() as c:
+            gone = (await _fork(c, held)).json()
+            on_gone = await _view_on(gone["dataSourceId"], "On a fork", "draft_of_the_fork")
+            assert (await c.delete(f"/api/v1/{WS}/versioning/graphs/{gone['graphId']}")).status_code == 204
+            r = await c.delete(f"/api/v1/admin/workspaces/{WS}/data-sources/{held_ds}",
+                               params={"permanent": "true"})
+            assert r.status_code == 204, r.text
+        assert await _view(on_gone) == (None, None, None)
+    _run(case)
+
 def test_a_parents_permanent_delete_purges_its_trashed_forks_first():
     from backend.app.services.versioning.models import JobORM
 
