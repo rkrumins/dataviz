@@ -2,7 +2,9 @@
 — needs Postgres.
 
 * Queuing a publish (``create_publish_job``) takes the draft's row lock and sets it ``publishing``
-  in the transaction that stores the job, already queued. Saves, stages, checkpoints, pulls,
+  in the transaction that stores the job, already queued — unless the draft is behind ``main``,
+  which is refused then and there (409 not_up_to_date), as a publish inside the request is, rather
+  than queued to fail. Saves, stages, checkpoints, pulls,
   abandons, an in-request publish and a second queued publish are then refused (409
   branch_closed); only the job's own publish runs. A job queued before this change, on a draft
   still ``open``, runs as well.
@@ -26,7 +28,7 @@ from sqlalchemy import func, select, update
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.errors import BranchNotOpen, MainWriteForbidden
 from backend.app.services.versioning.models import JobORM, WorkingChangeORM
-from backend.app.services.versioning.service import GraphVersioningService
+from backend.app.services.versioning.service import GraphVersioningService, NotUpToDate
 
 pytestmark = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"),
                                 reason="set GRAPHVER_E2E=1 + a live Postgres to run")
@@ -149,6 +151,28 @@ async def _queued_publish_holds_the_draft(svc, ie):
 
 def test_a_queued_publish_holds_its_draft_until_it_lands():
     _e2e(_queued_publish_holds_the_draft)
+
+
+async def _behind_is_refused_before_it_is_queued(svc, ie):
+    gid = await _graph(svc)
+    behind = await _draft(svc, gid, description="behind")
+    first = await svc.open_draft(graph_id=gid, owner="u")
+    await svc.apply_ops(graph_id=gid, branch_id=first, actor="u", ops=[_upd("M", description="first")])
+    await svc.publish(graph_id=gid, branch_id=first, actor="u", message="main moves on")
+
+    with pytest.raises(NotUpToDate):
+        await _queue(ie, gid, behind)
+    assert await _status(svc, behind) == "open"             # not closed for a job bound to fail
+    async with db.graphver_session() as s:
+        assert (await s.execute(select(JobORM.id).where(JobORM.branch_id == behind))).first() is None
+    # Pulled, it is queued.
+    await svc.rebase_draft(graph_id=gid, branch_id=behind, actor="u")
+    assert (await _queue(ie, gid, behind))["job_id"]
+    assert await _status(svc, behind) == "publishing"
+
+
+def test_a_draft_behind_main_is_refused_before_its_publish_is_queued():
+    _e2e(_behind_is_refused_before_it_is_queued)
 
 
 async def _release(svc, ie):

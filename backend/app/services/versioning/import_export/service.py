@@ -27,7 +27,7 @@ from .. import config, db
 from ..errors import JobActive, MainWriteForbidden
 from ..job_lease import Draining, Lease, Superseded, friendly_infra_error, is_transient
 from ..models import GraphORM, ImportRowORM, JobORM, MergeRequestORM
-from ..service import AccessDenied, GraphVersioningService, Viewer
+from ..service import AccessDenied, GraphVersioningService, NotUpToDate, Viewer
 from . import stream
 from .export_worker import ExportWorker, example_template_records
 from .formats import get_adapter
@@ -571,7 +571,8 @@ class ImportExportService:
         ``publishing``, closed to every write but the job's publish until the job ends. A publish of
         someone else's private draft is :class:`NotDraftOwner`, of a shared draft by anyone but its owner
         or a maintainer :class:`DraftRoleRequired`. A merge its reviewers have not approved is
-        :class:`ApprovalRequired` here, before the draft is closed for it; the job checks again. The job
+        :class:`ApprovalRequired` here, before the draft is closed for it, and a draft behind ``main``
+        :class:`NotUpToDate`, as a publish inside the request is; the job checks both again. The job
         is stored already queued: it has no input to wait for."""
         fields: Dict[str, Any] = {"actor": actor, "message": message}
         if resolutions:
@@ -589,6 +590,9 @@ class ImportExportService:
             if not merge_request_id:                     # a review's merger need not own the draft
                 await self._svc._require_publish(s, branch, actor, ())
             await self._svc._require_no_import(s, branch_id)
+            head = await s.scalar(select(GraphORM.main_head_commit_seq).where(GraphORM.id == graph_id))
+            if (branch.base_commit_seq or 0) < head:
+                raise NotUpToDate(branch_id, branch.base_commit_seq, head)
             if merge_request_id:
                 pr = await s.get(MergeRequestORM, merge_request_id)
                 if pr is None or pr.status in ("merged", "closed"):
