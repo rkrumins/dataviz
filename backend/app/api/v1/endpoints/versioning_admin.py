@@ -1,6 +1,7 @@
 """Platform administration of the versioned graphs' FalkorDB projections, under
 ``/admin/versioning``: the disaster-recovery reseed of a provider, the fleet inventory, moving
-one graph's projection to another provider or key, and the residency policy (doc 17).
+one graph's projection to another provider or key, adopting a customer's key onto a platform key,
+and residency (doc 17).
 
 Every route needs ``system:admin``. None is on the API-key surface (``auth/api_key_surface``), so
 an API key is refused.
@@ -26,8 +27,9 @@ from backend.app.services.graph_store.topology import key_slot
 from backend.app.services.system_status import probes
 from backend.app.services.versioning import config as vconfig
 from backend.app.services.versioning import keymigrate, residency, residency_policy
-from backend.app.services.versioning.errors import (JobActive, ProjectionKeyInUse,
-                                                    ProjectionKeyInvalid, ProjectionNotAdopted)
+from backend.app.services.versioning.errors import (JobActive, ProjectionAlreadyAdopted,
+                                                    ProjectionKeyInUse, ProjectionKeyInvalid,
+                                                    ProjectionNotAdopted)
 from backend.app.services.versioning.service import ConcurrencyError
 from backend.auth_service.interface import User
 
@@ -340,6 +342,107 @@ async def load_graph(
     return {"graphId": graph_id, "state": wm["residency_state"], "loadRequested": requested}
 
 
+def _capacity_insufficient(master: Optional[str], shortfall: Optional[int],
+                           what: str) -> HTTPException:
+    return HTTPException(status_code=409, detail={
+        "type": "capacity_insufficient", "master": master, "shortfallBytes": shortfall,
+        "message": (f"master {master or '?'} has no room for {what}: it needs "
+                    f"{human_bytes(shortfall)} more under its start mark"
+                    if shortfall is not None else
+                    f"master {master or '?'} could not be measured, so {what} cannot be admitted "
+                    "now")})
+
+
+@router.post("/graphs/{graph_id}/adopt",
+             summary="Adopt a graph's projection from the customer's own FalkorDB key onto a "
+                     "platform key")
+async def adopt_projection(
+    graph_id: str,
+    background: BackgroundTasks,
+    user: User = Depends(requires("system:admin")),
+    session: AsyncSession = Depends(get_db_session),
+) -> dict:
+    """Adopt (doc 17): a graph that projects into the customer's own FalkorDB key moves onto a
+    fresh platform key on the same provider — the reseed move (doc 14 §6): seeded from Postgres a
+    page at a time, Postgres serving its reads until the new key catches up. From then the
+    platform owns the key, and the graph's residency class applies. The customer's key is left
+    exactly as it was — never written, dropped, renamed, relabelled or retired — so what other
+    tools keep writing there no longer shows, and Bring into history no longer sees it. With
+    residency on the key is placed on the provider's master with the most room, and the seed is
+    admission-checked first (409 ``capacity_insufficient``).
+
+    Refused where a move is: an unpinned graph, a key other data sources read (they would go on
+    reading a key nobody writes), a dedicated rollup graph (422), a running rollup job; a graph
+    already on a platform key (409 ``already_adopted``) and a fork (409 ``not_for_forks``). The
+    reseed is scheduled and the adoption recorded."""
+    meta = await _graph_with_a_key(graph_id)
+    svc = get_versioning_service()
+    wm = await svc.projection_watermark(graph_id)
+    pin = wm["falkor_graph_name"]
+    if pin in (None, f"gv_{graph_id}"):
+        raise ProjectionNotAdopted("unpinned", "this graph has no FalkorDB key yet; nothing to adopt")
+    if wm["owns_falkor_graph"]:
+        raise ProjectionAlreadyAdopted(pin)
+    ds = await data_source_repo.get_data_source_orm(session, meta["data_source_id"])
+    if ds is not None and ds.projection_mode == "dedicated":
+        # Its rollups live in a graph named from the key, which a new key would leave behind.
+        raise HTTPException(status_code=422, detail={
+            "type": "projection_mode_unsupported",
+            "message": "a data source with a dedicated rollup graph cannot be adopted"})
+    job = (await session.execute(
+        select(AggregationJobORM.id).where(
+            AggregationJobORM.data_source_id == meta["data_source_id"],
+            AggregationJobORM.status.in_(("pending", "running"))).limit(1)
+    )).scalar_one_or_none()
+    if job is not None:
+        raise JobActive(job, "a rollup rebuild is running for this graph; adopt it when it finishes")
+    provider = wm["falkor_provider"] or vconfig.DEFAULT_FALKOR_PROVIDER
+    shared = await managed_sources.graph_key_bindings(
+        session, wm["falkor_provider"] or (ds.provider_id if ds else None), pin,
+        exclude_ds=meta["data_source_id"])
+    if shared:              # they would go on reading a key nobody writes
+        raise ProjectionNotAdopted("shared", "other data sources read this graph's FalkorDB key",
+                                   sharedWith=len(shared))
+    if vconfig.RESIDENCY_ENABLED:
+        fits, master, shortfall = await residency.admission(graph_id)
+        if not fits:
+            raise _capacity_insufficient(master, shortfall, "this graph's copy")
+    keys = await falkor_graph_registry.list_graph_keys(provider)
+    if keys is None:        # cannot verify, never "free"
+        raise HTTPException(status_code=503, detail={
+            "type": "provider_unreachable", "retryable": True,
+            "message": "the provider's FalkorDB graphs could not be listed; try again"})
+    taken = keys | {e["name"] for e in wm["retired_keys"]}
+    placed = (await residency.place_key(graph_id, provider, taken)
+              if vconfig.RESIDENCY_ENABLED else None)
+    if placed is None:
+        n = 1
+        while keymigrate.owned_key(graph_id, n) in taken:
+            n += 1
+        placed = keymigrate.owned_key(graph_id, n), None
+    key, master = placed
+    shard_map = {"tag": key[key.index("{") + 1:-1], "slot": key_slot(key),
+                 "chosenAt": datetime.now(timezone.utc).isoformat(), "chosenBy": user.id,
+                 **({"master": master} if master else {})}
+    with _domain_errors():
+        try:
+            res = await svc.adopt_projection(graph_id=graph_id, key=key, actor=user.id,
+                                             shard_map=shard_map)
+        except ConcurrencyError as exc:     # enabling version control hasn't finished
+            raise HTTPException(status_code=409,
+                                detail={"type": "bootstrapping", "message": str(exc)})
+    background.add_task(rebuild_now, graph_id)
+    await recorder.record_for_request(
+        session, "platform.versioning.projection_adopted",
+        details={"graphId": graph_id, "workspaceId": meta["workspace_id"],
+                 "dataSourceId": meta["data_source_id"], "from": res["from"], "to": res["to"],
+                 "externalDrift": res["externalDrift"]},
+        best_effort=True,   # the adoption is already committed
+    )
+    return {"graphId": graph_id, "from": res["from"], "to": res["to"],
+            "watermark": await _watermark_model(session, await svc.projection_watermark(graph_id))}
+
+
 class ResidencyClassRequest(BaseModel):
     residency_class: Literal["always", "standard", "coldline"] = Field(..., alias="class")
 
@@ -361,13 +464,7 @@ async def set_graph_residency(
     if cls == "always" and out:
         fits, master, shortfall = await residency.admission(graph_id)
         if not fits:
-            raise HTTPException(status_code=409, detail={
-                "type": "capacity_insufficient", "master": master, "shortfallBytes": shortfall,
-                "message": (f"master {master or '?'} has no room for this graph: it needs "
-                            f"{human_bytes(shortfall)} more under its start mark"
-                            if shortfall is not None else
-                            f"master {master or '?'} could not be measured, so this graph's load "
-                            "cannot be admitted now")})
+            raise _capacity_insufficient(master, shortfall, "this graph")
     before = await residency.set_class(graph_id, cls)
     if cls == "always" and out:
         await residency.request_load(graph_id)

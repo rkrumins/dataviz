@@ -245,6 +245,43 @@ async def test_a_fork_stays_outside_residency_and_is_reseeded_as_before(store, m
     assert ps.status == "idle" and ps.projected_commit_seq == ps.target_commit_seq > 0
 
 
+async def test_adopt_moves_the_pin_onto_a_platform_key_and_leaves_the_customer_s_key_alone(
+        store, monkeypatch):
+    """Adopt swaps the pin to a platform key on the same provider, which the platform owns from
+    then, at watermark 0 (reseeding): the customer's key is never retired, and what it held that
+    history didn't is no longer flagged — the graph reads its own copy now."""
+    from backend.app.services.versioning import keymigrate
+    from backend.app.services.versioning.errors import (ProjectionAlreadyAdopted,
+                                                        ProjectionKeyInvalid)
+
+    svc, fake = store, FakeFalkor()
+    proj = FalkorProjector(graph_client_factory=fake)
+    customer = "cust_" + _hex()
+    gid = (await svc.create_graph(data_source_id="ds_" + _hex(), workspace_id="ws_res", actor="a",
+                                  falkor_graph_name=customer, owns_falkor_graph=False))["graph_id"]
+    await _publish(svc, gid, "A")
+    await proj.project_graph(gid)
+    await _set_ps(gid, external_drift={"at": "2026-10-30T09:00:00+00:00", "nodes": 2, "edges": 0,
+                                       "via": "verify"})
+    before = await _ps(gid)
+    with pytest.raises(ProjectionKeyInvalid):
+        await svc.adopt_projection(graph_id=gid, key="other_key", actor="a", shard_map={})
+    key = keymigrate.owned_key(gid, 1)
+    res = await svc.adopt_projection(graph_id=gid, key=key, actor="a", shard_map={"tag": "t"})
+    assert res["from"]["key"] == customer and res["to"]["key"] == key
+    assert res["externalDrift"]["nodes"] == 2
+    ps = await _ps(gid)
+    assert (ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph) == (
+        key, before.falkor_provider, True)
+    assert (ps.status, ps.projected_commit_seq, ps.epoch) == ("reseeding", 0, before.epoch + 1)
+    assert not ps.retired_keys and ps.external_drift is None and ps.shard_map == {"tag": "t"}
+    with pytest.raises(ProjectionAlreadyAdopted):
+        await svc.adopt_projection(graph_id=gid, key=keymigrate.owned_key(gid, 2), actor="a",
+                                   shard_map={})
+    await proj.project_graph(gid)
+    assert (await _ps(gid)).status == "idle"
+
+
 async def test_with_residency_off_an_evicted_graph_is_reseeded_as_before(store, monkeypatch):
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
     svc, fake = store, FakeFalkor()
@@ -465,6 +502,67 @@ async def test_a_reload_seeds_a_fresh_key_placed_on_the_master_with_the_most_roo
     names = await falkor.execute_command("GRAPH.LIST")
     assert keymigrate.owned_key(gid, 1) in names and old not in names
     assert (await svc.projection_watermark(gid))["read_route"]["main"] == "falkordb"
+
+
+async def _content(graph) -> tuple:
+    """What a FalkorDB key holds, to compare: its node and edge counts, and every node's labels and
+    properties in order."""
+    nodes = (await graph.query("MATCH (n) RETURN count(n)")).result_set[0][0]
+    edges = (await graph.query("MATCH ()-[r]->() RETURN count(r)")).result_set[0][0]
+    rows = (await graph.query(
+        "MATCH (n) RETURN labels(n), properties(n) ORDER BY n.urn, n.name")).result_set
+    return nodes, edges, [(sorted(lbl), sorted(props.items())) for lbl, props in rows]
+
+
+async def _urns(graph) -> set:
+    return {r[0] for r in (await graph.query(
+        "MATCH (n) WHERE n.urn IS NOT NULL RETURN n.urn")).result_set}
+
+
+@live
+async def test_adopt_never_touches_the_customer_s_key_through_an_eviction_and_a_reload(
+        store, falkor, mine, monkeypatch):
+    """The customer's key holds what another tool wrote and what version control projected there
+    before Adopt. After Adopt, and after the platform key is evicted and loaded again, it holds
+    exactly that: same counts, same nodes, same properties."""
+    from backend.app.services.versioning import keymigrate
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    factory = make_falkor_graph_factory()
+    svc, proj = store, FalkorProjector(graph_client_factory=factory)
+    customer = "cust_" + _hex()
+    theirs = await factory(customer)
+    await theirs.query(
+        "CREATE (:Dataset {urn: 'urn:cust:orders', displayName: 'Orders', owner: 'ops'})"
+        "-[:FLOWS_TO {kind: 'etl'}]->(:Dataset {urn: 'urn:cust:revenue', displayName: 'Revenue'})")
+    try:
+        gid = (await svc.create_graph(data_source_id="ds_" + _hex(), workspace_id="ws_res",
+                                      actor="a", falkor_graph_name=customer,
+                                      owns_falkor_graph=False))["graph_id"]
+        mine.append(gid)
+        await _publish(svc, gid, "A", "B")
+        await proj.project_graph(gid)          # version control writes their key, until Adopt
+        before = await _content(theirs)
+        assert {"urn:cust:orders", "urn:cust:revenue", f"urn:{gid}:A"} <= await _urns(theirs)
+        key = keymigrate.owned_key(gid, 1)
+        await svc.adopt_projection(graph_id=gid, key=key, actor="a", shard_map={})
+        await proj.project_graph(gid)          # the platform key, seeded from Postgres
+        ps = await _ps(gid)
+        assert (ps.falkor_graph_name, ps.owns_falkor_graph, ps.status) == (key, True, "idle")
+        assert await _urns(await factory(key)) == {f"urn:{gid}:A", f"urn:{gid}:B"}   # history
+        assert await _content(theirs) == before
+        assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+        assert await _content(theirs) == before
+        await residency.request_load(gid)
+        loop = CapacityLoop(proj)
+        await loop.run_once(graph_ids=[gid])
+        await _loads(loop, proj, gid)
+        ps = await _ps(gid)
+        assert ps.status == "idle" and keymigrate.is_owned_key(gid, ps.falkor_graph_name)
+        assert customer not in {e["name"] for e in ps.retired_keys or []}
+        assert await _content(theirs) == before
+    finally:
+        await theirs.delete()
 
 
 @live

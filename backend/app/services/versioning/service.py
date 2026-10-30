@@ -50,7 +50,7 @@ from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionE
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
                      MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
-                     PersonRequired,
+                     PersonRequired, ProjectionAlreadyAdopted,
                      ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted, ReviewRequired,
                      SelfMerge, SelfReview, VersionConflict)
 from .ids import prefixed_id
@@ -3965,6 +3965,67 @@ class GraphVersioningService:
             from .residency import request_load
             await request_load(graph_id)
         return {"changed": True, "from": cur, "to": tgt, "retiring": entry}
+
+    async def adopt_projection(self, *, graph_id: str, key: str, actor: str,
+                               shard_map: dict) -> Dict[str, object]:
+        """Adopt (doc 17): move a graph that projects into the customer's own FalkorDB key onto
+        its platform key ``key`` on the same provider — the reseed move of doc 14 §6. The pin
+        swaps, the platform owns the key from then (its residency class applies), the epoch is
+        bumped so a pass in flight cannot publish over it, and the watermark goes to 0
+        (``reseeding``): the next pass seeds the key from Postgres, which serves the graph's reads
+        until it catches up. The customer's key is left exactly as it was: never written,
+        dropped, renamed, relabelled or retired. What it held that history didn't is no longer
+        flagged (``external_drift``, returned as ``externalDrift``): the graph reads its own copy,
+        and Bring into history no longer sees that key.
+
+        Refused: an unpinned graph (:class:`ProjectionNotAdopted`), one already on a platform key
+        (:class:`ProjectionAlreadyAdopted`), a key that is not this graph's platform key
+        (:class:`ProjectionKeyInvalid`) or that another graph holds (:class:`ProjectionKeyInUse`),
+        and while the graph's "enable version control" job is unfinished
+        (:class:`ConcurrencyError`). No FalkorDB I/O: the caller checks the key is free there and
+        schedules the reseed."""
+        default = config.DEFAULT_FALKOR_PROVIDER
+        try:
+            async with self._session() as s:
+                await self._lock_graph(s, graph_id)
+                graph = await s.get(GraphORM, graph_id)
+                if graph is None or graph.deleted_at is not None:
+                    raise ValueError(f"unknown graph {graph_id}")
+                await self._assert_not_bootstrapping(s, graph_id)
+                ps = (await s.execute(
+                    select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+                    .with_for_update().execution_options(populate_existing=True)
+                )).scalar_one_or_none()
+                if ps is None:
+                    raise ValueError(f"unknown graph {graph_id}")
+                if ps.falkor_graph_name in (None, f"gv_{graph_id}"):
+                    raise ProjectionNotAdopted(
+                        "unpinned", "this graph has no FalkorDB key yet; nothing to adopt")
+                if ps.owns_falkor_graph:
+                    raise ProjectionAlreadyAdopted(ps.falkor_graph_name)
+                if not keymigrate.is_owned_key(graph_id, key):
+                    raise ProjectionKeyInvalid(key)
+                try:
+                    await self._claim_projection_key(s, key, ps.falkor_provider,
+                                                     exclude_graph_id=graph_id)
+                except ConcurrencyError:
+                    raise ProjectionKeyInUse(ps.falkor_provider or default, key) from None
+                cur = {"providerId": ps.falkor_provider or default, "key": ps.falkor_graph_name}
+                drift = ps.external_drift
+                ps.falkor_graph_name, ps.owns_falkor_graph, ps.shard_map = key, True, shard_map
+                ps.projected_commit_seq = 0
+                ps.target_commit_seq = graph.main_head_commit_seq
+                ps.status = "reseeding"
+                ps.external_drift = None
+                ps.last_error = None
+                ps.failed_attempts = 0
+                ps.next_retry_at = None
+                ps.progress_done = ps.progress_total = None
+                ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
+        except IntegrityError:
+            raise ProjectionKeyInUse(cur["providerId"], key) from None   # uq_ps_key: claimed
+        return {"from": cur, "to": {"providerId": cur["providerId"], "key": key},
+                "externalDrift": drift}
 
     async def reset_projection_watermarks(self, *, provider: str, actor: str,
                                           dry_run: bool = False) -> List[str]:
