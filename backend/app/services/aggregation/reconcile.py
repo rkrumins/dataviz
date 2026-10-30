@@ -357,7 +357,8 @@ def _guard(obs: Observation, policy: Policy) -> Optional[str]:
         # incrementally per committed window from the same pair rules the batch
         # pipeline uses, and hands off to ``agg.trigger()`` via
         # ``on_rollups_stale`` wherever it cannot (full seed, oversized move
-        # window, verify-heal reseed) — on all three projector wirings.
+        # window, verify-heal reseed, a key no build has stamped yet) — on all
+        # three projector wirings.
         #
         # So this comes SECOND, ahead of every "someone else owns this" guard,
         # because that is exactly what it asserts. Recorded and surfaced as

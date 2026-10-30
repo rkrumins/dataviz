@@ -384,7 +384,8 @@ NOTES: dict[str, tuple[str, str | None]] = {
     "GRAPHVER_LIVENESS_SECS": (
         "How often, in seconds, the versioning worker checks that each versioned graph's FalkorDB "
         "key still holds what was projected into it, and reseeds one that was lost or restored "
-        "to an older state. `0` turns the check off.",
+        "to an older state. The same check asks for the first summaries build of a key no build "
+        "has covered yet. `0` turns the check off.",
         None,
     ),
 }
