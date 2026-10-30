@@ -107,6 +107,8 @@ tests/integration/test_versioning_eviction.py
 tests/integration/test_versioning_falkor_live.py
 tests/integration/test_versioning_foreign_key_guards.py
 tests/integration/test_versioning_fork.py
+tests/integration/test_versioning_fork_bounded.py
+tests/integration/test_versioning_fork_merge.py
 tests/integration/test_versioning_lost_update.py
 tests/integration/test_versioning_main_lock.py
 tests/integration/test_versioning_main_write_publish.py

@@ -9,6 +9,60 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Forks: merged right, and costing what changes in them
+
+A fork can be reviewed into its parent again and again, each review merging what the fork changed
+since the last one, as git merges from the last merged commit. Forking, working on a fork and
+reviewing it now cost what changes in the fork, not the graph: on a parent of millions, each of
+them used to load every entity of it.
+
+### Fixed
+
+- **A fork's second review no longer proposes again what the parent undid, nor calls the parent's
+  own changes conflicts.** Every review of a fork merged from the fork point, so after a first one
+  merged, a change the parent took and then undid came back in the next, and a field only the
+  parent had changed since was a conflict. Each merge now records the fork's head it took, and the
+  next review merges from the fork's state there.
+- **A fork's review merged from the review screen keeps the parent's rules.** The parent's
+  containment and ontology rules were dropped on the way from the merge-request route to the fork's
+  merge; they were applied only through the fork's own merge route.
+- **A fork's review refused for conflicts stays marked so**: the mark was rolled back with the
+  refusal. **One that changes nothing is recorded** as merged by whom and when. **One merged twice
+  at once merges once**: it is read again under the parent's lock.
+- **A fork's preview and diff count what its merge writes.** The edges a merge takes with a deleted
+  node — the parent's onto a node the fork deleted, the fork's onto one the parent deleted — were
+  missing from both.
+
+### Changed
+
+- **Forking no longer hashes the whole parent**, under its lock. The fork point carries the
+  fingerprint the parent stored at its head, and a commit on a fork carries none, as a draft's
+  doesn't (`merkle_root` is `null`): every commit on a fork used to hash its whole state.
+- **A fork's drafts read only what they change.** Saving to a draft on a fork, its preview, pull
+  latest, publish, overlay and diffs, and a revert or restore of the fork's `main`, read the parent's
+  whole state; they now read through to the parent for the entities they touch.
+- **A fork's review reads only what the fork changed** since its last merged review: opening it, its
+  preview, diff and summary, and its merge, which held three whole states under the parent's lock.
+
+### Upgrading
+
+- **Run the migrations.** `20261030_1000_gv_mr_merged_seq` (graphver: `merge_requests.merged_source_seq`)
+  follows `20261029_1100_drafts_policy`. It fills in, for each fork review merged before it, the
+  fork's head its merge took, so a fork merged before the upgrade merges from there next time. With a
+  separate `GRAPHVER_DB_URL` the versioning worker adds it on start.
+- `merkle_root` is `null` on a fork's commits after its fork point.
+
+### Known limitations
+
+- **A fork's review is merged inside the request**, holding what the fork changed since its last
+  merged review (about 1.5 KB a change): a draft that large is published by a job on the versioning
+  worker, a fork's review is not. Review a busy fork often — each review merges only what changed since
+  the last.
+- **A fork of a FalkorDB-backed graph still gets a FalkorDB copy of it**, projected whole: forking a
+  graph of millions loads every entity of it into the projection worker. Nothing reads that copy (a fork
+  is read from Postgres); whether forks get one at all is an open decision.
+- **Forks have no screens**: forking, opening a fork's review and merging it are API calls.
+
 ## [Unreleased] — Versioning at millions of entities
 
 On a graph of millions of entities, everyday work on drafts no longer reads the whole graph, and
@@ -34,7 +88,7 @@ it 209 MB instead of 1,653 MB. At 1,000,000 nodes and 1,000,000 edges every step
   whole graph's state to find the touched entities' current values; Pull latest, the publish
   dialog's preview and a review's open, preview, diff and summary each ran a three-way merge of the
   whole graph. Each now reads the entities its change touches, and the edges and containers its
-  checks and views need around them. A fork still reads whole (forks are next).
+  checks and views need around them.
 - **A graph's schema read from Postgres is counted there.** The schema panel and the insights
   collector, reading `main` from Postgres (a graph with no FalkorDB key always does, any graph
   until its projection catches up with a publish), counted every entity in the web process; they
@@ -70,8 +124,7 @@ it 209 MB instead of 1,653 MB. At 1,000,000 nodes and 1,000,000 edges every step
 
 ### Known limitations
 
-- **Forks still read whole graphs**: creating one, merging one and every commit on one. See
-  `docs/versioning/09-scale-limits-and-roadmap.md` §4.
+- See `docs/versioning/09-scale-limits-and-roadmap.md` §4.
 - **A view's export holds the ids of the view's entities** (about 100 bytes each: about 1 GB for a
   10-million-entity view, within the transfer worker's 4 GiB).
 - **A very large publish holds its graph's publish lock while it runs** (measured: 111 s for

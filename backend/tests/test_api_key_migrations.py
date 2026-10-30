@@ -99,6 +99,8 @@ _ON_LIVE_TABLES = {
     "20261029_1000_gv_branch_vis.py": ("upgrade", "downgrade"),
     # workspaces and workspace_data_sources, which most requests read.
     "20261029_1100_drafts_policy.py": ("upgrade", "downgrade"),
+    # graphver.merge_requests again: the fork's head a merged review took.
+    "20261030_1000_gv_mr_merged_seq.py": ("upgrade", "downgrade"),
 }
 
 

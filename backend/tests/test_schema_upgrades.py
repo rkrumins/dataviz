@@ -759,6 +759,88 @@ async def test_the_approvals_migration_round_trips(store):
             await trans.rollback()
 
 
+# ── merge_requests.merged_source_seq: the fork's head a merged review took (20261030_1000_gv_mr_merged_seq) ──
+_MR_MERGED_SEQ = _VERSIONS / "20261030_1000_gv_mr_merged_seq.py"
+_MRS = f'"{models._SCHEMA}"."merge_requests"'
+_COMMITS = f'"{models._SCHEMA}"."commits"'
+
+
+def test_the_merged_source_seq_is_declared_and_migrated():
+    assert models.MergeRequestORM.__table__.c.merged_source_seq.nullable
+    migration = _migration(_MR_MERGED_SEQ)
+    assert migration.revision == _MR_MERGED_SEQ.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261029_1100_drafts_policy"
+    assert "ensure_mr_merged_source_seq" in _MR_MERGED_SEQ.read_text()
+
+
+async def _seed_fork_reviews(conn) -> None:
+    """A fork whose main reached seq 7, and its review merged by a squash into its parent that
+    names the fork's commits; a review of the fork merged with no change (no squash); and a
+    draft's review merged within the parent."""
+    commits = [("g_fk_fork", "c_fk_5", 5, None), ("g_fk_fork", "c_fk_7", 7, None),
+               ("g_fk_fork", "c_fk_6", 6, None),
+               ("g_fk_parent", "c_fk_sq", 12, '["c_fk_5", "c_fk_6", "c_fk_7"]'),
+               ("g_fk_parent", "c_fk_draft", 13, '["c_fk_x"]')]
+    for gid, cid, seq, names in commits:
+        await conn.execute(text(
+            f"INSERT INTO {_COMMITS} (graph_id, id, branch_id, commit_seq, kind, created_at, "
+            "source_commit_ids) VALUES (:g, :c, :b, :seq, 'squash_publish', '2026-10-30', "
+            "CAST(:names AS JSONB))"), {"g": gid, "c": cid, "b": f"br_{gid}", "seq": seq,
+                                        "names": names})
+    for mid, gid, status, result in (("mr_fk_merged", "g_fk_fork", "merged", "c_fk_sq"),
+                                     ("mr_fk_noop", "g_fk_fork", "merged", None),
+                                     ("mr_fk_draft", "g_fk_parent", "merged", "c_fk_draft")):
+        await conn.execute(text(
+            f"INSERT INTO {_MRS} (id, graph_id, source_branch_id, target_graph_id, target_branch, "
+            "status, resulting_commit_id, created_at, updated_at) VALUES (:id, :g, :b, "
+            "'g_fk_parent', 'main', :status, :result, '2026-10-30', '2026-10-30')"),
+            {"id": mid, "g": gid, "b": f"br_{mid}", "status": status, "result": result})
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_merged_source_seq(store):
+    """A fork's review merged before the column existed gets the latest of the fork's commits its
+    squash names; one merged with no change, and a draft's review, get none."""
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f"ALTER TABLE {_MRS} DROP COLUMN merged_source_seq"))
+            await _seed_fork_reviews(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)
+            took = dict((await conn.execute(text(
+                f"SELECT id, merged_source_seq FROM {_MRS} WHERE id LIKE 'mr_fk_%'"))).all())
+            assert took == {"mr_fk_merged": 7, "mr_fk_noop": None, "mr_fk_draft": None}, took
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_merged_source_seq_migration_round_trips(store):
+    migration = _migration(_MR_MERGED_SEQ)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await _seed_fork_reviews(conn)
+            await conn.run_sync(run("downgrade"))
+            assert "merged_source_seq" not in await _mr_columns(conn)
+            await conn.run_sync(run("upgrade"))
+            assert "merged_source_seq" in await _mr_columns(conn)
+            assert (await conn.execute(text(
+                f"SELECT merged_source_seq FROM {_MRS} WHERE id = 'mr_fk_merged'"))).scalar() == 7
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()
+
+
 # ── projection_state.retired_keys: a moved graph's old keys (20261018_1100_gv_ps_retired) ──
 _PS_RETIRED = _VERSIONS / "20261018_1100_gv_ps_retired.py"
 
