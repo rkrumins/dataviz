@@ -84,9 +84,12 @@ the graph:
 | The root's value | Nothing: the root's store serves it |
 
 **Lazy.** The patch set is built from content hashes and version-row columns alone. A read loads the
-fork's value of just what it serves (`overlay_payloads`, which reads through the layers: the fork's
-own row, or its parent's at the base), so a fork that changed 100,000 entities costs a page read a
-page of payloads.
+fork's value of just what it serves, for that request (`overlay_payloads`, which reads through the
+layers: the fork's own row, or its parent's at the base): a page of what the root has costs a page
+of payloads, however much the fork changed. A listing serves the nodes the fork created that it
+lists on its first page, all of them, as a draft's does (`compose_page`), so a fork that created
+many nodes at its top level, or a listing with no filter, loads each of those on every request
+([09](09-scale-limits-and-roadmap.md) §4.1).
 
 **Cached, then extended.** A process keeps a patch set per fork head, base and root head. When only
 the root moved, the next one is the last one extended by what the root changed since, instead of

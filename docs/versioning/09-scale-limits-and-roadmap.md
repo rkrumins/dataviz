@@ -125,20 +125,32 @@ held the graph's publish lock, and how much Postgres and FalkorDB grew.
 
 ## 4. The sharp edges (`O(graph)` hotspots)
 
-### 4.1 A busy fork: its review, and its reads past the ceiling
+### 4.1 A busy fork: its reads and its review
 
 Forking, working on a fork, reading it and reviewing it cost what changes in the fork: the fork point
 copies the root its parent stored, a fork's commits carry no root, the bounded reads go through to the
 parent for what the fork has not changed, a review merges what the fork changed since its last merged
 review ([03](03-branching-commits-merge.md) §3.8), and a fork's `main` reads its root's store with a
 patch set of what either side changed since they parted laid over it, with no FalkorDB copy of its own
-([17](17-forks-and-residency.md) §2, §6). Two things still scale with a busy fork:
+([17](17-forks-and-residency.md) §2, §6). Three things still scale with a busy fork:
 
 - **A fork past `GRAPHVER_FORK_REWIND_MAX`** (200,000) entities to classify is read from its layered
   rows in Postgres instead, and search does not reach it; its fork-list item recommends an update from
   its parent.
+- **A listing serves every node the fork created that it lists**, on its first page, as a draft's
+  does, and loads each for every request: an unfiltered listing of 500 through a fork that created
+  12,500 nodes serves all 12,500, in 0.75 s each time. A fork that created many nodes at its top
+  level reads that level the same way.
 - **A fork's review is merged inside the request**, holding what the fork changed since its last merged
   review (about 1.5 KB a change); a draft that large is published by a job on the versioning worker.
+
+**Measured** (`backend/scripts/bench_fork_overlay.py`, one process: a root of 100,000 nodes and
+100,000 edges that changed 50,000 entities after the fork point). A fork that changed 100,000 of its
+own builds a patch set of 145,000 entries in 6.2 s and holds 170 MB (292 MB at the build's peak); one
+that changed 1,000, 50,500 entries in 2.2 s and 69 MB. A canvas read through it (the top-level page,
+the edges of its first 500 nodes, a table's children) takes 10.9 s and 5.6 s on a process's first
+read, which builds the patch set (once per fork head, base and root head), then 2.7 s and 2.1 s,
+against 2.5 s and 2.2 s for the same reads on the root's key alone.
 
 > **Limitation.** Reviewing a fork that changed hundreds of thousands of entities holds them in a web
 > process. Review a busy fork often: each review merges only what changed since the last.

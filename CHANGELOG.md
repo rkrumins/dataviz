@@ -58,8 +58,8 @@ the next step — taking the parent's newer commits into a fork — builds on. S
   go to its nearest live parent, losing the fork's draft they were pinned to.
 - **A fork reads through its root's published graph.** Its `main` is read as a draft's is: the
   FalkorDB graph of the data source at the top of its fork chain, with a patch set of what either
-  side changed since they parted laid over it, classified from content hashes, loaded a page at a
-  time, kept per fork head and extended when only the root moved. A root still catching up, evicted
+  side changed since they parted laid over it, classified from content hashes, its values loaded as
+  a read serves them, kept per fork head and extended when only the root moved. A root still catching up, evicted
   or in the trash is read from Postgres instead, the same data more slowly, and so is a fork whose
   patch set would pass `GRAPHVER_FORK_REWIND_MAX` (default 200,000) entities. Looking up an entity
   the fork never changed by its URN finds it. Deep search on a fork runs in the root's graph, without
@@ -124,6 +124,10 @@ the next step — taking the parent's newer commits into a fork — builds on. S
   fork comes next, as a new base row.
 - **A fork's own changes are not searchable.** Deep search on a fork answers from its root's
   published graph, and native queries are unavailable on it.
+- **A listing of a fork serves every node the fork created that it lists**, on its first page, as a
+  draft's does, loading each for every request: an unfiltered listing of a fork that created 12,500
+  nodes serves all of them, in 0.75 s each time, and so does the top level of a fork that created
+  many nodes there.
 - **A fork far behind its parent reads from Postgres.** Past `GRAPHVER_FORK_REWIND_MAX` entities
   changed on either side since they parted, its reads are slower and search does not reach it, until
   it takes its parent's newer commits.
