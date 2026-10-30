@@ -981,7 +981,11 @@ class Reaper:
         for g in missing:
             try:
                 async with Session() as s:
-                    parent_row = await s.get(DS, g.parent_data_source_id)
+                    # FOR SHARE, as the fork route reads it: a change of its settings in flight
+                    # commits first and is copied (fork_sources.follow_parent).
+                    parent_row = (await s.execute(
+                        select(DS).where(DS.id == g.parent_data_source_id)
+                        .with_for_update(read=True))).scalar_one_or_none()
                     if parent_row is None:
                         continue
                     s.add(fork_sources.fork_row(

@@ -65,7 +65,11 @@ async def follow_parent(session, row: WorkspaceDataSourceORM, before: Dict[str, 
     was), in the same transaction: a fork's row refuses a change of one (409
     ``fork_settings_follow_parent``; its label and the rest stay its own), and the forks of any
     other row, forks of forks too, take the new values. A refusal rolls the transaction back.
-    Returns the fork rows it changed."""
+    Returns the fork rows it changed.
+
+    The row is written before its forks are listed: its lock makes a fork being made meanwhile
+    (which reads its parent FOR SHARE) wait and copy the new values, or be listed. The parent's
+    row, then its forks': the order every writer of both takes."""
     changed = [column for column in GOVERNING if getattr(row, column) != before[column]]
     if not changed:
         return []
@@ -74,6 +78,7 @@ async def follow_parent(session, row: WorkspaceDataSourceORM, before: Dict[str, 
         raise HTTPException(status_code=409, detail={
             "type": "fork_settings_follow_parent", "fields": changed,
             "message": "A fork's settings are its parent data source's: change them there."})
+    await session.flush()
     forks = await forks_of(session, row.id)
     if forks:
         await session.execute(

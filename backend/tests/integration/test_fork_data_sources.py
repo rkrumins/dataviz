@@ -364,6 +364,54 @@ def test_the_reaper_keeps_each_forks_data_source_in_step_with_its_graph():
     _run(case)
 
 
+def test_a_fork_made_while_its_parents_settings_change_takes_the_new_ones():
+    """A governing change on the parent listed its forks before the parent's own UPDATE was sent
+    (sessions never autoflush): a fork made meanwhile read the parent unblocked, copied the old
+    value and kept it for good, its row refusing the column. The change now writes the parent
+    first, so a fork made meanwhile reads the parent after it; and the reaper's backfill of a
+    fork made before forks had rows reads the parent the same way."""
+    from backend.app.db.models import WorkspaceDataSourceORM as DS
+    from backend.app.services import fork_sources
+    from backend.app.services.versioning.purge_worker import Reaper
+
+    async def change(parent_ds, column):
+        """A governing change on the parent, written but not committed: its session."""
+        s = _mgmt()
+        ds = await s.get(DS, parent_ds)
+        before = fork_sources.governing(ds)
+        setattr(ds, column, False)
+        await fork_sources.follow_parent(s, ds, before)
+        return s
+
+    async def case(svc):
+        from backend.app.db.repositories import data_source_repo
+
+        async def meanwhile(change_open, made):
+            """``made`` (a fork's row being made) running while ``change_open`` is uncommitted."""
+            task = asyncio.ensure_future(made)
+            await asyncio.wait({task}, timeout=0.5)        # done at once, or waiting for the change
+            await change_open.commit()
+            await change_open.close()
+            await task
+
+        async def fork_route(parent_ds, gid, ds_id):
+            async with _mgmt() as b:                       # its read, its row, its commit
+                parent = await data_source_repo.get_data_source_orm(b, parent_ds, lock="share")
+                b.add(fork_sources.fork_row(parent, ds_id=ds_id, name="race", parent_graph_id=gid,
+                                            actor="u"))
+                await b.commit()
+
+        parent_ds, gid = await _parent(svc, review_self_approval=True, review_self_merge=True)
+        ds_id = "dsfork_race_" + os.urandom(3).hex()
+        await meanwhile(await change(parent_ds, "review_self_approval"),
+                        fork_route(parent_ds, gid, ds_id))
+        assert (await _row(ds_id)).review_self_approval is False
+
+        legacy = await svc.fork_graph(parent_graph_id=gid, workspace_id=WS, actor="bob")
+        await meanwhile(await change(parent_ds, "review_self_merge"), Reaper().fork_rows())
+        assert (await _row(legacy["data_source_id"])).review_self_merge is False
+    _run(case)
+
 def test_a_parents_permanent_delete_purges_its_trashed_forks_first():
     from backend.app.services.versioning.models import JobORM
 
