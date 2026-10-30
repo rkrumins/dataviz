@@ -184,8 +184,8 @@ def _plan_master(policy: ResidencyPolicy, master: Master, graphs: Sequence[Graph
         if master.used is not None and master.maxmemory > 0 \
                 and master.used * 100 >= master.maxmemory * policy.high_water_pct:
             stop = master.maxmemory * policy.low_water_pct // 100
-            oldest = datetime.min.replace(tzinfo=now.tzinfo)
-            for g in sorted(left, key=lambda g: (g.residency != "coldline", g.last_read or oldest)):
+            # No read on record sorts as read now: its idle clock has not started.
+            for g in sorted(left, key=lambda g: (g.residency != "coldline", g.last_read or now)):
                 if master.used - freed <= stop:
                     break
                 out.evictions.append(Eviction(g.graph_id, master.endpoint, g.bytes(policy),

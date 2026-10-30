@@ -98,6 +98,16 @@ def test_pressure_starts_at_the_start_mark_and_idle_eviction_counts_toward_the_s
     assert _evicted(p) == [("idle", "idle_coldline")]           # 650 MB ≤ 700: nothing more
 
 
+def test_a_graph_with_no_read_on_record_is_never_idle_nor_first_under_pressure():
+    """Its idle clock has not started (the capacity loop starts it): it is no candidate for idle
+    eviction, and under pressure it goes after every graph whose last read is known."""
+    graphs = [_graph("unread", "coldline", read=None, size=200 * MB),
+              _graph("read", "coldline", read=_ago(minutes=30), size=200 * MB)]
+    p = plan(POLICY, [_master(used_pct=82)], graphs, NOW)      # 120 MB to free: one is enough
+    assert _evicted(p) == [("read", "pressure")]
+    assert plan(POLICY, [_master(used_pct=50)], graphs[:1], NOW).evictions == []
+
+
 def test_pressure_stops_when_nothing_evictable_is_left():
     graphs = [_graph("a", "always", size=900 * MB), _graph("b", leased=True, size=10 * MB)]
     p = plan(POLICY, [_master(used_pct=95)], graphs, NOW)
@@ -314,10 +324,9 @@ class _Session:
 
 
 def _snapshot() -> residency.Snapshot:
-    now = datetime.now(timezone.utc)                          # the preview plans at the real now
     graphs = [
-        _graph("cold", "coldline", read=now - timedelta(minutes=20), size=150 * MB),
-        _graph("std", read=now - timedelta(days=2), size=150 * MB),
+        _graph("cold", "coldline", read=NOW - timedelta(minutes=20), size=150 * MB),
+        _graph("std", read=NOW - timedelta(days=2), size=150 * MB),
         _graph("asked", status="waiting_capacity", requested_at=1.0, size=10 * MB),
     ]
     rows = {"cold": {"data_source_id": "ds_cold"}, "std": {"data_source_id": "ds_std"},
@@ -332,7 +341,7 @@ async def _preview(body, row=None):
         return snap
 
     session = _Session(row)
-    with patch.object(residency, "gather", gather):
+    with patch.object(residency, "gather", gather), patch.object(residency, "_clock", lambda: NOW):
         out = await va.preview_residency_policy(body, _user=SimpleNamespace(id="usr_admin"),
                                                 session=session)
     assert session.commits == 0                               # it acts on nothing
@@ -344,7 +353,7 @@ async def test_the_preview_is_the_planner_on_the_proposed_values():
                                PlatformSettingsORM(id=1, gv_load_margin_pct=150))
     policy = residency_policy.effective({"highWaterPct": 70, "lowWaterPct": 60,
                                          "loadMarginPct": 150})
-    expected = plan(policy, snap.masters, snap.graphs, datetime.now(timezone.utc))
+    expected = plan(policy, snap.masters, snap.graphs, NOW)
     assert out["values"]["highWaterPct"] == 70 and out["values"]["loadMarginPct"] == 150
     (master,) = out["masters"]
     assert [(e["graphId"], e["reason"], e["bytes"]) for e in master["evictions"]] == [

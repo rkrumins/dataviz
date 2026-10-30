@@ -61,6 +61,13 @@ _LEADER = "gvresidency"
 _READ_TIMEOUT_S = 5.0
 #: Keys measured per pass (``GRAPH.MEMORY USAGE``): what was never measured first.
 _MEASURE_PER_PASS = 16
+#: Graphs whose idle clock a pass starts, at most (:func:`_start_idle_clocks`).
+_CLOCKS_PER_PASS = 1000
+
+
+def _clock() -> datetime:
+    """The time a pass, the preview and admission plan at (patched in tests)."""
+    return datetime.now(timezone.utc)
 
 
 async def request_load(graph_id: str) -> None:
@@ -217,6 +224,9 @@ class Snapshot:
     clients: Dict[str, Tuple[Any, Optional[str]]] = field(default_factory=dict)
     queued: List[str] = field(default_factory=list)
     slots: Dict[str, Optional[List[Tuple[int, int]]]] = field(default_factory=dict)
+    #: Graphs the pass puts in the queue itself (an Always graph out of FalkorDB, a waiting graph
+    #: whose request the broker lost), with the score they get once, and keep.
+    requeue: Dict[str, float] = field(default_factory=dict)
 
 
 def _ts(value) -> Optional[datetime]:
@@ -373,7 +383,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
     for r in found:
         if r.graph_id not in asked and (r.status == "waiting_capacity" or
                                         (r.status == "evicted" and r.residency == "always")):
-            asked[r.graph_id] = now
+            asked[r.graph_id] = snap.requeue[r.graph_id] = now
     estimate = await _entities({r.data_source_id for r in found if r.size_bytes is None})
     dedicated = await _dedicated({r.data_source_id for r in found})
     by_provider: Dict[str, List[Any]] = {p: [] for p in providers or ()}
@@ -417,7 +427,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             status=r.status, owned=bool(r.owns_falkor_graph),
             evictable=bool(r.past_genesis and r.enable_finished),
             leased=candidate and await is_pinned(r.graph_id),
-            last_read=_ts(r.last_read_at) or _ts(r.last_projected_at),
+            last_read=_ts(r.last_read_at),       # none on record: its clock starts this pass
             size_bytes=r.size_bytes, entities=estimate.get(r.data_source_id),
             seeding=(r.status == "rehydrating" and r.projected_commit_seq < target)
             or (r.status in ("rebuilding", "reseeding") and r.projected_commit_seq == 0),
@@ -444,7 +454,7 @@ async def admission(graph_id: str) -> Tuple[bool, Optional[str], Optional[int]]:
     graph = next((g for g in snap.graphs if g.graph_id == graph_id), None)
     if graph is None:
         return False, None, None
-    decided = plan(policy, snap.masters, snap.graphs, datetime.now(timezone.utc))
+    decided = plan(policy, snap.masters, snap.graphs, _clock())
     target = roomiest(_pool(decided, graph), policy)
     if target is None:
         return False, graph.endpoint, None
@@ -460,7 +470,7 @@ async def place_key(graph_id: str, provider: str,
     there within the search's bound."""
     policy = await residency_policy.resolve()
     snap = await gather(providers=[provider])
-    decided = plan(policy, snap.masters, snap.graphs, datetime.now(timezone.utc))
+    decided = plan(policy, snap.masters, snap.graphs, _clock())
     target = roomiest([p for p in decided.masters if provider in p.master.providers], policy)
     if target is None:
         return None
@@ -468,10 +478,12 @@ async def place_key(graph_id: str, provider: str,
     return (key, target.master.endpoint) if key else None
 
 
-async def preview(policy, *, graph_ids: Optional[Collection[str]] = None) -> Tuple[Plan, Snapshot]:
-    """What the next pass would do under ``policy``, acting on nothing."""
+async def preview(policy, *, graph_ids: Optional[Collection[str]] = None,
+                  now: Optional[datetime] = None) -> Tuple[Plan, Snapshot]:
+    """What the next pass would do under ``policy`` at ``now`` (default: the clock), acting on
+    nothing."""
     snap = await gather(graph_ids=graph_ids)
-    return plan(policy, snap.masters, snap.graphs, datetime.now(timezone.utc)), snap
+    return plan(policy, snap.masters, snap.graphs, now or _clock()), snap
 
 
 class CapacityLoop:
@@ -495,8 +507,10 @@ class CapacityLoop:
             if not acquired:
                 return None
             policy = await residency_policy.resolve()
+            await _start_idle_clocks(graph_ids)
             snap = await gather(graph_ids=graph_ids)
-            decided = plan(policy, snap.masters, snap.graphs, datetime.now(timezone.utc))
+            await _requeue(snap)
+            decided = plan(policy, snap.masters, snap.graphs, _clock())
             await self._measure(snap, first={e.graph_id for e in decided.evictions})
             await self._act(decided, snap)
             await self._finish_loads(snap)
@@ -630,6 +644,33 @@ def _report(snap: Snapshot) -> None:
              if r["status"] == "rehydrating" and r.get("rehydrating_since") is not None]
     metrics.gauge_set("versioning_residency_oldest_rehydrating_seconds",
                       max(((now - s).total_seconds() for s in since), default=0))
+
+
+async def _start_idle_clocks(graph_ids: Optional[Collection[str]] = None) -> None:
+    """A graph with no read on record — every graph, the day residency is turned on, and each new
+    graph — starts its idle clock now: until then it is never idle. Bounded per pass."""
+    ps = ProjectionStateORM
+    todo = select(ps.graph_id).where(ps.last_read_at.is_(None)).limit(_CLOCKS_PER_PASS)
+    if graph_ids is not None:
+        todo = todo.where(ps.graph_id.in_(list(graph_ids)))
+    try:
+        async with db.graphver_session() as s:
+            await s.execute(update(ps).where(ps.graph_id.in_(todo.scalar_subquery()))
+                            .values(last_read_at=func.now())
+                            .execution_options(synchronize_session=False))
+    except Exception:  # noqa: BLE001 — still never idle; the next pass tries again
+        logger.warning("residency: idle clocks not started", exc_info=True)
+
+
+async def _requeue(snap: Snapshot) -> None:
+    """Put the graphs the pass queued itself into the queue once (``ZADD NX``), so they keep the
+    place they got rather than going behind every request again each pass."""
+    if not snap.requeue:
+        return
+    try:
+        await get_broker_redis().zadd(LOAD_REQUESTS, snap.requeue, nx=True)
+    except Exception:  # noqa: BLE001 — queued again on the next pass
+        logger.warning("residency: graphs not queued for their load", exc_info=True)
 
 
 async def _clear_spent(snap: Snapshot, *, full: bool) -> None:

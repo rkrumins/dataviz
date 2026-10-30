@@ -401,6 +401,45 @@ async def test_pressure_evicts_coldline_before_standard_and_never_always(
 
 
 @live
+async def test_the_idle_clock_starts_when_residency_first_runs(store, falkor, mine, monkeypatch):
+    """A graph with no read on record — every graph, the day residency is turned on — is never
+    idle: the pass starts its idle clock instead. A graph read daily but last published ten days
+    ago is not evicted on the first pass."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(svc, proj, mine, 1)
+    now = datetime.now(timezone.utc)
+    await _set_ps(gid, last_read_at=None,
+                  last_projected_at=(now - timedelta(days=10)).isoformat())
+    p = await CapacityLoop(proj).run_once(graph_ids=[gid])
+    ps = await _ps(gid)
+    assert p.evictions == [] and ps.status == "idle"
+    assert ps.last_read_at is not None and ps.last_read_at >= now - timedelta(minutes=1)
+
+
+@live
+async def test_a_graph_queued_by_the_loop_is_queued_once_and_keeps_its_place(
+        store, falkor, mine, monkeypatch):
+    """An Always graph out of FalkorDB, or a waiting graph whose request the broker lost, is
+    queued once (ZADD NX), not behind every request each pass."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(svc, proj, mine, 1)
+    assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+    used = await _used(falkor)
+    await _set_ps(gid, residency="always", size_bytes=used)       # it waits for room
+    await falkor.config_set("maxmemory", used * 2)
+    await get_broker_redis().zrem(residency.LOAD_REQUESTS, gid)
+    loop = CapacityLoop(proj)
+    assert (await loop.run_once(graph_ids=[gid])).waits[0].reason == "capacity"
+    first = await get_broker_redis().zscore(residency.LOAD_REQUESTS, gid)
+    assert first is not None
+    await asyncio.sleep(0.05)
+    await loop.run_once(graph_ids=[gid])
+    assert await get_broker_redis().zscore(residency.LOAD_REQUESTS, gid) == first
+
+
+@live
 async def test_idle_graphs_go_by_class_and_eviction_off_stops_it(store, falkor, mine, monkeypatch):
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
