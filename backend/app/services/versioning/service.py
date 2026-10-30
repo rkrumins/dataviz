@@ -4492,12 +4492,14 @@ class GraphVersioningService:
         create_targets = {t for _e, v in edge_creates for _s2, t in [_edge_src_tgt(v)] if t}
         existing_incident = (await self._incident_live_edge_skeletons(
             s, graph_id, branch_id, create_targets, sides=("target",)) if create_targets else {})
+        # An edge this batch re-points is judged where it now points, never where it was.
+        rewritten = {eid for eid, _v in edge_creates}
         # Index the live edges into the batch's targets once: (source, target, type) → their ids,
         # and child → {containment edge id: parent}.
         by_triple: Dict[Tuple[str, str, str], set] = {}
         parents_of: Dict[str, Dict[str, str]] = {}
         for oeid, op_ in existing_incident.items():
-            if oeid in deleted_edge_ids:
+            if oeid in deleted_edge_ids or oeid in rewritten:
                 continue
             osrc, otgt = _edge_src_tgt(op_)
             oet = _etype(op_)
@@ -4544,7 +4546,7 @@ class GraphVersioningService:
                 _seen, live = await self._containment_parents_climb(
                     s, graph_id, branch_id, ends, cset, None, skeleton=True)
                 graph_edges = [(oeid, *_edge_src_tgt(p)) for oeid, p in live.items()
-                               if oeid not in deleted_edge_ids]
+                               if oeid not in deleted_edge_ids and oeid not in rewritten]
                 graph_edges += checks
                 if len(graph_edges) > _CYCLE_THREAD_MIN:
                     looped = await asyncio.to_thread(_containment_cycle_edges, graph_edges, checks)
