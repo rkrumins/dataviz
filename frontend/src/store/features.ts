@@ -36,6 +36,9 @@ import { fetchPublicFeatureValues } from '@/services/featuresService'
  */
 export const DEFAULT_FEATURES: Record<string, unknown> = {
     versioningEnabled: true,
+    // Opt-in, and the server reads an unreadable value as off: guessing "on" would offer Fork and
+    // Update from parent only for them to 403.
+    forksEnabled: false,
     editModeEnabled: true,
     nodeSortingEnabled: true,             // kill switch — sort UI; saved orders always render
     traceEnabled: true,
