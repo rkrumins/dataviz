@@ -15,8 +15,8 @@ Builds, against Postgres (graphver):
 
 then measures each in a process of its own, as peak RSS is per process:
 
-  update  ``fork_update_size`` (how the route sizes an update) and ``update_fork_from_parent``:
-          seconds, rows written, the process's resident memory before and its high-water mark
+  update  ``fork_update_size`` (how the route sizes an update) and ``update_fork_from_parent``,
+          with the containment types given here: seconds, rows written, the process's resident memory before and its high-water mark
           (``VmHWM``: a child's ``ru_maxrss`` starts at its parent's)
   merge   the review's merge as a ``fork_merge`` job: queued as the routes queue one
           (``create_fork_merge_job``), claimed and run on its lease by the transfer lane's runner,
@@ -119,10 +119,11 @@ async def _measure_update(state: Dict[str, Any]) -> Dict[str, Any]:
     await svc.get_graph(fork)                                   # connections up, before the rss
     rss_before = _rss_mb()
     started = time.perf_counter()
-    size = await svc.fork_update_size(fork_graph_id=fork)
+    size = await svc.fork_update_size(fork_graph_id=fork, containment_edge_types=CONT)
     sized = time.perf_counter() - started
     started = time.perf_counter()
-    out = await svc.update_fork_from_parent(fork_graph_id=fork, actor="bench")
+    out = await svc.update_fork_from_parent(fork_graph_id=fork, actor="bench",
+                                            containment_edge_types=CONT)
     took = time.perf_counter() - started
     rows = await _rows(fork, (await svc.get_graph(fork))["main_head_commit_seq"])
     await db.dispose_engine()

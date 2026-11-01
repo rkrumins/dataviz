@@ -4076,16 +4076,18 @@ async def update_from_parent(
 ):
     """Take the parent's changes into this fork (its ``graph_id``): one ``sync_parent`` commit,
     and the fork reads the parent at its head from there on. 409 ``fork_update_conflicts`` names
-    what both changed (``conflicts``, and ``seeds``: the fork's own values to resolve from); send
-    it again with ``resolutions``, for those only (422 ``resolutions_without_conflict``). What it
+    what both changed (``conflicts``, and ``seeds``: the fork's own values to resolve from), and
+    what the update would break of the fork's hierarchy (``kind: structure``); send it again with
+    ``resolutions``, for those only (422 ``resolutions_without_conflict``). What it
     writes is judged by the fork's ontology, as every write is (422 ``ontology_violation``). 409
     ``not_a_fork`` for a graph with no parent. One that would
     merge, or delete in its cascades, more than ``SYNC_PUBLISH_MAX_CHANGES`` entities runs as a job
     pinned to the parent's head now: 202 with the job to poll (``GET …/update-jobs/{jobId}``), one
     at a time per fork (409 ``job_active``)."""
     resolutions = body.resolutions if body is not None else None
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     with _domain_errors():
-        size = await svc.fork_update_size(fork_graph_id=graph_id)
+        size = await svc.fork_update_size(fork_graph_id=graph_id, containment_edge_types=cset)
     parent_id = _meta["fork_parent_graph_id"]
     label = await _data_source_label(session, await svc.get_graph(parent_id))
     if size["changes"] > vconfig.SYNC_PUBLISH_MAX_CHANGES:
@@ -4099,7 +4101,6 @@ async def update_from_parent(
                                  parentSeq=size["parent_seq"], jobId=job["job_id"])
         return JSONResponse(status_code=202, content={"jobId": job["job_id"], "graphId": graph_id,
                                                       "status": started})
-    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
     rules = await _rules_for_meta(session, ws_id, _meta)
     with _domain_errors():
         out = await svc.update_fork_from_parent(

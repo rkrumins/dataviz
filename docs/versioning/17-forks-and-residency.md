@@ -344,7 +344,22 @@ with it, or, when the fork changed the node, is a `delete/modify` conflict. An e
 or pointed in the window at a node the fork deleted is deleted on the fork. The candidates come from
 SQL over the window; each is judged at what the fork reads after the update. Containment
 descendants are not cascaded: a column the fork made under a table the parent deleted stays, with
-no parent, as a draft's pull leaves it.
+no parent, as a draft's pull leaves it — unless the fork's ontology says its type sits inside a
+parent, which makes it a `structure` conflict (below).
+
+**What would break the hierarchy.** Each side's changes can be sound alone and break the fork's
+hierarchy together: the fork moved a column from T1 to T2, the parent moved it from T1 to T3, and
+after the update it would sit in both. The update judges what it would leave the fork holding as
+the gate judges a write: an edge it brings in — the parent's, drawn or pointed elsewhere, that the
+fork reads new after the move, or a merged one — that duplicates an edge, gives a node a second
+parent or closes a loop with the fork's own; and, under strict enforcement, a node it leaves outside
+every parent its type needs. The candidates come from SQL, the window joined to the fork's edges (the
+parent's edges into a node one of the fork's edges points at, and, while the fork has containment
+links of its own, the parent's new containment links, which a loop may run through however far from
+the fork's). Each is a conflict too, `kind: "structure"`, whole-entity (`path: []`), on the entity
+the update brings in, with the gate's words as its `reason`: settled like the others, by a
+resolution for it (`null` drops the parent's link on the fork). They are judged once the field
+conflicts are settled, so they may come in a second answer.
 
 **History.** One commit on the fork's `main`, kind `sync_parent`, message `Update from <the parent
 data source's label>@P`, written with no rows too, so history shows the update; its `stats` are

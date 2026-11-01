@@ -404,6 +404,64 @@ def test_an_update_that_would_write_an_untyped_or_undeclared_node_is_refused_by_
     _run(case)
 
 
+def test_a_second_parent_the_update_would_give_a_node_is_a_conflict_to_settle():
+    """The fork moves C from T1 to T2, the parent from T1 to T3: both deleted the link to T1, which
+    merges clean, but C would sit under T2 and T3. That is a conflict the update raises — on the
+    parent's link, which the fork never had — and settles, never a refusal at the merge."""
+    async def case(svc):
+        async with _projected(svc) as root:
+            gid = await root.make([_n("T1"), _n("T2"), _n("T3"), _n("C"),
+                                   _e("k1", "T1", "C", "CONTAINS")])
+            fgid, fmain = await _fork(svc, gid)
+            await svc.apply_ops(graph_id=fgid, actor="bob", message="move", containment_edge_types=CONT,
+                                ops=[_d("k1", "edge"), _e("k2", "T2", "C", "CONTAINS")])
+            await root.edit([_d("k1", "edge"), _e("k3", "T3", "C", "CONTAINS")])
+            with pytest.raises(ForkUpdateConflicts) as exc:
+                await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob",
+                                                  containment_edge_types=CONT)
+            assert [(c["entity_id"], c["kind"], c["path"]) for c in exc.value.conflicts] == [
+                ("k3", "structure", [])]
+            assert "parent" in exc.value.conflicts[0]["reason"]
+            assert exc.value.seeds == {"k3": None}
+            out = await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob",
+                                                    containment_edge_types=CONT,
+                                                    resolutions={"k3": None})
+            assert out["wrote"] == 1
+            st = await svc.materialize_state(graph_id=fgid, branch_id=fmain)
+            assert {e: (p["sourceEntityId"], p["targetEntityId"]) for e, p in st["edges"].items()} == {
+                "k2": ("T2", "C")}
+            pr = await svc.open_pr(source_graph_id=fgid, actor="bob")
+            assert await svc.merge_pr(pr_id=pr, actor="carol", message="m", containment_edge_types=CONT)
+            pmain = await svc.main_branch_id(gid)
+            pst = await svc.materialize_state(graph_id=gid, branch_id=pmain)
+            assert set(pst["edges"]) == {"k2"}
+    _run(case)
+
+
+def test_a_loop_the_update_would_close_far_from_the_forks_own_link_is_a_conflict():
+    """Q holds S and R holds P on both sides; the fork puts Q in P, the parent R in S. Neither
+    loops alone; together P holds Q holds S holds R holds P. The parent's link touches no node of
+    the fork's, and is the conflict all the same."""
+    async def case(svc):
+        async with _projected(svc) as root:
+            gid = await root.make([_n("P"), _n("Q"), _n("R"), _n("S"),
+                                   _e("qs", "Q", "S", "CONTAINS"), _e("rp", "R", "P", "CONTAINS")])
+            fgid, _fmain = await _fork(svc, gid)
+            await svc.apply_ops(graph_id=fgid, actor="bob", message="nest", containment_edge_types=CONT,
+                                ops=[_e("pq", "P", "Q", "CONTAINS")])
+            await root.edit([_e("sr", "S", "R", "CONTAINS")])
+            with pytest.raises(ForkUpdateConflicts) as exc:
+                await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob",
+                                                  containment_edge_types=CONT)
+            assert [(c["entity_id"], c["kind"]) for c in exc.value.conflicts] == [("sr", "structure")]
+            assert "loop" in exc.value.conflicts[0]["reason"]
+            out = await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob",
+                                                    containment_edge_types=CONT,
+                                                    resolutions={"sr": None})
+            assert out["wrote"] == 1
+    _run(case)
+
+
 # ── history across an update ──────────────────────────────────────────────────────────────────
 def test_reverting_an_update_or_restoring_past_one_is_refused():
     """An update changes the parent the fork reads, which no commit of the fork's own can take back:

@@ -3313,7 +3313,11 @@ class GraphVersioningService:
         pointed in it at a node the fork deleted is deleted on the fork. What is written is what
         the fork would read otherwise once its base moves: merged and resolved values, and those
         deletions. It faces the gate every write does (:meth:`_enforce_written`), by the fork's
-        ontology (``ontology_rules``, ``containment_edge_types``).
+        ontology (``ontology_rules``, ``containment_edge_types``). What the update would leave the
+        fork holding that breaks its hierarchy between what each side did — a duplicate, a second
+        parent, a loop, a node left outside the parent its type needs (:meth:`_broken_structure`)
+        — is a conflict too, of kind ``structure`` and whole-entity, on the entity the update brings
+        in, and settled as the others are.
 
         One ``sync_parent`` commit on the fork's ``main`` — written with no rows too, so history
         shows the update — and the base the fork reads from it on, ``(that commit's seq, P)`` in
@@ -3327,12 +3331,14 @@ class GraphVersioningService:
                 parent_seq=parent_seq, parent_label=parent_label,
                 containment_edge_types=containment_edge_types, ontology_rules=ontology_rules))
 
-    async def fork_update_size(self, *, fork_graph_id: str) -> Dict[str, object]:
+    async def fork_update_size(self, *, fork_graph_id: str,
+                               containment_edge_types: Sequence[str] = ()) -> Dict[str, object]:
         """What :meth:`update_fork_from_parent` would take now, counted in SQL without running it:
-        ``{changes, parent_seq, up_to_date}`` — the entities it would merge and the edges its
-        cascades may delete (each query counted no further than ``SYNC_PUBLISH_MAX_CHANGES + 1``),
-        and the parent's head it would update to. What the route sizes an update by, to run it in
-        the request or queue it as a job pinned to ``parent_seq``."""
+        ``{changes, parent_seq, up_to_date}`` — the entities it would merge, the edges its
+        cascades may delete and those its hierarchy check judges (each query counted no further
+        than ``SYNC_PUBLISH_MAX_CHANGES + 1``), and the parent's head it would update to. What the
+        route sizes an update by, to run it in the request or queue it as a job pinned to
+        ``parent_seq``."""
         cap = config.SYNC_PUBLISH_MAX_CHANGES
         async with self._session() as s:
             fork, parent = await self._fork_and_parent(s, fork_graph_id)
@@ -3345,7 +3351,9 @@ class GraphVersioningService:
                 s, parent.id, await self._main_branch_id(s, parent.id), base, to)
             changes = 0
             for stmt in [*self._both_queries(fork.id, fork_main, window),
-                         *self._cascade_queries(fork.id, fork_main, window)]:
+                         *self._cascade_queries(fork.id, fork_main, window),
+                         *self._structure_queries(fork.id, fork_main, window,
+                                                  containment_edge_types)]:
                 changes += int(await s.scalar(select(func.count()).select_from(
                     stmt.distinct().limit(cap + 1).subquery())) or 0)
             return {"changes": changes, "parent_seq": to, "up_to_date": False}
@@ -3417,13 +3425,31 @@ class GraphVersioningService:
             if conflicts:
                 raise ForkUpdateConflicts(conflicts, {
                     eid: ours.get(eid) for eid in sorted({c["entity_id"] for c in conflicts})})
-            if set(resolutions) - settled:
-                raise ResolutionsWithoutConflict(set(resolutions) - settled)
             view = _collapse_empty_payloads(merged)
             await self._sync_neighborhood(s, fork.id, fork_main, window, view, new_seq)
             self._cascade_incident_edges(view)
-            self._assert_referential_integrity(view)
+            # Judged against the fork as the update leaves it: its head is the update's seq for what
+            # this transaction reads from here on — its base moved, before a row is written.
+            fork.main_head_commit_seq = new_seq
             after = await self._values_at(s, fork.id, fork_main, list(view), new_seq)
+            # A resolution's own value is the gate's to judge, below; the rest is the update's.
+            broken = [v for v in await self._broken_structure(
+                s, fork, fork_main, head, window, view, after, containment_edge_types, ontology_rules)
+                if v["entity_id"] not in settled]
+            blamed = sorted({v["entity_id"] for v in broken})
+            if set(resolutions) - settled - set(blamed):
+                raise ResolutionsWithoutConflict(set(resolutions) - settled - set(blamed))
+            unsettled = [eid for eid in blamed if eid not in resolutions]
+            if unsettled:
+                raise ForkUpdateConflicts(*await self._structure_conflicts(
+                    s, broken, unsettled, (parent.id, parent_main, base), (fork.id, fork_main, head),
+                    (parent.id, parent_main, to)))
+            if blamed:
+                view.update({eid: _normalize_resolution(resolutions[eid]) for eid in blamed})
+                await self._sync_neighborhood(s, fork.id, fork_main, window, view, new_seq)
+                self._cascade_incident_edges(view)
+                after = await self._values_at(s, fork.id, fork_main, list(view), new_seq)
+            self._assert_referential_integrity(view)
             deltas = net_delta({eid: after.get(eid) for eid in view}, view)
 
             kind_by_entity: Dict[str, str] = {}
@@ -3431,9 +3457,6 @@ class GraphVersioningService:
                 kind_by_entity = self._resolve_delta_kinds(deltas, await self._kind_map_multi(
                     s, [(g, b) for g, b, _at in await self._layers(s, fork.id, fork_main, new_seq)],
                     entity_ids=[d.entity_id for d in deltas]))
-                # Judged against the fork as the update leaves it: its head is the update's seq for
-                # what this transaction reads from here on — its base moved, before a row is written.
-                fork.main_head_commit_seq = new_seq
                 await self._enforce_written(
                     s, fork.id, fork_main, {d.entity_id: d.payload for d in deltas}, after,
                     kind_by_entity, containment_edge_types=containment_edge_types,
@@ -3532,6 +3555,86 @@ class GraphVersioningService:
                     ev.graph_id == gid, ev.branch_id == bid, ev.commit_seq > lo,
                     ev.commit_seq <= hi, ev.op != "delete", end.in_(gone)))
         return queries
+
+    @staticmethod
+    def _structure_queries(fork_id: str, fork_main: str, window,
+                           containment_edge_types: Sequence[str]) -> list:
+        """The parent's edges that may break a fork's hierarchy once Update from parent moves its
+        base, as queries: those drawn, or pointed elsewhere, in ``window`` (:meth:`_window_chain`)
+        that the fork has no rows of (they show through) — into a node an edge of the fork's own
+        points at (a duplicate of it, or a second parent beside it), and, while the fork has a live
+        containment link of its own, every containment link among them: a loop runs through one of
+        the fork's links and one of the parent's new ones, however far apart. More than that, at
+        times: which of them the fork reads new or re-pointed is told from what it reads
+        (:meth:`_broken_structure`)."""
+        ev, own = EdgeVersionORM, aliased(EdgeVersionORM)
+        cset = sorted({t.upper() for t in containment_edge_types or ()})
+
+        def contained(m):
+            return or_(func.upper(m.edge_type).in_(cset), m.edge_type.is_(None))
+
+        mine = select(EntityHeadORM.entity_id).where(
+            EntityHeadORM.graph_id == fork_id, EntityHeadORM.branch_id == fork_main)
+        ends = select(own.target_entity_id).where(own.graph_id == fork_id, own.branch_id == fork_main)
+        linked = select(own.entity_id).where(own.graph_id == fork_id, own.branch_id == fork_main,
+                                             own.op != "delete", contained(own)).exists()
+        queries = []
+        for gid, bid, lo, hi in window:
+            drawn = select(ev.entity_id).where(
+                ev.graph_id == gid, ev.branch_id == bid, ev.commit_seq > lo, ev.commit_seq <= hi,
+                ev.op != "delete", ev.entity_id.not_in(mine))
+            queries.append(drawn.where(ev.target_entity_id.in_(ends)))
+            if cset:
+                queries.append(drawn.where(contained(ev), linked))
+        return queries
+
+    async def _broken_structure(
+        self, s, fork: GraphORM, fork_main: str, head: int, window,
+        view: Dict[str, Optional[dict]], after: Mapping[str, Optional[dict]],
+        containment_edge_types: Sequence[str], ontology_rules: Optional[OntologyRules],
+    ) -> List[dict]:
+        """What Update from parent would leave a fork holding that breaks its hierarchy where
+        neither side did alone, as the gate words it: a duplicate, a second parent or a loop between
+        an edge the update brings in — the parent's, new or re-pointed against what the fork read at
+        ``head``, shown through (:meth:`_structure_queries`) or merged (in ``view``) — and the
+        fork's own (:meth:`_validate_edge_integrity`); and under strict enforcement, a node left
+        outside every parent its type needs (:meth:`_parentless_violations`, of ``view`` against
+        ``after``: what the fork reads once its base moves). Judged against the fork as the update
+        leaves it: the caller has made its head the update's seq in ``s``."""
+        at = fork.main_head_commit_seq
+        near = await self._ids_of(s, self._structure_queries(
+            fork.id, fork_main, window, containment_edge_types))
+        shown = near - view.keys()
+        edges = shown | {eid for eid, p in view.items() if p and _is_edge_payload(p)}
+        was = await self._skeletons_at(s, fork.id, fork_main, edges, head)
+        now = await self._skeletons_at(s, fork.id, fork_main, shown, at)
+        now.update({eid: view[eid] for eid in edges - shown})
+        creates = [(eid, now[eid]) for eid in sorted(edges)
+                   if now.get(eid) and _redefines(was.get(eid), now[eid], "edge")]
+        viol = (await self._validate_edge_integrity(
+            s, fork.id, fork_main, creates, {eid for eid, p in view.items() if p is None},
+            containment_edge_types) if creates else [])
+        if ontology_rules is not None and fork.ontology_enforcement == "strict":
+            kinds = {eid: "edge" if _is_edge_payload(p or after.get(eid) or {}) else "node"
+                     for eid, p in view.items()}
+            viol += await self._parentless_violations(
+                s, fork.id, fork_main, view, after, kinds, ontology_rules)
+        return viol
+
+    async def _structure_conflicts(self, s, broken: List[dict], ids: List[str], base, ours,
+                                   theirs) -> Tuple[List[dict], Dict[str, Optional[dict]]]:
+        """:meth:`_broken_structure`'s violations of ``ids`` as an update's conflicts, in a pull's
+        shape — whole-entity (``path`` empty), ``kind`` ``structure``, and the gate's words as
+        their ``reason`` — with their seeds: each entity's value at ``base``, ``ours`` and
+        ``theirs``, each ``(graph, branch, seq)``."""
+        values = [await self._values_at(s, g, b, ids, at) for g, b, at in (base, ours, theirs)]
+        reasons: Dict[str, List[str]] = {}
+        for v in broken:
+            reasons.setdefault(v["entity_id"], []).append(v["reason"])
+        return ([{"entity_id": eid, "path": [], "base": values[0].get(eid),
+                  "ours": values[1].get(eid), "theirs": values[2].get(eid), "kind": "structure",
+                  "reason": " ".join(dict.fromkeys(reasons[eid]))} for eid in ids],
+                {eid: values[1].get(eid) for eid in ids})
 
     @staticmethod
     async def _ids_of(s, queries) -> set:

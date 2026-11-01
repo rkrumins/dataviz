@@ -42,11 +42,13 @@ review then merges only up to date with its parent, as a copy of its own changes
   through and writes nothing; what both changed is 3-way merged against the parent as the fork last
   agreed with it. Fields both changed differently answer **409** `fork_update_conflicts`
   `{conflicts, seeds}`, settled field by field by `resolutions`, as a pull's are, and only those
-  (**422** `resolutions_without_conflict` names any other). What it writes faces the gate every write
-  does, by the fork's ontology, and it takes `workspace:datasource:publish`. A node the parent
-  deleted takes the fork's own edges on it with it, and an edge the parent drew to a node the fork
-  deleted is deleted on the fork. It holds only the fork's lock, so it never waits on the parent's
-  publishes. → `{commitId, parentSeq, wrote, upToDate}`; recorded as
+  (**422** `resolutions_without_conflict` names any other). What the two sides' changes would break
+  of the fork's hierarchy together — a node in two parents, a duplicate, a loop, a node left outside
+  the parent its type needs — is a conflict too (`kind: "structure"`). What it writes faces the gate
+  every write does, by the fork's ontology, and it takes `workspace:datasource:publish`. A node the
+  parent deleted takes the fork's own edges on it with it, and an edge the parent drew to a node the
+  fork deleted is deleted on the fork. It holds only the fork's lock, so it never waits on the
+  parent's publishes. → `{commitId, parentSeq, wrote, upToDate}`; recorded as
   `workspace.versioning.fork_updated`. One that would merge, or delete in its cascades, more than
   `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` entities runs as a `fork_update` job pinned to the parent's
   head (**202**; poll `GET …/graphs/{fork}/update-jobs/{jobId}`), one per fork at a time. A
