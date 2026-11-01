@@ -67,7 +67,8 @@ def test_a_fork_says_how_far_it_is_from_its_parent(monkeypatch, forks_on):
                                     "readsFrom": "postgres", "countsCapped": True}
 
             # A fork in the trash says none of it.
-            assert (await c.delete(f"/api/v1/{WS}/versioning/graphs/{fgid}")).status_code == 204
+            deleted = await c.delete(f"/api/v1/{WS}/versioning/graphs/{fgid}")
+            assert deleted.status_code == 204
             assert await item() == {k: None for k in FIELDS}
     _run(case)
 
