@@ -51,7 +51,7 @@ async def _forked(svc, c, seed):
     return gid, r.json()["graphId"]
 
 
-def test_update_from_parent_answers_its_commit_and_is_recorded(monkeypatch):
+def test_update_from_parent_answers_its_commit_and_is_recorded(monkeypatch, forks_on):
     updates = _recorder(monkeypatch)
 
     async def case(svc):
@@ -75,7 +75,7 @@ def test_update_from_parent_answers_its_commit_and_is_recorded(monkeypatch):
     _run(case)
 
 
-def test_update_from_parent_needs_the_publish_permission():
+def test_update_from_parent_needs_the_publish_permission(forks_on):
     async def case(svc):
         async with _client(PERMS) as c:
             gid, fgid = await _forked(svc, c, [_n("A")])
@@ -88,7 +88,7 @@ def test_update_from_parent_needs_the_publish_permission():
     _run(case)
 
 
-def test_the_inline_update_takes_the_parent_head_it_was_sized_at(monkeypatch):
+def test_the_inline_update_takes_the_parent_head_it_was_sized_at(monkeypatch, forks_on):
     """The route sizes an update at the parent's head, then runs it there: a parent publish in
     between is the next update's, never this one's — which was judged small at that size."""
     from backend.app.services.versioning.service import GraphVersioningService
@@ -114,7 +114,7 @@ def test_the_inline_update_takes_the_parent_head_it_was_sized_at(monkeypatch):
     _run(case)
 
 
-def test_update_from_parent_answers_conflicts_and_refuses_a_graph_with_no_parent():
+def test_update_from_parent_answers_conflicts_and_refuses_a_graph_with_no_parent(forks_on):
     async def case(svc):
         async with _client(PERMS) as c:
             gid, fgid = await _forked(svc, c, [_n("A")])
@@ -138,7 +138,7 @@ def test_update_from_parent_answers_conflicts_and_refuses_a_graph_with_no_parent
     _run(case)
 
 
-def test_a_large_update_runs_as_a_job_one_at_a_time_pinned_to_the_parent_it_was_asked_of(monkeypatch):
+def test_a_large_update_runs_as_a_job_one_at_a_time_pinned_to_the_parent_it_was_asked_of(monkeypatch, forks_on):
     """Here every update that merges anything is large."""
     from backend.app.api.v1.endpoints import versioning as ep
     from backend.app.services.versioning import config as vconfig
@@ -208,7 +208,7 @@ def test_a_large_update_runs_as_a_job_one_at_a_time_pinned_to_the_parent_it_was_
     _run(case)
 
 
-def test_an_update_job_that_finds_conflicts_fails_with_them(monkeypatch):
+def test_an_update_job_that_finds_conflicts_fails_with_them(monkeypatch, forks_on):
     from backend.app.services.versioning import config as vconfig
 
     monkeypatch.setattr(vconfig, "SYNC_PUBLISH_MAX_CHANGES", 0)
@@ -239,4 +239,37 @@ def test_an_update_job_that_finds_conflicts_fails_with_them(monkeypatch):
             r = await c.post(_url(fgid), json={"resolutions": {"A": {**seed, "displayName": "A both"}}})
             assert r.status_code == 202, r.text
             assert (await ie.run_fork_job(r.json()["jobId"]))["wrote"] == 1
+    _run(case)
+
+
+def test_while_forks_are_off_an_update_is_refused_and_a_queued_one_fails_yet_reads(monkeypatch):
+    """Turned off after an update was queued: the route refuses another (``graph_in_workspace``'s
+    gate on a fork), the job refuses when it runs, as the route would — 403 ``feature_disabled`` —
+    and the job can still be read."""
+    from backend.app.api.v1.endpoints.versioning import get_import_export_service
+    from backend.app.services.versioning import config as vconfig
+    from backend.tests.integration.test_forks_feature_flag import REFUSED, _forks, _refused
+    from backend.tests.integration.test_forks_feature_flag import _client as _switched
+
+    monkeypatch.setattr(vconfig, "SYNC_PUBLISH_MAX_CHANGES", 0)
+
+    async def case(svc):
+        ie = get_import_export_service()
+        _forks(True)
+        async with _switched() as c:
+            gid, fgid = await _forked(svc, c, [_n("A")])
+            await svc.apply_ops(graph_id=fgid, actor="bob", message="own", ops=[_u("A", "A fork")])
+            await svc.apply_ops(graph_id=gid, actor="alice", message="parent", ops=[_u("A", "A", w=1)])
+            head = (await svc.get_graph(fgid))["main_head_commit_seq"]
+            r = await c.post(_url(fgid), json={})
+            assert r.status_code == 202, r.text
+            job_id = r.json()["jobId"]
+            _forks(False)
+            assert _refused(await c.post(_url(fgid), json={}))
+            result = await ie.run_fork_job(job_id)
+            assert result == {"error": {"status": 403, "detail": REFUSED}}, result
+            r = await c.get(f"/api/v1/{WS}/versioning/graphs/{fgid}/update-jobs/{job_id}")
+            assert r.status_code == 200, r.text
+            assert (r.json()["status"], r.json()["error"]) == ("failed", {"status": 403, "detail": REFUSED})
+            assert (await svc.get_graph(fgid))["main_head_commit_seq"] == head
     _run(case)

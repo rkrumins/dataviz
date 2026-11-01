@@ -28,16 +28,18 @@ left to resolve. Either runs as a job when it is large.
 Forks are **off** on a new deployment and after an upgrade to this release. A system administrator
 turns them on under **Admin → Features → Forks** (`forksEnabled`, in Lineage beside Version control,
 which it needs); only a system administrator can change a switch there. It is a preview: Update from
-parent and the screens to work in a fork come next (§9).
+parent (§8) is here, and the screens to work in a fork come next.
 
 While it is off nothing new happens in a fork, and no parent graph is touched. Making a fork, any
 change to a fork's graph or its drafts (opening, saving, checkpointing, publishing and pulling a
-draft, writing its `main`, importing, reverting, restoring to a commit) and its reviews (opening,
-approving, editing, merging, and the job a large merge or publish runs as) answer **403**
-`feature_disabled`: "Forks are turned off for this deployment. An administrator can turn them on
-under Admin → Features." What stays open:
+draft, writing its `main`, importing, reverting, restoring to a commit, and Update from parent) and
+its reviews (opening, approving, editing, merging) answer **403** `feature_disabled`: "Forks are
+turned off for this deployment. An administrator can turn them on under Admin → Features." So does
+the job a large publish, update or merge on a fork runs as, when it runs after forks were turned
+off: it fails with that answer, and a merge's review is handed back. What stays open:
 
-- listing a graph's forks, and reading a fork: its data, its views and canvas, its history;
+- listing a graph's forks, and reading a fork: its data, its views and canvas, its history, and how
+  its update and merge jobs went (`…/update-jobs/{jobId}`, `…/publish-jobs/{jobId}`);
 - moving a fork to the trash and back, closing its review (a fork with a live one can't go to the
   trash), exporting and freezing it;
 - the purge, the reaper, the backfill and every other background job, and the admin views.

@@ -4169,6 +4169,7 @@ async def _fork_from_job(job: dict) -> dict:
             meta = await svc.get_graph(job["graphId"])
             if meta is None:                            # trashed, or being purged, since queued
                 raise HTTPException(status_code=404, detail="graph not found")
+            await require_forks_enabled()               # forks turned off since it was queued
             async with get_async_session() as session:
                 cset = await _live_containment_types(session, job["workspaceId"], meta.get("data_source_id"))
                 rules = await _rules_for_meta(session, job["workspaceId"], meta)
@@ -4200,6 +4201,7 @@ async def _fork_merge_from_job(job: dict) -> dict:
                 meta = await svc.get_graph(graph_id)
                 if meta is None:                        # trashed, or being purged, since queued
                     raise HTTPException(status_code=404, detail="graph not found")
+                await require_forks_enabled()           # forks turned off since it was queued
                 async with get_async_session() as session:
                     cset = await _live_containment_types(session, job["workspaceId"], meta.get("data_source_id"))
                     rules = await _rules_for_meta(session, job["workspaceId"], meta)

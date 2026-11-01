@@ -25,11 +25,12 @@ review then merges only up to date with its parent, as a copy of its own changes
 
 - **Forks are opt-in: Admin → Features → Forks** (`forksEnabled`, a preview in Lineage, needing
   Version control). It ships off. While it is off no fork is made and a fork is read-only: a
-  change to its graph or its drafts, and opening, approving, editing or merging its reviews,
-  answer **403** `feature_disabled` ("Forks are turned off for this deployment. …"), and the job a
-  large publish or merge on a fork runs as refuses the same way. Listing and reading forks, moving
-  them to the trash and back, closing their reviews, and the purge, the reaper and the backfill
-  keep working; no parent graph is touched, and nothing is deleted.
+  change to its graph or its drafts, Update from parent, and opening, approving, editing or merging
+  its reviews, answer **403** `feature_disabled` ("Forks are turned off for this deployment. …"),
+  and the job a large publish, update or merge on a fork runs as refuses the same way. Listing and
+  reading forks and their jobs, moving them to the trash and back, closing their reviews, and the
+  purge, the reaper and the backfill keep working; no parent graph is touched, and nothing is
+  deleted.
 - **A fork is a data source of its own.** `POST /api/v1/{ws}/versioning/graphs/{gid}/forks` takes an
   optional `{name}` (1–80 characters) and answers its `dataSourceId` too: a data source in the
   parent's workspace, on its provider, labelled `"<parent label> · <name>"` (without a name, `Fork`

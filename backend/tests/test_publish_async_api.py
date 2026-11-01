@@ -257,7 +257,7 @@ async def test_a_queued_publish_on_a_deleted_graph_is_refused(monkeypatch):
     assert published == []
 
 
-async def test_a_refused_update_job_keeps_bounded_conflicts(monkeypatch):
+async def test_a_refused_update_job_keeps_bounded_conflicts(monkeypatch, forks_on):
     """An Update from parent job runs above 20,000 changes, and each conflict it finds carries the
     fork's own value of its entity: kept whole, they fill the job and every poll of it. The job
     keeps a hundred conflicts, the seeds of their entities, and the count."""

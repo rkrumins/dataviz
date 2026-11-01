@@ -39,7 +39,7 @@ def _merge_url(pr, route):
     return f"/api/v1/{WS}/versioning/{route}/{pr}/merge"
 
 
-def test_both_merge_routes_refuse_a_fork_behind_its_parent():
+def test_both_merge_routes_refuse_a_fork_behind_its_parent(forks_on):
     async def case(svc):
         async with _client(PERMS) as c:
             gid, fgid, pr = await _review(svc, c)
@@ -59,7 +59,7 @@ def test_both_merge_routes_refuse_a_fork_behind_its_parent():
     _run(case)
 
 
-def test_a_large_review_is_merged_by_a_job_that_holds_it_merging(monkeypatch):
+def test_a_large_review_is_merged_by_a_job_that_holds_it_merging(monkeypatch, forks_on):
     from backend.app.services.versioning import config as vconfig
 
     monkeypatch.setattr(vconfig, "SYNC_PUBLISH_MAX_CHANGES", 0)
@@ -100,7 +100,7 @@ def test_a_large_review_is_merged_by_a_job_that_holds_it_merging(monkeypatch):
     _run(case)
 
 
-def test_a_merge_job_lands_and_one_refused_or_dead_hands_the_review_back(monkeypatch):
+def test_a_merge_job_lands_and_one_refused_or_dead_hands_the_review_back(monkeypatch, forks_on):
     from backend.app.services.versioning import config as vconfig
 
     monkeypatch.setattr(vconfig, "SYNC_PUBLISH_MAX_CHANGES", 0)
@@ -149,7 +149,7 @@ def test_a_merge_job_lands_and_one_refused_or_dead_hands_the_review_back(monkeyp
     _run(case)
 
 
-def test_a_merge_job_whose_review_merged_under_it_completes_with_that_merge(monkeypatch):
+def test_a_merge_job_whose_review_merged_under_it_completes_with_that_merge(monkeypatch, forks_on):
     """A superseded attempt's merge lands between this attempt's look at the review and its merge:
     the merge is refused (the review merged), and the job completes with that merge all the same."""
     from backend.app.services.versioning import config as vconfig
@@ -181,7 +181,7 @@ def test_a_merge_job_whose_review_merged_under_it_completes_with_that_merge(monk
     _run(case)
 
 
-def test_a_review_being_merged_can_be_neither_closed_nor_given_reviewers(monkeypatch):
+def test_a_review_being_merged_can_be_neither_closed_nor_given_reviewers(monkeypatch, forks_on):
     from backend.app.services.versioning import config as vconfig
     from backend.app.services.versioning.errors import JobActive
 
@@ -203,7 +203,7 @@ def test_a_review_being_merged_can_be_neither_closed_nor_given_reviewers(monkeyp
     _run(case)
 
 
-def test_the_overview_counts_a_review_being_merged_as_open(monkeypatch):
+def test_the_overview_counts_a_review_being_merged_as_open(monkeypatch, forks_on):
     from backend.app.services.system_status.probes import probe_overview
     from backend.app.services.versioning import config as vconfig
 
@@ -231,4 +231,30 @@ def test_a_drafts_review_sent_to_the_fork_merge_route_is_refused_early():
             r = await c.post(_merge_url(mr, "pulls"), json={"message": "m"})
             assert r.status_code == 404, r.text
             assert (await svc.get_pr(mr))["status"] != "merged"
+    _run(case)
+
+
+def test_a_merge_job_queued_before_forks_were_turned_off_fails_and_hands_the_review_back(monkeypatch):
+    from backend.app.services.versioning import config as vconfig
+    from backend.tests.integration.test_forks_feature_flag import REFUSED, _forks
+    from backend.tests.integration.test_forks_feature_flag import _client as _switched
+
+    monkeypatch.setattr(vconfig, "SYNC_PUBLISH_MAX_CHANGES", 0)
+
+    async def case(svc):
+        from backend.app.api.v1.endpoints.versioning import get_import_export_service
+
+        ie = get_import_export_service()
+        _forks(True)
+        async with _switched() as c:
+            gid, _fgid, pr = await _review(svc, c)
+            head = (await svc.get_graph(gid))["main_head_commit_seq"]
+            r = await c.post(_merge_url(pr, "pulls"), json={"message": "m"})
+            assert r.status_code == 202, r.text
+            _forks(False)
+            result = await ie.run_fork_job(r.json()["jobId"])
+            assert result == {"error": {"status": 403, "detail": REFUSED}}, result
+            assert (await ie.get_job(r.json()["jobId"]))["status"] == "failed"
+            assert (await svc.get_pr(pr))["status"] == "mergeable"
+            assert (await svc.get_graph(gid))["main_head_commit_seq"] == head
     _run(case)
