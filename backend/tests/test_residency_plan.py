@@ -743,7 +743,7 @@ async def test_a_load_waits_for_its_summaries_while_its_edge_types_cannot_be_rea
                            edge_types_resolver=projection_target.resolve_aggregation_edge_types)
     proj._svc = _Blip()
     assert await proj.summaries_built("graph_x", "gvp_graph_x{abc.1}", None, 42,
-                                      ask="load7.0") is False
+                                      ask="load7.0") is None       # cannot tell: not served
     assert asked == []                         # nothing to ask a build for, either
 
     async def no_lineage(svc, gid):
@@ -779,6 +779,36 @@ async def test_a_package_seed_writes_its_key_only_when_admitted(monkeypatch):
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
     await package_seed._admit_seed("graph_x", ctx)
     assert len(asked) == 1
+
+
+async def test_a_failed_ontology_read_is_unresolved_not_no_lineage(monkeypatch):
+    """Review 3, finding 3: LocalOntologyService.resolve swallows a failed read of the assigned
+    ontology and resolves with none — "no lineage" — so with the management database down the
+    summaries gate let a load through, the original case. The resolver reads the assigned ontology
+    itself now, and a failed read is UNRESOLVED."""
+    import contextlib
+
+    from backend.app.services import projection_target
+    from backend.app.services.versioning.projection import UNRESOLVED
+
+    class _Svc:
+        async def get_graph(self, gid):
+            return {"graph_id": gid, "data_source_id": "ds_1", "workspace_id": "ws_1"}
+
+    class _Down:
+        async def execute(self, *a, **kw):
+            raise ConnectionRefusedError("management database unreachable")
+
+    @contextlib.asynccontextmanager
+    async def down():
+        yield _Down()
+
+    async def in_source(ds_id):
+        return "in_source"
+
+    monkeypatch.setattr(projection_target, "get_async_session", down)
+    monkeypatch.setattr(projection_target, "_projection_mode", in_source)
+    assert await projection_target.resolve_aggregation_edge_types(_Svc(), "graph_x") is UNRESOLVED
 
 
 def test_a_resident_graph_asks_for_no_load():

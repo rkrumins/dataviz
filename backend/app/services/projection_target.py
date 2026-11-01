@@ -43,12 +43,15 @@ async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: 
         # reads; leave dedicated-mode rollups entirely to the aggregation job.
         dedicated = await _projection_mode(str(meta["data_source_id"])) == "dedicated"
         from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
-        from backend.app.ontology.service import LocalOntologyService
-        async with get_async_session() as s:
-            ont = LocalOntologyService(SQLAlchemyOntologyRepository(s))
-            resolved = await ont.resolve(
-                workspace_id=meta.get("workspace_id"),
-                data_source_id=str(meta["data_source_id"]))
+        from backend.app.ontology.resolver import resolve_ontology
+        # The assigned ontology is read here, not through LocalOntologyService.resolve, which
+        # resolves a failed read as no ontology at all — no lineage — where it must be UNRESOLVED.
+        assigned = None
+        if meta.get("workspace_id"):
+            async with get_async_session() as s:
+                assigned = await SQLAlchemyOntologyRepository(s).get_for_data_source(
+                    meta.get("workspace_id"), str(meta["data_source_id"]))
+        resolved = resolve_ontology(system_default=None, assigned=assigned)
         cont = list(getattr(resolved, "containment_edge_types", None) or [])
         lin = list(getattr(resolved, "lineage_edge_types", None) or [])
         if not lin:

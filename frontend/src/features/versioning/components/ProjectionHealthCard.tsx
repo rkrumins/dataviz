@@ -48,6 +48,7 @@ const CLASS_DETAIL: Record<string, string> = {
 const EVICTED_BECAUSE: Record<string, string> = {
   idle_standard: 'unread past its idle time', idle_coldline: 'unread past its idle time',
   pressure: 'to make room', lost: 'its graph store lost it', admin: 'by an administrator',
+  load_stalled: 'its load stalled; it loads again on its next read',
 }
 
 /** Whether the graph is in memory, in plain words (residency, doc 17). */

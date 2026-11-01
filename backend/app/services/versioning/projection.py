@@ -1134,19 +1134,20 @@ class FalkorProjector:
                            graph_id, exc)
 
     async def summaries_built(self, graph_id: str, name: str, provider_id: Optional[str],
-                              projected: int, *, ask: Optional[str] = None) -> bool:
+                              projected: int, *, ask: Optional[str] = None) -> Optional[bool]:
         """Whether a graph's key holds the summaries its readers need: a summaries build stamped
         it, or it needs none here (no lineage in its ontology, its summaries kept in a dedicated
         key, or no aggregation wired into this projector). A key still without them has the build
         asked for, once per watermark — and per ``ask``, which names the ask under its own
         idempotency key (a load's epoch and attempt: the aggregation service answers a key it has
         seen within the hour with the job it already ran). A key that cannot be read has not got
-        them, nor one whose ontology could not be read (:data:`UNRESOLVED`): it may need them."""
+        them. None — falsy, but not "not yet" — when its ontology could not be read
+        (:data:`UNRESOLVED`): it may need them, and nothing can tell."""
         if self._on_rollups_stale is None or self._edge_types_resolver is None:
             return True
         sets = await self._edge_types_resolver(self._svc, graph_id)
         if sets is UNRESOLVED:
-            return False
+            return None
         if not (sets and sets[1]) or "dedicated" in sets[3:]:
             return True
         try:

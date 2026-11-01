@@ -1359,8 +1359,8 @@ def test_the_residency_columns_are_declared_and_migrated():
     assert table.c.last_read_at.type.timezone and table.c.size_measured_at.type.timezone
     assert table.c.rehydrating_since.type.timezone
     assert "residency IN ('always','standard','coldline')" in _check_sql("ck_ps_residency")
-    assert ("evicted_reason IN ('idle_standard','idle_coldline','pressure','lost','admin')"
-            in _check_sql("ck_ps_evicted_reason"))
+    assert ("evicted_reason IN ('idle_standard','idle_coldline','pressure','lost','admin',"
+            "'load_stalled')" in _check_sql("ck_ps_evicted_reason"))
     assert {"'rehydrating'", "'waiting_capacity'", "'reseeding'"} <= {
         s.strip() for s in _check_sql("ck_proj_status").split("(")[1].rstrip(")").split(",")}
     migration = _migration(_PS_RESIDENCY)
@@ -1393,6 +1393,7 @@ async def test_a_store_alembic_never_reached_gets_the_residency_columns(store):
             assert "'waiting_capacity'" in checks["ck_proj_status"]
             assert "'coldline'" in checks["ck_ps_residency"]
             assert "'pressure'" in checks["ck_ps_evicted_reason"]
+            assert "'load_stalled'" in checks["ck_ps_evicted_reason"]
             oid = (await _status_check(conn))[0]
             await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
             assert (await _status_check(conn))[0] == oid

@@ -748,6 +748,8 @@ class CapacityLoop:
         self._started: Dict[str, Tuple[str, Optional[int]]] = {}
         # Loads waiting for their summaries: graph id -> (its epoch, passes waited).
         self._waited: Dict[str, Tuple[int, int]] = {}
+        # Loads whose ontology could not be read: graph id -> (its epoch, passes in a row).
+        self._unread: Dict[str, Tuple[int, int]] = {}
 
     async def run_once(self, *, graph_ids: Optional[Collection[str]] = None) -> Optional[Plan]:
         """One pass, under the leader lock: gather, plan, act, measure. Returns the plan, or None
@@ -861,7 +863,9 @@ class CapacityLoop:
         for the build meanwhile): then it is ``idle``, no longer evicted, and its idle time starts
         again from now. The key is measured on a later pass, as everything projected since its
         last measurement is. Each load asks for the build under its own key (its epoch), and asks
-        again under a new one every ``_REASK_PASSES`` passes it goes without."""
+        again under a new one every ``_REASK_PASSES`` passes it goes without. One whose ontology
+        cannot be read for more than ``_REASK_PASSES`` passes in a row goes back to evicted
+        (:meth:`_stall`): its key is not held forever."""
         for r in snap.rows.values():
             head = max(r["target_commit_seq"], r["main_head_commit_seq"])
             projected = r["projected_commit_seq"]
@@ -879,6 +883,14 @@ class CapacityLoop:
                 logger.warning("residency: whether %s's load is ready is unknown", r["graph_id"],
                                exc_info=True)
                 continue
+            if ready is None:                        # its ontology could not be read
+                seen, passes = self._unread.get(r["graph_id"], (epoch, 0))
+                passes = passes + 1 if seen == epoch else 1
+                self._unread[r["graph_id"]] = (epoch, passes)
+                if passes > _REASK_PASSES:
+                    await self._stall(r, passes)
+                continue
+            self._unread.pop(r["graph_id"], None)
             if not ready:
                 continue
             async with db.graphver_session() as s:
@@ -895,6 +907,43 @@ class CapacityLoop:
             if done:
                 metrics.increment("versioning_residency_loads_total", outcome="completed")
                 logger.info("residency: graph %s is loaded and serves reads again", r["graph_id"])
+
+    async def _stall(self, r, passes: int) -> None:
+        """A load whose seed has published but whose ontology could not be read for ``passes``
+        passes in a row: nothing can tell whether its key needs summaries, so it is not served,
+        and it would hold its master's memory for good — it is not idle, so nothing evicts it. It
+        goes back to evicted (``load_stalled``) with its key dropped (or left to the retire pass),
+        and the next read asks for its load again."""
+        from .cache_manager import CacheManager
+
+        gid = r["graph_id"]
+        async with db.graphver_session() as s:
+            row = (await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == gid,
+                       ProjectionStateORM.status == "rehydrating",
+                       ProjectionStateORM.epoch == r["epoch"])
+                .values(status="evicted", evicted_reason="load_stalled", projected_commit_seq=0,
+                        rehydrating_since=None, epoch=ProjectionStateORM.epoch + 1,
+                        updated_at=_now())
+                .returning(ProjectionStateORM.falkor_graph_name, ProjectionStateORM.falkor_provider)
+                .execution_options(synchronize_session=False))).first()
+        self._unread.pop(gid, None)
+        self._waited.pop(gid, None)
+        if row is None:
+            return
+        name, provider = row
+        metrics.increment("versioning_residency_evictions_total", reason="load_stalled")
+        logger.warning("residency: graph %s's load stalled: its ontology could not be read for %d "
+                       "passes, so whether its key needs summaries is unknown; it is evicted again "
+                       "(load_stalled), and its next read asks for it", gid, passes)
+        if name:
+            try:
+                await self._proj.drop_graph(name, provider)
+            except Exception:  # noqa: BLE001 — the retire pass drops it
+                logger.warning("residency: graph %s's key %s could not be dropped; the retire pass "
+                               "will", gid, name, exc_info=True)
+                await CacheManager(self._proj)._retire_later(gid, name, provider)
 
     async def _measure(self, snap: Snapshot, *, first: Collection[str]) -> None:
         """Measure what resident keys hold — those about to be evicted (``first``) and the

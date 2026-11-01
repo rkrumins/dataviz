@@ -411,6 +411,43 @@ async def test_an_eviction_never_puts_back_a_watermark_liveness_lowered(store, m
     assert (await _ps(gid)).projected_commit_seq == 0
 
 
+async def test_a_load_whose_ontology_stays_unreadable_goes_back_to_evicted(store, monkeypatch):
+    """Review 3, finding 3: a load whose ontology cannot be read waits for its summaries, rightly —
+    but for good, its key in memory and never evictable (it is not idle). Past 10 passes it goes
+    back to evicted (load_stalled) with its key dropped, and the next read asks for it again."""
+    from backend.app.services.versioning.projection import UNRESOLVED
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+
+    async def unreadable(svc, gid):
+        return UNRESOLVED
+
+    async def build(gid, **kw):
+        pass
+
+    fake = FakeFalkor()
+    svc = store
+    gid = await _resident(svc, FalkorProjector(graph_client_factory=fake))
+    key = (await _ps(gid)).falkor_graph_name
+    proj = FalkorProjector(graph_client_factory=fake, edge_types_resolver=unreadable,
+                           on_rollups_stale=build)
+    dropped = []
+
+    async def drop(name, provider_id=None):
+        dropped.append(name)
+
+    proj.drop_graph = drop
+    await _set_ps(gid, status="rehydrating", rehydrating_since=func.now())   # its seed published
+    loop = CapacityLoop(proj)
+    for _ in range(10):
+        await loop.run_once(graph_ids=[gid])
+    assert (await _ps(gid)).status == "rehydrating" and dropped == []
+    await loop.run_once(graph_ids=[gid])
+    ps = await _ps(gid)
+    assert (ps.status, ps.evicted_reason, ps.projected_commit_seq) == ("evicted", "load_stalled", 0)
+    assert ps.rehydrating_since is None and dropped == [key]
+
+
 async def test_check_sync_skips_a_graph_out_of_falkordb_and_says_why(store, monkeypatch):
     """Review finding 10: Check sync scanned an evicted graph's dropped key (everything missing,
     or a 503), and a loading graph's half-written one; an eviction lasts days under residency."""

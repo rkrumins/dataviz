@@ -8,8 +8,8 @@ it. This revision adds what the capacity loop decides from and records:
 
 * ``residency`` — the class, ``'standard'`` for every graph (check ``ck_ps_residency``);
 * ``last_read_at`` — when a person last read the graph;
-* ``evicted_reason`` — ``idle_standard``, ``idle_coldline``, ``pressure``, ``lost`` or ``admin``
-  (check ``ck_ps_evicted_reason``);
+* ``evicted_reason`` — ``idle_standard``, ``idle_coldline``, ``pressure``, ``lost``,
+  ``load_stalled`` or ``admin`` (check ``ck_ps_evicted_reason``);
 * ``size_bytes`` and ``size_measured_at`` — the key's measured size;
 * ``rehydrating_since`` — when its load in flight started;
 
