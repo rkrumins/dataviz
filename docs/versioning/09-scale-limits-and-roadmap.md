@@ -150,7 +150,11 @@ own builds a patch set of 145,000 entries in 6.2 s and holds 170 MB (292 MB at t
 that changed 1,000, 50,500 entries in 2.2 s and 69 MB. A canvas read through it (the top-level page,
 the edges of its first 500 nodes, a table's children) takes 10.9 s and 5.6 s on a process's first
 read, which builds the patch set (once per fork head, base and root head), then 2.7 s and 2.1 s,
-against 2.5 s and 2.2 s for the same reads on the root's key alone.
+against 2.5 s and 2.2 s for the same reads on the root's key alone. Before any read, a request on a
+fork runs 21 statements (21.6 ms warm), where the same request on its root runs 17; deciding the
+ceiling counted 73 ms a request at 145,000 candidates before the count was kept per version, and
+takes 5 ms after. A rollup read runs no query per flow the root changed: 528 more than its store's
+own at 4 such flows, 5,280 at 40, before the chains were kept with the patch set.
 
 > **Limitation.** Reviewing a fork that changed hundreds of thousands of entities holds them in a web
 > process. Review a busy fork often: each review merges only what changed since the last.

@@ -87,6 +87,12 @@ the next step — taking the parent's newer commits into a fork — builds on. S
 - **An edge a draft changed only in its properties is counted once.** The draft's overlay added it
   where the published graph already had it, so rollups, degrees and its source's child count were one
   too many. It now serves the draft's value and counts the edge where it runs.
+- **A node main moved since a draft branched is listed where the draft has it.** The draft took it
+  out of its new parent's count but still listed it there, as well as under its old parent; a
+  top-level node main put under a parent showed under it and nowhere at the top level.
+- **A flow a draft deleted comes off its rollups where main counted it**, also when the draft moved
+  one of its ends: it came off under the container the draft moved the end to, and main's cell
+  stayed.
 - **A draft no longer shows main's later edit of an edge's properties.** The draft reads main as it
   was when the draft branched, but an edge main changed only in its properties since read as main
   has it now.
@@ -131,6 +137,10 @@ the next step — taking the parent's newer commits into a fork — builds on. S
   draft's does, loading each for every request: an unfiltered listing of a fork that created 12,500
   nodes serves all of them, in 0.75 s each time, and so does the top level of a fork that created
   many nodes there.
+- **Each root commit costs CPU in each process reading a fork**: its patch set is indexed again on
+  the next read, 1.3 to 2 s at 145,000 entries; each fork commit builds it again.
+- **A trace on a fork follows its root's later flows**, as a draft's follows main's.
+- **A customer key's outside changes show on a fork**, as on a draft (`externalDrift`).
 - **A fork far behind its parent reads from Postgres.** Past `GRAPHVER_FORK_REWIND_MAX` entities
   changed on either side since they parted, its reads are slower and search does not reach it, until
   it takes its parent's newer commits.

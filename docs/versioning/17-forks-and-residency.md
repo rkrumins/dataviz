@@ -9,7 +9,7 @@
 > in [06 · API Reference](06-api-reference.md); every behaviour change is in the
 > [CHANGELOG](../../CHANGELOG.md).
 
-**Checked against the code on 2026-10-30 (`c6f1c0308`).**
+**Checked against the code on 2026-11-01 (`c63c65f08`).**
 
 **TL;DR.** Forking a graph now makes a data source as well as a graph: the fork's own row in
 `workspace_data_sources`, in its parent's workspace and on its parent's provider. Views, the canvas
@@ -104,16 +104,35 @@ under 512 MB in each web process; an evicted delta is built again on its next re
 **The ceiling.** A fork whose patch set would classify more than `GRAPHVER_FORK_REWIND_MAX`
 entities (default 200,000, counted cheaply as an upper bound) is read from its own layered rows in
 Postgres instead (`VersionedBranchProvider` on its `main`): the same data, slower, and search does
-not reach it. Its fork-list item says `readsFrom: "postgres"` and recommends an update from its
-parent (§7).
+not reach it. The count is kept per version of the fork (its head, the base each layer reads, its
+root's head), so a request at an unchanged version does not count again. Its fork-list item and
+its watermark say `readsFrom: "postgres"`, its read route says Postgres, and the fork list
+recommends an update from its parent where that would bring it back under (§7).
 
 **A draft on a fork** overlays the fork's `main` in turn: its own patch set against the fork's
 `main` at its branch point.
 
 **Edges are counted where they run.** An edge the overlay holds as a value of its own — one the
 fork or a draft changed, or the root changed after the base — is served with that value and counted
-once: an edge still between the same ends as the same type moves no rollup, degree or child count;
-one whose ends moved counts where it runs now, and no longer where the store has it.
+once, against where its store holds it now: an edge still between the same ends as the same type
+moves no rollup, degree or child count; one whose ends moved counts where it runs now, and no
+longer where the store has it. A flow the overlay added goes on the rollups under its ends'
+containers on the overlay's own state; one it removed comes off where the store counted it. The
+chains that place them are looked up once per patch set, in one batched walk, and kept with it:
+a rollup read or a degree read with rollups runs no query per flow, however many the root changed.
+
+**Listings follow the overlay's moves.** A child the overlay took away from a parent, its edge from
+there removed or moved elsewhere, is not listed there though the store lists it; it is listed where
+the overlay has it. A node the overlay took every parent edge from, and gave none, is at the top
+level.
+
+**What a request costs.** One session reads the fork's version, its ceiling decision, its root and
+the root's store as its `projection_state` row says it is now, which is read every time: an eviction
+moves the store without moving any seq the version holds. The overlay is handed the version, so its
+first read does not read it again (21 statements a request, where the root's own takes 17). Its reads
+of the root's FalkorDB store take that shard's admission slots, as the root's own do. Its cached
+answers are keyed by the root store's version it read against (the root's committed and projected
+seqs), so one built across a root publish is not served after it.
 
 **Writes** are commits on the fork's drafts, or on its `main` for someone with publish, exactly as
 on any versioned source. **The provider registry** hands out, for a fork's row, its root parent's
@@ -131,6 +150,20 @@ changes are not searchable yet: results come from the parent data source's publi
 draft on a fork, the draft's changes and the fork's). While the root's projection lags, or past the
 ceiling, it answers **501**, as on a stale `main`. Native queries on a fork are **501**
 `native_query_unavailable`: run them on the parent.
+
+**What the overlay does not cover yet.**
+
+- **Listings serve every node the fork created that they list**, on their first page, loading each
+  for every request, as a draft's do ([09](09-scale-limits-and-roadmap.md) §4.1).
+- **Each root commit costs CPU in each process reading the fork.** The patch set is extended from
+  Postgres by the root's window, but each process indexes the whole of it again on its next read:
+  1.3 to 2 s for 145,000 entries, holding the interpreter. Each fork commit builds it again (4.6 to
+  6.2 s at that size).
+- **A trace follows the root's later flows**, as a draft's follows main's: a node reached only
+  through a flow the root added since the fork point stays in the fork's trace, and one reachable
+  only through a flow the root deleted since does not appear.
+- **A customer key's outside changes show on a fork**, as on a draft: entities another writer put
+  in the root's key that no history holds (`externalDrift`) are read through.
 
 **Stats.** A fork's counts are not polled: they are not its root's plus its patch set, and counting
 it in Postgres would compose the whole graph. A stats read of a fork's data source answers
@@ -243,7 +276,9 @@ pass, read by almost nothing, and kept for the fork's undo window after it was t
   one. `POST …/projection/rebuild` on a fork answers its **409** for a graph with no target.
 - **A fork's watermark is its root's** (`GET …/watermark`): the revisions, freshness and state of
   the store it reads through, with `readsThrough` naming the root's graph and no key, provider or
-  ownership of its own. Its read route says `falkordb` while the root's projection holds its head.
+  ownership of its own. Its read route says where its reads come from: `falkordb` while the root's
+  projection holds its head, `postgres` otherwise and past the ceiling (`readsFrom`), and the
+  canvas chip says so ("far from its parent"). A fork whose parent's graph is gone answers **404**.
   The fleet inventory counts every fork as behind on nothing, one still pinned to an old copy
   included, and the liveness check leaves forks out.
 - **Check sync** (`POST …/projection/reconcile`) has nothing of a fork's to compare:
