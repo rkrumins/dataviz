@@ -51,7 +51,8 @@ review then merges only up to date with its parent, as a copy of its own changes
   parent's publishes. → `{commitId, parentSeq, wrote, upToDate}`; recorded as
   `workspace.versioning.fork_updated`. One that would merge, or delete in its cascades, more than
   `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` entities runs as a `fork_update` job pinned to the parent's
-  head (**202**; poll `GET …/graphs/{fork}/update-jobs/{jobId}`), one per fork at a time. A
+  head (**202**; poll `GET …/graphs/{fork}/update-jobs/{jobId}`), one per fork at a time; one refused
+  for conflicts keeps the first 100, their entities' seeds and the `total`. A
   `sync_parent` commit that wrote no rows keeps the fork's review approved; one that wrote rows makes
   its approvals stale. Drafts on the fork read as behind, and take it with Pull latest. A
   `sync_parent` commit is not reverted, nor the fork restored to before its latest update (**409**

@@ -2176,12 +2176,19 @@ _JOB_REFUSAL_MAX_VIOLATIONS = 100
 
 
 def _bounded_refusal(detail):
-    """A refusal as a publish job keeps it. A large draft can break the ontology on every entity it
-    changes (200k violations, 60 MB on the job and to the client, which shows the first two): keep
-    a hundred, and how many there were."""
+    """A refusal as a job keeps it. A large draft can break the ontology on every entity it changes
+    (200k violations, 60 MB on the job and to the client, which shows the first two), and a large
+    Update from parent conflict on as many, each with the fork's own value of its entity: keep a
+    hundred — of conflicts, with the seeds of their entities — and how many there were."""
     violations = detail.get("violations") if isinstance(detail, dict) else None
     if violations and len(violations) > _JOB_REFUSAL_MAX_VIOLATIONS:
         return {**detail, "violations": violations[:_JOB_REFUSAL_MAX_VIOLATIONS], "total": len(violations)}
+    conflicts = detail.get("conflicts") if isinstance(detail, dict) else None
+    if conflicts and len(conflicts) > _JOB_REFUSAL_MAX_VIOLATIONS:
+        kept = conflicts[:_JOB_REFUSAL_MAX_VIOLATIONS]
+        ids = {c.get("entity_id") for c in kept}
+        return {**detail, "conflicts": kept, "total": len(conflicts),
+                "seeds": {eid: v for eid, v in (detail.get("seeds") or {}).items() if eid in ids}}
     return detail
 
 

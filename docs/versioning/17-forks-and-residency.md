@@ -393,8 +393,9 @@ worker's transfer lane: **202** `{jobId, graphId, status}`, pinned to the parent
 fenced as a publish job: the fork's lifecycle and move locks shared, the fork writable and still in
 the workspace, and one update of a fork pending or running at a time (**409 `job_active`**). Poll
 `GET …/graphs/{fork}/update-jobs/{jobId}`: what the route would have answered (`commitId`,
-`parentSeq`, `wrote`, `upToDate`), or its refusal — conflicts fail the job, with them in `error`; the
-caller resolves them and asks again. Run again after its update landed, a job answers up to date
+`parentSeq`, `wrote`, `upToDate`), or its refusal — conflicts fail the job, with them in `error` (past
+100, the first 100, the seeds of their entities, and `total`); the caller resolves them and asks
+again. Run again after its update landed, a job answers up to date
 and writes nothing.
 
 The activity log records `workspace.versioning.fork_updated` `{forkParentGraphId, parentSeq,
