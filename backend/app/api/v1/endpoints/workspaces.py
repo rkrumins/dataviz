@@ -9,6 +9,7 @@ caller's effective permissions so non-admins only see workspaces they
 have a binding into. The legacy "everyone sees everything" behaviour
 returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=false``.
 """
+import asyncio
 import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -931,17 +932,19 @@ async def update_data_source(
         await enqueue_stats_job_safe(ds_id, workspace_id)
         # Ontology (re)assignment / projection changes alter how reads
         # resolve — invalidate the process-wide resolved-ontology cache.
+        # The source and its forks side by side: in a broker outage each waits out its retries,
+        # and one after another a parent with forks outlived the request timeout.
         from backend.app.services.resolved_ontology_cache import bump_ontology_generation
-        for changed_id in (ds_id, *forks):
-            await bump_ontology_generation(workspace_id, changed_id)
+        await asyncio.gather(*(bump_ontology_generation(workspace_id, changed_id)
+                               for changed_id in (ds_id, *forks)))
         # Cached hierarchy reads were answered under the old ontology / name
         # mapping (entity types, display names) — drop them. Only when one of
         # them really moved: the edit form re-sends the current ontologyId with
         # a rename. Never raises.
         if ds.ontology_id != old_ontology_id or mapping_changed:
             from backend.app.services.graph_cache import invalidate_hierarchy_reads
-            for changed_id in (ds_id, *forks):
-                await invalidate_hierarchy_reads(workspace_id, changed_id)
+            await asyncio.gather(*(invalidate_hierarchy_reads(workspace_id, changed_id)
+                                   for changed_id in (ds_id, *forks)))
 
     # A mapping change makes the materialized AGGREGATED edges stale, and the
     # stamp's NULL-only fill means a re-run is required to rewrite them.

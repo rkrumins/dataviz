@@ -48,7 +48,7 @@ class _Registry:
         return self.provider
 
 
-def test_a_fork_reads_its_roots_store_with_its_changes_over_it(monkeypatch):
+def test_a_fork_reads_its_roots_store_with_its_changes_over_it(monkeypatch, forks_on):
     from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
     from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
     from backend.app.services.context_engine import ContextEngine
@@ -155,7 +155,7 @@ def test_a_fork_finds_what_it_only_inherited():
     _run(case)
 
 
-def test_a_forks_cached_reads_move_with_its_roots_store():
+def test_a_forks_cached_reads_move_with_its_roots_store(forks_on):
     """A fork's cached canvas reads are keyed by its own data source, and its root's writes and
     projections bump only the root's cache: an answer a fork built across a root publish (its
     patch set at one root head, the store read at the next) was served for the cache's hour. A
@@ -184,7 +184,7 @@ def test_a_forks_cached_reads_move_with_its_roots_store():
     _run(case)
 
 
-def test_a_request_on_a_fork_reads_its_version_and_root_once():
+def test_a_request_on_a_fork_reads_its_version_and_root_once(forks_on):
     """Each request on a fork built its engine with some thirty statements before its read: the
     fork's and its root's rows each in a session of their own, the main branch ids again and
     again, the ceiling, the root's watermark (two sessions), and on its first read the version

@@ -109,7 +109,7 @@ def _run(case):
 
 
 # ── creating a fork ──────────────────────────────────────────────────────────────────────────
-def test_a_fork_is_a_data_source_with_its_parents_settings(monkeypatch):
+def test_a_fork_is_a_data_source_with_its_parents_settings(monkeypatch, forks_on):
     from backend.app.services.activity import recorder
 
     recorded = []
@@ -156,7 +156,7 @@ def test_a_fork_is_a_data_source_with_its_parents_settings(monkeypatch):
     _run(case)
 
 
-def test_a_fork_that_cannot_be_made_leaves_no_data_source(monkeypatch):
+def test_a_fork_that_cannot_be_made_leaves_no_data_source(monkeypatch, forks_on):
     from backend.app.db.models import WorkspaceDataSourceORM
     from backend.app.services.versioning.errors import ForkLimit
 
@@ -220,7 +220,7 @@ async def _falkor_keys(prefix):
 from backend.app.services.versioned_sources import physical_key as _real_physical_key  # noqa: E402
 
 
-def test_a_fork_is_read_and_written_through_version_control_never_falkordb(monkeypatch):
+def test_a_fork_is_read_and_written_through_version_control_never_falkordb(monkeypatch, forks_on):
     from backend.app.db.models import WorkspaceDataSourceORM
     from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
     from backend.app.providers.manager import provider_manager
@@ -282,7 +282,7 @@ def test_a_fork_is_read_and_written_through_version_control_never_falkordb(monke
 
 
 # ── the lifecycle: a fork's data source goes where its graph goes ────────────────────────────
-def test_the_fork_endpoints_take_its_data_source_through_the_trash_and_away():
+def test_the_fork_endpoints_take_its_data_source_through_the_trash_and_away(forks_on):
     from backend.app.services.versioning.purge_worker import PurgeRunner, create_purge_job
     from backend.tests.integration.test_graph_lifecycle_purge import _nobody, _take
 
@@ -412,7 +412,7 @@ def test_a_fork_made_while_its_parents_settings_change_takes_the_new_ones():
         assert (await _row(legacy["data_source_id"])).review_self_merge is False
     _run(case)
 
-def test_a_view_made_on_a_fork_while_its_parent_moves_goes_with_it():
+def test_a_view_made_on_a_fork_while_its_parent_moves_goes_with_it(forks_on):
     """A view is made holding its source's row FOR KEY SHARE. A move locked the parent's row
     alone and changed its forks' with a plain UPDATE, which does not wait for a key share: a view
     made on a fork meanwhile committed in the old workspace after the move had taken the views,
@@ -458,7 +458,7 @@ def test_a_view_made_on_a_fork_while_its_parent_moves_goes_with_it():
         assert (await _row(fork_ds)).workspace_id == to_ws
     _run(case)
 
-def test_the_reaper_never_undoes_a_trash_and_a_restore_it_did_not_see(monkeypatch):
+def test_the_reaper_never_undoes_a_trash_and_a_restore_it_did_not_see(monkeypatch, forks_on):
     """The reaper read a fork's row live and its graph trashed (a trash between its two writes),
     and tombstoned the row where it was still live. When the trash's row and then a restore of
     graph and row landed between those reads and that write, it tombstoned a restored fork. It now
@@ -536,7 +536,7 @@ def test_the_reaper_removes_orphan_rows_one_at_a_time_deepest_first():
     _run(case)
 
 
-def test_a_parent_with_only_its_genesis_is_not_purged_while_its_forks_live(caplog, monkeypatch):
+def test_a_parent_with_only_its_genesis_is_not_purged_while_its_forks_live(caplog, monkeypatch, forks_on):
     """A parent's graph with nothing past its genesis was purged whatever forks it had, as giving
     them nothing; but a fork reads through its parent's graph whatever it holds, and every request
     on the fork then failed (a 500: its parent missing from its layers). Its purge now waits for
@@ -612,7 +612,7 @@ async def _view(view_id):
         return v.data_source_id, v.draft_branch_id, v.deleted_at
 
 
-def test_the_views_on_a_fork_go_to_its_parent_when_its_row_goes():
+def test_the_views_on_a_fork_go_to_its_parent_when_its_row_goes(forks_on):
     """When a fork's row was deleted — its purge done, the reaper's orphan pass, its parent's
     permanent delete — the views on it fell to no data source, so they read the workspace's
     default. They now go to the fork's nearest live ancestor (its parent; up a fork of a fork),
@@ -674,7 +674,7 @@ def test_the_views_on_a_fork_go_to_its_parent_when_its_row_goes():
         assert await _view(on_gone) == (None, None, None)
     _run(case)
 
-def test_the_reapers_expiry_of_a_forks_row_sends_its_views_to_the_parent(monkeypatch):
+def test_the_reapers_expiry_of_a_forks_row_sends_its_views_to_the_parent(monkeypatch, forks_on):
     """A fork's row past its undo window whose graph is gone — its purge finished, and a crash
     came before ``_drop_fork_row`` — is deleted by the reaper's expiry pass, which took no care of
     the views on it: they fell to no data source, and read the workspace's default. They go to the
@@ -712,7 +712,7 @@ def test_the_reapers_expiry_of_a_forks_row_sends_its_views_to_the_parent(monkeyp
     _run(case)
 
 
-def test_a_parents_permanent_delete_purges_its_trashed_forks_first():
+def test_a_parents_permanent_delete_purges_its_trashed_forks_first(forks_on):
     from backend.app.services.versioning.models import JobORM
 
     async def jobs_of(*gids):

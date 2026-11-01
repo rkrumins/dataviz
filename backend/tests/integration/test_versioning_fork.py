@@ -175,7 +175,7 @@ async def _fork(c, gid, body=None):
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_fork_needs_manage_and_ignores_a_data_source_id_e2e():
+def test_fork_needs_manage_and_ignores_a_data_source_id_e2e(forks_on):
     async def go():
         svc = GraphVersioningService()
         gid = await _parent(svc)
@@ -193,7 +193,7 @@ def test_fork_needs_manage_and_ignores_a_data_source_id_e2e():
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_fork_cap_counts_live_forks_only_e2e(monkeypatch):
+def test_fork_cap_counts_live_forks_only_e2e(monkeypatch, forks_on):
     from backend.app.services.versioning import config
     from backend.app.services.versioning.purge_worker import tombstone_graphs_for_data_source
 

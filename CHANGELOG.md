@@ -23,6 +23,13 @@ review then merges only up to date with its parent, as a copy of its own changes
 
 ### Added
 
+- **Forks are opt-in: Admin → Features → Forks** (`forksEnabled`, a preview in Lineage, needing
+  Version control). It ships off. While it is off no fork is made and a fork is read-only: a
+  change to its graph or its drafts, and opening, approving, editing or merging its reviews,
+  answer **403** `feature_disabled` ("Forks are turned off for this deployment. …"), and the job a
+  large publish or merge on a fork runs as refuses the same way. Listing and reading forks, moving
+  them to the trash and back, closing their reviews, and the purge, the reaper and the backfill
+  keep working; no parent graph is touched, and nothing is deleted.
 - **A fork is a data source of its own.** `POST /api/v1/{ws}/versioning/graphs/{gid}/forks` takes an
   optional `{name}` (1–80 characters) and answers its `dataSourceId` too: a data source in the
   parent's workspace, on its provider, labelled `"<parent label> · <name>"` (without a name, `Fork`
@@ -157,6 +164,9 @@ review then merges only up to date with its parent, as a copy of its own changes
   fork's data source from naming a graph) follows it. Both wait at most five seconds for their locks
   and can be run again. The second will not downgrade while forks' data sources exist: the code before
   it reads a data source that names no graph from its provider's default graph, so delete them first.
+- **Forks are off by default, also after the upgrade.** A system administrator turns them on under
+  **Admin → Features → Forks**. Until then existing forks stay readable and can be moved to the
+  trash and restored, but take no change.
 - **Existing forks get their data sources on the reaper's first pass** after the upgrade, labelled
   `"<parent label> · Fork <end of its id>"`, while their parent's data source exists. A fork already
   in the trash gets none, and is purged as before.

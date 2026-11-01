@@ -4,7 +4,7 @@
 to know which endpoint a switch turns off.*
 
 This page is the reference for the feature-switch API behind **Administration → Features**:
-every route with its request and answer, how a change is saved safely, and all 35 switches
+every route with its request and answer, how a change is saved safely, and all 37 switches
 with their defaults and the server routes each one controls.
 
 - **Administrators:** what each switch does on screen, and how to change one, is in
@@ -188,7 +188,7 @@ An unknown key answers `404`.
 
 ## Feature flags (authoritative set)
 
-All 35 switches, grouped as **Administration → Features** groups them. **Switch** is the name
+All 37 switches, grouped as **Administration → Features** groups them. **Switch** is the name
 an administrator sees. **When it is off** names the routes the server refuses — `403` with
 `{"detail": {"type": "feature_disabled", "feature": "<key>", "message": "…"}}` unless the row
 says otherwise — or what it does instead. Paths are relative to `/api/v1`. Every switch whose
@@ -235,6 +235,7 @@ feature open to anyone who knows the URL.
 | Switch | Key | Default | When it is off | Notes |
 |---|---|---|---|---|
 | Version control | `versioningEnabled` | On | Every `POST`, `PUT`, `PATCH` and `DELETE` under `/{ws_id}/versioning/` except `…/projection/rebuild`, `…/projection/reconcile` and `POST …/exports`; `POST /{ws_id}/graph/bootstrap`, `…/bootstrap/retry`, `…/bootstrap/decision`, `…/bootstrap/abandon` and `POST /{ws_id}/graph/resync`; view packages and staging a view import in a draft; and every write through a versioned graph | Reads stay open and history is kept. The widest switch: it withdraws editing too |
+| Forks | `forksEnabled` | Off | `POST /{ws_id}/versioning/graphs/{graph_id}/forks`; on a fork's graph, every `POST`, `PUT`, `PATCH` and `DELETE` under `/{ws_id}/versioning/` except `DELETE …/graphs/{graph_id}`, `…/projection/rebuild`, `…/projection/reconcile`, `POST …/exports` and `…/lifecycle/freeze`; approving, editing and merging a review from a fork or into one (closing it stays open), and the job a large publish or merge on a fork runs as; `POST /{ws_id}/versioning/resolve` for a fork's data source; `POST /{ws_id}/graph/changes`, `…/nodes/create`, `…/save`, `…/commands/batch`, and `POST`, `PATCH` and `DELETE` on `…/edges`, on a fork; staging a view import or a view package's data in a draft on a fork | Experimental preview; needs Version control. Reads, the trash and restoring a fork stay open. An unreadable value counts as off |
 | Lineage trace | `traceEnabled` | On | `POST /{ws_id}/graph/trace/v2`, `…/trace/closure`, `…/trace/expand`, `…/trace/expand-batch`, and the retired `…/trace` | Browsing and expanding by hand keep working |
 
 ### Data Governance
@@ -287,6 +288,7 @@ feature open to anyone who knows the URL.
 |---|---|---|
 | Per route: refuse when off | `backend/app/api/v1/feature_gate.py` · `require_feature` | Most switches |
 | Per router: refuse every write, keep reads | `backend/app/api/v1/versioning_gate.py` · `versioning_write_gate` | Version control |
+| Refuse a change to a fork, keep its reads | `versioning_gate.py` · `require_forks_enabled`, and `fork_write_gate` for the routes that resolve a fork's graph or review | Forks |
 | Refuse non-administrators only | `feature_gate.py` · `require_admin_unless` | Let non-admins edit layers |
 | A list of allowed values | `feature_gate.py` · `ensure_view_mode_allowed` | View modes |
 | A level, not a switch | `feature_gate.py` · `resolve_enterprise_view_policy` | Publishing views to everyone |

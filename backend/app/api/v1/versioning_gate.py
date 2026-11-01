@@ -11,6 +11,12 @@ Two flavours:
   rebuild/reconcile, exports (read-shaped, produces files) and a freeze (a safety stop).
 * ``require_versioning_enabled`` — explicit per-route dependency for write routes
   that live on OTHER routers (e.g. ``/graph/bootstrap``, ``/graph/resync``).
+* ``require_forks_enabled`` — the ``forksEnabled`` flag: ``FeatureDisabledError`` (the same 403)
+  while forks are off, when nothing new happens in a fork. ``fork_write_gate`` calls it for every
+  mutating request on a fork's graph or review, which the routes' resolvers hand it
+  (``graph_in_workspace``, ``pr_in_workspace``), except the ops allowlist below, closing a review
+  and moving the fork to the trash. Routes that make a fork, or reach one by its data source, call
+  it themselves.
 * ``require_branch_scope`` — the view, layout and library routes that take a
   ``branchId`` call it whatever ``RBAC_ENFORCE_VIEWS`` says: the branch must be one
   of the view's own graph that the caller can read (404), and a write needs an open
@@ -25,7 +31,8 @@ publish, or with an API key whose owner has it.
 
 Both go through ``FeatureFlagService.is_enabled_self_session`` (cache-first, 30s
 TTL — the hot read paths never pay a DB-pool checkout for this), defaulting to
-**enabled** so a missing definition can never lock users out.
+**enabled** so a missing definition can never lock users out. The forks gate reads
+it the same way but defaults to **disabled**: forks are opt-in.
 """
 import logging
 from typing import NamedTuple, Optional
@@ -38,9 +45,10 @@ from backend.app.auth.dependencies import (
     get_current_user,
     get_permission_claims,
 )
+from backend.app.config.features_seed import REFUSAL_MESSAGES
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories import data_source_repo
-from backend.app.services.feature_flags import feature_flags
+from backend.app.services.feature_flags import FeatureDisabledError, feature_flags
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.versioning.errors import MainWriteForbidden, PublishRequired
 from backend.app.services.versioning.service import Viewer
@@ -88,6 +96,38 @@ async def versioning_write_gate(request: Request) -> None:
     if not await feature_flags.is_enabled_self_session(VERSIONING_FLAG, default=True):
         logger.info("versioning write blocked by feature flag: %s %s", request.method, path)
         raise _disabled_error()
+
+
+FORKS_FLAG = "forksEnabled"
+
+# Mutating routes on a fork that stay usable while forks are off: the allowlist above (a fork's
+# export reads it, and a freeze is a safety stop), and winding the fork down — closing a review,
+# without which a fork with one open can't go to the trash, and the trash itself
+# (``DELETE …/graphs/{fork}``, matched in ``fork_write_gate``). Restoring a fork from the trash
+# never comes through here.
+_FORK_ALLOWLIST_SUFFIXES = _WRITE_ALLOWLIST_SUFFIXES + ("/close",)
+
+
+async def require_forks_enabled() -> None:
+    """``FeatureDisabledError`` (403 ``feature_disabled``) while forks are off: no fork is made and
+    none takes a change. Default False, not the capability ``fail_safe_default``: a flag that cannot
+    be read means forks are off, as a fresh deployment has them."""
+    if not await feature_flags.is_enabled_self_session(FORKS_FLAG, default=False):
+        raise FeatureDisabledError(FORKS_FLAG, REFUSAL_MESSAGES[FORKS_FLAG])
+
+
+async def fork_write_gate(request: Request) -> None:
+    """``require_forks_enabled`` for a mutating request on a fork's graph or review, unless it is on
+    the fork allowlist or moves the fork to the trash. The caller has found the graph or review to
+    be a fork's, in its workspace."""
+    if request.method not in _MUTATING:
+        return
+    path = request.url.path
+    if path.endswith(_FORK_ALLOWLIST_SUFFIXES):
+        return
+    if request.method == "DELETE" and path.endswith(f"/graphs/{request.path_params.get('graph_id')}"):
+        return
+    await require_forks_enabled()
 
 
 async def require_branch_scope(session: AsyncSession, svc, view: ViewORM, branch_id: Optional[str], *,

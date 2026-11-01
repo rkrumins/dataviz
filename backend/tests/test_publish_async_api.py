@@ -34,6 +34,8 @@ class _Versioning:
         return "cmt_1"
 
     async def get_pr(self, pr_id):
+        # No source graph: a fork's review, as the store reads one, so the tests that merge it
+        # turn forks on.
         return {"pr_id": pr_id, "target_graph_id": "g1", "source_branch_id": "br_big", "actor": self.opener}
 
 
@@ -116,7 +118,7 @@ async def test_a_large_draft_publishes_as_a_job(test_client, services):
     assert created["merge_request_id"] is None
 
 
-async def test_the_review_of_a_large_draft_merges_as_a_job(test_client, services):
+async def test_the_review_of_a_large_draft_merges_as_a_job(test_client, services, forks_on):
     svc, jobs = services
     r = await test_client.post(f"{BASE}/merge-requests/mr_1/merge", json={"message": "ship it"})
     assert r.status_code == 202, r.text
@@ -125,7 +127,7 @@ async def test_the_review_of_a_large_draft_merges_as_a_job(test_client, services
 
 
 async def test_where_someone_else_merges_a_large_draft_is_refused_rather_than_queued(
-        test_client, services, monkeypatch, fake_user):
+        test_client, services, monkeypatch, fake_user, forks_on):
     """Self-merge off: publishing the draft directly is 409 review_required, and merging a review
     you opened is 403 self_merge, from the request — not from a job that fails afterwards."""
     from types import SimpleNamespace
@@ -149,7 +151,8 @@ async def test_where_someone_else_merges_a_large_draft_is_refused_rather_than_qu
 
 
 @pytest.mark.parametrize("path", ["/graphs/g1/branches/br_big/publish", "/merge-requests/mr_1/merge"])
-async def test_a_publish_that_cannot_be_queued_answers_like_one_in_the_request(test_client, services, path):
+async def test_a_publish_that_cannot_be_queued_answers_like_one_in_the_request(test_client, services, path,
+                                                                              forks_on):
     """Queuing takes the draft (``publishing``), so it is refused as a publish is: a draft that is
     not open is 409 branch_closed, an unknown one 404 — not a 500."""
     from backend.app.services.versioning.errors import BranchNotOpen

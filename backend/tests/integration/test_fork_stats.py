@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.skipif(
     not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")]
 
 
-def test_no_stats_path_reads_a_forks_whole_graph(monkeypatch):
+def test_no_stats_path_reads_a_forks_whole_graph(monkeypatch, forks_on):
     from backend.app.services import projection_target, stats_cache
     from backend.insights_service import collector, enqueue
     from backend.insights_service.schemas import StatsJobEnvelope
