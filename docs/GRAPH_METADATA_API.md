@@ -232,7 +232,7 @@ The fields of a commit use the names the version store keeps them under, in snak
 | `contributors` | For a publish or a merged review — a fork's included — or a `pull`, everyone whose commits it folds in. Otherwise `null`. |
 | `source_branch_id`, `source_commit_count` | For a publish or merged review: the draft it came from — for a fork's review, the fork's `main` — and how many of its commits it folds in. For a `pull`: `main`, and how many of its commits came in. A fork's `genesis` names the parent graph's `main`. |
 | `originating_view_id` | The view it was made from, when it was made from one. |
-| `merkle_root` | A fingerprint of the graph's content at this commit, on `main`, set when the commit lands. `null` on a draft's commits, and on the import that turned version control on for a graph of more than a million entities (`GRAPHVER_BOOTSTRAP_MERKLE_MAX`). |
+| `merkle_root` | A fingerprint of the graph's content at this commit, on `main`, set when the commit lands. `null` on a draft's commits, on a fork's after its fork point (which carries its parent's), and on the import that turned version control on for a graph of more than a million entities (`GRAPHVER_BOOTSTRAP_MERKLE_MAX`). |
 | `stats` | How much it changed — its shape depends on `kind`, below. |
 | `created_at` | When it landed, ISO-8601 in UTC. |
 

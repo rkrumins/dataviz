@@ -142,7 +142,8 @@ made against (`service.py:415-419`).
 `_checkpoint_once` (`service.py:481`):
 
 1. Load uncommitted `working_changes` ordered by `seq`; nothing staged → return `None`.
-2. Compose the **base state** for just the touched entities, fork-aware (`_composed_state`).
+2. Compose the **base state** for just the touched entities, fork-aware (`_current_values`; a fork's
+   `main` reads its parent's for what it has no row of, §3.8).
 3. **Fold** — a private draft calls `changeset.materialize(base, ops)`; a **shared** draft calls
    `_fold_shared`, which 3-way-merges per collaborator against each edit's staged ancestor and raises
    `MergeConflict` on a same-field clash unless `resolutions` settle it (`service.py:529-550`).
@@ -208,7 +209,10 @@ system's scale story ([09 · Scale](09-scale-limits-and-roadmap.md)).
 > point, copying no rows. Equivalence at every seq is proven by `test_versioning_state_reconstruction.py`.
 
 The bounded primitives (`_values_at`, `_compute_merge_bounded`, revert's window) exist specifically so
-the hot write paths never pay the whole-branch `_state_as_of` cost inside a lock.
+the hot write paths never pay the whole-branch `_state_as_of` cost inside a lock. They read through a
+fork the same way, for the ids asked: a fork's `main` at a seq is its own rows, then its parent's `main`
+at the fork point (`_layers`, up a fork of a fork too), and the incident-edge lookup a cascade makes
+includes the parent's rows.
 
 ---
 
@@ -360,12 +364,16 @@ what a pull had pulled.
 
 ## 3.8 Fork (copy-on-write) & pull requests
 
-`fork_graph` (`service.py:2139`) creates a new graph whose `main` **inherits the parent's state without
-copying any rows** — `fork_parent_graph_id` + `fork_base_commit_seq` are set, and the fork-point commit
-carries the parent's merkle root (`service.py:2162-2191`). Divergence accrues only as the fork's own
-commits; reads compose parent@fork-base ⊕ own (that recursion lives in `_state_as_of`, §3.4). The fork
+`fork_graph` creates a new graph whose `main` **inherits the parent's state without copying any rows** —
+`fork_parent_graph_id` + `fork_base_commit_seq` are set, and the fork-point commit carries the Merkle root
+the parent stored at its head (none when the parent is a fork itself; nothing is hashed). Divergence
+accrues only as the fork's own commits; reads compose parent@fork-base ⊕ own — `_state_as_of` for a whole
+state, the bounded reads for the ids a save, pull, preview, publish, revert, restore or diff touches
+(§3.4) — so working on a fork of a graph of millions costs what changes in it. The fork
 gets its own FalkorDB graph name **only if the parent is pinned** — an unpinned parent's fork stays
-unpinned so the projector doesn't materialize an orphan key nothing reads (`service.py:2192-2204`).
+unpinned so the projector doesn't materialize an orphan key nothing reads. Nothing in the product reads a
+pinned fork's key either (the canvas, search and exports reach a fork through Postgres), and its first
+projection reconciles its whole state in one pass: see [09 · Scale](09-scale-limits-and-roadmap.md) §4.1.
 
 Forking needs `workspace:datasource:manage`. It runs under the parent's `_lock_graph`, refuses a
 parent with `GRAPHVER_MAX_FORKS_PER_GRAPH` (default 10) live forks with **409** `fork_limit {limit}`
@@ -390,14 +398,32 @@ flowchart LR
     MERGE --> PM2["parent main @ N+1"]
 ```
 
-`open_pr` (`service.py:2212`) opens a fork-main → parent-main PR, recording the current
-mergeability/conflict set from `_compute_fork_merge`; listed `reviewers` make approval a merge
-precondition. `merge_pr` re-locks the parent, recomputes the fork merge, runs the ontology + approval
-gates, and squashes into the parent's `main` with the fork's contributors. `merge_mr` (`service.py:2762`)
-is the unified entry: it dispatches a fork PR to `merge_pr` and a draft→main MR through the shared squash
-body, enforcing the reviewer-approval gate (`_require_approvals`, `service.py:2872`) before the merge is
-computed (`service.py:2810`). An approval counts until a content commit lands on the draft after it
-(§3.15). Proof: `test_versioning_fork.py`, `test_versioning_pr_gate.py`,
+`open_pr` opens a fork-main → parent-main PR, recording the current mergeability/conflict set; listed
+`reviewers` make approval a merge precondition. `merge_pr` locks the parent, reads the PR again under
+the lock (a second merge of it is refused), recomputes the fork merge, runs the ontology + approval
+gates, and squashes into the parent's `main` with the fork's contributors. A merge refused for
+conflicts leaves the PR marked `conflicts`; one that changes nothing is recorded as merged by whom and
+when. `merge_mr` is the unified entry: it dispatches a fork PR to `merge_pr` — with the parent's
+containment and ontology rules, as the fork route passes them — and a draft→main MR through the shared
+squash body, enforcing the reviewer-approval gate (`_require_approvals`) before the merge is computed.
+An approval counts until a content commit lands on the draft after it (§3.15).
+
+**The merge base.** A fork merges into its parent more than once, so like git it merges from the last
+merged commit: each merge records the fork's head it took (`merge_requests.merged_source_seq`), and the
+next PR's base is the fork's `main` there (`_fork_merge_base`), else the fork point. A change the parent
+took and then undid is not proposed again, and a field only the parent changed since is no conflict.
+
+**What a fork merge reads.** `_compute_fork_merge` merges what the fork changed since the base
+(`_changed_in_window` on its `main`), at the base, at the fork's head and at the parent's head: an
+entity the fork has not changed since is the same in ours as in base, so it merges to the parent's value
+and nets to nothing. Around it, `_fork_merge_neighborhood` adds what the cascade and integrity guards
+reason about, at its merged value: the parent's live edges on each node the merge deletes, and the ends
+of every live edge it writes, deleted ones too — so the parent's edges onto a node the fork deleted go
+with it, and so does a fork's edge onto a node the parent has deleted since. The preview, the diff and
+its summary run the same merge and cascade (`_fork_merge`), so they count what the merge writes. Opening,
+previewing, diffing and merging a fork's PR therefore costs what the fork changed, never the graph; the
+merge itself still runs in the request, holding those changes (§09). Proof: `test_versioning_fork.py`,
+`test_versioning_fork_merge.py`, `test_versioning_fork_bounded.py`, `test_versioning_pr_gate.py`,
 `test_versioning_draft_mr.py`.
 
 ### Invariant — ONE LIVE PR PER SOURCE BRANCH
@@ -433,10 +459,10 @@ would have accepted it. Regression: `test_versioning_draft_mr.py` §C2.
 
 ## 3.9 Revert
 
-`revert_commit` (`service.py:975`) applies the inverse of a published `main` commit as a new `revert`
-commit — restoring every entity that commit touched to its **pre-commit** value. It is **bounded** for a
-non-fork main (reads only the touched window at `k-1`, `k`, and head via `_values_at`; forks fall back to
-the CoW-aware full replay, `service.py:994-1012`). It is **conflict-guarded**: if a later commit also
+`revert_commit` applies the inverse of a published `main` commit as a new `revert`
+commit — restoring every entity that commit touched to its **pre-commit** value. It is **bounded**: it reads
+only the touched window at `k-1`, `k`, and head via `_values_at` (a fork's through its parent). It is
+**conflict-guarded**: if a later commit also
 changed one of those entities (`content_hash(cur) != content_hash(after)`), it raises `MergeConflict`
 rather than silently clobbering (`service.py:1014-1020`). No data is ever lost — pre-commit payloads live
 in history. The operator CLI `backend/scripts/repair_revert_commit.py` wraps this for damaged-graph repair.
@@ -490,12 +516,13 @@ pruning equal subtrees (`merkle.py:150-176`).
 `merkle_store.py` persists this incrementally for a **non-fork `main`**: `commit_tree` recomputes only the
 changed buckets and bubbles to the root (O(changed · depth)), writing **only changed-path rows**;
 unchanged subtrees are inherited via the as-of index `(graph_id, branch_id, path, commit_seq)`
-(`merkle_store.py:42-107`). `_commit_merkle` uses this store for non-fork mains; `_merkle_root` does a full
-in-memory rebuild for **draft checkpoints and fork mains** (`service.py:615`, `1098`).
+(`merkle_store.py:42-107`). `_commit_merkle` uses this store for non-fork mains. A draft's commits and a
+fork's carry no root: only a non-fork `main`'s tree is read (the projector's diff), and a fork's would be
+built from its whole composed state on every commit. A fork's fork-point commit copies the root its parent
+stored at the fork point.
 
-> **Limitation.** Cross-branch incremental Merkle is not built — draft checkpoints and fork mains pay a
-> full O(graph) `MerkleTree.build` every commit (`merkle_store.py:13-15`). This is the top remaining Merkle
-> hotspot; see [09 · Scale](09-scale-limits-and-roadmap.md). Hash algorithm and depth are
+> **Limitation.** Cross-branch incremental Merkle is not built, so a fork has no fingerprint of its own
+> after its fork point. Hash algorithm and depth are
 > **immutable-after-data** ([02 · Config](02-data-model.md)); blake3 fails fast rather than silently
 > downgrading. Proof: `test_versioning_merkle.py`.
 

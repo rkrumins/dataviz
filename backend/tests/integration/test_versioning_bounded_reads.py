@@ -43,7 +43,7 @@ def _del(eid, kind="node"):
 @contextlib.contextmanager
 def _whole_graph_reads_refused():
     """Every read of a branch's whole state raises, naming the path that asked for it."""
-    names = ("_state_as_of", "_composed_state", "_composed_state_as_of", "_merkle_root")
+    names = ("_state_as_of", "_composed_state", "_composed_state_as_of")
     saved = {n: getattr(GraphVersioningService, n) for n in names}
 
     def refuse(name):

@@ -238,6 +238,8 @@ class MergeRequestORM(VersioningBase):
     merged_at = Column(Text, nullable=True)               # when + who merged
     merged_by = Column(Text, nullable=True)
     merged_via = Column(Text, nullable=True)              # 'review' | 'direct_publish' (see _apply_draft_squash)
+    # A fork's review: the fork's head the merge took. Its next review merges from there.
+    merged_source_seq = Column(BigInteger, nullable=True)
     closed_at = Column(Text, nullable=True)               # when + who closed (without merging)
     closed_by = Column(Text, nullable=True)
 
@@ -783,6 +785,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261029_1000_gv_branch_vis. Every draft request reads branches: short tries.
     _bounded_step(conn, "the draft visibility column was not added",
                   lambda: ensure_branch_visibility(conn), required=True, tries=10)
+    # 20261030_1000_gv_mr_merged_seq.
+    _bounded_step(conn, "merge_requests.merged_source_seq was not added",
+                  lambda: ensure_mr_merged_source_seq(conn), required=True)
 
 
 def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
@@ -933,6 +938,29 @@ def ensure_mr_approvals_column(conn) -> None:
     if "approvals" in {c["name"] for c in inspector.get_columns("merge_requests", schema=_SCHEMA)}:
         return
     conn.execute(text(f'ALTER TABLE "{_SCHEMA}"."merge_requests" ADD COLUMN IF NOT EXISTS approvals JSONB'))
+
+
+def ensure_mr_merged_source_seq(conn) -> None:
+    """Add ``merge_requests.merged_source_seq``, the fork's head a merged review of a fork took, and
+    fill it in for the forks' reviews merged before it existed: the latest of the fork's commits
+    their squash names. A no-op without the table, and once it is there (an ALTER takes the table's
+    ACCESS EXCLUSIVE lock even when it adds nothing). ``conn`` is a synchronous connection
+    (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("merge_requests", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    if "merged_source_seq" in {c["name"] for c in inspector.get_columns("merge_requests", schema=_SCHEMA)}:
+        return
+    mrs, commits = f'"{_SCHEMA}"."merge_requests"', f'"{_SCHEMA}"."commits"'
+    conn.execute(text(f"ALTER TABLE {mrs} ADD COLUMN IF NOT EXISTS merged_source_seq BIGINT"))
+    conn.execute(text(
+        f"UPDATE {mrs} mr SET merged_source_seq = ("
+        f"SELECT max(c.commit_seq) FROM {commits} sq JOIN {commits} c ON c.graph_id = mr.graph_id "
+        "AND c.id IN (SELECT jsonb_array_elements_text(sq.source_commit_ids)) "
+        "WHERE sq.graph_id = mr.target_graph_id AND sq.id = mr.resulting_commit_id "
+        "AND jsonb_typeof(sq.source_commit_ids) = 'array') "
+        "WHERE mr.status = 'merged' AND mr.resulting_commit_id IS NOT NULL "
+        "AND mr.graph_id <> mr.target_graph_id"))
 
 
 def ensure_graph_lifecycle_columns(conn) -> None:
