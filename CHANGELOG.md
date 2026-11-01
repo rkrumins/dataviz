@@ -62,8 +62,9 @@ review then merges only up to date with its parent, as a copy of its own changes
 - **A large fork review merges as a job.** One whose fork changed more than
   `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` entities since its last merged review merges as a `fork_merge`
   job from either merge route (**202**, polled at the parent's `…/publish-jobs/{jobId}`). It pins the
-  fork's head and holds the review `merging` until the job ends (another merge of it is **409**
-  `job_active`); a refused job hands it back at once, and the worker's reaper one whose job died. Its
+  fork's head and holds the review `merging` until the job ends (another merge of it, closing it or
+  changing its reviewers is **409** `job_active`; the reviews inbox and lists show it as Merging, in
+  progress); a refused job hands it back at once, and the worker's reaper one whose job died. Its
   approvals are judged when it runs: a content commit on the fork after it was queued makes them
   stale, and the job is refused for the reviewers to look again.
 - **A fork says how far it is from its parent.** Each live fork in `GET …/forks` carries `ahead` (the

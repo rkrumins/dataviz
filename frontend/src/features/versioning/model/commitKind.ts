@@ -11,6 +11,8 @@ const KIND_META: Record<string, { label: string; cls: string }> = {
   // A pull: someone else's published work arriving in this branch. Teal — it's neither your edit
   // nor a publish of yours; it's incoming.
   pull: { label: 'pulled', cls: 'bg-teal-500/10 text-teal-600 dark:text-teal-400' },
+  // A fork taking its parent's changes: incoming too.
+  sync_parent: { label: 'Update from parent', cls: 'bg-teal-500/10 text-teal-600 dark:text-teal-400' },
   genesis: { label: 'genesis', cls: 'bg-ink/10 text-ink-muted' },
 }
 

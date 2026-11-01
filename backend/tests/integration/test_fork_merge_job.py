@@ -179,3 +179,41 @@ def test_a_merge_job_whose_review_merged_under_it_completes_with_that_merge(monk
             assert result == {"commitId": zombie[0]}, result
             assert (await ie.get_job(r.json()["jobId"]))["status"] == "completed"
     _run(case)
+
+
+def test_a_review_being_merged_can_be_neither_closed_nor_given_reviewers(monkeypatch):
+    from backend.app.services.versioning import config as vconfig
+    from backend.app.services.versioning.errors import JobActive
+
+    monkeypatch.setattr(vconfig, "SYNC_PUBLISH_MAX_CHANGES", 0)
+
+    async def case(svc):
+        async with _client(PERMS) as c:
+            _gid, _fgid, pr = await _review(svc, c)
+            r = await c.post(_merge_url(pr, "pulls"), json={"message": "m"})
+            assert r.status_code == 202, r.text
+            with pytest.raises(JobActive):
+                await svc.close_pr(pr_id=pr, actor="bob")
+            with pytest.raises(JobActive):
+                await svc.update_pr(pr_id=pr, reviewers=["carol"])
+            r = await c.post(f"/api/v1/{WS}/versioning/pulls/{pr}/close")
+            assert (r.status_code, r.json()["detail"]["type"]) == (409, "job_active"), r.text
+            meta = await svc.get_pr(pr)
+            assert (meta["status"], meta["reviewers"]) == ("merging", None)
+    _run(case)
+
+
+def test_the_overview_counts_a_review_being_merged_as_open(monkeypatch):
+    from backend.app.services.system_status.probes import probe_overview
+    from backend.app.services.versioning import config as vconfig
+
+    monkeypatch.setattr(vconfig, "SYNC_PUBLISH_MAX_CHANGES", 0)
+
+    async def case(svc):
+        async with _client(PERMS) as c:
+            _gid, _fgid, pr = await _review(svc, c)
+            before = (await probe_overview(None))["openReviews"]
+            r = await c.post(_merge_url(pr, "pulls"), json={"message": "m"})
+            assert r.status_code == 202, r.text
+            assert (await probe_overview(None))["openReviews"] == before
+    _run(case)

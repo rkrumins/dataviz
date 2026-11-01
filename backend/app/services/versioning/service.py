@@ -3725,15 +3725,20 @@ class GraphVersioningService:
 
     async def close_pr(self, *, pr_id: str, actor: Optional[str] = None) -> dict:
         """Close a PR without merging — terminal: approve_pr and merge_pr both
-        reject a closed PR. Idempotent; an already-merged PR cannot be closed."""
+        reject a closed PR. Idempotent; an already-merged PR cannot be closed, nor one a job is
+        merging (:class:`JobActive`). Under the PR's row lock, which that job's queueing takes."""
         async with self._session() as s:
-            pr = await s.get(MergeRequestORM, pr_id)
+            pr = await self._lock_pr(s, pr_id)
             if pr is None:
                 raise ValueError(f"unknown pr {pr_id}")
             if pr.status == "closed":
                 return await self._pr_meta(s, pr)              # idempotent
             if pr.status == "merged":
                 raise ValueError(f"pr {pr_id} is merged")
+            if pr.status == "merging":
+                raise JobActive(await self._merging_job(s, pr_id),
+                                "This review is being merged by a job; it can be closed if that "
+                                "job ends without merging it.")
             pr.status = "closed"
             pr.closed_at = _now()
             pr.closed_by = actor
@@ -3758,8 +3763,8 @@ class GraphVersioningService:
         """Edit a PR's human title + description, and who must review it. PATCH semantics: a
         field left ``None`` is untouched, an empty string (or list) clears it. New ``reviewers``
         re-judge ``approval_status`` from the approvals that still stand (:meth:`_approvals`);
-        a merged or closed PR's reviewers are settled. A service account is never a reviewer
-        (:class:`PersonRequired`)."""
+        a merged or closed PR's reviewers are settled, and a merging one's held while its job runs
+        (:class:`JobActive`). A service account is never a reviewer (:class:`PersonRequired`)."""
         if any(is_service_account(r) for r in reviewers or ()):
             raise PersonRequired("a service account cannot review a PR: name a person")
         async with self._session() as s:
@@ -3773,6 +3778,10 @@ class GraphVersioningService:
             if reviewers is not None:
                 if pr.status in ("merged", "closed"):
                     raise ValueError(f"pr {pr_id} is {pr.status}")
+                if pr.status == "merging":
+                    raise JobActive(await self._merging_job(s, pr_id),
+                                    "This review is being merged by a job; its reviewers can change "
+                                    "if that job ends without merging it.")
                 pr.reviewers = list(dict.fromkeys(reviewers)) or None
                 pr.approval_status = None
                 if pr.reviewers:

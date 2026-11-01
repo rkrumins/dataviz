@@ -14,7 +14,7 @@ import { ownerName } from '@/features/versioning/model/branchVocab'
 import { OwnerAvatar } from '@/features/versioning/components/BranchStatusBits'
 import { PrStatusBadge, PrKindIcon, derivePrTitle, isDraftMr } from './PrMeta'
 
-const COUNTED_STATUSES = new Set(['open', 'mergeable', 'approved', 'conflicts'])
+const COUNTED_STATUSES = new Set(['open', 'mergeable', 'approved', 'conflicts', 'merging'])
 
 /** Lazy per-row change-count chip. Only fetches for active PRs (a merged/closed PR's diff is
  *  historical); React Query dedups + caches so pagination re-renders are free. */
@@ -81,7 +81,8 @@ export function PrListRow({
   const behind = pr.behind && (pr.behindBy ?? 0) > 0
   const closePr = useCloseMergeRequest(wsId)
   const [confirming, setConfirming] = useState(false)
-  const canDismiss = COUNTED_STATUSES.has(pr.status) // only an active PR can be dismissed
+  // Only an active PR can be dismissed — never one a job is merging, which the server refuses.
+  const canDismiss = COUNTED_STATUSES.has(pr.status) && pr.status !== 'merging'
 
   return (
     // A clickable <div> (not <button>) so the inline Dismiss controls can be real nested buttons.

@@ -459,7 +459,9 @@ again. Run again after its merge landed, it answers with the review's merge; so 
 is refused because a superseded attempt of it merged the review first. Refused (the parent moved
 since, say), it fails with the route's answer and hands the review back at once (`approved`, or
 `mergeable`); one whose job died is handed back by the versioning worker's reaper
-(`release_merging`).
+(`release_merging`). While it is `merging` the review is neither closed nor given other reviewers
+(**409 `job_active`**); the reviews inbox and lists show it as Merging, among those in progress, and
+the overview counts it open. In history an update is "Update from parent".
 
 **What it costs.** On the same bench, merging a review of 100,000 changes (renames, new columns in
 tables, flow edits) as a job takes 18.8 s at a peak of 299 MB resident (98 MB before it); paged

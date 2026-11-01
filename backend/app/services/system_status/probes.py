@@ -1792,7 +1792,7 @@ async def probe_overview(app_state) -> Optional[dict]:
                 out["openReviews"] = (await s.execute(
                     select(func.count()).select_from(MergeRequestORM).where(and_(
                         MergeRequestORM.status.in_(
-                            ("open", "conflicts", "mergeable", "approved")),
+                            ("open", "conflicts", "mergeable", "approved", "merging")),
                         MergeRequestORM.graph_id.in_(live_graph_ids))))).scalar()
                 out["commits"] = (await s.execute(
                     select(func.count()).select_from(CommitORM).where(
