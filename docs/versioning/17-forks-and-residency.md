@@ -6,12 +6,11 @@
 > laid over it, and how it reads its parent commit by commit. Then residency (§10–§19): which graphs
 > FalkorDB holds, by class and by each master's memory, where a new key goes, adopting a customer's
 > key, and the admin screens. The fork engine itself — copy-on-write reads, pull requests, merge —
-> is in
-> [03 · Branching, Commits & Merge](03-branching-commits-merge.md); the routes and their refusals are
-> in [06 · API Reference](06-api-reference.md); every behaviour change is in the
+> is in [03 · Branching, Commits & Merge](03-branching-commits-merge.md); the routes and their
+> refusals are in [06 · API Reference](06-api-reference.md); every behaviour change is in the
 > [CHANGELOG](../../CHANGELOG.md).
 
-**Checked against the code on 2026-11-01 (`c63c65f08`).**
+**Checked against the code on 2026-11-01: §1–§9 at `c63c65f08`, §10–§19 at `0bf5831bd`.**
 
 **TL;DR.** Forking a graph now makes a data source as well as a graph: the fork's own row in
 `workspace_data_sources`, in its parent's workspace and on its parent's provider. Views, the canvas
@@ -333,12 +332,8 @@ A fork in the trash says none of it (`null`).
 
 - **Update from parent.** A fork takes its parent's newer commits as a new `fork_bases` row, and a
   fork's pull request merges only when it is up to date with its parent.
-- **Residency** is §10–§19 below: classes, the capacity loop, loads, placement, Adopt and the
-  admin screens.
 
 ## 10. Residency: which graphs FalkorDB holds
-
-**Checked against the code on 2026-11-01 (`cc060bc0b`, with `3b6589fab` merged).**
 
 FalkorDB holds a copy of each versioned graph's published `main` (doc 04); Postgres is the only
 source of truth. Residency decides which copies FalkorDB keeps, per graph by a class and per
@@ -357,9 +352,14 @@ Postgres until it is loaded again.
   a new graph's from its first pass.
 - **Only keys the platform minted are ever evicted** (`owns_falkor_graph`): a customer's own graph,
   which version control was enabled on, behaves as Always until it is adopted (§18).
-- **Forks are outside residency.** A fork has no key of its own to evict, load or count; its reads
-  count for its root, whose key they read (§14), and the residency routes answer **409**
-  `not_for_forks` for one. A fork the count budget evicted is reseeded by the poll as before.
+- **Forks are outside residency.** A fork has no key (§6): nothing of its own to evict, load or
+  count, and no class (`residency` is null on its watermark, and the fleet inventory's fork rows
+  carry no residency). It reads through its root's store (§2), so its reads count for its root, hold
+  the root's read lease and ask for the root's load (§14); while the root is out of FalkorDB, or
+  being loaded, the fork reads the root's Postgres, and its watermark shows the root's state. A
+  fork past the ceiling (§2) reads its own rows and nothing of its root's: its reads hold nothing,
+  count for nothing and ask for no load, and its deep search is its own **501**. The residency
+  routes answer **409** `not_for_forks` for one.
 - **Who sets the class.** System administrators only, on Admin → Infrastructure → Versioned graphs
   (§19) or `PUT /api/v1/admin/versioning/graphs/{gid}/residency {"class": "always" | "standard" |
   "coldline"}`. A new graph gets the policy's default class. Workspaces see the class and the state
@@ -438,7 +438,7 @@ measured, with no size, and the graph keeps its estimate.
 |---|---|
 | A person's read of the graph (§14) | Standard, Always |
 | A canvas read of a graph with more entities than the canvas-load threshold (its count, kept per head, else its last size over bytes per entity) | Coldline |
-| A request only FalkorDB can answer — deep search, node degrees, a native query — which answers **503** `graph_loading` with `Retry-After` (the loop's interval) meanwhile | Any |
+| A request only FalkorDB can answer — deep search, node degrees, a native query — which answers **503** `graph_loading` with `Retry-After` (the loop's interval) meanwhile; on a fork, for its root, as on the root (once the root is in, a fork's own rules stand: deep search in the root's store with its note, native queries **501**) | Any |
 | Load now: `POST /api/v1/admin/versioning/graphs/{gid}/load` (recorded) | Any |
 | Setting the class to Always (§10, admission-checked first), and an Always graph out of FalkorDB on every pass | Always |
 | An operator's rebuild of the graph (`POST …/projection/rebuild`), a move of it (§17), a watermark reset that caught its load in flight | Any |
@@ -491,8 +491,8 @@ oldest one has been under way is reported (§15).
   the reset never touches it.
 - Liveness finding a platform key its master lost (a restart without its data) marks the graph
   evicted (`lost`) rather than lowering it to 0 for the poll to reseed at once: its load is admitted
-  like any other, on its next read, or by the next pass for an Always graph. A customer's key and a
-  fork are reseeded as before.
+  like any other, on its next read, or by the next pass for an Always graph. A customer's key is
+  reseeded as before; the liveness check leaves forks out (§6).
 
 ## 13. The policy: every value
 
@@ -541,8 +541,10 @@ Routes, under `/api/v1/admin/versioning`, `system:admin` only and never with an 
 before it reads the graph's watermark. Live exports and the v2 router build their engine with the
 person's viewer, as the canvas does; a native query holds its graph (`residency.hold`) before it
 reads the watermark. Only a person's read counts — a background job builds its engine with no
-viewer — and it counts for the graph whose key serves it: a fork's root, for a fork, whose key a fork
-reads through.
+viewer — and it counts for the graph whose key serves it. For a fork that is its root: the fork's
+read plan names the root and whether the fork reads through the root's store (§2), and only then
+is `on_read` called, with the root, before the root's store is read for the read's route; a fork
+past the ceiling reads its own rows and calls nothing.
 
 - **The read lease, first.** The read holds the graph's read lease (the one the neighbors route
   takes) for `GRAPHVER_TRACE_LEASE_TTL_SECS` (120 seconds) before it reads anything: refreshed at most
@@ -562,16 +564,19 @@ reads through.
   `{retryAfter, message}` with `Retry-After`, and ask for the load; native queries answer **503**
   with code `graph_loading`.
 - **Cost.** A person's read of a resident graph costs one small read of the graph's state (measured:
-  1.4 ms here) and, at most every 30 seconds per graph per process, one broker round trip.
+  1.4 ms here) and, at most every 30 seconds per graph per process, one broker round trip; a read
+  of a fork, the same read of its root's. Counted as §2 counts a request: 18 statements on a small
+  root, where it was 17, and 23 on a fork of it, where it was 22.
 
 ## 15. Health and metrics
 
 - **The watermark** (`GET …/watermark`, and every route that returns one) carries `residency` (the
   class), `residencyState` (`resident`, `evicted`, `rehydrating` or `waiting_capacity`),
   `evictedReason`, `lastReadAt`, `sizeBytes` and, while it is being loaded, `rehydratingSince`. A
-  graph being loaded reads `fresh: false` and `readRoute.main: "postgres"` until its load is done.
+  graph being loaded reads `fresh: false` and `readRoute.main: "postgres"` until its load is done. A
+  fork's are its root's (`readsThrough`), but for `residency`, null.
 - **The fleet inventory** (`GET /api/v1/admin/versioning/graphs`) carries the same six on every row,
-  and its `status` filter takes `rehydrating` and `waiting_capacity`.
+  null on a fork's, and its `status` filter takes `rehydrating` and `waiting_capacity`.
 - **The projection-lag probe** counts `rehydrating` and `waitingCapacity`, and leaves evicted
   graphs out of its worst list: they lag by design. The stats probe does not read a graph out of
   FalkorDB (it would record 0 nodes and 0 edges).
