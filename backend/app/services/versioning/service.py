@@ -143,10 +143,11 @@ def _heads_of(heads, rows: Dict[str, tuple]) -> Dict[str, _Head]:
     return out
 
 
-def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, before) -> tuple:
+def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, held) -> tuple:
     """The draft's own part of :meth:`GraphVersioningService.branch_overlay_delta`, from hashes and
     version-row columns: ``(nodesUpsert, nodesModified, nodesRemove, edgesUpsert, edgesRemove,
-    nodesNew)`` — pure CPU, run in a thread."""
+    nodesNew)`` — pure CPU, run in a thread. ``held``: each of the draft's edges as its store holds
+    it, main at its head, which a removal takes out and an edit counts against (``was``)."""
     nodes_upsert: List[dict] = []
     nodes_modified: List[dict] = []    # {urn, entityId}: the reader loads the payload it serves
     nodes_remove: List[dict] = []
@@ -169,7 +170,7 @@ def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, befo
         else:                                          # modified → loaded when a read serves it
             nodes_modified.append({"entityId": eid, "urn": h.urn or b.urn or f"gv:{eid}"})
     for eid in edge_ids:
-        h, b = heads[eid], before.get(eid)
+        h, b = heads[eid], held.get(eid)
         if not h.live and b is None:
             continue
         # Edge endpoints are entity ids, read as urns, as _graphedge_dict gives them.
@@ -5539,9 +5540,11 @@ class GraphVersioningService:
             node_ids = [eid for eid, h in heads.items() if h.kind == "node"]
             edge_ids = [eid for eid, h in heads.items() if h.kind != "node"]
             # Which the draft created, modified or removed, from hashes; what each is, from version
-            # rows — no payload (a draft's own edges are what it holds now: its heads).
+            # rows — no payload (a draft's own edges are what it holds now: its heads). Its edges
+            # are counted against where the store holds them: main at its head, not at the branch
+            # point, where an edge main deleted or re-pointed since would be counted nowhere.
             base_nodes = await self._hashes_at(s, graph_id, main_id, node_ids, base_seq)
-            before = await self._hashes_at(s, graph_id, main_id, edge_ids, base_seq) if edge_ids else {}
+            held = await self._hashes_at(s, graph_id, main_id, edge_ids, head_seq) if edge_ids else {}
             # For the rewind: each advanced entity's value at the fork point (base) vs main head.
             rewind_base: Dict[str, Optional[dict]] = {}
             rewind_head: Dict[str, Optional[dict]] = {}
@@ -5552,7 +5555,7 @@ class GraphVersioningService:
         # One dict per entity the draft changed: built in a thread, as its head index was — on a
         # draft's first read this runs in the web process, and 200k of them are a stall of their own.
         nodes_upsert, nodes_modified, nodes_remove, edges_upsert, edges_remove, nodes_new = (
-            await asyncio.to_thread(_overlay_patch, heads, node_ids, edge_ids, base_nodes, before))
+            await asyncio.to_thread(_overlay_patch, heads, node_ids, edge_ids, base_nodes, held))
         # ── Fork-point rewind ── undo main's post-fork advances so the read reflects main@base_seq
         # ⊕ the draft (never live main). For each entity main changed after the fork that the draft
         # did NOT touch: main-ADDED (absent at base) → REMOVE it from the read; main-DELETED (absent

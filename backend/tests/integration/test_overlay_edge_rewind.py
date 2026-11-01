@@ -12,7 +12,7 @@ import os
 import pytest
 
 from backend.common.models.graph import EdgeQuery
-from backend.tests.integration.test_fork_overlay_delta import _e, _n, _run, _ue
+from backend.tests.integration.test_fork_overlay_delta import _d, _e, _n, _run, _ue
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(
     not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")]
@@ -83,4 +83,44 @@ def test_an_edge_main_changed_after_the_base_reads_as_it_was():
         p = _overlay(svc, _reader(svc, gid, main), fgid, fmain, fork=True)
         assert await _props(p) == {"lin": {"w": 0}, "cA": {"p": 7}}
         assert await _counts(p) == (*at_base[:3], [("cA", {"p": 7})])
+    _run(case)
+
+
+def test_a_drafts_own_edit_of_an_edge_main_deleted_or_moved_since_counts_where_it_runs():
+    """A draft's own edit of an edge is counted where it runs against where its store holds it
+    (``was``): main at its head. ``was`` came from main at the draft's branch point, so an edit of
+    an edge main deleted, or re-pointed, since the draft branched counted nowhere: the draft lost
+    the flow from its rollups, and the child from its parent's count (to the parent main moved it
+    to). So too for a draft on a fork, whose store is the fork's main."""
+    async def counts(p):
+        agg = await p.get_aggregated_edges_between(["A", "B", "C"], ["A", "B", "C"], None, CONT,
+                                                   ["FLOWS"])
+        return ({(e.source_urn, e.target_urn): e.edge_count for e in agg.aggregated_edges},
+                (await p.get_node("A")).child_count, (await p.get_node("C")).child_count)
+
+    async def case(svc):
+        gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
+                                      workspace_id="ws1", actor="alice"))["graph_id"]
+        main = await svc.main_branch_id(gid)
+        await svc.apply_ops(graph_id=gid, actor="alice", message="seed", containment_edge_types=CONT,
+                            ops=[_n("A"), _n("B"), _n("C"), _n("A.c"), _n("A.d"), _n("B.c"),
+                                 _e("cA", "A", "A.c", "CONTAINS"), _e("cD", "A", "A.d", "CONTAINS"),
+                                 _e("cB", "B", "B.c", "CONTAINS"), _e("lin", "A.c", "B.c")])
+        fork = await svc.fork_graph(parent_graph_id=gid, workspace_id="ws1", actor="bob")
+        fgid, fmain = fork["graph_id"], fork["main_branch_id"]
+        root_store = _reader(svc, gid, main)
+        for store_gid, store in ((gid, root_store),
+                                 (fgid, _overlay(svc, root_store, fgid, fmain, fork=True))):
+            draft = await svc.open_draft(graph_id=store_gid, owner="alice")
+            # The draft's main deletes the flow and moves A.d under C, after the draft branched.
+            await svc.apply_ops(graph_id=store_gid, actor="alice", message="main moves on",
+                                containment_edge_types=CONT,
+                                ops=[_d("lin", "edge"), _ue("cD", "C", "A.d", "CONTAINS")])
+            assert await counts(store) == ({}, 1, 1), store_gid
+            # The draft edits both, as it holds them: the flow, and A.d under A.
+            await svc.apply_ops(graph_id=store_gid, branch_id=draft, actor="alice", message="own",
+                                containment_edge_types=CONT,
+                                ops=[_ue("lin", "A.c", "B.c", w=5), _ue("cD", "A", "A.d", "CONTAINS", p=9)])
+            assert await counts(_overlay(svc, store, store_gid, draft)) == ({("A", "B"): 1}, 2, 0), \
+                store_gid
     _run(case)
