@@ -5669,15 +5669,19 @@ class GraphVersioningService:
             total += int(await s.scalar(select(func.count()).select_from(ids)) or 0)
         return total
 
-    async def _fork_candidates(self, s, fork: GraphORM, main_id: str, cap: int) -> int:
+    async def _fork_candidates(self, s, fork: GraphORM, main_id: str, cap: int,
+                               layers: Optional[list] = None,
+                               root_head: Optional[int] = None) -> int:
         """At least as many entities as a fork's patch set classifies (:meth:`_fork_overlay_delta`):
         its own changes, each fork between up to its base and the root's since the outermost base,
         each counted no further than ``cap + 1``. Kept per version of the fork (its head, the base
         each layer reads, its root's head) and ``cap``: while none of them moves, history being
         append-only, nothing it counts does."""
-        layers = await self._layers(s, fork.id, main_id, fork.main_head_commit_seq)
+        if layers is None:
+            layers = await self._layers(s, fork.id, main_id, fork.main_head_commit_seq)
         root_id, root_main, base = layers[-1]
-        root_head = (await s.get(GraphORM, root_id)).main_head_commit_seq
+        if root_head is None:
+            root_head = (await s.get(GraphORM, root_id)).main_head_commit_seq
         key = (fork.id, fork.main_head_commit_seq, tuple(at for _g, _b, at in layers), root_head, cap)
         if key in _FORK_COUNTS:
             _FORK_COUNTS.move_to_end(key)
@@ -5692,6 +5696,40 @@ class GraphVersioningService:
         while len(_FORK_COUNTS) > _FORK_COUNTS_KEPT:
             _FORK_COUNTS.popitem(last=False)
         return total
+
+    async def fork_read_plan(self, graph_id: str) -> Dict[str, object]:
+        """What reading a fork's ``main`` takes, read in one session: its version (as
+        :meth:`overlay_version` gives it — the reader is handed it, so its first read does not
+        compute it again); how it is read (``reads_from``, :meth:`fork_reads_from`'s answer from
+        the count kept per version); its root (graph, ``main``, data source, in the trash or not);
+        and the root's store as its ``projection_state`` row says it is now: its committed and
+        projected seqs (``fresh`` when the projection holds the head) and its pin. That row is
+        read every time: an eviction moves the store without moving any seq the version holds."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None or not graph.fork_parent_graph_id:
+                raise ValueError(f"not a fork: {graph_id}")
+            main_id = await self._main_branch_id(s, graph_id)
+            branch = await self._get_branch(s, graph_id, main_id)
+            layers = await self._layers(s, graph_id, main_id, graph.main_head_commit_seq)
+            root_id, root_main, _base = layers[-1]
+            root = await s.get(GraphORM, root_id)
+            n = await self._fork_candidates(s, graph, main_id, config.FORK_REWIND_MAX,
+                                            layers=layers, root_head=root.main_head_commit_seq)
+            ps = await s.get(ProjectionStateORM, root_id)
+            committed = root.main_head_commit_seq
+            projected = ps.projected_commit_seq if ps is not None else 0
+            return {
+                "main_id": main_id,
+                "version": (branch.head_commit_id, tuple(at for _g, _b, at in layers), committed,
+                            getattr(branch, "status", None)),
+                "reads_from": "postgres" if n > config.FORK_REWIND_MAX else "overlay",
+                "root_id": root_id, "root_main": root_main,
+                "root_data_source_id": root.data_source_id, "root_trashed": root.deleted_at is not None,
+                "committed": committed, "projected": projected, "fresh": projected >= committed,
+                "falkor_provider": ps.falkor_provider if ps is not None else None,
+                "falkor_graph_name": ps.falkor_graph_name if ps is not None else None,
+            }
 
     async def fork_reads_from(self, graph_id: str) -> str:
         """How a fork's ``main`` is read: ``"overlay"``, its patch set over its root's store, or —
@@ -6024,15 +6062,6 @@ class GraphVersioningService:
                 select(GraphORM).where(GraphORM.data_source_id == data_source_id,
                                        GraphORM.deleted_at.is_(None))
             )).scalar_one_or_none()
-            return None if g is None else self._graph_meta(g)
-
-    async def fork_root(self, graph_id: str) -> Optional[Dict[str, object]]:
-        """The graph whose store a fork reads through: up ``fork_parent_graph_id`` to the first that
-        is no fork (``graph_id``'s own, when it is none). Trashed or not, as it is."""
-        async with self._session() as s:
-            g = await s.get(GraphORM, graph_id)
-            while g is not None and g.fork_parent_graph_id:
-                g = await s.get(GraphORM, g.fork_parent_graph_id)
             return None if g is None else self._graph_meta(g)
 
     async def move_graph_workspace(self, data_source_id: str, new_workspace_id: str, *,

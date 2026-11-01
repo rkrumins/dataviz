@@ -371,10 +371,11 @@ class DraftOverlayProvider:
     ``fork``: this is a fork's ``main``, read the same way over its root's store (``base``) with
     the fork's patch set; a draft on the fork overlays this one in turn. ``read_ns``: which version
     of its root's store a fork's reads were built against, carried in its cache keys
-    (:meth:`physical_graph_id`)."""
+    (:meth:`physical_graph_id`). ``version``: its ``overlay_version`` when the caller has read it
+    already (``fork_read_plan``), so the first read does not read it again."""
 
     def __init__(self, base, *, svc, graph_id: str, branch_id: str, actor: Optional[str] = None,
-                 fork: bool = False, read_ns: Optional[str] = None):
+                 fork: bool = False, read_ns: Optional[str] = None, version: Optional[tuple] = None):
         self._base = base
         self._svc = svc
         self._gid = graph_id
@@ -382,6 +383,7 @@ class DraftOverlayProvider:
         self._actor = actor or "system"
         self._fork = fork
         self._read_ns = read_ns
+        self._version = version
         self._containment_types: List[str] = []
         self._delta: Optional[_OverlayDelta] = None
         # Writes (and as-of-free branch ops) reuse the ordinary branch provider — no duplication.
@@ -420,6 +422,13 @@ class DraftOverlayProvider:
     def name(self) -> str:
         return f"draft-overlay[{self._gid}:{self._branch}] over {getattr(self._base, 'name', '?')}"
 
+    @property
+    def manager_cache_key(self) -> Optional[tuple]:
+        """A fork's reads of its root's FalkorDB store take that shard's admission slots, as the
+        root's own do (``_bounded_compute``): its store's key. None for a draft, and over a
+        Postgres reader, as before: those reads are Postgres-heavy, not FalkorDB fan-out."""
+        return getattr(self._base, "manager_cache_key", None) if self._fork else None
+
     def physical_graph_id(self) -> Optional[str]:
         """The physical graph behind this overlay's reads, which cached answers are keyed by: its
         store's, and for a fork's, the version of its root's store it was read against
@@ -446,7 +455,8 @@ class DraftOverlayProvider:
 
     async def _delta_(self) -> _OverlayDelta:
         if self._delta is None:
-            version = await self._svc.overlay_version(graph_id=self._gid, branch_id=self._branch)
+            version = self._version or await self._svc.overlay_version(
+                graph_id=self._gid, branch_id=self._branch)
             cset = list(self._containment_types)
             key = (self._gid, self._branch, version, tuple(cset))
 

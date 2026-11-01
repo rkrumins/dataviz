@@ -82,6 +82,7 @@ def test_a_fork_reads_its_roots_store_with_its_changes_over_it(monkeypatch):
         assert e.provider._gid == fgid
         assert isinstance(e.provider._base, VersionedBranchProvider) and e.provider._base._gid == gid
         assert await names(e.provider) == {"A": "A fork", "B": "B", "N": "N", "P": None}
+        assert e.provider.manager_cache_key is None              # nothing of FalkorDB's to admit
 
         # Once it holds the head, the root's own provider, built from the root's data source.
         await FalkorProjector(graph_client_factory=FakeFalkor()).project_graph(gid)
@@ -89,6 +90,8 @@ def test_a_fork_reads_its_roots_store_with_its_changes_over_it(monkeypatch):
         registry = _Registry(_RootStore((wm["falkor_provider"], wm["falkor_graph_name"])))
         e = await engine(registry)
         assert e.provider._base is registry.provider and registry.asked == [parent_ds]
+        # Its reads take the root shard's admission slot, as the root's own reads do.
+        assert e.provider.manager_cache_key == registry.provider.manager_cache_key
         # Deep search runs there: the fork's own changes are not in it, and the note says so.
         assert await e.provider.deep_search("q") == "the root's page"
         assert registry.provider.searches == ["q"]
@@ -178,4 +181,51 @@ def test_a_forks_cached_reads_move_with_its_roots_store():
         assert await scope() == before                              # the root stood still
         await svc.apply_ops(graph_id=gid, actor="alice", message="root", ops=[_n("B")])
         assert await scope() != before
+    _run(case)
+
+
+def test_a_request_on_a_fork_reads_its_version_and_root_once():
+    """Each request on a fork built its engine with some thirty statements before its read: the
+    fork's and its root's rows each in a session of their own, the main branch ids again and
+    again, the ceiling, the root's watermark (two sessions), and on its first read the version
+    once more. One session now reads the fork's version, its ceiling (kept per version), its root
+    and the root's store, and hands the version to the overlay: a request on a fork costs a few
+    statements more than the same request on its root."""
+    from sqlalchemy import event
+
+    from backend.app.providers.manager import provider_manager
+    from backend.app.services.context_engine import ContextEngine
+    from backend.app.services.versioning import db
+
+    async def case(svc):
+        parent_ds, gid = await _parent(svc)
+        await svc.apply_ops(graph_id=gid, actor="alice", message="seed", ops=[_n("A"), _n("B")])
+        async with _client() as c:
+            fork_ds = (await _fork(c, gid)).json()["dataSourceId"]
+        fgid = (await svc.get_graph_by_data_source(fork_ds))["graph_id"]
+        await svc.apply_ops(graph_id=fgid, actor="u_forker", message="own", ops=[_n("F")])
+
+        async def cost(ds):
+            sent = []
+
+            def record(conn, cursor, statement, params, context, executemany):
+                sent.append(statement)
+
+            async def request():
+                async with _mgmt() as session:
+                    engine = await ContextEngine.for_workspace(WS, provider_manager, session,
+                                                               data_source_id=ds, actor="u_forker")
+                    await engine.provider.get_node("A")
+
+            await request()                                     # warm: the delta is cached
+            engine = db.get_engine().sync_engine
+            event.listen(engine, "before_cursor_execute", record)
+            try:
+                await request()
+            finally:
+                event.remove(engine, "before_cursor_execute", record)
+            return len(sent)
+
+        root, fork = await cost(parent_ds), await cost(fork_ds)
+        assert fork <= root + 8, (root, fork)
     _run(case)

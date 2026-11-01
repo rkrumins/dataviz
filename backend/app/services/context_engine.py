@@ -309,33 +309,33 @@ class ContextEngine:
         from ..providers.versioned_branch_provider import FORK_NO_DEEP_SEARCH, VersionedBranchProvider
         from .versioned_sources import serves_pin
 
-        if await svc.fork_reads_from(gid) == "postgres":
+        # One session reads the fork's version, its ceiling, its root and the root's store.
+        plan = await svc.fork_read_plan(gid)
+        if plan["reads_from"] == "postgres":
             return VersionedBranchProvider(svc, graph_id=gid, branch_id=main_id, actor=actor,
                                            deep_search_gap=FORK_NO_DEEP_SEARCH)
-        root = await svc.fork_root(gid)
-        root_id = root["graph_id"]
+        root_id = plan["root_id"]
         base = None
-        wm = await svc.projection_watermark(root_id)
-        if wm["fresh"] and root["deleted_at"] is None:
+        if plan["fresh"] and not plan["root_trashed"]:
             try:
                 provider = await registry.get_provider_for_workspace(
-                    workspace_id, session, root["data_source_id"])
+                    workspace_id, session, plan["root_data_source_id"])
             except (KeyError, ProviderUnavailable, ConnectionError, OSError,
                     asyncio.TimeoutError) as exc:
                 # Postgres holds what the root's store would have served: read it there.
                 logger.warning("fork %s reads its root %s from Postgres: %s", gid, root_id, exc)
             else:
-                if serves_pin(getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
-                              wm.get("falkor_graph_name"), root_id):
+                if serves_pin(getattr(provider, "manager_cache_key", None), plan["falkor_provider"],
+                              plan["falkor_graph_name"], root_id):
                     base = provider
         if base is None:
-            base = VersionedBranchProvider(svc, graph_id=root_id,
-                                           branch_id=await svc.main_branch_id(root_id), actor=actor)
+            base = VersionedBranchProvider(svc, graph_id=root_id, branch_id=plan["root_main"],
+                                           actor=actor)
         # Its cache keys carry the root store's version it reads against: the root's writes and
         # projections bump only the root's cache (DraftOverlayProvider.physical_graph_id).
         return DraftOverlayProvider(base, svc=svc, graph_id=gid, branch_id=main_id, actor=actor,
-                                    fork=True,
-                                    read_ns=f"{root_id}@{wm['committed']}:{wm['projected']}")
+                                    fork=True, version=plan["version"],
+                                    read_ns=f"{root_id}@{plan['committed']}:{plan['projected']}")
 
     # ------------------------------------------------------------------ #
     # Connection-aware factory (legacy compat)                             #
