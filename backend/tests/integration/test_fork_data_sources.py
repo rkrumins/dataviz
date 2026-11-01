@@ -536,21 +536,25 @@ def test_the_reaper_removes_orphan_rows_one_at_a_time_deepest_first():
     _run(case)
 
 
-def test_an_expired_parent_waits_for_the_fork_rows_that_name_it(caplog):
-    """A parent's graph with nothing past its genesis is purged whatever forks it has: they read
-    nothing of it. Its expired row was then deleted while fork rows still named it, and failed on
-    RESTRICT on every pass of the reaper. It now waits for them."""
+def test_a_parent_with_only_its_genesis_is_not_purged_while_its_forks_live(caplog, monkeypatch):
+    """A parent's graph with nothing past its genesis was purged whatever forks it had, as giving
+    them nothing; but a fork reads through its parent's graph whatever it holds, and every request
+    on the fork then failed (a 500: its parent missing from its layers). Its purge now waits for
+    its forks, as a permanent delete refuses: the reaper leaves it standing, its row with it. A fork
+    whose parent is gone all the same (an earlier release purged it) answers 404, not 500."""
     import logging
     from datetime import datetime, timedelta, timezone
 
+    from backend.app.services.versioning import purge_worker
     from backend.app.services.versioning.purge_worker import (
-        PurgeRunner, Reaper, create_purge_job, tombstone_graphs_for_data_source)
+        PurgeRefused, PurgeRunner, Reaper, create_purge_job, tombstone_graphs_for_data_source)
     from backend.tests.integration.test_graph_lifecycle_purge import _nobody, _take
 
     async def case(svc):
         parent_ds, gid = await _parent(svc)
         async with _client() as c:
             fork = (await _fork(c, gid)).json()
+        fork_ds, fgid = fork["dataSourceId"], fork["graphId"]
         assert (await svc.get_graph(gid))["main_head_commit_seq"] <= 1
         await tombstone_graphs_for_data_source(data_source_id=parent_ds, workspace_id=WS, actor="u")
         expired = (datetime.now(timezone.utc) - timedelta(days=config.PURGE_GRACE_DAYS + 1)).isoformat()
@@ -559,15 +563,31 @@ def test_an_expired_parent_waits_for_the_fork_rows_that_name_it(caplog):
                               .WorkspaceDataSourceORM, parent_ds)
             row.deleted_at, row.deleted_by = expired, "u"
             await s.commit()
+        assert await create_purge_job(graph_id=gid, workspace_id=WS, actor="u",
+                                      require_tombstoned=True) is None
+        with pytest.raises(PurgeRefused):
+            await create_purge_job(graph_id=gid, workspace_id=WS, actor="u")
+        with caplog.at_level(logging.ERROR, logger="backend.app.services.versioning.purge_worker"):
+            await Reaper().run_once()
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR], caplog.text
+        assert await _row(parent_ds) is not None and await _row(fork_ds) is not None
+        assert await svc.fork_reads_from(fgid) == "overlay"
+
+        # A parent purged all the same, as an earlier release did.
+        async def none_read(s, graph):
+            return 0
+        monkeypatch.setattr(purge_worker, "_forks_reading", none_read)
         job = await create_purge_job(graph_id=gid, workspace_id=WS, actor="u",
                                      require_tombstoned=True)
         assert (await PurgeRunner(None, key_in_use=_nobody).run_job(await _take(job)))[
             "status"] == "completed"
-
-        with caplog.at_level(logging.ERROR, logger="backend.app.services.versioning.purge_worker"):
-            await Reaper().run_once()
-        assert not [r for r in caplog.records if r.levelno >= logging.ERROR], caplog.text
-        assert await _row(parent_ds) is not None and await _row(fork["dataSourceId"]) is not None
+        with pytest.raises(ValueError):
+            await svc.fork_reads_from(fgid)
+        async with _client() as c:
+            r = await c.get(f"/api/v1/{WS}/versioning/graphs/{fgid}/watermark")
+            assert r.status_code == 404, r.text
+            r = await c.get(f"/api/v1/{WS}/graph/nodes", params={"dataSourceId": fork_ds})
+            assert r.status_code == 404, r.text
     _run(case)
 
 async def _view_on(ds_id, name, draft=None):

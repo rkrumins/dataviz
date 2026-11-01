@@ -187,8 +187,10 @@ default, as the parent's own views do.
 
 **A parent's permanent delete** queues the purges of its trashed forks before its own, and deletes
 their rows with its own. A live fork refuses it (**409** `live_forks`) before anything is queued —
-also when the parent has nothing published, whose graph purge would not wait for its forks: the
-fork's row names the parent's.
+also when the parent has nothing published: a fork reads through its parent's graph whatever it
+holds, so the parent's purge waits for its forks too, and the reaper leaves it standing. A fork
+whose parent's graph is gone all the same (an earlier release purged one under its forks) answers
+**404**.
 
 **The reaper keeps the two in step.** Each step above crosses two databases, so a crash can leave
 the row behind its graph. On every pass, `Reaper.fork_rows`:

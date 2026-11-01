@@ -2297,8 +2297,13 @@ async def get_watermark(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised)."""
-    return await _watermark_model(session, await svc.projection_watermark(graph_id))
+    """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised).
+    404 for a fork whose parent's graph is gone."""
+    try:
+        wm = await svc.projection_watermark(graph_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return await _watermark_model(session, wm)
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/freshness", response_model=BranchFreshnessModel)
@@ -2384,7 +2389,10 @@ async def rebuild_projection(
     worker-less deployment self-heals (``project_now`` is an idempotent catch-up, a no-op when the
     cache is already fresh)."""
     await _repair_projection_target(graph_id)            # self-heal: pin an unpinned graph when possible
-    wm = await svc.projection_watermark(graph_id)
+    try:
+        wm = await svc.projection_watermark(graph_id)
+    except ValueError as exc:                            # a fork whose parent's graph is gone
+        raise HTTPException(status_code=404, detail=str(exc))
     name = wm.get("falkor_graph_name")
     # No real target — NULL or the synthetic ``gv_<id>`` placeholder nothing reads (mirrors the
     # projector's unpinned skip). Nothing is cached, so there is nothing to rebuild.

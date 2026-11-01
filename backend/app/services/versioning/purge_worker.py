@@ -138,12 +138,10 @@ def _minted(g):
 
 
 async def _forks_reading(s, graph: GraphORM) -> int:
-    """How many forks still read ``graph``'s history. A graph with nothing past its genesis
-    commit (an abandoned enablement) gives its forks nothing, so none hold it back. A trashed
-    minted fork stops holding its parent back unless a live fork, or one bound to a data source,
-    reads through it, at any depth (a fork's state composes its parent's, recursively)."""
-    if graph.main_head_commit_seq <= 1:
-        return 0
+    """How many forks still read ``graph``'s history — one with nothing past its genesis commit
+    too: a fork reads through its parent's graph whatever it holds, and fails without it. A
+    trashed minted fork stops holding its parent back unless a live fork, or one bound to a data
+    source, reads through it, at any depth (a fork's state composes its parent's, recursively)."""
     # Each fork of ``graph`` (top), and every fork under it reached through trashed minted forks.
     sub = select(GraphORM.id.label("top"), GraphORM.id, GraphORM.deleted_at,
                  GraphORM.data_source_id).where(
@@ -929,9 +927,9 @@ class Reaper:
                     named = await s.scalar(select(WorkspaceDataSourceORM.id).where(
                         WorkspaceDataSourceORM.fork_of_data_source_id == ds_id).limit(1))
                     if named is not None:
-                        # Its forks' rows still name it (a parent with nothing past its genesis is
-                        # purged whatever forks it has): it waits for them to go, as they will
-                        # with their graphs.
+                        # Its forks' rows still name it (its graph gone all the same, as an
+                        # earlier release purged one under its forks): it waits for them to go,
+                        # as they will with their graphs.
                         if ds_id not in _LEFT_STANDING:
                             _LEFT_STANDING.add(ds_id)
                             logger.warning("reaper: %s is past its grace period, but forks' data "

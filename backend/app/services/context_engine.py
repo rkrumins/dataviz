@@ -310,7 +310,10 @@ class ContextEngine:
         from .versioned_sources import serves_pin
 
         # One session reads the fork's version, its ceiling, its root and the root's store.
-        plan = await svc.fork_read_plan(gid)
+        try:
+            plan = await svc.fork_read_plan(gid)
+        except ValueError as exc:                    # its parent is gone: a fork not found
+            raise KeyError(str(exc)) from exc
         if plan["reads_from"] == "postgres":
             return VersionedBranchProvider(svc, graph_id=gid, branch_id=main_id, actor=actor,
                                            deep_search_gap=FORK_NO_DEEP_SEARCH)

@@ -3819,7 +3819,10 @@ class GraphVersioningService:
             graph = await s.get(GraphORM, graph_id)
             root = graph
             while root is not None and root.fork_parent_graph_id:
-                root = await s.get(GraphORM, root.fork_parent_graph_id)
+                parent = await s.get(GraphORM, root.fork_parent_graph_id)
+                if parent is None:              # purged under it (an earlier release did)
+                    raise ValueError(f"the graph fork {root.id} was forked from is gone")
+                root = parent
         if root is not None and root.id != graph_id:
             wm = await self.projection_watermark(root.id)
             reads_from = await self.fork_reads_from(graph_id)
@@ -8743,6 +8746,9 @@ class GraphVersioningService:
         while graph is not None and graph.fork_parent_graph_id:
             if branch_id != await self._main_branch_id(s, graph.id):
                 break
+            if await s.get(GraphORM, graph.fork_parent_graph_id) is None:
+                # Purged under it (an earlier release did): not found, never a crash.
+                raise ValueError(f"the graph fork {graph.id} was forked from is gone")
             branch_id = await self._main_branch_id(s, graph.fork_parent_graph_id)
             seq = await fork_base_at(s, graph, seq)
             layers.append((graph.fork_parent_graph_id, branch_id, seq))
