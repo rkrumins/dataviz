@@ -633,6 +633,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_INGEST_HEARTBEAT_SECS` | computed | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_INGEST_POLL_SECS` | `5` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_INGEST_STALE_SECS` | `120` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_JOBS_PER_USER` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_JOBS_PER_WORKSPACE` | `2` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_JOB_WEDGE_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_LEASE_TTL` | `60` | `backend/app/services/versioning/config.py` |

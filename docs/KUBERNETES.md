@@ -348,6 +348,13 @@ the version store's tables appear when the lanes first start. The chart's Networ
 already admit every lane. See
 [Where the jobs run: the worker lanes](/docs/versioning-import-export#2a-where-the-jobs-run-the-worker-lanes).
 
+To scale the transfer lane on its queue as well as on CPU, set
+`services.versioning.transfer.autoscaling.keda.enabled` and its `prometheusServerAddress`. That
+needs KEDA in the cluster and a Prometheus that scrapes viz-service's `/api/v1/metrics`
+(`METRICS_ENABLED` and `METRICS_TOKEN`). A KEDA `ScaledObject` then replaces the lane's HPA with
+the same bounds and CPU target, and also runs a pod for every `jobsPerReplica` (2) jobs running
+or waiting.
+
 ```bash
 kubectl -n <namespace> logs deploy/versioning-transfer | grep "versioning worker starting"
 ```

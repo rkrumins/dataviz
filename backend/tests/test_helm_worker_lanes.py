@@ -164,6 +164,60 @@ def test_helm_template_declares_the_three_lanes_on_the_shared_env():
     assert "OBJECT_STORE_BACKEND: {{ .Values.config.objectStore.backend" in configmap
 
 
+_KEDA = "services.versioning.transfer.autoscaling.keda"
+
+
+def _helm_template(*sets: str) -> subprocess.CompletedProcess:
+    args = [a for s in sets for a in ("--set", s)]
+    return subprocess.run(["helm", "template", "dataviz", str(_CHART), *args],
+                          capture_output=True, text=True, timeout=120)
+
+
+@pytest.mark.skipif(shutil.which("helm") is None, reason="helm is not installed")
+def test_helm_can_scale_the_transfer_lane_on_its_queue_with_keda():
+    rendered = _helm_template(f"{_KEDA}.enabled=true",
+                              f"{_KEDA}.prometheusServerAddress=http://prometheus:9090")
+    assert rendered.returncode == 0, rendered.stderr
+    docs = [d for d in yaml.safe_load_all(rendered.stdout) if d]
+    transfer = _lane_deployments(docs)["transfer"]
+    name = transfer["metadata"]["name"]
+    assert not [d for d in docs if d.get("kind") == "HorizontalPodAutoscaler"
+                and d["spec"]["scaleTargetRef"]["name"] == name], "two autoscalers would fight"
+    assert "replicas" not in transfer["spec"], "KEDA owns the transfer replicas"
+    (scaled,) = [d for d in docs if d.get("kind") == "ScaledObject"]
+    spec = scaled["spec"]
+    assert spec["scaleTargetRef"]["name"] == name
+    assert (spec["minReplicaCount"], spec["maxReplicaCount"]) == (2, 8)
+    behavior = spec["advanced"]["horizontalPodAutoscalerConfig"]["behavior"]
+    assert behavior["scaleDown"]["stabilizationWindowSeconds"] == 900
+    cpu, queue = spec["triggers"]
+    assert (cpu["type"], cpu["metricType"], cpu["metadata"]["value"]) == ("cpu", "Utilization", "70")
+    assert queue["type"] == "prometheus"
+    assert queue["metadata"]["serverAddress"] == "http://prometheus:9090"
+    assert queue["metadata"]["threshold"] == str(config.TRANSFER_SLOTS)
+    assert queue["metadata"]["query"] == ('max(versioning_jobs_running{lane="transfer"}) + '
+                                          'max(versioning_jobs_claimable{lane="transfer"})')
+
+    # On without a Prometheus to ask, the chart refuses to render.
+    refused = _helm_template(f"{_KEDA}.enabled=true")
+    assert refused.returncode != 0 and "prometheusServerAddress" in refused.stderr
+
+
+def test_the_transfer_lanes_keda_scaler_is_off_by_default_and_reads_what_the_api_reports():
+    """The checks that need no helm binary. KEDA is opt-in (it needs KEDA in the cluster and a
+    Prometheus scraping viz-service), counts a pod's worth as GRAPHVER_TRANSFER_SLOTS jobs, and
+    queries the series viz-service's /api/v1/metrics actually exports."""
+    values = yaml.safe_load((_CHART / "values.yaml").read_text())
+    keda = values["services"]["versioning"]["transfer"]["autoscaling"]["keda"]
+    assert keda["enabled"] is False and keda["prometheusServerAddress"] == ""
+    assert keda["jobsPerReplica"] == config.TRANSFER_SLOTS
+    text = _TEMPLATE.read_text()
+    assert "kind: ScaledObject" in text and "{{- if and .keda .keda.enabled }}" in text
+    exported = (_ROOT / "backend" / "app" / "api" / "v1" / "endpoints" / "metrics.py").read_text()
+    for series in ("versioning_jobs_running", "versioning_jobs_claimable"):
+        assert series in text and f'"{series}"' in exported, series
+
+
 # --------------------------------------------------------------------------- #
 # k8s base and compose                                                         #
 # --------------------------------------------------------------------------- #
