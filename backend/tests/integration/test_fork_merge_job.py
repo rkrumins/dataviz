@@ -217,3 +217,18 @@ def test_the_overview_counts_a_review_being_merged_as_open(monkeypatch):
             assert r.status_code == 202, r.text
             assert (await probe_overview(None))["openReviews"] == before
     _run(case)
+
+
+def test_a_drafts_review_sent_to_the_fork_merge_route_is_refused_early():
+    async def case(svc):
+        async with _client(PERMS) as c:
+            _ds, gid = await _parent(svc)
+            await svc.apply_ops(graph_id=gid, actor="alice", message="seed", ops=[_n("A")])
+            draft = await svc.open_draft(graph_id=gid, owner="u_forker", visibility="public")
+            await svc.apply_ops(graph_id=gid, branch_id=draft, actor="u_forker", message="d",
+                                ops=[_u("A", "A draft")])
+            mr = await svc.open_draft_mr(graph_id=gid, branch_id=draft, actor="u_forker")
+            r = await c.post(_merge_url(mr, "pulls"), json={"message": "m"})
+            assert r.status_code == 404, r.text
+            assert (await svc.get_pr(mr))["status"] != "merged"
+    _run(case)

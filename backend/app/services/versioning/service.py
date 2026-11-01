@@ -3843,6 +3843,8 @@ class GraphVersioningService:
                 pr = await s.get(MergeRequestORM, pr_id)
                 if pr is None:
                     raise ValueError(f"unknown pr {pr_id}")
+                if self._is_draft_mr(pr):                 # before anything counts how far behind
+                    raise ValueError(f"pr {pr_id} is a draft's review, not a fork's")
                 if pr.status in ("merged", "closed"):
                     raise ValueError(f"pr {pr_id} is {pr.status}")
                 if not self_merge and actor == pr.actor:

@@ -253,3 +253,23 @@ def test_a_merged_edge_delete_lands_in_edge_versions_on_the_parent():
             pmain = await svc.main_branch_id(gid)
             assert (await _state(svc, gid, pmain))[1] == {}
     _run(case)
+
+
+def test_a_drafts_review_is_not_merged_as_a_forks(monkeypatch):
+    """A draft's review sent to the fork merge is refused at once, as unknown to it, before any
+    count of how far behind anything is."""
+    async def case(svc):
+        from backend.tests.integration.test_fork_overlay_delta import _graph
+
+        gid = await _graph(svc, [_n("A")])
+        draft = await svc.open_draft(graph_id=gid, owner="bob")
+        await svc.apply_ops(graph_id=gid, branch_id=draft, actor="bob", message="d",
+                            ops=[_u("A", "A draft")])
+        mr = await svc.open_draft_mr(graph_id=gid, branch_id=draft, actor="bob")
+
+        async def counted(*_a, **_k):
+            raise AssertionError("counted a window")
+        monkeypatch.setattr(svc, "_window_count", counted)
+        with pytest.raises(ValueError, match="not a fork"):
+            await svc.merge_pr(pr_id=mr, actor="carol", message="m")
+    _run(case)
