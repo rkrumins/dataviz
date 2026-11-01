@@ -190,7 +190,8 @@ function expectCatchUp(wsId?: string, graphId?: string | null) {
 }
 
 /** How often to re-read the watermark (false = stop): while forced; while catching up,
- *  rebuilding or waiting for an operator's reseed; and, for a short window after main advanced, while merely behind — until the
+ *  rebuilding, waiting for an operator's reseed or being loaded into memory (and slowly while it
+ *  waits for room there); and, for a short window after main advanced, while merely behind — until the
  *  projection has had its chance to start. A recorded failure ends that window early, but keeps a
  *  slow poll while behind: the projector retries after its backoff, and only a fresh read shows
  *  the route back on FalkorDB. */
@@ -200,6 +201,8 @@ export function watermarkPollInterval(
   if (force) return 3_000
   if (!d || d.fresh !== false) return false
   const active = d.status === 'projecting' || d.status === 'rebuilding' || d.status === 'reseeding'
+    || d.status === 'rehydrating'
+  if (d.status === 'waiting_capacity') return 15_000
   const justAdvanced = advancedAt !== undefined && now - advancedAt < CATCH_UP_WINDOW_MS
   if (active || (justAdvanced && !d.lastError)) return 3_000
   return d.lastError ? 30_000 : false

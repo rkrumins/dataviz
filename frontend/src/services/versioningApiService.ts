@@ -184,6 +184,14 @@ export interface Watermark {
   /** What the customer's own graph holds that history doesn't (another writer kept writing to it),
    *  kept, not deleted; null when there is none. Brought in with {@link bringIntoHistory}. */
   externalDrift?: ExternalDrift | null
+  /** Residency (doc 17): the class a system administrator set, and whether the key is in FalkorDB
+   *  — `rehydrating`: being loaded, `waiting_capacity`: its master has no room for it yet. */
+  residency?: 'always' | 'standard' | 'coldline'
+  residencyState?: 'resident' | 'evicted' | 'rehydrating' | 'waiting_capacity'
+  evictedReason?: string | null
+  lastReadAt?: string | null
+  sizeBytes?: number | null
+  rehydratingSince?: string | null
 }
 
 /** Changes in a graph that version history doesn't hold. `via`: `verify` counted them on the last

@@ -135,15 +135,97 @@ export interface RetiredProjectionKey {
     afterSeq: number
 }
 
+/** A graph's residency class (doc 17): Always stays in FalkorDB, Standard is
+ *  evicted when unread for a while or under memory pressure, Coldline is
+ *  loaded only when a request needs FalkorDB. */
+export type ResidencyClass = 'always' | 'standard' | 'coldline'
+
+/** Whether a graph's key is in FalkorDB: ``rehydrating`` is being loaded,
+ *  ``waiting_capacity`` waits for room on its master. */
+export type ResidencyState = 'resident' | 'evicted' | 'rehydrating' | 'waiting_capacity'
+
 /** One row of the fleet inventory (``GET /api/v1/admin/versioning/graphs``):
  *  a projection row, plus whether the platform owns the key, whether the
  *  graph is a fork or an orphan (not a fork, and its data source is gone),
- *  and the old keys a move left behind. */
+ *  the old keys a move left behind, and its residency. */
 export interface VersionedGraphRow extends ProjectionWorstRow {
     owned: boolean
     forkParentGraphId: string | null
     orphan: boolean
     retiredKeys: RetiredProjectionKey[]
+    residency: ResidencyClass
+    residencyState: ResidencyState
+    evictedReason: string | null
+    lastReadAt: string | null
+    sizeBytes: number | null
+    /** While it is being loaded: since when (a load has no timeout). */
+    rehydratingSince: string | null
+}
+
+/** One residency policy value: as saved (null: unset), its default, and the
+ *  value in force. */
+export interface ResidencyPolicyValue<T> {
+    saved: T | null
+    default: T
+    effective: T
+}
+
+export interface ResidencyPolicyValues {
+    evictionEnabled: ResidencyPolicyValue<boolean>
+    defaultResidency: ResidencyPolicyValue<ResidencyClass>
+    standardIdleSecs: ResidencyPolicyValue<number>
+    coldlineIdleSecs: ResidencyPolicyValue<number>
+    highWaterPct: ResidencyPolicyValue<number>
+    lowWaterPct: ResidencyPolicyValue<number>
+    loadMarginPct: ResidencyPolicyValue<number>
+    bytesPerEntity: ResidencyPolicyValue<number>
+    coldlineCanvasLoadAbove: ResidencyPolicyValue<number>
+    capacityIntervalSecs: ResidencyPolicyValue<number>
+}
+
+export type ResidencyPolicyField = keyof ResidencyPolicyValues
+
+/** ``GET /api/v1/admin/versioning/residency-policy``: ``enabled`` is the deploy
+ *  flag (``GRAPHVER_RESIDENCY_ENABLED``); who changed the values last, and when. */
+export interface ResidencyPolicy {
+    enabled: boolean
+    values: ResidencyPolicyValues
+    ranges: Partial<Record<ResidencyPolicyField, { min: number; max: number }>>
+    updatedBy: string | null
+    updatedAt: string | null
+}
+
+/** A partial change: ``-1`` clears a value back to its default. */
+export type ResidencyPolicyChange = Partial<Record<ResidencyPolicyField, number | boolean | string>>
+
+export interface ResidencyPreviewItem {
+    graphId: string
+    dataSourceId: string | null
+    label: string | null
+    bytes: number | null
+    reason?: string
+    shortfallBytes?: number | null
+}
+
+export interface ResidencyPreviewMaster {
+    endpoint: string
+    usedBytes: number | null
+    maxBytes: number | null
+    reservedBytes: number
+    usedAfterBytes: number | null
+    hold: string | null
+    evictions: ResidencyPreviewItem[]
+    loads: ResidencyPreviewItem[]
+    waits: ResidencyPreviewItem[]
+}
+
+/** What the next capacity pass would do with these values, acting on nothing. */
+export interface ResidencyPreview {
+    values: Record<ResidencyPolicyField, number | boolean | string>
+    masters: ResidencyPreviewMaster[]
+    evictions: number
+    evictedBytes: number
+    loads: number
 }
 
 /** What ``POST /api/v1/admin/versioning/graphs/{graphId}/projection/move``
@@ -157,7 +239,8 @@ export interface ProjectionMoveResult {
     watermark: Watermark
 }
 
-export type ProjectionBucket = 'fresh' | 'lagging' | 'projecting' | 'rebuilding' | 'evicted' | 'failed'
+export type ProjectionBucket = 'fresh' | 'lagging' | 'projecting' | 'rebuilding' | 'evicted'
+    | 'rehydrating' | 'waiting_capacity' | 'failed'
 
 export interface VersionedGraphsFilter {
     provider?: string
@@ -178,6 +261,9 @@ export interface ProjectionSection {
     projecting: number
     rebuilding: number
     evicted: number
+    /** Residency (doc 17): being loaded, and waiting for room on their master. */
+    rehydrating?: number
+    waitingCapacity?: number
     failed: number
     maxLag: number
     worst: ProjectionWorstRow[]
@@ -307,4 +393,32 @@ export const systemStatusService = {
             method: 'POST',
             body: JSON.stringify(body),
         }),
+    /** The residency policy: each value as saved, its default and the value in force. */
+    residencyPolicy: (): Promise<ResidencyPolicy> =>
+        authFetch<ResidencyPolicy>('/api/v1/admin/versioning/residency-policy'),
+    /** Save policy values; ``-1`` clears one. A 422 names the field (``detail.field``). */
+    saveResidencyPolicy: (change: ResidencyPolicyChange): Promise<ResidencyPolicy> =>
+        authFetch<ResidencyPolicy>('/api/v1/admin/versioning/residency-policy', {
+            method: 'PUT',
+            body: JSON.stringify(change),
+        }),
+    /** What the next capacity pass would do with ``change`` applied (``{}``: as things stand). */
+    previewResidencyPolicy: (change: ResidencyPolicyChange): Promise<ResidencyPreview> =>
+        authFetch<ResidencyPreview>('/api/v1/admin/versioning/residency-policy/preview', {
+            method: 'POST',
+            body: JSON.stringify(change),
+        }),
+    /** Set a graph's class; Always on a graph out of FalkorDB may answer 409
+     *  ``capacity_insufficient`` with a message naming the master. */
+    setGraphResidency: (graphId: string, cls: ResidencyClass): Promise<{ graphId: string; residency: ResidencyClass; state: ResidencyState }> =>
+        authFetch(`/api/v1/admin/versioning/graphs/${encodeURIComponent(graphId)}/residency`, {
+            method: 'PUT',
+            body: JSON.stringify({ class: cls }),
+        }),
+    /** Load now: ask for an evicted graph's load, which admission decides. */
+    loadGraph: (graphId: string): Promise<{ graphId: string; state: ResidencyState; loadRequested: boolean }> =>
+        authFetch(`/api/v1/admin/versioning/graphs/${encodeURIComponent(graphId)}/load`, { method: 'POST' }),
+    /** Adopt a graph projecting into the customer's own key onto a platform key. */
+    adoptGraph: (graphId: string): Promise<{ graphId: string; from: { providerId: string; key: string }; to: { providerId: string; key: string } }> =>
+        authFetch(`/api/v1/admin/versioning/graphs/${encodeURIComponent(graphId)}/adopt`, { method: 'POST' }),
 }
