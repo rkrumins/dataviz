@@ -68,6 +68,7 @@ class ImportExportService:
         publish_hook=None,
         replace_scope_resolver=None,
         identity_resolver=None,
+        fork_hook=None,
     ) -> None:
         self._svc = versioning or GraphVersioningService()
         self._store = store or get_object_store()
@@ -94,6 +95,8 @@ class ImportExportService:
         # API layer, which resolves the ontology and owns those side effects; a refusal comes back
         # as the HTTP answer the route gives when it publishes inside the request.
         self._publish_hook = publish_hook
+        # The same for a fork's jobs (``fork_update``): ``(job) -> its answer | {"error": …}``.
+        self._fork_hook = fork_hook
 
     @property
     def store(self):
@@ -643,6 +646,69 @@ class ImportExportService:
 
     async def run_publish_safe(self, job_id: str, lease: Lease) -> None:
         await self._run_safe(job_id, lease, self.run_publish)
+
+    async def create_fork_update_job(
+        self, *, workspace_id: str, data_source_id: Optional[str], graph_id: str, actor: str,
+        parent_seq: int, resolutions: Optional[Dict[str, Any]] = None,
+        parent_label: Optional[str] = None,
+    ) -> Dict[str, str]:
+        """An Update from parent too large to run inside a request (``graph_id``: the fork), queued
+        like a publish, already queued: the parent's head it updates to is pinned (``parent_seq``),
+        and the request rides in ``field_scope``. Fenced as a publish job is: the fork's lifecycle
+        and move locks shared, the fork writable and still in ``workspace_id``, and one update of
+        it pending or running at a time (:class:`JobActive`), told under a lock its creations
+        take in turn."""
+        fields: Dict[str, Any] = {"actor": actor, "parentSeq": parent_seq}
+        if resolutions:
+            fields["resolutions"] = resolutions
+        if parent_label:
+            fields["parentLabel"] = parent_label
+        async with db.graphver_session() as s:
+            await self._svc._lock_lifecycle(s, graph_id, shared=True)
+            await self._lock_in_workspace(s, graph_id, workspace_id)
+            await self._svc._assert_writable(s, graph_id)
+            await self._svc._bounded_lock(s, select(func.pg_advisory_xact_lock(
+                func.hashtext(f"gvforkupdate:{graph_id}"))), f"graph {graph_id}")
+            active = await s.scalar(select(JobORM.id).where(
+                JobORM.graph_id == graph_id, JobORM.job_type == "fork_update",
+                JobORM.status.in_(("pending", "running"))).limit(1))
+            if active is not None:
+                raise JobActive(active, f"An update from the parent is already running on this fork "
+                                        f"(job {active}).")
+            job = JobORM(job_type="fork_update", graph_id=graph_id, workspace_id=workspace_id,
+                         data_source_id=data_source_id, field_scope=fields, status="pending",
+                         current_phase=QUEUED, updated_at=_now())
+            s.add(job)
+            await s.flush()
+            return {"job_id": job.id}
+
+    async def start_fork_job(self, job_id: str) -> str:
+        """Queue a fork's job (see :meth:`_start`). Returns the status to report."""
+        return await self._start(job_id)
+
+    async def run_fork_job(self, job_id: str, lease: Optional[Lease] = None) -> Dict[str, Any]:
+        """Run a fork's job through the injected hook, on ``lease`` (the transfer lane's; taken here
+        when called without one), as :meth:`run_publish` runs a publish: the hook's answer is the
+        job's summary, and a refusal — an update's conflicts — fails the job with it, through the
+        fenced finish. Safe to run again: an update already landed answers up to date."""
+        lease = lease or await lease_job(job_id)
+        async with db.graphver_session() as s:
+            row = await s.get(JobORM, job_id)
+            job = {**(row.field_scope or {}), "jobType": row.job_type, "graphId": row.graph_id,
+                   "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id}
+        result = await self._fork_hook(job)
+        values: Dict[str, Any] = {"summary": result}
+        if "error" in result:
+            detail = result["error"].get("detail")
+            values.update(status="failed", error_message=str(
+                detail.get("message") or detail.get("type") if isinstance(detail, dict) else detail)[:2000])
+        if not await lease.finish(**values):
+            raise Superseded(f"{job['jobType']} job {job_id} (epoch {lease.epoch}) was taken over "
+                             "before it could finish")
+        return result
+
+    async def run_fork_job_safe(self, job_id: str, lease: Lease) -> None:
+        await self._run_safe(job_id, lease, self.run_fork_job)
 
     async def requeue_failed(self, job_id: str) -> bool:
         """Queue a FAILED job again — a person asked to retry it — to resume from its cursor.

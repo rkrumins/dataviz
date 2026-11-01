@@ -3045,6 +3045,44 @@ class GraphVersioningService:
                 fork_graph_id=fork_graph_id, actor=actor, resolutions=dict(resolutions or {}),
                 parent_seq=parent_seq, parent_label=parent_label))
 
+    async def fork_update_size(self, *, fork_graph_id: str) -> Dict[str, object]:
+        """What :meth:`update_fork_from_parent` would take now, counted in SQL without running it:
+        ``{changes, parent_seq, up_to_date}`` — the entities it would merge and the edges its
+        cascades may delete (each query counted no further than ``SYNC_PUBLISH_MAX_CHANGES + 1``),
+        and the parent's head it would update to. What the route sizes an update by, to run it in
+        the request or queue it as a job pinned to ``parent_seq``."""
+        cap = config.SYNC_PUBLISH_MAX_CHANGES
+        async with self._session() as s:
+            fork, parent = await self._fork_and_parent(s, fork_graph_id)
+            fork_main = await self._main_branch_id(s, fork.id)
+            base = await fork_base_at(s, fork, fork.main_head_commit_seq)
+            to = parent.main_head_commit_seq
+            if to <= base:
+                return {"changes": 0, "parent_seq": base, "up_to_date": True}
+            window = await self._window_chain(
+                s, parent.id, await self._main_branch_id(s, parent.id), base, to)
+            changes = 0
+            for stmt in [*self._both_queries(fork.id, fork_main, window),
+                         *self._cascade_queries(fork.id, fork_main, window)]:
+                changes += int(await s.scalar(select(func.count()).select_from(
+                    stmt.distinct().limit(cap + 1).subquery())) or 0)
+            return {"changes": changes, "parent_seq": to, "up_to_date": False}
+
+    @staticmethod
+    async def _fork_and_parent(s, fork_graph_id: str) -> Tuple[GraphORM, GraphORM]:
+        """A live fork and its parent, for Update from parent: an unknown or trashed graph, or a
+        parent gone, is ``ValueError``; a graph with no parent, :class:`NotAFork`."""
+        fork = await s.get(GraphORM, fork_graph_id)
+        if fork is None or fork.deleted_at is not None:
+            raise ValueError(f"unknown graph {fork_graph_id}")
+        if not fork.fork_parent_graph_id:
+            raise NotAFork(fork_graph_id, f"graph {fork_graph_id} is not a fork: it has no parent "
+                                          "to update from")
+        parent = await s.get(GraphORM, fork.fork_parent_graph_id)
+        if parent is None:
+            raise ValueError(f"the graph fork {fork.id} was forked from is gone")
+        return fork, parent
+
     async def _update_fork_once(
         self, *, fork_graph_id: str, actor: str, resolutions: Dict[str, Optional[dict]],
         parent_seq: Optional[int], parent_label: Optional[str],
@@ -3056,16 +3094,8 @@ class GraphVersioningService:
             # parent, and a large update holds none up. A path that holds both graphs' locks takes
             # the parent's first.
             await self._lock_graph(s, fork_graph_id)
-            fork = await s.get(GraphORM, fork_graph_id)
-            if fork is None or fork.deleted_at is not None:
-                raise ValueError(f"unknown graph {fork_graph_id}")
-            if not fork.fork_parent_graph_id:
-                raise NotAFork(fork_graph_id, f"graph {fork_graph_id} is not a fork: it has no "
-                                              "parent to update from")
+            fork, parent = await self._fork_and_parent(s, fork_graph_id)
             await self._assert_writable(s, fork.id)
-            parent = await s.get(GraphORM, fork.fork_parent_graph_id)
-            if parent is None:
-                raise ValueError(f"the graph fork {fork.id} was forked from is gone")
             fork_main = await self._main_branch_id(s, fork.id)
             parent_main = await self._main_branch_id(s, parent.id)
             head = fork.main_head_commit_seq
@@ -3080,7 +3110,8 @@ class GraphVersioningService:
                               created_by=actor))
             await s.flush()
             window = await self._window_chain(s, parent.id, parent_main, base, to)
-            changed = await self._both_changed(s, fork.id, fork_main, window) | set(resolutions)
+            changed = await self._ids_of(s, self._both_queries(fork.id, fork_main, window))
+            changed |= set(resolutions)
             was = await self._values_at(s, parent.id, parent_main, changed, base)
             ours = await self._values_at(s, fork.id, fork_main, changed, head)
             theirs = await self._values_at(s, parent.id, parent_main, changed, to)
@@ -3147,23 +3178,20 @@ class GraphVersioningService:
         return chain
 
     @staticmethod
-    async def _both_changed(s, fork_id: str, fork_main: str, window) -> set:
+    def _both_queries(fork_id: str, fork_main: str, window) -> list:
         """Of the entities a fork's parent changed in ``window`` (:meth:`_window_chain`), those the
-        fork has rows of (a head on its ``main``): what Update from parent merges. Joined in SQL,
-        never the window's ids in this process."""
+        fork has rows of (a head on its ``main``): what Update from parent merges, as a query a
+        table and window, joined in SQL — never the window's ids in this process."""
         mine = select(EntityHeadORM.entity_id).where(
             EntityHeadORM.graph_id == fork_id, EntityHeadORM.branch_id == fork_main)
-        both: set = set()
-        for gid, bid, lo, hi in window:
-            for model in (NodeVersionORM, EdgeVersionORM):
-                both.update((await s.execute(select(model.entity_id).where(
+        return [select(model.entity_id).where(
                     model.graph_id == gid, model.branch_id == bid, model.commit_seq > lo,
-                    model.commit_seq <= hi, model.entity_id.in_(mine)).distinct())).scalars())
-        return both
+                    model.commit_seq <= hi, model.entity_id.in_(mine))
+                for gid, bid, lo, hi in window for model in (NodeVersionORM, EdgeVersionORM)]
 
     @staticmethod
-    async def _sync_cascades(s, fork_id: str, fork_main: str, window) -> set:
-        """The edges Update from parent may have to delete on the fork, found in SQL: the fork's own
+    def _cascade_queries(fork_id: str, fork_main: str, window) -> list:
+        """The edges Update from parent may have to delete on the fork, as queries: the fork's own
         edges on a node its parent deleted in ``window`` (:meth:`_window_chain`), and the parent's
         edges written in it — drawn, or pointed elsewhere — at a node the fork deleted. More than
         that, at times: whether one is left on a node gone is told from what the fork reads after
@@ -3172,30 +3200,36 @@ class GraphVersioningService:
         gone = select(EntityHeadORM.entity_id).where(
             EntityHeadORM.graph_id == fork_id, EntityHeadORM.branch_id == fork_main,
             EntityHeadORM.is_tombstone.is_(True))
-        edges: set = set()
+        queries = []
         for gid, bid, lo, hi in window:
             deleted = select(nv.entity_id).where(
                 nv.graph_id == gid, nv.branch_id == bid, nv.commit_seq > lo, nv.commit_seq <= hi,
                 nv.op == "delete")
             for end in (ev.source_entity_id, ev.target_entity_id):
-                for stmt in (
-                        select(ev.entity_id).where(ev.graph_id == fork_id, ev.branch_id == fork_main,
-                                                   end.in_(deleted)),
-                        select(ev.entity_id).where(ev.graph_id == gid, ev.branch_id == bid,
-                                                   ev.commit_seq > lo, ev.commit_seq <= hi,
-                                                   ev.op != "delete", end.in_(gone))):
-                    edges.update((await s.execute(stmt.distinct())).scalars())
-        return edges
+                queries.append(select(ev.entity_id).where(
+                    ev.graph_id == fork_id, ev.branch_id == fork_main, end.in_(deleted)))
+                queries.append(select(ev.entity_id).where(
+                    ev.graph_id == gid, ev.branch_id == bid, ev.commit_seq > lo,
+                    ev.commit_seq <= hi, ev.op != "delete", end.in_(gone)))
+        return queries
+
+    @staticmethod
+    async def _ids_of(s, queries) -> set:
+        """The entity ids ``queries`` select, together."""
+        ids: set = set()
+        for stmt in queries:
+            ids.update((await s.execute(stmt.distinct())).scalars())
+        return ids
 
     async def _sync_neighborhood(self, s, fork_id: str, fork_main: str, window,
                                  view: Dict[str, Optional[dict]], at: int) -> None:
         """Add to an update's SPARSE result (``view``) what its cascade and integrity guards reason
         about, each at what the fork reads at ``at`` (the update's seq, its base moved): the edges
-        that may be left on a node gone — :meth:`_sync_cascades`'s, and every edge on a node the
+        that may be left on a node gone — :meth:`_cascade_queries`', and every edge on a node the
         merge deletes — and the ends of every live edge in it, the deleted ones too (as None), so
         the cascade sees them gone. Each nets to nothing unless the cascade then deletes it.
         Bounded by what the window and the merge changed."""
-        edges = await self._sync_cascades(s, fork_id, fork_main, window)
+        edges = await self._ids_of(s, self._cascade_queries(fork_id, fork_main, window))
         tomb = [eid for eid, p in view.items() if p is None]
         if tomb:
             edges |= await self._incident_edge_ids(s, fork_id, fork_main, tomb)

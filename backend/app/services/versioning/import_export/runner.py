@@ -1,13 +1,13 @@
-"""Import, export and publish jobs on the versioning worker's transfer lane, off the API pods.
+"""Import, export, publish and fork jobs on the versioning worker's transfer lane, off the API pods.
 
 An API process only queues the jobs it creates (:meth:`ImportExportService.start_import` /
-``start_export`` / ``start_publish``): the job row stays ``pending``, in phase ``queued``, once its
-inputs are stored. The transfer lane claims queued jobs here through :func:`job_lease.claim` —
-``FOR UPDATE SKIP LOCKED``, fair per workspace, every claim a new epoch — and runs them
-``GRAPHVER_TRANSFER_SLOTS`` at a time, plus one slot of its own for ``package_inspect`` so a person
-waiting on an upload never queues behind a 10-minute import. A job whose worker dies is taken over
-once its heartbeat is stale and resumed from its cursor; a stopping worker releases its jobs.
-:class:`JobReaper` fails the jobs nothing will ever run.
+``start_export`` / ``start_publish`` / ``start_fork_job``): the job row stays ``pending``, in phase
+``queued``, once its inputs are stored. The transfer lane claims queued jobs here through
+:func:`job_lease.claim` — ``FOR UPDATE SKIP LOCKED``, fair per workspace, every claim a new epoch —
+and runs them ``GRAPHVER_TRANSFER_SLOTS`` at a time, plus one slot of its own for
+``package_inspect`` so a person waiting on an upload never queues behind a 10-minute import. A job
+whose worker dies is taken over once its heartbeat is stale and resumed from its cursor; a stopping
+worker releases its jobs. :class:`JobReaper` fails the jobs nothing will ever run.
 """
 from __future__ import annotations
 
@@ -27,7 +27,8 @@ logger = logging.getLogger(__name__)
 # service entry point that runs each: called as ``entry(job_id, lease)``, it records a failure on
 # the job rather than raising.
 _ENTRY_POINTS = {"ingest": "run_import_safe", "export": "run_export_safe",
-                 "publish": "run_publish_safe", "package_inspect": "run_inspect_safe"}
+                 "publish": "run_publish_safe", "package_inspect": "run_inspect_safe",
+                 "fork_update": "run_fork_job_safe"}
 JOB_TYPES = job_lease.TRANSFER_TYPES
 
 

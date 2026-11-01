@@ -156,7 +156,7 @@ def get_import_export_service():
             ontology_resolver=_resolve_ontology_types,
             layout_writer=_write_view_import_assignments,
             publish_hook=_publish_from_job, replace_scope_resolver=_view_export_scope,
-            identity_resolver=_resolve_node_identity_for_import)
+            identity_resolver=_resolve_node_identity_for_import, fork_hook=_fork_from_job)
     return _ie_service
 
 
@@ -912,13 +912,18 @@ class CommitResponse(_ApiModel):
 
 
 class PublishJobResponse(_ApiModel):
-    """A large draft's publish (or review merge), run as a job: poll until it's done. ``error`` is
-    ``{status, detail}``, the answer the route gives when it publishes inside the request."""
+    """A large draft's publish (or review merge), or a fork's Update from parent, run as a job: poll
+    until it's done. ``error`` is ``{status, detail}``, the answer the route gives when it runs
+    inside the request. An update's says what ``POST …/update-from-parent`` says (``parentSeq``,
+    ``wrote``, ``upToDate``)."""
     job_id: str = Field(alias="jobId")
     graph_id: str = Field(alias="graphId")
     status: str
     commit_id: Optional[str] = Field(default=None, alias="commitId")
     error: Optional[dict] = None
+    parent_seq: Optional[int] = Field(default=None, alias="parentSeq")
+    wrote: Optional[int] = None
+    up_to_date: Optional[bool] = Field(default=None, alias="upToDate")
 
 
 class RevisionModel(_ApiModel):
@@ -1270,6 +1275,20 @@ class ForkSummaryResponse(GraphResponse):
     update_recommended: Optional[bool] = Field(default=None, alias="updateRecommended")
     reads_from: Optional[Literal["overlay", "postgres"]] = Field(default=None, alias="readsFrom")
     counts_capped: Optional[bool] = Field(default=None, alias="countsCapped")
+
+
+class UpdateFromParentRequest(_ApiModel):
+    resolutions: Optional[Dict[str, Optional[dict]]] = None
+
+
+class UpdateFromParentResponse(_ApiModel):
+    """An Update from parent that ran inside the request: its ``sync_parent`` commit, the parent's
+    head the fork now reads (``parentSeq``) and the rows it wrote. ``upToDate``: there was nothing to
+    take — no commit, and ``parentSeq`` is the head the fork reads already."""
+    commit_id: Optional[str] = Field(default=None, alias="commitId")
+    parent_seq: int = Field(alias="parentSeq")
+    wrote: int
+    up_to_date: bool = Field(alias="upToDate")
 
 
 class OpenPrRequest(_ApiModel):
@@ -2209,17 +2228,20 @@ async def get_publish_job(
     _meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
 ):
-    """Where a large draft's publish (or review merge) is: pending, running, completed with its
-    commit, or failed with the answer a publish inside the request would have given."""
+    """Where a large draft's publish (or review merge) is, or a fork's Update from parent (the
+    fork's job): pending, running, completed with its commit, or failed with the answer the route
+    would have given inside the request."""
     job = await ie.get_job(job_id)
-    if job is None or job["jobType"] != "publish" or job["graphId"] != graph_id:
+    if job is None or job["jobType"] not in ("publish", "fork_update") or job["graphId"] != graph_id:
         raise HTTPException(status_code=404, detail="publish job not found")
     summary = job.get("summary") or {}
     error = summary.get("error")
     if job["status"] == "failed" and error is None:          # died rather than refused
         error = {"status": 500, "detail": job.get("errorMessage") or "publishing failed"}
     return {"job_id": job_id, "graph_id": graph_id, "status": job["status"],
-            "commit_id": summary.get("commitId"), "error": error}
+            "commit_id": summary.get("commitId"), "error": error,
+            "parent_seq": summary.get("parentSeq"), "wrote": summary.get("wrote"),
+            "up_to_date": summary.get("upToDate")}
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/abandon", response_model=BranchResponse)
@@ -3955,14 +3977,14 @@ async def list_forks(
 
 
 async def _record_fork_event(session: AsyncSession, verb: str, ws_id: str, graph_id: str,
-                             parent_id: str) -> None:
+                             parent_id: str, **details) -> None:
     # After the graphver commit: best-effort, the fork has already moved.
     from backend.app.services.activity import recorder
 
     await recorder.record_for_request(
         session, f"workspace.versioning.fork_{verb}", workspace_id=ws_id,
         target_type="versioned_graph", target_id=graph_id,
-        details={"forkParentGraphId": parent_id}, best_effort=True)
+        details={"forkParentGraphId": parent_id, **details}, best_effort=True)
 
 
 @router.delete("/graphs/{graph_id}", status_code=204)
@@ -4003,6 +4025,82 @@ async def restore_fork(
         await restore_row(session, meta["data_source_id"])
     if parent_id is not None:
         await _record_fork_event(session, "restored", ws_id, graph_id, parent_id)
+
+
+@router.post("/graphs/{graph_id}/update-from-parent", response_model=UpdateFromParentResponse,
+             responses={202: {"description": "Queued as a job: ``{jobId, graphId, status}``"}})
+async def update_from_parent(
+    ws_id: str, graph_id: str, body: Optional[UpdateFromParentRequest] = None,
+    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+    ie=Depends(get_import_export_service),
+):
+    """Take the parent's changes into this fork (its ``graph_id``): one ``sync_parent`` commit,
+    and the fork reads the parent at its head from there on. 409 ``fork_update_conflicts`` names
+    what both changed (``conflicts``, and ``seeds``: the fork's own values to resolve from); send
+    it again with ``resolutions``. 409 ``not_a_fork`` for a graph with no parent. One that would
+    merge, or delete in its cascades, more than ``SYNC_PUBLISH_MAX_CHANGES`` entities runs as a job
+    pinned to the parent's head now: 202 with the job to poll (``GET …/publish-jobs/{jobId}``), one
+    at a time per fork (409 ``job_active``)."""
+    resolutions = body.resolutions if body is not None else None
+    with _domain_errors():
+        size = await svc.fork_update_size(fork_graph_id=graph_id)
+    parent_id = _meta["fork_parent_graph_id"]
+    label = await _data_source_label(session, await svc.get_graph(parent_id))
+    if size["changes"] > vconfig.SYNC_PUBLISH_MAX_CHANGES:
+        with _domain_errors():
+            job = await ie.create_fork_update_job(
+                workspace_id=ws_id, data_source_id=_meta.get("data_source_id"), graph_id=graph_id,
+                actor=user.id, parent_seq=size["parent_seq"], resolutions=resolutions,
+                parent_label=label)
+        started = await ie.start_fork_job(job["job_id"])
+        await _record_fork_event(session, "updated", ws_id, graph_id, parent_id,
+                                 parentSeq=size["parent_seq"], jobId=job["job_id"])
+        return JSONResponse(status_code=202, content={"jobId": job["job_id"], "graphId": graph_id,
+                                                      "status": started})
+    with _domain_errors():
+        out = await svc.update_fork_from_parent(
+            fork_graph_id=graph_id, actor=user.id, resolutions=resolutions, parent_label=label)
+    if not out["up_to_date"]:
+        await _fork_updated(graph_id, user.id)
+        await _record_fork_event(session, "updated", ws_id, graph_id, parent_id,
+                                 parentSeq=out["parent_seq"], wrote=out["wrote"])
+    return out
+
+
+async def _data_source_label(session: AsyncSession, meta: Optional[dict]) -> Optional[str]:
+    """The label of a graph's data source (``meta``, as ``get_graph`` gives it), or None."""
+    from backend.app.db.models import WorkspaceDataSourceORM
+
+    ds_id = (meta or {}).get("data_source_id")
+    row = await session.get(WorkspaceDataSourceORM, ds_id) if ds_id else None
+    return row.label if row is not None else None
+
+
+async def _fork_updated(graph_id: str, actor: str) -> None:
+    """What an Update from parent that wrote a commit sets off: the fork's canvas reads and its
+    views' "data updated" (a fork has no projection of its own to nudge)."""
+    await _bump_main_cache(graph_id)
+    await _touch_views_data_updated(graph_id, actor)
+
+
+async def _fork_from_job(job: dict) -> dict:
+    """Run a fork's queued job as the route runs it inside the request — a refusal as the HTTP answer
+    the route gives — then what it sets off. On the versioning worker's transfer lane."""
+    svc = get_versioning_service()
+    try:
+        with _domain_errors():
+            out = await svc.update_fork_from_parent(
+                fork_graph_id=job["graphId"], actor=job["actor"], resolutions=job.get("resolutions"),
+                parent_seq=job["parentSeq"], parent_label=job.get("parentLabel"))
+    except HTTPException as exc:
+        return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
+    if not out["up_to_date"]:
+        await _fork_updated(job["graphId"], job["actor"])
+    return {"commitId": out["commit_id"], "parentSeq": out["parent_seq"], "wrote": out["wrote"],
+            "upToDate": out["up_to_date"]}
 
 
 @router.post("/graphs/{graph_id}/pulls", response_model=OpenPrResponse, status_code=201)

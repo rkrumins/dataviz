@@ -36,6 +36,7 @@ tests/integration/test_fork_overlay_property.py
 tests/integration/test_fork_overlay_reads.py
 tests/integration/test_fork_stats.py
 tests/integration/test_fork_update.py
+tests/integration/test_fork_update_route.py
 tests/integration/test_graph_changes_freshness.py
 tests/integration/test_graph_changes_idempotent.py
 tests/integration/test_graph_changes_name_identity.py
