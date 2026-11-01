@@ -277,8 +277,13 @@ export function ResidencyPolicyCard() {
                                                 className={FIELD_CLS}
                                                 value={unit}
                                                 onChange={e => {
-                                                    setUnits(prev => ({ ...prev, [field]: Number(e.target.value) }))
-                                                    if (text === undefined || text === RESET) set(current)
+                                                    // The same duration in the new unit: an untouched value only shows
+                                                    // in it, an edit is converted.
+                                                    const next = Number(e.target.value)
+                                                    setUnits(prev => ({ ...prev, [field]: next }))
+                                                    if (text !== undefined && text !== RESET && text.trim() !== '' && !Number.isNaN(Number(text))) {
+                                                        set(String(Number(text) * unit / next))
+                                                    }
                                                 }}
                                             >
                                                 {DURATION_UNITS.map(u => <option key={u.secs} value={u.secs}>{u.label}</option>)}
@@ -336,16 +341,25 @@ function PreviewSummary({ preview }: { preview: ResidencyPreview }) {
     const lines = preview.masters.flatMap(m => {
         const out: string[] = []
         if (m.evictions.length) {
-            const bytes = m.evictions.reduce((n, e) => n + (e.bytes ?? 0), 0)
-            out.push(`Saving evicts ${m.evictions.length} graph${m.evictions.length === 1 ? '' : 's'}, ${formatBytes(bytes)}, on master ${m.endpoint}.`)
+            const sized = m.evictions.filter(e => e.bytes != null)
+            const bytes = sized.reduce((n, e) => n + (e.bytes ?? 0), 0)
+            const unknown = m.evictions.length - sized.length
+            const size = !sized.length ? 'size unknown'
+                : unknown ? `${formatBytes(bytes)} and ${unknown} of unknown size` : formatBytes(bytes)
+            out.push(`Saving evicts ${m.evictions.length} graph${m.evictions.length === 1 ? '' : 's'}, ${size}, on master ${m.endpoint}.`)
         }
         if (m.loads.length) out.push(`It starts loading ${m.loads.length} graph${m.loads.length === 1 ? '' : 's'} on master ${m.endpoint}.`)
         return out
     })
+    const secs = Number(preview.values?.capacityIntervalSecs)
+    const interval = Number.isFinite(secs) && secs > 0 ? formatSecs(secs) : null
     return (
         <div className="space-y-1">
             {lines.length ? lines.map(l => <p key={l}>{l}</p>) : <p>Saving evicts nothing now.</p>}
-            <p className="text-[11px] text-ink-muted">The next capacity pass acts on the new values within a minute; reads of an evicted graph come from Postgres until it is loaded again.</p>
+            <p className="text-[11px] text-ink-muted">
+                Every server reads the new values within 30 seconds, and the next capacity pass
+                {interval ? ` (every ${interval})` : ''} acts on them; reads of an evicted graph come from Postgres until it is loaded again.
+            </p>
         </div>
     )
 }

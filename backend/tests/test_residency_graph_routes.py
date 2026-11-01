@@ -127,6 +127,23 @@ async def test_always_on_a_graph_out_of_falkordb_that_does_not_fit_is_refused(wo
     assert world.classes == world.loads == world.recorded == []
 
 
+@pytest.mark.parametrize("why, says", [
+    ("unsized", "the size of this graph is not known"),       # review finding 8: not "measured"
+    ("unmeasured", "could not be measured"),
+    ("busy", "is taking another load"),
+    ("loading", "it is loading its data"),
+])
+async def test_a_refused_admission_says_why_in_words(world, why, says):
+    world.svc = _Svc(state="evicted")
+    world.admission = (False, "10.0.0.2:6379", None, why)
+    with pytest.raises(HTTPException) as caught:
+        await _set(world, "always")
+    detail = caught.value.detail
+    assert (detail["type"], detail["reason"], detail["shortfallBytes"]) == (
+        "capacity_insufficient", why, None)
+    assert says in detail["message"], detail["message"]
+
+
 async def test_always_on_a_graph_out_of_falkordb_that_fits_is_set_and_loaded(world):
     world.svc = _Svc(state="evicted", residency_class="coldline")
     out = await _set(world, "always")

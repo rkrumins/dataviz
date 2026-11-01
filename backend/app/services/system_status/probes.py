@@ -1492,10 +1492,12 @@ async def list_versioned_graphs(
         if r.fork_parent_graph_id is not None:
             return dict.fromkeys(("residency", "residencyState", "evictedReason", "lastReadAt",
                                   "sizeBytes", "rehydratingSince"))
+        from backend.app.services.versioning.service import residency_state_of
+
         return {
             "residency": r.residency,
-            "residencyState": (r.status if r.status in ("evicted", "rehydrating",
-                                                        "waiting_capacity") else "resident"),
+            "residencyState": residency_state_of(r.status, r.projected_commit_seq or 0,
+                                                 r.falkor_graph_name, r.id),
             "evictedReason": r.evicted_reason,
             "lastReadAt": r.last_read_at,
             "sizeBytes": r.size_bytes,

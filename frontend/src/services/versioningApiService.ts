@@ -193,7 +193,8 @@ export interface Watermark {
    *  and whether the key is in FalkorDB — a fork's root's, for a fork — `rehydrating`: being
    *  loaded, `waiting_capacity`: its master has no room for it yet. */
   residency?: 'always' | 'standard' | 'coldline' | null
-  residencyState?: 'resident' | 'evicted' | 'rehydrating' | 'waiting_capacity'
+  /** Null for a graph with no key; `rehydrating` too while a key is written from nothing. */
+  residencyState?: 'resident' | 'evicted' | 'rehydrating' | 'waiting_capacity' | null
   evictedReason?: string | null
   lastReadAt?: string | null
   sizeBytes?: number | null

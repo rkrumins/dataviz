@@ -58,12 +58,18 @@ const STATE_CHIP: Record<ResidencyState, { label: string; cls: string }> = {
 
 const CHIP_CLS = 'inline-flex px-1.5 py-px rounded-full border text-[9px] uppercase tracking-wide shrink-0'
 
-type Refusal = { type?: string; message?: string }
+type Refusal = { type?: string; reason?: string; message?: string }
+
+/** Why a key cannot be adopted, by the refusal's reason. */
+const NOT_ADOPTED: Record<string, string> = {
+    unpinned: 'This graph has no FalkorDB key yet, so there is nothing to adopt.',
+    shared: 'Other data sources read this key, so it cannot be adopted.',
+}
 
 /** A refusal in words: the server's own message where it gives one. */
 function explain(e: Error & { detail?: unknown }): string {
     const d: Refusal = typeof e.detail === 'object' && e.detail ? e.detail as Refusal : {}
-    if (d.type === 'projection_not_adopted') return 'Other data sources read this key, so it cannot be adopted.'
+    if (d.type === 'projection_not_adopted') return NOT_ADOPTED[d.reason ?? ''] ?? d.message ?? e.message
     if (d.type === 'projection_mode_unsupported') return 'A data source with a dedicated rollup graph cannot be adopted.'
     if (d.type === 'job_active') return 'A rollup rebuild is running; try again when it finishes.'
     if (d.type === 'already_adopted') return 'This graph already uses a platform key.'
@@ -354,7 +360,8 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                 {!row.forkParentGraphId && (row.residencyState === 'evicted' || row.residencyState === 'waiting_capacity') && (
                                                     <button className={ACTION_CLS} disabled={busy !== null} onClick={() => reside(row, 'load')}>Load now</button>
                                                 )}
-                                                {!row.owned && !row.forkParentGraphId && !row.orphan && (
+                                                {!row.owned && !row.forkParentGraphId && !row.orphan && row.falkorGraphName
+                                                    && row.falkorGraphName !== `gv_${row.graphId}` && (
                                                     <button className={ACTION_CLS} disabled={busy !== null} onClick={() => setAdopting(row)}>Adopt…</button>
                                                 )}
                                             </div>
@@ -392,7 +399,8 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                     </p>
                     <p>
                         <span className="font-mono">{adopting.falkorGraphName}</span> is left exactly as it is: never written,
-                        dropped or renamed.
+                        dropped or renamed. It keeps its memory too, so the graph then takes the room of two copies until
+                        that key is cleared.
                     </p>
                     <p className="text-amber-700 dark:text-amber-400">
                         Changes other tools keep making to {adopting.falkorGraphName} no longer show here, and Bring into history

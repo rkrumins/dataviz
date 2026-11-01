@@ -140,6 +140,39 @@ describe('ResidencyPolicyCard', () => {
         await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
     })
 
+    it('converts a duration when its unit changes, and an untouched one stays unedited', async () => {
+        // Review finding 8: switching the unit kept the number, so 7 days became 7 hours, edited.
+        renderCard()
+        const standard = await screen.findByRole('group', { name: 'Unload unread Standard graphs after' })
+        await userEvent.selectOptions(within(standard).getByRole('combobox'), 'hours')
+        expect(within(standard).getByRole('spinbutton')).toHaveValue(168)
+        expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+        // An edit is converted too: 2 days in hours is 48.
+        await userEvent.selectOptions(within(standard).getByRole('combobox'), 'days')
+        const days = within(standard).getByRole('spinbutton')
+        await userEvent.clear(days)
+        await userEvent.type(days, '2')
+        await userEvent.selectOptions(within(standard).getByRole('combobox'), 'hours')
+        expect(within(standard).getByRole('spinbutton')).toHaveValue(48)
+    })
+
+    it('says a size is unknown rather than 0 bytes, and when the new values take effect', async () => {
+        renderCard()
+        const start = within(await screen.findByRole('group', { name: 'Start mark' })).getByRole('spinbutton')
+        await userEvent.clear(start)
+        await userEvent.type(start, '60')
+        const unsized = preview().masters.map(m => ({
+            ...m, evictions: m.evictions.map((e, i) => (i === 0 ? e : { ...e, bytes: null })) }))
+        previewResidencyPolicy.mockResolvedValueOnce(preview({
+            masters: unsized, values: { capacityIntervalSecs: 300 } as ResidencyPreview['values'] }))
+        await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+        const dialog = await screen.findByRole('dialog')
+        expect(dialog).toHaveTextContent('Saving evicts 2 graphs, 1 GB and 1 of unknown size, on master 10.0.0.2:6379')
+        expect(dialog).toHaveTextContent('within 30 seconds')
+        expect(dialog).toHaveTextContent('every 5 minutes')
+        expect(dialog).not.toHaveTextContent('within a minute')
+    })
+
     it('resets a value to its default by saving -1', async () => {
         renderCard()
         await userEvent.click(within(await screen.findByRole('group', { name: 'Start mark' })).getByRole('button', { name: 'Reset to default' }))

@@ -185,6 +185,22 @@ export function useDraftsWhoseOwnerLeft(wsId?: string | null) {
  *  short window after main moves, behind-and-idle keeps polling too. */
 const mainAdvancedAt = new Map<string, number>()
 const CATCH_UP_WINDOW_MS = 60_000
+
+/** Since when this client has seen each graph being loaded into memory, or waiting for room there
+ *  (residency), for the poll's back-off: `{status, at}`. */
+const outSeen = new Map<string, { status: string; at: number }>()
+const OUT_BACKOFF_AFTER_MS = 180_000
+
+function outSince(key: string, status: string | undefined, now: number): number | undefined {
+  if (status !== 'rehydrating' && status !== 'waiting_capacity') {
+    outSeen.delete(key)
+    return undefined
+  }
+  const seen = outSeen.get(key)
+  if (seen?.status === status) return seen.at
+  outSeen.set(key, { status, at: now })
+  return now
+}
 function expectCatchUp(wsId?: string, graphId?: string | null) {
   if (wsId && graphId) mainAdvancedAt.set(`${wsId}:${graphId}`, Date.now())
 }
@@ -197,9 +213,13 @@ function expectCatchUp(wsId?: string, graphId?: string | null) {
  *  the route back on FalkorDB. */
 export function watermarkPollInterval(
   d: Pick<Watermark, 'fresh' | 'status' | 'lastError'> | undefined, force: boolean, advancedAt: number | undefined, now: number,
+  outSince?: number,
 ): number | false {
   if (force) return 3_000
   if (!d || d.fresh !== false) return false
+  // A load or a wait for room can go on for long: after a few minutes, once a minute.
+  if ((d.status === 'rehydrating' || d.status === 'waiting_capacity') && outSince !== undefined
+    && now - outSince >= OUT_BACKOFF_AFTER_MS) return 60_000
   const active = d.status === 'projecting' || d.status === 'rebuilding' || d.status === 'reseeding'
     || d.status === 'rehydrating'
   if (d.status === 'waiting_capacity') return 15_000
@@ -223,7 +243,11 @@ export function useProjectionWatermark(
     queryKey: VERSIONING_KEYS.projectionWatermark(wsId, graphId),
     queryFn: () => api.getWatermark(wsId!, graphId!),
     enabled: !!wsId && !!graphId,
-    refetchInterval: (q) => watermarkPollInterval(q.state.data, force, mainAdvancedAt.get(`${wsId}:${graphId}`), Date.now()),
+    refetchInterval: (q) => {
+      const now = Date.now()
+      return watermarkPollInterval(q.state.data, force, mainAdvancedAt.get(`${wsId}:${graphId}`), now,
+        outSince(`${wsId}:${graphId}`, q.state.data?.status, now))
+    },
     staleTime: 2_000,
     refetchOnWindowFocus: false,
   })

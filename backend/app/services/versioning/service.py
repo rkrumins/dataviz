@@ -540,6 +540,19 @@ def serves_head(projected: int, committed: int, status: Optional[str]) -> bool:
     return projected >= committed and not (config.RESIDENCY_ENABLED and status == "rehydrating")
 
 
+def residency_state_of(status: str, projected: int, key: Optional[str],
+                       graph_id: str) -> Optional[str]:
+    """Whether a graph's key is in FalkorDB, as residency shows it (doc 17): ``evicted``,
+    ``rehydrating`` (being loaded) or ``waiting_capacity`` as its status says; None with no key
+    (unpinned); ``rehydrating`` too while its key is written from nothing (a move's, an Adopt's,
+    a first seed: watermark 0); else ``resident``."""
+    if status in ("evicted", "rehydrating", "waiting_capacity"):
+        return status
+    if key in (None, f"gv_{graph_id}"):
+        return None
+    return "rehydrating" if projected == 0 else "resident"
+
+
 def bootstrap_unfinished(graph_id) -> tuple:
     """The ``jobs`` rows that say a graph's "enable version control" job has not COMPLETED
     (:meth:`GraphVersioningService._assert_not_bootstrapping`). ``graph_id`` is an id or a
@@ -3908,8 +3921,8 @@ class GraphVersioningService:
                 # FalkorDB (resident, evicted, rehydrating: being loaded, waiting_capacity: its
                 # master has no room for it yet), why it was evicted, its last read and its size.
                 "residency": ps.residency if ps else "standard",
-                "residency_state": (status if status in ("evicted", "rehydrating",
-                                                         "waiting_capacity") else "resident"),
+                "residency_state": residency_state_of(
+                    status, projected, ps.falkor_graph_name if ps else None, graph_id),
                 "evicted_reason": ps.evicted_reason if ps else None,
                 "last_read_at": ps.last_read_at if ps else None,
                 "size_bytes": ps.size_bytes if ps else None,

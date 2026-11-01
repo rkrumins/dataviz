@@ -289,6 +289,28 @@ describe('VersionedGraphsPanel', () => {
         expect(screen.getAllByLabelText('Residency class')).toHaveLength(4)
     })
 
+    it('names why a graph cannot be adopted, offers no Adopt on a graph with no key, and says it costs two copies', async () => {
+        // Review finding 8: every projection_not_adopted read "Other data sources read this key".
+        const unpinned = row({ graphId: 'graph_u', dataSourceId: 'ds_u', dataSourceLabel: 'Unpinned', falkorGraphName: null })
+        const synthetic = row({ graphId: 'graph_s', dataSourceId: 'ds_s', dataSourceLabel: 'Synthetic', falkorGraphName: 'gv_graph_s' })
+        versionedGraphs.mockResolvedValue({ graphs: [MAIN, unpinned, synthetic], nextCursor: null })
+        renderPanel()
+        await screen.findByText('Customer 360')
+        const cells = (label: string) => within(screen.getByText(label).closest('tr')!)
+        expect(cells('Unpinned').queryByRole('button', { name: 'Adopt…' })).not.toBeInTheDocument()
+        expect(cells('Synthetic').queryByRole('button', { name: 'Adopt…' })).not.toBeInTheDocument()
+
+        await userEvent.click(cells('Customer 360').getByRole('button', { name: 'Adopt…' }))
+        const dialog = await screen.findByRole('dialog')
+        expect(dialog).toHaveTextContent('keeps its memory')
+        expect(dialog).toHaveTextContent('two copies')
+        adoptGraph.mockRejectedValueOnce(Object.assign(new Error('409'), {
+            status: 409, detail: { type: 'projection_not_adopted', reason: 'unpinned',
+                message: 'this graph has no FalkorDB key yet; nothing to adopt' } }))
+        await userEvent.click(within(dialog).getByRole('button', { name: 'Adopt' }))
+        expect(await cells('Customer 360').findByText('This graph has no FalkorDB key yet, so there is nothing to adopt.')).toBeInTheDocument()
+    })
+
     it("sets a graph's class, and shows why Always cannot be had on a full master", async () => {
         versionedGraphs.mockResolvedValue({ graphs: [PLATFORM], nextCursor: null })
         setGraphResidency

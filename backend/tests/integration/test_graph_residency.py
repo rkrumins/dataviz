@@ -361,6 +361,30 @@ async def test_a_drop_that_fails_leaves_the_key_to_be_dropped_later(store, monke
     assert [(e["name"], e["movedBy"]) for e in ps.retired_keys] == [(key, "eviction")]
 
 
+async def test_a_graph_with_no_key_in_falkordb_is_not_in_memory(store, monkeypatch):
+    """Review finding 8: residencyState read "resident" (In memory) for a graph with no key, and
+    for one whose new key a move or an Adopt is writing from nothing (watermark 0)."""
+    from backend.app.services.system_status import probes
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
+
+    async def states(gid):
+        wm = await svc.projection_watermark(gid)
+        (row,) = (await probes.list_versioned_graphs(provider=None, status=None, workspace_id=None,
+                                                     kind=None, q=gid, cursor=None,
+                                                     limit=5))["graphs"]
+        return wm["residency_state"], row["residencyState"]
+
+    unpinned = (await svc.create_graph(data_source_id="ds_" + _hex(), workspace_id="ws_res",
+                                       actor="a"))["graph_id"]
+    assert await states(unpinned) == (None, None)
+    gid = await _resident(svc, proj)
+    assert await states(gid) == ("resident", "resident")
+    await _set_ps(gid, status="reseeding", projected_commit_seq=0)          # a move's new key
+    assert await states(gid) == ("rehydrating", "rehydrating")
+
+
 async def test_an_eviction_never_puts_back_a_watermark_liveness_lowered(store, monkeypatch):
     """Review finding 11: liveness lowers a graph's watermark without the projection lock. One that
     landed between an eviction's read of the watermark and its compare-and-swap, with a read's
