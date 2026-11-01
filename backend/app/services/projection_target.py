@@ -25,9 +25,10 @@ async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: 
     projected window. The level map lets the projector emit the same CANONICAL
     level-bridged pairs as the aggregation worker; without it the projector's full
     ancestor cross-product writes leaf/mixed cells the canonical boundary excludes,
-    which the on-demand reader then double-counts. ``None`` on any failure or when
-    the ontology defines no lineage types (the projector then skips rollup
-    maintenance for that window).
+    which the on-demand reader then double-counts. ``None`` when the ontology
+    defines no lineage types, and ``UNRESOLVED`` (falsy too) on any failure: the
+    projector then skips rollup maintenance for that window either way, but a
+    load's summaries gate waits on a failure (``FalkorProjector.summaries_built``).
 
     A data source in dedicated mode answers ``(containment, lineage, {}, "dedicated")``:
     the projector maintains none of its rollups, so it needs no level map; the types only
@@ -61,8 +62,10 @@ async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: 
             levels = {}
         return (cont, lin, levels)
     except Exception as exc:
+        from backend.app.services.versioning.projection import UNRESOLVED
+
         logger.warning("aggregation edge-type resolution for %s skipped: %s", graph_id, exc)
-        return None
+        return UNRESOLVED
 
 
 async def _projection_mode(data_source_id: str) -> str:

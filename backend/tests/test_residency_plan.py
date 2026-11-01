@@ -507,6 +507,37 @@ async def test_a_refused_eviction_is_made_up_from_the_next_candidates(monkeypatc
     assert tried == ["a", "b", "c"]
 
 
+async def test_a_load_waits_for_its_summaries_while_its_edge_types_cannot_be_read():
+    """Review finding 4: the summaries gate let a load's key serve reads when the ontology's edge
+    types could not be resolved (a management-database blip): "no lineage" (no summaries to wait
+    for) and "could not tell" (not yet) answered alike. Now only the first passes."""
+    from backend.app.services import projection_target
+    from backend.app.services.versioning.projection import FalkorProjector
+
+    asked = []
+
+    async def build(gid, idempotency_key=None):
+        asked.append(gid)
+
+    class _Blip:
+        async def get_graph(self, gid):
+            raise ConnectionError("management database unreachable")
+
+    proj = FalkorProjector(graph_client_factory=lambda *a, **kw: None, on_rollups_stale=build,
+                           edge_types_resolver=projection_target.resolve_aggregation_edge_types)
+    proj._svc = _Blip()
+    assert await proj.summaries_built("graph_x", "gvp_graph_x{abc.1}", None, 42,
+                                      ask="load7.0") is False
+    assert asked == []                         # nothing to ask a build for, either
+
+    async def no_lineage(svc, gid):
+        return None
+
+    proj._edge_types_resolver = no_lineage
+    assert await proj.summaries_built("graph_x", "gvp_graph_x{abc.1}", None, 42,
+                                      ask="load7.0") is True
+
+
 def test_a_resident_graph_asks_for_no_load():
     graphs = [_graph("g", requested_at=1.0)]
     assert plan(POLICY, [_master()], graphs, NOW).loads == []

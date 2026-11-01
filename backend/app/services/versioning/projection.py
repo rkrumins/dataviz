@@ -484,6 +484,20 @@ def _unless_loading(status: str):
     return case((ProjectionStateORM.status == "rehydrating", "rehydrating"), else_=status)
 
 
+class _Unresolved(tuple):
+    """An edge-type resolver's answer when the ontology could not be read (an outage), as against
+    ``None`` for one with no lineage: falsy, so every caller that skips rollup maintenance for
+    "no lineage" skips it alike, and :meth:`FalkorProjector.summaries_built` tells them apart."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNRESOLVED"
+
+
+UNRESOLVED = _Unresolved()
+
+
 class FalkorProjector:
     """Projects committed `main` state of a graph into its FalkorDB graph."""
 
@@ -1100,10 +1114,12 @@ class FalkorProjector:
         asked for, once per watermark — and per ``ask``, which names the ask under its own
         idempotency key (a load's epoch and attempt: the aggregation service answers a key it has
         seen within the hour with the job it already ran). A key that cannot be read has not got
-        them."""
+        them, nor one whose ontology could not be read (:data:`UNRESOLVED`): it may need them."""
         if self._on_rollups_stale is None or self._edge_types_resolver is None:
             return True
         sets = await self._edge_types_resolver(self._svc, graph_id)
+        if sets is UNRESOLVED:
+            return False
         if not (sets and sets[1]) or "dedicated" in sets[3:]:
             return True
         try:
