@@ -274,6 +274,18 @@ class ForkUpdateConflicts(_HttpMapped, RuntimeError):
                              "seeds": self.seeds})
 
 
+class CrossesUpdate(_HttpMapped, RuntimeError):
+    """A revert of a fork's Update from parent, or a restore of the fork to before its latest one.
+    An update moves the parent commit the fork reads (``fork_bases``), which no commit of the
+    fork's own can move back: what it would write is not what the fork read then."""
+
+    def __init__(self, graph_id: str, commit_id: str):
+        self.graph_id, self.commit_id = graph_id, commit_id
+        super().__init__("This crosses an update from the parent, which a revert or restore can't "
+                         "take back: fork again from that point instead.",
+                         {"type": "crosses_update", "graphId": graph_id, "commitId": commit_id})
+
+
 class ResolutionsWithoutConflict(_HttpMapped, RuntimeError):
     """Update from parent was sent resolutions for entities it found in no conflict (``ids``). A
     resolution settles a conflict the update raised, and writes nothing else. Nothing was
@@ -455,4 +467,5 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
-               IneligibleOwner, ForkUpdateConflicts, ResolutionsWithoutConflict, ForkNotUpToDate)
+               IneligibleOwner, ForkUpdateConflicts, ResolutionsWithoutConflict, ForkNotUpToDate,
+               CrossesUpdate)

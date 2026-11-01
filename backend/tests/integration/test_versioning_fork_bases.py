@@ -5,8 +5,8 @@ at the fork point, and (with Update from parent) one per update. A read of the f
 composes its parent at the ``parent_seq`` of the latest row at or before S, or at S before the
 first. These cases write a second row directly, as an update will, and check that every read
 follows it — the whole state, the heads, the bounded values, what changed in a window — that a
-read or a restore at an earlier seq is unchanged by it, and that a fork of a fork reads through
-both. A fork forked before the table, with no row, still reads at its fork point.
+read at an earlier seq is unchanged by it and a restore to before it refused, and that a fork of a
+fork reads through both. A fork forked before the table, with no row, still reads at its fork point.
 """
 import asyncio
 import os
@@ -15,6 +15,7 @@ import pytest
 from sqlalchemy import delete, select
 
 from backend.app.services.versioning import db, models
+from backend.app.services.versioning.errors import CrossesUpdate
 from backend.app.services.versioning.models import CommitORM, ForkBaseORM, GraphORM
 from backend.app.services.versioning.service import GraphVersioningService
 from backend.tests.integration.test_versioning_bounded_reads import _node, _upd
@@ -100,19 +101,18 @@ async def _a_second_base_moves_what_the_fork_reads_from_its_seq_on(svc):
     old = await svc.materialize_state(graph_id=fg, branch_id=fmain, as_of_seq=p1)
     assert {eid: n["displayName"] for eid, n in old["nodes"].items()} == {"A": "one"}, old
 
-    # A restore to the fork point brings back what the fork read there, the parent's later
-    # changes undone on the fork; the parent keeps them.
+    # A restore to the fork point is refused: from f2 on the fork reads its parent at p3, which no
+    # commit of its own can take back — it would write the parent's older values as its own.
     async with db.graphver_session() as s:
         point = (await s.execute(select(CommitORM.id).where(
             CommitORM.graph_id == fg, CommitORM.commit_seq == p1))).scalar_one()
-    preview = await svc.restore_preview(graph_id=fg, commit_id=point)
-    assert preview["nodes"] == {"create": 0, "update": 1, "delete": 2}, preview
-    await svc.restore_to_commit(graph_id=fg, commit_id=point, actor="bob")
+    with pytest.raises(CrossesUpdate):
+        await svc.restore_preview(graph_id=fg, commit_id=point)
+    with pytest.raises(CrossesUpdate):
+        await svc.restore_to_commit(graph_id=fg, commit_id=point, actor="bob")
     now = await svc.materialize_state(graph_id=fg, branch_id=fmain)
-    assert {eid: n["displayName"] for eid, n in now["nodes"].items()} == {"A": "one"}, now
-    parent = await svc.materialize_state(graph_id=pg, branch_id=pmain)
-    assert {eid: n["displayName"] for eid, n in parent["nodes"].items()} == {
-        "A": "two", "B": "B name"}, parent
+    assert {eid: n["displayName"] for eid, n in now["nodes"].items()} == {
+        "A": "two", "B": "B name", "C": "C name"}, now
 
 
 async def _a_fork_of_a_fork_reads_through_both_bases(svc):

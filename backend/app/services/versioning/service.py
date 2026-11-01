@@ -46,7 +46,7 @@ from backend.common.property_patch import apply_patch, compose_patches, strip_de
 from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
 from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionExhausted,
-                     CurationAtRisk, DraftNotReadable, StagedChangesUnsaved,
+                     CrossesUpdate, CurationAtRisk, DraftNotReadable, StagedChangesUnsaved,
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, ForkNotUpToDate,
                      ForkUpdateConflicts, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
@@ -2271,7 +2271,8 @@ class GraphVersioningService:
             held = await self._hashes_at(s, gid, parent_main, list(heads), base)
             deltas = [Delta(eid, "delete", None, held[eid].content_hash, _HASH_NONE)
                       for eid in sorted(heads) if eid in held]
-            kinds = {eid: heads[eid].kind for eid in heads}
+            # The parent's kind, where the parent reads what it deletes: never the fork's row's.
+            kinds = {eid: held[eid].kind for eid in heads if eid in held}
             incident = await self._incident_live_edge_skeletons(s, gid, parent_main, sorted(heads))
             mine = set(await review(list(incident))) if incident else set()
             cascaded = sorted(eid for eid, v in incident.items()
@@ -2761,7 +2762,8 @@ class GraphVersioningService:
         main (plan §17): restore every entity that commit touched to its
         pre-commit state. If a later commit also changed one of those entities the
         revert can't apply cleanly and raises :class:`MergeConflict`. Deleting a
-        node on revert cascades to its incident edges, same as publish."""
+        node on revert cascades to its incident edges, same as publish. A fork's
+        Update from parent is not reverted (:class:`CrossesUpdate`)."""
         return await self._retry_seq(
             f"revert {commit_id}",
             lambda: self._revert_commit_once(
@@ -2784,6 +2786,8 @@ class GraphVersioningService:
                 raise ValueError("commit is not on this graph's main")
             if target.kind == "genesis":
                 raise ValueError("cannot revert the genesis commit")
+            if target.kind == "sync_parent":
+                raise CrossesUpdate(graph_id, commit_id)
 
             k, head_seq = target.commit_seq, graph.main_head_commit_seq
             touched = await self._changed_in_window(s, graph_id, main_id, k - 1, k)
@@ -2821,8 +2825,8 @@ class GraphVersioningService:
             )
             s.add(revert)
             await s.flush()
-            kind_by_entity = await self._kind_map_multi(
-                s, [(graph_id, main_id)], entity_ids=[d.entity_id for d in deltas])
+            kind_by_entity = await self._kind_map_multi(s, await self._layer_pairs(
+                s, graph_id, main_id, head_seq), entity_ids=[d.entity_id for d in deltas])
             kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)  # payload wins over stale head
             await self._write_deltas(s, graph_id, main_id, revert, deltas, kind_by_entity, actor)
             main.head_commit_id = revert.id
@@ -2845,8 +2849,10 @@ class GraphVersioningService:
         later are resurrected). Bounded O(touched) via ``_values_at`` (a fork's
         through its parent). The same hydrate → cascade →
         integrity guards as publish/revert run so the delta (and therefore the
-        preview counts) is exactly what a restore will write."""
+        preview counts) is exactly what a restore will write. A fork is not restored
+        to before its latest Update from parent (:meth:`_assert_within_base`)."""
         graph_id = graph.id
+        await self._assert_within_base(s, graph, target)
         k, head_seq = target.commit_seq, graph.main_head_commit_seq
         touched = await self._changed_in_window(s, graph_id, main_id, k, head_seq)
         before = await self._values_at(s, graph_id, main_id, touched, k)
@@ -2908,8 +2914,8 @@ class GraphVersioningService:
             )
             s.add(restore)
             await s.flush()
-            kind_by_entity = await self._kind_map_multi(
-                s, [(graph_id, main_id)], entity_ids=[d.entity_id for d in deltas])
+            kind_by_entity = await self._kind_map_multi(s, await self._layer_pairs(
+                s, graph_id, main_id, head_seq), entity_ids=[d.entity_id for d in deltas])
             kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)  # payload wins over stale head
             await self._write_deltas(s, graph_id, main_id, restore, deltas, kind_by_entity, actor)
             main.head_commit_id = restore.id
@@ -2944,6 +2950,7 @@ class GraphVersioningService:
             target = await s.get(CommitORM, (graph_id, commit_id))
             if target is None or target.branch_id != main_id:
                 raise ValueError("commit is not on this graph's main")
+            await self._assert_within_base(s, graph, target)
 
             commits_undone = await s.scalar(
                 select(func.count()).select_from(CommitORM).where(
@@ -2963,8 +2970,9 @@ class GraphVersioningService:
                         "edges": {"create": 0, "update": 0, "delete": 0}}
 
             deltas = await self._restore_delta(s, graph, main_id, target)
-            kind_by_entity = await self._kind_map_multi(
-                s, [(graph_id, main_id)], entity_ids=[d.entity_id for d in deltas])
+            kind_by_entity = await self._kind_map_multi(s, await self._layer_pairs(
+                s, graph_id, main_id, graph.main_head_commit_seq),
+                entity_ids=[d.entity_id for d in deltas])
             kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)
             counts = {"nodes": {"create": 0, "update": 0, "delete": 0},
                       "edges": {"create": 0, "update": 0, "delete": 0}}
@@ -2991,6 +2999,25 @@ class GraphVersioningService:
         if parent is not None:
             total += await self._count_changed_in_window(s, *parent)
         return total
+
+    async def _layer_pairs(self, s, graph_id: str, branch_id: str, seq: int) -> List[Tuple[str, str]]:
+        """The ``(graph, branch)`` head sets a read of ``branch_id`` at ``seq`` composes
+        (:meth:`_layers`): what an entity's kind is told from — for a fork's ``main``, its parent's
+        too, where an entity the fork never wrote has its only rows."""
+        return [(g, b) for g, b, _at in await self._layers(s, graph_id, branch_id, seq)]
+
+    @staticmethod
+    async def _assert_within_base(s, graph: GraphORM, target: CommitORM) -> None:
+        """A fork is restored only to a commit since its latest Update from parent (its latest
+        ``fork_bases`` row): before it, the fork read another parent commit, which no commit of its
+        own can bring back (:class:`CrossesUpdate`)."""
+        if not graph.fork_parent_graph_id:
+            return
+        latest = await s.scalar(select(func.max(ForkBaseORM.fork_seq)).where(
+            ForkBaseORM.fork_graph_id == graph.id,
+            ForkBaseORM.fork_seq <= graph.main_head_commit_seq))
+        if latest is not None and target.commit_seq < latest:
+            raise CrossesUpdate(graph.id, target.id)
 
     # ------------------------------------------------------------------ #
     # Forking + pull requests (copy-on-write — plan §8, §12.5)            #

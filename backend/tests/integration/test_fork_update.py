@@ -402,3 +402,47 @@ def test_an_update_that_would_write_an_untyped_or_undeclared_node_is_refused_by_
                 resolutions={"A": {"urn": "A", "entityType": "Table", "displayName": "A kept"}})
             assert out["wrote"] == 1
     _run(case)
+
+
+# ── history across an update ──────────────────────────────────────────────────────────────────
+def test_reverting_an_update_or_restoring_past_one_is_refused():
+    """An update changes the parent the fork reads, which no commit of the fork's own can take back:
+    reverting it, or restoring to before it, is refused (crosses_update)."""
+    from backend.app.services.versioning.errors import CrossesUpdate
+
+    async def case(svc):
+        async with _projected(svc) as root:
+            gid = await root.make([_n("A"), _n("B")])
+            fgid, fmain = await _fork(svc, gid)
+            await svc.apply_ops(graph_id=fgid, actor="bob", message="own", ops=[_u("A", "A fork")])
+            before = (await svc.commit_log(graph_id=fgid, branch_id=fmain, limit=1))[0]["commit_id"]
+            await root.edit([_e("ab", "A", "B")])
+            out = await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob")
+            head = (await svc.get_graph(fgid))["main_head_commit_seq"]
+            with pytest.raises(CrossesUpdate) as exc:
+                await svc.revert_commit(graph_id=fgid, commit_id=out["commit_id"], actor="bob")
+            assert (exc.value.status_code, exc.value.detail["type"]) == (409, "crosses_update")
+            assert "fork again" in exc.value.detail["message"]
+            with pytest.raises(CrossesUpdate):
+                await svc.restore_to_commit(graph_id=fgid, commit_id=before, actor="bob")
+            with pytest.raises(CrossesUpdate):
+                await svc.restore_preview(graph_id=fgid, commit_id=before)
+            assert (await svc.get_graph(fgid))["main_head_commit_seq"] == head
+    _run(case)
+
+
+def test_a_restore_within_one_base_still_works():
+    async def case(svc):
+        async with _projected(svc) as root:
+            gid = await root.make([_n("A"), _n("B")])
+            fgid, fmain = await _fork(svc, gid)
+            await root.edit([_e("ab", "A", "B")])
+            out = await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob")
+            await svc.apply_ops(graph_id=fgid, actor="bob", message="later",
+                                ops=[_u("A", "A fork"), _d("B")])
+            preview = await svc.restore_preview(graph_id=fgid, commit_id=out["commit_id"])
+            assert preview["edges"] == {"create": 1, "update": 0, "delete": 0}, preview
+            assert await svc.restore_to_commit(graph_id=fgid, commit_id=out["commit_id"], actor="bob")
+            assert await _agrees(root, fgid, fmain, {"A", "B"}) == (
+                {"A": "A", "B": "B"}, {"ab": ("A", "B")})
+    _run(case)

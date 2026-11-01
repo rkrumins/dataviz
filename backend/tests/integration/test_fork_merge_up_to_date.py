@@ -200,3 +200,51 @@ def test_a_large_review_is_merged_a_page_at_a_time_as_one_commit(monkeypatch):
             assert [c["commit_id"] for c in log] == [commit]
             assert log[0]["stats"] == {"create": 5, "update": 2, "delete": 2}
     _run(case)
+
+
+async def _misfiled_delete(svc, fgid, eid):
+    """A commit on the fork's main that deleted the parent's edge ``eid`` but filed it under
+    ``node_versions`` — what a revert or restore across an update wrote before it was refused."""
+    from backend.app.services.versioning import db
+    from backend.app.services.versioning.changeset import Delta
+    from backend.app.services.versioning.merkle import content_hash
+    from backend.app.services.versioning.models import BranchORM, CommitORM, GraphORM
+    async with db.graphver_session() as s:
+        await svc._lock_graph(s, fgid)
+        fork = await s.get(GraphORM, fgid)
+        fmain = await svc._main_branch_id(s, fgid)
+        main = await s.get(BranchORM, fmain)
+        held = (await svc._hashes_at(s, fgid, fmain, [eid], fork.main_head_commit_seq))[eid]
+        seq = fork.main_head_commit_seq + 1
+        commit = CommitORM(graph_id=fgid, branch_id=fmain, commit_seq=seq,
+                           parent_commit_id=main.head_commit_id, kind="edit",
+                           message="a delete filed under nodes", actor="bob")
+        s.add(commit)
+        await s.flush()
+        await svc._write_deltas(s, fgid, fmain, commit,
+                                [Delta(eid, "delete", None, held.content_hash, content_hash(None))],
+                                {eid: "node"}, "bob")
+        main.head_commit_id = commit.id
+        fork.main_head_commit_seq = seq
+
+
+def test_a_merged_edge_delete_lands_in_edge_versions_on_the_parent():
+    """The parent's delete takes the parent's own kind for what it deletes, never the fork's head's:
+    an edge's tombstone goes to ``edge_versions``, where the parent reads the edge."""
+    async def case(svc):
+        from sqlalchemy import select
+
+        from backend.app.services.versioning import db
+        from backend.app.services.versioning.models import EdgeVersionORM
+
+        async with _projected(svc) as root:
+            gid = await root.make([_n("A"), _n("B"), _e("ab", "A", "B")])
+            fgid, _fmain = await _fork(svc, gid)
+            await _misfiled_delete(svc, fgid, "ab")
+            pr, commit = await _merge(svc, root, fgid)
+            async with db.graphver_session() as s:
+                assert (await s.scalar(select(EdgeVersionORM.op).where(
+                    EdgeVersionORM.graph_id == gid, EdgeVersionORM.commit_id == commit))) == "delete"
+            pmain = await svc.main_branch_id(gid)
+            assert (await _state(svc, gid, pmain))[1] == {}
+    _run(case)

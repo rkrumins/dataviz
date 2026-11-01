@@ -350,7 +350,12 @@ no parent, as a draft's pull leaves it.
 data source's label>@P`, written with no rows too, so history shows the update; its `stats` are
 the rows it wrote (create, update, delete, and the same as `rebased`) with `from_seq` and `to_seq`.
 With it, in the same transaction, the fork's `fork_bases` row `(that commit, P)`: a read before it
-keeps the old base.
+keeps the old base. An update is not taken back by a commit of the fork's own: reverting a
+`sync_parent` commit, or restoring the fork (or previewing a restore) to a commit before its latest
+update, answers **409 `crosses_update`** — the fork read another parent commit then, and the rows a
+revert or restore wrote would be the parent's older values as the fork's own, proposed back at its
+next merge. Fork again from that point instead. A restore since the latest update works as on any
+graph.
 
 **Locks.** The fork's graph lock only. What it reads of the parent are rows at seqs up to `P`, and
 those never change once `P` is the parent's head, so it waits on no publish of the parent and a
