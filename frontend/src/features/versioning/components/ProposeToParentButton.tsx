@@ -15,6 +15,7 @@ import { useNavigate } from 'react-router-dom'
 import { GitPullRequestArrow, TriangleAlert } from 'lucide-react'
 import { Backdrop } from '@/components/ui/Backdrop'
 import { Button } from '@/components/ui/Button'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useModalA11y } from '@/hooks/useModalA11y'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { PullRequestExistsError } from '@/services/versioningApiService'
@@ -41,10 +42,12 @@ export function ProposeToParentButton({ wsId, forkGraphId, parentDataSourceId, b
           Propose to parent
         </Button>
         {behind > 0 && (
-          <span className="text-[11px] font-medium text-amber-600 dark:text-amber-400"
-            title="Its review merges into its parent only once the fork has taken its parent’s changes">
-            Update from parent first
-          </span>
+          <HoverTip className="inline-flex"
+            label="Its review merges into its parent only once the fork has taken its parent’s changes">
+            <span className="text-[11px] font-medium text-amber-600 dark:text-amber-400">
+              Update from parent first
+            </span>
+          </HoverTip>
         )}
       </span>
       {open && (
