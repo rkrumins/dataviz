@@ -408,7 +408,8 @@ async def test_a_master_claimed_for_a_waiting_load_takes_no_other_key_or_load(mo
         loop = residency.CapacityLoop(SimpleNamespace(drop_graph=None))
         await loop._act(decided, residency.Snapshot(
             masters=[m.master for m in decided.masters],
-            rows={"g": {"placed": True, "provider": "default", "key": "old"}}))
+            rows={"g": {"placed": True, "provider": "default", "key": "old",
+                        "status": "evicted"}}))
         assert started == [("g", "m2")]
     finally:
         residency_policy.invalidate()
@@ -693,7 +694,8 @@ async def test_a_load_no_key_lands_on_goes_to_the_next_master_in_the_same_pass(m
         MasterPlan(master=_master(endpoint="m2", used_pct=79), reserved=0, used_after=None),
         MasterPlan(master=_master(endpoint="m3", used_pct=50), reserved=0, used_after=None)])
     snap = residency.Snapshot(masters=[m.master for m in decided.masters],
-                              rows={"g": {"placed": True, "provider": "default", "key": "old"}})
+                              rows={"g": {"placed": True, "provider": "default", "key": "old",
+                                          "status": "evicted"}})
     loop = residency.CapacityLoop(SimpleNamespace(drop_graph=None))
     try:
         await loop._act(decided, snap)

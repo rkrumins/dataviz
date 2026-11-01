@@ -1187,6 +1187,30 @@ async def test_a_first_seed_is_admitted_as_a_load(store, falkor, mine, monkeypat
 
 
 @live
+async def test_a_first_seed_s_wait_is_logged_and_counted(store, falkor, mine, monkeypatch, caplog):
+    """Review 3, finding 12: a first seed goes straight to waiting_capacity (the projector queues
+    it), and a pass logged and counted a wait only as a graph went from evicted to waiting, so a new
+    graph's wait was never told. It is, once, with the reason the pass found."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    proj = FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    gid = (await store.create_graph(data_source_id="ds_" + _hex(), workspace_id="ws_res",
+                                    actor="a", falkor_graph_name="gvt_" + _hex(),
+                                    owns_falkor_graph=True))["graph_id"]
+    mine.append(gid)
+    await _publish(store, gid, "A")
+    assert (await proj.project_graph(gid))["skipped"] == "waiting_capacity"
+    await falkor.config_set("maxmemory", await _used(falkor) * 100 // 80)   # no room under 80 %
+    counted = _counting(monkeypatch)
+    loop = CapacityLoop(proj)
+    with caplog.at_level("WARNING"):
+        decided = await loop.run_once(graph_ids=[gid])
+        await loop.run_once(graph_ids=[gid])
+    assert [(w.graph_id, w.reason) for w in decided.waits] == [(gid, "capacity")]
+    assert counted == {("versioning_residency_load_waits_total", (("reason", "capacity"),)): 1}
+    assert sum(f"graph {gid} waits for room" in r.getMessage() for r in caplog.records) == 1
+
+
+@live
 async def test_the_retire_pass_drops_a_key_an_eviction_could_not(store, falkor, mine, monkeypatch):
     """Review finding 3: the graph's own row still names the key its eviction could not drop, and
     the retire pass kept it for that ("PROTECTED: graph … projects into it") and forgot it, so the

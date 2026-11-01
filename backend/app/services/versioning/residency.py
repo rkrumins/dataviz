@@ -784,6 +784,8 @@ class CapacityLoop:
         self._waited: Dict[str, Tuple[int, int]] = {}
         # Loads whose ontology could not be read: graph id -> (its epoch, passes in a row).
         self._unread: Dict[str, Tuple[int, int]] = {}
+        # Waits this process has told (logged and counted), until the graph stops waiting.
+        self._told: set = set()
 
     async def run_once(self, *, graph_ids: Optional[Collection[str]] = None) -> Optional[Plan]:
         """One pass, under the leader lock: gather, plan, act, measure. Returns the plan, or None
@@ -852,6 +854,10 @@ class CapacityLoop:
                 metrics.increment("versioning_residency_loads_total", outcome="started")
                 logger.info("residency: loading graph %s onto %s (about %d bytes)",
                             load.graph_id, load.endpoint, load.bytes)
+        # A wait is told once: as the graph enters it from evicted, or — a first seed, which the
+        # projector queues straight into waiting_capacity, or one waiting since before this
+        # process — the first time a pass here finds it waiting.
+        self._told -= {g for g, r in snap.rows.items() if r["status"] != "waiting_capacity"}
         for wait in decided.waits:
             async with db.graphver_session() as s:
                 entered = (await s.execute(
@@ -861,7 +867,10 @@ class CapacityLoop:
                     .values(status="waiting_capacity", updated_at=_now())
                     .returning(ProjectionStateORM.graph_id)
                     .execution_options(synchronize_session=False))).first()
+            entered = entered or (wait.graph_id not in self._told and snap.rows.get(
+                wait.graph_id, {}).get("status") == "waiting_capacity")
             if entered:
+                self._told.add(wait.graph_id)
                 metrics.increment("versioning_residency_load_waits_total", reason=wait.reason)
             if entered and wait.reason == "capacity":
                 logger.warning("residency: graph %s waits for room on %s: its load needs %d bytes "
