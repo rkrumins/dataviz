@@ -244,7 +244,8 @@ pass, read by almost nothing, and kept for the fork's undo window after it was t
 - **A fork's watermark is its root's** (`GET …/watermark`): the revisions, freshness and state of
   the store it reads through, with `readsThrough` naming the root's graph and no key, provider or
   ownership of its own. Its read route says `falkordb` while the root's projection holds its head.
-  The fleet inventory counts a fork without a key as behind on nothing.
+  The fleet inventory counts every fork as behind on nothing, one still pinned to an old copy
+  included, and the liveness check leaves forks out.
 - **Check sync** (`POST …/projection/reconcile`) has nothing of a fork's to compare:
   `skippedReason: "a fork reads through its parent's graph"`.
 

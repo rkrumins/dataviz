@@ -75,7 +75,7 @@ the next step — taking the parent's newer commits into a fork — builds on. S
 - **A fork gets no FalkorDB copy.** Forking pins no key, and the projector never projects a fork: a
   fork's rebuild is **409** (no target), and Check sync answers `skippedReason` for it. A fork's
   watermark is its root's, the graph it reads through (`readsThrough`), and the fleet inventory no
-  longer shows a fork without a key as behind.
+  longer shows a fork as behind; the liveness check leaves forks out.
 - **A fork has no stats.** Nothing polls them — they would compose the whole graph — and a stats read
   of a fork's data source answers `status: "unavailable"` (`missing_fields:
   ["not_available_for_a_fork"]`) instead of "computing" for a poll that never lands.

@@ -116,6 +116,37 @@ def test_a_forks_read_route_is_where_its_reads_come_from(monkeypatch):
     _run(case)
 
 
+def test_a_forks_old_copy_is_neither_behind_nor_checked():
+    """A fork reads through its root's store and is never projected, so the fleet inventory says
+    it is behind on nothing; but only while it had no key: one still pinned to a copy an earlier
+    release made (until GRAPHVER_DROP_FORK_COPIES) showed as lagging, more with every commit on
+    it. And the liveness check read that copy's marker, and lowered the fork's watermark once the
+    copy was lost. Every fork is behind on nothing now, and the liveness check leaves forks out."""
+    from backend.app.services.system_status.probes import list_versioned_graphs
+
+    async def case(svc):
+        key = "gvt_nc_" + os.urandom(4).hex()
+        root = await _root(svc, key)
+        fake = FakeFalkor()
+        projector = FalkorProjector(graph_client_factory=fake)
+        await projector.project_graph(root)
+        fid = (await svc.fork_graph(parent_graph_id=root, workspace_id="ws1", actor="bob"))["graph_id"]
+        for name in ("N", "M", "O"):
+            await svc.apply_ops(graph_id=fid, actor="bob", message=name, ops=[_n(name)])
+        # A copy an earlier release projected at the fork's second commit, lost since.
+        await _pin(fid, falkor_graph_name=f"{key}__fork_{fid}", owns_falkor_graph=True,
+                   projected_commit_seq=2)
+        listed = await list_versioned_graphs(provider=None, status=None, workspace_id="ws1",
+                                             kind="fork", q=fid, cursor=None, limit=5)
+        assert [(g["graphId"], g["lag"]) for g in listed["graphs"]] == [(fid, 0)]
+        assert fid not in {r["graph_id"] for r in await projector.check_liveness()}
+        assert f"{key}__fork_{fid}" not in fake.graphs              # its copy is not even read
+        async with db.graphver_session() as s:
+            ps = await s.get(ProjectionStateORM, fid)
+            assert (ps.projected_commit_seq, ps.last_error) == (2, None)
+    _run(case)
+
+
 @pytest.mark.skipif(os.getenv("RUN_FALKOR_LIVE") != "1", reason="set RUN_FALKOR_LIVE=1")
 def test_a_forks_old_copy_is_dropped_only_when_asked_and_only_if_it_is_ours(monkeypatch):
     from falkordb.asyncio import FalkorDB

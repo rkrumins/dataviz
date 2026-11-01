@@ -971,7 +971,9 @@ class FalkorProjector:
         """Lower the watermark of every idle graph whose FalkorDB key lost what the watermark says
         it holds (:func:`liveness_reset_to`), so the poll reseeds it or re-applies the lost window
         instead of reads being served from it. Graphs at genesis, tombstoned or still being
-        enabled for version control are not checked; a key that cannot be read is left alone.
+        enabled for version control are not checked, nor forks, which are never projected (a copy
+        an earlier release made of one is no store of theirs); a key that cannot be read is left
+        alone.
         Each reset is fenced like a pass: it lands only while the row's epoch and watermark are
         still the ones read. A key that holds what it should is also checked for a summaries
         build (:meth:`_ask_for_first_summaries`). Returns the resets."""
@@ -979,10 +981,11 @@ class FalkorProjector:
             rows = (await s.execute(
                 select(ProjectionStateORM.graph_id, ProjectionStateORM.falkor_graph_name,
                        ProjectionStateORM.falkor_provider, ProjectionStateORM.projected_commit_seq,
-                       ProjectionStateORM.epoch, GraphORM.fork_parent_graph_id)
+                       ProjectionStateORM.epoch)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(
                     ProjectionStateORM.status == "idle",
+                    GraphORM.fork_parent_graph_id.is_(None),
                     # Past genesis (main's eviction rule): a key at genesis may be the data
                     # source's own graph, and a reseed from genesis would empty it.
                     ProjectionStateORM.projected_commit_seq > 1,
@@ -996,8 +999,7 @@ class FalkorProjector:
             )).all()
         sem = asyncio.Semaphore(config.PROJECTION_CONCURRENCY)
 
-        async def _one(gid, name, provider_id, projected, epoch,
-                       fork_of) -> Optional[Dict[str, object]]:
+        async def _one(gid, name, provider_id, projected, epoch) -> Optional[Dict[str, object]]:
             async with sem:
                 try:
                     client = await self._graph_client(name, provider_id)
@@ -1007,7 +1009,7 @@ class FalkorProjector:
                                    gid, name, exc)
                     return None
                 to_seq = liveness_reset_to(exists, seq, projected) if exists is not None else None
-                if exists and to_seq is None and fork_of is None:
+                if exists and to_seq is None:
                     await self._ask_for_first_summaries(gid, client, projected)
             if exists is None:
                 return None

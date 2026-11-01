@@ -1288,8 +1288,8 @@ def _projection_rows(forks: bool = False):
     """Every versioned graph's projection row — its FalkorDB key, watermark and how far behind it
     is — plus the status buckets the rollup counts (``{bucket: predicate}``). Shared by the lag
     probe and the fleet inventory, so a graph reads the same in both. ``forks``: the rows include
-    forks, and one with no key of its own (it reads through its root's store) is behind on
-    nothing."""
+    forks, each behind on nothing: it reads through its root's store and is never projected, a
+    copy an earlier release made of it included."""
     from sqlalchemy import and_, case, func, select
 
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
@@ -1297,8 +1297,7 @@ def _projection_rows(forks: bool = False):
     lag = GraphORM.main_head_commit_seq - func.coalesce(
         ProjectionStateORM.projected_commit_seq, 0)
     if forks:
-        lag = case((and_(GraphORM.fork_parent_graph_id.isnot(None),
-                         ProjectionStateORM.falkor_graph_name.is_(None)), 0), else_=lag)
+        lag = case((GraphORM.fork_parent_graph_id.isnot(None), 0), else_=lag)
     status = func.coalesce(ProjectionStateORM.status, "idle")
 
     err = ProjectionStateORM.last_error.isnot(None)
