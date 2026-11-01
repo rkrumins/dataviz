@@ -3,13 +3,14 @@
 > **Audience & scope:** engineers and reviewers of the fork work. What a fork is now that it is a
 > data source of its own, how its settings follow its parent's, how it moves through the trash and
 > between workspaces with its parent, how it reads through its root's store with its own changes
-> laid over it, and how it reads its parent commit by commit. The fork engine itself — copy-on-write
+> laid over it, how it reads its parent commit by commit, how it takes its parent's newer changes
+> (Update from parent), and how its review merges once it has. The fork engine itself — copy-on-write
 > reads, pull requests, merge — is in
 > [03 · Branching, Commits & Merge](03-branching-commits-merge.md); the routes and their refusals are
 > in [06 · API Reference](06-api-reference.md); every behaviour change is in the
 > [CHANGELOG](../../CHANGELOG.md).
 
-**Checked against the code on 2026-11-01 (`c63c65f08`).**
+**Checked against the code on 2026-11-01 (`000a2ba64`).**
 
 **TL;DR.** Forking a graph now makes a data source as well as a graph: the fork's own row in
 `workspace_data_sources`, in its parent's workspace and on its parent's provider. Views, the canvas
@@ -17,8 +18,10 @@ and every data-source read reach the fork by that id. Its governing settings are
 stay so. It goes to the trash, comes back and is purged with its graph, and moves with its parent.
 It never has a FalkorDB graph of its own: it reads its root's published store with its own changes
 laid over it, as a draft reads main's, so a fork costs FalkorDB nothing. Each of its commits records
-which parent commit it reads, so a fork can later take its parent's newer work without rewriting its
-own history.
+which parent commit it reads, so a fork takes its parent's newer work — Update from parent, one
+commit — without rewriting its own history; what both changed is merged there, conflicts and all.
+Its review then merges only up to date with its parent: a copy of its own changes, with nothing
+left to resolve. Either runs as a job when it is large.
 
 ## 1. What a fork is now
 
@@ -261,9 +264,9 @@ travel, restore and export — and a fork of a fork reads through both bases. A 
 reads at its fork point, as it always did; the migration gives every fork that has a fork point its
 row.
 
-The point of the table is the next step: when a fork takes its parent's newer commits (Update from
-parent, below), it adds a row instead of rewriting anything, and every earlier commit of the fork
-still reads exactly what it read when it was made.
+When a fork takes its parent's newer commits (Update from parent, §8), it adds a row instead of
+rewriting anything, and every earlier commit of the fork still reads exactly what it read when it
+was made: time travel to before an update reads the old base.
 
 ## 6. No FalkorDB copy
 
@@ -299,16 +302,146 @@ Each live fork in `GET …/graphs/{gid}/forks` says:
 | Field | Meaning |
 |---|---|
 | `ahead` | The entities it changed since its last merged review, or since its fork point |
-| `behind` | The entities its parent changed that it has not taken in: the parent's window since the base the fork reads |
+| `behind` | The entities its parent changed that it has not taken in: the parent's window since the base the fork agrees with (§9: the base it reads, past its own merged reviews). 0 right after an update, or a merge with nothing else landed since |
 | `updateRecommended` | What Update from parent can fix: `behind` reaches `GRAPHVER_FORK_REWIND_WARN` (default 50,000), or the fork's reads are past the ceiling and taking in its parent's changes would bring them back under it (a fork of the root whose own changes alone fit). A fork of a fork past the ceiling on its parent's own history is not told to update: that would only add to it |
 | `readsFrom` | `overlay`, or `postgres` past `GRAPHVER_FORK_REWIND_MAX` (§2) |
 | `countsCapped` | A count stopped at the ceiling: it is at least that |
 
 A fork in the trash says none of it (`null`).
 
-## 8. Upgrading
+## 8. Update from parent
 
-- **Two migrations.** `20261030_1100_gv_fork_bases` creates `graphver.fork_bases` and gives every
+`POST …/graphs/{fork}/update-from-parent` (`update_fork_from_parent`) takes the parent's changes
+into the fork: the parent's `main` from the base the fork agrees with at its head (`B`) to the
+parent's head (`P`, read once). At `P` already, it answers `upToDate` and writes nothing.
+
+**What it takes.** Most of the parent's changes need nothing written: the fork has no row of them,
+so they show through once its base moves. What the fork has rows of and the parent changed in
+`(B, P]` — found in SQL, the parent's window joined to the fork's heads, never the window's ids in
+the process — goes through the 3-way merge: base the parent at `B`, ours the fork at its head,
+theirs the parent at `P`. The parent at `B` is the last value both agreed on, after an earlier
+update that merged the entity too. It writes only what the fork would read otherwise after the
+move: merged values, and the cascades.
+
+**Conflicts.** Fields both changed, differently, answer **409 `fork_update_conflicts`**
+`{conflicts, seeds}`: a pull's conflicts (`entity_id`, `path`, `base`, `ours`, `theirs`, `kind`,
+with `delete/modify` when one side deleted what the other changed), and the fork's own value of
+each entity to resolve from. Nothing is written. Send it again with `resolutions`
+(`{entityId: payload | null}`): each settles only the conflicting fields, as a pull's does, and
+`null` deletes the entity.
+
+**Cascades, both ways.** A node the parent deleted in the window takes the fork's own edges on it
+with it, or, when the fork changed the node, is a `delete/modify` conflict. An edge the parent drew
+or pointed in the window at a node the fork deleted is deleted on the fork. The candidates come from
+SQL over the window; each is judged at what the fork reads after the update. Containment
+descendants are not cascaded: a column the fork made under a table the parent deleted stays, with
+no parent, as a draft's pull leaves it.
+
+**History.** One commit on the fork's `main`, kind `sync_parent`, message `Update from <the parent
+data source's label>@P`, written with no rows too, so history shows the update; its `stats` are
+the rows it wrote (create, update, delete, and the same as `rebased`) with `from_seq` and `to_seq`.
+With it, in the same transaction, the fork's `fork_bases` row `(that commit, P)`: a read before it
+keeps the old base.
+
+**Locks.** The fork's graph lock only. What it reads of the parent are rows at seqs up to `P`, and
+those never change once `P` is the parent's head, so it waits on no publish of the parent and a
+large update holds none up. A path that holds both graphs' locks takes the parent's first.
+
+**Its review's approvals.** A `sync_parent` commit that wrote no rows is not content, as a pull that
+rewrote nothing is not: the fork's open review keeps its approvals. One that wrote rows makes them
+stale.
+
+**Drafts on the fork** read as behind after the update (their base is the fork's head before it)
+and take it with Pull latest, as any change to the fork's `main`.
+
+**Large updates run as jobs.** The route counts first, in SQL: what the update would merge and the
+edges its cascades may delete, each query stopping past the threshold (`fork_update_size`). Past
+`GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` (20,000) it queues a `fork_update` job on the versioning
+worker's transfer lane: **202** `{jobId, graphId, status}`, pinned to the parent's head now. It is
+fenced as a publish job: the fork's lifecycle and move locks shared, the fork writable and still in
+the workspace, and one update of a fork pending or running at a time (**409 `job_active`**). Poll
+`GET …/graphs/{fork}/update-jobs/{jobId}`: what the route would have answered (`commitId`,
+`parentSeq`, `wrote`, `upToDate`), or its refusal — conflicts fail the job, with them in `error`; the
+caller resolves them and asks again. Run again after its update landed, a job answers up to date
+and writes nothing.
+
+The activity log records `workspace.versioning.fork_updated` `{forkParentGraphId, parentSeq,
+wrote}` for an update that ran, or `{…, jobId}` when it was queued (the person's action; what the
+job did is on the job).
+
+**What it costs.** Measured with `backend/scripts/bench_fork_sync.py` on a root of 100,000 nodes and
+100,000 edges: an update taking 100,000 parent changes, 1,000 of them changed by the fork too, is
+sized in 0.05–0.08 s and runs in 0.25–0.35 s, writing those 1,000 rows, at a peak of 88 MB resident
+(79 MB before it). Only what both changed is read into the process; the window is joined in SQL.
+
+## 9. Merging a fork
+
+**Up to date first.** A fork's review merges only when the fork is up to date with its parent, as a
+draft publishes only up to date with `main`: both merge routes (`/pulls/{pr}/merge`,
+`/merge-requests/{pr}/merge`) answer **409 `not_up_to_date`** `{reason: "parent_moved", behind,
+graphId}`, "update from parent first", otherwise. The check is made under the parent's lock, of the
+head the merge takes. A review refused so is not marked: it merges once the fork has updated.
+
+**The base a fork agrees with** (`_fork_agreed_base`) is the base it reads, past each squash of its
+own reviews that landed right after it. A review merged up to date wrote the fork's own values,
+which the fork has already: so a fork that has just merged is up to date (nothing else landed), its
+`behind` is 0, and its next update merges from after its own merge — what it merged is not its
+parent's change for it to take, nor a conflict with what it changed since.
+
+**What a merge writes.** Update from parent settled conflicts on the fork's side, so the merge is a
+copy, with nothing to resolve (`resolutions` is not used): the fork's own changes since its last
+merged review — its rows in `(merge base, head]`, never the parent's window — each its value at the
+head the merge takes against the parent's, every difference a change. The merge base is the head
+its last merged review took (`merged_source_seq`), else the fork point; an update does not move it,
+so an edit made before an update is still proposed after it. `_squash_fork` plans it from content
+hashes and copies the rows from the fork's version rows inside Postgres (the fork is the source
+graph), in the narrow squash's order and with its gates: the gate every write shares (the review's
+own view of what it writes), the parent's ontology (a strict one refuses; a permissive one's
+findings are kept on the review, the first 100 and their total), the reviewers' approvals before the
+first row. Past `GRAPHVER_SQUASH_PAGED_ABOVE` (200,000) changes it goes `GRAPHVER_SQUASH_PAGE`
+(20,000) at a time, in the same one commit. The preview, diff and summary show the same changes,
+against the parent at the base the fork agrees with, with no conflicts.
+
+So the rules hold: a change taken from the parent is never proposed back (only the fork's rows are,
+and a merged one differs only by the fork's part); a fork edit made before an update is still
+proposed after it; a conflict settled in an update is not raised again at the merge; and updates and
+merges interleaved converge — after each merge the parent is the fork at the head it took.
+
+**Large reviews merge as jobs.** A review whose fork changed more than
+`GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` entities since its last merged review is merged by a `fork_merge`
+job on the transfer lane, from either route: **202** `{jobId, graphId, status}` (`graphId`: the
+parent; poll `GET …/graphs/{parent}/publish-jobs/{jobId}`). It is queued only approved and up to
+date, under the parent's lifecycle and move locks (shared) and the review's row lock; it pins the
+fork's head, and holds the review `merging`, so no other merge of it gets past (**409 `job_active`**)
+until the job ends. Where the data source's policy has someone else merge, whoever opened the review
+gets **403 `self_merge`** before anything is queued. The job merges the head it pinned, by the
+parent's rules as they are when it runs. Run again after its merge landed, it answers with the
+review's merge. Refused (the parent moved since, say), it fails with the route's answer and hands
+the review back at once (`approved`, or `mergeable`); one whose job died is handed back by the
+versioning worker's reaper (`release_merging`).
+
+**What it costs.** On the same bench, merging a review of 100,000 changes (renames, new columns in
+tables, flow edits) as a job takes 18.8 s at a peak of 299 MB resident (98 MB before it); paged
+(`GRAPHVER_SQUASH_PAGED_ABOVE` at 50,000, pages of 20,000), 18.7 s at 287 MB. Most of what the
+merge holds is the parent commit's Merkle tree, built in memory up to `GRAPHVER_BOOTSTRAP_MERKLE_MAX`
+(1,000,000) changes as a draft's paged publish builds it: with it left unset the paged merge peaks
+at 159 MB, in 15.1 s.
+
+## 10. Upgrading
+
+- **The migration for Update from parent and merging.** `20261101_1000_gv_fork_sync` lets
+  `commits.kind` hold `sync_parent`, `merge_requests.status` hold `merging`, and `jobs.job_type` hold
+  `fork_update` and `fork_merge`. Each check is rebuilt once, while it lacks its value, waiting at
+  most five seconds for its lock; it is safe to run again, and widen-only: the downgrade narrows
+  nothing. A separate `GRAPHVER_DB_URL` gets the same from the worker's start.
+- **A fork behind its parent no longer merges.** Its review answered with a 3-way merge before, and
+  `merge_conflict` at the merge; now it answers **409 `not_up_to_date`** `{reason: "parent_moved"}`,
+  and the conflicts surface at Update from parent. Clients that merge forks update them first, and
+  handle **202** from a merge route for a large review.
+- **A fork's review records no conflicts** (`status` is `mergeable` when it opens), and its merge
+  ignores `resolutions`.
+- **The migrations for bases and data sources.** `20261030_1100_gv_fork_bases` creates
+  `graphver.fork_bases` and gives every
   existing fork its fork-point row. `20261030_1200_ds_fork_of` adds
   `workspace_data_sources.fork_of_data_source_id` (with its index) and `ck_ds_fork_no_key`. Both wait
   at most five seconds for their locks and are safe to run again. The second refuses to downgrade
@@ -327,10 +460,8 @@ A fork in the trash says none of it (`null`).
   process keeps, drafts' as well as forks', at about 1.2 KB an entry: under 512 MB a process. Lower
   it where a process has less to spare (§2).
 
-## 9. Coming next
+## 11. Coming next
 
-- **Update from parent.** A fork takes its parent's newer commits as a new `fork_bases` row, and a
-  fork's pull request merges only when it is up to date with its parent.
 - **Residency.** Which graphs stay loaded in FalkorDB is decided per graph — always, standard
   (evicted when idle) or coldline (loaded only when a request needs it) — and by each FalkorDB
   master's free memory. Postgres stays the source of truth: an evicted graph reads from it until

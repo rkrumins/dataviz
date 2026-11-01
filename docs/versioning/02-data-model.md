@@ -207,8 +207,8 @@ and the collaborator gates in [03](03-branching-commits-merge.md).
 surface (`title`, `description`), the computed `conflicts` (JSONB, field-level set), user-supplied
 `resolutions`, `reviewers`/`approved_by`/`approval_status`, `checks_status` (e.g. ontology
 re-validation), and full lifecycle attribution (`actor` raised, `merged_at`/`merged_by`,
-`closed_at`/`closed_by`). `status ∈ open|conflicts|mergeable|approved|merged|closed`
-(`ck_mr_status`, `models.py:216-219`).
+`closed_at`/`closed_by`). `status ∈ open|conflicts|mergeable|approved|merged|closed|merging`
+(`ck_mr_status`; `merging` while a `fork_merge` job merges a fork's PR).
 
 ### `projection_state` — the FalkorDB cache watermark (one row / graph)
 `models.py:223-250`. Drives read freshness and bounded staleness: `projected_commit_seq` vs
@@ -219,8 +219,8 @@ full-reseed progress bar (`progress_done`/`progress_total`, `models.py:238-242`)
 
 ### `jobs` — crash-recoverable worker jobs (+ import/export)
 `models.py:253-325`. Mirrors the aggregation job model (cursor checkpoint, idempotency key, phase,
-retry, monotonic sequence). `job_type ∈ ingest|projection|rebuild|export` (`ck_jobs_type`,
-`models.py:322-324`). The branch's **import/export** vertical extends it with full traceability +
+retry, monotonic sequence). `job_type ∈ ingest|projection|rebuild|export|bootstrap|publish|purge|
+package_inspect|fork_update|fork_merge` (`ck_jobs_type`, `models.JOB_TYPES`). The branch's **import/export** vertical extends it with full traceability +
 parameters + artifact URIs + a `summary` JSONB tally (`models.py:285-305`) — see
 [08 · Import/Export](08-import-export.md). A **partial unique** index `ix_jobs_idem_active` keeps
 one job per `(graph_id, idempotency_key)` among the jobs that have a key, finished or not
@@ -242,8 +242,8 @@ scan — resumable across a crash, reused by both preview and apply (idempotent 
 monotonic within its branch, enforced by `uq_commits_branch_seq (graph_id, branch_id, commit_seq)`
 (`models.py:387-389`) — the unique constraint that turns a concurrent-writer race into a retriable
 integrity error (see the concurrency model in [03](03-branching-commits-merge.md)). `kind` spans the
-full lifecycle: `genesis | edit | checkpoint | pull | squash_publish | import | sync | revert | restore`
-(`ck_commits_kind`, `models.py:392-396`). Squash provenance lives here: `contributors` (distinct
+full lifecycle: `genesis | edit | checkpoint | pull | squash_publish | import | sync | revert | restore
+| sync_parent` (`ck_commits_kind`; `sync_parent` is a fork's Update from parent). Squash provenance lives here: `contributors` (distinct
 actors folded in), `source_branch_id`, `source_commit_ids` + `source_commit_count` (the "merged N
 commits" drill-down), plus `merkle_root`, `stats`, `originating_view_id`, and `idempotency_key` (bulk
 dedup). A BRIN index on `commit_seq` (`ix_commits_seq_brin`) keeps range scans cheap on the naturally
