@@ -5849,8 +5849,10 @@ class GraphVersioningService:
         compute it again); how it is read (``reads_from``, :meth:`fork_reads_from`'s answer from
         the count kept per version); its root (graph, ``main``, data source, in the trash or not);
         and the root's store as its ``projection_state`` row says it is now: its committed and
-        projected seqs (``fresh`` when the projection holds the head) and its pin. That row is
-        read every time: an eviction moves the store without moving any seq the version holds."""
+        projected seqs (``fresh`` when the projection holds the head and, with residency on, no
+        load of the root is under way, as :meth:`projection_watermark` has it) and its pin. That
+        row is read every time: an eviction moves the store without moving any seq the version
+        holds."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or not graph.fork_parent_graph_id:
@@ -5865,6 +5867,7 @@ class GraphVersioningService:
             ps = await s.get(ProjectionStateORM, root_id)
             committed = root.main_head_commit_seq
             projected = ps.projected_commit_seq if ps is not None else 0
+            loading = config.RESIDENCY_ENABLED and ps is not None and ps.status == "rehydrating"
             return {
                 "main_id": main_id,
                 "version": (branch.head_commit_id, tuple(at for _g, _b, at in layers), committed,
@@ -5872,7 +5875,8 @@ class GraphVersioningService:
                 "reads_from": "postgres" if n > config.FORK_REWIND_MAX else "overlay",
                 "root_id": root_id, "root_main": root_main,
                 "root_data_source_id": root.data_source_id, "root_trashed": root.deleted_at is not None,
-                "committed": committed, "projected": projected, "fresh": projected >= committed,
+                "committed": committed, "projected": projected,
+                "fresh": projected >= committed and not loading,
                 "falkor_provider": ps.falkor_provider if ps is not None else None,
                 "falkor_graph_name": ps.falkor_graph_name if ps is not None else None,
             }

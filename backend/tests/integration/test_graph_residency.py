@@ -900,6 +900,9 @@ class _LiveProvider:
     store serves the read is under test here."""
     name = "live"
 
+    def physical_graph_id(self) -> str:          # what keys the answers cached from it
+        return "localhost:6379:the-live-key"
+
     async def deep_search_discover(self, *, sample_per_label=200):
         return {"labels": {}, "served": "falkordb"}
 
@@ -1127,6 +1130,167 @@ async def test_a_fork_has_no_residency_of_its_own(store, monkeypatch):
     out = (await V._watermark_model(None, wm)).model_dump(by_alias=True)
     assert (out["readsThrough"], out["residency"], out["residencyState"]) == (root, None, "evicted")
     assert [g.graph_id for g in (await residency.gather(graph_ids=[root, fork])).graphs] == [root]
+
+
+@pytest.fixture
+async def forked(store):
+    """``make(projector)``: a root made as a data source on this lane's FalkorDB provider, its
+    graph pinned to the data source's key and projected, and a fork of it made as the fork route
+    makes one — ``(root data source, root graph, fork data source, fork graph)``. Both graphs are
+    in the trash after the case, and out of the load queue."""
+    from backend.tests.integration.test_fork_data_sources import _client, _fork, _parent
+
+    made: list = []
+
+    async def make(proj):
+        root_ds, root = await _parent(store, pinned=True)
+        made.append(root)
+        await _publish(store, root, "A")
+        assert not (await proj.project_graph(root)).get("skipped")
+        async with _client() as c:
+            fork = (await _fork(c, root)).json()
+        made.append(fork["graphId"])
+        return root_ds, root, fork["dataSourceId"], fork["graphId"]
+
+    yield make
+    if made:
+        async with db.graphver_session() as s:
+            await s.execute(update(GraphORM).where(GraphORM.id.in_(made),
+                                                   GraphORM.deleted_at.is_(None))
+                            .values(deleted_at=models._now()))
+        await get_broker_redis().zrem(residency.LOAD_REQUESTS, *made)
+
+
+@pytest.fixture
+def fork_engine(monkeypatch):
+    """ContextEngine with ontology resolution stubbed: a fork's engine is built before any
+    write-through, and only which store its reads go through is under test here."""
+    from backend.app.services.context_engine import ContextEngine
+
+    async def nothing(*a, **kw):
+        return None
+
+    monkeypatch.setattr(ContextEngine, "_resolve_ontology", nothing)
+    return ContextEngine
+
+
+async def _fork_engine(engine_cls, ds: str, viewer):
+    """The engine a request on the fork's data source ``ds`` builds; its root's FalkorDB provider is
+    the registry's stub, which serves any key."""
+    async with db.graphver_session() as session:
+        return await engine_cls.for_workspace("ws_forks", _Registry(), session,
+                                              data_source_id=ds, viewer=viewer)
+
+
+def _through(engine) -> str:
+    """Which of its root's stores a fork's read goes through: the root's FalkorDB provider, or the
+    root's Postgres reader."""
+    return "falkordb" if isinstance(engine.provider._base, _LiveProvider) else "postgres"
+
+
+async def _loading(root: str) -> None:
+    """The root's load seeded its key to its head, but the key does not serve reads yet."""
+    await _set_ps(root, status="rehydrating",
+                  projected_commit_seq=(await GraphVersioningService().projection_watermark(
+                      root))["committed"])
+
+
+@pytest.mark.parametrize("residency_class, loads", [("standard", True), ("always", True),
+                                                    ("coldline", False)])
+async def test_a_person_s_read_of_a_fork_counts_for_its_root_and_asks_for_its_load(
+        store, forked, fork_engine, monkeypatch, residency_class, loads):
+    """A person's read of a fork holds its root's read lease and counts for its root, as it reads
+    through the root's FalkorDB store. With the root out of FalkorDB the fork reads the root's
+    Postgres, and the read asks for the root's load — a Standard or an Always one's; a small
+    Coldline root waits for work only FalkorDB can do. While the root's load is not done the fork
+    reads Postgres, as reads of the root do."""
+    from backend.app.services.versioning import cache_manager
+    from backend.app.services.versioning.service import Viewer
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    proj = FalkorProjector(graph_client_factory=FakeFalkor())
+    _root_ds, root, fork_ds, fork = await forked(proj)
+    reader, broker = Viewer(actor="usr_reader", can_read=True), get_broker_redis()
+    await broker.delete(cache_manager._lease_key(root), cache_manager._lease_key(fork))
+    residency._HELD.clear()
+    residency._READS.clear()
+
+    assert _through(await _fork_engine(fork_engine, fork_ds, reader)) == "falkordb"
+    assert await cache_manager.is_pinned(root) and not await cache_manager.is_pinned(fork)
+    assert set(residency._READS) == {root}
+    await residency.flush_reads()
+    assert (await _ps(root)).last_read_at is not None and (await _ps(fork)).last_read_at is None
+
+    await broker.delete(cache_manager._lease_key(root))
+    assert await CacheManager(proj).evict(root, drop_graph=_dropped) is True
+    await _set_ps(root, residency=residency_class)       # out of FalkorDB, whatever put it out
+    assert _through(await _fork_engine(fork_engine, fork_ds, reader)) == "postgres"
+    assert await _load_requested(root) is loads and not await _load_requested(fork)
+    await _loading(root)
+    assert _through(await _fork_engine(fork_engine, fork_ds, reader)) == "postgres"
+    await _set_ps(root, status="idle")
+    assert _through(await _fork_engine(fork_engine, fork_ds, reader)) == "falkordb"
+
+
+async def test_a_fork_never_serves_an_answer_cached_from_its_root_s_evicted_key(
+        store, forked, fork_engine, monkeypatch):
+    """A fork's cached answers are keyed by the store it read and that store's seqs
+    (``_cache_scope``). Evicting its root moves the key — the root's projected seq goes to 0, the
+    reads to Postgres — and it stays moved while the root's load is not done, so no answer built
+    on the evicted key is served meanwhile. Loaded again onto its key at the same seqs, the root
+    holds what the answers were built on."""
+    from backend.app.api.v1.endpoints.graph import _cache_scope
+    from backend.app.services.versioning.service import Viewer
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    proj = FalkorProjector(graph_client_factory=FakeFalkor())
+    _root_ds, root, fork_ds, _fork = await forked(proj)
+    reader = Viewer(actor="usr_reader", can_read=True)
+
+    async def scope():
+        return _cache_scope(await _fork_engine(fork_engine, fork_ds, reader))
+
+    resident = await scope()
+    assert await scope() == resident
+    await get_broker_redis().delete(f"versioning:lease:{root}")
+    assert await CacheManager(proj).evict(root, drop_graph=_dropped) is True
+    assert await scope() != resident
+    await _loading(root)
+    assert await scope() != resident
+    await _set_ps(root, status="idle")
+    assert await scope() == resident
+
+
+async def test_what_residency_adds_to_a_person_s_read(store, forked, fork_engine, monkeypatch):
+    """Warm, residency adds one statement to a person's read — the state of the graph whose key
+    serves it — and on a fork one more, finding its root (a row per fork level). The read lease
+    and the read's note cost none: the broker at most every 30 seconds, and memory."""
+    from sqlalchemy import event
+
+    from backend.app.services.versioning.service import Viewer
+
+    proj = FalkorProjector(graph_client_factory=FakeFalkor())
+    root_ds, _root, fork_ds, _fork = await forked(proj)
+    reader = Viewer(actor="usr_reader", can_read=True)
+
+    async def cost(ds: str, on: bool) -> int:
+        monkeypatch.setattr(config, "RESIDENCY_ENABLED", on)
+        await _fork_engine(fork_engine, ds, reader)               # warm, the lease held
+        sent: list = []
+
+        def record(conn, cursor, statement, *_):
+            sent.append(statement)
+
+        engine = db.get_engine().sync_engine
+        event.listen(engine, "before_cursor_execute", record)
+        try:
+            await _fork_engine(fork_engine, ds, reader)
+        finally:
+            event.remove(engine, "before_cursor_execute", record)
+        return len(sent)
+
+    assert await cost(root_ds, True) == await cost(root_ds, False) + 1
+    assert await cost(fork_ds, True) == await cost(fork_ds, False) + 2
 
 
 # ── read tracking ──────────────────────────────────────────────────────────────────────────────
