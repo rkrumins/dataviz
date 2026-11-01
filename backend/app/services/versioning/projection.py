@@ -28,7 +28,8 @@ from collections import Counter
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
-from sqlalchemy import case, func, literal, null, or_, select, update
+from sqlalchemy import Text, any_, bindparam, case, func, literal, null, or_, select, update
+from sqlalchemy.dialects.postgresql import ARRAY
 
 from . import config, db
 from .errors import AmbiguousSpelling
@@ -56,7 +57,8 @@ from .models import (
     ProjectionStateORM,
     _now,
 )
-from .service import ConcurrencyError, GraphVersioningService, _is_edge_payload, bootstrap_unfinished
+from .service import (_HASH_EMPTY, _HASH_NONE, ConcurrencyError, GraphVersioningService,
+                      _is_edge_payload, bootstrap_unfinished)
 from backend.common.derived_artifacts import is_derived_label
 
 # Reuse the existing reader's schema helpers verbatim so the projection is
@@ -726,12 +728,16 @@ class FalkorProjector:
                 main_id = await self._svc._main_branch_id(s, graph_id)
                 # A full replay (first seed, explicit rebuild, repin) is an in-place
                 # reconcile against what the graph already holds — its writes are known
-                # only once the diff runs, so it computes (and reports) them itself.
+                # only once the diff runs, so it computes (and reports) them itself. A window
+                # too large to hold is computed a page at a time as it is written (_apply_paged).
+                paged = False
                 if from_seq > 0:
                     changes = await self._compute_changes(s, graph, main_id, from_seq, to_seq)
+                    paged = changes is None
+                    changes = changes or ([], [], [], [])
                 total_items = sum(len(c) for c in changes)
                 prior = None
-                if from_seq > 0:
+                if from_seq > 0 and not paged:
                     structural, retypes = await self._window_meta(s, graph, main_id, from_seq,
                                                                   changes)
                     if not owned:
@@ -755,7 +761,7 @@ class FalkorProjector:
             # save_custom_graph). Best-effort: {} when unavailable, leaving level unset.
             level_map = await self._resolve_level_map(graph_id)
             reconciled: Optional[Dict[str, object]] = None
-            dropped = 0
+            dropped = paged_writes = 0
             if from_seq <= 0:
                 # Probe BEFORE writing anything. Deliberately NOT ``read_only``: it is a proof
                 # that this node takes the writes below — under ``min-replicas-to-write`` a read
@@ -771,6 +777,10 @@ class FalkorProjector:
                 # "everything", so a first seed is the same code path.
                 reconciled = await self._reconcile_in_place(
                     client, graph_id, main_id, to_seq, is_fork, level_map, track_progress=True,
+                    provider_id=provider_id, owned=owned)
+            elif paged:
+                dropped, structural, paged_writes = await self._apply_paged(
+                    client, graph_id, main_id, from_seq, to_seq, level_map=level_map,
                     provider_id=provider_id, owned=owned)
             else:
                 await self._relabel_in_place(client, retypes)
@@ -942,8 +952,8 @@ class FalkorProjector:
 
         await asyncio.shield(asyncio.ensure_future(_after_publish()))
 
-        applied = sum(len(c) for c in changes) + int((reconciled or {}).get("writes") or 0) \
-            + int(heal_outcome.get("writes") or 0)
+        applied = sum(len(c) for c in changes) + paged_writes \
+            + int((reconciled or {}).get("writes") or 0) + int(heal_outcome.get("writes") or 0)
         # Report the seq actually PUBLISHED: to_seq when verified, else the held-back from_seq
         # (the watermark did not advance — reads stay on Postgres).
         result = {"projected": to_seq if published else from_seq, "applied": applied,
@@ -1173,7 +1183,10 @@ class FalkorProjector:
 
     async def _compute_changes(
         self, s, graph: GraphORM, main_id: str, from_seq: int, to_seq: int
-    ) -> Tuple[List[NodeUpsert], List[EdgeUpsert], List[Tuple[str, str]], List[object]]:
+    ) -> Optional[Tuple[List[NodeUpsert], List[EdgeUpsert], List[Tuple[str, str]], List[object]]]:
+        """The window ``(from_seq, to_seq]``'s ``(node upserts, edge upserts, node deletes, edge
+        deletes)``; None for a window of more than ``PROJECTION_PAGED_ABOVE`` version rows, which
+        is too large to hold and is written a page at a time instead (:meth:`_apply_paged`)."""
         node_upserts: List[NodeUpsert] = []
         edge_upserts: List[EdgeUpsert] = []
         node_deletes: List[Tuple[str, str]] = []   # (urn, label)
@@ -1200,6 +1213,8 @@ class FalkorProjector:
                 edge_upserts.append((eid, su, tu, p, slb, tlb))
             return node_upserts, edge_upserts, node_deletes, edge_deletes
 
+        if await self._window_rows(s, graph, main_id, from_seq, to_seq) > config.PROJECTION_PAGED_ABOVE:
+            return None
         # Incremental: net of each entity's rows in (from_seq, to_seq]. Key the fold by
         # (kind, entity_id) — NOT entity_id alone — so a node and an edge that ever share
         # an entity_id can never overwrite each other (which would silently drop a node
@@ -1221,6 +1236,24 @@ class FalkorProjector:
                 last[(kind, eid)] = (kind, op, None if op == "delete" else _Pending(
                     (kind, graph.id, vid),
                     (("urn", urn), (type_key, typ), ("sourceEntityId", src), ("targetEntityId", tgt))))
+        node_upserts, edge_upserts, node_deletes, edge_deletes = await self._changes_of(
+            s, graph, main_id, from_seq, last, urn_of, label_of)
+        await self._merkle_augment_upserts(
+            s, graph, main_id, from_seq, to_seq, last, urn_of, label_of,
+            node_upserts, edge_upserts)
+        return node_upserts, edge_upserts, node_deletes, edge_deletes
+
+    async def _changes_of(self, s, graph, main_id, from_seq, last, urn_of, label_of):
+        """The window's four lists (:meth:`_compute_changes`) from ``last`` — each entity's final
+        row in it, ``(kind, op, _Pending | None)`` by ``(kind, entity_id)`` — with the urns and
+        labels of the deleted entities and of the edges' ends resolved (``urn_of``/``label_of``
+        filled in on the way). An edge the window re-points or retypes is written where it now
+        points, and deleted where it was, as a deleted edge is: the write MERGEs by its type and
+        ends, and would leave its old relationship there beside it."""
+        node_upserts: List[NodeUpsert] = []
+        edge_upserts: List[EdgeUpsert] = []
+        node_deletes: List[Tuple[str, str]] = []
+        edge_deletes: List[object] = []
         deleted_nodes: List[str] = []
         for (kind, eid), (_, op, p) in last.items():
             if kind != "node":
@@ -1246,12 +1279,21 @@ class FalkorProjector:
         # Unresolvable ids keep the legacy scan-delete fallback.
         before = (await self._svc._values_at(s, graph.id, main_id, deleted_edge_ids, from_seq)
                   if deleted_edge_ids else {})
+        # Where each written edge pointed before the window (its type and ends, no payload).
+        was = (await self._svc._skeletons_at(s, graph.id, main_id, [e for e, _p in live_edges],
+                                             from_seq) if live_edges else {})
+        moved = [(eid, was[eid]) for eid, p in live_edges
+                 if was.get(eid) and _is_edge_payload(was[eid])
+                 and not _is_derived_edge_payload(was[eid])
+                 and (_edge_endpoints(was[eid]) != _edge_endpoints(p)
+                      or spelled_type(was[eid].get("edgeType")) != spelled_type(p.get("edgeType")))]
         # Every urn/label the window's deletes and edge ends need that it does not itself say, in
         # a few batched reads rather than one per endpoint (``_endpoint`` remains the fallback).
         await self._prefetch_endpoints(
             s, graph, main_id,
             [*deleted_nodes, *(e for _eid, p in live_edges for e in _edge_endpoints(p)),
-             *(e for p in before.values() if p and _is_edge_payload(p) for e in _edge_endpoints(p))],
+             *(e for p in before.values() if p and _is_edge_payload(p) for e in _edge_endpoints(p)),
+             *(e for _eid, p in moved for e in _edge_endpoints(p))],
             urn_of, label_of)
         for eid in deleted_nodes:
             node_deletes.append(await self._endpoint(s, graph, main_id, eid, urn_of, label_of))
@@ -1276,11 +1318,54 @@ class FalkorProjector:
                     })
                 else:
                     edge_deletes.append(eid)
-
-        await self._merkle_augment_upserts(
-            s, graph, main_id, from_seq, to_seq, last, urn_of, label_of,
-            node_upserts, edge_upserts)
+        for eid, p in moved:
+            src, tgt = _edge_endpoints(p)
+            su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
+            tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
+            edge_deletes.append({"eid": eid, "src": su, "tgt": tu,
+                                 "rel": str(p.get("edgeType") or "REL"), "slb": slb, "tlb": tlb})
         return node_upserts, edge_upserts, node_deletes, edge_deletes
+
+    async def _window_rows(self, s, graph, main_id, from_seq, to_seq) -> int:
+        """How many version rows the window ``(from_seq, to_seq]`` holds, nodes and edges."""
+        n = 0
+        for model in (NodeVersionORM, EdgeVersionORM):
+            n += (await s.execute(select(func.count()).select_from(model).where(
+                model.graph_id == graph.id, model.branch_id == main_id,
+                model.commit_seq > from_seq, model.commit_seq <= to_seq))).scalar_one()
+        return n
+
+    async def _window_pages(self, s, graph, main_id, from_seq, to_seq, kind: str):
+        """:meth:`_compute_changes` of the window's ``kind`` entities (``node`` or ``edge``), a page
+        of ``PROJECTION_PAGE`` version rows at a time (a keyset on their ids): each page's entities
+        at their final row in the window. An entity with rows on two pages comes up on both, at
+        the same final value — written twice, never stale."""
+        model = NodeVersionORM if kind == "node" else EdgeVersionORM
+        named = ((model.urn, model.entity_type, null(), null()) if kind == "node" else
+                 (null(), model.edge_type, model.source_entity_id, model.target_entity_id))
+        type_key = "entityType" if kind == "node" else "edgeType"
+        window = (model.graph_id == graph.id, model.branch_id == main_id,
+                  model.commit_seq > from_seq, model.commit_seq <= to_seq)
+        final = (select(model.entity_id, model.id, model.op, *named)
+                 .where(*window, model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))))
+                 .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                 .distinct(model.entity_id))
+        after = ""
+        while True:
+            page = (await s.execute(select(model.id, model.entity_id).where(*window, model.id > after)
+                                    .order_by(model.id).limit(config.PROJECTION_PAGE))).all()
+            if not page:
+                return
+            last: Dict[Tuple[str, str], Tuple[str, str, Optional[dict]]] = {}
+            for eid, vid, op, urn, typ, src, tgt in (await s.execute(
+                    final, {"ids": sorted({e for _v, e in page})})).all():
+                last[(kind, eid)] = (kind, op, None if op == "delete" else _Pending(
+                    (kind, graph.id, vid),
+                    (("urn", urn), (type_key, typ), ("sourceEntityId", src), ("targetEntityId", tgt))))
+            yield await self._changes_of(s, graph, main_id, from_seq, last, {}, {})
+            if len(page) < config.PROJECTION_PAGE:
+                return
+            after = page[-1][0]
 
     async def _merkle_augment_upserts(
         self, s, graph, main_id, from_seq, to_seq, last, urn_of, label_of,
@@ -1460,10 +1545,14 @@ class FalkorProjector:
             select(EdgeVersionORM.entity_id, EdgeVersionORM.op, EdgeVersionORM.payload)
             .where(EdgeVersionORM.graph_id == graph.id, EdgeVersionORM.branch_id == main_id,
                    EdgeVersionORM.commit_seq > from_seq, EdgeVersionORM.commit_seq <= to_seq)
-            .order_by(EdgeVersionORM.commit_seq)
+            .order_by(EdgeVersionORM.commit_seq).limit(self._MOVE_EDGE_CAP + 1)
         )).all()
         if not rows:
             return None
+        if len(rows) > self._MOVE_EDGE_CAP:
+            # More edge rows than the inline cap allows changes: the job takes the window over
+            # before any more of it is read (a publish of millions is that many payloads).
+            return "stale"
         final: Dict[str, Optional[dict]] = {}
         for eid, op, payload in rows:                    # last row in window wins
             final[eid] = None if op == "delete" else payload
@@ -2058,7 +2147,19 @@ class FalkorProjector:
         other writers put there, extra copies of one — and no property history never held is
         stripped. Only what history tombstoned goes (:meth:`_sweep_tombstoned`). The rollups are
         then the batch job's whenever something was kept, since moving them by the difference
-        would take out what stays."""
+        would take out what stays.
+
+        A graph of more than ``PROJECTION_RECONCILE_STREAMED_ABOVE`` live entities is reconciled a
+        page at a time instead (:meth:`_reconcile_streamed`); a fork, whose state composes its
+        parent's, always here."""
+        if not is_fork:
+            async with self._session() as s:
+                large = await self._live_count(s, graph_id, main_id) \
+                    > config.PROJECTION_RECONCILE_STREAMED_ABOVE
+            if large:
+                return await self._reconcile_streamed(
+                    client, graph_id, main_id, to_seq, level_map, track_progress=track_progress,
+                    provider_id=provider_id, owned=owned)
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             nodes, edges, types_by_urn = await self._expected_projection(
@@ -2205,6 +2306,309 @@ class FalkorProjector:
                     graph_id, to_seq, total, len(node_upserts), len(diff.relabels),
                     len(diff.node_deletes), len(edge_upserts), len(diff.edge_deletes), rollups)
         return {"writes": total, "rollups": rollups, "structural": structural}
+
+    async def _reconcile_streamed(self, client, graph_id, main_id, to_seq, level_map, *,
+                                  track_progress: bool, provider_id: Optional[str],
+                                  owned: bool) -> Dict[str, object]:
+        """:meth:`_reconcile_in_place` for a graph too large to hold: the same end — FalkorDB
+        holding exactly committed main at ``to_seq``, written by the difference, never dropped —
+        reached a page of each side at a time, so the projector holds a page, never the graph.
+
+        First what FalkorDB holds that main does not: a page of its nodes at a time (``_SCAN_PAGE``
+        internal ids), their urns looked up in Postgres. A node main no longer has is deleted —
+        or relabelled in place when main has its urn under exactly one other label FalkorDB does
+        not hold yet (a retype; another stale copy is then deleted) — and so is a node with no urn.
+        Then its relationships, a page of source nodes at a time: one main no longer has, or one of
+        several on one key, is deleted. Then what main holds: a page of its live heads at a time
+        (``PROJECTION_PAGE``), their keys looked up in FalkorDB through the urn indexes, and what is
+        missing, differs or is held twice written (the copies of a node held twice deleted first).
+        In a key the platform did not mint nothing is deleted, as in place. The rollups are the
+        batch job's whenever anything changed."""
+        async with self._session() as s:
+            total = await self._live_count(s, graph_id, main_id)
+        progress = self._progress_writer(graph_id, total) if track_progress and total else None
+        done = {"writes": 0, "structural": False, "kept": False}
+
+        # ── What FalkorDB holds that main does not: nodes ──
+        res = await _q(client, "MATCH (n) RETURN max(id(n))", timeout_ms=_READ_TIMEOUT_MS,
+                       read_only=True)
+        rows = getattr(res, "result_set", None) or []
+        top = rows[0][0] if rows and rows[0] else None
+        for lo in range(0, (int(top) + 1) if top is not None else 0, self._SCAN_PAGE):
+            res = await _q(client, "MATCH (n) WHERE id(n) >= $lo AND id(n) < $hi "
+                           "RETURN id(n), labels(n), n.urn, n.gvHash",
+                           params={"lo": lo, "hi": lo + self._SCAN_PAGE},
+                           timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+            stored, unkeyed = [], []
+            for nid, labels, urn, _fp in (getattr(res, "result_set", None) or []):
+                labels = [str(x) for x in (labels or [])]
+                if any(is_derived_label(x) for x in labels):
+                    continue
+                if urn:
+                    stored.append((int(nid), labels[0] if labels else "", str(urn)))
+                else:
+                    unkeyed.append(int(nid))
+            async with self._session() as s:
+                expected = await self._live_labels(s, graph_id, main_id, to_seq,
+                                                   {u for _n, _l, u in stored})
+            gone, retype = [], []
+            for nid, label, urn in stored:
+                labels = expected.get(urn, set())
+                if label in labels:
+                    continue
+                (retype if len(labels) == 1 else gone).append((nid, label, urn))
+            relabels = []
+            for new, items in _group([((nid, old, urn), next(iter(expected[urn])))
+                                      for nid, old, urn in retype]).items():
+                held = await self._held_urns(client, new, [urn for _n, _o, urn in items])
+                for nid, old, urn in items:
+                    if urn in held:
+                        gone.append((nid, old, urn))
+                    else:
+                        relabels.append((urn, old, new))
+                        held.add(urn)                    # a second stale copy is then gone
+            await self._relabel_in_place(client, relabels)
+            done["writes"] += len(relabels)
+            done["structural"] |= bool(relabels)
+            doomed = [nid for nid, _l, _u in gone] + unkeyed
+            if doomed and not owned:
+                done["kept"] = True
+            elif doomed:
+                for chunk in _batches(doomed, self._batch):
+                    await _q(client, "UNWIND $ids AS i MATCH (n) WHERE id(n) = i DETACH DELETE n",
+                             params={"ids": list(chunk)})
+                done["writes"] += len(doomed)
+                done["structural"] = True
+
+        # ── What FalkorDB holds that main does not: relationships (an owned key's alone) ──
+        if owned and top is not None:
+            for lo in range(0, int(top) + 1, self._SCAN_PAGE):
+                res = await _q(client,
+                               "MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi "
+                               f"AND type(r) <> '{ROLLUP_EDGE_TYPE}' "
+                               "RETURN id(r), labels(a), a.urn, type(r), labels(b), b.urn, r.id",
+                               params={"lo": lo, "hi": lo + self._SCAN_PAGE},
+                               timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+                held: Dict[EdgeKey, List[Tuple[int, Optional[str]]]] = {}
+                for rid, la, su, rel, lb, tu, eid in (getattr(res, "result_set", None) or []):
+                    la, lb = [str(x) for x in (la or [])], [str(x) for x in (lb or [])]
+                    if not su or not tu or any(is_derived_label(x) for x in la + lb):
+                        continue
+                    key = (la[0] if la else "", str(su), str(rel), lb[0] if lb else "", str(tu))
+                    held.setdefault(key, []).append((int(rid), eid))
+                async with self._session() as s:
+                    graph = await s.get(GraphORM, graph_id)
+                    want = await self._edge_keys_at(
+                        s, graph, main_id, to_seq,
+                        [str(e) for rels in held.values() for _r, e in rels if e])
+                doomed = [rid for key, rels in held.items() for rid, eid in rels
+                          if len(rels) > 1 or want.get(str(eid)) != key]
+                for chunk in _batches(doomed, self._batch):
+                    await _q(client, "UNWIND $ids AS i MATCH ()-[r]->() WHERE id(r) = i DELETE r",
+                             params={"ids": list(chunk)})
+                done["writes"] += len(doomed)
+                done["structural"] |= bool(doomed)
+
+        # ── What main holds: nodes, then relationships ──
+        twice: Set[Tuple[str, str]] = set()             # nodes held twice: their edges rewritten
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            for kind in ("node", "edge"):
+                async for page in self._live_head_pages(s, graph, main_id, to_seq, kind):
+                    written = await self._write_missing(client, s, graph, main_id, kind, page,
+                                                        level_map, provider_id, owned, twice)
+                    done["writes"] += written
+                    done["structural"] |= kind == "edge" and bool(written)
+                    if progress:
+                        await progress(len(page))
+        if done["kept"]:
+            await self._sweep_tombstoned(client, graph_id, main_id)
+        logger.info("reconcile for %s at seq %d, a page at a time: %d write(s)", graph_id, to_seq,
+                    done["writes"])
+        return {"writes": done["writes"], "structural": done["structural"],
+                "rollups": "stale" if done["writes"] or done["kept"] else "none"}
+
+    async def _live_count(self, s, graph_id: str, main_id: str) -> int:
+        """How many live entities ``main``'s heads hold — what a full reconcile compares."""
+        return (await s.execute(select(func.count()).select_from(EntityHeadORM).where(
+            EntityHeadORM.graph_id == graph_id, EntityHeadORM.branch_id == main_id,
+            EntityHeadORM.is_tombstone.is_(False)))).scalar_one()
+
+    async def _live_head_pages(self, s, graph, main_id, to_seq, kind: str):
+        """``main``'s live ``kind`` entities at ``to_seq``, ``PROJECTION_PAGE`` at a time in id order
+        (each entity's last row at the seq): ``[(entity_id, version_id, content_hash, urn or
+        source, type, target)]``. The platform's rollups are left out."""
+        model = NodeVersionORM if kind == "node" else EdgeVersionORM
+        named = ((model.urn, model.entity_type, null()) if kind == "node" else
+                 (model.source_entity_id, model.edge_type, model.target_entity_id))
+        after = ""
+        while True:
+            rows = (await s.execute(
+                select(model.entity_id, model.id, model.op, model.content_hash, *named)
+                .where(model.graph_id == graph.id, model.branch_id == main_id,
+                       model.commit_seq <= to_seq, model.entity_id > after)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id).limit(config.PROJECTION_PAGE))).all()
+            if not rows:
+                return
+            page = [(eid, vid, chash, a, typ, b) for eid, vid, op, chash, a, typ, b in rows
+                    if op != "delete" and chash not in (_HASH_EMPTY, _HASH_NONE)
+                    and (kind == "node" or (typ or "") != ROLLUP_EDGE_TYPE)]
+            if page:
+                yield page
+            if len(rows) < config.PROJECTION_PAGE:
+                return
+            after = rows[-1][0]
+
+    async def _write_missing(self, client, s, graph, main_id, kind, page, level_map,
+                             provider_id, owned, twice_nodes: Set[Tuple[str, str]]) -> int:
+        """Write what of ``page`` (:meth:`_live_head_pages`) FalkorDB lacks or holds differently;
+        returns how many writes it took. As in place: a key held twice is rewritten (its copies
+        deleted first, on an owned key) — but a customer's relationship held twice, one copy as
+        main says, is left as it is — and so is every relationship on a node held twice
+        (``twice_nodes``, filled in by the node pages)."""
+        lm, wanted = level_map or {}, {}
+        if kind == "node":
+            for eid, vid, chash, urn, etype, _x in page:
+                etype = etype or "Entity"
+                label = spelled_label(etype)
+                wanted[(label, urn or f"gv:{eid}")] = (
+                    eid, ("node", graph.id, vid), _node_fingerprint(label, chash, lm.get(etype)))
+        else:
+            urn_of: Dict[str, str] = {}
+            label_of: Dict[str, str] = {}
+            await self._prefetch_endpoints(s, graph, main_id,
+                                           [e for row in page for e in (row[3], row[5])],
+                                           urn_of, label_of)
+            for eid, vid, chash, src, etype, tgt in page:
+                su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
+                tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
+                rel = spelled_type(etype)
+                wanted[(spelled_label(slb), su, rel, spelled_label(tlb), tu)] = (
+                    eid, ("edge", graph.id, vid), _edge_fingerprint(rel, chash))
+        held = await self._held_fingerprints(client, kind, list(wanted))
+
+        def right(k) -> bool:      # held once, as main says; a customer's relationship: any copy
+            fps = held.get(k, ())
+            return fps == [wanted[k][2]] or (
+                kind == "edge" and not owned and len(fps) > 1 and wanted[k][2] in fps)
+
+        twice = [k for k in wanted if len(held.get(k, ())) > 1 and not right(k)]
+        todo = [k for k in wanted if not right(k) or (kind == "edge" and (
+            (k[0], k[1]) in twice_nodes or (k[3], k[4]) in twice_nodes))]
+        if kind == "node":
+            twice_nodes.update(k for k in wanted if len(held.get(k, ())) > 1)
+        writes = len(todo)
+        if twice and owned:
+            if kind == "node":
+                for label, urns in _group([(u, lb) for lb, u in twice]).items():
+                    for chunk in _batches(urns, self._batch):
+                        await _q(client, _delete_nodes_cypher(_sanitize_label(label)),
+                                 params={"urns": list(chunk)})
+            else:
+                await self._delete_edges_by_key(client, twice)
+            writes += len(twice)
+        if not todo:
+            return 0
+        payload_of = await self._svc._payloads_by_version(s, [wanted[k][1] for k in todo])
+        if kind == "node":
+            await self._apply(client, [(wanted[k][0], k[1], payload_of[wanted[k][1][2]]) for k in todo],
+                              [], [], [], level_map=level_map, provider_id=provider_id,
+                              owned=owned, prior=None if owned else {})
+        else:
+            await self._apply(client, [], [(wanted[k][0], k[1], k[4], payload_of[wanted[k][1][2]],
+                                             k[0], k[3]) for k in todo], [], [],
+                              level_map=level_map, provider_id=provider_id, owned=owned,
+                              prior=None if owned else {})
+        return writes
+
+    async def _held_fingerprints(self, client, kind: str, keys) -> Dict[tuple, List[object]]:
+        """What FalkorDB holds under each key — every copy's fingerprint — looked up through the
+        urn indexes: a node key ``(label, urn)``, a relationship's ``(source label, source urn,
+        type, target label, target urn)``."""
+        out: Dict[tuple, List[object]] = {}
+        if kind == "node":
+            for label, urns in _group([(u, lb) for lb, u in keys]).items():
+                for chunk in _batches(urns, self._batch):
+                    res = await _q(client, f"UNWIND $urns AS u MATCH (n:{_sanitize_label(label)} "
+                                   "{urn: u}) RETURN u, n.gvHash", params={"urns": list(chunk)},
+                                   timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+                    for u, fp in (getattr(res, "result_set", None) or []):
+                        out.setdefault((label, str(u)), []).append(fp)
+            return out
+        by: Dict[Tuple[str, str, str], list] = {}
+        for sl, su, rel, tl, tu in keys:
+            by.setdefault((rel, sl, tl), []).append({"src": su, "tgt": tu})
+        for (rel, sl, tl), items in by.items():
+            for chunk in _batches(items, self._batch):
+                res = await _q(client,
+                               f"UNWIND $batch AS it MATCH (a:{_sanitize_label(sl or 'Entity')} "
+                               f"{{urn: it.src}})-[r:{rel}]->"
+                               f"(b:{_sanitize_label(tl or 'Entity')} {{urn: it.tgt}}) "
+                               "RETURN it.src, it.tgt, r.gvHash", params={"batch": list(chunk)},
+                               timeout_ms=_READ_TIMEOUT_MS, read_only=True)
+                for su, tu, fp in (getattr(res, "result_set", None) or []):
+                    out.setdefault((sl, str(su), rel, tl, str(tu)), []).append(fp)
+        return out
+
+    async def _held_urns(self, client, label: str, urns) -> Set[str]:
+        """Those of ``urns`` FalkorDB holds a node of under ``label``."""
+        return {k[1] for k in await self._held_fingerprints(client, "node", [(label, u) for u in urns])}
+
+    async def _live_labels(self, s, graph_id, main_id, to_seq, urns) -> Dict[str, Set[str]]:
+        """For each of ``urns``, the labels ``main`` holds a live node of it under at ``to_seq``
+        (a node with no urn of its own is ``gv:<entity id>``)."""
+        urns = list(urns)
+        if not urns:
+            return {}
+        eids = {u[3:] for u in urns if u.startswith("gv:")}
+        for chunk in _batches([u for u in urns if not u.startswith("gv:")], _ENDPOINT_CHUNK):
+            eids.update((await s.execute(
+                select(NodeVersionORM.entity_id).where(
+                    NodeVersionORM.graph_id == graph_id, NodeVersionORM.branch_id == main_id,
+                    NodeVersionORM.urn.in_(list(chunk)), NodeVersionORM.commit_seq <= to_seq)
+                .distinct())).scalars().all())
+        out: Dict[str, Set[str]] = {}
+        for chunk in _batches(sorted(eids), _ENDPOINT_CHUNK):
+            for eid, op, chash, urn, etype in (await s.execute(
+                    select(NodeVersionORM.entity_id, NodeVersionORM.op, NodeVersionORM.content_hash,
+                           NodeVersionORM.urn, NodeVersionORM.entity_type)
+                    .where(NodeVersionORM.graph_id == graph_id, NodeVersionORM.branch_id == main_id,
+                           NodeVersionORM.entity_id.in_(list(chunk)),
+                           NodeVersionORM.commit_seq <= to_seq)
+                    .order_by(NodeVersionORM.entity_id, NodeVersionORM.commit_seq.desc(),
+                              NodeVersionORM.created_at.desc())
+                    .distinct(NodeVersionORM.entity_id))).all():
+                if op != "delete" and chash not in (_HASH_EMPTY, _HASH_NONE):
+                    out.setdefault(urn or f"gv:{eid}", set()).add(spelled_label(etype or "Entity"))
+        return out
+
+    async def _edge_keys_at(self, s, graph, main_id, to_seq, eids) -> Dict[str, EdgeKey]:
+        """For each of the relationship ids ``eids`` live on ``main`` at ``to_seq``, the key the
+        projector writes it under."""
+        out: Dict[str, EdgeKey] = {}
+        rows = []
+        for chunk in _batches(sorted(set(eids)), _ENDPOINT_CHUNK):
+            rows += (await s.execute(
+                select(EdgeVersionORM.entity_id, EdgeVersionORM.op, EdgeVersionORM.content_hash,
+                       EdgeVersionORM.source_entity_id, EdgeVersionORM.edge_type,
+                       EdgeVersionORM.target_entity_id)
+                .where(EdgeVersionORM.graph_id == graph.id, EdgeVersionORM.branch_id == main_id,
+                       EdgeVersionORM.entity_id.in_(list(chunk)),
+                       EdgeVersionORM.commit_seq <= to_seq)
+                .order_by(EdgeVersionORM.entity_id, EdgeVersionORM.commit_seq.desc(),
+                          EdgeVersionORM.created_at.desc())
+                .distinct(EdgeVersionORM.entity_id))).all()
+        live = [r for r in rows if r[1] != "delete" and r[2] not in (_HASH_EMPTY, _HASH_NONE)]
+        urn_of: Dict[str, str] = {}
+        label_of: Dict[str, str] = {}
+        await self._prefetch_endpoints(s, graph, main_id, [e for r in live for e in (r[3], r[5])],
+                                       urn_of, label_of)
+        for eid, _op, _h, src, etype, tgt in live:
+            su, slb = await self._endpoint(s, graph, main_id, src, urn_of, label_of)
+            tu, tlb = await self._endpoint(s, graph, main_id, tgt, urn_of, label_of)
+            out[eid] = (spelled_label(slb), su, spelled_type(etype), spelled_label(tlb), tu)
+        return out
 
     async def _relabel_in_place(self, client, relabels, progress=None) -> None:
         """Retype nodes IN PLACE (``SET n:new REMOVE n:old``): the node keeps its id, its
@@ -2494,6 +2898,30 @@ class FalkorProjector:
                 logger.debug("progress write failed for %s", graph_id, exc_info=True)
 
         return _on_chunk
+
+    async def _apply_paged(self, client, graph_id, main_id, from_seq, to_seq, *, level_map,
+                           provider_id, owned) -> Tuple[int, bool, int]:
+        """:meth:`_apply` of a window too large to hold (more than ``PROJECTION_PAGED_ABOVE``
+        version rows), computed and written a page at a time (:meth:`_window_pages`): every page
+        of its nodes, each relabelled first as one window's are, then every page of its edges, so
+        an edge's ends are there when it is written. Its Merkle cross-check is left out (the
+        verify that follows counts what landed). Returns ``(dropped, structural, written)``:
+        the first two as the one-batch pass has them, and how many changes it wrote."""
+        dropped, structural, written = 0, False, 0
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            for kind in ("node", "edge"):
+                async for changes in self._window_pages(s, graph, main_id, from_seq, to_seq, kind):
+                    moved, retypes = await self._window_meta(s, graph, main_id, from_seq, changes)
+                    structural = structural or moved
+                    prior = None if owned else await self._properties_before(
+                        s, graph, main_id, from_seq, changes[0])
+                    await self._relabel_in_place(client, retypes)
+                    dropped += await self._apply(client, *changes, level_map=level_map,
+                                                 provider_id=provider_id, owned=owned,
+                                                 prior=prior) or 0
+                    written += sum(len(c) for c in changes)
+        return dropped, structural, written
 
     async def _apply(self, client, node_upserts, edge_upserts, node_deletes, edge_deletes,
                      progress=None, level_map: Optional[Dict[str, int]] = None,

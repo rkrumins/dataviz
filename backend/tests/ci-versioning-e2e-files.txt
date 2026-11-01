@@ -75,6 +75,7 @@ tests/integration/test_versioning_apply_ops.py
 tests/integration/test_versioning_asof_reads.py
 tests/integration/test_versioning_batch_create_edge.py
 tests/integration/test_versioning_bootstrap.py
+tests/integration/test_versioning_bounded_reads.py
 tests/integration/test_versioning_branch_freshness.py
 tests/integration/test_versioning_branch_list.py
 tests/integration/test_versioning_branch_per_view.py
@@ -116,6 +117,8 @@ tests/integration/test_versioning_neighbors_bounded.py
 tests/integration/test_versioning_nodes_paging.py
 tests/integration/test_versioning_occ_concurrency.py
 tests/integration/test_versioning_ontology.py
+tests/integration/test_versioning_paged_projection.py
+tests/integration/test_versioning_paged_publish.py
 tests/integration/test_versioning_pr_close.py
 tests/integration/test_versioning_pr_gate.py
 tests/integration/test_versioning_projection.py
@@ -140,6 +143,7 @@ tests/integration/test_versioning_scale_smoke.py
 tests/integration/test_versioning_shared.py
 tests/integration/test_versioning_single_writer.py
 tests/integration/test_versioning_state_reconstruction.py
+tests/integration/test_versioning_streamed_reconcile.py
 tests/integration/test_versioning_sync.py
 tests/integration/test_versioning_sync_characterisation.py
 tests/integration/test_versioning_top_level_window.py

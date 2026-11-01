@@ -147,6 +147,9 @@ def _stub_reconcile(monkeypatch, proj, *, expected=({}, {}), actual=({}, {}, set
     exp_nodes, exp_edges = expected
     act_nodes, act_edges, parallel, unkeyed = actual
 
+    async def small(s, graph_id, main_id):
+        return len(exp_nodes) + len(exp_edges)       # reconciled in one pass, not a page at a time
+
     async def expected_projection(s, graph, main_id, to_seq, level_map):
         return exp_nodes, exp_edges, {}
 
@@ -165,6 +168,7 @@ def _stub_reconcile(monkeypatch, proj, *, expected=({}, {}), actual=({}, {}, set
     async def delete_edges_by_key(client, keys, progress=None):
         writes["edge_key_deletes"] += list(keys)
 
+    monkeypatch.setattr(proj, "_live_count", small)
     monkeypatch.setattr(proj, "_expected_projection", expected_projection)
     monkeypatch.setattr(proj, "_scan_projection", scan)
     monkeypatch.setattr(proj._svc, "_payloads_by_version", payloads)

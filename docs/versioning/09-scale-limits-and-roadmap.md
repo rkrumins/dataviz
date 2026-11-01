@@ -5,12 +5,12 @@
 > gaps, and the prioritized roadmap. Nothing here is aspirational marketing; every limit traces to
 > code.
 
-**Re-checked against the code on 2026-10-09 (`42cae50`); §7, §9 and §10's Stage 1–2 subsections again on 2026-10-19 (`57444bd8`).**
+**Re-checked against the code on 2026-10-09 (`42cae50`); §7, §9 and §10's Stage 1–2 subsections again on 2026-10-19 (`57444bd8`); §2–§4 and §8 on 2026-10-30, at millions of entities.**
 
 **TL;DR.** The Versioned Graph is **feature-complete and test-covered for the managed, single-node
-case**. Interactive edits and publishes are `O(change)`, not `O(graph)`. The remaining sharp edges are
-deliberately-deferred scale items — a full-graph Merkle rebuild on *draft* checkpoints, pulls and
-forks; a full re-projection that still holds the graph's ids in memory; export jobs that start over
+case**. Saves, pulls, previews, reviews and publishes are `O(change)`, not `O(graph)`, and a publish,
+its projection and a rebuild of millions hold a page at a time (§2). The remaining sharp edges are
+deliberately-deferred scale items — forks, which still read whole graphs; export jobs that start over
 when interrupted (imports resume); no retention inside a live graph; and a partitioning key that doesn't
 help a single hot collaborative graph. Re-sync, separately, runs a bounded merge that has not been
 proven on a graph the bootstrap worker wrote ([11](11-resync-at-any-scale.md)). Read this chapter
@@ -43,44 +43,109 @@ These were real hotspots that were fixed and measured (see [03](03-branching-com
 | **Bulk inserts / large reads** | Chunked to stay under asyncpg's 32767 / Postgres' 65535 bind-param cap (`_IN_LIST_MAX=20000`) | no param-overflow crashes at scale |
 | **Reconciling projection** | Stalest-first, bounded concurrency (`PROJECTION_CONCURRENCY=8`), unpinned graphs excluded from the batch | catches up across hundreds of graphs |
 
+### Measured up to 1,000,000 nodes and 1,000,000 edges
+
+`backend/scripts/bench_versioning.py` (one job per process, peak RSS of that process; Postgres 16 and
+FalkorDB 4.18 on one 4-CPU machine). The graph is imported into a new graph's draft, published,
+projected and exported; "one pass" is the same step with the paging threshold raised past it.
+
+| Step | 100k + 100k | 300k + 300k | 1M + 1M | 300k + 300k, one pass |
+|------|------------:|------------:|--------:|----------------------:|
+| Import into a draft (windowed) | 117 s, 192 MB | 214 s, 198 MB | 727 s, 197 MB | — |
+| Publish (paged above 200,000 changes) | 24 s, 436 MB (one batch) | 111 s, 369 MB | 367 s, 399 MB | ~1 GB, est. (1.7 KB a change) |
+| Projection of the published window (paged above 200,000 rows) | — | 112 s, 182 MB | 426 s, 206 MB | 92 s, 956 MB |
+| Rebuild from nothing (paged above 500,000 entities) | — | 84 s, 209 MB | 286 s, 216 MB | 77 s, 1,653 MB |
+| Export (NDJSON, streamed) | 12 s, 154 MB | 31 s, 150 MB | 101 s, 166 MB | — |
+
+A paged publish holds at most the Merkle fingerprint's list of changes besides its page — up to
+1,000,000 entries, past which the fingerprint is left unset — so its peak stops growing there.
+Everything else above is flat in the graph's size. Time is not: for 3.3 times the entities, 1M + 1M
+took 3.3 to 3.4 times as long as 300k + 300k (the projection 3.8 times).
+
+What 1M + 1M left behind: 6.1 GB of graphver in Postgres (each entity's version on the draft and on
+`main`, and both branches' heads) and 2.7 GB of the import's staged rows until they are swept
+([08](08-import-export.md) §3c); 1.05 GB for the graph in FalkorDB (`GRAPH.MEMORY USAGE`).
+
+### At 10 million (derived)
+
+Not measured: the 1M + 1M run times five, for a graph of 5,000,000 nodes and 5,000,000 edges.
+
+| Step | Time | Peak memory |
+|------|-----:|------------:|
+| Import into a draft | about 1 h | about 200 MB |
+| Publish | about 30 min, holding the graph's publish lock | about 400 MB |
+| Projection of that publish | 35–45 min | about 200 MB |
+| Rebuild from nothing | about 25 min | about 220 MB |
+| Export (NDJSON) | about 8 min | about 170 MB |
+
+It takes about 30 GB of graphver in Postgres (plus about 13 GB of staged import rows until they are
+swept) and about 5 GB in FalkorDB. While the publish runs, other publishes and merges into that graph
+wait for its lock and answer 503 `lock_busy` past their wait; saves into drafts don't wait.
+
+### Measuring at your size
+
+CI runs the 1M + 1M graph end to end every week (`.github/workflows/versioning-scale.yml`, also on
+demand at any size). It fails when a step does not complete, when its peak memory passes its ceiling
+(512 MB, 1 GB for a publish), or when FalkorDB and Postgres disagree after it. To measure at your own
+size, point the harness at a staging Postgres and FalkorDB sized like production
+(`MANAGEMENT_DB_URL`, `FALKORDB_HOST`, `FALKORDB_PORT`) and run each step in a process of its own:
+
+```bash
+B="python -m backend.scripts.bench_versioning"
+$B gen-package --nodes 5000000 --edges 5000000 --out /data/p10m.zip
+$B run inspect --package /data/p10m.zip --state s.json --label inspect
+$B run import --target empty --state s.json --label import
+$B run publish --state s.json --label publish
+$B run project --state s.json --label project
+$B run project --full --state s.json --label rebuild
+$B run export --state s.json --label export
+$B report --state s.json --md report.md
+```
+
+Watch each step's peak memory (flat in the graph's size), its time (linear), how long the publish
+held the graph's publish lock, and how much Postgres and FalkorDB grew.
+
 ## 3. Complexity reference
 
 | Operation | Cost | Notes |
 |-----------|------|-------|
-| Stage / checkpoint (draft) | `O(ops)` writes; **`O(graph)` Merkle** | see §4.1 |
+| Stage / checkpoint (draft) | `O(ops)`; the touched entities' values read alone | a draft gets no Merkle root |
 | `apply_ops` (direct write) | `O(ops)` | ontology + integrity gated |
-| Publish / merge to `main` | `O(changed)` compose + **`O(changed)` incremental Merkle** | advisory-locked, `O(delta)` |
-| Fork merge / rebase | `O(changed)`; **full `_merkle_root`** for forks | forks use full compose in places |
+| Pull latest / publish preview / a review's open, preview, diff, summary | `O(changed)`: the draft's edits and what main changed since it branched | the bounded merge (`_compute_merge_bounded`) |
+| Publish / merge to `main` | `O(changed)` compose + **`O(changed)` incremental Merkle**; a page at a time above `GRAPHVER_SQUASH_PAGED_ABOVE` | advisory-locked, `O(delta)` |
+| Fork creation / fork merge / fork commit | **`O(graph)`**: whole states and a full `_merkle_root` | §4.1 |
 | Read `main` (fresh) | `O(neighborhood)` in FalkorDB | hot path |
 | Read `main` (lagging) / draft / as-of | `O(neighborhood)` compose in Postgres | + `O(delta)` overlay for drafts |
-| Incremental projection window | `O(window)` MERGE/DELETE | idempotent |
-| **Full re-projection** | `O(N + E)` narrow ids in memory; payloads fetched only for rows it writes | §4.2 |
+| Incremental projection window | `O(window)` MERGE/DELETE; a page at a time above `GRAPHVER_PROJECTION_PAGED_ABOVE` | idempotent |
+| **Full re-projection** | `O(N + E)` reads; a page of each side at a time above `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE` | §4.2 |
+| Schema counts of `main` read from Postgres | counted in Postgres, once per commit | `schema_counts` |
 | Reconcile (drift scan) | `O(N)` streamed, bounded memory | operator tool |
 
 ## 4. The sharp edges (`O(graph)` hotspots)
 
-### 4.1 Draft checkpoints do a full-graph Merkle rebuild
-Non-fork `main` gets an **incremental** persisted Merkle root, but **draft checkpoints, pulls of
-`main` into a draft, fork creation and fork `main`s** call the full `_merkle_root` build over the
-entire composed state on *every* commit
-(cross-branch copy-on-write Merkle is explicitly a "later step"). This is the next `O(graph)` hotspot
-after `_state_as_of`/`_kind_map_multi` were fixed — it makes a one-entity checkpoint on a large draft
-`O(graph)`. See [03](03-branching-commits-merge.md).
+### 4.1 Forks still read whole graphs
 
-> **Limitation.** A checkpoint on a draft of a multi-million-entity graph pays a full-graph hash walk.
-> Fine at current scale; a keyset/CoW upgrade is the fix (§10).
+A draft's checkpoint reads only the entities it touches, and a draft commit gets no Merkle root.
+Forks are the exception: creating one builds the parent's full Merkle root, every commit on a fork's
+`main` builds the fork's (`_commit_merkle` falls back to `_merkle_root`), and a fork's pull request
+merges three whole states (`_compute_fork_merge`) under the parent's lock. A fork's checkpoint,
+revert and restore compose its whole state too, because the bounded reads (`_values_at`) don't yet
+look through to the parent's rows. See [03](03-branching-commits-merge.md).
+
+> **Limitation.** Fine at thousands of entities; at millions a fork's creation and merge run out of
+> memory. Bounded fork merges are the next step (§10).
 
 ### 4.2 A full re-projection holds the graph's ids in memory
 
-A full replay no longer composes the live state through `_state_as_of`. It reconciles FalkorDB in
-place (`_reconcile_in_place` in `projection.py`): it reads narrow heads with no payloads, scans
-FalkorDB in internal-id pages, diffs off the event loop, fetches payloads only for the rows it must
-write, and never drops the graph. Since 2026-07 every endpoint MATCH is label-anchored and every
-projector query carries an explicit server-side timeout, so the write side scales with `E·log N`.
-What remains is memory: the diff still holds whole-graph maps of small tuples, `O(N + E)`, rather
-than streaming by keyset. (The "`O(n²/batch)` — upgrade to keyset if a graph outgrows it" comment
-belongs to the drift reconciler, `reconcile.py`, not to the projector.) See
-[04](04-projection-and-cache.md).
+A full replay reconciles FalkorDB in place (`_reconcile_in_place` in `projection.py`): it never
+drops the graph, and writes only the difference. Up to `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE`
+(500,000) live entities it holds whole-graph maps of small tuples, `O(N + E)` (1,653 MB at 600,000),
+and moves the summaries by the difference. Above it, `_reconcile_streamed` compares a page of each
+side at a time — FalkorDB's in internal-id pages against Postgres lookups, then Postgres's heads in
+keyset pages against FalkorDB's urn indexes — and hands the summaries to the aggregation job (209 MB
+at 600,000). A fork always takes the first: its state composes its parent's. (The "`O(n²/batch)` —
+upgrade to keyset if a graph outgrows it" comment belongs to the drift reconciler, `reconcile.py`,
+not to the projector.) See [04](04-projection-and-cache.md).
 
 ## 5. Wired-but-dormant machinery
 
@@ -174,6 +239,10 @@ See [08](08-import-export.md) for detail; the load-bearing ones:
   a data source's own import still uploads through the backend, in resumable pieces.
   JSON and xlsx *exports* now stream; JSON and xlsx *imports* are still read whole, which the client
   caps at 100 MiB.
+- **A view's export holds the view's entity ids.** A view-scoped export (and a view package) first
+  finds the entities the view places and their containment descendants, and keeps their ids while
+  it streams — about 100 bytes each, so about 1 GB for a view of 10 million entities, inside the
+  transfer worker's 4 GiB. A whole data source's export keeps nothing.
 - **Row-scoped export is API-only — not surfaced in the UI.** The backend export options (`props`,
   row-scope `ids`/`types`, view-scope, branch-vs-published, as-of) are wired consistently end-to-end
   (`create_export` → `create_export_job` packs an `options` dict → `ExportWorker`). The **ExportDialog

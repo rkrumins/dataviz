@@ -44,6 +44,7 @@ class FakeGraph:
         self._ids: dict = {}    # urn -> internal node id (FalkorDB's id(n)), never reused
         self._property_keys: set = set()   # db.propertyKeys() — registered, never freed
         self._next_id = 0
+        self._rel_ids: dict = {}   # relationship id -> internal id (FalkorDB's id(r)), never reused
         self.proj_meta: dict = {}  # the pass marker (_GVProjMeta) — kept apart, never counted
 
     async def query(self, cypher: str, params: dict = None):
@@ -140,6 +141,38 @@ class FakeGraph:
             return _Result([[self._id_of(u), [n.get("_label")], u, n.get("gvHash")]
                             for u, n in self.nodes.items()
                             if params["lo"] <= self._id_of(u) < params["hi"]])
+        # The paged reconcile's reads and deletes (``FalkorProjector._reconcile_streamed``): a page
+        # of relationships with their own ids, deletes by internal id, and lookups by key.
+        if cypher.startswith("MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi") \
+                and "RETURN id(r), labels(a)" in cypher:
+            return _Result([[self._rel_id(eid), [self.nodes[e["src"]].get("_label")], e["src"],
+                             e["type"], [self.nodes[e["tgt"]].get("_label")], e["tgt"], eid]
+                            for eid, e in self.edges.items()
+                            if e["src"] in self.nodes and e["tgt"] in self.nodes
+                            and e["type"] != "AGGREGATED"
+                            and params["lo"] <= self._id_of(e["src"]) < params["hi"]])
+        if cypher == "UNWIND $ids AS i MATCH ()-[r]->() WHERE id(r) = i DELETE r":
+            for eid in [k for k in self.edges if self._rel_id(k) in params["ids"]]:
+                self.edges.pop(eid, None)
+            return None
+        if cypher == "UNWIND $ids AS i MATCH (n) WHERE id(n) = i DETACH DELETE n":
+            for u in [u for u in self.nodes if self._id_of(u) in params["ids"]]:
+                self._drop_node(u)
+            return None
+        if cypher.startswith("UNWIND $urns AS u MATCH (n:") and cypher.endswith("RETURN u, n.gvHash"):
+            label = cypher.split("MATCH (n:", 1)[1].split(" {urn:", 1)[0]
+            return _Result([[u, self.nodes[u].get("gvHash")] for u in params["urns"]
+                            if u in self.nodes and self.nodes[u].get("_label") == label])
+        if cypher.startswith("UNWIND $batch AS it MATCH (a:") and cypher.endswith(
+                "RETURN it.src, it.tgt, r.gvHash"):
+            slb = cypher.split("MATCH (a:", 1)[1].split(" {urn:", 1)[0]
+            rel = cypher.split("-[r:", 1)[1].split("]->", 1)[0]
+            tlb = cypher.split("->(b:", 1)[1].split(" {urn:", 1)[0]
+            return _Result([[it["src"], it["tgt"], e.get("gvHash")] for it in params["batch"]
+                            for e in self.edges.values()
+                            if e["src"] == it["src"] and e["tgt"] == it["tgt"] and e["type"] == rel
+                            and (self.nodes.get(e["src"]) or {}).get("_label") == slb
+                            and (self.nodes.get(e["tgt"]) or {}).get("_label") == tlb])
         if cypher.startswith("MATCH (a)-[r]->(b) WHERE id(a) >= $lo AND id(a) < $hi"):
             return _Result([[self._id_of(e["src"]), e["type"], self._id_of(e["tgt"]), e.get("gvHash")]
                             for e in self.edges.values()
@@ -225,6 +258,12 @@ class FakeGraph:
             self.proj_meta = dict(params)
             return None
         raise AssertionError(f"unexpected cypher emitted: {cypher!r}")
+
+    def _rel_id(self, eid: str) -> int:
+        """FalkorDB's internal id for a relationship — minted on first sight, never reused."""
+        if eid not in self._rel_ids:
+            self._rel_ids[eid] = len(self._rel_ids)
+        return self._rel_ids[eid]
 
     def _id_of(self, urn: str) -> int:
         """FalkorDB's internal id for a node — minted on first sight, never reused."""
@@ -499,8 +538,8 @@ class _DropFailGraph(FakeGraph):
         self.apply_ran = False
 
     async def query(self, cypher: str, params: dict = None):
-        if cypher.startswith("UNWIND"):
-            self.apply_ran = True
+        if cypher.startswith("UNWIND") and re.search(r"\b(MERGE|DELETE|SET|CREATE)\b", cypher):
+            self.apply_ran = True                        # a write, not an UNWIND that only reads
         return await super().query(cypher, params)
 
     async def delete(self):

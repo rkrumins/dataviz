@@ -174,7 +174,11 @@ describe('ProfilingSettings', () => {
         }))
         renderIt()
 
-        await userEvent.clear(await screen.findByRole('spinbutton', { name: /raw observations/i }))
+        // Seeded before it is cleared: the input exists a commit before the
+        // policy's value lands in it.
+        const raw = await screen.findByRole('spinbutton', { name: /raw observations/i })
+        await waitFor(() => expect(raw).toHaveValue(14))
+        await userEvent.clear(raw)
         await userEvent.click(screen.getByRole('button', { name: /save policy/i }))
 
         await waitFor(() => expect(setPolicy).toHaveBeenCalled())
