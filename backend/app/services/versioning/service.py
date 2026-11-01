@@ -3584,8 +3584,10 @@ class GraphVersioningService:
         def contained(m):
             return or_(func.upper(m.edge_type).in_(cset), m.edge_type.is_(None))
 
+        # An anti-join on the heads' key: a NOT IN over a large fork's heads is no hashed plan.
         mine = select(EntityHeadORM.entity_id).where(
-            EntityHeadORM.graph_id == fork_id, EntityHeadORM.branch_id == fork_main)
+            EntityHeadORM.graph_id == fork_id, EntityHeadORM.branch_id == fork_main,
+            EntityHeadORM.entity_id == ev.entity_id).exists()
         ends = select(own.target_entity_id).where(own.graph_id == fork_id, own.branch_id == fork_main)
         linked = select(own.entity_id).where(own.graph_id == fork_id, own.branch_id == fork_main,
                                              own.op != "delete", contained(own)).exists()
@@ -3593,7 +3595,7 @@ class GraphVersioningService:
         for gid, bid, lo, hi in window:
             drawn = select(ev.entity_id).where(
                 ev.graph_id == gid, ev.branch_id == bid, ev.commit_seq > lo, ev.commit_seq <= hi,
-                ev.op != "delete", ev.entity_id.not_in(mine))
+                ev.op != "delete", ~mine)
             queries.append(drawn.where(ev.target_entity_id.in_(ends)))
             if cset:
                 queries.append(drawn.where(contained(ev), linked))
