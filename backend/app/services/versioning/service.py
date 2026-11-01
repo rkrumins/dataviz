@@ -625,7 +625,9 @@ class GraphVersioningService:
             s.add(
                 ProjectionStateORM(
                     graph_id=graph.id, projected_commit_seq=1 if parked else 0, target_commit_seq=1,
-                    residency=await default_class(),       # the policy's class for a new graph
+                    # The policy's class for a new graph; with residency off, no policy is read.
+                    residency=(await default_class() if config.RESIDENCY_ENABLED
+                               else "standard"),
                     falkor_graph_name=falkor_graph_name,   # the data source's real graph
                     falkor_provider=falkor_provider,       # FalkorDB instance (per-provider eviction)
                     # THE GUARDRAIL, recorded at birth from a fact we actually know: we own the

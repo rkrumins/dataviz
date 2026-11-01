@@ -158,6 +158,13 @@ async def move_projection(
         res = {"changed": False, "from": current, "to": current, "retiring": None}
     else:
         key, master = await _target_key(graph_id, body, current, wm["retired_keys"])
+        if vconfig.RESIDENCY_ENABLED and wm.get("status") not in (
+                "evicted", "waiting_capacity", "rehydrating"):
+            # Its new key is seeded while the old one stands: a full copy, admitted like a load.
+            # A graph out of FalkorDB only changes its pin; its load is admitted when it starts.
+            fits, at, shortfall = await residency.admission_on(graph_id, body.provider_id, key)
+            if not fits:
+                raise _capacity_insufficient(at, shortfall, "a copy of this graph")
         shard_map = {"tag": key[key.index("{") + 1:-1]
                      if keymigrate.is_owned_key(graph_id, key) else None,
                      "slot": key_slot(key), "chosenAt": datetime.now(timezone.utc).isoformat(),

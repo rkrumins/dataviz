@@ -60,10 +60,16 @@ async def _residency(gid: str) -> str:
         return (await s.get(ProjectionStateORM, gid)).residency
 
 
-async def test_a_new_graph_gets_the_class_the_policy_names(store):
+async def test_a_new_graph_gets_the_class_the_policy_names(store, monkeypatch):
+    """With residency on; off, creating a graph reads no policy, and it is Standard."""
     svc = store
     before = await _set_policy(gv_default_residency="coldline")
     try:
+        monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
+        off = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
+                                      workspace_id="ws_res", actor="a"))["graph_id"]
+        assert await _residency(off) == "standard"
+        monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
         gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
                                       workspace_id="ws_res", actor="a"))["graph_id"]
         assert await _residency(gid) == "coldline"
@@ -345,6 +351,18 @@ async def test_concurrent_read_flushes_never_wait_on_each_other(store):
         residency._READS.update({g: datetime.now(timezone.utc) for g in gids})
         await asyncio.wait_for(residency.flush_reads(), 5)
     assert (await _ps(gids[1])).last_read_at is not None
+
+
+async def test_the_count_budget_never_evicts_an_always_graph(store, monkeypatch):
+    """Residency off — or a pod without the flag in a mixed rollout — the count budget's evictor
+    leaves an Always graph alone too."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
+    svc, fake = store, FakeFalkor()
+    proj = FalkorProjector(graph_client_factory=fake)
+    gid = await _resident(svc, proj)
+    await _set_ps(gid, residency="always")
+    assert await CacheManager(proj).evict(gid, drop_graph=_dropped) is False
+    assert (await _ps(gid)).status == "idle"
 
 
 async def test_with_residency_off_an_evicted_graph_is_reseeded_as_before(store, monkeypatch):
@@ -916,6 +934,32 @@ async def _loads(loop, proj, gid: str) -> None:
     key (the lane's nudge), then the pass that sees it done."""
     await proj.project_graph(gid)
     await loop.run_once(graph_ids=[gid])
+
+
+@live
+@pytest.mark.parametrize("residency_class", ["standard", "always"])
+async def test_a_key_the_master_lost_is_evicted_not_reseeded_outside_admission(
+        store, falkor, mine, monkeypatch, residency_class):
+    """A master that restarts without its data loses every key it held, and liveness used to
+    lower them all to 0 for the poll to reseed at once, unadmitted. With residency on such a graph
+    is evicted (lost): a Standard one loads on its next read, an Always one is queued by the next
+    pass, and each load is admitted like any other."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    factory = make_falkor_graph_factory()
+    svc, proj = store, FalkorProjector(graph_client_factory=factory)
+    (gid,) = await _live_graphs(svc, proj, mine, 1)
+    await _publish(svc, gid, "B")
+    await proj.project_graph(gid)                        # past genesis, a marker at seq 3
+    await _set_ps(gid, residency=residency_class)
+    await (await factory((await _ps(gid)).falkor_graph_name)).delete()      # the master lost it
+    await proj.check_liveness()
+    ps = await _ps(gid)
+    assert (ps.status, ps.evicted_reason, ps.projected_commit_seq) == ("evicted", "lost", 0)
+    assert await _pending(proj, gid) is False
+    if residency_class == "always":
+        await get_broker_redis().zrem(residency.LOAD_REQUESTS, gid)
+        decided = await CapacityLoop(proj).run_once(graph_ids=[gid])
+        assert [x.graph_id for x in decided.loads] == [gid]
 
 
 @live

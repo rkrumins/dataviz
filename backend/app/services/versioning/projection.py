@@ -991,7 +991,8 @@ class FalkorProjector:
             rows = (await s.execute(
                 select(ProjectionStateORM.graph_id, ProjectionStateORM.falkor_graph_name,
                        ProjectionStateORM.falkor_provider, ProjectionStateORM.projected_commit_seq,
-                       ProjectionStateORM.epoch, GraphORM.fork_parent_graph_id)
+                       ProjectionStateORM.epoch, GraphORM.fork_parent_graph_id,
+                       ProjectionStateORM.owns_falkor_graph)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(
                     ProjectionStateORM.status == "idle",
@@ -1009,7 +1010,7 @@ class FalkorProjector:
         sem = asyncio.Semaphore(config.PROJECTION_CONCURRENCY)
 
         async def _one(gid, name, provider_id, projected, epoch,
-                       fork_of) -> Optional[Dict[str, object]]:
+                       fork_of, owned) -> Optional[Dict[str, object]]:
             async with sem:
                 try:
                     client = await self._graph_client(name, provider_id)
@@ -1027,6 +1028,10 @@ class FalkorProjector:
                 return None
             reason = ("liveness: projection key missing" if not exists
                       else f"liveness: marker seq {seq} < projected {projected}")
+            # Residency (doc 17): a key the master lost, of a graph whose key the platform owns, is
+            # evicted (lost) rather than reseeded at once and unadmitted: its load is admitted
+            # like any other — on its next read, or by the next pass for an Always graph.
+            lost = (config.RESIDENCY_ENABLED and to_seq == 0 and owned and fork_of is None)
             async with self._session() as s:
                 row = (await s.execute(
                     update(ProjectionStateORM)
@@ -1036,15 +1041,17 @@ class FalkorProjector:
                            ProjectionStateORM.status == "idle")
                     .values(projected_commit_seq=to_seq, epoch=ProjectionStateORM.epoch + 1,
                             last_error=reason, failed_attempts=0, next_retry_at=None,
-                            updated_at=_now())
+                            updated_at=_now(),
+                            **({"status": "evicted", "evicted_reason": "lost"} if lost else {}))
                     .returning(ProjectionStateORM.graph_id)
                     .execution_options(synchronize_session=False)
                 )).first()
             if row is None:
                 return None                     # a pass or a reset got there first
-            logger.error("%s for graph %s (%s): watermark %s -> %s",
-                         reason, gid, name, projected, to_seq)
-            await nudge_projection(gid)
+            logger.error("%s for graph %s (%s): watermark %s -> %s%s",
+                         reason, gid, name, projected, to_seq, " (evicted, lost)" if lost else "")
+            if not lost:
+                await nudge_projection(gid)
             return {"graph_id": gid, "projected": projected, "reset_to": to_seq, "reason": reason}
 
         done = await asyncio.gather(*[_one(*r) for r in rows])

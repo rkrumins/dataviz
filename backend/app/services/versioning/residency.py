@@ -610,6 +610,34 @@ async def admission(graph_id: str) -> Tuple[bool, Optional[str], Optional[int]]:
     return fits, target.master.endpoint, shortfall
 
 
+async def admission_on(graph_id: str, provider: str,
+                       key: str) -> Tuple[bool, Optional[str], Optional[int]]:
+    """Whether a full copy of ``graph_id`` fits now on the master ``key`` hashes to on
+    ``provider`` — a move's new key, seeded while the old one still stands — as admission decides
+    for a load: ``(fits, master, shortfall in bytes)``; a master that could not be read, or a
+    graph whose size is unknown, never fits (shortfall None)."""
+    policy = await residency_policy.resolve()
+    own = await gather(graph_ids=[graph_id])
+    graph = next((g for g in own.graphs if g.graph_id == graph_id), None)
+    if graph is None:
+        return False, None, None
+    if graph.bytes(policy) is None:
+        row = own.rows[graph_id]
+        try:
+            graph = replace(graph, entities=await _entity_count(
+                graph_id, row["data_source_id"], row["main_head_commit_seq"]))
+        except _Unread:
+            pass
+    snap = await gather(providers=[provider])
+    endpoint = _master_of(snap.slots, key) if snap.slots else None
+    decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
+    target = next((p for p in decided.masters if p.master.endpoint == endpoint), None)
+    if target is None or need(graph, policy) is None:
+        return False, endpoint, None
+    fits, shortfall = admit(target.master, need(graph, policy), policy, target.reserved)
+    return fits, endpoint, shortfall
+
+
 async def place_key(graph_id: str, provider: str,
                     taken: Collection[str]) -> Optional[Tuple[str, str]]:
     """A new platform key for ``graph_id`` on ``provider``, placed (doc 17): on the master with

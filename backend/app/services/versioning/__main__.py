@@ -82,7 +82,15 @@ async def _serve_metrics():
         app.include_router(metrics_endpoint.router)
         server = uvicorn.Server(uvicorn.Config(app, host="0.0.0.0", port=port,
                                                log_level="warning", access_log=False))
-        asyncio.create_task(server.serve(), name="versioning-metrics")
+
+        async def serve():
+            try:
+                await server.serve()
+            except SystemExit:            # uvicorn exits when it cannot bind: not the worker
+                logger.warning("metrics: worker scrape endpoint not started: port %d unusable",
+                               port)
+
+        asyncio.create_task(serve(), name="versioning-metrics")
         logger.info("metrics: worker scrape endpoint on :%d/metrics", port)
         return server
     except Exception as exc:              # noqa: BLE001 — never fail the worker

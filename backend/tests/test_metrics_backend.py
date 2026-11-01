@@ -325,6 +325,29 @@ def test_the_worker_still_runs_when_its_metrics_port_cannot_be_served(monkeypatc
     assert asyncio.run(worker_main._serve_metrics()) is None   # and never raises
 
 
+def test_the_versioning_worker_survives_a_metrics_port_that_is_taken(monkeypatch):
+    """uvicorn exits (SystemExit) when it cannot bind, and asyncio re-raises that from the task:
+    the scrape endpoint's task must swallow it, or the whole worker stops."""
+    import importlib
+
+    import uvicorn
+
+    worker_main = importlib.import_module("backend.app.services.versioning.__main__")
+    monkeypatch.setenv("METRICS_ENABLED", "1")
+
+    async def taken(self, sockets=None):
+        raise SystemExit(3)
+
+    monkeypatch.setattr(uvicorn.Server, "serve", taken)
+
+    async def run():
+        assert await worker_main._serve_metrics() is not None
+        await asyncio.sleep(0.05)              # the task runs, and fails to bind
+        return "still running"
+
+    assert asyncio.run(run()) == "still running"
+
+
 # ── the request path, which had no series at all ─────────────────────────
 #
 # Every emit site in the codebase was in the worker or the control plane, so

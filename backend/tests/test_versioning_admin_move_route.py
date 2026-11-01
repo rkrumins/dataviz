@@ -164,8 +164,12 @@ async def test_with_residency_on_a_minted_key_is_placed_on_the_master_with_the_m
         asked.append((graph_id, provider, set(taken)))
         return placed, "10.0.0.3:6379"
 
+    async def fits(graph_id, provider, key):
+        return True, "10.0.0.3:6379", 0
+
     monkeypatch.setattr(va.vconfig, "RESIDENCY_ENABLED", True)
     monkeypatch.setattr(va.residency, "place_key", place_key)
+    monkeypatch.setattr(va.residency, "admission_on", fits)
     svc = _Svc(retired=[{"name": keymigrate.owned_key(GID, 2), "provider": "prov_C"}])
     await _move(svc, {"providerId": "prov_B"}, keys={keymigrate.owned_key(GID, 1)})
     (move,) = svc.moves
@@ -181,6 +185,36 @@ async def test_with_residency_on_a_minted_key_is_placed_on_the_master_with_the_m
     await _move(svc, {"providerId": "prov_B"})
     assert svc.moves[0]["key"] == keymigrate.owned_key(GID, 1)
     assert "master" not in svc.moves[0]["shard_map"]
+
+
+@pytest.mark.asyncio
+async def test_with_residency_on_a_move_that_would_not_fit_its_new_master_is_refused(monkeypatch):
+    """A move of a graph in FalkorDB copies it onto its new key's master before the old key goes:
+    admission-checked like a load (409 capacity_insufficient), and nothing moves."""
+    asked = []
+
+    async def place_key(graph_id, provider, taken):
+        return keymigrate.owned_key(GID, 3), "10.0.0.3:6379"
+
+    async def admission_on(graph_id, provider, key):
+        asked.append((graph_id, provider, key))
+        return False, "10.0.0.3:6379", 512 * 1024 ** 2
+
+    monkeypatch.setattr(va.vconfig, "RESIDENCY_ENABLED", True)
+    monkeypatch.setattr(va.residency, "place_key", place_key)
+    monkeypatch.setattr(va.residency, "admission_on", admission_on)
+    svc = _Svc()
+    with pytest.raises(HTTPException) as caught:
+        await _move(svc, {"providerId": "prov_B"})
+    detail = caught.value.detail
+    assert caught.value.status_code == 409 and detail["type"] == "capacity_insufficient"
+    assert detail["master"] == "10.0.0.3:6379" and svc.moves == []
+    assert asked == [(GID, "prov_B", keymigrate.owned_key(GID, 3))]
+    # A graph out of FalkorDB only changes its pin: its load is admitted when it starts.
+    svc = _Svc()
+    svc.wm["status"] = "evicted"
+    await _move(svc, {"providerId": "prov_B"})
+    assert len(svc.moves) == 1 and len(asked) == 1
 
 
 @pytest.mark.asyncio

@@ -1359,7 +1359,7 @@ def test_the_residency_columns_are_declared_and_migrated():
     assert table.c.last_read_at.type.timezone and table.c.size_measured_at.type.timezone
     assert table.c.rehydrating_since.type.timezone
     assert "residency IN ('always','standard','coldline')" in _check_sql("ck_ps_residency")
-    assert ("evicted_reason IN ('idle_standard','idle_coldline','pressure','admin')"
+    assert ("evicted_reason IN ('idle_standard','idle_coldline','pressure','lost','admin')"
             in _check_sql("ck_ps_evicted_reason"))
     assert {"'rehydrating'", "'waiting_capacity'", "'reseeding'"} <= {
         s.strip() for s in _check_sql("ck_proj_status").split("(")[1].rstrip(")").split(",")}

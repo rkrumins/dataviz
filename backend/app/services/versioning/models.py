@@ -346,8 +346,8 @@ class ProjectionStateORM(VersioningBase):
     # When a person last read the graph (a fork's reads count for its root), flushed by each
     # process once a minute. NULL: never read since the column existed.
     last_read_at = Column(TIMESTAMP(timezone=True), nullable=True)
-    # Why the capacity loop evicted it (idle_standard | idle_coldline | pressure | admin), NULL
-    # while it is resident.
+    # Why it was evicted (idle_standard | idle_coldline | pressure, by the capacity loop; lost:
+    # its master lost the key, as liveness found; admin), NULL while it is resident.
     evicted_reason = Column(Text, nullable=True)
     # The key's measured size in bytes, and when: what evicting it frees and loading it costs.
     size_bytes = Column(BigInteger, nullable=True)
@@ -365,7 +365,7 @@ class ProjectionStateORM(VersioningBase):
         CheckConstraint("residency IN ('always','standard','coldline')", name="ck_ps_residency"),
         CheckConstraint(
             "evicted_reason IS NULL OR "
-            "evicted_reason IN ('idle_standard','idle_coldline','pressure','admin')",
+            "evicted_reason IN ('idle_standard','idle_coldline','pressure','lost','admin')",
             name="ck_ps_evicted_reason",
         ),
         # One versioned graph per FalkorDB graph: two projecting into one key would each reconcile
@@ -1061,7 +1061,8 @@ def ensure_ps_residency(conn) -> None:
     columns = {"residency", "last_read_at", "evicted_reason", "size_bytes", "size_measured_at",
                "rehydrating_since"}
     widened = "'waiting_capacity'" in (checks.get("ck_proj_status") or "")
-    if columns <= present and widened and {"ck_ps_residency", "ck_ps_evicted_reason"} <= set(checks):
+    reasons = "'lost'" in (checks.get("ck_ps_evicted_reason") or "")
+    if columns <= present and widened and reasons and "ck_ps_residency" in checks:
         return
     conn.execute(text(
         f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS residency TEXT NOT NULL DEFAULT 'standard'"))
@@ -1076,7 +1077,7 @@ def ensure_ps_residency(conn) -> None:
     conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_ps_evicted_reason"))
     conn.execute(text(
         f"ALTER TABLE {ps} ADD CONSTRAINT ck_ps_evicted_reason CHECK (evicted_reason IS NULL OR "
-        "evicted_reason IN ('idle_standard','idle_coldline','pressure','admin'))"))
+        "evicted_reason IN ('idle_standard','idle_coldline','pressure','lost','admin'))"))
     if not widened:
         conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_proj_status"))
         conn.execute(text(
