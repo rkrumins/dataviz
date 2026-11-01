@@ -13,17 +13,28 @@ import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const { versionedGraphs, moveProjection, rebuildProjection, reconcileProjection, deleteFork } = vi.hoisted(() => ({
+const {
+    versionedGraphs, moveProjection, rebuildProjection, reconcileProjection, deleteFork,
+    setGraphResidency, loadGraph, adoptGraph,
+} = vi.hoisted(() => ({
     versionedGraphs: vi.fn(),
     moveProjection: vi.fn(),
     rebuildProjection: vi.fn(),
     reconcileProjection: vi.fn(),
     deleteFork: vi.fn(),
+    setGraphResidency: vi.fn(),
+    loadGraph: vi.fn(),
+    adoptGraph: vi.fn(),
 }))
 
 vi.mock('@/services/systemStatusService', async () => {
     const actual = await vi.importActual<typeof import('@/services/systemStatusService')>('@/services/systemStatusService')
-    return { ...actual, systemStatusService: { ...actual.systemStatusService, versionedGraphs, moveProjection } }
+    return {
+        ...actual,
+        systemStatusService: {
+            ...actual.systemStatusService, versionedGraphs, moveProjection, setGraphResidency, loadGraph, adoptGraph,
+        },
+    }
 })
 vi.mock('@/services/versioningApiService', () => ({ rebuildProjection, reconcileProjection, deleteFork }))
 
@@ -42,6 +53,8 @@ function row(over: Partial<VersionedGraphRow>): VersionedGraphRow {
         falkorGraphName: 'customer_360', falkorProvider: 'falkor-eu', committed: 3, projected: 3, target: 3,
         lag: 0, status: 'idle', lastError: null, lastProjectedAt: null, progressDone: null, progressTotal: null,
         updatedAt: null, owned: false, forkParentGraphId: null, orphan: false, retiredKeys: [],
+        residency: 'standard', residencyState: 'resident', evictedReason: null, lastReadAt: null,
+        sizeBytes: null, rehydratingSince: null,
         ...over,
     }
 }
@@ -81,7 +94,16 @@ beforeEach(() => {
     rebuildProjection.mockReset()
     reconcileProjection.mockReset()
     deleteFork.mockReset()
+    setGraphResidency.mockReset()
+    loadGraph.mockReset()
+    adoptGraph.mockReset()
     vi.restoreAllMocks()
+})
+
+const PLATFORM = row({
+    graphId: 'graph_d', dataSourceId: 'ds4', dataSourceLabel: 'Orders', owned: true,
+    falkorGraphName: 'gvp_graph_d{aph_d.1}', residency: 'coldline', residencyState: 'evicted',
+    evictedReason: 'idle_coldline', status: 'evicted',
 })
 
 describe('VersionedGraphsPanel', () => {
@@ -247,6 +269,94 @@ describe('VersionedGraphsPanel', () => {
         expect(await screen.findByText('Already there')).toBeInTheDocument()
     })
 
+    it("shows each graph's class and whether it is in memory, but none on a fork", async () => {
+        const loading = row({ graphId: 'graph_e', dataSourceLabel: 'Loading one', residency: 'always', residencyState: 'rehydrating' })
+        const waiting = row({ graphId: 'graph_f', dataSourceLabel: 'Waiting one', residencyState: 'waiting_capacity' })
+        versionedGraphs.mockResolvedValue({ graphs: [MAIN, PLATFORM, loading, waiting, FORK], nextCursor: null })
+        renderPanel()
+        await screen.findByText('Customer 360')
+
+        const cells = (label: string) => within(screen.getByText(label).closest('tr')!)
+        const chip = { selector: 'span' }
+        expect(cells('Customer 360').getByText('Standard', chip)).toBeInTheDocument()
+        expect(cells('Customer 360').getByText('In memory', chip)).toBeInTheDocument()
+        expect(cells('Orders').getByText('Coldline', chip)).toBeInTheDocument()
+        expect(cells('Orders').getByText('Evicted', chip)).toBeInTheDocument()
+        expect(cells('Loading one').getByText('Loading', chip)).toBeInTheDocument()
+        expect(cells('Waiting one').getByText('Waiting for room', chip)).toBeInTheDocument()
+        expect(within(screen.getByText('dsfork_1').closest('tr')!).queryByLabelText('Residency class')).not.toBeInTheDocument()
+        expect(screen.getAllByLabelText('Residency class')).toHaveLength(4)
+    })
+
+    it("sets a graph's class, and shows why Always cannot be had on a full master", async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [PLATFORM], nextCursor: null })
+        setGraphResidency
+            .mockRejectedValueOnce(Object.assign(new Error('409'), {
+                status: 409,
+                detail: { type: 'capacity_insufficient', master: '10.0.0.2:6379', shortfallBytes: 3221225472,
+                    message: 'master 10.0.0.2:6379 has no room for this graph: it needs 3.0 GiB more under its start mark' },
+            }))
+            .mockResolvedValueOnce({ graphId: 'graph_d', residency: 'standard', state: 'evicted' })
+        renderPanel()
+        await screen.findByText('Orders')
+
+        await userEvent.selectOptions(screen.getByLabelText('Residency class'), 'always')
+        expect(setGraphResidency).toHaveBeenCalledWith('graph_d', 'always')
+        expect(await screen.findByText('master 10.0.0.2:6379 has no room for this graph: it needs 3.0 GiB more under its start mark')).toBeInTheDocument()
+        await userEvent.selectOptions(screen.getByLabelText('Residency class'), 'standard')
+        expect(await screen.findByText('Set to Standard')).toBeInTheDocument()
+    })
+
+    it('loads a graph out of FalkorDB now, and offers it only there', async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [MAIN, PLATFORM], nextCursor: null })
+        loadGraph.mockResolvedValue({ graphId: 'graph_d', state: 'evicted', loadRequested: true })
+        renderPanel()
+        await screen.findByText('Orders')
+
+        const load = screen.getAllByRole('button', { name: 'Load now' })
+        expect(load).toHaveLength(1)
+        await userEvent.click(load[0])
+        expect(loadGraph).toHaveBeenCalledWith('graph_d')
+        expect(await screen.findByText('Load asked for — it starts when its master has room')).toBeInTheDocument()
+    })
+
+    it("adopts a customer's key after a confirmation that says what changes", async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [MAIN, PLATFORM, FORK], nextCursor: null })
+        adoptGraph.mockResolvedValue({
+            graphId: 'graph_a', from: { providerId: 'falkor-eu', key: 'customer_360' },
+            to: { providerId: 'falkor-eu', key: 'gvp_graph_a{raph_a.1}' },
+        })
+        renderPanel()
+        await screen.findByText('Customer 360')
+
+        const adopt = screen.getAllByRole('button', { name: 'Adopt…' })
+        expect(adopt).toHaveLength(1)                       // the customer's key only
+        await userEvent.click(adopt[0])
+        const dialog = screen.getByRole('dialog')
+        expect(dialog).toHaveTextContent('the platform reads its own copy')
+        expect(dialog).toHaveTextContent('Changes other tools keep making to customer_360 no longer show here')
+        expect(dialog).toHaveTextContent('Bring into history no longer sees them')
+        expect(dialog).toHaveTextContent('customer_360 is left exactly as it is')
+        await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
+        expect(adoptGraph).not.toHaveBeenCalled()
+
+        await userEvent.click(screen.getByRole('button', { name: 'Adopt…' }))
+        await userEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Adopt' }))
+        expect(adoptGraph).toHaveBeenCalledWith('graph_a')
+        expect(await screen.findByText('Adopting onto gvp_graph_a{raph_a.1} — reads come from Postgres until it catches up')).toBeInTheDocument()
+        await waitFor(() => expect(versionedGraphs).toHaveBeenCalledTimes(2))
+    })
+
+    it('filters by graphs being loaded and graphs waiting for room', async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [MAIN], nextCursor: null })
+        renderPanel()
+        await screen.findByText('Customer 360')
+        await userEvent.selectOptions(screen.getByLabelText('Status'), 'waiting_capacity')
+        await waitFor(() => expect(versionedGraphs).toHaveBeenLastCalledWith({ status: 'waiting_capacity' }, null))
+        await userEvent.selectOptions(screen.getByLabelText('Status'), 'rehydrating')
+        await waitFor(() => expect(versionedGraphs).toHaveBeenLastCalledWith({ status: 'rehydrating' }, null))
+    })
+
     it('shows the old key a moved graph is still retiring', async () => {
         versionedGraphs.mockResolvedValue({ graphs: [{
             ...FORK, retiredKeys: [{ name: 'gv_fork_old', provider: 'falkor-eu', retireAfter: '2026-10-18T12:15:00Z', afterSeq: 5 }],
@@ -271,6 +381,17 @@ describe('ProjectionPanel', () => {
         )
         await userEvent.click(screen.getByRole('button', { name: /all versioned graphs/i }))
         expect(onShowAll).toHaveBeenCalled()
+    })
+
+    it('counts graphs being loaded and graphs waiting for room', () => {
+        render(
+            <MemoryRouter>
+                <ProjectionPanel projection={{ ...PROJECTION, rehydrating: 2, waitingCapacity: 1 }} providers={PROVIDERS} />
+            </MemoryRouter>,
+        )
+        const chip = (text: string) => (_: string, el: Element | null) => el?.textContent === text
+        expect(screen.getByText(chip('2 loading'))).toBeInTheDocument()
+        expect(screen.getByText(chip('1 waiting for room'))).toBeInTheDocument()
     })
 
     it('offers no link to someone who cannot open the list', () => {

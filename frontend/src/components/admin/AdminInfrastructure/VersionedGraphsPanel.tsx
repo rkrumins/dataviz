@@ -10,21 +10,31 @@
  * can also move the fork to the trash. A platform copy can be moved to
  * another FalkorDB provider or key, and the old key a move left behind is
  * listed under the key until it is dropped.
+ *
+ * Residency (doc 17): each graph's class and whether it is in memory show as
+ * chips; a system administrator sets the class (Always may be refused when its
+ * master has no room, with the reason), asks for an evicted graph's load (Load
+ * now), and adopts a customer's key onto a platform key after a confirmation
+ * that says what changes. "Residency & eviction" opens the policy card.
  */
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useInfiniteQuery } from '@tanstack/react-query'
-import { Database, Loader2, X } from 'lucide-react'
+import { Database, Gauge, Loader2, X } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import {
     systemStatusService,
     type GraphProvider,
+    type ResidencyClass,
+    type ResidencyState,
     type VersionedGraphRow,
     type VersionedGraphsFilter,
 } from '@/services/systemStatusService'
 import { deleteFork, rebuildProjection, reconcileProjection } from '@/services/versioningApiService'
 import { formatSince } from './meta'
 import { MoveProjectionDialog } from './MoveProjectionDialog'
+import { ConfirmDialog } from './ConfirmDialog'
+import { ResidencyPolicyCard } from './ResidencyPolicyCard'
 
 const STATUS_OPTIONS: { value: NonNullable<VersionedGraphsFilter['status']>; label: string }[] = [
     { value: 'fresh', label: 'In sync' },
@@ -32,8 +42,33 @@ const STATUS_OPTIONS: { value: NonNullable<VersionedGraphsFilter['status']>; lab
     { value: 'projecting', label: 'Projecting' },
     { value: 'rebuilding', label: 'Rebuilding' },
     { value: 'evicted', label: 'Evicted' },
+    { value: 'rehydrating', label: 'Loading' },
+    { value: 'waiting_capacity', label: 'Waiting for room' },
     { value: 'failed', label: 'Failed' },
 ]
+
+const CLASS_LABEL: Record<ResidencyClass, string> = { always: 'Always', standard: 'Standard', coldline: 'Coldline' }
+
+const STATE_CHIP: Record<ResidencyState, { label: string; cls: string }> = {
+    resident: { label: 'In memory', cls: 'border-emerald-500/20 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400' },
+    evicted: { label: 'Evicted', cls: 'border-glass-border bg-black/5 dark:bg-white/5 text-ink-muted' },
+    rehydrating: { label: 'Loading', cls: 'border-sky-500/20 bg-sky-500/10 text-sky-600 dark:text-sky-400' },
+    waiting_capacity: { label: 'Waiting for room', cls: 'border-amber-500/20 bg-amber-500/10 text-amber-600 dark:text-amber-400' },
+}
+
+const CHIP_CLS = 'inline-flex px-1.5 py-px rounded-full border text-[9px] uppercase tracking-wide shrink-0'
+
+type Refusal = { type?: string; message?: string }
+
+/** A refusal in words: the server's own message where it gives one. */
+function explain(e: Error & { detail?: unknown }): string {
+    const d: Refusal = typeof e.detail === 'object' && e.detail ? e.detail as Refusal : {}
+    if (d.type === 'projection_not_adopted') return 'Other data sources read this key, so it cannot be adopted.'
+    if (d.type === 'projection_mode_unsupported') return 'A data source with a dedicated rollup graph cannot be adopted.'
+    if (d.type === 'job_active') return 'A rollup rebuild is running; try again when it finishes.'
+    if (d.type === 'already_adopted') return 'This graph already uses a platform key.'
+    return d.message ?? e.message
+}
 
 const KIND_OPTIONS: { value: NonNullable<VersionedGraphsFilter['kind']>; label: string }[] = [
     { value: 'main', label: 'Data source graphs' },
@@ -70,6 +105,8 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
     const [busy, setBusy] = useState<string | null>(null)
     const [notes, setNotes] = useState<Record<string, RowNote>>({})
     const [moving, setMoving] = useState<VersionedGraphRow | null>(null)
+    const [adopting, setAdopting] = useState<VersionedGraphRow | null>(null)
+    const [showPolicy, setShowPolicy] = useState(false)
     const providerName = new Map((providers ?? []).map(p => [p.id, p.name]))
 
     const query = useInfiniteQuery({
@@ -126,6 +163,34 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
         setBusy(null)
     }
 
+    /** A residency action on one graph: its class, Load now, or Adopt (confirmed first). */
+    const reside = async (row: VersionedGraphRow, action: 'class' | 'load' | 'adopt', cls?: ResidencyClass) => {
+        setBusy(`${row.graphId}:${action}`)
+        let note: RowNote
+        try {
+            if (action === 'class') {
+                await systemStatusService.setGraphResidency(row.graphId, cls!)
+                note = { tone: 'ok', text: `Set to ${CLASS_LABEL[cls!]}` }
+                void query.refetch()
+            } else if (action === 'load') {
+                const res = await systemStatusService.loadGraph(row.graphId)
+                note = res.loadRequested
+                    ? { tone: 'ok', text: 'Load asked for — it starts when its master has room' }
+                    : { tone: 'warn', text: 'Already in memory, or being loaded' }
+            } else {
+                const res = await systemStatusService.adoptGraph(row.graphId)
+                note = { tone: 'ok', text: `Adopting onto ${res.to.key} — reads come from Postgres until it catches up` }
+                setAdopting(null)
+                void query.refetch()
+            }
+        } catch (e) {
+            note = { tone: 'bad', text: explain(e as Error) }
+            if (action === 'adopt') setAdopting(null)
+        }
+        setNotes(prev => ({ ...prev, [row.graphId]: note }))
+        setBusy(null)
+    }
+
     return (
         <div id="versioned-graphs" className="border border-glass-border rounded-xl bg-canvas-elevated overflow-hidden">
             <div className="px-5 pt-4 pb-3 flex items-center justify-between gap-3">
@@ -136,10 +201,21 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                         <p className="text-[11px] text-ink-muted">Every versioned graph, the FalkorDB key it projects into, and its state — forks and orphans included.</p>
                     </div>
                 </div>
-                <button onClick={onClose} className="p-1 rounded-md text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5" aria-label="Close versioned graphs">
-                    <X className="w-4 h-4" />
-                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                    <button
+                        onClick={() => setShowPolicy(open => !open)}
+                        aria-expanded={showPolicy}
+                        className="inline-flex items-center gap-1 text-[11px] font-medium text-indigo-600 dark:text-indigo-400 hover:underline"
+                    >
+                        <Gauge className="w-3.5 h-3.5" /> Residency &amp; eviction
+                    </button>
+                    <button onClick={onClose} className="p-1 rounded-md text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5" aria-label="Close versioned graphs">
+                        <X className="w-4 h-4" />
+                    </button>
+                </div>
             </div>
+
+            {showPolicy && <ResidencyPolicyCard />}
 
             <div className="px-5 pb-3 flex flex-wrap items-center gap-2">
                 <select aria-label="Provider" className={SELECT_CLS} value={filter.provider ?? ''} onChange={e => setField('provider', e.target.value)}>
@@ -204,6 +280,19 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                     <span className="inline-flex px-1.5 py-px rounded-full border border-amber-500/20 bg-amber-500/10 text-[9px] uppercase tracking-wide text-amber-600 dark:text-amber-400 shrink-0" title="Its data source no longer exists">Orphan</span>
                                                 )}
                                             </div>
+                                            {!row.forkParentGraphId && row.residency && (
+                                                <div className="mt-1 flex items-center gap-1">
+                                                    <span className={cn(CHIP_CLS, 'border-indigo-500/20 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400')}>
+                                                        {CLASS_LABEL[row.residency] ?? row.residency}
+                                                    </span>
+                                                    <span
+                                                        className={cn(CHIP_CLS, STATE_CHIP[row.residencyState]?.cls)}
+                                                        title={row.rehydratingSince ? `Loading since ${row.rehydratingSince}` : undefined}
+                                                    >
+                                                        {STATE_CHIP[row.residencyState]?.label ?? row.residencyState}
+                                                    </span>
+                                                </div>
+                                            )}
                                             <span className="text-[10px] text-ink-muted">{row.workspaceName ?? row.workspaceId}</span>
                                         </td>
                                         <td className="px-3 py-2.5">
@@ -249,6 +338,25 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                 >
                                                     Move…
                                                 </button>
+                                                {!row.forkParentGraphId && (
+                                                    <select
+                                                        aria-label="Residency class"
+                                                        className={cn(SELECT_CLS, 'py-0.5 text-[11px]')}
+                                                        value={row.residency}
+                                                        disabled={busy !== null}
+                                                        onChange={e => reside(row, 'class', e.target.value as ResidencyClass)}
+                                                    >
+                                                        {(Object.keys(CLASS_LABEL) as ResidencyClass[]).map(c => (
+                                                            <option key={c} value={c}>{CLASS_LABEL[c]}</option>
+                                                        ))}
+                                                    </select>
+                                                )}
+                                                {!row.forkParentGraphId && (row.residencyState === 'evicted' || row.residencyState === 'waiting_capacity') && (
+                                                    <button className={ACTION_CLS} disabled={busy !== null} onClick={() => reside(row, 'load')}>Load now</button>
+                                                )}
+                                                {!row.owned && !row.forkParentGraphId && !row.orphan && (
+                                                    <button className={ACTION_CLS} disabled={busy !== null} onClick={() => setAdopting(row)}>Adopt…</button>
+                                                )}
                                             </div>
                                             {busy?.startsWith(`${row.graphId}:`) && <Loader2 className="mt-1 w-3 h-3 animate-spin text-ink-muted" />}
                                             {note && <p className={cn('mt-1 text-[11px]', NOTE_CLS[note.tone])}>{note.text}</p>}
@@ -267,6 +375,30 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                         {query.isFetchingNextPage ? 'Loading…' : 'Load more'}
                     </button>
                 </div>
+            )}
+
+            {adopting && (
+                <ConfirmDialog
+                    title="Adopt onto a platform key"
+                    confirmLabel="Adopt"
+                    pending={busy === `${adopting.graphId}:adopt`}
+                    onClose={() => setAdopting(null)}
+                    onConfirm={() => reside(adopting, 'adopt')}
+                >
+                    <p>
+                        {adopting.dataSourceLabel ?? adopting.dataSourceId} is copied from Postgres into a new platform key on the
+                        same provider, a page at a time; reads come from Postgres until the copy catches up. From then the
+                        platform reads its own copy, and the graph's residency class applies.
+                    </p>
+                    <p>
+                        <span className="font-mono">{adopting.falkorGraphName}</span> is left exactly as it is: never written,
+                        dropped or renamed.
+                    </p>
+                    <p className="text-amber-700 dark:text-amber-400">
+                        Changes other tools keep making to {adopting.falkorGraphName} no longer show here, and Bring into history
+                        no longer sees them.
+                    </p>
+                </ConfirmDialog>
             )}
 
             {moving && (
