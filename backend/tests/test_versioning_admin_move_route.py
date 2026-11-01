@@ -13,7 +13,7 @@ projection to another FalkorDB provider or key (doc 14 §6 KeyMigration, phase 1
 The swap, the reseed and the old key's retirement run against Postgres in
 ``integration/test_versioning_projection_provider_routing.py``.
 """
-from contextlib import ExitStack
+from contextlib import ExitStack, asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -165,13 +165,32 @@ async def test_with_residency_on_a_minted_key_is_placed_on_the_master_with_the_m
         return placed, "10.0.0.3:6379"
 
     async def fits(graph_id, provider, key):
-        return True, "10.0.0.3:6379", 0
+        asked.append(("admit", key))
+        return va.residency.Admitted(True, "10.0.0.3:6379", 0, None)
+
+    held = []
+
+    @asynccontextmanager
+    async def admitting(**kw):
+        held.append(True)
+        yield
+        held.append(False)
 
     monkeypatch.setattr(va.vconfig, "RESIDENCY_ENABLED", True)
     monkeypatch.setattr(va.residency, "place_key", place_key)
     monkeypatch.setattr(va.residency, "admission_on", fits)
+    monkeypatch.setattr(va.residency, "admitting", admitting)
     svc = _Svc(retired=[{"name": keymigrate.owned_key(GID, 2), "provider": "prov_C"}])
+    real_move = svc.move_projection
+
+    async def move_held(**kw):        # review finding 2: committed before anything else admits
+        assert held == [True]
+        return await real_move(**kw)
+
+    svc.move_projection = move_held
     await _move(svc, {"providerId": "prov_B"}, keys={keymigrate.owned_key(GID, 1)})
+    assert held == [True, False] and asked[-1] == ("admit", placed)
+    asked.pop()
     (move,) = svc.moves
     assert move["key"] == placed and move["shard_map"]["master"] == "10.0.0.3:6379"
     assert move["shard_map"]["slot"] == key_slot(placed)
@@ -198,7 +217,7 @@ async def test_with_residency_on_a_move_that_would_not_fit_its_new_master_is_ref
 
     async def admission_on(graph_id, provider, key):
         asked.append((graph_id, provider, key))
-        return False, "10.0.0.3:6379", 512 * 1024 ** 2
+        return va.residency.Admitted(False, "10.0.0.3:6379", 512 * 1024 ** 2, "capacity")
 
     monkeypatch.setattr(va.vconfig, "RESIDENCY_ENABLED", True)
     monkeypatch.setattr(va.residency, "place_key", place_key)

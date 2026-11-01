@@ -882,6 +882,23 @@ async def test_a_projected_key_is_measured(store, falkor, mine, monkeypatch):
     assert ps.size_measured_at is not None and ps.size_bytes != 5
 
 
+async def test_admission_and_its_commit_hold_off_a_pass_and_each_other(store, monkeypatch):
+    """Review finding 2: a move's or an Adopt's admission and its commit are one step against the
+    capacity pass and each other (the pass's leader lock), so neither a load the pass starts nor
+    another route's write is admitted between the two. A route waits a while for a pass, then
+    answers lock_busy."""
+    from backend.app.services.versioning.errors import LockBusy
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    proj = FalkorProjector(graph_client_factory=FakeFalkor())
+    async with residency.admitting():
+        assert await CapacityLoop(proj).run_once(graph_ids=[]) is None
+        with pytest.raises(LockBusy):
+            async with residency.admitting(wait_s=0.3):
+                pass
+    assert await CapacityLoop(proj).run_once(graph_ids=[]) is not None
+
+
 async def test_one_pass_at_a_time_across_workers(store, monkeypatch):
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     proj = FalkorProjector(graph_client_factory=FakeFalkor())

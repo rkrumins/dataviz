@@ -338,9 +338,9 @@ async def test_admission_answers_for_the_master_the_load_would_go_to(monkeypatch
     monkeypatch.setattr(residency, "gather", gather)
     residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
     try:
-        assert await residency.admission("g") == (True, "m2", 0)
+        assert await residency.admission("g") == (True, "m2", 0, None)
         snap.graphs[0] = _graph("g", status="evicted", size=600 * MB)        # 780 MB > 700 MB
-        assert await residency.admission("g") == (False, "m2", 80 * MB)
+        assert await residency.admission("g") == (False, "m2", 80 * MB, "capacity")
     finally:
         residency_policy.invalidate()
 
@@ -364,6 +364,40 @@ async def test_a_new_key_is_placed_on_the_roomiest_master_of_its_provider(monkey
         key, master = await residency.place_key(gid, "default", taken=set())
         assert master == "m2" and key_slot(key) >= 8192 and key.startswith(f"gvp_{gid}")
         assert asked == [{"providers": ["default"]}]
+    finally:
+        residency_policy.invalidate()
+
+
+async def test_placement_and_admission_pass_over_held_and_busy_masters(monkeypatch):
+    """Review finding 2: a master replaying its dataset reads near empty, and one taking a load
+    already has its one; neither has a new key placed on it nor a full write admitted onto it, as
+    the planner's own loads never do."""
+    from backend.app.services.versioning import keymigrate
+
+    snap = residency.Snapshot(
+        masters=[_master(used_pct=60), _master(endpoint="m2", used_pct=5, hold="loading"),
+                 _master(endpoint="m3", used_pct=0)],
+        graphs=[_graph("g", owned=False, size=100 * MB),
+                _graph("seeding", status="rehydrating", seeding=True, size=10 * MB,
+                       endpoint="m3")],
+        rows={"g": {"data_source_id": "ds1", "main_head_commit_seq": 9}},
+        slots={"m1": [(0, 5000)], "m2": [(5001, 10000)], "m3": [(10001, 16383)]})
+
+    async def gather(**kw):
+        return snap
+
+    monkeypatch.setattr(residency, "gather", gather)
+    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
+    gid = "graph_01JA2B3C4D5E6F7G8H9JKMNPQR"
+    try:
+        assert (await residency.place_key(gid, "default", taken=set()))[1] == "m1"
+        assert await residency.admission("g") == (True, "m1", 0, None)
+        on = {m: keymigrate.placed_key(gid, snap.slots[m], set()) for m in ("m1", "m2", "m3")}
+        assert await residency.admission_on("g", "default", on["m1"]) == (True, "m1", 0, None)
+        assert await residency.admission_on("g", "default", on["m2"]) == (
+            False, "m2", None, "loading")
+        assert await residency.admission_on("g", "default", on["m3"]) == (
+            False, "m3", None, "busy")
     finally:
         residency_policy.invalidate()
 

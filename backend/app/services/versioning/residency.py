@@ -37,10 +37,11 @@ import asyncio
 import logging
 import time
 from collections import OrderedDict
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
-from typing import Any, Collection, Dict, List, Mapping, Optional, Tuple
+from typing import Any, AsyncIterator, Collection, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 from sqlalchemy import func, literal, select, text, update
 
@@ -590,72 +591,119 @@ def _pool(decided: Plan, graph: Graph) -> List[MasterPlan]:
                 else p.master.endpoint == graph.endpoint)]
 
 
-async def admission(graph_id: str) -> Tuple[bool, Optional[str], Optional[int]]:
-    """Whether a load of ``graph_id`` fits now on the master it would go to (the roomiest of its
-    provider's, or its own when its key stays), as the planner's admission decides (its estimate
-    times the headroom under the start mark, after what is held there): ``(fits, master,
-    shortfall in bytes)``; a master that could not be read never fits, and its shortfall is
-    None."""
+class Admitted(NamedTuple):
+    """Whether a full write of a graph fits now, on ``master``; when it does not, ``why``:
+    ``capacity`` (``shortfall`` bytes short under the start mark), ``unsized`` (its size is
+    unknown), ``unmeasured`` (the master could not be read), ``busy`` (a load or full projection
+    is under way there: one at a time) or the master's hold (``fork``, ``loading``, ...)."""
+    fits: bool
+    master: Optional[str]
+    shortfall: Optional[int] = None
+    why: Optional[str] = None
+
+
+def _free(p: MasterPlan) -> bool:
+    """Free to take a load, as the planner's loads take one: read, holding none, taking none."""
+    return p.master.used is not None and not p.master.hold and not p.seeding
+
+
+def _admitted(target: Optional[MasterPlan], graph: Graph, policy,
+              endpoint: Optional[str]) -> Admitted:
+    if need(graph, policy) is None:
+        return Admitted(False, endpoint, None, "unsized")
+    if target is None or target.master.used is None:
+        return Admitted(False, endpoint, None, "unmeasured")
+    if target.master.hold:
+        return Admitted(False, endpoint, None, target.master.hold)
+    if target.seeding:
+        return Admitted(False, endpoint, None, "busy")
+    fits, shortfall = admit(target.master, need(graph, policy), policy, target.reserved)
+    return Admitted(fits, endpoint, shortfall, None if fits else "capacity")
+
+
+async def _sized(graph: Graph, row: Optional[Mapping], policy) -> Graph:
+    """``graph`` with its entities counted when its size is unknown, for the estimate."""
+    if graph.bytes(policy) is not None or row is None:
+        return graph
+    try:
+        return replace(graph, entities=await _entity_count(
+            graph.graph_id, row["data_source_id"], row["main_head_commit_seq"]))
+    except _Unread:
+        return graph
+
+
+async def admission(graph_id: str) -> Admitted:
+    """Whether a load of ``graph_id`` fits now on the master it would go to — the roomiest free
+    one of its provider's, or its own when its key stays — as the planner's admission decides (its
+    estimate times the headroom under the start mark, after what is held there)."""
     policy = await residency_policy.resolve()
     snap = await gather()
     graph = next((g for g in snap.graphs if g.graph_id == graph_id), None)
     if graph is None:
-        return False, None, None
-    if graph.bytes(policy) is None:
-        row = snap.rows[graph_id]
-        try:
-            graph = replace(graph, entities=await _entity_count(
-                graph_id, row["data_source_id"], row["main_head_commit_seq"]))
-        except _Unread:
-            pass
+        return Admitted(False, None, None, "unmeasured")
+    graph = await _sized(graph, snap.rows.get(graph_id), policy)
     decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
-    target = roomiest(_pool(decided, graph), policy)
-    if need(graph, policy) is None:
-        return False, target.master.endpoint if target else graph.endpoint, None
-    if target is None:
-        return False, graph.endpoint, None
-    fits, shortfall = admit(target.master, need(graph, policy), policy, target.reserved)
-    return fits, target.master.endpoint, shortfall
+    pool = _pool(decided, graph)
+    target = roomiest([p for p in pool if _free(p)], policy) or roomiest(pool, policy)
+    return _admitted(target, graph, policy, target.master.endpoint if target else graph.endpoint)
 
 
-async def admission_on(graph_id: str, provider: str,
-                       key: str) -> Tuple[bool, Optional[str], Optional[int]]:
+async def admission_on(graph_id: str, provider: str, key: str) -> Admitted:
     """Whether a full copy of ``graph_id`` fits now on the master ``key`` hashes to on
-    ``provider`` — a move's new key, seeded while the old one still stands — as admission decides
-    for a load: ``(fits, master, shortfall in bytes)``; a master that could not be read, or a
-    graph whose size is unknown, never fits (shortfall None)."""
+    ``provider`` — a move's or an Adopt's new key, seeded while the old one still stands — as
+    admission decides for a load: never on a master that could not be read, holds, or takes a
+    load already, nor for a graph whose size is unknown."""
     policy = await residency_policy.resolve()
     own = await gather(graph_ids=[graph_id])
     graph = next((g for g in own.graphs if g.graph_id == graph_id), None)
     if graph is None:
-        return False, None, None
-    if graph.bytes(policy) is None:
-        row = own.rows[graph_id]
-        try:
-            graph = replace(graph, entities=await _entity_count(
-                graph_id, row["data_source_id"], row["main_head_commit_seq"]))
-        except _Unread:
-            pass
+        return Admitted(False, None, None, "unmeasured")
+    graph = await _sized(graph, own.rows.get(graph_id), policy)
     snap = await gather(providers=[provider])
     endpoint = _master_of(snap.slots, key) if snap.slots else None
     decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
     target = next((p for p in decided.masters if p.master.endpoint == endpoint), None)
-    if target is None or need(graph, policy) is None:
-        return False, endpoint, None
-    fits, shortfall = admit(target.master, need(graph, policy), policy, target.reserved)
-    return fits, endpoint, shortfall
+    return _admitted(target, graph, policy, endpoint)
+
+
+@asynccontextmanager
+async def admitting(wait_s: float = 15.0) -> AsyncIterator[None]:
+    """A full write's admission and its commit as one step: under the capacity pass's leader lock,
+    so neither a load a pass starts nor another route's write is admitted between the two (the
+    commit's ``projection_state`` row then reserves its room for the next). A pass holding the
+    lock longer than ``wait_s`` is ``LockBusy``."""
+    from .errors import LockBusy
+
+    lock_scope = db.graphver_lock_session()
+    lock_s = await lock_scope.__aenter__()
+    lock_arg = func.hashtext(_LEADER)
+    acquired = False
+    try:
+        deadline, take = time.monotonic() + wait_s, select(func.pg_try_advisory_lock(lock_arg))
+        while not (acquired := bool(await lock_s.scalar(take))):
+            if time.monotonic() >= deadline:
+                raise LockBusy("a capacity pass is under way; try again shortly")
+            await asyncio.sleep(0.2)
+        yield
+    finally:
+        try:
+            if acquired:
+                await lock_s.execute(select(func.pg_advisory_unlock(lock_arg)))
+        finally:
+            await lock_scope.__aexit__(None, None, None)
 
 
 async def place_key(graph_id: str, provider: str,
                     taken: Collection[str]) -> Optional[Tuple[str, str]]:
     """A new platform key for ``graph_id`` on ``provider``, placed (doc 17): on the master with
-    the most room after what is held there, the first of the graph's keys not ``taken`` that hashes
-    to it. ``(key, master)``; None when no master of the provider could be read, or no key lands
-    there within the search's bound."""
+    the most room after what is held there, among those free to take a load, the first of the
+    graph's keys not ``taken`` that hashes to it. ``(key, master)``; None when no master of the
+    provider is free, or no key lands there within the search's bound."""
     policy = await residency_policy.resolve()
     snap = await gather(providers=[provider])
     decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
-    target = roomiest([p for p in decided.masters if provider in p.master.providers], policy)
+    target = roomiest([p for p in decided.masters
+                       if provider in p.master.providers and _free(p)], policy)
     if target is None:
         return None
     key = keymigrate.placed_key(graph_id, snap.slots.get(target.master.endpoint), taken)

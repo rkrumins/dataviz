@@ -6,6 +6,7 @@ and residency (doc 17).
 Every route needs ``system:admin``. None is on the API-key surface (``auth/api_key_surface``), so
 an API key is refused.
 """
+import contextlib
 from datetime import datetime, timezone
 from typing import Any, Dict, Literal, Optional, Tuple
 
@@ -157,25 +158,28 @@ async def move_projection(
             and keymigrate.is_owned_key(graph_id, pin)):
         res = {"changed": False, "from": current, "to": current, "retiring": None}
     else:
-        key, master = await _target_key(graph_id, body, current, wm["retired_keys"])
-        if vconfig.RESIDENCY_ENABLED and wm.get("status") not in (
-                "evicted", "waiting_capacity", "rehydrating"):
-            # Its new key is seeded while the old one stands: a full copy, admitted like a load.
-            # A graph out of FalkorDB only changes its pin; its load is admitted when it starts.
-            fits, at, shortfall = await residency.admission_on(graph_id, body.provider_id, key)
-            if not fits:
-                raise _capacity_insufficient(at, shortfall, "a copy of this graph")
-        shard_map = {"tag": key[key.index("{") + 1:-1]
-                     if keymigrate.is_owned_key(graph_id, key) else None,
-                     "slot": key_slot(key), "chosenAt": datetime.now(timezone.utc).isoformat(),
-                     "chosenBy": user.id, **({"master": master} if master else {})}
-        with _domain_errors():
-            try:
-                res = await svc.move_projection(graph_id=graph_id, provider=body.provider_id,
-                                                key=key, actor=user.id, shard_map=shard_map)
-            except ConcurrencyError as exc:     # enabling version control hasn't finished
-                raise HTTPException(status_code=409,
-                                    detail={"type": "bootstrapping", "message": str(exc)})
+        # Its new key is seeded while the old one stands: a full copy, admitted like a load, and
+        # committed before anything else is admitted. A graph out of FalkorDB only changes its
+        # pin; its load is admitted when it starts.
+        copied = vconfig.RESIDENCY_ENABLED and wm.get("status") not in (
+            "evicted", "waiting_capacity", "rehydrating")
+        async with residency.admitting() if copied else contextlib.nullcontext():
+            key, master = await _target_key(graph_id, body, current, wm["retired_keys"])
+            if copied:
+                admitted = await residency.admission_on(graph_id, body.provider_id, key)
+                if not admitted.fits:
+                    raise _capacity_insufficient(admitted, "a copy of this graph")
+            shard_map = {"tag": key[key.index("{") + 1:-1]
+                         if keymigrate.is_owned_key(graph_id, key) else None,
+                         "slot": key_slot(key), "chosenAt": datetime.now(timezone.utc).isoformat(),
+                         "chosenBy": user.id, **({"master": master} if master else {})}
+            with _domain_errors():
+                try:
+                    res = await svc.move_projection(graph_id=graph_id, provider=body.provider_id,
+                                                    key=key, actor=user.id, shard_map=shard_map)
+                except ConcurrencyError as exc:     # enabling version control hasn't finished
+                    raise HTTPException(status_code=409,
+                                        detail={"type": "bootstrapping", "message": str(exc)})
     if res["changed"]:
         background.add_task(rebuild_now, graph_id)
         await recorder.record_for_request(
@@ -349,15 +353,32 @@ async def load_graph(
     return {"graphId": graph_id, "state": wm["residency_state"], "loadRequested": requested}
 
 
-def _capacity_insufficient(master: Optional[str], shortfall: Optional[int],
-                           what: str) -> HTTPException:
+#: A master's hold (``shard_capacity.hold_reason``), in words.
+_HELD = {"fork": "it is writing its data to disk", "loading": "it is loading its data",
+         "memory": "its memory is too high to write through", "replica_lost": "a replica dropped",
+         "replica_lag": "a replica is behind", "unmeasured": "it could not be measured"}
+
+
+def _capacity_insufficient(admitted: "residency.Admitted", what: str) -> HTTPException:
+    """409 ``capacity_insufficient`` for a full write admission refused: its master, its shortfall
+    (when it is one of room) and ``reason`` (``Admitted.why``), in words."""
+    master, why = admitted.master or "?", admitted.why
+    if why == "capacity":
+        message = (f"master {master} has no room for {what}: it needs "
+                   f"{human_bytes(admitted.shortfall)} more under its start mark")
+    elif why == "unsized":
+        message = (f"the size of {what} is not known, so it cannot be admitted now; it is "
+                   "estimated from its history once that can be read")
+    elif why == "busy":
+        message = f"master {master} is taking another load; try again once it is done"
+    elif why == "unmeasured":
+        message = f"master {master} could not be measured, so {what} cannot be admitted now"
+    else:
+        message = f"master {master} cannot take {what} now: {_HELD.get(why, why)}"
     return HTTPException(status_code=409, detail={
-        "type": "capacity_insufficient", "master": master, "shortfallBytes": shortfall,
-        "message": (f"master {master or '?'} has no room for {what}: it needs "
-                    f"{human_bytes(shortfall)} more under its start mark"
-                    if shortfall is not None else
-                    f"master {master or '?'} could not be measured, so {what} cannot be admitted "
-                    "now")})
+        "type": "capacity_insufficient", "master": admitted.master,
+        "shortfallBytes": admitted.shortfall if why == "capacity" else None, "reason": why,
+        "message": message})
 
 
 @router.post("/graphs/{graph_id}/adopt",
@@ -410,34 +431,37 @@ async def adopt_projection(
     if shared:              # they would go on reading a key nobody writes
         raise ProjectionNotAdopted("shared", "other data sources read this graph's FalkorDB key",
                                    sharedWith=len(shared))
-    if vconfig.RESIDENCY_ENABLED:
-        fits, master, shortfall = await residency.admission(graph_id)
-        if not fits:
-            raise _capacity_insufficient(master, shortfall, "this graph's copy")
     keys = await falkor_graph_registry.list_graph_keys(provider)
     if keys is None:        # cannot verify, never "free"
         raise HTTPException(status_code=503, detail={
             "type": "provider_unreachable", "retryable": True,
             "message": "the provider's FalkorDB graphs could not be listed; try again"})
     taken = keys | {e["name"] for e in wm["retired_keys"]}
-    placed = (await residency.place_key(graph_id, provider, taken)
-              if vconfig.RESIDENCY_ENABLED else None)
-    if placed is None:
-        n = 1
-        while keymigrate.owned_key(graph_id, n) in taken:
-            n += 1
-        placed = keymigrate.owned_key(graph_id, n), None
-    key, master = placed
-    shard_map = {"tag": key[key.index("{") + 1:-1], "slot": key_slot(key),
-                 "chosenAt": datetime.now(timezone.utc).isoformat(), "chosenBy": user.id,
-                 **({"master": master} if master else {})}
-    with _domain_errors():
-        try:
-            res = await svc.adopt_projection(graph_id=graph_id, key=key, actor=user.id,
-                                             shard_map=shard_map)
-        except ConcurrencyError as exc:     # enabling version control hasn't finished
-            raise HTTPException(status_code=409,
-                                detail={"type": "bootstrapping", "message": str(exc)})
+    # The key first, then its copy admitted on the master it hashes to, as a move's, and the
+    # commit made before anything else is admitted.
+    async with residency.admitting() if vconfig.RESIDENCY_ENABLED else contextlib.nullcontext():
+        placed = (await residency.place_key(graph_id, provider, taken)
+                  if vconfig.RESIDENCY_ENABLED else None)
+        if placed is None:
+            n = 1
+            while keymigrate.owned_key(graph_id, n) in taken:
+                n += 1
+            placed = keymigrate.owned_key(graph_id, n), None
+        key, master = placed
+        if vconfig.RESIDENCY_ENABLED:
+            admitted = await residency.admission_on(graph_id, provider, key)
+            if not admitted.fits:
+                raise _capacity_insufficient(admitted, "this graph's copy")
+        shard_map = {"tag": key[key.index("{") + 1:-1], "slot": key_slot(key),
+                     "chosenAt": datetime.now(timezone.utc).isoformat(), "chosenBy": user.id,
+                     **({"master": master} if master else {})}
+        with _domain_errors():
+            try:
+                res = await svc.adopt_projection(graph_id=graph_id, key=key, actor=user.id,
+                                                 shard_map=shard_map)
+            except ConcurrencyError as exc:     # enabling version control hasn't finished
+                raise HTTPException(status_code=409,
+                                    detail={"type": "bootstrapping", "message": str(exc)})
     background.add_task(rebuild_now, graph_id)
     await recorder.record_for_request(
         session, "platform.versioning.projection_adopted",
@@ -469,9 +493,9 @@ async def set_graph_residency(
     wm = await get_versioning_service().projection_watermark(graph_id)
     cls, out = body.residency_class, wm["residency_state"] in ("evicted", "waiting_capacity")
     if cls == "always" and out:
-        fits, master, shortfall = await residency.admission(graph_id)
-        if not fits:
-            raise _capacity_insufficient(master, shortfall, "this graph")
+        admitted = await residency.admission(graph_id)
+        if not admitted.fits:
+            raise _capacity_insufficient(admitted, "this graph")
     before = await residency.set_class(graph_id, cls)
     if cls == "always" and out:
         await residency.request_load(graph_id)

@@ -43,7 +43,8 @@ class _Svc:
 @pytest.fixture
 def world(monkeypatch):
     """What the routes asked for, set and recorded."""
-    out = SimpleNamespace(loads=[], classes=[], recorded=[], admission=(True, "m1:6379", 0))
+    out = SimpleNamespace(loads=[], classes=[], recorded=[],
+                          admission=(True, "m1:6379", 0, None))
 
     async def request_load(gid):
         out.loads.append(gid)
@@ -53,7 +54,7 @@ def world(monkeypatch):
         return out.svc.wm["residency"]
 
     async def admission(gid):
-        return out.admission
+        return residency.Admitted(*out.admission)
 
     async def record(session, event_type, **fields):
         out.recorded.append((event_type, fields))
@@ -116,7 +117,7 @@ async def _set(world, residency_class):
 
 async def test_always_on_a_graph_out_of_falkordb_that_does_not_fit_is_refused(world):
     world.svc = _Svc(state="evicted")
-    world.admission = (False, "10.0.0.2:6379", 3 * 1024 ** 3)
+    world.admission = (False, "10.0.0.2:6379", 3 * 1024 ** 3, "capacity")
     with pytest.raises(HTTPException) as caught:
         await _set(world, "always")
     detail = caught.value.detail
@@ -137,7 +138,7 @@ async def test_always_on_a_graph_out_of_falkordb_that_fits_is_set_and_loaded(wor
 
 
 async def test_any_class_on_a_resident_graph_is_set_with_no_admission_and_no_load(world):
-    world.admission = (False, "m1:6379", 1)                    # would refuse, if it were asked
+    world.admission = (False, "m1:6379", 1, "capacity")       # would refuse, if it were asked
     for cls in ("always", "coldline"):
         await _set(world, cls)
     assert world.classes == [("g1", "always"), ("g1", "coldline")] and world.loads == []

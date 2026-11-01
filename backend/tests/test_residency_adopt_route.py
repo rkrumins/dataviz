@@ -14,7 +14,7 @@ into the customer's own FalkorDB key moves onto a platform key on the same provi
 The swap and the customer's key left untouched run against Postgres and FalkorDB in
 ``integration/test_graph_residency.py``.
 """
-from contextlib import ExitStack
+from contextlib import ExitStack, asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -43,7 +43,7 @@ class _Svc:
         self.wm = {"falkor_graph_name": pin, "falkor_provider": provider, "owns_falkor_graph": owned,
                    "retired_keys": [{"name": keymigrate.owned_key(GID, 1), "provider": "prov_A"}],
                    "status": "idle", "residency_state": "resident"}
-        self.raises, self.adopted = raises, []
+        self.raises, self.adopted, self.calls = raises, [], []
 
     async def get_graph(self, graph_id):
         return self.meta
@@ -53,6 +53,7 @@ class _Svc:
 
     async def adopt_projection(self, **kw):
         self.adopted.append(kw)
+        self.calls.append(("commit", kw["key"]))
         if self.raises:
             raise self.raises
         return {"from": {"providerId": "prov_A", "key": self.wm["falkor_graph_name"]},
@@ -68,7 +69,7 @@ class _Session:
 
 
 async def _adopt(svc, *, keys=frozenset(), ds=None, bindings=(), job=None, residency_on=False,
-                 fits=(True, "10.0.0.3:6379", 0), placed=None):
+                 fits=(True, "10.0.0.3:6379", 0, None), placed=None):
     ds = ds if ds is not None else SimpleNamespace(projection_mode=None, provider_id="prov_A")
     seen = {"listed": [], "recorded": [], "placed": [], "bindings": []}
 
@@ -83,12 +84,20 @@ async def _adopt(svc, *, keys=frozenset(), ds=None, bindings=(), job=None, resid
         seen["listed"].append(provider_id)
         return None if keys is None else set(keys)
 
-    async def admission(graph_id):
-        return fits
+    async def admission_on(graph_id, provider, key):
+        svc.calls.append(("admit", key))
+        return va.residency.Admitted(*fits)
 
     async def place_key(graph_id, provider, taken):
         seen["placed"].append((provider, set(taken)))
+        svc.calls.append(("place", provider))
         return placed
+
+    @asynccontextmanager
+    async def admitting(**kw):
+        svc.calls.append(("lock",))
+        yield
+        svc.calls.append(("unlock",))
 
     async def watermark_model(session, wm):
         return {"wm": wm["falkor_graph_name"]}
@@ -104,8 +113,9 @@ async def _adopt(svc, *, keys=frozenset(), ds=None, bindings=(), job=None, resid
                 (va.managed_sources, "graph_key_bindings", key_bindings),
                 (va.data_source_repo, "get_data_source_orm", get_ds),
                 (va.falkor_graph_registry, "list_graph_keys", list_keys),
-                (va.residency, "admission", admission),
+                (va.residency, "admission_on", admission_on),
                 (va.residency, "place_key", place_key),
+                (va.residency, "admitting", admitting),
                 (va.vconfig, "RESIDENCY_ENABLED", residency_on),
                 (va, "_watermark_model", watermark_model),
                 (va.recorder, "record_for_request", record)):
@@ -141,10 +151,22 @@ async def test_with_residency_on_the_key_is_placed_and_the_seed_admitted_first()
     assert svc.adopted[0]["key"] == placed
     assert svc.adopted[0]["shard_map"]["master"] == "10.0.0.3:6379"
     assert seen["placed"] == [("prov_A", {"nexus_lineage", keymigrate.owned_key(GID, 1)})]
+    # Review finding 2: the key is chosen first, then the copy admitted on the master it hashes
+    # to, and the commit made before anything else is admitted (the capacity pass's lock).
+    assert svc.calls == [("lock",), ("place", "prov_A"), ("admit", placed), ("commit", placed),
+                         ("unlock",)]
+    # A key placed nowhere (no master read, or none hashes there): the first free key, admitted
+    # on whichever master it hashes to all the same.
+    svc = _Svc()
+    await _adopt(svc, residency_on=True, placed=None, keys={"nexus_lineage"})
+    first = keymigrate.owned_key(GID, 2)
+    assert svc.calls == [("lock",), ("place", "prov_A"), ("admit", first), ("commit", first),
+                         ("unlock",)]
 
     svc = _Svc()
     with pytest.raises(HTTPException) as caught:
-        await _adopt(svc, residency_on=True, fits=(False, "10.0.0.2:6379", 2 * 1024 ** 3))
+        await _adopt(svc, residency_on=True, fits=(False, "10.0.0.2:6379", 2 * 1024 ** 3,
+                                                   "capacity"))
     detail = caught.value.detail
     assert caught.value.status_code == 409 and detail["type"] == "capacity_insufficient"
     assert (detail["master"], detail["shortfallBytes"]) == ("10.0.0.2:6379", 2 * 1024 ** 3)
