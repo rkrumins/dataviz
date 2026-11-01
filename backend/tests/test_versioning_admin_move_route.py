@@ -219,9 +219,14 @@ async def test_with_residency_on_a_move_that_would_not_fit_its_new_master_is_ref
         asked.append((graph_id, provider, key))
         return va.residency.Admitted(False, "10.0.0.3:6379", 512 * 1024 ** 2, "capacity")
 
+    @asynccontextmanager
+    async def admitting(**kw):        # the capacity pass's lock, which needs graphver's database
+        yield
+
     monkeypatch.setattr(va.vconfig, "RESIDENCY_ENABLED", True)
     monkeypatch.setattr(va.residency, "place_key", place_key)
     monkeypatch.setattr(va.residency, "admission_on", admission_on)
+    monkeypatch.setattr(va.residency, "admitting", admitting)
     svc = _Svc()
     with pytest.raises(HTTPException) as caught:
         await _move(svc, {"providerId": "prov_B"})
