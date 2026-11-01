@@ -303,7 +303,7 @@ Each live fork in `GET …/graphs/{gid}/forks` says:
 |---|---|
 | `ahead` | The entities it changed since its last merged review, or since its fork point |
 | `behind` | The entities its parent changed that it has not taken in: the parent's window since the base the fork agrees with (§9: the base it reads, past its own merged reviews). 0 right after an update, or a merge with nothing else landed since |
-| `updateRecommended` | What Update from parent can fix: `behind` reaches `GRAPHVER_FORK_REWIND_WARN` (default 50,000), or the fork's reads are past the ceiling and taking in its parent's changes would bring them back under it (a fork of the root whose own changes alone fit). A fork of a fork past the ceiling on its parent's own history is not told to update: that would only add to it |
+| `updateRecommended` | What Update from parent can fix: `behind` reaches `GRAPHVER_FORK_REWIND_WARN` (default 50,000), or the fork's reads are past the ceiling and taking in its parent's changes — moving its base past its own merged reviews too — would bring them back under it (a fork of the root whose own changes alone fit). A fork of a fork past the ceiling on its parent's own history is not told to update: that would only add to it |
 | `readsFrom` | `overlay`, or `postgres` past `GRAPHVER_FORK_REWIND_MAX` (§2) |
 | `countsCapped` | A count stopped at the ceiling: it is at least that |
 
@@ -313,8 +313,11 @@ A fork in the trash says none of it (`null`).
 
 `POST …/graphs/{fork}/update-from-parent` (`update_fork_from_parent`) takes the parent's changes
 into the fork: the parent's `main` from the base the fork agrees with at its head (`B`) to the
-parent's head (`P`, read once). At `P` already, it answers `upToDate` and writes nothing. It writes
-the fork's `main`, as a publish writes a graph's, so it takes `workspace:datasource:publish`.
+parent's head (`P`, read once). At `P` already, it answers `upToDate` and writes nothing — unless
+the fork reads its parent from below `B`, as it does right after its review merged: then it writes
+a `sync_parent` commit with no rows that moves the base the fork reads to `B` (`upToDate: false`,
+`wrote: 0`), so its reads stop counting its own merged changes twice toward the ceiling (§2). It
+writes the fork's `main`, as a publish writes a graph's, so it takes `workspace:datasource:publish`.
 
 **What it takes.** Most of the parent's changes need nothing written: the fork has no row of them,
 so they show through once its base moves. What the fork has rows of and the parent changed in
@@ -415,7 +418,9 @@ head the merge takes. A review refused so is not marked: it merges once the fork
 own reviews that landed right after it. A review merged up to date wrote the fork's own values,
 which the fork has already: so a fork that has just merged is up to date (nothing else landed), its
 `behind` is 0, and its next update merges from after its own merge — what it merged is not its
-parent's change for it to take, nor a conflict with what it changed since.
+parent's change for it to take, nor a conflict with what it changed since. It still reads its parent
+from before its merge, its merged changes counted twice toward the ceiling, until an update moves
+that base (§8); `updateRecommended` says so once that is what puts its reads past the ceiling.
 
 **What a merge writes.** Update from parent settled conflicts on the fork's side, so the merge is a
 copy, with nothing to resolve (`resolutions` is not used): the fork's own changes since its last

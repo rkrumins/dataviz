@@ -55,7 +55,9 @@ review then merges only up to date with its parent, as a copy of its own changes
   `sync_parent` commit that wrote no rows keeps the fork's review approved; one that wrote rows makes
   its approvals stale. Drafts on the fork read as behind, and take it with Pull latest. A
   `sync_parent` commit is not reverted, nor the fork restored to before its latest update (**409**
-  `crosses_update`): fork again from that point instead.
+  `crosses_update`): fork again from that point instead. Right after a fork's review merged, the
+  fork still reads its parent from before the merge; an update then writes a commit with no rows
+  that moves that base, so its reads stop counting its merged changes twice toward the ceiling.
 - **A large fork review merges as a job.** One whose fork changed more than
   `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` entities since its last merged review merges as a `fork_merge`
   job from either merge route (**202**, polled at the parent's `…/publish-jobs/{jobId}`). It pins the

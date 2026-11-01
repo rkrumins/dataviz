@@ -504,3 +504,37 @@ def test_a_restore_within_one_base_still_works():
             assert await _agrees(root, fgid, fmain, {"A", "B"}) == (
                 {"A": "A", "B": "B"}, {"ab": ("A", "B")})
     _run(case)
+
+
+# ── the agreed base and the base the fork reads ───────────────────────────────────────────────
+def test_an_update_moves_the_read_base_to_what_the_fork_agrees_with(monkeypatch):
+    """A fork that merged reads its parent from before its merge, though it agrees with it after:
+    its own merged changes count twice toward the ceiling. An update writes no rows then, only the
+    base it agrees with, and the count drops, its reads back on the overlay."""
+    from backend.app.services.versioning import config
+
+    monkeypatch.setattr(config, "FORK_REWIND_MAX", 5)
+
+    async def case(svc):
+        async with _projected(svc) as root:
+            gid = await root.make([_n("A")])
+            fgid, fmain = await _fork(svc, gid)
+            await svc.apply_ops(graph_id=fgid, actor="bob", message="own",
+                                ops=[_n("N1"), _n("N2"), _n("N3"), _n("N4")])
+            pr = await svc.open_pr(source_graph_id=fgid, actor="bob")
+            await svc.merge_pr(pr_id=pr, actor="carol", message="m")
+            await root.projector.project_graph(gid)
+            merged_at = (await svc.get_graph(gid))["main_head_commit_seq"]
+            assert await svc.fork_reads_from(fgid) == "postgres"     # 4 own + 4 merged > 5
+            listed = {f["graph_id"]: f for f in await svc.list_forks(graph_id=gid, workspace_id="ws1",
+                                                                     limit=10)}
+            assert (listed[fgid]["behind"], listed[fgid]["update_recommended"]) == (0, True)
+
+            out = await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob")
+            assert (out["wrote"], out["parent_seq"], out["up_to_date"]) == (0, merged_at, False)
+            assert out["commit_id"]
+            assert await _base(fgid) == merged_at
+            assert await svc.fork_reads_from(fgid) == "overlay"
+            await _agrees(root, fgid, fmain, {"A", "N1", "N2", "N3", "N4"})
+            assert (await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob"))["up_to_date"]
+    _run(case)

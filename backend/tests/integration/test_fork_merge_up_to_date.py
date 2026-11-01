@@ -71,6 +71,11 @@ def test_a_fork_behind_its_parent_merges_once_it_has_updated():
             listed = {f["graph_id"]: f for f in await svc.list_forks(graph_id=gid, workspace_id="ws1",
                                                                      limit=10)}
             assert listed[fgid]["behind"] == 0 and listed[fgid]["ahead"] == 0
+            # An update takes nothing then: it only moves the base the fork reads to the one it
+            # agrees with, past its merge — a commit with no rows — and is up to date after.
+            out = await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob")
+            assert (out["wrote"], out["parent_seq"], out["up_to_date"]) == (
+                0, (await svc.get_graph(gid))["main_head_commit_seq"], False)
             assert (await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob"))["up_to_date"]
             await _agrees(root, fgid, fmain, {"A", "B", "C"})
     _run(case)

@@ -3262,22 +3262,26 @@ class GraphVersioningService:
         that reaches ``config.FORK_REWIND_WARN``, or when the fork's reads are past the ceiling,
         which ``reads_from`` says (``overlay`` | ``postgres``, as :meth:`fork_reads_from`), and
         taking the parent's changes in would bring it back under: a fork of the root whose own
-        changes alone fit. A fork of a fork reads its parent's own history up to its base, which
-        taking in more of it can only grow. Each count stops at the ceiling,
-        ``config.FORK_REWIND_MAX`` (``counts_capped``)."""
+        changes alone fit (an update moves its base, past its own merged reviews too). A fork of a
+        fork reads its parent's own history up to its base, which taking in more of it can only
+        grow. Each count stops at the ceiling, ``config.FORK_REWIND_MAX`` (``counts_capped``)."""
         cap = config.FORK_REWIND_MAX
         main_id = await self._main_branch_id(s, fork.id)
         head = fork.main_head_commit_seq
         ahead = await self._own_change_count(
             s, fork.id, main_id, await self._fork_merge_base(s, fork), head, cap)
         parent = await s.get(GraphORM, fork.fork_parent_graph_id)
+        parent_main = await self._main_branch_id(s, parent.id)
+        agreed, read = await self._fork_agreed_base(s, fork, head), await fork_base_at(s, fork, head)
         behind = await self._window_count(
-            s, parent.id, await self._main_branch_id(s, parent.id),
-            await self._fork_agreed_base(s, fork, head), parent.main_head_commit_seq, cap)
+            s, parent.id, parent_main, agreed, parent.main_head_commit_seq, cap)
         n = await self._fork_candidates(s, fork, main_id, cap)
         past = n > cap
-        # Of a fork of the root, what its reads overlay beyond its own changes is ``behind``.
-        fixable = past and parent.fork_parent_graph_id is None and n - behind <= cap
+        # Of a fork of the root, what its reads overlay beyond its own changes is its parent's window
+        # since the base it reads: ``behind``, unless that is below the base it agrees with.
+        overlaid = behind if read == agreed else await self._window_count(
+            s, parent.id, parent_main, read, parent.main_head_commit_seq, cap)
+        fixable = past and parent.fork_parent_graph_id is None and n - overlaid <= cap
         return {"ahead": min(ahead, cap), "behind": min(behind, cap),
                 "update_recommended": fixable or behind >= config.FORK_REWIND_WARN,
                 "reads_from": "postgres" if past else "overlay",
@@ -3301,7 +3305,8 @@ class GraphVersioningService:
         there, past the squashes of its own reviews that landed right after it) to its head (``P``,
         read once; ``parent_seq`` pins it, as a queued update does). Returns ``{commit_id,
         parent_seq, wrote, up_to_date}``: at ``P`` already, nothing is written, ``commit_id`` is
-        None and ``parent_seq`` is ``B``.
+        None and ``parent_seq`` is ``B`` — unless the fork reads its parent from below ``B``: then
+        the commit moves its base to ``B``, with no rows.
 
         What only the parent changed shows through once the base moves. What the fork has rows of
         and the parent changed in ``(B, P]`` goes through the 3-way merge — base the parent at
@@ -3346,7 +3351,8 @@ class GraphVersioningService:
             base = await self._fork_agreed_base(s, fork, fork.main_head_commit_seq)
             to = parent.main_head_commit_seq
             if to <= base:
-                return {"changes": 0, "parent_seq": base, "up_to_date": True}
+                return {"changes": 0, "parent_seq": base,
+                        "up_to_date": await fork_base_at(s, fork, fork.main_head_commit_seq) >= base}
             window = await self._window_chain(
                 s, parent.id, await self._main_branch_id(s, parent.id), base, to)
             changes = 0
@@ -3393,9 +3399,14 @@ class GraphVersioningService:
             base = await self._fork_agreed_base(s, fork, head)
             to = parent.main_head_commit_seq if parent_seq is None else parent_seq
             if to <= base:
-                if resolutions:
-                    raise ResolutionsWithoutConflict(resolutions)
-                return {"commit_id": None, "parent_seq": base, "wrote": 0, "up_to_date": True}
+                if await fork_base_at(s, fork, head) >= base:
+                    if resolutions:
+                        raise ResolutionsWithoutConflict(resolutions)
+                    return {"commit_id": None, "parent_seq": base, "wrote": 0, "up_to_date": True}
+                # Nothing of the parent's to take, but the fork reads it from before the squashes
+                # of its own reviews, which its reads then count twice: only the base moves, to the
+                # one it agrees with — a commit with no rows.
+                to = base
             new_seq = head + 1
             # The base the fork reads from the update's commit on, first: a read at ``new_seq`` in
             # this transaction is then the fork as the update leaves it, before it writes a row.
