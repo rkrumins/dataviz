@@ -1580,7 +1580,7 @@ async def nodes_query(test_client: AsyncClient, monkeypatch):
 
     monkeypatch.setattr(ont_cache, "_redis", _unavailable)
     monkeypatch.setattr("backend.app.db.engine.get_session_factory", _unavailable)
-    monkeypatch.setattr(graph_module, "get_graph_cache", lambda: _PassthroughGraphCache())
+    monkeypatch.setattr(graph_module, "get_graph_cache", _PassthroughGraphCache)
 
     async def _post(assigned):
         cyphers: list = []
