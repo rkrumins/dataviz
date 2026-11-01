@@ -111,7 +111,8 @@ async def _run() -> None:
     assert rows[fork]["retiredKeys"] == [{"name": "gvt_old", "provider": None,
                                           "retireAfter": "2026-10-18T12:00:00+00:00",
                                           "afterSeq": 5}]
-    assert rows[fork]["forkParentGraphId"] == main and rows[fork]["lag"] == 3
+    # A fork is never projected: behind on nothing, a copy an earlier release made of it included.
+    assert rows[fork]["forkParentGraphId"] == main and rows[fork]["lag"] == 0
     assert rows[fork]["orphan"] is False, "a fork's data source id is never a management row"
     assert rows[orphan]["orphan"] is True and rows[orphan]["dataSourceLabel"] is None
     assert rows[orphan]["status"] == "evicted"
@@ -133,9 +134,9 @@ async def _run() -> None:
     assert await _ids(workspace_id=ws, kind="orphan") == [orphan, failed]
     assert await _ids(provider=other_prov) == [orphan, elsewhere, waiting]
     assert await _ids(workspace_id=ws, status="failed") == [failed]
-    assert await _ids(workspace_id=ws, status="lagging") == [fork]
+    assert await _ids(workspace_id=ws, status="lagging") == []
     assert await _ids(workspace_id=ws, status="evicted") == [orphan]
-    assert await _ids(workspace_id=ws, status="fresh") == [main]
+    assert await _ids(workspace_id=ws, status="fresh") == [main, fork]
     assert await _ids(workspace_id=other_ws, status="waiting_capacity") == [waiting]
     assert await _ids(workspace_id=other_ws, status="rehydrating") == []
     row = (await _list(workspace_id=other_ws, status="waiting_capacity"))["graphs"][0]

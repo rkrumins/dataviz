@@ -104,6 +104,7 @@ from backend.insights_service.enqueue import (
     enqueue_stats_job_force,
     enqueue_stats_job_safe,
     mark_stats_changed,
+    polls_stats,
 )
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
@@ -3763,14 +3764,15 @@ async def get_graph_schema(
     synthetic = await build_synthetic_schema(session, ds_id)
     if synthetic:
         logger.info("stats_cache.served_synthetic endpoint=/metadata/schema ds_id=%s", ds_id)
+        polled = polls_stats(ds_id)               # a fork's: no refresh comes to follow
         meta = build_meta(
             status="partial",
             source="ontology",
             data_source_id=ds_id,
             missing_fields=SYNTHETIC_SCHEMA_MISSING_FIELDS,
-            refreshing=True,
-            job_id=job_id,
-            poll_url=poll_url,
+            refreshing=polled,
+            job_id=job_id if polled else None,
+            poll_url=poll_url if polled else None,
         )
         return _schema_response(synthetic, request, meta=meta)
 

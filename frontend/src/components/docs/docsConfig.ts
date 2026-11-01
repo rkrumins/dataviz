@@ -601,7 +601,7 @@ export const docEntries: DocEntry[] = [
     slug: 'versioning-forks-and-residency',
     section: 'versioning',
     title: 'Versioning: Forks & Residency',
-    description: 'A fork as a data source of its own: settings, lifecycle and the per-commit parent base',
+    description: "A fork as a data source of its own: settings, lifecycle, reads through its root's store, and the per-commit parent base",
     importFn: () => import('@docs/versioning/17-forks-and-residency.md?raw'),
   },
   {

@@ -19,8 +19,9 @@ import asyncio
 import copy
 import logging
 from collections import ChainMap, OrderedDict
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
+from backend.app.services.versioning import config as vconfig
 from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
@@ -35,6 +36,14 @@ _TraceT = TypeVar("_TraceT", bound=TraceResult)
 
 logger = logging.getLogger(__name__)
 
+#: The scope notes a search through an overlay carries (``search_scope_note``): the base answers it.
+DRAFT_SEARCH_NOTE = ("draft-only changes are not searchable yet: results come from the "
+                     "published graph")
+FORK_SEARCH_NOTE = ("the fork's own changes are not searchable yet: results come from the "
+                    "parent data source's published graph")
+DRAFT_ON_FORK_SEARCH_NOTE = ("draft-only changes and the fork's own changes are not searchable "
+                             "yet: results come from the parent data source's published graph")
+
 
 class _OverlayDelta:
     """Indexed, reader-shaped view of a draft's patch set vs its main base.
@@ -47,6 +56,12 @@ class _OverlayDelta:
 
     def __init__(self, raw: Dict[str, Any], containment_types: List[str]):
         cset = {t.upper() for t in (containment_types or [])}
+        # What the cache counts this delta as holding; and a fork's patch set, which the next
+        # build of the fork extends when only its root moved (``since`` says what it is of), kept
+        # compact (:func:`_keep`).
+        self.size = max(1, sum(len(raw.get(k) or ()) for k in (
+            "nodesUpsert", "nodesModified", "nodesRemove", "edgesUpsert", "edgesRemove")))
+        self.raw: Optional[Dict[str, Any]] = _keep(raw) if raw.get("since") else None
         self.node_upsert: Dict[str, GraphNode] = {}         # values to serve, by urn
         # Every node the patch set gives a value or a skeleton for, by urn: what listings, matches
         # and searches read. A skeleton is served once loaded.
@@ -62,6 +77,9 @@ class _OverlayDelta:
         self.child_count_delta: Dict[str, int] = {}
         self.cont_added: List[GraphEdge] = []
         self.cont_removed: List[GraphEdge] = []
+        # What reads of this delta look up once and share (:meth:`DraftOverlayProvider._chains`):
+        # a request's view (:meth:`for_request`) is a shallow copy, so it holds this same dict.
+        self.shared: Dict[str, Any] = {}
 
         # Nodes the draft modified or created, by urn → entity id: a read loads the ones it serves
         # (load()).
@@ -83,25 +101,39 @@ class _OverlayDelta:
         for d in raw.get("nodesRemove", []):
             self.node_remove.add(d["urn"])
         for d in raw.get("edgesUpsert", []):
+            # ``was``: the base holds this edge too, there — its ends and type. It is served with
+            # the overlay's value, and counted where it runs now: an edge still between the same
+            # ends as the same type is counted as the base counts it already, never once more.
+            was = d.get("was")
+            fields = {k: v for k, v in d.items() if k != "was"}
             if d.get("lazy"):
-                e = GraphEdge.model_construct(**d, properties={})
+                e = GraphEdge.model_construct(**fields, properties={})
                 self.edge_lazy.add(e.id)
             else:
-                e = GraphEdge(**d)
+                e = GraphEdge(**fields)
             self.edge_upsert[e.id] = e
-            if (e.edge_type or "").upper() in cset:
-                self.cont_added.append(e)
-                self.child_count_delta[e.source_urn] = self.child_count_delta.get(e.source_urn, 0) + 1
-            else:
-                self.lineage_added.append(e)
+            if was is not None:
+                held = GraphEdge.model_construct(id=e.id, sourceUrn=was["sourceUrn"],
+                                                 targetUrn=was["targetUrn"],
+                                                 edgeType=was["edgeType"], properties={})
+                if (held.source_urn, held.target_urn, (held.edge_type or "").upper()) == (
+                        e.source_urn, e.target_urn, (e.edge_type or "").upper()):
+                    continue
+                self._count(held, -1, cset)
+            self._count(e, +1, cset)
         for d in raw.get("edgesRemove", []):
             e = GraphEdge(**d)
             self.edge_remove[e.id] = e
-            if (e.edge_type or "").upper() in cset:
-                self.cont_removed.append(e)
-                self.child_count_delta[e.source_urn] = self.child_count_delta.get(e.source_urn, 0) - 1
-            else:
-                self.lineage_removed.append(e)
+            self._count(e, -1, cset)
+
+    def _count(self, e: GraphEdge, sign: int, cset: set) -> None:
+        """Count ``e`` in (+1) or out (-1) where it runs: a containment edge in its source's child
+        count, a lineage edge in the rollups and degrees."""
+        if (e.edge_type or "").upper() in cset:
+            (self.cont_added if sign > 0 else self.cont_removed).append(e)
+            self.child_count_delta[e.source_urn] = self.child_count_delta.get(e.source_urn, 0) + sign
+        else:
+            (self.lineage_added if sign > 0 else self.lineage_removed).append(e)
 
     @property
     def empty(self) -> bool:
@@ -207,16 +239,101 @@ class _OverlayDelta:
         return self.with_child_count(up)
 
 
-class _DeltaCache:
-    """This process's recent draft deltas, keyed by what a delta depends on
-    (``GraphVersioningService.overlay_version``): a draft's reads share one delta until the draft or
-    main moves, instead of each read rebuilding it — at 100k changed entities a rebuild costs a read
-    seconds. Built once per key, however many reads ask at the same time."""
+def _line(key: tuple) -> tuple:
+    """The draft or fork a cache key is of — its graph, branch and containment types — whatever
+    version of it."""
+    return key[0], key[1], key[3]
 
-    def __init__(self, size: int = 2):
-        self._size = size
+
+# A fork's patch set as its delta keeps it for the next extension: each list's entries as tuples
+# of these fields, over the strings the index holds already — no dict per entry (1,043 bytes an
+# entry with the index became 865; the index alone holds 737).
+_KEPT_FIELDS = {"nodesUpsert": ("urn", "entityId", "entityType", "displayName", "qualifiedName", "lazy"),
+                "nodesModified": ("entityId", "urn"), "nodesRemove": ("entityId", "urn"),
+                "edgesUpsert": ("id", "sourceUrn", "targetUrn", "edgeType", "lazy", "was"),
+                "edgesRemove": ("id", "sourceUrn", "targetUrn", "edgeType")}
+_WAS_FIELDS = ("sourceUrn", "targetUrn", "edgeType")
+
+
+def _keep(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """``raw``, a fork's patch set, as its delta keeps it: what its next extension needs, compact."""
+    kept: Dict[str, Any] = {"since": raw["since"], "nodesNew": list(raw.get("nodesNew") or ())}
+    for key, fields in _KEPT_FIELDS.items():
+        kept[key] = [tuple((tuple(x["was"][f] for f in _WAS_FIELDS) if x.get("was") else None)
+                           if f == "was" else x.get(f) for f in fields)
+                     for x in raw.get(key) or ()]
+    return kept
+
+
+def _unkept(kept: Dict[str, Any]) -> Dict[str, Any]:
+    """The patch set :func:`_keep` kept, reader-shaped again, for the service to extend."""
+    out: Dict[str, Any] = {"since": kept["since"], "nodesNew": list(kept["nodesNew"])}
+    for key, fields in _KEPT_FIELDS.items():
+        rows = []
+        for t in kept[key]:
+            x = dict(zip(fields, t))
+            if key == "edgesUpsert":
+                was = x.pop("was")
+                if was is not None:
+                    x["was"] = dict(zip(_WAS_FIELDS, was))
+            rows.append(x)
+        out[key] = rows
+    return out
+
+
+def _ends(flows: List[GraphEdge]) -> List[str]:
+    return sorted({u for e in flows for u in (e.source_urn, e.target_urn)})
+
+
+def _rollup_cells(flows: List[GraphEdge], sign: int, chains: Dict[str, List[str]],
+                  sources: set, targets: set, out: Dict[Tuple[str, str], Dict[str, Any]]) -> None:
+    """Move rollup cells ``out`` by ``flows``, each counted ``sign``, as the materialiser rolls a
+    flow up: into every cell (Sx, Tx), Sx ≠ Tx, where Sx is its source or a container above it
+    among ``sources`` and Tx its target or one above it among ``targets``; no sources (or targets)
+    named means every one. ``chains`` places the ends (``{urn: [parent, …, root]}``); an end with
+    none is not a live node there, and only places itself. Pure CPU: no query."""
+    for e in flows:
+        sxs = {e.source_urn, *chains.get(e.source_urn, ())}
+        if sources:
+            sxs &= sources
+        if not sxs:
+            continue
+        txs = {e.target_urn, *chains.get(e.target_urn, ())}
+        if targets:
+            txs &= targets
+        for sx in sxs:
+            for tx in txs:
+                if sx == tx:
+                    continue
+                slot = out.setdefault((sx, tx), {"weight": 0, "types": set()})
+                slot["weight"] += sign
+                if e.edge_type:
+                    slot["types"].add(e.edge_type)
+
+
+class _DeltaCache:
+    """This process's recent overlay deltas, keyed by what a delta depends on
+    (``GraphVersioningService.overlay_version``): a draft's or fork's reads share one delta until it
+    or what it overlays moves, instead of each read rebuilding it — at 100k changed entities a
+    rebuild costs a read seconds. Built once per key, however many reads ask at the same time.
+
+    Bounded by the entries its deltas hold together (``GRAPHVER_OVERLAY_CACHE_ENTRIES``), not by
+    their number: many drafts and forks read at once each keep theirs, and the newest is kept
+    whatever its size. A delta supersedes the older ones of its draft or fork."""
+
+    def __init__(self, max_entries: Optional[int] = None):
+        self._max = max_entries
+        self._held = 0
         self._items: "OrderedDict[tuple, _OverlayDelta]" = OrderedDict()
         self._building: Dict[tuple, asyncio.Task] = {}
+
+    def latest(self, line: tuple) -> Optional[Dict[str, Any]]:
+        """The patch set of the newest delta held of ``line`` (:func:`_line`) that the next build
+        may extend — a fork's, as kept (:func:`_unkept` gives it back) — or None."""
+        for key in reversed(self._items):
+            if _line(key) == line and self._items[key].raw is not None:
+                return self._items[key].raw
+        return None
 
     async def get(self, key: tuple, build: Callable[[], Awaitable[_OverlayDelta]]) -> _OverlayDelta:
         hit = self._items.get(key)
@@ -235,10 +352,13 @@ class _DeltaCache:
             del self._building[key]
         if task.cancelled() or task.exception() is not None:
             return
-        self._items[key] = task.result()
-        self._items.move_to_end(key)
-        while len(self._items) > self._size:
-            self._items.popitem(last=False)
+        for old in [k for k in self._items if _line(k) == _line(key)]:
+            self._held -= self._items.pop(old).size
+        delta = self._items[key] = task.result()
+        self._held += delta.size
+        limit = vconfig.OVERLAY_CACHE_ENTRIES if self._max is None else self._max
+        while self._held > limit and len(self._items) > 1:
+            self._held -= self._items.popitem(last=False)[1].size
 
 
 _DELTAS = _DeltaCache()
@@ -246,14 +366,24 @@ _DELTAS = _DeltaCache()
 
 class DraftOverlayProvider:
     """A ``GraphDataProvider`` for a live draft: reads = ``base`` (main) ⊕ the draft's sparse delta,
-    writes = a commit on the draft. Empty delta ⇒ every read is a pure pass-through to ``base``."""
+    writes = a commit on the draft. Empty delta ⇒ every read is a pure pass-through to ``base``.
 
-    def __init__(self, base, *, svc, graph_id: str, branch_id: str, actor: Optional[str] = None):
+    ``fork``: this is a fork's ``main``, read the same way over its root's store (``base``) with
+    the fork's patch set; a draft on the fork overlays this one in turn. ``read_ns``: which version
+    of its root's store a fork's reads were built against, carried in its cache keys
+    (:meth:`physical_graph_id`). ``version``: its ``overlay_version`` when the caller has read it
+    already (``fork_read_plan``), so the first read does not read it again."""
+
+    def __init__(self, base, *, svc, graph_id: str, branch_id: str, actor: Optional[str] = None,
+                 fork: bool = False, read_ns: Optional[str] = None, version: Optional[tuple] = None):
         self._base = base
         self._svc = svc
         self._gid = graph_id
         self._branch = branch_id
         self._actor = actor or "system"
+        self._fork = fork
+        self._read_ns = read_ns
+        self._version = version
         self._containment_types: List[str] = []
         self._delta: Optional[_OverlayDelta] = None
         # Writes (and as-of-free branch ops) reuse the ordinary branch provider — no duplication.
@@ -292,6 +422,32 @@ class DraftOverlayProvider:
     def name(self) -> str:
         return f"draft-overlay[{self._gid}:{self._branch}] over {getattr(self._base, 'name', '?')}"
 
+    @property
+    def manager_cache_key(self) -> Optional[tuple]:
+        """A fork's reads of its root's FalkorDB store take that shard's admission slots, as the
+        root's own do (``_bounded_compute``): its store's key. None for a draft, and over a
+        Postgres reader, as before: those reads are Postgres-heavy, not FalkorDB fan-out."""
+        return getattr(self._base, "manager_cache_key", None) if self._fork else None
+
+    def physical_graph_id(self) -> Optional[str]:
+        """The physical graph behind this overlay's reads, which cached answers are keyed by: its
+        store's, and for a fork's, the version of its root's store it was read against
+        (``read_ns``). A fork's cache is its own data source's, which its root's writes and
+        projections never bump: its key moving with the root's store is what keeps an answer
+        built across a root publish from being served after it."""
+        base, base_id = self._base, None
+        for _ in range(5):
+            get_id = getattr(base, "physical_graph_id", None)
+            if callable(get_id):
+                base_id = get_id()
+                break
+            base = getattr(base, "_base", None)
+            if base is None:
+                break
+        if self._read_ns is None:
+            return base_id
+        return f"{base_id or ''}|{self._read_ns}"
+
     async def get_ontology_metadata(self):
         # Like VersionedBranchProvider: the engine resolves ontology from the data source and pushes
         # edge-type sets in; there is no per-branch ontology surface.
@@ -299,15 +455,22 @@ class DraftOverlayProvider:
 
     async def _delta_(self) -> _OverlayDelta:
         if self._delta is None:
-            version = await self._svc.overlay_version(graph_id=self._gid, branch_id=self._branch)
+            version = self._version or await self._svc.overlay_version(
+                graph_id=self._gid, branch_id=self._branch)
             cset = list(self._containment_types)
+            key = (self._gid, self._branch, version, tuple(cset))
 
             async def build() -> _OverlayDelta:
-                raw = await self._svc.branch_overlay_delta(graph_id=self._gid, branch_id=self._branch)
+                # A fork's patch set as it was before its root moved, for the service to extend.
+                prev = _DELTAS.latest(_line(key))
+                if prev is not None:
+                    prev = await asyncio.to_thread(_unkept, prev)
+                raw = await self._svc.branch_overlay_delta(
+                    graph_id=self._gid, branch_id=self._branch, **({"extend": prev} if prev else {}))
                 # Indexing a large draft's patch set is pure CPU: off the event loop.
                 return await asyncio.to_thread(_OverlayDelta, raw, cset)
 
-            shared = await _DELTAS.get((self._gid, self._branch, version, tuple(cset)), build)
+            shared = await _DELTAS.get(key, build)
             self._delta = shared.for_request(self._load_modified, self._load_edges)
         return self._delta
 
@@ -318,6 +481,22 @@ class DraftOverlayProvider:
     async def _load_edges(self, entity_ids: List[str]) -> List[dict]:
         return await self._svc.overlay_payloads(
             graph_id=self._gid, branch_id=self._branch, entity_ids=entity_ids, kind="edge")
+
+    async def _chains(self, d: _OverlayDelta, kind: str, urns: List[str],
+                      on: Any = None) -> Dict[str, List[str]]:
+        """``urns``' containment chains (``{urn: [parent, …, root]}``, ``[]`` for a root, absent
+        when not a live node) on this overlay's own state, or on the store's (``on=self._base``),
+        for a set of urns its patch set fixes, which ``kind`` names: looked up once per patch set
+        in one batched walk, and kept with it, so later reads of it place them without a query."""
+        task = d.shared.get(kind)
+        if task is None or task.get_loop() is not asyncio.get_running_loop():
+            task = d.shared[kind] = asyncio.ensure_future((on or self).get_ancestor_chains(urns))
+        try:
+            return await asyncio.shield(task)
+        except Exception:
+            if d.shared.get(kind) is task:
+                del d.shared[kind]                       # the next read asks again
+            raise
 
     @staticmethod
     def _matches(node: GraphNode, query: NodeQuery) -> bool:
@@ -476,6 +655,9 @@ class DraftOverlayProvider:
             return base
         first_page = offset == 0 and not cursor
         targets = [e.target_urn for e in d.cont_added if e.source_urn == parent_urn]
+        # A child the overlay took away from this parent (its edge from here removed, or moved
+        # elsewhere) and did not give back is not listed here, though the store lists it.
+        gone = {e.target_urn for e in d.cont_removed if e.source_urn == parent_urn} - set(targets)
         # The draft's new children are served on the first page only (compose_page); past it they
         # are only counted, which a created child's skeleton is enough for.
         await d.load([c.urn for c in base.children]
@@ -498,11 +680,12 @@ class DraftOverlayProvider:
                      if q in (n.display_name or "").lower() or q in (n.urn or "").lower()]
         removed = sum(1 for e in d.cont_removed if e.source_urn == parent_urn)
         children, total_children = d.compose_page(
-            base.children, added, first_page=first_page,
+            [c for c in base.children if c.urn not in gone], added, first_page=first_page,
             base_total=base.total_children, removed=removed)
         present = {c.urn for c in children}
         # containment edges under this parent
-        cont = [e for e in base.containment_edges if e.id not in d.edge_remove]
+        cont = [e for e in base.containment_edges
+                if e.id not in d.edge_remove and e.target_urn not in gone]
         cont = await d.edges(cont + [e for e in d.cont_added if e.source_urn == parent_urn])
         # lineage edges among the (now overlaid) visible child scope
         lineage = base.lineage_edges
@@ -575,6 +758,20 @@ class DraftOverlayProvider:
         # Served on the first page only (compose_page); past it only counted, by their skeletons.
         added = [d.with_child_count(n) for n in (
             await d.served(roots) if not cursor else [d.node_index[u] for u in roots])]
+        # A node of main the overlay took every parent edge from, and gave none, is a root here
+        # though the store lists it under a parent: its chain on the overlay's state says so.
+        lost = sorted({e.target_urn for e in d.cont_removed} - has_parent - d.node_remove)
+        if lost:
+            chains = await self._chains(d, "lost_parents", lost)
+            lost = [u for u in lost if chains.get(u) == []]
+        if lost:
+            found = await self._base.get_nodes(NodeQuery(urns=lost, limit=len(lost)))
+            await d.load(n.urn for n in found)
+            for n in found:
+                m = d.overlay_existing(n)
+                if m is not None and (not et or m.entity_type in et) and (
+                        not q or q in (m.display_name or "").lower() or q in m.urn.lower()):
+                    added.append(d.with_child_count(m))
         # A removed node was a root of main unless the draft also removed a parent link to it.
         had_parent = {e.target_urn for e in d.cont_removed}
         removed = sum(1 for urn in d.node_remove if urn not in had_parent and urn not in d.node_new)
@@ -597,11 +794,21 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if not d.lineage_changed:
             return base                                      # no lineage delta ⇒ main's rollups verbatim
-        delta = ([(e.source_urn, e.target_urn, e.edge_type, +1) for e in d.lineage_added]
-                 + [(e.source_urn, e.target_urn, e.edge_type, -1) for e in d.lineage_removed])
-        adjust = await self._svc.aggregated_overlay_adjust(
-            graph_id=self._gid, branch_id=self._branch, source_urns=source_urns,
-            target_urns=target_urns, lineage_delta=delta, containment_edge_types=containment_edges)
+        # A flow the overlay added goes on where it runs, under its ends' containers on the
+        # overlay's own state; one it removed (or moved away) comes off where the store counted
+        # it, under the store's. Both sets of chains are looked up once per patch set.
+        adjust: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        sources, targets = set(source_urns or []), set(target_urns or [])
+        if sources or targets:
+            if d.lineage_added:
+                _rollup_cells(d.lineage_added, +1,
+                              await self._chains(d, "flows_added", _ends(d.lineage_added)),
+                              sources, targets, adjust)
+            if d.lineage_removed:
+                _rollup_cells(d.lineage_removed, -1,
+                              await self._chains(d, "flows_removed", _ends(d.lineage_removed),
+                                                 on=self._base),
+                              sources, targets, adjust)
         by_pair = {(e.source_urn, e.target_urn): e for e in base.aggregated_edges}
         for (su, tu), adj in adjust.items():
             cur = by_pair.get((su, tu))
@@ -633,10 +840,9 @@ class DraftOverlayProvider:
         """Main's lineage counts, moved by the draft's own flows. A urn main
         could not count stays absent (unknown), and a base that cannot count at
         all (a stale projection is served by VersionedBranchProvider) says so,
-        as the draft's other unsupported reads do: a 501 at the route. The
-        delta does not tell an added flow from an edited one, so an edited
-        flow counts once more, as in the roll-ups above: too high keeps a
-        marker solid.
+        as the draft's other unsupported reads do: a 501 at the route. A flow
+        the draft edited where it runs counts as main counts it, and one it
+        moved counts where it runs now, as in the roll-ups above.
 
         Roll-up presence: a flow the draft added gives its source and every
         container above it a cell out, and its target and theirs a cell in, as
@@ -677,8 +883,7 @@ class DraftOverlayProvider:
             v["in"], v["out"] = max(0, v["in"]), max(0, v["out"])
         if include_rollups and added:
             try:
-                chains = await self.get_ancestor_chains(
-                    sorted({u for e in added for u in (e.source_urn, e.target_urn)}))
+                chains = await self._chains(d, "flows_added", _ends(d.lineage_added))
             except Exception:
                 for v in out.values():
                     v.pop("rollupIn", None)
@@ -747,21 +952,22 @@ class DraftOverlayProvider:
     async def _overlay_trace(self, base: _TraceT) -> _TraceT:
         """Patch a base trace with the draft's lineage delta, bounded to the trace's node scope."""
         d = await self._delta_()
-        if not d.lineage_changed and not d.node_remove:
+        if not d.lineage_changed and not d.node_remove and not d.edge_upsert:
             return base
         # Drop nodes the rewind/draft removed (e.g. a main-added node that must not leak into this
-        # draft's trace) and any base edge INCIDENT to a removed node. Keep other base edges verbatim —
-        # a base trace can legitimately carry boundary edges whose endpoint node was capped out of
-        # base.nodes (max_nodes), and those must not be dropped just because the scope shrank.
+        # draft's trace) and any base edge INCIDENT to a removed node. Keep other base edges — with
+        # the overlay's value of one it changed — a base trace can legitimately carry boundary edges
+        # whose endpoint node was capped out of base.nodes (max_nodes), and those must not be
+        # dropped just because the scope shrank.
         nodes = [n for n in base.nodes if n.urn not in d.node_remove]
         scope = {n.urn for n in nodes}
-        edges = [e for e in base.edges
+        edges = [d.edge_upsert.get(e.id, e) for e in base.edges
                  if e.id not in d.edge_remove
                  and e.source_urn not in d.node_remove and e.target_urn not in d.node_remove]
         seen = {e.id for e in edges}
-        edges += await d.edges([e for e in d.lineage_added
-                                if e.id not in seen and e.source_urn in scope and e.target_urn in scope])
-        return base.model_copy(update={"nodes": nodes, "edges": edges})
+        edges += [e for e in d.lineage_added
+                  if e.id not in seen and e.source_urn in scope and e.target_urn in scope]
+        return base.model_copy(update={"nodes": nodes, "edges": await d.edges(edges)})
 
     # ---- deep search: the base answers, the draft's delta does not ------ #
     #: Read by ``AdvancedSearchService._build_scope_diagnostics`` to note
@@ -769,6 +975,16 @@ class DraftOverlayProvider:
     #: than an ``isinstance`` keeps the provider classes out of the
     #: service layer.
     is_overlay = True
+
+    @property
+    def search_scope_note(self) -> str:
+        """What the scope diagnostics say a search here left out: the draft's changes, a fork's
+        own (its base is its parent's published graph), or both, for a draft on a fork."""
+        if self._fork:
+            return FORK_SEARCH_NOTE
+        if getattr(self._base, "is_overlay", False):
+            return DRAFT_ON_FORK_SEARCH_NOTE
+        return DRAFT_SEARCH_NOTE
 
     # The ontology's edge classification, as the base reads it (the scope
     # diagnostics report it).
@@ -785,8 +1001,9 @@ class DraftOverlayProvider:
         predicate tree compiles to Cypher inside the base provider, and
         there is no seam to overlay a sparse Postgres patch set onto a
         result page without re-implementing the whole compiler over it.
-        So a draft searches what it is a draft OF, and the response says
-        so — ``is_overlay`` drives the scope-diagnostics note, so the gap
+        So a draft searches what it is a draft OF — and a fork its parent's
+        published graph — and the response says so: ``is_overlay`` and
+        ``search_scope_note`` drive the scope-diagnostics note, so the gap
         is disclosed rather than silently narrowing someone's results.
 
         Pure delegation also means the provider's match-set cache entry

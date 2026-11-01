@@ -34,6 +34,10 @@ OVERLAY_NOTE = (
     "draft-only changes are not searchable yet: results come from the "
     "published graph"
 )
+FORK_NOTE = (
+    "the fork's own changes are not searchable yet: results come from the "
+    "parent data source's published graph"
+)
 
 
 class _RecordingBase:
@@ -158,6 +162,45 @@ async def test_search_on_a_draft_notes_the_published_graph(
     assert len(base.searches) == 1, "the base provider ran the search"
     assert OVERLAY_NOTE in page.scope_diagnostics.notes
 
+
+def _fork_overlay(base) -> DraftOverlayProvider:
+    return DraftOverlayProvider(base, svc=object(), graph_id="f1", branch_id="main-f1", fork=True)
+
+
+async def test_a_fork_searches_its_parents_published_graph_and_says_so():
+    """A fork reads its parent's published store with its own changes over it, and searches
+    that store: the note says the fork's own changes are not in the answer. A draft on the fork
+    leaves out its own and the fork's."""
+    base = _RecordingBase()
+    query = _query("view-1")
+    fork = _fork_overlay(base)
+
+    await DraftOverlayProvider(fork, svc=object(), graph_id="f1", branch_id="d1").deep_search(query)
+
+    assert base.searches == [(query, None)]
+    assert fork.search_scope_note == FORK_NOTE
+    assert DraftOverlayProvider(fork, svc=object(), graph_id="f1", branch_id="d1") \
+        .search_scope_note == ("draft-only changes and the fork's own changes are not searchable "
+                               "yet: results come from the parent data source's published graph")
+    assert _overlay(base).search_scope_note == OVERLAY_NOTE
+
+
+async def test_search_on_a_fork_notes_its_parents_published_graph(db_session: AsyncSession):
+    from backend.app.services.advanced_search_service import AdvancedSearchService
+
+    ws = WorkspaceORM(name="WS")
+    db_session.add(ws)
+    await db_session.flush()
+    view = ViewORM(name="Fork View", workspace_id=ws.id, view_type="graph", config=json.dumps({}))
+    db_session.add(view)
+    await db_session.flush()
+
+    svc = AdvancedSearchService(
+        _FakeEngine(_fork_overlay(_RecordingBase())), session=db_session, workspace_id=ws.id)
+    page, _eff = await svc.search(_query(view.id))
+
+    assert FORK_NOTE in page.scope_diagnostics.notes
+    assert OVERLAY_NOTE not in page.scope_diagnostics.notes
 
 async def test_search_on_main_carries_no_overlay_note(
     db_session: AsyncSession,

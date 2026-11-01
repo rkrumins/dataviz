@@ -48,6 +48,7 @@ from backend.app.services.top_level_cache import (
 )
 
 from . import admission
+from .enqueue import polls_stats
 from .schemas import StatsJobEnvelope
 
 logger = logging.getLogger(__name__)
@@ -78,6 +79,10 @@ async def _open_context(
     fail because ontology resolution did. Returns
     ``(engine, provider, provider_id, ontology_meta, resolved)``.
     """
+    if not polls_stats(envelope.data_source_id):
+        # Queued before forks stopped being polled: never build the engine of one to count it.
+        raise RuntimeError(
+            f"Stats are not available for a fork (ds={envelope.data_source_id}) — poll rejected.")
     async with get_jobs_session() as session:
         engine = await ContextEngine.for_workspace(
             workspace_id=envelope.workspace_id,

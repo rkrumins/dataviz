@@ -181,6 +181,10 @@ Key guards:
   synthetic `gv_<id>` name means there is no real FalkorDB target (a test graph, or one whose data
   source couldn't be healed); even an empty `GRAPH.QUERY` would instantiate an orphan key, so the
   projector refuses. `project_pending` applies the same exclusion in SQL (`:411-413`).
+- **Forks are never projected** (`skipped: "fork"`), whatever their `projection_state` row says: a
+  fork reads through its root's store with its patch set over it
+  ([17](17-forks-and-residency.md) §6). `project_pending` leaves forks out in SQL too, and neither a
+  rebuild nor an eviction's reseed touches one.
 - **The cancel/failure handler resets a committed `projecting` row** (`projection.py:329-363`). Once
   `status="projecting"` is committed, a later exception *or a cancellation* (e.g. the `project_now`
   timeout, a `BaseException` that plain `except Exception` would miss) must reset the row to `idle`
@@ -264,8 +268,8 @@ reconciles **live node/edge counts** between Postgres and FalkorDB and bounded-h
 (`projection.py:742-816`). It is best-effort — any count failure skips the check.
 
 - **PG counts** come from `entity_heads` via `reconcile.pg_live_counts` (the single source, shared
-  with the reconciler), but **only for a non-fork main that is fully caught up** (`_pg_live_counts`,
-  `projection.py:720-733`); a fork's composed count is O(graph), a lagging head verifies on catch-up.
+  with the reconciler), but **only for a main that is fully caught up** (`_pg_live_counts`); a
+  lagging head verifies on catch-up. A fork is never projected (§4).
 - **FalkorDB counts** come from `reconcile.falkor_counts` (`projection.py:735-740`), which excludes
   `:AGGREGATED` and meta nodes.
 - **FalkorDB has *more* than committed main** (`projection.py:773-794`): first `_sweep_tombstoned`
@@ -370,8 +374,8 @@ for a window or reconcile that changes lineage or containment, writing no rollup
 > **Limitation (large windows and forks).** Incremental rollups now carry level and depth stamps
 > (`sourceLevel`, `targetLevel`, `sourceDepth`, `targetDepth`, `levelDigest`), but a window over
 > `PROJECTION_ROLLUP_INLINE_CAP` (50,000) or an overlapping one still punts to `"stale"` → full
-> rebuild. Forks skip incremental rollups entirely (their containment chains span the parent's rows),
-> getting rollups only from full rebuilds.
+> rebuild. A fork has no rollups of its own: it is never projected, and reads its root's with its own
+> changes over them ([17](17-forks-and-residency.md) §2).
 
 ---
 
@@ -583,8 +587,7 @@ Consolidated here and expanded in [09 · Scale & Limits](09-scale-limits-and-roa
    heads, but is not keyset-streamed (§3).
 3. **No eviction budget is set anywhere** (default 0 = unlimited; the loop runs and skips) and the
    **ephemeral time-travel pool is config-only** with no call sites (§11).
-4. **Large or overlapping windows rebuild rollups in full**; forks never get incremental rollups
-   (§8).
+4. **Large or overlapping windows rebuild rollups in full** (§8).
 5. **Reconcile sorted-merge assumes ASCII collation** (§12).
 6. **`gv:<id>` urn fallback can mint phantom nodes** — a reconciliation signal, not a handled case
    (§2).

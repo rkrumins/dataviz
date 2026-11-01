@@ -117,7 +117,7 @@ class Svc:
         self.loads.append(sorted(entity_ids))
         return [VALUES[e] for e in entity_ids if e in VALUES]
 
-    async def aggregated_overlay_adjust(self, **kw):
+    async def ancestor_chains(self, **kw):                # rollups place flows by these
         return {}
 
 

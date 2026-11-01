@@ -4,8 +4,8 @@ A draft opened off main must read IDENTICALLY to main until it changes something
 changed entities differ. We prove this against a stub "main" provider with a fixed graph: an empty
 delta is a byte-for-byte pass-through (the invariant), and add/remove/edit deltas patch exactly the
 affected nodes/edges/rollups and nothing else. The delta-computation service methods
-(``branch_overlay_delta`` / ``aggregated_overlay_adjust``) are stubbed here and exercised against live
-Postgres elsewhere — this test pins the provider's overlay *application* logic.
+(``branch_overlay_delta``, and the containment chains rollups are placed by) are stubbed here and
+exercised against live Postgres elsewhere — this test pins the provider's overlay *application* logic.
 """
 import asyncio
 
@@ -15,7 +15,13 @@ from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphNode,
     NodeQuery, TopLevelNodesResult, TraceFocus, TraceResult,
 )
-from backend.app.providers.draft_overlay_provider import DraftOverlayProvider
+from backend.app.providers.draft_overlay_provider import (
+    DraftOverlayProvider, _DeltaCache, _OverlayDelta,
+)
+
+
+# The stub tree's containment chains: A ⊃ A.c, B ⊃ B.c.
+CHAINS = {"A.c": ["A"], "B.c": ["B"], "A": [], "B": []}
 
 
 class StubMain:
@@ -75,14 +81,17 @@ class StubMain:
         return TraceResult(nodes=list(self.nodes.values()), edges=[],
                            focus=TraceFocus(urn=urn, level=0, entityType="Table"), effectiveLevel=0)
 
+    async def get_ancestor_chains(self, urns):
+        return {u: CHAINS[u] for u in urns if u in CHAINS}
+
     async def expand_aggregated(self, *a, **kw):
         return TraceResult(nodes=list(self.nodes.values()), edges=[],
                            focus=TraceFocus(urn="A", level=0, entityType="Table"), effectiveLevel=0)
 
 
 class FakeSvc:
-    def __init__(self, delta, adjust=None, payloads=None):
-        self._delta, self._adjust = delta, adjust or {}
+    def __init__(self, delta, payloads=None):
+        self._delta = delta
         self._payloads = payloads or {}            # entity id -> the draft's value, reader-shaped
         self.version = (object(),)                 # a fresh draft per stub: nothing cached is shared
         self.builds = 0
@@ -99,15 +108,15 @@ class FakeSvc:
         self.loads.append(list(entity_ids))
         return [self._payloads[e] for e in entity_ids if e in self._payloads]
 
-    async def aggregated_overlay_adjust(self, **kw):
-        return self._adjust
+    async def ancestor_chains(self, *, graph_id, branch_id, urns, containment_edge_types, as_of_seq=None):
+        return {u: CHAINS[u] for u in urns if u in CHAINS}
 
 
 _EMPTY = {"nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": []}
 
 
-def _mk(base, delta, adjust=None):
-    p = DraftOverlayProvider(base, svc=FakeSvc(delta, adjust), graph_id="g", branch_id="d")
+def _mk(base, delta):
+    p = DraftOverlayProvider(base, svc=FakeSvc(delta), graph_id="g", branch_id="d")
     p.set_containment_edge_types(["CONTAINS"])
     return p
 
@@ -136,15 +145,13 @@ async def _run() -> None:
 
     # ── added lineage edge ⇒ that rollup +1, nothing else moves ─────────────────
     p2 = _mk(base, {**_EMPTY, "edgesUpsert": [
-        {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]},
-        adjust={("A", "B"): {"weight": +1, "types": {"LINEAGE"}}})
+        {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]})
     agg2 = await p2.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"])
     assert {(e.source_urn, e.target_urn): e.edge_count for e in agg2.aggregated_edges} == {("A", "B"): 2}
 
     # ── removed base lineage edge ⇒ rollup drops to 0 (edge disappears) ─────────
     p3 = _mk(base, {**_EMPTY, "edgesRemove": [
-        {"id": "lin1", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]},
-        adjust={("A", "B"): {"weight": -1, "types": {"LINEAGE"}}})
+        {"id": "lin1", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]})
     agg3 = await p3.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"])
     assert agg3.aggregated_edges == []
 
@@ -231,8 +238,7 @@ def test_a_lineage_delta_keeps_the_base_answers_freshness():
             })
 
     p = _mk(_ShortMain(), {**_EMPTY, "edgesUpsert": [
-        {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]},
-        adjust={("A", "B"): {"weight": +1, "types": {"LINEAGE"}}})
+        {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]})
     agg = asyncio.run(p.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"]))
 
     assert {(e.source_urn, e.target_urn): e.edge_count for e in agg.aggregated_edges} == {("A", "B"): 2}
@@ -382,6 +388,97 @@ def test_a_draft_over_a_base_that_cannot_count_says_so():
         asyncio.run(p.get_node_degrees(["A"], ["LINEAGE"], include_rollups=True))
 
 
+# ── An edge the overlay changed: served with its value, counted where it runs ────────────────
+def _was(e, **base):
+    """``e`` as a lazy overlay entry (its id, type and ends) over an edge the base holds too: at
+    ``base``'s ends (``s``, ``t``), its own unless given."""
+    return {**{k: e[k] for k in ("id", "sourceUrn", "targetUrn", "edgeType")}, "lazy": True,
+            "was": {"sourceUrn": base.get("s", e["sourceUrn"]),
+                    "targetUrn": base.get("t", e["targetUrn"]), "edgeType": e["edgeType"]}}
+
+
+class _EdgesMain(_CountingMain):
+    """Main holding A.c → B.c (lin1) and A ⊃ A.c (cA), each with properties of its own."""
+    LIN = {**_lin("lin1", "A.c", "B.c"), "properties": {"w": "main"}}
+    CONT = {**_lin("cA", "A", "A.c", "CONTAINS"), "properties": {"p": "main"}}
+
+    async def get_edges(self, query: EdgeQuery):
+        from backend.common.models.graph import GraphEdge
+        return [GraphEdge(**self.LIN), GraphEdge(**self.CONT)]
+
+    async def get_children_with_edges(self, parent_urn, **kw):
+        from backend.common.models.graph import GraphEdge
+        res = await super().get_children_with_edges(parent_urn, **kw)
+        cont = [GraphEdge(**self.CONT)] if parent_urn == "A" else []
+        return res.model_copy(update={"containment_edges": cont})
+
+    async def trace_at_level(self, urn, *a, **kw):
+        from backend.common.models.graph import GraphEdge
+        res = await super().trace_at_level(urn, *a, **kw)
+        return res.model_copy(update={"edges": [GraphEdge(**self.LIN)]})
+
+
+class _EdgeSvc(_ChainSvc):
+    """Loads the overlay's value of an edge."""
+
+    def __init__(self, delta, values):
+        super().__init__(delta)
+        self.values = values
+
+    async def overlay_payloads(self, *, graph_id, branch_id, entity_ids, kind="node"):
+        self.loads.append(list(entity_ids))
+        return [self.values[e] for e in entity_ids if e in self.values] if kind == "edge" else []
+
+
+def _edged(delta, values):
+    svc = _EdgeSvc(delta, values)
+    p = DraftOverlayProvider(_EdgesMain(), svc=svc, graph_id="g", branch_id="d")
+    p.set_containment_edge_types(["CONTAINS"])
+    return p, svc
+
+
+def test_an_edge_changed_where_it_runs_is_served_and_counted_as_main_counts_it():
+    """An edge the overlay holds as a value of its own, between the ends main has it at — a
+    draft's own property edit, the rewind of one main made after the draft's base, a fork's
+    either way — reads with the overlay's value everywhere it is served, and moves no count:
+    no rollup, degree or child count. Before, each was counted once more."""
+    async def run():
+        p, svc = _edged({**_EMPTY, "edgesUpsert": [_was(_EdgesMain.LIN), _was(_EdgesMain.CONT)]},
+                        {"lin1": {**_EdgesMain.LIN, "properties": {"w": "overlay"}},
+                         "cA": {**_EdgesMain.CONT, "properties": {"p": "overlay"}}})
+        main = _EdgesMain()
+        agg = await p.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"])
+        assert [(e.source_urn, e.target_urn, e.edge_count) for e in agg.aggregated_edges] == [("A", "B", 1)]
+        assert svc.chains_asked == []                        # nothing to place
+        assert await p.get_node_degrees(URNS, ["LINEAGE"], include_rollups=True) == \
+            await main.get_node_degrees(URNS, ["LINEAGE"], include_rollups=True)
+        assert (await p.get_node("A")).child_count == 1
+        kids = await p.get_children_with_edges("A")
+        assert kids.total_children == 1 and [c.urn for c in kids.children] == ["A.c"]
+        assert [(e.id, e.properties) for e in kids.containment_edges] == [("cA", {"p": "overlay"})]
+        assert {e.id: e.properties for e in await p.get_edges(EdgeQuery())} == {
+            "lin1": {"w": "overlay"}, "cA": {"p": "overlay"}}
+        trace = await p.trace_at_level("A", 0, 1, 1, ["LINEAGE"], ["CONTAINS"], 100, 1000)
+        assert [(e.id, e.properties) for e in trace.edges] == [("lin1", {"w": "overlay"})]
+    asyncio.run(run())
+
+
+def test_an_edge_the_overlay_moved_is_counted_where_it_runs_now():
+    """A changed edge whose ends moved counts where the overlay has it and no longer where main
+    holds it: its rollup and degrees move with it, and so does a child from one parent to the
+    other."""
+    async def run():
+        flow = _was(_lin("lin1", "B.c", "A.c"), s="A.c", t="B.c")
+        cont = _was(_lin("cA", "B", "A.c", "CONTAINS"), s="A")
+        p, svc = _edged({**_EMPTY, "edgesUpsert": [flow, cont]}, {})
+        agg = await p.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"])
+        # Off where main counted it (A, B), on where it runs now (B, A).
+        assert [(e.source_urn, e.target_urn, e.edge_count) for e in agg.aggregated_edges] == [("B", "A", 1)]
+        got = await p.get_node_degrees(["A.c", "B.c"], ["LINEAGE"])
+        assert got == {"A.c": {"in": 1, "out": 0}, "B.c": {"in": 0, "out": 1}}
+        assert ((await p.get_node("A")).child_count, (await p.get_node("B")).child_count) == (0, 2)
+    asyncio.run(run())
+
 # ── A large draft: modified nodes come by name, and a read loads just the ones it serves ─────
 _MODIFIED = {**_EMPTY, "nodesModified": [
     {"urn": "A", "entityId": "e0"}, {"urn": "A.c", "entityId": "e1"}, {"urn": "B.c", "entityId": "e2"}]}
@@ -437,6 +534,113 @@ def test_reads_share_one_delta_until_the_draft_moves():
         await _prov(svc).get_node("A")
         assert svc.builds == 2
     asyncio.run(run())
+
+
+# ── The cache: bounded by what its deltas hold, a fork's next delta extending its last ──────
+def _sized(n: int):
+    async def build():
+        return _OverlayDelta({"nodesRemove": [{"urn": f"u{i}", "entityId": f"e{i}"}
+                                              for i in range(n)]}, [])
+    return build
+
+
+def test_the_cache_holds_as_many_deltas_as_their_entries_allow():
+    """Two deltas were all a process kept: many drafts and forks read at once evicted each other
+    on every read. It keeps what fits GRAPHVER_OVERLAY_CACHE_ENTRIES together, the least recently
+    read going first, and always the newest, whatever its size."""
+    async def run():
+        cache = _DeltaCache(max_entries=10)
+        for g in ("a", "b", "c"):
+            await cache.get((g, "d", 1, ()), _sized(3))
+        assert [k[0] for k in cache._items] == ["a", "b", "c"]
+        await cache.get(("a", "d", 1, ()), _sized(3))            # read again: the most recent
+        await cache.get(("e", "d", 1, ()), _sized(3))            # 12 > 10: b, the coldest, goes
+        assert [k[0] for k in cache._items] == ["c", "a", "e"]
+        await cache.get(("f", "d", 1, ()), _sized(50))           # alone past the bound: kept
+        assert [k[0] for k in cache._items] == ["f"]
+    asyncio.run(run())
+
+
+def test_a_newer_delta_of_a_draft_takes_its_older_ones_place():
+    async def run():
+        cache = _DeltaCache(max_entries=100)
+        await cache.get(("g", "d", 1, ()), _sized(3))
+        await cache.get(("g", "d2", 1, ()), _sized(3))
+        await cache.get(("g", "d", 2, ()), _sized(3))
+        assert list(cache._items) == [("g", "d2", 1, ()), ("g", "d", 2, ())]
+    asyncio.run(run())
+
+
+class _ForkSvc(FakeSvc):
+    """A fork's main: each patch set says what it is of, and the service is handed the last."""
+
+    def __init__(self):
+        super().__init__(_EMPTY)
+        self.handed = []
+
+    async def branch_overlay_delta(self, *, graph_id, branch_id, extend=None):
+        self.handed.append(extend)
+        self.builds += 1
+        return {**_EMPTY, "since": {"rootHead": self.builds}}
+
+
+def test_a_forks_next_delta_is_handed_its_last_to_extend():
+    """When only its root moved, a fork's patch set is the last one extended by the root's
+    window: the build is handed the patch set the cache holds of the fork. A draft's is built
+    afresh, as before (its patch set says nothing of what it is of)."""
+    async def run():
+        svc = _ForkSvc()
+
+        def fork():
+            return DraftOverlayProvider(StubMain(), svc=svc, graph_id="g_ext", branch_id="m",
+                                        fork=True)
+        await fork().get_node("A")
+        svc.version = (object(),)                                # its root moved
+        await fork().get_node("A")
+        assert svc.handed == [None, {**_EMPTY, "nodesModified": [], "nodesNew": [],
+                                     "since": {"rootHead": 1}}]
+        draft = FakeSvc(_EMPTY)
+        await DraftOverlayProvider(StubMain(), svc=draft, graph_id="g_ext", branch_id="d").get_node("A")
+        assert draft.builds == 1                                 # no extend handed (none to give)
+    asyncio.run(run())
+
+def test_a_forks_delta_keeps_its_patch_set_compact_for_the_next_extension():
+    """A fork's delta kept its patch set as built, a dict per entry beside the index built from
+    it, for the next extension: 1,043 bytes an entry with the index, where the index alone holds
+    737. It keeps what the extension needs, each entry's fields as a tuple over the strings the
+    index holds already (865 bytes an entry with the index), and the extension gets the patch set
+    back as it was built."""
+    import copy as _copy
+    raw = {"nodesUpsert": [{"urn": "N", "entityId": "eN", "entityType": "Table", "displayName": "N",
+                            "qualifiedName": None, "lazy": True}],
+           "nodesModified": [{"entityId": "e1", "urn": "A.c"}],
+           "nodesRemove": [{"entityId": "e2", "urn": "B.c"}],
+           "edgesUpsert": [{"id": "f1", "sourceUrn": "A.c", "targetUrn": "N", "edgeType": "FLOWS",
+                            "lazy": True},
+                           {"id": "f2", "sourceUrn": "A.c", "targetUrn": "N", "edgeType": "FLOWS",
+                            "lazy": True,
+                            "was": {"sourceUrn": "A.c", "targetUrn": "A", "edgeType": "FLOWS"}}],
+           "edgesRemove": [{"id": "f3", "sourceUrn": "B.c", "targetUrn": "A.c", "edgeType": "FLOWS"}],
+           "nodesNew": ["N"], "since": {"head": "c1", "layers": [3, 1], "rootHead": 7}}
+    d = _OverlayDelta(_copy.deepcopy(raw), ["CONTAINS"])
+    kept = [x for key in ("nodesUpsert", "nodesModified", "nodesRemove", "edgesUpsert", "edgesRemove")
+            for x in d.raw[key]]
+    assert len(kept) == 6 and not any(isinstance(x, dict) for x in kept)
+    from backend.app.providers.draft_overlay_provider import _unkept
+    assert _unkept(d.raw) == raw
+    assert _OverlayDelta(_copy.deepcopy({**raw, "since": None}), ["CONTAINS"]).raw is None  # a draft's
+
+
+def test_the_overlay_caches_default_holds_under_half_a_gigabyte():
+    """GRAPHVER_OVERLAY_CACHE_ENTRIES bounds the entries a process's cached deltas hold together.
+    At about 1.2 KB an entry (measured: 0.74 KB a draft's, 0.87 KB a fork's, before allocator
+    slack and the chains a rollup read keeps), its old default of 1,000,000 let one web process
+    hold 1.2 GB. Its default keeps them under 512 MB."""
+    import re
+    from backend.app.services.versioning import config
+    default = int(re.search(r'"GRAPHVER_OVERLAY_CACHE_ENTRIES", "(\d+)"',
+                            open(config.__file__).read()).group(1))
+    assert default * 1_200 <= 512 * 2 ** 20, default
 
 
 if __name__ == "__main__":

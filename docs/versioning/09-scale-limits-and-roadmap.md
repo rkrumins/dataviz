@@ -10,9 +10,9 @@
 **TL;DR.** The Versioned Graph is **feature-complete and test-covered for the managed, single-node
 case**. Saves, pulls, previews, reviews and publishes are `O(change)`, not `O(graph)`, and a publish,
 its projection and a rebuild of millions hold a page at a time (§2). The remaining sharp edges are
-deliberately-deferred scale items — a fork's FalkorDB copy, which is projected whole; export jobs that start over
-when interrupted (imports resume); no retention inside a live graph; and a partitioning key that doesn't
-help a single hot collaborative graph. Re-sync, separately, runs a bounded merge that has not been
+deliberately-deferred scale items — export jobs that start over when interrupted (imports resume); no
+retention inside a live graph; and a partitioning key that doesn't help a single hot collaborative
+graph. Re-sync, separately, runs a bounded merge that has not been
 proven on a graph the bootstrap worker wrote ([11](11-resync-at-any-scale.md)). Read this chapter
 before betting a large production workload on it.
 
@@ -115,7 +115,7 @@ held the graph's publish lock, and how much Postgres and FalkorDB grew.
 | Publish / merge to `main` | `O(changed)` compose + **`O(changed)` incremental Merkle**; a page at a time above `GRAPHVER_SQUASH_PAGED_ABOVE` | advisory-locked, `O(delta)` |
 | Fork creation / a fork's draft work | `O(1)` / `O(changed)`: through the parent for what the fork has not changed | §4.1 |
 | A fork's review (open, preview, diff, merge) | `O(changed)` since its last merged review; merged in the request | §4.1 |
-| A fork's FalkorDB copy | **`O(graph)`**: its first projection reconciles its whole state in one pass | §4.1 |
+| Read a fork's `main` | `O(neighborhood)` in its root's store, over a patch set of `O(changed)` since the fork and its root parted (built once per fork head, then extended); past `GRAPHVER_FORK_REWIND_MAX`, composed in Postgres | §4.1 |
 | Read `main` (fresh) | `O(neighborhood)` in FalkorDB | hot path |
 | Read `main` (lagging) / draft / as-of | `O(neighborhood)` compose in Postgres | + `O(delta)` overlay for drafts |
 | Incremental projection window | `O(window)` MERGE/DELETE; a page at a time above `GRAPHVER_PROJECTION_PAGED_ABOVE` | idempotent |
@@ -125,26 +125,38 @@ held the graph's publish lock, and how much Postgres and FalkorDB grew.
 
 ## 4. The sharp edges (`O(graph)` hotspots)
 
-### 4.1 A fork's FalkorDB copy is its parent's whole graph
+### 4.1 A busy fork: its reads and its review
 
-Forking, working on a fork and reviewing it cost what changes in the fork: the fork point copies the
-root its parent stored, a fork's commits carry no root, the bounded reads go through to the parent for
-what the fork has not changed, and a review merges what the fork changed since its last merged review
-([03](03-branching-commits-merge.md) §3.8). Two things still scale with the graph or the fork:
+Forking, working on a fork, reading it and reviewing it cost what changes in the fork: the fork point
+copies the root its parent stored, a fork's commits carry no root, the bounded reads go through to the
+parent for what the fork has not changed, a review merges what the fork changed since its last merged
+review ([03](03-branching-commits-merge.md) §3.8), and a fork's `main` reads its root's store with a
+patch set of what either side changed since they parted laid over it, with no FalkorDB copy of its own
+([17](17-forks-and-residency.md) §2, §6). Three things still scale with a busy fork:
 
-- **A fork of a graph pinned to FalkorDB gets a key of its own** (`<parent's key>__fork_<id>`), and its
-  first projection reconciles its whole composed state in one pass (`_reconcile_in_place`; the streamed
-  reconcile composes no parent): every entity of the parent held in the projection worker, and a second
-  copy of the graph in FalkorDB that the eviction budget counts. Nothing in the product reads that copy —
-  the canvas, search and exports reach a fork only through Postgres; only
-  `GET …/graphs/{graphId}/graph/neighbors`, which no screen calls, and the admin "Check sync" read it.
-  Whether a fork gets a FalkorDB copy at all is open product decision 10 of the go-live review
-  (`docs/audits/versioning-go-live-review-2026-10.md`).
+- **A fork past `GRAPHVER_FORK_REWIND_MAX`** (200,000) entities to classify is read from its layered
+  rows in Postgres instead, and search does not reach it; its fork-list item recommends an update from
+  its parent.
+- **A listing serves every node the fork created that it lists**, on its first page, as a draft's
+  does, and loads each for every request: an unfiltered listing of 500 through a fork that created
+  12,500 nodes serves all 12,500, in 0.75 s each time. A fork that created many nodes at its top
+  level reads that level the same way.
 - **A fork's review is merged inside the request**, holding what the fork changed since its last merged
   review (about 1.5 KB a change); a draft that large is published by a job on the versioning worker.
 
-> **Limitation.** Forking a FalkorDB-backed graph of millions loads every entity of it into the
-> projection worker; reviewing a fork that changed hundreds of thousands of entities holds them in a web
+**Measured** (`backend/scripts/bench_fork_overlay.py`, one process: a root of 100,000 nodes and
+100,000 edges that changed 50,000 entities after the fork point). A fork that changed 100,000 of its
+own builds a patch set of 145,000 entries in 6.2 s and holds 170 MB (292 MB at the build's peak); one
+that changed 1,000, 50,500 entries in 2.2 s and 69 MB. A canvas read through it (the top-level page,
+the edges of its first 500 nodes, a table's children) takes 10.9 s and 5.6 s on a process's first
+read, which builds the patch set (once per fork head, base and root head), then 2.7 s and 2.1 s,
+against 2.5 s and 2.2 s for the same reads on the root's key alone. Before any read, a request on a
+fork runs 21 statements (21.6 ms warm), where the same request on its root runs 17; deciding the
+ceiling counted 73 ms a request at 145,000 candidates before the count was kept per version, and
+takes 5 ms after. A rollup read runs no query per flow the root changed: 528 more than its store's
+own at 4 such flows, 5,280 at 40, before the chains were kept with the patch set.
+
+> **Limitation.** Reviewing a fork that changed hundreds of thousands of entities holds them in a web
 > process. Review a busy fork often: each review merges only what changed since the last.
 
 ### 4.2 A full re-projection holds the graph's ids in memory
@@ -155,7 +167,7 @@ drops the graph, and writes only the difference. Up to `GRAPHVER_PROJECTION_RECO
 and moves the summaries by the difference. Above it, `_reconcile_streamed` compares a page of each
 side at a time — FalkorDB's in internal-id pages against Postgres lookups, then Postgres's heads in
 keyset pages against FalkorDB's urn indexes — and hands the summaries to the aggregation job (209 MB
-at 600,000). A fork always takes the first: its state composes its parent's. (The "`O(n²/batch)` —
+at 600,000). A fork is never projected ([17](17-forks-and-residency.md) §6). (The "`O(n²/batch)` —
 upgrade to keyset if a graph outgrows it" comment belongs to the drift reconciler, `reconcile.py`,
 not to the projector.) See [04](04-projection-and-cache.md).
 
@@ -288,6 +300,8 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `commit_seq`-collision retry budget |
 | `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` | `5000` | longest wait for any one graph, draft, lifecycle, move, PR or graph-row lock; a write `_retry_seq` retries (save, checkpoint, pull, publish, merge, revert, restore, sync, bulk ingest) tries `GRAPHVER_COMMIT_MAX_RETRIES` times before 503 `lock_busy`, anything else answers it after one wait |
 | `GRAPHVER_MAX_FORKS_PER_GRAPH` | `10` | live forks per graph; one more is 409 `fork_limit` |
+| `GRAPHVER_FORK_REWIND_MAX` / `_WARN` | `200000` / `50000` | entities a fork's patch set may classify before its reads go to Postgres / parent changes not taken in that recommend an update ([17](17-forks-and-residency.md) §2, §7) |
+| `GRAPHVER_OVERLAY_CACHE_ENTRIES` | `400000` | entries the overlay deltas a process keeps for drafts' and forks' reads hold together: about 1.2 KB each (0.74 KB a draft's, 0.87 KB a fork's, measured, before allocator slack and the chains a rollup read keeps), so under 512 MB a process; an evicted delta is built again on its next read, 2 to 6 s at 50,000 to 145,000 entries |
 | `GRAPHVER_SET_FIELDS` | `tags` | payload fields merged as unordered sets in 3-way merge |
 | `IMPORT_COMMIT_WINDOW` / `INLINE_IMPORT_MAX` | `10000` / `5000` | import windowing / inline-vs-async threshold |
 | `OBJECT_STORE_BACKEND` | `database` | where import/export artifacts live: `database`, `local` (a shared mount) or `s3` (opt-in) |

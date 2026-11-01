@@ -981,11 +981,19 @@ class WatermarkModel(_ApiModel):
     # `verify`, or a change notification), null when there is none. Bring it into history with
     # POST /graph/resync.
     external_drift: Optional[Dict[str, Any]] = Field(default=None, alias="externalDrift")
-    # Residency (doc 17): the class a system admin set (always | standard | coldline) and whether
-    # the key is in FalkorDB: resident | evicted | rehydrating (being loaded) | waiting_capacity
-    # (its master has no room for it yet). Then why it was evicted, when a person last read it and
-    # its measured size; while it is being loaded, since when (a load has no timeout).
-    residency: str = "standard"
+    # A fork has no projection: the root graph whose store it reads through, whose watermark this
+    # is (no key of its own). Null for a graph that is no fork.
+    reads_through: Optional[str] = Field(default=None, alias="readsThrough")
+    # A fork's: "overlay", its changes laid over that store, or "postgres" past the ceiling
+    # (GRAPHVER_FORK_REWIND_MAX), when readRoute.main says Postgres too. Null for a graph that is
+    # no fork.
+    reads_from: Optional[Literal["overlay", "postgres"]] = Field(default=None, alias="readsFrom")
+    # Residency (doc 17): the class a system admin set (always | standard | coldline; null for a
+    # fork, which has none) and whether the key is in FalkorDB — for a fork, its root's, through
+    # which it reads: resident | evicted | rehydrating (being loaded) | waiting_capacity (its
+    # master has no room for it yet). Then why it was evicted, when a person last read it and its
+    # measured size; while it is being loaded, since when (a load has no timeout).
+    residency: Optional[str] = "standard"
     residency_state: str = Field(default="resident", alias="residencyState")
     evicted_reason: Optional[str] = Field(default=None, alias="evictedReason")
     last_read_at: Optional[datetime] = Field(default=None, alias="lastReadAt")
@@ -1260,13 +1268,24 @@ class ForkResponse(_ApiModel):
 class ForkSummaryResponse(GraphResponse):
     """One of a graph's forks, live or in the trash (``deletedAt`` set), with its data source and
     that source's label. ``purging``: its purge is queued, so it can no longer be restored;
-    ``purgeAfter``: the end of its undo window."""
+    ``purgeAfter``: the end of its undo window.
+
+    A live one says how far it is from this graph: ``ahead``, the entities it changed since its
+    last merged review (or its fork point); ``behind``, those this graph changed that it has not
+    taken in; ``updateRecommended``, past ``GRAPHVER_FORK_REWIND_WARN`` of those, or past the
+    ceiling its reads go to Postgres (``readsFrom``: ``overlay`` | ``postgres``). The counts stop at
+    ``GRAPHVER_FORK_REWIND_MAX`` (``countsCapped``: one is at least that). Null on a trashed one."""
     data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
     label: Optional[str] = None
     deleted_at: Optional[str] = Field(default=None, alias="deletedAt")
     deleted_by: Optional[str] = Field(default=None, alias="deletedBy")
     purging: bool = False
     purge_after: Optional[str] = Field(default=None, alias="purgeAfter")
+    ahead: Optional[int] = None
+    behind: Optional[int] = None
+    update_recommended: Optional[bool] = Field(default=None, alias="updateRecommended")
+    reads_from: Optional[Literal["overlay", "postgres"]] = Field(default=None, alias="readsFrom")
+    counts_capped: Optional[bool] = Field(default=None, alias="countsCapped")
 
 
 class OpenPrRequest(_ApiModel):
@@ -2294,8 +2313,13 @@ async def get_watermark(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised)."""
-    return await _watermark_model(session, await svc.projection_watermark(graph_id))
+    """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised).
+    404 for a fork whose parent's graph is gone."""
+    try:
+        wm = await svc.projection_watermark(graph_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return await _watermark_model(session, wm)
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/freshness", response_model=BranchFreshnessModel)
@@ -2352,6 +2376,8 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           next_retry_at=wm.get("next_retry_at"),
                           liveness_error=wm.get("liveness_error"),
                           external_drift=wm.get("external_drift"),
+                          reads_through=wm.get("reads_through"),
+                          reads_from=wm.get("reads_from"),
                           residency=wm.get("residency", "standard"),
                           residency_state=wm.get("residency_state", "resident"),
                           evicted_reason=wm.get("evicted_reason"),
@@ -2385,7 +2411,10 @@ async def rebuild_projection(
     worker-less deployment self-heals (``project_now`` is an idempotent catch-up, a no-op when the
     cache is already fresh)."""
     await _repair_projection_target(graph_id)            # self-heal: pin an unpinned graph when possible
-    wm = await svc.projection_watermark(graph_id)
+    try:
+        wm = await svc.projection_watermark(graph_id)
+    except ValueError as exc:                            # a fork whose parent's graph is gone
+        raise HTTPException(status_code=404, detail=str(exc))
     name = wm.get("falkor_graph_name")
     # No real target — NULL or the synthetic ``gv_<id>`` placeholder nothing reads (mirrors the
     # projector's unpinned skip). Nothing is cached, so there is nothing to rebuild.
@@ -2869,16 +2898,17 @@ async def graph_neighbors(
     return await _serve_neighbors(
         svc, read_factory, graph_id, urn=urn, depth=depth,
         direction=direction, edge_types=ets, limit=limit,
-        branch_id=branch_id, as_of_seq=as_of_seq,
+        branch_id=branch_id, as_of_seq=as_of_seq, fork=bool(_meta.get("fork_parent_graph_id")),
     )
 
 
 async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction,
-                           edge_types, limit, branch_id=None, as_of_seq=None):
+                           edge_types, limit, branch_id=None, as_of_seq=None, fork=False):
     wm = await svc.projection_watermark(graph_id)
     wm_out = {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}
-    # FalkorDB projection is main@head only; drafts / as-of reads must use Postgres.
-    is_head_main = as_of_seq is None and (
+    # FalkorDB projection is main@head only; drafts / as-of reads must use Postgres, and so does a
+    # fork, which has no projection of its own (it reads through its parent's, with its changes).
+    is_head_main = as_of_seq is None and not fork and (
         branch_id is None or branch_id == await svc.main_branch_id(graph_id))
     can_falkor = bool(
         is_head_main and read_factory is not None and wm["falkor_graph_name"]

@@ -2,23 +2,25 @@
 
 > **Audience & scope:** engineers and reviewers of the fork work. What a fork is now that it is a
 > data source of its own, how its settings follow its parent's, how it moves through the trash and
-> between workspaces with its parent, and how a fork reads its parent commit by commit. Then
-> residency (§8–§17): which graphs FalkorDB holds, by class and by each master's memory, where a
-> new key goes, adopting a customer's key, and the admin screens. The fork
-> engine itself — copy-on-write reads, pull requests, merge — is in
+> between workspaces with its parent, how it reads through its root's store with its own changes
+> laid over it, and how it reads its parent commit by commit. Then residency (§10–§19): which graphs
+> FalkorDB holds, by class and by each master's memory, where a new key goes, adopting a customer's
+> key, and the admin screens. The fork engine itself — copy-on-write reads, pull requests, merge —
+> is in
 > [03 · Branching, Commits & Merge](03-branching-commits-merge.md); the routes and their refusals are
 > in [06 · API Reference](06-api-reference.md); every behaviour change is in the
 > [CHANGELOG](../../CHANGELOG.md).
 
-**Checked against the code on 2026-10-30 (`76acf1fe2`).**
+**Checked against the code on 2026-11-01 (`c63c65f08`).**
 
 **TL;DR.** Forking a graph now makes a data source as well as a graph: the fork's own row in
 `workspace_data_sources`, in its parent's workspace and on its parent's provider. Views, the canvas
 and every data-source read reach the fork by that id. Its governing settings are its parent's and
 stay so. It goes to the trash, comes back and is purged with its graph, and moves with its parent.
-It never has a FalkorDB graph of its own: it reads through version control. Each of its commits
-records which parent commit it reads, so a fork can later take its parent's newer work without
-rewriting its own history.
+It never has a FalkorDB graph of its own: it reads its root's published store with its own changes
+laid over it, as a draft reads main's, so a fork costs FalkorDB nothing. Each of its commits records
+which parent commit it reads, so a fork can later take its parent's newer work without rewriting its
+own history.
 
 ## 1. What a fork is now
 
@@ -49,37 +51,134 @@ the last two leaves a row with no graph; the reaper deletes it once it is ten mi
 activity log records `workspace.versioning.fork_created`.
 
 **Where forks are listed.** `GET …/graphs/{gid}/forks` gives each fork's `dataSourceId` and
-`label`. The workspace's data-source list leaves forks out unless asked
-(`GET /api/v1/admin/workspaces/{ws}/data-sources?includeForks=true`), and so do the data-source
-lists embedded in workspace answers, the workspace's default source and its last-source count: a
-fork is reached through its graph, not picked as a workspace's source.
+`label`, and how far a live one is from the graph (§7). The workspace's data-source list leaves
+forks out unless asked (`GET /api/v1/admin/workspaces/{ws}/data-sources?includeForks=true`), and so
+do the data-source lists embedded in workspace answers, the workspace's default source and its
+last-source count: a fork is reached through its graph, not picked as a workspace's source. The trash
+never lists one: a fork comes back with its graph (`POST …/graphs/{fork}/restore`).
 
-## 2. Reads and writes: no store of its own
+## 2. Reads: through its root's store, with its changes over it
 
-A fork's data source reads and writes through version control, as any versioned source does, and
-never through a FalkorDB graph of its own:
+A fork's `main` is read as a draft is: through a store with a patch set laid over it
+(`DraftOverlayProvider`). The store is its **root's**, the graph up `fork_parent_graph_id` that is
+no fork — a fork of a fork reads the same one:
 
-- **Reads.** `ContextEngine` recognises a fork's row before it builds a provider, and builds none.
-  The fork's `main` reads through `VersionedBranchProvider` — its own rows over its parent's, at the
-  parent commit each of its commits took (§5) — and a draft on it through `DraftOverlayProvider`
-  over that.
-- **Writes** are commits on the fork's drafts, or on its `main` for someone with publish, exactly as
-  on any versioned source.
-- **The provider registry** hands out, for a fork's row, its root parent's provider, read only
-  (`fork_sources.ForkReadOnlyProvider`). Every write through it is refused, so nothing addressed to a
-  fork reaches FalkorDB. A managed data source with no graph and no pin is refused too, instead of
-  reading the provider's default graph.
+- the root's own FalkorDB provider, which `ContextEngine` builds from the root's data source, while
+  the root's projection holds its head in the key it publishes;
+- otherwise the root's Postgres reader (`VersionedBranchProvider` on the root's `main`): a root
+  still catching up, evicted or in the trash, or whose provider cannot be built. The reads are the
+  same, only slower.
 
-Until reads move onto an overlay (§7), looking up by its URN an entity the fork has not changed
-finds nothing through the fork's data source; its `gv:` id finds it.
+Ontology and node identity still come from the fork's own row (its parent's settings, §3), and who
+may read is the fork's to decide: the root's store is read on its behalf.
+
+**The patch set** (`branch_overlay_delta` on a fork's `main`) describes the fork's value at its
+head against the root's at the root's head, for every entity either side changed since they parted:
+the fork's own changes, each fork between it and the root up to the base the level below reads it
+at, and the root's changes since the outermost base (§5). It is bounded by those changes, never by
+the graph:
+
+| The entity at the fork's head | In the patch set |
+|---|---|
+| Live, and not at the root's head | Created |
+| Live, with another value than the root's | Modified: the fork's value |
+| Gone, and live at the root's head | Removed |
+| The root's value | Nothing: the root's store serves it |
+
+**Lazy.** The patch set is built from content hashes and version-row columns alone. A read loads the
+fork's value of just what it serves, for that request (`overlay_payloads`, which reads through the
+layers: the fork's own row, or its parent's at the base): a page of what the root has costs a page
+of payloads, however much the fork changed. A listing serves the nodes the fork created that it
+lists on its first page, all of them, as a draft's does (`compose_page`), so a fork that created
+many nodes at its top level, or a listing with no filter, loads each of those on every request
+([09](09-scale-limits-and-roadmap.md) §4.1).
+
+**Cached, then extended.** A process keeps a patch set per fork head, base and root head. When only
+the root moved, the next one is the last one extended by what the root changed since, instead of
+built again; a commit on the fork, or a new base, builds it again. A fork's delta keeps its patch
+set for that, compact: each entry's fields as a tuple. The deltas kept, drafts' and forks', hold at
+most `GRAPHVER_OVERLAY_CACHE_ENTRIES` entries together (default 400,000; the coldest go first, and
+the newest is kept whatever its size). An entry holds about 1.2 KB (measured: 0.74 KB a draft's,
+0.87 KB a fork's, before allocator slack and the chains a rollup read keeps), so the default holds
+under 512 MB in each web process; an evicted delta is built again on its next read, 2 to 6 s for
+50,000 to 145,000 entries.
+
+**The ceiling.** A fork whose patch set would classify more than `GRAPHVER_FORK_REWIND_MAX`
+entities (default 200,000, counted cheaply as an upper bound) is read from its own layered rows in
+Postgres instead (`VersionedBranchProvider` on its `main`): the same data, slower, and search does
+not reach it. The count is kept per version of the fork (its head, the base each layer reads, its
+root's head), so a request at an unchanged version does not count again. Its fork-list item and
+its watermark say `readsFrom: "postgres"`, its read route says Postgres, and the fork list
+recommends an update from its parent where that would bring it back under (§7).
+
+**A draft on a fork** overlays the fork's `main` in turn: its own patch set against the fork's
+`main` at its branch point.
+
+**Edges are counted where they run.** An edge the overlay holds as a value of its own — one the
+fork or a draft changed, or the root changed after the base — is served with that value and counted
+once, against where its store holds it now: an edge still between the same ends as the same type
+moves no rollup, degree or child count; one whose ends moved counts where it runs now, and no
+longer where the store has it. A flow the overlay added goes on the rollups under its ends'
+containers on the overlay's own state; one it removed comes off where the store counted it. The
+chains that place them are looked up once per patch set, in one batched walk, and kept with it:
+a rollup read or a degree read with rollups runs no query per flow, however many the root changed.
+
+**Listings follow the overlay's moves.** A child the overlay took away from a parent, its edge from
+there removed or moved elsewhere, is not listed there though the store lists it; it is listed where
+the overlay has it. A node the overlay took every parent edge from, and gave none, is at the top
+level.
+
+**What a request costs.** One session reads the fork's version, its ceiling decision, its root and
+the root's store as its `projection_state` row says it is now, which is read every time: an eviction
+moves the store without moving any seq the version holds. The overlay is handed the version, so its
+first read does not read it again (21 statements a request, where the root's own takes 17). Its reads
+of the root's FalkorDB store take that shard's admission slots, as the root's own do. Its cached
+answers are keyed by the root store's version it read against (the root's committed and projected
+seqs), so one built across a root publish is not served after it.
+
+**Writes** are commits on the fork's drafts, or on its `main` for someone with publish, exactly as
+on any versioned source. **The provider registry** hands out, for a fork's row, its root parent's
+provider, read only (`fork_sources.ForkReadOnlyProvider`): every write through it is refused, so
+nothing addressed to a fork reaches FalkorDB. A managed data source with no graph and no pin is
+refused too, instead of reading the provider's default graph.
+
+**Lookups find what a fork inherited.** The Postgres reads — a node by its URN, the listings, a
+neighbourhood — take the fork's rows over its parent's, so an entity the fork never changed is
+found by its URN. The neighbours route never reads FalkorDB for a fork.
+
+**Search and native queries.** Deep search on a fork runs in the root's store, as a draft's runs in
+main's: the fork's own changes are not in its answer, and its scope notes say so ("the fork's own
+changes are not searchable yet: results come from the parent data source's published graph"; on a
+draft on a fork, the draft's changes and the fork's). While the root's projection lags, or past the
+ceiling, it answers **501**, as on a stale `main`. Native queries on a fork are **501**
+`native_query_unavailable`: run them on the parent.
+
+**What the overlay does not cover yet.**
+
+- **Listings serve every node the fork created that they list**, on their first page, loading each
+  for every request, as a draft's do ([09](09-scale-limits-and-roadmap.md) §4.1).
+- **Each root commit costs CPU in each process reading the fork.** The patch set is extended from
+  Postgres by the root's window, but each process indexes the whole of it again on its next read:
+  1.3 to 2 s for 145,000 entries, holding the interpreter. Each fork commit builds it again (4.6 to
+  6.2 s at that size).
+- **A trace follows the root's later flows**, as a draft's follows main's: a node reached only
+  through a flow the root added since the fork point stays in the fork's trace, and one reachable
+  only through a flow the root deleted since does not appear.
+- **A customer key's outside changes show on a fork**, as on a draft: entities another writer put
+  in the root's key that no history holds (`externalDrift`) are read through.
+
+**Stats.** A fork's counts are not polled: they are not its root's plus its patch set, and counting
+it in Postgres would compose the whole graph. A stats read of a fork's data source answers
+`status: "unavailable"` with `missing_fields: ["not_available_for_a_fork"]`, and its schema read
+answers from the fork's ontology, with no refresh to follow.
 
 What needs a data source's own graph store answers for a fork as follows:
 
 | Request on a fork's data source | Answer |
 |---|---|
 | A write through the provider registry; an aggregation trigger; a dedicated rollup graph or projection mode; a projection move; bringing outside changes into history | **409** `fork_has_no_store` `{dataSourceId, message}`. Do it on the data source it was forked from |
+| Making it the workspace's default (`POST …/data-sources/{ds}/set-primary`) | **409** `fork_not_primary`: a fork is never a workspace's default |
 | A native query | **501** `native_query_unavailable`: native queries read a graph's own published store, and a fork reads through its parent |
-| Deep search | **501**: search reads a graph's own published store; search the parent, or browse the fork in the canvas |
 
 The schedulers and scans that work per data source leave forks out: the probe and stats
 schedulers, silent-source alerts, the reconcile sweeper, the aggregation and capacity views and the
@@ -115,10 +214,18 @@ The fork routes take the row along with the graph, after the graph:
 The data-source routes never act on a fork's row on its own: delete, permanent delete, restore,
 move, move preview and transfer requests answer **409** `use_fork_endpoints`.
 
+**The views on a fork outlive its row.** When the row is deleted — its purge completes, the reaper
+removes it, or its parent's permanent delete takes it — the views on it go to its nearest live
+ancestor (its parent; up a fork of a fork), losing the fork's draft they were pinned to; one in the
+trash stays there. With no ancestor left (a parent's permanent delete), they read the workspace's
+default, as the parent's own views do.
+
 **A parent's permanent delete** queues the purges of its trashed forks before its own, and deletes
 their rows with its own. A live fork refuses it (**409** `live_forks`) before anything is queued —
-also when the parent has nothing published, whose graph purge would not wait for its forks: the
-fork's row names the parent's.
+also when the parent has nothing published: a fork reads through its parent's graph whatever it
+holds, so the parent's purge waits for its forks too, and the reaper leaves it standing. A fork
+whose parent's graph is gone all the same (an earlier release purged one under its forks) answers
+**404**.
 
 **The reaper keeps the two in step.** Each step above crosses two databases, so a crash can leave
 the row behind its graph. On every pass, `Reaper.fork_rows`:
@@ -128,9 +235,12 @@ the row behind its graph. On every pass, `Reaper.fork_rows`:
   release get theirs;
 - tombstones a row whose graph is in the trash, and brings back one whose graph is live;
 - deletes a row whose graph does not exist — never made, or purged — once it is ten minutes old
-  (`ORPHAN_FORK_ROW_SECS`; a younger one may be a fork still being made).
+  (`ORPHAN_FORK_ROW_SECS`; a younger one may be a fork still being made), one at a time, a fork's
+  fork before its fork: a row another fork's row still names is left for a later pass.
 
-It reads the rows before the graphs, so a trash or a restore in flight is only ever carried forward.
+It puts each row right under the row's lock, from its graph as it is then, so a trash or a restore
+in flight is only ever carried forward. A parent's row past its undo window waits while its forks'
+rows still name it, and goes on the pass after theirs.
 
 ## 5. The per-commit parent base
 
@@ -157,7 +267,48 @@ The point of the table is the next step: when a fork takes its parent's newer co
 parent, below), it adds a row instead of rewriting anything, and every earlier commit of the fork
 still reads exactly what it read when it was made.
 
-## 6. Upgrading
+## 6. No FalkorDB copy
+
+A fork used to be projected into `<parent key>__fork_<id>`: a second copy of its parent, built in one
+pass, read by almost nothing, and kept for the fork's undo window after it was trashed. Now:
+
+- **`fork_graph` pins no key.** The fork's `projection_state` row stays, naming none and owning none.
+- **The projector never projects a fork,** whatever its row says: a pass skips it (`skipped:
+  "fork"`), the poll loop leaves forks out, and neither a rebuild nor an eviction's reseed touches
+  one. `POST …/projection/rebuild` on a fork answers its **409** for a graph with no target.
+- **A fork's watermark is its root's** (`GET …/watermark`): the revisions, freshness and state of
+  the store it reads through, with `readsThrough` naming the root's graph and no key, provider or
+  ownership of its own. Its read route says where its reads come from: `falkordb` while the root's
+  projection holds its head, `postgres` otherwise and past the ceiling (`readsFrom`), and the
+  canvas chip says so ("far from its parent"). A fork whose parent's graph is gone answers **404**.
+  The fleet inventory counts every fork as behind on nothing, one still pinned to an old copy
+  included, and the liveness check leaves forks out.
+- **Check sync** (`POST …/projection/reconcile`) has nothing of a fork's to compare:
+  `skippedReason: "a fork reads through its parent's graph"`.
+
+**Copies earlier releases made** stay, and every process running this release ignores them, until
+`GRAPHVER_DROP_FORK_COPIES=true`. Then the versioning reaper drops each on its pass, by the purge's
+rules for a key: ours, the name minted for the fork, the projector's marker in it, nothing else
+projecting into it or reading it; and clears the fork's pin. A copy it keeps (shared, read by
+another data source, or not ours) keeps its pin, and is asked about again on the next pass. It is
+off by default because a pod still running an earlier release reads and projects them: turn it on
+once every pod runs this one.
+
+## 7. How far a fork is from its parent
+
+Each live fork in `GET …/graphs/{gid}/forks` says:
+
+| Field | Meaning |
+|---|---|
+| `ahead` | The entities it changed since its last merged review, or since its fork point |
+| `behind` | The entities its parent changed that it has not taken in: the parent's window since the base the fork reads |
+| `updateRecommended` | What Update from parent can fix: `behind` reaches `GRAPHVER_FORK_REWIND_WARN` (default 50,000), or the fork's reads are past the ceiling and taking in its parent's changes would bring them back under it (a fork of the root whose own changes alone fit). A fork of a fork past the ceiling on its parent's own history is not told to update: that would only add to it |
+| `readsFrom` | `overlay`, or `postgres` past `GRAPHVER_FORK_REWIND_MAX` (§2) |
+| `countsCapped` | A count stopped at the ceiling: it is at least that |
+
+A fork in the trash says none of it (`null`).
+
+## 8. Upgrading
 
 - **Two migrations.** `20261030_1100_gv_fork_bases` creates `graphver.fork_bases` and gives every
   existing fork its fork-point row. `20261030_1200_ds_fork_of` adds
@@ -168,23 +319,26 @@ still reads exactly what it read when it was made.
 - **Existing forks** get their data source on the reaper's first pass after the upgrade, if their
   parent's data source still exists. A fork already in the trash gets none and is purged as before.
 - **The data-source routes refuse fork rows** (`use_fork_endpoints`, `fork_settings_follow_parent`,
-  `fork_has_no_store`): use the fork routes, and change settings on the parent.
-- **Lists leave forks out** unless asked with `includeForks=true`. Every data-source answer carries
-  `forkOf`.
+  `fork_has_no_store`, `fork_not_primary`): use the fork routes, and change settings on the parent.
+- **Lists leave forks out** unless asked with `includeForks=true`; the trash always does. Every
+  data-source answer carries `forkOf`.
+- **Free the old fork copies' memory**: set `GRAPHVER_DROP_FORK_COPIES=true` once every pod runs this
+  release (§6). Until then they stay, unread.
+- **New settings**: `GRAPHVER_FORK_REWIND_MAX` (200,000) and `GRAPHVER_FORK_REWIND_WARN` (50,000)
+  (§2, §7), and `GRAPHVER_OVERLAY_CACHE_ENTRIES` (400,000), which bounds the overlay deltas each
+  process keeps, drafts' as well as forks', at about 1.2 KB an entry: under 512 MB a process. Lower
+  it where a process has less to spare (§2).
 
-## 7. Coming next
+## 9. Coming next
 
-- **Overlay reads.** A fork's reads become an overlay on its parent's FalkorDB store, and new forks
-  stop getting a FalkorDB copy of their own. Until then a fork reads through Postgres, as it does
-  today.
 - **Update from parent.** A fork takes its parent's newer commits as a new `fork_bases` row, and a
   fork's pull request merges only when it is up to date with its parent.
-- **Residency** is §8–§17 below: classes, the capacity loop, loads, placement, Adopt and the
+- **Residency** is §10–§19 below: classes, the capacity loop, loads, placement, Adopt and the
   admin screens.
 
-## 8. Residency: which graphs FalkorDB holds
+## 10. Residency: which graphs FalkorDB holds
 
-**Checked against the code on 2026-11-01 (`563134462`).**
+**Checked against the code on 2026-11-01 (`cc060bc0b`, with `3b6589fab` merged).**
 
 FalkorDB holds a copy of each versioned graph's published `main` (doc 04); Postgres is the only
 source of truth. Residency decides which copies FalkorDB keeps, per graph by a class and per
@@ -195,23 +349,23 @@ Postgres until it is loaded again.
 |---|---|---|
 | **Always** | Never | When it is not in FalkorDB (set to Always while evicted, its key lost, or waiting for room), queued by the next capacity pass until it fits |
 | **Standard** (the default) | When unread for the Standard idle time (7 days), or earlier when its master is under memory pressure | On its next read |
-| **Coldline** | When unread for the Coldline idle time (1 hour), and first under memory pressure | Only when a request needs FalkorDB (§10), or on a canvas read of a graph larger than the canvas-load threshold |
+| **Coldline** | When unread for the Coldline idle time (1 hour), and first under memory pressure | Only when a request needs FalkorDB (§12), or on a canvas read of a graph larger than the canvas-load threshold |
 
 - **The idle clock starts when residency first runs.** A graph with no read on record is never idle:
   each pass starts the clock of up to 1000 such graphs (`last_read_at` = now). So on the day the flag
   is turned on every graph's idle time starts from that day, however long ago it was published, and
   a new graph's from its first pass.
 - **Only keys the platform minted are ever evicted** (`owns_falkor_graph`): a customer's own graph,
-  which version control was enabled on, behaves as Always until it is adopted (§16).
+  which version control was enabled on, behaves as Always until it is adopted (§18).
 - **Forks are outside residency.** A fork has no key of its own to evict, load or count; its reads
-  count for its root, whose key they read (§12), and the residency routes answer **409**
+  count for its root, whose key they read (§14), and the residency routes answer **409**
   `not_for_forks` for one. A fork the count budget evicted is reseeded by the poll as before.
 - **Who sets the class.** System administrators only, on Admin → Infrastructure → Versioned graphs
-  (§17) or `PUT /api/v1/admin/versioning/graphs/{gid}/residency {"class": "always" | "standard" |
+  (§19) or `PUT /api/v1/admin/versioning/graphs/{gid}/residency {"class": "always" | "standard" |
   "coldline"}`. A new graph gets the policy's default class. Workspaces see the class and the state
   on the graph's watermark and its Versioning tab.
 - **The flag.** None of this applies unless the deployment sets `GRAPHVER_RESIDENCY_ENABLED`
-  (§14). Off, eviction is the per-provider count budget, as before, and an evicted graph is reseeded
+  (§16). Off, eviction is the per-provider count budget, as before, and an evicted graph is reseeded
   by the projection poll within seconds.
 
 `graphver.projection_state` holds each graph's `residency`, `last_read_at`, `evicted_reason`
@@ -219,12 +373,12 @@ Postgres until it is loaded again.
 nothing writes yet), `size_bytes`, `size_measured_at` and `rehydrating_since`. Its `status` gains
 `rehydrating` (a load in flight) and `waiting_capacity` (a load no master has room for yet).
 
-## 9. The capacity loop
+## 11. The capacity loop
 
 The projection lane runs one capacity pass every policy interval (60 seconds by default), under a
 Postgres advisory lock so one worker leads; a pass another worker holds is skipped. A pass starts
 idle clocks, gathers, asks a pure planner (`residency_plan.plan`, no I/O) and acts. The policy
-preview (§11) and admission checks run the same planner.
+preview (§13) and admission checks run the same planner.
 
 **What it reads.** Every live graph that is not a fork and has a key of its own; every master of
 each of their providers' topologies, from the client's slot map (a standalone or Sentinel instance
@@ -264,11 +418,11 @@ nothing is evicted; loads and admission go on.
 re-checks all of the above (the rollup jobs and who reads the key in the management database, the
 rest in its guarded UPDATE), drops the key and records the reason. After its compare-and-swap
 commits it checks the read lease once more, and puts the graph back as it was when a read took it in
-between (§12). A drop that fails puts the key in `retired_keys`, due at once, for the retire pass to
+between (§14). A drop that fails puts the key in `retired_keys`, due at once, for the retire pass to
 drop. The graph then stays evicted: `project_graph` refuses to project or reseed an evicted graph,
 or one waiting for room, so none of its four callers (the poll, `project_now`, `rebuild_now`,
 `ensure_rebuilt`) brings it back; the poll does not select it; a rebuild asked for becomes a request
-for its load (§10).
+for its load (§12).
 
 **Measuring.** Each pass measures up to 16 resident keys that were never measured or were projected
 since their last measurement, those it is about to evict first: `GRAPH.MEMORY USAGE`, else, for a
@@ -276,25 +430,25 @@ load the same worker started on a master that evicted nothing that pass, how muc
 grew. `GRAPH.MEMORY USAGE` answers in whole MiB, so a key under 1 MiB reads 0: that is recorded as
 measured, with no size, and the graph keeps its estimate.
 
-## 10. Loading a graph again
+## 12. Loading a graph again
 
 **What asks for a load:**
 
 | What | Classes |
 |---|---|
-| A person's read of the graph (§12) | Standard, Always |
+| A person's read of the graph (§14) | Standard, Always |
 | A canvas read of a graph with more entities than the canvas-load threshold (its count, kept per head, else its last size over bytes per entity) | Coldline |
 | A request only FalkorDB can answer — deep search, node degrees, a native query — which answers **503** `graph_loading` with `Retry-After` (the loop's interval) meanwhile | Any |
 | Load now: `POST /api/v1/admin/versioning/graphs/{gid}/load` (recorded) | Any |
-| Setting the class to Always (§8, admission-checked first), and an Always graph out of FalkorDB on every pass | Always |
-| An operator's rebuild of the graph (`POST …/projection/rebuild`), a move of it (§15), a watermark reset that caught its load in flight | Any |
+| Setting the class to Always (§10, admission-checked first), and an Always graph out of FalkorDB on every pass | Always |
+| An operator's rebuild of the graph (`POST …/projection/rebuild`), a move of it (§17), a watermark reset that caught its load in flight | Any |
 
 A request is kept in the order it was first made (a sorted set on the broker). A broker that loses
 it loses nothing durable: the next read asks again, and a graph waiting for room or an Always graph
 out of FalkorDB is queued again — once, keeping its place.
 
 **Admission.** Requests are taken per provider, in the order they were made. Each goes to the
-master of its provider with the most room free to take a load (§15) and starts when its estimate
+master of its provider with the most room free to take a load (§17) and starts when its estimate
 times the headroom (×1.3) fits under that master's start mark after what is held there — the
 aggregation write governor's reservations, and the estimate times the headroom of each load and full
 projection (a rebuild, a move's reseed, a first seed) in flight on it. Fitting under the start mark
@@ -308,7 +462,7 @@ Always on a graph out of FalkorDB is checked the same way when it is set: **409*
 `capacity_insufficient` `{master, shortfallBytes, message}` when its load would not fit, and
 nothing changes; otherwise the class is set and its load asked for.
 
-**The load.** An admitted load pins a fresh platform key placed on the chosen master (§15), marks the
+**The load.** An admitted load pins a fresh platform key placed on the chosen master (§17), marks the
 graph `rehydrating` at watermark 0 with `rehydrating_since` (a compare-and-swap under the row's lock:
 one load per graph), and nudges the projection lane, whose next pass — single-flight under the
 graph's projection lock — is the load: a full seed of the key from Postgres, a page at a time above
@@ -325,13 +479,13 @@ saw within the hour with the job it already ran), and asks again under a new one
 goes without the stamp. Then the graph is `idle`, its eviction reason and `rehydrating_since` are
 cleared, and its idle time starts again from the load. A load that fails is retried by the poll after
 its backoff, still `rehydrating`. A load has no timeout: its reads stay on Postgres, and how long the
-oldest one has been under way is reported (§13).
+oldest one has been under way is reported (§15).
 
 **Nothing writes to FalkorDB without admission.** With residency on:
 
 - A move of a graph out of FalkorDB (evicted, waiting, or being loaded) changes only its pin and asks
   for its load again; a load in flight is fenced off (the epoch) and the graph evicted again, to wait
-  its turn. A move of a graph in FalkorDB is admission-checked on its new key's master (§15).
+  its turn. A move of a graph in FalkorDB is admission-checked on its new key's master (§17).
 - The watermark reset after a restore reseeds in place what FalkorDB holds; a load in flight it
   would have reseeded goes back to the queue instead. A graph out of FalkorDB is at watermark 0, and
   the reset never touches it.
@@ -340,7 +494,7 @@ oldest one has been under way is reported (§13).
   like any other, on its next read, or by the next pass for an Always graph. A customer's key and a
   fork are reseeded as before.
 
-## 11. The policy: every value
+## 13. The policy: every value
 
 Every value is changed live by a system administrator, with no redeploy, and stored on
 `platform_settings` (migration `20261030_1400_residency_policy`). Unset is the environment's
@@ -381,7 +535,7 @@ Routes, under `/api/v1/admin/versioning`, `system:admin` only and never with an 
   label, bytes, reason}], loads: [...], waits: [{..., reason, shortfallBytes}]}], evictions,
   evictedBytes, loads}`. Every master of each provider holding a versioned graph is listed.
 
-## 12. Read tracking and the read lease
+## 14. Read tracking and the read lease
 
 `ContextEngine` calls `residency.on_read` once for each engine it builds over a versioned graph,
 before it reads the graph's watermark. Live exports and the v2 router build their engine with the
@@ -402,7 +556,7 @@ reads through.
   UPDATE of `last_read_at`, which never moves a read back and passes over a row another process's
   flush holds (rows in id order, `SKIP LOCKED`: two flushes never wait on each other). A process
   that stops loses at most a minute of reads.
-- **A read of a graph out of FalkorDB** is served from Postgres and asks for its load (§10), never
+- **A read of a graph out of FalkorDB** is served from Postgres and asks for its load (§12), never
   waiting on the broker more than about 100 ms. For the rest of the request the graph is known to be
   out (`residency.READING`), so deep search and node degrees answer **503** `graph_loading`
   `{retryAfter, message}` with `Retry-After`, and ask for the load; native queries answer **503**
@@ -410,7 +564,7 @@ reads through.
 - **Cost.** A person's read of a resident graph costs one small read of the graph's state (measured:
   1.4 ms here) and, at most every 30 seconds per graph per process, one broker round trip.
 
-## 13. Health and metrics
+## 15. Health and metrics
 
 - **The watermark** (`GET …/watermark`, and every route that returns one) carries `residency` (the
   class), `residencyState` (`resident`, `evicted`, `rehydrating` or `waiting_capacity`),
@@ -434,7 +588,7 @@ reads through.
 | `versioning_residency_load_waits_total` | `reason` (`capacity`, `queued`, `unmeasured`, `unsized`, or the master's hold: `fork`, `loading`, `memory`) | Loads that began to wait for room |
 | `versioning_residency_oldest_rehydrating_seconds` | — | How long the oldest load in flight has been under way (0: none) — a load has no timeout |
 
-## 14. Turning residency on
+## 16. Turning residency on
 
 - **Two migrations.** `20261030_1300_gv_ps_residency` (graphver: the residency columns, their
   checks, and the two statuses) follows `20261030_1200_ds_fork_of`; with a separate
@@ -461,7 +615,7 @@ reads through.
   its `maxmemory`. A graph whose load had published its seed keeps reading `rehydrating` until its
   next projection pass, while its reads come from FalkorDB.
 
-## 15. Placement: each new key on the master with the most room
+## 17. Placement: each new key on the master with the most room
 
 A platform key's hash tag alone decides its cluster slot, so a new key is placed by choosing its
 tag: on the master with the most room under its start mark after what is held there (the
@@ -471,19 +625,19 @@ that exists nowhere on the provider, is none of its retired keys, and hashes to 
 (`keymigrate.placed_key`, at most 4096 tries; one master: simply the first free key). The master's
 slots come from the client's slot map (`shard_capacity.master_slots`).
 
-- **A reload after eviction** goes onto a fresh key placed this way (§10), whatever master its old
+- **A reload after eviction** goes onto a fresh key placed this way (§12), whatever master its old
   key was on. A graph whose rollups live in a dedicated graph keeps its key.
 - **A move without a key**, with residency on, is placed the same way (`residency.place_key`), and
   records the master in its `shard_map`; it is admission-checked on that master first (409
   `capacity_insufficient`), since the old key stands until the new one has caught up. A move with a
   key is checked on the master that key hashes to. A graph out of FalkorDB only changes its pin.
-- **Adopt** (§16) places the platform key the same way.
+- **Adopt** (§18) places the platform key the same way.
 - **A graph's first key** is not placed: a blank model's key is its data source's name
   (`blank_<ds>`, or the one its creator chose), and a converted source's is the customer's own until
   it is adopted. The first reload after an eviction places it.
 - **Customer keys never move**, except by Adopt.
 
-## 16. Adopt: a customer's key onto a platform key
+## 18. Adopt: a customer's key onto a platform key
 
 `POST /api/v1/admin/versioning/graphs/{gid}/adopt` (system administrators; Admin → Infrastructure →
 Versioned graphs → **Adopt…**): a graph that projects into the customer's own FalkorDB key moves
@@ -508,7 +662,7 @@ evicted, loaded and moved like any platform copy.
 - Recorded as `platform.versioning.projection_adopted` `{graphId, workspaceId, dataSourceId, from,
   to, externalDrift}`. The reseed is scheduled at once.
 
-## 17. The admin screens
+## 19. The admin screens
 
 Admin → Infrastructure → **Versioned graphs** (system administrators; it opens from the projection
 panel's **All versioned graphs**):
@@ -517,7 +671,7 @@ panel's **All versioned graphs**):
   **Evicted**, **Loading** (with when it started), **Waiting for room** — and, for a graph that is not
   a fork, a class selector (Always may be refused when its master has no room: the server's message
   shows on the row), **Load now** on a graph out of FalkorDB, and **Adopt…** on a customer's key,
-  behind a confirmation that says what changes (§16). The state filter takes **Loading** and
+  behind a confirmation that says what changes (§18). The state filter takes **Loading** and
   **Waiting for room**.
 - **Residency & eviction** opens the policy card: every value with the one in force, its default and
   its unit, **Reset** (saves `-1`), each master's memory as a gauge with the start and stop marks

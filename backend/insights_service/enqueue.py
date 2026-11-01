@@ -71,7 +71,14 @@ _REDIS_BENIGN_ERRORS: tuple = (
 # Why no message was enqueued. ``dedup`` (a job for this scope is already
 # in flight) is the normal steady-state outcome and must be readable
 # distinctly from ``redis_down`` (Redis unreachable — degraded path).
-EnqueueOutcome = Literal["enqueued", "dedup", "redis_down", "error"]
+EnqueueOutcome = Literal["enqueued", "dedup", "redis_down", "error", "fork"]
+
+
+def polls_stats(data_source_id: str) -> bool:
+    """Whether a data source's stats are polled. A fork's (``dsfork_…``) are not: its counts are
+    not its root's store's counts plus its patch set, and its reader would compose the whole graph,
+    its parent's included, to count it. A stats read of a fork says so (``stats_cache``)."""
+    return not data_source_id.startswith("dsfork_")
 
 
 # ── Core: kind-generic enqueue ───────────────────────────────────────
@@ -185,7 +192,7 @@ async def enqueue_stats_job(
     user-facing response should carry ``status=computing`` — the job
     will complete whether we enqueued it this turn or not.
     """
-    if not data_source_id or not workspace_id:
+    if not data_source_id or not workspace_id or not polls_stats(data_source_id):
         return None
     envelope = StatsJobEnvelope(
         data_source_id=data_source_id,
@@ -207,6 +214,8 @@ async def enqueue_stats_job_safe_ex(
     """
     if not data_source_id or not workspace_id:
         return None, "error"
+    if not polls_stats(data_source_id):
+        return None, "fork"
     envelope = StatsJobEnvelope(
         data_source_id=data_source_id,
         workspace_id=workspace_id,
@@ -249,7 +258,7 @@ async def mark_stats_changed(data_source_id: str, workspace_id: str) -> None:
     here (Redis blip, cooldown key wiped, worker down). Advisory Redis
     state only; Postgres remains authoritative.
     """
-    if not data_source_id or not workspace_id:
+    if not data_source_id or not workspace_id or not polls_stats(data_source_id):
         return
     try:
         # Counts-neutral graph edits (re-parenting) must still force a

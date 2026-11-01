@@ -1,7 +1,7 @@
 """Placement by versioned graph id reads the key and provider from ``projection_state`` — where the
-projector writes — so a fork answers with its own ``__fork_`` key rather than its parent data
-source's graph, and only to a caller who may read the graph's workspace. Needs Postgres
-(GRAPHVER_E2E=1)."""
+projector writes — so the copy an earlier release made of a fork answers with its own ``__fork_``
+key rather than its parent data source's graph, and only to a caller who may read the graph's
+workspace. Needs Postgres (GRAPHVER_E2E=1)."""
 import asyncio
 import os
 
@@ -54,6 +54,11 @@ async def _run(monkeypatch) -> None:
         data_source_id=f"ds_pl_{sfx}", workspace_id="ws1",
         falkor_graph_name=f"customer_{sfx}", falkor_provider=prov))["graph_id"]
     fork = (await svc.fork_graph(parent_graph_id=pinned, workspace_id="ws1", actor="u_test"))["graph_id"]
+    async with graphver_session() as s:              # its copy, as an earlier release made it
+        await s.execute(update(models.ProjectionStateORM)
+                        .where(models.ProjectionStateORM.graph_id == fork)
+                        .values(falkor_graph_name=f"customer_{sfx}__fork_{fork}",
+                                falkor_provider=prov, owns_falkor_graph=True))
     unprojected = (await svc.create_graph(data_source_id=f"ds_up_{sfx}", workspace_id="ws1"))["graph_id"]
     trashed = (await svc.create_graph(
         data_source_id=f"ds_tr_{sfx}", workspace_id="ws1",

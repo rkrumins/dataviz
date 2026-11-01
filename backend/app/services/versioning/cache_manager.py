@@ -265,17 +265,21 @@ class CacheManager:
     async def ensure_rebuilt(self, graph_id: str) -> bool:
         """If the graph is evicted, rebuild it from Postgres under a single-flight
         lock. Returns ``True`` iff THIS caller performed the rebuild (concurrent
-        callers return ``False`` while the holder rebuilds). With residency on, an evicted graph
-        (or one waiting for room) is not rebuilt here: its load is asked for, for the capacity
-        loop to admit (``residency.request_load``)."""
+        callers return ``False`` while the holder rebuilds). Never a fork: it has no FalkorDB
+        copy to rebuild. With residency on, an evicted graph (or one waiting for room) is not
+        rebuilt here: its load is asked for, for the capacity loop to admit
+        (``residency.request_load``)."""
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
-            if ps is not None and config.RESIDENCY_ENABLED:
+            graph = await s.get(GraphORM, graph_id)
+            if ps is None or graph is None or graph.fork_parent_graph_id:
+                return False
+            if config.RESIDENCY_ENABLED:
                 if ps.status in ("evicted", "waiting_capacity"):
                     from .residency import request_load
                     await request_load(graph_id)
                 return False
-            if ps is None or ps.status != "evicted":
+            if ps.status != "evicted":
                 return False
         r = get_broker_redis()
         got = await r.set(_lock_key(graph_id), "1", nx=True, ex=config.REBUILD_LOCK_TTL)

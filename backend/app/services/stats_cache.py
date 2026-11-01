@@ -52,12 +52,14 @@ from backend.app.config import resilience
 from backend.app.db.models import DataSourcePollingConfigORM
 from backend.app.db.repositories import data_source_repo
 from backend.app.db.repositories.stats_repo import get_data_source_stats
-from backend.insights_service.enqueue import enqueue_stats_job_safe_ex
+from backend.insights_service.enqueue import enqueue_stats_job_safe_ex, polls_stats
 
 logger = logging.getLogger(__name__)
 
 
-CacheStatus = Literal["fresh", "stale", "computing", "partial", "error"]
+CacheStatus = Literal["fresh", "stale", "computing", "partial", "error", "unavailable"]
+#: Why a fork's stats read answers ``unavailable`` (``missing_fields``): none are polled for it.
+FORK_STATS = "not_available_for_a_fork"
 CacheSource = Literal["postgres", "ontology", "none", "error"]
 StatsFieldName = Literal["node_stats", "schema_stats", "ontology_metadata", "graph_schema"]
 StatsServiceStatus = Literal["healthy", "lagging", "unreachable", "unknown"]
@@ -224,7 +226,13 @@ def build_computing_envelope(
     ``enqueue_stats_job_safe``. ``None`` covers both "dedup claim
     already held" (another job in flight) and "Redis unreachable" — the
     frontend treats both identically (poll and retry).
+
+    A fork's data source has no stats polled (``polls_stats``): it answers ``unavailable``, with
+    no job to follow, rather than ``computing`` for a poll that never lands.
     """
+    if not polls_stats(ds_id):
+        return build_envelope(None, build_meta(
+            status="unavailable", source="none", data_source_id=ds_id, missing_fields=[FORK_STATS]))
     job_id = msg_id or f"dedup:{ds_id}"
     poll_url = f"/api/v1/{ws_id}/graph/introspection/refresh/{job_id}" if ws_id else None
     meta = build_meta(

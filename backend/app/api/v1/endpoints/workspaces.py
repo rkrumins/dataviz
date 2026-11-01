@@ -9,6 +9,7 @@ caller's effective permissions so non-admins only see workspaces they
 have a binding into. The legacy "everyone sees everything" behaviour
 returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=false``.
 """
+import asyncio
 import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
@@ -76,7 +77,7 @@ from backend.common.models.management import (
     DataSourceMoveRequest,
     DataSourceTransferResponse,
 )
-from backend.insights_service.enqueue import enqueue_stats_job_safe
+from backend.insights_service.enqueue import enqueue_stats_job_safe, polls_stats
 
 from backend.app.services.versioning import config as gv_config
 from backend.app.services.versioning.errors import LockBusy
@@ -931,17 +932,19 @@ async def update_data_source(
         await enqueue_stats_job_safe(ds_id, workspace_id)
         # Ontology (re)assignment / projection changes alter how reads
         # resolve — invalidate the process-wide resolved-ontology cache.
+        # The source and its forks side by side: in a broker outage each waits out its retries,
+        # and one after another a parent with forks outlived the request timeout.
         from backend.app.services.resolved_ontology_cache import bump_ontology_generation
-        for changed_id in (ds_id, *forks):
-            await bump_ontology_generation(workspace_id, changed_id)
+        await asyncio.gather(*(bump_ontology_generation(workspace_id, changed_id)
+                               for changed_id in (ds_id, *forks)))
         # Cached hierarchy reads were answered under the old ontology / name
         # mapping (entity types, display names) — drop them. Only when one of
         # them really moved: the edit form re-sends the current ontologyId with
         # a rename. Never raises.
         if ds.ontology_id != old_ontology_id or mapping_changed:
             from backend.app.services.graph_cache import invalidate_hierarchy_reads
-            for changed_id in (ds_id, *forks):
-                await invalidate_hierarchy_reads(workspace_id, changed_id)
+            await asyncio.gather(*(invalidate_hierarchy_reads(workspace_id, changed_id)
+                                   for changed_id in (ds_id, *forks)))
 
     # A mapping change makes the materialized AGGREGATED edges stale, and the
     # stamp's NULL-only fill means a re-run is required to rewrite them.
@@ -1047,8 +1050,9 @@ async def remove_data_source(
             session, ds_id, actor=_user.id, note="The data source was deleted.",
         )
         # Its forks are all in the trash, and their purges are queued with its: their rows go
-        # with it, as its own does before its graph is gone.
+        # with it, as its own does before its graph is gone, and the views on them as its own.
         if forks:
+            await fork_sources.views_to_parent(session, forks, going=[ds_id])
             await session.execute(
                 delete(WorkspaceDataSourceORM).where(WorkspaceDataSourceORM.id.in_(forks)))
         await data_source_repo.delete_data_source(session, ds_id)
@@ -1173,7 +1177,8 @@ async def set_primary_data_source(
     _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Promote a data source to primary within its workspace."""
+    """Promote a data source to primary within its workspace. Never a fork's (409)."""
+    fork_sources.refuse_primary(await data_source_repo.get_data_source_orm(session, ds_id))
     success = await data_source_repo.set_primary(session, workspace_id, ds_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
@@ -1519,11 +1524,13 @@ async def get_cached_schema(
 
     synthetic = await build_synthetic_schema(session, ds_id)
     if synthetic:
+        polled = polls_stats(ds_id)               # a fork's: no refresh comes to follow
         meta = build_meta(
             status="partial", source="ontology",
             data_source_id=ds_id,
             missing_fields=SYNTHETIC_SCHEMA_MISSING_FIELDS,
-            refreshing=True, job_id=job_id, poll_url=poll_url,
+            refreshing=polled, job_id=job_id if polled else None,
+            poll_url=poll_url if polled else None,
         )
         return JSONResponse(content=build_envelope(synthetic, meta))
 

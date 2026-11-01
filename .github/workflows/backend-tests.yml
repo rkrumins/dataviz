@@ -33,7 +33,10 @@ jobs:
   connectivity-suite:
     name: Backend connectivity + provider suite (required)
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # Both steps took 19 to 24 min on main and the PRs on it (Nov 2026), and no broker runs here, so
+    # a test that touches it waits out the client's retries; at 25 a job was cancelled as its last
+    # step ended.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

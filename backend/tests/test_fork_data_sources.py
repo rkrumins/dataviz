@@ -59,6 +59,7 @@ def test_a_fork_row_takes_its_parents_governing_settings():
 
 
 # ── governing settings follow the parent ─────────────────────────────────────────────────────
+import asyncio  # noqa: E402
 import time  # noqa: E402
 
 import pytest  # noqa: E402
@@ -128,6 +129,30 @@ async def test_a_parents_settings_reach_its_forks_and_theirs(test_client, db_ses
             c: getattr(parent, c) for c in fork_sources.GOVERNING}
         assert fork.ontology_id == "ont_2" and fork.draft_levels == "private_only"
     assert (a.label, b.label) == ("Sales · A", "Sales · A · B")       # a label is a row's own
+
+
+async def test_a_parents_change_drops_its_forks_cached_reads_side_by_side(
+        test_client, db_session, forks, versioning_on, monkeypatch):
+    # In a broker outage each refresh waits out its retries: one after another, a parent with forks
+    # took that wait once per fork, and its edit outlived the request timeout.
+    from backend.app.services import graph_cache, resolved_ontology_cache
+    seen: dict = {}
+    everyone = {"ontology": asyncio.Event(), "hierarchy": asyncio.Event()}
+
+    def _all_at_once(kind):
+        async def refresh(workspace_id, data_source_id):
+            seen.setdefault(kind, []).append(data_source_id)
+            if len(seen[kind]) == 3:
+                everyone[kind].set()
+            await asyncio.wait_for(everyone[kind].wait(), timeout=2)   # one at a time never gets there
+        return refresh
+
+    monkeypatch.setattr(resolved_ontology_cache, "bump_ontology_generation", _all_at_once("ontology"))
+    monkeypatch.setattr(graph_cache, "invalidate_hierarchy_reads", _all_at_once("hierarchy"))
+    r = await test_client.put(f"{_DS}/ds_parent", json={"ontologyId": "ont_2", "nameProperty": "title"})
+    assert r.status_code == 200, r.text
+    assert {k: sorted(v) for k, v in seen.items()} == {
+        k: ["ds_parent", "dsfork_a", "dsfork_b"] for k in ("ontology", "hierarchy")}
 
 
 @pytest.mark.parametrize("field, value", [
@@ -375,3 +400,28 @@ async def test_the_generic_lifecycle_routes_refuse_a_fork(test_client, db_sessio
     refused(await test_client.post(f"{_DS}/dsfork_a/restore"))
     (a,) = await _rows(db_session, "dsfork_a")
     assert a.workspace_id == WS and a.deleted_at is not None
+
+
+async def test_the_trash_leaves_a_fork_out(test_client, db_session, forks):
+    """A trashed fork's row was listed in the trash as restorable, and its Restore button answered
+    409 use_fork_endpoints: a fork comes back through the fork endpoints, with its graph."""
+    db_session.add(WorkspaceDataSourceORM(id="ds_gone", workspace_id=WS, provider_id="prov_f",
+                                          graph_name="gone", label="Gone",
+                                          deleted_at="2026-10-30T00:00:00+00:00"))
+    (a,) = await _rows(db_session, "dsfork_a")
+    a.deleted_at = "2026-10-30T00:00:00+00:00"
+    await db_session.commit()
+    r = await test_client.get(f"{_DS}/deleted")
+    assert r.status_code == 200, r.text
+    assert [d["id"] for d in r.json()] == ["ds_gone"]
+
+
+async def test_a_fork_is_never_made_the_workspaces_default(test_client, db_session, forks):
+    """Set-primary made a fork's row the default, which every default lookup skips: the workspace
+    fell back to its oldest source, and the views that follow the default with it."""
+    r = await test_client.post(f"{_DS}/dsfork_b/set-primary")
+    assert r.status_code == 409, r.text
+    assert r.json()["detail"]["type"] == "fork_not_primary", r.text
+    (b,) = await _rows(db_session, "dsfork_b")
+    assert not b.is_primary
+    assert (await test_client.post(f"{_DS}/ds_parent/set-primary")).status_code == 200

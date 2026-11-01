@@ -24,7 +24,7 @@ async def _run(monkeypatch) -> tuple:
     proj = FalkorProjector(graph_client_factory=_unused_client_factory,
                            session_factory=_unused_session)
 
-    async def fake_pg_counts(graph_id, main_id, to_seq, is_fork):
+    async def fake_pg_counts(graph_id, main_id, to_seq):
         return (5, 5)
 
     async def fake_falkor_counts(client, owned=True):
@@ -36,7 +36,7 @@ async def _run(monkeypatch) -> tuple:
     # from_seq=0 skips the reseed branch (only taken when from_seq > 0); PG (5,5) > Falkor
     # (3,3) skips the tombstone-sweep/"Falkor has extra" branches — landing directly on the
     # "still mismatched after heal" fallthrough, the one path that used to return a bare str.
-    return await proj._verify_and_heal(None, "g1", "main1", 0, 10, False)
+    return await proj._verify_and_heal(None, "g1", "main1", 0, 10)
 
 
 def test_verify_and_heal_fallthrough_returns_two_tuple(monkeypatch):

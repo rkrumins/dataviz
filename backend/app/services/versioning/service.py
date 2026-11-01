@@ -109,6 +109,8 @@ class _Stored(NamedTuple):
     type: Optional[str]             # a node's entityType, an edge's edgeType
     src: Optional[str] = None       # an edge's ends, from its version row
     tgt: Optional[str] = None
+    name: Optional[str] = None      # a node's displayName and qualifiedName, from its version row
+    qname: Optional[str] = None
 
 
 class _Head(NamedTuple):
@@ -141,10 +143,11 @@ def _heads_of(heads, rows: Dict[str, tuple]) -> Dict[str, _Head]:
     return out
 
 
-def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, before) -> tuple:
+def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, held) -> tuple:
     """The draft's own part of :meth:`GraphVersioningService.branch_overlay_delta`, from hashes and
     version-row columns: ``(nodesUpsert, nodesModified, nodesRemove, edgesUpsert, edgesRemove,
-    nodesNew)`` — pure CPU, run in a thread."""
+    nodesNew)`` — pure CPU, run in a thread. ``held``: each of the draft's edges as its store holds
+    it, main at its head, which a removal takes out and an edit counts against (``was``)."""
     nodes_upsert: List[dict] = []
     nodes_modified: List[dict] = []    # {urn, entityId}: the reader loads the payload it serves
     nodes_remove: List[dict] = []
@@ -167,7 +170,7 @@ def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, befo
         else:                                          # modified → loaded when a read serves it
             nodes_modified.append({"entityId": eid, "urn": h.urn or b.urn or f"gv:{eid}"})
     for eid in edge_ids:
-        h, b = heads[eid], before.get(eid)
+        h, b = heads[eid], held.get(eid)
         if not h.live and b is None:
             continue
         # Edge endpoints are entity ids, read as urns, as _graphedge_dict gives them.
@@ -176,8 +179,69 @@ def _overlay_patch(heads: Dict[str, _Head], node_ids, edge_ids, base_nodes, befo
                                  "edgeType": b.type or "unknown"})
         else:                                          # added/modified → loaded when a read serves it
             edges_upsert.append({"id": eid, "sourceUrn": h.src or "", "targetUrn": h.tgt or "",
-                                 "edgeType": h.type or "unknown", "lazy": True})
+                                 "edgeType": h.type or "unknown", "lazy": True, **_was(b)})
     return nodes_upsert, nodes_modified, nodes_remove, edges_upsert, edges_remove, nodes_new
+
+
+def _was(held: Optional[_Stored]) -> dict:
+    """An overlay edge's ``was``: where the base holds it (its ends and type), so a reader serves
+    the overlay's value and counts the edge where it runs — once, never on top of the base's count.
+    Nothing for an edge the base does not hold."""
+    if held is None:
+        return {}
+    return {"was": {"sourceUrn": held.src or "", "targetUrn": held.tgt or "",
+                    "edgeType": held.type or "unknown"}}
+
+
+#: The lists of a reader-shaped patch set (:meth:`GraphVersioningService.branch_overlay_delta`),
+#: and what each entry is keyed by.
+_PATCH_KEYS = (("nodesUpsert", "entityId"), ("nodesModified", "entityId"),
+               ("nodesRemove", "entityId"), ("edgesUpsert", "id"), ("edgesRemove", "id"))
+
+
+def _fork_patch(ids, ours: Dict[str, _Stored], theirs: Dict[str, _Stored]) -> Dict[str, list]:
+    """A fork's ``main`` against its root's store, for ``ids``: ``ours`` the fork's live value of
+    each at its head, ``theirs`` the root's at the root's head (absent: not live there) — as
+    :func:`_overlay_patch` gives a draft's, from hashes and version-row columns. Only the fork has
+    it: created (a skeleton); only the root: removed; both, as different values: modified; equal:
+    nothing. Pure CPU, run in a thread."""
+    out: Dict[str, list] = {key: [] for key, _k in _PATCH_KEYS}
+    out["nodesNew"] = []
+    for eid in ids:
+        f, r = ours.get(eid), theirs.get(eid)
+        if f is None and r is None:
+            continue
+        if f is not None and r is not None and f.content_hash == r.content_hash:
+            continue
+        if (f or r).kind == "node":
+            if r is None:
+                urn = f.urn or f"gv:{eid}"
+                out["nodesUpsert"].append({"urn": urn, "entityId": eid,
+                                           "entityType": f.type or "unknown",
+                                           "displayName": f.name or "", "qualifiedName": f.qname,
+                                           "lazy": True})
+                out["nodesNew"].append(urn)
+            elif f is None:
+                out["nodesRemove"].append({"entityId": eid, "urn": r.urn or f"gv:{eid}"})
+            else:
+                out["nodesModified"].append({"entityId": eid, "urn": f.urn or r.urn or f"gv:{eid}"})
+        elif f is None:
+            out["edgesRemove"].append({"id": eid, "sourceUrn": r.src or "", "targetUrn": r.tgt or "",
+                                       "edgeType": r.type or "unknown"})
+        else:
+            out["edgesUpsert"].append({"id": eid, "sourceUrn": f.src or "", "targetUrn": f.tgt or "",
+                                       "edgeType": f.type or "unknown", "lazy": True, **_was(r)})
+    return out
+
+
+def _extended_patch(prev: Mapping[str, list], window: Mapping[str, list], ids: set) -> Dict[str, list]:
+    """``prev``, a fork's patch set, with what it said of ``ids`` replaced by ``window``'s — the
+    entities the root changed since ``prev`` was built, classified again. Pure CPU."""
+    out: Dict[str, list] = {key: [x for x in prev[key] if x[k] not in ids] + window[key]
+                            for key, k in _PATCH_KEYS}
+    gone = {n["urn"] for n in prev["nodesUpsert"] if n["entityId"] in ids}
+    out["nodesNew"] = [u for u in prev["nodesNew"] if u not in gone] + window["nodesNew"]
+    return out
 
 
 class _SquashRow(NamedTuple):
@@ -448,6 +512,14 @@ _MACHINE_COMMIT_KINDS = ("genesis", "import", "sync")
 # How many of others' newest commits a freshness poll reads for "saved since": a client that sends an
 # old head costs no more than one that keeps up (branch_freshness).
 _SAVED_SINCE_SCAN = 200
+
+# What a live fork in a fork list says of how far it is from its parent (_fork_distance).
+_FORK_DISTANCE = ("ahead", "behind", "update_recommended", "reads_from", "counts_capped")
+
+# A fork's candidate count (_fork_candidates) per version of the fork and ceiling, as each engine a
+# request builds for a fork asks for it (fork_reads_from): at 145,000 candidates it costs 70 ms.
+_FORK_COUNTS: "OrderedDict[tuple, int]" = OrderedDict()
+_FORK_COUNTS_KEPT = 4096
 
 # An "enable version control" job in one of these states means its graph isn't a graph yet: the
 # head is parked at genesis and the import is half-written. A failed job counts — it must be
@@ -2775,20 +2847,10 @@ class GraphVersioningService:
             s.add(fork_point)
             await s.flush()                      # materialise fork_point.id before linking
             main.head_commit_id = fork_point.id
-            parent_ps = await s.get(ProjectionStateORM, parent_graph_id)
-            # Forks get their own FalkorDB graph — but ONLY when the parent has a real one.
-            # An unpinned parent (test-created, or pre-injection) has no FalkorDB readers, so
-            # its fork must stay unpinned too: deriving a synthetic "gv_<parent>__fork_<id>"
-            # name would make the projection worker materialise an orphan key nothing reads.
-            parent_name = parent_ps.falkor_graph_name if parent_ps else None
-            s.add(ProjectionStateORM(
-                graph_id=fork.id, projected_commit_seq=0, target_commit_seq=base_seq,
-                falkor_graph_name=(f"{parent_name}__fork_{fork.id}" if parent_name else None),
-                falkor_provider=(parent_ps.falkor_provider if parent_ps else None),  # same instance as parent
-                # WE minted this name (`…__fork_<id>`), so the key is ours and nobody else's — the
-                # one case where ownership is provable rather than merely asserted.
-                owns_falkor_graph=bool(parent_name),
-            ))
+            # A fork has no FalkorDB copy: it reads through its root's store, its patch set over
+            # it. Its row names no key, as every graph has one (the watermark reads its root's).
+            s.add(ProjectionStateORM(graph_id=fork.id, projected_commit_seq=0,
+                                     target_commit_seq=base_seq, owns_falkor_graph=False))
             return {
                 "graph_id": fork.id,
                 "data_source_id": fork.data_source_id,
@@ -2899,7 +2961,8 @@ class GraphVersioningService:
     async def list_forks(self, *, graph_id: str, workspace_id: str, limit: int) -> List[dict]:
         """A graph's direct forks, newest first, live and trashed: when a trashed one was
         deleted and by whom, whether its purge is queued (no undo then), and when its undo
-        window (``config.PURGE_GRACE_DAYS``) ends."""
+        window (``config.PURGE_GRACE_DAYS``) ends. A live one says how far it is from this graph
+        (:meth:`_fork_distance`)."""
         purging = select(JobORM.id).where(JobORM.job_type == PURGE_JOB_TYPE,
                                           JobORM.graph_id == GraphORM.id).exists()
         async with self._session() as s:
@@ -2908,13 +2971,52 @@ class GraphVersioningService:
                     GraphORM.fork_parent_graph_id == graph_id,
                     GraphORM.workspace_id == workspace_id)
                 .order_by(GraphORM.created_at.desc(), GraphORM.id.desc()).limit(limit))).all()
+            distance = {g.id: await self._fork_distance(s, g) for g, _p in rows
+                        if g.deleted_at is None}
         return [{
             **self._graph_meta(g), "deleted_at": g.deleted_at, "deleted_by": g.deleted_by,
             "purging": bool(p),
             "purge_after": (datetime.fromisoformat(g.deleted_at)
                             + timedelta(days=config.PURGE_GRACE_DAYS)).isoformat()
             if g.deleted_at else None,
+            **distance.get(g.id, dict.fromkeys(_FORK_DISTANCE)),
         } for g, p in rows]
+
+    async def _fork_distance(self, s, fork: GraphORM) -> Dict[str, object]:
+        """How far a fork is from its parent: ``ahead``, the entities it changed since its last
+        merged review, or its fork point (:meth:`_fork_merge_base`); ``behind``, those its parent
+        changed that it has not taken in — the parent's window since the base the fork reads
+        (:func:`fork_base_at`); ``update_recommended`` for what Update from parent can fix: when
+        that reaches ``config.FORK_REWIND_WARN``, or when the fork's reads are past the ceiling,
+        which ``reads_from`` says (``overlay`` | ``postgres``, as :meth:`fork_reads_from`), and
+        taking the parent's changes in would bring it back under: a fork of the root whose own
+        changes alone fit. A fork of a fork reads its parent's own history up to its base, which
+        taking in more of it can only grow. Each count stops at the ceiling,
+        ``config.FORK_REWIND_MAX`` (``counts_capped``)."""
+        cap = config.FORK_REWIND_MAX
+        main_id = await self._main_branch_id(s, fork.id)
+        head = fork.main_head_commit_seq
+        ahead = await self._own_change_count(
+            s, fork.id, main_id, await self._fork_merge_base(s, fork), head, cap)
+        parent = await s.get(GraphORM, fork.fork_parent_graph_id)
+        behind = await self._window_count(
+            s, parent.id, await self._main_branch_id(s, parent.id),
+            await fork_base_at(s, fork, head), parent.main_head_commit_seq, cap)
+        n = await self._fork_candidates(s, fork, main_id, cap)
+        past = n > cap
+        # Of a fork of the root, what its reads overlay beyond its own changes is ``behind``.
+        fixable = past and parent.fork_parent_graph_id is None and n - behind <= cap
+        return {"ahead": min(ahead, cap), "behind": min(behind, cap),
+                "update_recommended": fixable or behind >= config.FORK_REWIND_WARN,
+                "reads_from": "postgres" if past else "overlay",
+                "counts_capped": ahead > cap or behind > cap}
+
+    async def _window_count(self, s, graph_id: str, branch_id: str, lo: int, hi: int,
+                            cap: int) -> int:
+        """:meth:`_count_changed_in_window`, each graph's count stopping past ``cap``."""
+        n = await self._own_change_count(s, graph_id, branch_id, lo, hi, cap)
+        parent = await self._parent_window(s, graph_id, branch_id, lo, hi)
+        return n + (await self._window_count(s, *parent, cap) if parent is not None else 0)
 
     async def approve_pr(
         self, *, pr_id: str, actor: str, expected_head_commit_id: Optional[str] = None,
@@ -3710,7 +3812,30 @@ class GraphVersioningService:
 
     async def projection_watermark(self, graph_id: str) -> Dict[str, object]:
         """Read freshness for a graph's FalkorDB projection — attached to reads so
-        a client knows whether it's seeing the latest committed `main`."""
+        a client knows whether it's seeing the latest committed `main`.
+
+        A fork has no projection: it reads through its root's store (``reads_through``, the root's
+        graph id), so its watermark is its root's — the root's revisions, freshness and state —
+        naming no key, owning none: nothing reads a fork's key through it, and no screen shows a
+        fork behind on a projection it does not have. Its route is where its reads come from
+        (``reads_from``, :meth:`fork_reads_from`): past the ceiling its own layered reads in
+        Postgres serve its main, whatever the root's projection holds."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            root = graph
+            while root is not None and root.fork_parent_graph_id:
+                parent = await s.get(GraphORM, root.fork_parent_graph_id)
+                if parent is None:              # purged under it (an earlier release did)
+                    raise ValueError(f"the graph fork {root.id} was forked from is gone")
+                root = parent
+        if root is not None and root.id != graph_id:
+            wm = await self.projection_watermark(root.id)
+            reads_from = await self.fork_reads_from(graph_id)
+            if reads_from == "postgres":
+                wm["read_route"] = {**wm["read_route"], "main": "postgres"}
+            return {**wm, "reads_through": root.id, "reads_from": reads_from,
+                    "falkor_graph_name": None, "falkor_provider": None,
+                    "owns_falkor_graph": False, "retired_keys": [], "external_drift": None}
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
@@ -3827,7 +3952,7 @@ class GraphVersioningService:
         the full committed ``main`` window ``(0, target]`` into the real graph — idempotent
         MERGE/DETACH DELETE, so it converges to exactly committed main (deletes included), once.
         Returns the OLD name when it changed (so the caller can drop the now-orphaned graph), else
-        ``None``. A fork is left untouched — it legitimately owns its ``__fork_`` graph.
+        ``None``. A fork is left untouched — it has no FalkorDB graph of its own.
 
         Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
         unfinished, and when another versioned graph already projects into ``falkor_graph_name``
@@ -3870,7 +3995,7 @@ class GraphVersioningService:
 
         Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
         unfinished: a rebuild would wipe the data source's own FalkorDB graph and reseed it from a
-        main parked at genesis.
+        main parked at genesis. ``False`` for a fork, which has no FalkorDB copy to rebuild.
 
         With residency on, an evicted graph (or one waiting for room) is left as it is and its
         load asked for instead, for the capacity loop to admit (``residency.request_load``); a
@@ -3880,7 +4005,7 @@ class GraphVersioningService:
             await self._assert_not_bootstrapping(s, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
             graph = await s.get(GraphORM, graph_id)
-            if ps is None or graph is None:
+            if ps is None or graph is None or graph.fork_parent_graph_id:
                 return False
             if config.RESIDENCY_ENABLED and ps.status == "rehydrating":
                 return False
@@ -4208,28 +4333,42 @@ class GraphVersioningService:
         filter, so a stale revision can never shadow the current one. Bounded by ``limit`` and
         ordered by entity_id for a stable window — or, ``by_name``, by (display name, entity_id)
         in BYTE order with a missing name as "": exactly the order a caller then sorts in
-        Python, so a window of the first N ids holds the first N rows a page can need."""
-        latest = (
-            select(model)
-            .where(model.graph_id == graph_id, model.branch_id == branch_id,
-                   model.commit_seq <= seq)
-            .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
-            .distinct(model.entity_id)
-            .subquery()
-        )
-        stmt = select(latest.c.entity_id).where(latest.c.op != "delete")
-        if where is not None:
-            preds = where(latest.c)
-            if preds:
-                stmt = stmt.where(*preds)
-        if by_name:
-            stmt = stmt.order_by(func.coalesce(latest.c.display_name, "").collate("C"),
-                                 latest.c.entity_id.collate("C"))
-        else:
-            stmt = stmt.order_by(latest.c.entity_id)
-        if limit is not None:
-            stmt = stmt.limit(limit)
-        return list((await s.execute(stmt)).scalars().all())
+        Python, so a window of the first N ids holds the first N rows a page can need.
+
+        A fork's ``main`` lists what it inherited too: each graph its reads compose
+        (:meth:`_layers`), an entity decided by the nearest that has a row of it; the window is
+        the first rows of each, merged."""
+        layers = await self._layers(s, graph_id, branch_id, seq)
+        found: List[tuple] = []
+        for i, (gid, bid, at) in enumerate(layers):
+            latest = (
+                select(model)
+                .where(model.graph_id == gid, model.branch_id == bid, model.commit_seq <= at)
+                .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                .distinct(model.entity_id)
+                .subquery()
+            )
+            name = func.coalesce(latest.c.display_name, "").collate("C") if by_name else null()
+            stmt = select(latest.c.entity_id, name).where(latest.c.op != "delete")
+            for near_gid, near_bid, near_at in layers[:i]:      # a nearer layer's row decides
+                near = aliased(model)
+                stmt = stmt.where(~select(near.id).where(
+                    near.graph_id == near_gid, near.branch_id == near_bid,
+                    near.entity_id == latest.c.entity_id, near.commit_seq <= near_at).exists())
+            if where is not None:
+                preds = where(latest.c)
+                if preds:
+                    stmt = stmt.where(*preds)
+            if by_name:
+                stmt = stmt.order_by(name, latest.c.entity_id.collate("C"))
+            else:
+                stmt = stmt.order_by(latest.c.entity_id)
+            if limit is not None:
+                stmt = stmt.limit(limit)
+            found.extend((await s.execute(stmt)).all())
+        if len(layers) > 1:
+            found.sort(key=lambda r: (r[1], r[0]) if by_name else r[0])
+        return [eid for eid, _name in found[:limit]]
 
     async def _eids_for_urns(
         self, s, graph_id: str, branch_id: str, urns, as_of_seq: Optional[int] = None,
@@ -4248,7 +4387,8 @@ class GraphVersioningService:
     ) -> Dict[str, List[str]]:
         """Each urn's containment chain on a branch — ``{urn: [parent, …, root]}``, ``[]`` for a root —
         read from the branch's own state (a draft's moves included). An urn that is not a live node
-        here is absent (UNKNOWN), never a root. Bounded by hierarchy depth; batched per level."""
+        here is absent (UNKNOWN), never a root. Bounded by hierarchy depth; batched per level. A
+        fork finds a node it inherited by its urn among its layers' rows (:meth:`_layer_graph_ids`)."""
         cset = {t.upper() for t in (containment_edge_types or [])}
         if not urns or not cset:
             return {}
@@ -4259,10 +4399,11 @@ class GraphVersioningService:
                 if u.startswith("gv:"):
                     cand.setdefault(u[3:], set()).add(u)
                 cand.setdefault(u, set()).add(u)
+            graphs = await self._layer_graph_ids(s, graph_id)
             for chunk in _chunks(list(urns), _IN_LIST_MAX):
                 for eid, urn in (await s.execute(
                     select(NodeVersionORM.entity_id, NodeVersionORM.urn).where(
-                        NodeVersionORM.graph_id == graph_id, NodeVersionORM.urn.in_(chunk),
+                        NodeVersionORM.graph_id.in_(graphs), NodeVersionORM.urn.in_(chunk),
                     ).distinct()
                 )).all():
                     cand.setdefault(eid, set()).add(urn)
@@ -5482,7 +5623,8 @@ class GraphVersioningService:
             "modified": modified,
         }
 
-    async def branch_overlay_delta(self, *, graph_id: str, branch_id: str) -> Dict[str, object]:
+    async def branch_overlay_delta(self, *, graph_id: str, branch_id: str,
+                                   extend: Optional[Mapping[str, object]] = None) -> Dict[str, object]:
         """The draft's patch set vs **main at the draft's fork point**, **reader-shaped** for a
         read-overlay (:class:`DraftOverlayProvider`): the draft's effective nodes/edges to upsert
         and the before-values of those it removed, PLUS a rewind of any change main took after the
@@ -5508,11 +5650,18 @@ class GraphVersioningService:
         payloads too for what it serves (``overlay_payloads``, ``kind='edge'``). One it removed
         comes as its urn or, for an edge, its type and ends. So building the patch set reads no
         payload, whatever the draft's size; only the rewind of main's post-fork advance (below)
-        carries whole values."""
+        carries whole values.
+
+        A fork's ``main`` is read the same way over its root's store: its patch set is
+        :meth:`_fork_overlay_delta`'s, and ``extend`` is one an earlier call returned for it."""
         empty = {"nodesUpsert": [], "nodesModified": [], "nodesRemove": [], "edgesUpsert": [],
                  "edgesRemove": [], "nodesNew": []}
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
+            if branch.kind == "main":
+                graph = await s.get(GraphORM, graph_id)
+                if graph is not None and graph.fork_parent_graph_id:
+                    return await self._fork_overlay_delta(s, graph, branch, extend)
             if getattr(branch, "status", None) == "merged":
                 # Everything the draft changed is IN main now: reading it as main ⊕ its edits
                 # applied them twice — each added child counted again in its parent's count (a
@@ -5537,9 +5686,11 @@ class GraphVersioningService:
             node_ids = [eid for eid, h in heads.items() if h.kind == "node"]
             edge_ids = [eid for eid, h in heads.items() if h.kind != "node"]
             # Which the draft created, modified or removed, from hashes; what each is, from version
-            # rows — no payload (a draft's own edges are what it holds now: its heads).
+            # rows — no payload (a draft's own edges are what it holds now: its heads). Its edges
+            # are counted against where the store holds them: main at its head, not at the branch
+            # point, where an edge main deleted or re-pointed since would be counted nowhere.
             base_nodes = await self._hashes_at(s, graph_id, main_id, node_ids, base_seq)
-            before = await self._hashes_at(s, graph_id, main_id, edge_ids, base_seq) if edge_ids else {}
+            held = await self._hashes_at(s, graph_id, main_id, edge_ids, head_seq) if edge_ids else {}
             # For the rewind: each advanced entity's value at the fork point (base) vs main head.
             rewind_base: Dict[str, Optional[dict]] = {}
             rewind_head: Dict[str, Optional[dict]] = {}
@@ -5550,7 +5701,7 @@ class GraphVersioningService:
         # One dict per entity the draft changed: built in a thread, as its head index was — on a
         # draft's first read this runs in the web process, and 200k of them are a stall of their own.
         nodes_upsert, nodes_modified, nodes_remove, edges_upsert, edges_remove, nodes_new = (
-            await asyncio.to_thread(_overlay_patch, heads, node_ids, edge_ids, base_nodes, before))
+            await asyncio.to_thread(_overlay_patch, heads, node_ids, edge_ids, base_nodes, held))
         # ── Fork-point rewind ── undo main's post-fork advances so the read reflects main@base_seq
         # ⊕ the draft (never live main). For each entity main changed after the fork that the draft
         # did NOT touch: main-ADDED (absent at base) → REMOVE it from the read; main-DELETED (absent
@@ -5562,16 +5713,23 @@ class GraphVersioningService:
             if bv is None and hv is None:
                 continue
             if _is_edge_payload(bv if bv is not None else hv):
-                # Edges: rewind only ADD (main added → hide) and DELETE (main removed → restore). A
-                # property-only modification (present at both ends) is skipped — restoring it as an
-                # upsert would double-count in the aggregated rollup (main's head already counts the
-                # edge), and edge endpoints don't change in practice.
+                # Edges: main ADDED → hide; main DELETED → restore; main CHANGED it (its properties,
+                # or where it runs) → its fork-point value, loaded when a read serves it, as the
+                # draft's own edit is, and counted where it runs at the fork point rather than
+                # where main's head counts it (``was``): never twice in a rollup or a child count.
                 if bv is None:                             # main ADDED after fork → hide from the read
                     src, tgt = _edge_src_tgt(hv)
                     edges_remove.append(_graphedge_dict(eid, hv, {src: src, tgt: tgt}))
                 elif hv is None:                           # main DELETED after fork → restore fork-point edge
                     src, tgt = _edge_src_tgt(bv)
                     edges_upsert.append(_graphedge_dict(eid, bv, {src: src, tgt: tgt}))
+                elif bv != hv:                             # main CHANGED it after fork → fork-point value
+                    at, now = (_graphedge_dict(eid, v, {e: e for e in _edge_src_tgt(v)})
+                               for v in (bv, hv))
+                    edges_upsert.append({**{k: at[k] for k in ("id", "sourceUrn", "targetUrn",
+                                                               "edgeType")}, "lazy": True,
+                                         "was": {k: now[k] for k in ("sourceUrn", "targetUrn",
+                                                                     "edgeType")}})
             elif bv is not None:                           # node existed at the fork point → restore its value
                 urn = bv.get("urn") or f"gv:{eid}"
                 nodes_upsert.append(_graphnode_dict(eid, urn, bv))
@@ -5582,13 +5740,164 @@ class GraphVersioningService:
         return {"nodesUpsert": nodes_upsert, "nodesModified": nodes_modified, "nodesRemove": nodes_remove,
                 "edgesUpsert": edges_upsert, "edgesRemove": edges_remove, "nodesNew": nodes_new}
 
+    async def _fork_overlay_delta(self, s, fork: GraphORM, main: BranchORM,
+                                  extend: Optional[Mapping[str, object]]) -> Dict[str, object]:
+        """A fork's ``main`` as a patch set over its root's store (the graph up its
+        ``fork_parent_graph_id`` that is no fork): the fork's value at its head against the root's
+        at the root's head (:func:`_fork_patch`), for every entity the two may differ on — the
+        fork's own changes (its heads), each fork between it and the root up to the base the level
+        below reads it at, and the root's changes since the outermost base. Bounded by those
+        changes, never by the graph, and told from hashes and version-row columns: a reader loads
+        the fork's value of what it serves (:meth:`overlay_payloads`, through :meth:`_layers` —
+        its own, or its parent's at the base).
+
+        ``since`` says what it is of: the fork's head, the seq each of its layers reads, the root's
+        head. ``extend`` — one an earlier call returned, of the same fork head and bases — is
+        extended by the root's changes since its root head instead of built again."""
+        layers = await self._layers(s, fork.id, main.id, fork.main_head_commit_seq)
+        root_id, root_main, base = layers[-1]
+        root_head = (await s.get(GraphORM, root_id)).main_head_commit_seq
+        since = {"head": main.head_commit_id, "layers": [at for _g, _b, at in layers],
+                 "rootHead": root_head}
+        prev = (extend or {}).get("since")
+        if (prev and prev["head"] == since["head"] and prev["layers"] == since["layers"]
+                and prev["rootHead"] <= root_head):
+            ids = await self._changed_in_window(s, root_id, root_main, prev["rootHead"], root_head)
+            window = await self._fork_classified(s, layers, ids, root_head)
+            return {**await asyncio.to_thread(_extended_patch, extend, window, ids), "since": since}
+        heads = await self._head_index(s, fork.id, main.id)
+        ids = set(heads)
+        for gid, bid, at in layers[1:-1]:              # each fork between: its own, to its base
+            ids |= await self._own_changes(s, gid, bid, at)
+        if root_head > base:
+            ids |= await self._changed_in_window(s, root_id, root_main, base, root_head)
+        return {**await self._fork_classified(s, layers, ids, root_head, heads), "since": since}
+
+    async def _fork_classified(self, s, layers, ids, root_head: int,
+                               heads: Optional[Mapping[str, "_Head"]] = None) -> Dict[str, list]:
+        """:func:`_fork_patch` of ``ids``: the fork's value at its head — from ``heads``, its own,
+        where it has one, else through its layers (``layers``, :meth:`_layers` at its head) —
+        against the root's at ``root_head``."""
+        fork_id, fork_main, head_seq = layers[0]
+        if heads is None:
+            ours = await self._hashes_at(s, fork_id, fork_main, ids, head_seq)
+        else:
+            ours = {eid: _Stored(h.kind, h.content_hash, h.urn, h.type, h.src, h.tgt, h.name, h.qname)
+                    for eid, h in heads.items() if h.live and eid in ids}
+            rest = [eid for eid in ids if eid not in heads]
+            if rest:
+                ours.update(await self._hashes_at(s, *layers[1][:2], rest, layers[1][2]))
+        root_id, root_main, _base = layers[-1]
+        theirs = await self._hashes_at(s, root_id, root_main, ids, root_head)
+        return await asyncio.to_thread(_fork_patch, ids, ours, theirs)
+
+    async def _own_changes(self, s, graph_id: str, branch_id: str, at: int) -> set:
+        """Entity ids a branch's own commits up to ``at`` touched — its rows alone, where
+        :meth:`_changed_in_window` adds a fork's parent's between its bases."""
+        changed: set = set()
+        for model in (NodeVersionORM, EdgeVersionORM):
+            changed.update((await s.execute(select(model.entity_id).where(
+                model.graph_id == graph_id, model.branch_id == branch_id,
+                model.commit_seq <= at).distinct())).scalars().all())
+        return changed
+
+    @staticmethod
+    async def _own_change_count(s, graph_id: str, branch_id: str, lo: int, hi: int, cap: int) -> int:
+        """How many entities a branch's own commits in ``(lo, hi]`` touched, counted no further than
+        ``cap + 1`` a kind: the size of a window that may be large, at the cost of ``cap``."""
+        total = 0
+        for model in (NodeVersionORM, EdgeVersionORM):
+            ids = select(model.entity_id).where(
+                model.graph_id == graph_id, model.branch_id == branch_id,
+                model.commit_seq > lo, model.commit_seq <= hi).distinct().limit(cap + 1).subquery()
+            total += int(await s.scalar(select(func.count()).select_from(ids)) or 0)
+        return total
+
+    async def _fork_candidates(self, s, fork: GraphORM, main_id: str, cap: int,
+                               layers: Optional[list] = None,
+                               root_head: Optional[int] = None) -> int:
+        """At least as many entities as a fork's patch set classifies (:meth:`_fork_overlay_delta`):
+        its own changes, each fork between up to its base and the root's since the outermost base,
+        each counted no further than ``cap + 1``. Kept per version of the fork (its head, the base
+        each layer reads, its root's head) and ``cap``: while none of them moves, history being
+        append-only, nothing it counts does."""
+        if layers is None:
+            layers = await self._layers(s, fork.id, main_id, fork.main_head_commit_seq)
+        root_id, root_main, base = layers[-1]
+        if root_head is None:
+            root_head = (await s.get(GraphORM, root_id)).main_head_commit_seq
+        key = (fork.id, fork.main_head_commit_seq, tuple(at for _g, _b, at in layers), root_head, cap)
+        if key in _FORK_COUNTS:
+            _FORK_COUNTS.move_to_end(key)
+            return _FORK_COUNTS[key]
+        own = select(EntityHeadORM.entity_id).where(
+            EntityHeadORM.graph_id == fork.id, EntityHeadORM.branch_id == main_id).limit(cap + 1)
+        total = int(await s.scalar(select(func.count()).select_from(own.subquery())) or 0)
+        for gid, bid, at in layers[1:-1]:
+            total += await self._own_change_count(s, gid, bid, -1, at, cap)
+        total += await self._own_change_count(s, root_id, root_main, base, root_head, cap)
+        _FORK_COUNTS[key] = total
+        while len(_FORK_COUNTS) > _FORK_COUNTS_KEPT:
+            _FORK_COUNTS.popitem(last=False)
+        return total
+
+    async def fork_read_plan(self, graph_id: str) -> Dict[str, object]:
+        """What reading a fork's ``main`` takes, read in one session: its version (as
+        :meth:`overlay_version` gives it — the reader is handed it, so its first read does not
+        compute it again); how it is read (``reads_from``, :meth:`fork_reads_from`'s answer from
+        the count kept per version); its root (graph, ``main``, data source, in the trash or not);
+        and the root's store as its ``projection_state`` row says it is now: its committed and
+        projected seqs (``fresh`` when the projection holds the head) and its pin. That row is
+        read every time: an eviction moves the store without moving any seq the version holds."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None or not graph.fork_parent_graph_id:
+                raise ValueError(f"not a fork: {graph_id}")
+            main_id = await self._main_branch_id(s, graph_id)
+            branch = await self._get_branch(s, graph_id, main_id)
+            layers = await self._layers(s, graph_id, main_id, graph.main_head_commit_seq)
+            root_id, root_main, _base = layers[-1]
+            root = await s.get(GraphORM, root_id)
+            n = await self._fork_candidates(s, graph, main_id, config.FORK_REWIND_MAX,
+                                            layers=layers, root_head=root.main_head_commit_seq)
+            ps = await s.get(ProjectionStateORM, root_id)
+            committed = root.main_head_commit_seq
+            projected = ps.projected_commit_seq if ps is not None else 0
+            return {
+                "main_id": main_id,
+                "version": (branch.head_commit_id, tuple(at for _g, _b, at in layers), committed,
+                            getattr(branch, "status", None)),
+                "reads_from": "postgres" if n > config.FORK_REWIND_MAX else "overlay",
+                "root_id": root_id, "root_main": root_main,
+                "root_data_source_id": root.data_source_id, "root_trashed": root.deleted_at is not None,
+                "committed": committed, "projected": projected, "fresh": projected >= committed,
+                "falkor_provider": ps.falkor_provider if ps is not None else None,
+                "falkor_graph_name": ps.falkor_graph_name if ps is not None else None,
+            }
+
+    async def fork_reads_from(self, graph_id: str) -> str:
+        """How a fork's ``main`` is read: ``"overlay"``, its patch set over its root's store, or —
+        past ``config.FORK_REWIND_MAX`` entities to classify — ``"postgres"``, its layered reads
+        (``VersionedBranchProvider``)."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            main_id = await self._main_branch_id(s, graph_id)
+            n = await self._fork_candidates(s, graph, main_id, config.FORK_REWIND_MAX)
+        return "postgres" if n > config.FORK_REWIND_MAX else "overlay"
+
     async def overlay_version(self, *, graph_id: str, branch_id: str) -> tuple:
         """What a draft's :meth:`branch_overlay_delta` depends on: the draft's head and branch point,
         main's head, and the draft's status. Equal versions give equal deltas, so a reader may
-        reuse one across requests instead of recomputing it for each."""
+        reuse one across requests instead of recomputing it for each. A fork's ``main``'s: its
+        head, the seq each of its layers reads (its bases), its root's head and its status."""
         async with self._session() as s:
             branch = await self._get_branch(s, graph_id, branch_id)
             graph = await s.get(GraphORM, graph_id)
+            if branch.kind == "main" and graph is not None and graph.fork_parent_graph_id:
+                layers = await self._layers(s, graph_id, branch_id, graph.main_head_commit_seq)
+                root = await s.get(GraphORM, layers[-1][0])
+                return (branch.head_commit_id, tuple(at for _g, _b, at in layers),
+                        root.main_head_commit_seq, getattr(branch, "status", None))
             return (branch.head_commit_id, branch.base_commit_seq,
                     getattr(graph, "main_head_commit_seq", None), getattr(branch, "status", None))
 
@@ -5603,57 +5912,6 @@ class GraphVersioningService:
             return [_graphedge_dict(eid, v, {e: e for e in _edge_src_tgt(v)})
                     for eid, v in values.items() if v]
         return [_graphnode_dict(eid, v.get("urn") or f"gv:{eid}", v) for eid, v in values.items() if v]
-
-    async def aggregated_overlay_adjust(
-        self, *, graph_id: str, branch_id: str, source_urns: Sequence[str],
-        target_urns: Optional[Sequence[str]], lineage_delta: Sequence[Tuple[str, str, Optional[str], int]],
-        containment_edge_types: Sequence[str],
-    ) -> Dict[Tuple[str, str], Dict[str, object]]:
-        """Rollup adjustments for a draft's LINEAGE-edge delta, so a read-overlay can patch main's
-        materialized aggregated edges instead of recomputing them. ``lineage_delta`` is a list of
-        ``(sourceUrn, targetUrn, edgeType, sign)`` with ``sign`` +1 (draft added) / -1 (draft removed).
-        Each maps to rollup ``(Sx, Tx)`` for every requested **visible** source ``Sx`` that is an
-        ancestor-or-self of ``sourceUrn`` and target ``Tx`` ancestor-or-self of ``targetUrn`` (``Sx`` ≠
-        ``Tx``) — the same ancestor-pair semantics the FalkorDB materialiser bakes in, evaluated on the
-        draft's COMPOSED containment so re-parenting in the draft is honoured. Bounded by the delta size.
-
-        One side may be left open, as the base read allows: no targets means every ancestor-or-self of
-        ``targetUrn`` (every cell out of the sources), no sources every ancestor-or-self of
-        ``sourceUrn``. The named side is walked first, and a delta edge that misses it costs no walk
-        of the other."""
-        cset = {t.upper() for t in (containment_edge_types or [])}
-        src_set = set(source_urns or [])
-        tgt_set = set(target_urns or [])
-        out: Dict[Tuple[str, str], Dict[str, object]] = {}
-        if not (src_set or tgt_set):
-            return out
-        async with self._session() as s:
-            async def _visible_ancestors(urn: str, visible: Optional[set]) -> set:
-                """``urn``'s ancestors-or-self among ``visible``; all of them when it is None."""
-                eid = await self._eid_for_urn(s, graph_id, branch_id, urn)
-                hit = {urn} if visible is None else {urn} & visible  # the node itself, if it is a visible container
-                if eid is not None and cset:
-                    anc_eids, _ = await self._containment_ancestors(s, graph_id, branch_id, {eid}, cset, None)
-                    vals = await self._current_values(s, graph_id, branch_id, anc_eids)
-                    urns = {((vals.get(e) or {}).get("urn") or f"gv:{e}") for e in anc_eids}
-                    hit |= urns if visible is None else urns & visible
-                return hit
-            for su, tu, et, sign in lineage_delta:
-                if src_set:
-                    sxs = await _visible_ancestors(su, src_set)
-                    txs = await _visible_ancestors(tu, tgt_set or None) if sxs else set()
-                else:
-                    txs = await _visible_ancestors(tu, tgt_set)
-                    sxs = await _visible_ancestors(su, None) if txs else set()
-                for sx in sxs:
-                    for tx in txs:
-                        if sx == tx:
-                            continue
-                        slot = out.setdefault((sx, tx), {"weight": 0, "types": set()})
-                        slot["weight"] = int(slot["weight"]) + sign
-                        if et:
-                            slot["types"].add(et)            # type: ignore[union-attr]
-        return out
 
     async def diff_branch_summary(
         self, *, graph_id: str, branch_id: str, containment_edge_types, limit: int = 200,
@@ -8596,12 +8854,18 @@ class GraphVersioningService:
     async def _parent_window(self, s, graph_id, branch_id, from_seq, to_seq):
         """``(parent graph, its main, lo, hi)`` when ``branch_id`` is a fork's ``main`` whose
         reads at ``from_seq`` and ``to_seq`` compose its parent at different seqs
-        (:func:`fork_base_at`), the window of the parent's history between them; else None."""
+        (:func:`fork_base_at`), the window of the parent's history between them; else None.
+
+        A window's ends are taken no earlier than the fork point (its first ``fork_seq``): the
+        fork's own history starts there, so its genesis commit's window (the seq before it, to it)
+        holds nothing of the parent's commit at that seq."""
         graph = await s.get(GraphORM, graph_id)
         if (graph is None or not graph.fork_parent_graph_id
                 or branch_id != await self._main_branch_id(s, graph_id)):
             return None
-        lo, hi = sorted((await fork_base_at(s, graph, from_seq), await fork_base_at(s, graph, to_seq)))
+        point = graph.fork_base_commit_seq or 0
+        lo, hi = sorted((await fork_base_at(s, graph, max(from_seq, point)),
+                         await fork_base_at(s, graph, max(to_seq, point))))
         if lo == hi:
             return None
         parent_id = graph.fork_parent_graph_id
@@ -8617,6 +8881,9 @@ class GraphVersioningService:
         while graph is not None and graph.fork_parent_graph_id:
             if branch_id != await self._main_branch_id(s, graph.id):
                 break
+            if await s.get(GraphORM, graph.fork_parent_graph_id) is None:
+                # Purged under it (an earlier release did): not found, never a crash.
+                raise ValueError(f"the graph fork {graph.id} was forked from is gone")
             branch_id = await self._main_branch_id(s, graph.fork_parent_graph_id)
             seq = await fork_base_at(s, graph, seq)
             layers.append((graph.fork_parent_graph_id, branch_id, seq))
@@ -8666,9 +8933,10 @@ class GraphVersioningService:
         for gid, bid, at in await self._layers(s, graph_id, branch_id, seq):
             seen: set = set()
             for kind, model in (("node", NodeVersionORM), ("edge", EdgeVersionORM)):
-                named = ((model.urn, model.entity_type, null(), null()) if kind == "node"
+                named = ((model.urn, model.entity_type, null(), null(), model.display_name,
+                          model.qualified_name) if kind == "node"
                          else (null().label("urn"), model.edge_type, model.source_entity_id,
-                               model.target_entity_id))
+                               model.target_entity_id, null(), null()))
                 stmt = (
                     select(model.entity_id, model.op, model.content_hash, *named)
                     .where(model.graph_id == gid, model.branch_id == bid,
@@ -8678,11 +8946,11 @@ class GraphVersioningService:
                     .distinct(model.entity_id)
                 )
                 for chunk in _chunks(id_list, _IN_LIST_MAX):
-                    for eid, op, chash, urn, typ, src, tgt in (
+                    for eid, op, chash, urn, typ, src, tgt, name, qname in (
                             await conn.execute(stmt, {"ids": list(chunk)})).all():
                         seen.add(eid)
                         if op != "delete" and chash not in (_HASH_EMPTY, _HASH_NONE):
-                            out[eid] = _Stored(kind, chash, urn, typ, src, tgt)
+                            out[eid] = _Stored(kind, chash, urn, typ, src, tgt, name, qname)
             id_list = [i for i in id_list if i not in seen]     # a fork's: on to its parent's
             if not id_list:
                 break
@@ -9073,11 +9341,14 @@ class GraphVersioningService:
         self, s, graph_id: str, branch_id: str, urn: str, as_of_seq: Optional[int] = None,
     ) -> Optional[str]:
         """Resolve a seed urn to its live node's entity_id on a branch (bounded via
-        ix_nv_urn + the ``gv:<eid>`` fast path); ``None`` if absent/tombstoned/not a node."""
+        ix_nv_urn + the ``gv:<eid>`` fast path); ``None`` if absent/tombstoned/not a node. A fork
+        (its ``main``, or a draft on it) finds a node it only inherited: the candidates come from
+        the rows of every graph its reads compose (:meth:`_layer_graph_ids`)."""
         cand: List[str] = [urn[3:]] if urn.startswith("gv:") else []
+        graphs = await self._layer_graph_ids(s, graph_id)
         cand.extend((await s.execute(
             select(NodeVersionORM.entity_id).where(
-                NodeVersionORM.graph_id == graph_id, NodeVersionORM.urn == urn,
+                NodeVersionORM.graph_id.in_(graphs), NodeVersionORM.urn == urn,
             ).distinct()
         )).scalars().all())
         if not cand:
@@ -9088,6 +9359,15 @@ class GraphVersioningService:
             if p is not None and not _is_edge_payload(p) and (p.get("urn") == urn or f"gv:{eid}" == urn):
                 return eid
         return None
+
+    async def _layer_graph_ids(self, s, graph_id: str) -> List[str]:
+        """The graphs whose rows a read on ``graph_id`` composes: itself, and for a fork every graph
+        up its chain (:meth:`_layers`) — where a node it only inherited has its version rows."""
+        graph = await s.get(GraphORM, graph_id)
+        if graph is None or not graph.fork_parent_graph_id:
+            return [graph_id]
+        main_id = await self._main_branch_id(s, graph_id)
+        return [gid for gid, _b, _at in await self._layers(s, graph_id, main_id, 0)]
 
     async def entity_recorded(self, *, graph_id: str, entity_id: str) -> bool:
         """Whether main holds any version of the entity, live OR deleted — how the write-through
