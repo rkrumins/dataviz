@@ -262,7 +262,7 @@ Each live fork in `GET …/graphs/{gid}/forks` says:
 |---|---|
 | `ahead` | The entities it changed since its last merged review, or since its fork point |
 | `behind` | The entities its parent changed that it has not taken in: the parent's window since the base the fork reads |
-| `updateRecommended` | `behind` reaches `GRAPHVER_FORK_REWIND_WARN` (default 50,000), or the fork's reads are past the ceiling |
+| `updateRecommended` | What Update from parent can fix: `behind` reaches `GRAPHVER_FORK_REWIND_WARN` (default 50,000), or the fork's reads are past the ceiling and taking in its parent's changes would bring them back under it (a fork of the root whose own changes alone fit). A fork of a fork past the ceiling on its parent's own history is not told to update: that would only add to it |
 | `readsFrom` | `overlay`, or `postgres` past `GRAPHVER_FORK_REWIND_MAX` (§2) |
 | `countsCapped` | A count stopped at the ceiling: it is at least that |
 

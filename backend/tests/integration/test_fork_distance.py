@@ -61,7 +61,9 @@ def test_a_fork_says_how_far_it_is_from_its_parent(monkeypatch):
                                     "readsFrom": "overlay", "countsCapped": False}
             monkeypatch.setattr(config, "FORK_REWIND_WARN", 50_000)
             monkeypatch.setattr(config, "FORK_REWIND_MAX", 2)
-            assert await item() == {"ahead": 1, "behind": 2, "updateRecommended": True,
+            # Past the ceiling on its own 3 changes: taking in the parent's would not bring it
+            # back under, so no update is recommended for it.
+            assert await item() == {"ahead": 1, "behind": 2, "updateRecommended": False,
                                     "readsFrom": "postgres", "countsCapped": True}
 
             # A fork in the trash says none of it.
@@ -107,4 +109,37 @@ def test_a_forks_ceiling_count_is_kept_per_version(monkeypatch):
         assert await reads() == ("postgres", 1)         # the fork moved
         monkeypatch.setattr(config, "FORK_REWIND_MAX", 50)
         assert await reads() == ("overlay", 1)          # another ceiling, another count
+    _run(case)
+
+
+def test_an_update_is_recommended_only_where_it_would_help(monkeypatch):
+    """``updateRecommended`` is what Update from parent can fix. A fork past the ceiling recommended
+    one whatever put it there, and a fork of a busy fork, whose reads count its parent's own
+    history up to its base, recommended one for good: taking in its parent's newer work only adds
+    to that. Past the ceiling, one is recommended where taking in the parent's changes would bring
+    the fork back under it (a fork of the root that changed no more than the ceiling itself); and
+    always once ``behind`` reaches the warning. Either way the fork says it reads Postgres."""
+    async def case(svc):
+        _parent_ds, gid = await _parent(svc)
+        await svc.apply_ops(graph_id=gid, actor="alice", message="seed", ops=[_n("A")])
+        async with _client() as c:
+            fork = (await _fork(c, gid)).json()
+            fgid = fork["graphId"]
+            await svc.apply_ops(graph_id=fgid, actor="u_forker", message="own",
+                                ops=[_n("F1"), _n("F2"), _n("F3")])
+            leaf = (await _fork(c, fgid)).json()
+            await svc.apply_ops(graph_id=gid, actor="alice", message="root", ops=[_n("R1"), _n("R2")])
+
+            async def item(of, graph):
+                r = await c.get(f"/api/v1/{WS}/versioning/graphs/{of}/forks")
+                got = next(f for f in r.json() if f["graphId"] == graph)
+                return got["readsFrom"], got["updateRecommended"], got["behind"]
+
+            # The fork of the root: its own 3, the root's 2 it has not taken in.
+            monkeypatch.setattr(config, "FORK_REWIND_MAX", 4)
+            assert await item(gid, fgid) == ("postgres", True, 2)     # the update leaves 3
+            monkeypatch.setattr(config, "FORK_REWIND_MAX", 2)
+            assert await item(gid, fgid) == ("postgres", False, 2)    # its own 3 stay
+            # The fork of the fork: past the ceiling on its parent's own 3, behind on nothing.
+            assert await item(fgid, leaf["graphId"]) == ("postgres", False, 0)
     _run(case)

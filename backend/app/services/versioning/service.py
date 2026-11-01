@@ -2981,10 +2981,13 @@ class GraphVersioningService:
         """How far a fork is from its parent: ``ahead``, the entities it changed since its last
         merged review, or its fork point (:meth:`_fork_merge_base`); ``behind``, those its parent
         changed that it has not taken in — the parent's window since the base the fork reads
-        (:func:`fork_base_at`); ``update_recommended`` when that reaches
-        ``config.FORK_REWIND_WARN``, or the fork's reads are past the ceiling, which
-        ``reads_from`` says (``overlay`` | ``postgres``, as :meth:`fork_reads_from`). Each count
-        stops at the ceiling, ``config.FORK_REWIND_MAX`` (``counts_capped``)."""
+        (:func:`fork_base_at`); ``update_recommended`` for what Update from parent can fix: when
+        that reaches ``config.FORK_REWIND_WARN``, or when the fork's reads are past the ceiling,
+        which ``reads_from`` says (``overlay`` | ``postgres``, as :meth:`fork_reads_from`), and
+        taking the parent's changes in would bring it back under: a fork of the root whose own
+        changes alone fit. A fork of a fork reads its parent's own history up to its base, which
+        taking in more of it can only grow. Each count stops at the ceiling,
+        ``config.FORK_REWIND_MAX`` (``counts_capped``)."""
         cap = config.FORK_REWIND_MAX
         main_id = await self._main_branch_id(s, fork.id)
         head = fork.main_head_commit_seq
@@ -2994,9 +2997,12 @@ class GraphVersioningService:
         behind = await self._window_count(
             s, parent.id, await self._main_branch_id(s, parent.id),
             await fork_base_at(s, fork, head), parent.main_head_commit_seq, cap)
-        past = await self._fork_candidates(s, fork, main_id, cap) > cap
+        n = await self._fork_candidates(s, fork, main_id, cap)
+        past = n > cap
+        # Of a fork of the root, what its reads overlay beyond its own changes is ``behind``.
+        fixable = past and parent.fork_parent_graph_id is None and n - behind <= cap
         return {"ahead": min(ahead, cap), "behind": min(behind, cap),
-                "update_recommended": past or behind >= config.FORK_REWIND_WARN,
+                "update_recommended": fixable or behind >= config.FORK_REWIND_WARN,
                 "reads_from": "postgres" if past else "overlay",
                 "counts_capped": ahead > cap or behind > cap}
 

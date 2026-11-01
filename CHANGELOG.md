@@ -37,8 +37,9 @@ the next step — taking the parent's newer commits into a fork — builds on. S
   adding a row, and every earlier commit of the fork still reads what it read.
 - **A fork says how far it is from its parent.** Each live fork in `GET …/forks` carries `ahead` (the
   entities it changed since its last merged review, or its fork point), `behind` (those its parent
-  changed that it has not taken in), `updateRecommended` (`behind` reaches
-  `GRAPHVER_FORK_REWIND_WARN`, default 50,000, or its reads are past the ceiling), `readsFrom`
+  changed that it has not taken in), `updateRecommended` (what Update from parent can fix: `behind`
+  reaches `GRAPHVER_FORK_REWIND_WARN`, default 50,000, or its reads are past the ceiling and taking
+  in its parent's changes would bring them back under), `readsFrom`
   (`overlay` or `postgres`) and `countsCapped` (a count stopped at `GRAPHVER_FORK_REWIND_MAX`).
 
 ### Changed
