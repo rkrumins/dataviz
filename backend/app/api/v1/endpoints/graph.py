@@ -1727,10 +1727,11 @@ async def get_top_level_nodes(
     and page cache all key on that list. No such type means an empty page.
 
     Containment edge types are resolved from the ontology bound to the active
-    data source. If the ontology has no containment edges configured and no
-    ``CONTAINMENT_EDGE_TYPES`` env override is present, the provider raises
-    :class:`ProviderConfigurationError`, which is translated to HTTP 400 —
-    the API must never silently fall back to hardcoded type names.
+    data source. With none assigned, or one that declares no containment, the
+    set is empty and the graph is flat: every node is top-level. If the set was
+    never configured and no ``CONTAINMENT_EDGE_TYPES`` env override is present,
+    the provider raises :class:`ProviderConfigurationError`, which is translated
+    to HTTP 400 — the API must never silently fall back to hardcoded type names.
 
     **Route-ordering note.** This handler MUST be declared before
     ``/nodes/{urn}`` — FastAPI/Starlette matches routes in registration
@@ -3408,6 +3409,12 @@ async def get_edges_beneath(
     return await _bounded_compute(engine, compute)()
 
 
+#: What a node read says when its data source has no ontology assigned
+#: (``ContextEngine.reads_flat_without_ontology``). A header, because the answer
+#: is a bare list — as the branch list's ``X-Next-Cursor`` is.
+_NO_ONTOLOGY_NOTICE = "No ontology is assigned to this data source. Assign one to see its hierarchy."
+
+
 @router.post("/nodes/query", response_model=List[GraphNode], response_model_by_alias=True)
 async def query_nodes(
     response: Response,
@@ -3416,10 +3423,15 @@ async def query_nodes(
 ):
     """Advanced node query (bulk fetch, complex filters). Response-cached
     (gen-bump invalidated) + slot-bounded — fired on every canvas
-    hydration; repeat opens now serve from Redis, cold bursts shed 429."""
+    hydration; repeat opens now serve from Redis, cold bursts shed 429.
+
+    With no ontology assigned the nodes come back flat, and ``X-Graph-Notice``
+    says so."""
     async def compute() -> _NodeListResult:
         return _NodeListResult(await engine.get_nodes_query(query))
 
+    if await engine.reads_flat_without_ontology():
+        response.headers["X-Graph-Notice"] = _NO_ONTOLOGY_NOTICE
     scope = _cache_scope(engine)
     # (params built below — see _node_query_cache_params)
     if scope is None:
