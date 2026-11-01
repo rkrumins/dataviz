@@ -27,7 +27,8 @@ from backend.app.main import app
 from backend.app.services.activity import catalogue
 from backend.app.services.graph_store.topology import key_slot
 from backend.app.services.versioning import keymigrate
-from backend.app.services.versioning.errors import JobActive, ProjectionAlreadyAdopted
+from backend.app.services.versioning.errors import (JobActive, ProjectionAlreadyAdopted,
+                                                    ProjectionPassInFlight)
 from backend.app.services.versioning.service import ConcurrencyError
 
 GID = "graph_01J9ZK3M4N5P6Q7R8S9TABCDEF"
@@ -210,6 +211,7 @@ async def test_a_dedicated_rollup_graph_a_running_rollup_job_or_a_shared_key_is_
 @pytest.mark.parametrize("raises, status, kind", [
     (ConcurrencyError("enabling version control has not finished"), 409, "bootstrapping"),
     (ProjectionAlreadyAdopted("gvp_x"), 409, "already_adopted"),
+    (ProjectionPassInFlight(GID), 409, "lock_busy"),            # a pass writes the key now
 ])
 async def test_what_the_service_refuses_is_answered(raises, status, kind):
     with pytest.raises(HTTPException) as caught:

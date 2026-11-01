@@ -50,7 +50,7 @@ from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionE
                      DraftRoleRequired, ForkLimit, ForkNotRestorable, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
                      MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
-                     PersonRequired, ProjectionAlreadyAdopted,
+                     PersonRequired, ProjectionAlreadyAdopted, ProjectionPassInFlight,
                      ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted, ReviewRequired,
                      SelfMerge, SelfReview, VersionConflict)
 from .ids import prefixed_id
@@ -4135,8 +4135,31 @@ class GraphVersioningService:
         (:class:`ProjectionKeyInvalid`) or that another graph holds (:class:`ProjectionKeyInUse`),
         and while the graph's "enable version control" job is unfinished
         (:class:`ConcurrencyError`). No FalkorDB I/O: the caller checks the key is free there and
-        schedules the reseed."""
+        schedules the reseed.
+
+        Under the graph's projection lock, taken as a try: a pass in flight is fenced only when it
+        finishes, after it has written its window and its marker into the customer's key, so
+        while one holds the lock Adopt waits for it (:class:`ProjectionPassInFlight`)."""
         default = config.DEFAULT_FALKOR_PROVIDER
+        lock_scope = (db.graphver_lock_session() if self._session is db.graphver_session
+                      else self._session())
+        lock_s = await lock_scope.__aenter__()
+        lock_arg = func.hashtext(f"gvproj:{graph_id}")
+        acquired = False
+        try:
+            acquired = bool(await lock_s.scalar(select(func.pg_try_advisory_lock(lock_arg))))
+            if not acquired:
+                raise ProjectionPassInFlight(graph_id)
+            return await self._adopt_locked(graph_id, key, actor, shard_map, default)
+        finally:
+            try:
+                if acquired:
+                    await lock_s.execute(select(func.pg_advisory_unlock(lock_arg)))
+            finally:
+                await lock_scope.__aexit__(None, None, None)
+
+    async def _adopt_locked(self, graph_id: str, key: str, actor: str, shard_map: dict,
+                            default: str) -> Dict[str, object]:
         try:
             async with self._session() as s:
                 await self._lock_graph(s, graph_id)

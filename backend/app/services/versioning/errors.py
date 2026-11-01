@@ -309,6 +309,16 @@ class ProjectionAlreadyAdopted(_HttpMapped, RuntimeError):
                          {"type": "already_adopted", "key": key})
 
 
+class ProjectionPassInFlight(_HttpMapped, RuntimeError):
+    """Adopt (doc 17) reached a graph a projection pass is writing: the pass would go on writing
+    the customer's key after the pin swapped. 409 ``lock_busy``: adopt it once the pass is done."""
+
+    def __init__(self, graph_id: str):
+        self.graph_id = graph_id
+        super().__init__("a projection pass is writing this graph's key; try again once it is done",
+                         {"type": "lock_busy", "retryable": True})
+
+
 class ProjectionKeyInUse(_HttpMapped, RuntimeError):
     """The FalkorDB key a projection move targets already holds another graph's projection.
     Same type as ``BootstrapConflict``'s ``graph_key_in_use``."""
@@ -420,7 +430,7 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
                LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionAlreadyAdopted,
-               ProjectionKeyInUse,
+               ProjectionPassInFlight, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
                IneligibleOwner)

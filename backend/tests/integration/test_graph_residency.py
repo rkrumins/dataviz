@@ -298,6 +298,38 @@ async def test_adopt_moves_the_pin_onto_a_platform_key_and_leaves_the_customer_s
     assert (await _ps(gid)).status == "idle"
 
 
+async def test_adopt_waits_for_a_pass_writing_the_customer_s_key(store):
+    """Review finding 6: a pass fenced only at its finish would write its window and its marker
+    into the customer's key after Adopt committed. Adopt takes the graph's projection lock, as a
+    try: while a pass holds it, 409 lock_busy, and nothing changes."""
+    from backend.app.services.versioning import keymigrate
+    from backend.app.services.versioning.errors import ProjectionPassInFlight
+
+    svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
+    gid = (await svc.create_graph(data_source_id="ds_" + _hex(), workspace_id="ws_res", actor="a",
+                                  falkor_graph_name="cust_" + _hex(),
+                                  owns_falkor_graph=False))["graph_id"]
+    await _publish(svc, gid, "A")
+    await proj.project_graph(gid)
+    before = await _ps(gid)
+    async with db.graphver_lock_session() as pass_s:                 # a pass in flight
+        lock = func.hashtext(f"gvproj:{gid}")
+        assert await pass_s.scalar(select(func.pg_try_advisory_lock(lock)))
+        try:
+            with pytest.raises(ProjectionPassInFlight) as caught:
+                await svc.adopt_projection(graph_id=gid, key=keymigrate.owned_key(gid, 1),
+                                           actor="a", shard_map={})
+        finally:
+            await pass_s.execute(select(func.pg_advisory_unlock(lock)))
+    assert (caught.value.status_code, caught.value.detail["type"]) == (409, "lock_busy")
+    after = await _ps(gid)
+    assert (after.falkor_graph_name, after.owns_falkor_graph, after.epoch) == (
+        before.falkor_graph_name, False, before.epoch)
+    res = await svc.adopt_projection(graph_id=gid, key=keymigrate.owned_key(gid, 1), actor="a",
+                                     shard_map={})
+    assert res["to"]["key"] == keymigrate.owned_key(gid, 1)
+
+
 async def test_a_drop_that_fails_leaves_the_key_to_be_dropped_later(store, monkeypatch):
     """The graph reads evicted, so nothing would ever drop its key again: it is marked to be
     dropped by the retire pass."""
