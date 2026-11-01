@@ -15,14 +15,19 @@ Per cluster master:
 * **admission** — a load starts when the master has room for its estimate times the headroom
   under the start mark, after what the aggregation write governor and the loads and full
   projections already in flight on it hold; one at a time per master, none while it forks for
-  persistence or cannot be read, in the order the loads were asked for. The rest wait.
+  persistence or cannot be read, in the order the loads were asked for. The rest wait;
+* **room for a load** — the first load of a provider that fits on no master keeps the master
+  where it falls shortest, and room is made for it there: its idle-longest Coldline graphs, then
+  Standard by oldest read, as pressure picks them, but none read within the Coldline idle time
+  (it would come straight back), and only as many as make the room it lacks beyond what the pass
+  frees there already. Nothing, when they could not.
 
 **Placement** — a load seeds a fresh key, so it goes to the master of the graph's provider with the
 most room under its start mark after what is held there (:func:`roomiest`), among those free to
 take a load, whichever master its key was on; the loop then picks a key that hashes there. A graph
 whose dedicated rollup graph is named from its key keeps the key, and loads back onto its own
-master. Loads start in the order they were asked for, per provider: when the first does not fit,
-the rest wait their turn.
+master. Loads start in the order they were asked for, per provider: one that does not fit keeps its
+place, and a later one that fits elsewhere goes ahead.
 """
 from __future__ import annotations
 
@@ -208,14 +213,49 @@ def _plan_master(policy: ResidencyPolicy, master: Master, graphs: Sequence[Graph
     return out
 
 
+def _make_room(policy: ResidencyPolicy, at: MasterPlan, graphs: Sequence[Graph], shortfall: int,
+               now: datetime) -> None:
+    """Room on ``at`` for a load that lacks ``shortfall`` bytes there (see the module's room for a
+    load): pressure evictions of its own, added to the master's, or none when they would not make
+    the room."""
+    m = at.master
+    if not policy.eviction_enabled or m.used is None or m.hold == "loading":
+        return
+    lacking = shortfall - (m.used - (at.used_after if at.used_after is not None else m.used))
+    if lacking <= 0:
+        return                                 # this pass's evictions there make it already
+    planned = {e.graph_id for e in at.evictions}
+    quiet = timedelta(seconds=policy.coldline_idle_secs)
+    picks: List[Eviction] = []
+    for g in sorted((g for g in _candidates(graphs)
+                     if g.graph_id not in planned and g.bytes(policy) is not None
+                     and g.last_read is not None and now - g.last_read > quiet),
+                    key=lambda g: (g.residency != "coldline", g.last_read)):
+        if lacking <= 0:
+            break
+        picks.append(Eviction(g.graph_id, m.endpoint, g.bytes(policy), "pressure"))
+        lacking -= g.bytes(policy)
+    if lacking > 0:
+        return
+    taken = {e.graph_id for e in picks}
+    at.spare = [e for e in at.spare if e.graph_id not in taken]
+    at.evictions.extend(picks)
+    at.used_after = (at.used_after if at.used_after is not None else m.used) - sum(
+        e.bytes for e in picks)
+
+
 def _plan_loads(policy: ResidencyPolicy, plans: Sequence[MasterPlan],
-                graphs: Sequence[Graph]) -> None:
+                graphs: Sequence[Graph], now: datetime) -> None:
     """The loads asked for, in the order they were asked for: each onto the roomiest master free
-    to take one (see the module's placement), or a wait, and once one waits for room the rest of
-    its provider's wait their turn."""
+    to take one (see the module's placement), or a wait. The first of a provider's that fits on
+    no master keeps the roomiest, where room is made for it (:func:`_make_room`): no later load
+    goes there in this pass, and later loads that fit elsewhere go ahead."""
     by_endpoint = {p.master.endpoint: p for p in plans}
+    on: Dict[str, List[Graph]] = {}
+    for g in graphs:
+        on.setdefault(g.endpoint, []).append(g)
     busy = {p.master.endpoint for p in plans if p.seeding}      # one load per master at a time
-    blocked = set()
+    heads = set()                              # the providers whose first load waits for room
     asked = sorted((g for g in graphs
                     if g.requested_at is not None and g.status in ("evicted", "waiting_capacity")),
                    key=lambda g: g.requested_at)
@@ -225,9 +265,7 @@ def _plan_loads(policy: ResidencyPolicy, plans: Sequence[MasterPlan],
         readable = [p for p in pool if p.master.used is not None]
         free = [p for p in readable if p.master.endpoint not in busy and not p.master.hold]
         target, reason, shortfall = roomiest(free, policy), None, None
-        if g.provider in blocked:
-            reason = "queued"                  # the first in line waits for room
-        elif need(g, policy) is None:
+        if need(g, policy) is None:
             reason = "unsized"                 # admitted only with a size or an estimate
         elif not readable:
             reason = "unmeasured"
@@ -242,8 +280,10 @@ def _plan_loads(policy: ResidencyPolicy, plans: Sequence[MasterPlan],
             at.loads.append(Load(g.graph_id, at.master.endpoint, g.bytes(policy)))
             busy.add(at.master.endpoint)
             continue
-        if reason == "capacity":
-            blocked.add(g.provider)
+        if reason == "capacity" and g.provider not in heads:
+            heads.add(g.provider)
+            _make_room(policy, target, on.get(target.master.endpoint, []), shortfall, now)
+            busy.add(target.master.endpoint)
         at.waits.append(Wait(g.graph_id, at.master.endpoint, g.bytes(policy), reason,
                              shortfall if reason == "capacity" else None))
 
@@ -262,5 +302,5 @@ def plan(policy: ResidencyPolicy, masters: Sequence[Master], graphs: Sequence[Gr
               for e, gs in by_master.items() if e not in known]
     plans = [_plan_master(policy, m, by_master.get(m.endpoint, []), now, sized)
              for m in [*masters, *unread]]
-    _plan_loads(policy, plans, graphs)
+    _plan_loads(policy, plans, graphs, now)
     return Plan(masters=plans)

@@ -223,14 +223,90 @@ def test_a_busy_or_held_master_is_passed_over_for_another():
     assert plan(POLICY, masters, graphs, NOW).loads[0].endpoint == "m2"
 
 
-def test_when_the_first_load_fits_on_no_master_the_rest_wait_their_turn():
+def test_when_the_first_load_fits_on_no_master_later_ones_that_fit_go_ahead():
+    """The first waits for room on the master where it falls shortest, and keeps that master: a
+    later load goes to another one, and one that fits nowhere else waits its turn."""
     graphs = [_graph("big", status="evicted", requested_at=1.0, size=500 * MB),
-              _graph("small", status="evicted", requested_at=2.0, size=1 * MB)]
+              _graph("small", status="evicted", requested_at=2.0, size=1 * MB),
+              _graph("next", status="evicted", requested_at=3.0, size=1 * MB)]
     p = plan(POLICY, [_master(used_pct=60), _master(endpoint="m2", used_pct=70)], graphs, NOW)
-    assert p.loads == []
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("small", "m2")]
     assert [(w.graph_id, w.reason, w.endpoint) for w in p.waits] == [
-        ("big", "capacity", "m1"), ("small", "queued", "m1")]
+        ("big", "capacity", "m1"), ("next", "queued", "m1")]
     assert p.waits[0].shortfall == 650 * MB - 200 * MB
+
+
+GB = 1024 ** 3
+
+
+def _at_72_pct(n=3) -> list:
+    """Masters of 32 GB at 72 %: where pressure eviction leaves them, between the stop and the
+    start marks, so pressure never runs there."""
+    return [Master(endpoint=f"m{i}", used=32 * GB * 72 // 100, maxmemory=32 * GB)
+            for i in range(1, n + 1)]
+
+
+def test_a_load_that_fits_on_no_master_holds_up_no_later_load():
+    """Review finding 1, scenario A: a 2 GB graph needs 2.6 GB, and each master has 2.56 GB under
+    its start mark; a 50 MB graph asked after it, and an Always graph queued behind it, go ahead."""
+    graphs = [_graph("big", status="waiting_capacity", size=2 * GB, requested_at=100.0),
+              _graph("small", status="evicted", size=50 * MB, requested_at=200.0, endpoint="m2"),
+              _graph("always", "always", status="evicted", size=10 * MB, requested_at=300.0,
+                     endpoint="m3")]
+    p = plan(POLICY, _at_72_pct(), graphs, NOW)
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("small", "m2"), ("always", "m3")]
+    assert [(w.graph_id, w.endpoint, w.reason) for w in p.waits] == [("big", "m1", "capacity")]
+
+
+def test_a_graph_held_to_its_own_full_master_holds_up_no_load_elsewhere():
+    """Scenario B: a graph whose rollup graph is named from its key loads only onto its own master,
+    at 79 %; a 10 MB load goes ahead onto a master at 10 %."""
+    masters = [Master(endpoint="m1", used=32 * GB * 79 // 100, maxmemory=32 * GB),
+               Master(endpoint="m2", used=32 * GB * 10 // 100, maxmemory=32 * GB)]
+    graphs = [_graph("dedicated", status="evicted", size=1 * GB, requested_at=1.0, placed=False),
+              _graph("tiny", status="evicted", size=10 * MB, requested_at=2.0)]
+    p = plan(POLICY, masters, graphs, NOW)
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("tiny", "m2")]
+    assert [(w.graph_id, w.endpoint, w.reason) for w in p.waits] == [("dedicated", "m1",
+                                                                      "capacity")]
+
+
+def test_room_is_made_for_the_first_load_that_fits_nowhere_and_it_keeps_its_place():
+    """On the master where it falls shortest (here 41 MB), as pressure would pick them — Coldline
+    first, then Standard by oldest read — and only as many as make the room it lacks. Never an
+    Always graph, one a read holds, or one read within the Coldline idle time (it would come
+    straight back). The next pass, with the room made, it loads first."""
+    on_m1 = [_graph("always_old", "always", read=_ago(days=30), size=1 * GB),
+             _graph("leased_old", read=_ago(days=20), size=1 * GB, leased=True),
+             _graph("recent", read=_ago(minutes=30), size=1 * GB),
+             _graph("std_5d", read=_ago(days=5), size=30 * MB),
+             _graph("std_3d", read=_ago(days=3), size=100 * MB),
+             _graph("std_2d", read=_ago(days=2), size=200 * MB)]
+    graphs = [_graph("big", status="waiting_capacity", size=2 * GB, requested_at=100.0), *on_m1]
+    p = plan(POLICY, _at_72_pct(), graphs, NOW)
+    assert _evicted(p) == [("std_5d", "pressure"), ("std_3d", "pressure")]
+    assert [(w.graph_id, w.endpoint, w.reason) for w in p.waits] == [("big", "m1", "capacity")]
+    assert p.masters[0].used_after == 32 * GB * 72 // 100 - 130 * MB
+
+    later = _graph("later", status="evicted", size=10 * MB, requested_at=200.0)
+    freed = [Master(endpoint="m1", used=32 * GB * 72 // 100 - 130 * MB, maxmemory=32 * GB),
+             *_at_72_pct()[1:]]
+    p = plan(POLICY, freed, [graphs[0], later, *on_m1[:3], on_m1[5]], NOW)
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("big", "m1"), ("later", "m2")]
+    assert p.evictions == []
+
+
+def test_no_room_is_made_that_would_not_let_the_load_in():
+    """What the master could free without thrash is less than the load lacks: nothing is evicted
+    for it, and it waits; nor with eviction off."""
+    graphs = [_graph("big", status="waiting_capacity", size=2 * GB, requested_at=100.0),
+              _graph("std_5d", read=_ago(days=5), size=10 * MB)]
+    assert plan(POLICY, _at_72_pct(), graphs, NOW).evictions == []
+    room = [_graph("big", status="waiting_capacity", size=2 * GB, requested_at=100.0),
+            _graph("std_5d", read=_ago(days=5), size=100 * MB)]
+    off = residency_policy.effective({"evictionEnabled": False})
+    assert plan(off, _at_72_pct(), room, NOW).evictions == []
+    assert _evicted(plan(POLICY, _at_72_pct(), room, NOW)) == [("std_5d", "pressure")]
 
 
 def test_a_graph_whose_rollup_graph_is_named_from_its_key_loads_back_onto_its_own_master():
