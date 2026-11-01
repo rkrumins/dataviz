@@ -313,6 +313,25 @@ async def test_the_stats_probe_never_fails_on_residency_s_read(monkeypatch):
         None, None, None)
 
 
+async def test_a_pass_reads_each_lease_briefly_and_stops_asking_once_the_broker_fails(monkeypatch):
+    """Review 3, finding 9: a broker that times out rather than refuses cost a pass about 5 s per
+    eviction candidate, in turn — 200 candidates, some 17 minutes holding the leader lock. Each
+    read is bounded as a person's read is (100 ms), and after the first that fails the pass asks
+    no more: every lease it cannot read counts as held."""
+    asked = []
+
+    async def stuck(graph_id):
+        asked.append(graph_id)
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(cache_manager, "is_pinned", stuck)
+    broker: dict = {}
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    assert [await residency._leased(g, broker) for g in ("g1", "g2", "g3")] == [True] * 3
+    assert loop.time() - started < 1 and asked == ["g1"]
+
+
 # ── read tracking and the read lease ─────────────────────────────────────────────────────────────
 async def test_a_person_s_read_holds_the_lease_and_is_noted(asked):
     await _read(_Svc({"g": _wm()}))

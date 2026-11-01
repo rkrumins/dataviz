@@ -557,6 +557,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             endpoint_of[r.graph_id] = (_master_of(slots, r.falkor_graph_name) if slots
                                        else f"{provider}:unreachable")
 
+    broker: Dict[str, bool] = {}            # the read leases' broker, as this pass found it
     for r in found:
         candidate = r.owns_falkor_graph and r.status == "idle" and r.residency != "always"
         target = max(r.target_commit_seq, r.main_head_commit_seq)
@@ -568,7 +569,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             graph_id=r.graph_id, endpoint=endpoint_of[r.graph_id], residency=r.residency,
             status=r.status, owned=bool(r.owns_falkor_graph),
             evictable=bool(r.past_genesis and r.enable_finished) and r.graph_id not in held,
-            leased=candidate and await _leased(r.graph_id),
+            leased=candidate and await _leased(r.graph_id, broker),
             last_read=_ts(r.last_read_at),       # none on record: its clock starts this pass
             size_bytes=r.size_bytes, entities=estimate.get(r.graph_id),
             seeding=_seeding(r, target),
@@ -577,15 +578,21 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
     return snap
 
 
-async def _leased(graph_id: str) -> bool:
+async def _leased(graph_id: str, broker: Dict[str, bool]) -> bool:
     """Whether a read lease holds ``graph_id``: True when the broker cannot say, so an outage
-    there evicts nothing and fails no pass."""
-    from .cache_manager import is_pinned
+    there evicts nothing and fails no pass. Each read waits on the broker about 100 ms at most, as
+    a person's read does, and once one fails the pass (``broker``, one per pass) asks no more:
+    a broker that times out would otherwise cost seconds per candidate, holding the leader lock."""
+    from . import cache_manager
 
+    if broker.get("down"):
+        return True
     try:
-        return await is_pinned(graph_id)
-    except Exception:  # noqa: BLE001 — fail closed
-        logger.debug("residency: the read lease of %s could not be read", graph_id, exc_info=True)
+        return await asyncio.wait_for(cache_manager.is_pinned(graph_id), _BROKER_WAIT_S)
+    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — fail closed
+        broker["down"] = True
+        logger.warning("residency: read leases cannot be read; this pass holds every graph",
+                       exc_info=True)
         return True
 
 
