@@ -12,14 +12,16 @@ import { useState } from 'react'
 import { ArrowDownToLine } from 'lucide-react'
 import { Button } from '@/components/ui/Button'
 import { useAppNotifications } from '@/components/ui/notifications'
-import { ForkUpdateConflictsError, type ResolutionMap } from '@/services/versioningApiService'
+import { ForkUpdateConflictsError, type ResolutionMap, type UpdateFromParentResult } from '@/services/versioningApiService'
 import { ConflictResolver } from '@/features/reviews/components/ConflictResolver'
 import { useUpdateFromParent } from '../hooks/useVersioning'
 
-export function UpdateFromParentButton({ wsId, forkGraphId, className }: {
+export function UpdateFromParentButton({ wsId, forkGraphId, onUpdated, className }: {
   wsId: string
   /** The fork's graph. */
   forkGraphId: string
+  /** The fork has taken its parent's changes (or had none to take). */
+  onUpdated?: (res: UpdateFromParentResult) => void
   className?: string
 }) {
   const { notify } = useAppNotifications()
@@ -35,6 +37,7 @@ export function UpdateFromParentButton({ wsId, forkGraphId, className }: {
       {
         onSuccess: (res) => {
           setConflicts(null); setError(null)
+          onUpdated?.(res)
           if (res.upToDate) {
             notify('info', 'Already up to date with its parent.')
           } else {

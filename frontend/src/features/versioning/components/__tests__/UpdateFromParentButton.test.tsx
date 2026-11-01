@@ -50,6 +50,14 @@ describe('UpdateFromParentButton', () => {
     expect(notify).toHaveBeenCalledWith('success', 'Updated from its parent: 3 changes merged.')
   })
 
+  it('tells its host once the fork has taken its parent’s changes', () => {
+    const onUpdated = vi.fn()
+    answerWith(({ onSuccess }) => onSuccess({ commitId: 'c9', parentSeq: 12, wrote: 3, upToDate: false }))
+    render(<UpdateFromParentButton wsId="ws1" forkGraphId="g_f" onUpdated={onUpdated} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Update from parent' }))
+    expect(onUpdated).toHaveBeenCalledWith({ commitId: 'c9', parentSeq: 12, wrote: 3, upToDate: false })
+  })
+
   it('says when the fork was up to date already', () => {
     answerWith(({ onSuccess }) => onSuccess({ commitId: null, parentSeq: 12, wrote: 0, upToDate: true }))
     render(<UpdateFromParentButton wsId="ws1" forkGraphId="g_f" />)
