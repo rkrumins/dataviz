@@ -47,7 +47,8 @@ from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
 from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionExhausted,
                      CurationAtRisk, DraftNotReadable, StagedChangesUnsaved,
-                     DraftRoleRequired, ForkLimit, ForkNotRestorable, GraphMoved, GraphNotWritable,
+                     DraftRoleRequired, ForkLimit, ForkNotRestorable, ForkUpdateConflicts,
+                     GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
                      MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
                      PersonRequired,
@@ -3013,6 +3014,199 @@ class GraphVersioningService:
         parent = await self._parent_window(s, graph_id, branch_id, lo, hi)
         return n + (await self._window_count(s, *parent, cap) if parent is not None else 0)
 
+    async def update_fork_from_parent(
+        self, *, fork_graph_id: str, actor: str,
+        resolutions: Optional[Mapping[str, Optional[dict]]] = None,
+        parent_seq: Optional[int] = None, parent_label: Optional[str] = None,
+    ) -> Dict[str, object]:
+        """Take a fork's parent's changes into it ("Update from parent"): the parent's ``main`` from
+        the seq the fork reads it at (``B``, :func:`fork_base_at` at the fork's head) to its head
+        (``P``, read once; ``parent_seq`` pins it, as a queued update does). Returns ``{commit_id,
+        parent_seq, wrote, up_to_date}``: at ``P`` already, nothing is written, ``commit_id`` is
+        None and ``parent_seq`` is ``B``.
+
+        What only the parent changed shows through once the base moves. What the fork has rows of
+        and the parent changed in ``(B, P]`` goes through the 3-way merge — base the parent at
+        ``B``, ours the fork at its head, theirs the parent at ``P`` — and fields both changed,
+        differently, are :class:`ForkUpdateConflicts`, which ``resolutions`` (``{entity_id: payload |
+        None}``) settle field by field, as a pull's are. A node the parent deleted in the window takes
+        the fork's own edges on it with it, and an edge the parent drew or pointed in it at a node
+        the fork deleted is deleted on the fork. What is written is what the fork would read
+        otherwise once its base moves: merged and resolved values, and those deletions.
+
+        One ``sync_parent`` commit on the fork's ``main`` — written with no rows too, so history
+        shows the update — and the base the fork reads from it on, ``(that commit's seq, P)`` in
+        ``fork_bases``, in one transaction; a read before the commit keeps the base before it.
+        Drafts on the fork are behind then, and take it with Pull latest. ``parent_label`` names
+        the parent in the commit's message (its data source's label; its graph id when None)."""
+        return await self._retry_seq(
+            f"update {fork_graph_id} from its parent",
+            lambda: self._update_fork_once(
+                fork_graph_id=fork_graph_id, actor=actor, resolutions=dict(resolutions or {}),
+                parent_seq=parent_seq, parent_label=parent_label))
+
+    async def _update_fork_once(
+        self, *, fork_graph_id: str, actor: str, resolutions: Dict[str, Optional[dict]],
+        parent_seq: Optional[int], parent_label: Optional[str],
+    ) -> Dict[str, object]:
+        """One attempt at :meth:`update_fork_from_parent`, under the fork's graph lock."""
+        async with self._session() as s:
+            # The fork's lock only. What an update reads of the parent are its rows at seqs up to P,
+            # and those never change once P is the parent's head: it waits on no publish of the
+            # parent, and a large update holds none up. A path that holds both graphs' locks takes
+            # the parent's first.
+            await self._lock_graph(s, fork_graph_id)
+            fork = await s.get(GraphORM, fork_graph_id)
+            if fork is None or fork.deleted_at is not None:
+                raise ValueError(f"unknown graph {fork_graph_id}")
+            if not fork.fork_parent_graph_id:
+                raise NotAFork(fork_graph_id, f"graph {fork_graph_id} is not a fork: it has no "
+                                              "parent to update from")
+            await self._assert_writable(s, fork.id)
+            parent = await s.get(GraphORM, fork.fork_parent_graph_id)
+            if parent is None:
+                raise ValueError(f"the graph fork {fork.id} was forked from is gone")
+            fork_main = await self._main_branch_id(s, fork.id)
+            parent_main = await self._main_branch_id(s, parent.id)
+            head = fork.main_head_commit_seq
+            base = await fork_base_at(s, fork, head)
+            to = parent.main_head_commit_seq if parent_seq is None else parent_seq
+            if to <= base:
+                return {"commit_id": None, "parent_seq": base, "wrote": 0, "up_to_date": True}
+            new_seq = head + 1
+            # The base the fork reads from the update's commit on, first: a read at ``new_seq`` in
+            # this transaction is then the fork as the update leaves it, before it writes a row.
+            s.add(ForkBaseORM(fork_graph_id=fork.id, fork_seq=new_seq, parent_seq=to,
+                              created_by=actor))
+            await s.flush()
+            window = await self._window_chain(s, parent.id, parent_main, base, to)
+            changed = await self._both_changed(s, fork.id, fork_main, window) | set(resolutions)
+            was = await self._values_at(s, parent.id, parent_main, changed, base)
+            ours = await self._values_at(s, fork.id, fork_main, changed, head)
+            theirs = await self._values_at(s, parent.id, parent_main, changed, to)
+            set_fields = frozenset(config.SET_FIELDS)
+            merged: Dict[str, Optional[dict]] = {}
+            conflicts: List[dict] = []
+            for eid in sorted(changed):
+                out = three_way_merge(was.get(eid), ours.get(eid), theirs.get(eid), set_fields)
+                if eid in resolutions:
+                    merged[eid] = _settle_conflicts(
+                        out.merged, _normalize_resolution(resolutions[eid]), out.conflicts)
+                    continue
+                merged[eid] = out.merged
+                conflicts += [{"entity_id": eid, "path": list(c.path), "base": c.base,
+                               "ours": c.ours, "theirs": c.theirs, "kind": c.kind}
+                              for c in out.conflicts]
+            if conflicts:
+                raise ForkUpdateConflicts(conflicts, {
+                    eid: ours.get(eid) for eid in sorted({c["entity_id"] for c in conflicts})})
+            view = _collapse_empty_payloads(merged)
+            await self._sync_neighborhood(s, fork.id, fork_main, window, view, new_seq)
+            self._cascade_incident_edges(view)
+            self._assert_referential_integrity(view)
+            after = await self._values_at(s, fork.id, fork_main, list(view), new_seq)
+            deltas = net_delta({eid: after.get(eid) for eid in view}, view)
+
+            kind_by_entity: Dict[str, str] = {}
+            if deltas:
+                kind_by_entity = self._resolve_delta_kinds(deltas, await self._kind_map_multi(
+                    s, [(g, b) for g, b, _at in await self._layers(s, fork.id, fork_main, new_seq)],
+                    entity_ids=[d.entity_id for d in deltas]))
+            main = await s.get(BranchORM, fork_main)
+            commit = CommitORM(
+                graph_id=fork.id, branch_id=fork_main, commit_seq=new_seq,
+                parent_commit_id=main.head_commit_id, kind="sync_parent",
+                message=f"Update from {parent_label or parent.id}@{to}", actor=actor,
+                source_branch_id=parent_main,
+            )
+            s.add(commit)
+            await s.flush()
+            if deltas:
+                await self._write_deltas(s, fork.id, fork_main, commit, deltas, kind_by_entity, actor)
+            main.head_commit_id = commit.id
+            fork.main_head_commit_seq = new_seq
+            fork.updated_at = _now()
+            commit.merkle_root = await self._commit_merkle(s, fork.id, fork_main, commit, deltas)
+            # ``rebased``, as a pull's: what the update rewrote of the fork's own (_approvals).
+            written = _delta_stats(deltas)
+            commit.stats = {**written, "rebased": dict(written), "from_seq": base, "to_seq": to}
+            ps = await s.get(ProjectionStateORM, fork.id)
+            if ps is not None:
+                ps.target_commit_seq = new_seq
+            return {"commit_id": commit.id, "parent_seq": to, "wrote": len(deltas),
+                    "up_to_date": False}
+
+    async def _window_chain(self, s, graph_id: str, branch_id: str, lo: int,
+                            hi: int) -> List[Tuple[str, str, int, int]]:
+        """The windows :meth:`_changed_in_window` reads, as ``(graph, branch, lo, hi)``: the branch's
+        own, then up each fork above it (:meth:`_parent_window`) — for a query that joins a
+        window to other rows in SQL."""
+        chain = [(graph_id, branch_id, lo, hi)]
+        while (up := await self._parent_window(s, *chain[-1])) is not None:
+            chain.append(up)
+        return chain
+
+    @staticmethod
+    async def _both_changed(s, fork_id: str, fork_main: str, window) -> set:
+        """Of the entities a fork's parent changed in ``window`` (:meth:`_window_chain`), those the
+        fork has rows of (a head on its ``main``): what Update from parent merges. Joined in SQL,
+        never the window's ids in this process."""
+        mine = select(EntityHeadORM.entity_id).where(
+            EntityHeadORM.graph_id == fork_id, EntityHeadORM.branch_id == fork_main)
+        both: set = set()
+        for gid, bid, lo, hi in window:
+            for model in (NodeVersionORM, EdgeVersionORM):
+                both.update((await s.execute(select(model.entity_id).where(
+                    model.graph_id == gid, model.branch_id == bid, model.commit_seq > lo,
+                    model.commit_seq <= hi, model.entity_id.in_(mine)).distinct())).scalars())
+        return both
+
+    @staticmethod
+    async def _sync_cascades(s, fork_id: str, fork_main: str, window) -> set:
+        """The edges Update from parent may have to delete on the fork, found in SQL: the fork's own
+        edges on a node its parent deleted in ``window`` (:meth:`_window_chain`), and the parent's
+        edges written in it — drawn, or pointed elsewhere — at a node the fork deleted. More than
+        that, at times: whether one is left on a node gone is told from what the fork reads after
+        the update (:meth:`_sync_neighborhood`)."""
+        ev, nv = EdgeVersionORM, NodeVersionORM
+        gone = select(EntityHeadORM.entity_id).where(
+            EntityHeadORM.graph_id == fork_id, EntityHeadORM.branch_id == fork_main,
+            EntityHeadORM.is_tombstone.is_(True))
+        edges: set = set()
+        for gid, bid, lo, hi in window:
+            deleted = select(nv.entity_id).where(
+                nv.graph_id == gid, nv.branch_id == bid, nv.commit_seq > lo, nv.commit_seq <= hi,
+                nv.op == "delete")
+            for end in (ev.source_entity_id, ev.target_entity_id):
+                for stmt in (
+                        select(ev.entity_id).where(ev.graph_id == fork_id, ev.branch_id == fork_main,
+                                                   end.in_(deleted)),
+                        select(ev.entity_id).where(ev.graph_id == gid, ev.branch_id == bid,
+                                                   ev.commit_seq > lo, ev.commit_seq <= hi,
+                                                   ev.op != "delete", end.in_(gone))):
+                    edges.update((await s.execute(stmt.distinct())).scalars())
+        return edges
+
+    async def _sync_neighborhood(self, s, fork_id: str, fork_main: str, window,
+                                 view: Dict[str, Optional[dict]], at: int) -> None:
+        """Add to an update's SPARSE result (``view``) what its cascade and integrity guards reason
+        about, each at what the fork reads at ``at`` (the update's seq, its base moved): the edges
+        that may be left on a node gone — :meth:`_sync_cascades`'s, and every edge on a node the
+        merge deletes — and the ends of every live edge in it, the deleted ones too (as None), so
+        the cascade sees them gone. Each nets to nothing unless the cascade then deletes it.
+        Bounded by what the window and the merge changed."""
+        edges = await self._sync_cascades(s, fork_id, fork_main, window)
+        tomb = [eid for eid, p in view.items() if p is None]
+        if tomb:
+            edges |= await self._incident_edge_ids(s, fork_id, fork_main, tomb)
+        edges -= view.keys()
+        if edges:
+            view.update({eid: p for eid, p in (
+                await self._values_at(s, fork_id, fork_main, edges, at)).items() if p is not None})
+        ends = {e for p in view.values() if p for e in _edge_src_tgt(p) if e} - view.keys()
+        if ends:
+            view.update(await self._values_at(s, fork_id, fork_main, ends, at))
+
     async def approve_pr(
         self, *, pr_id: str, actor: str, expected_head_commit_id: Optional[str] = None,
         self_approval: bool = True,
@@ -3590,7 +3784,8 @@ class GraphVersioningService:
 
         An approval records the source branch's head when it was given (:meth:`approve_pr`) and
         holds until a content commit lands on the branch after it. A pull that rewrote none of
-        the draft's own edits (``stats.rebased`` all zero) is not content, so it keeps approvals.
+        the draft's own edits (``stats.rebased`` all zero) is not content, so it keeps approvals;
+        nor is a fork's Update from parent that wrote no rows.
         An approval with no recorded head was given before approvals were bound to one: stale.
         Past 1000 later commits, an approval older than all of them counts as stale too."""
         approved = list(pr.approved_by or [])
@@ -3604,7 +3799,7 @@ class GraphVersioningService:
                 .order_by(CommitORM.commit_seq.desc()).limit(1001))).all()
             for seq, kind, stats in rows:
                 rebased = (stats or {}).get("rebased")
-                if kind != "pull" or rebased is None or any(rebased.values()):
+                if kind not in ("pull", "sync_parent") or rebased is None or any(rebased.values()):
                     last_content = seq
                     break
             else:

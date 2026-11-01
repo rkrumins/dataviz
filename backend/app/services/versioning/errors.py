@@ -251,12 +251,27 @@ class ForkLimit(_HttpMapped, RuntimeError):
 
 class NotAFork(_HttpMapped, RuntimeError):
     """A fork route reached a graph that fork_graph did not mint: a data source's graph, or a
-    fork bound to a data source. Those go to the trash and back with their data source."""
+    fork bound to a data source. Those go to the trash and back with their data source. Update
+    from parent says why in its own words (``message``): the graph has no parent."""
 
-    def __init__(self, graph_id: str):
+    def __init__(self, graph_id: str, message: Optional[str] = None):
         self.graph_id = graph_id
-        super().__init__(f"graph {graph_id} is not a fork; it goes with its data source",
+        super().__init__(message or f"graph {graph_id} is not a fork; it goes with its data source",
                          {"type": "not_a_fork", "graphId": graph_id})
+
+
+class ForkUpdateConflicts(_HttpMapped, RuntimeError):
+    """Update from parent found fields the fork and its parent both changed, differently, since
+    the parent's version the fork reads: a pull's conflicts, and the fork's own value of each
+    entity in them (``seeds``) to resolve from. Nothing was written; the update is sent again with
+    ``resolutions``."""
+
+    def __init__(self, conflicts, seeds: Dict[str, Any]):
+        self.conflicts, self.seeds = list(conflicts), dict(seeds)
+        super().__init__(
+            f"{len(self.seeds)} item(s) changed both here and in the parent: resolve them, then "
+            "update again", {"type": "fork_update_conflicts", "conflicts": self.conflicts,
+                             "seeds": self.seeds})
 
 
 class LiveForks(_HttpMapped, RuntimeError):
@@ -412,4 +427,4 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
-               IneligibleOwner)
+               IneligibleOwner, ForkUpdateConflicts)

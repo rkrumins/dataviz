@@ -48,8 +48,10 @@ def test_the_models_and_the_migration_require_the_same_types():
         assert f"'{job_type}'" in str(check.sqltext)
     assert {"purge", "package_inspect"} <= set(JOB_TYPES)
     migration = _migration()
-    assert set(migration._REQUIRED) == set(JOB_TYPES)
+    assert set(migration._REQUIRED) <= set(JOB_TYPES)
     assert migration.down_revision == "20260930_1000_outbox_type_time"
+    # The latest migration to widen it requires every type the code writes.
+    assert set(_migration(_FORK_SYNC)._REQUIRED) == set(JOB_TYPES)
 
 
 def test_the_preflight_table_and_the_import_rows_indexes_follow_on():
@@ -923,6 +925,115 @@ async def test_the_fork_bases_migration_round_trips(store):
             assert len(await _bases(conn)) == 2
             await conn.execute(text(f"DELETE FROM {_FORKS} WHERE id = 'g_fb_fork'"))
             assert await _bases(conn) == [("g_fb_other", 3, 3, "bob")]
+        finally:
+            await trans.rollback()
+
+
+# ── sync_parent, merging and the fork jobs: Update from parent and a fork's merge (20261101_1000_gv_fork_sync) ──
+_FORK_SYNC = _VERSIONS / "20261101_1000_gv_fork_sync.py"
+
+
+def _check_of(model, name: str) -> str:
+    return str(next(c for c in model.__table__.constraints if getattr(c, "name", "") == name).sqltext)
+
+
+def test_the_fork_sync_values_are_declared_and_migrated():
+    """Update from parent's commit kind, a fork's review being merged by a job, and the two jobs:
+    a store ``create_all`` builds allows them, and so does a migrated one."""
+    assert "'sync_parent'" in _check_of(models.CommitORM, "ck_commits_kind")
+    assert "'merging'" in _check_of(models.MergeRequestORM, "ck_mr_status")
+    assert {"fork_update", "fork_merge"} <= set(JOB_TYPES)
+    migration = _migration(_FORK_SYNC)
+    assert migration.revision == _FORK_SYNC.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261030_1200_ds_fork_of"
+    assert "ensure_fork_sync_checks" in _FORK_SYNC.read_text()
+
+
+async def _definition(conn, table: str, name: str):
+    return (await conn.execute(text(
+        "SELECT oid, pg_get_constraintdef(oid) FROM pg_constraint WHERE conname = :name "
+        "AND conrelid = CAST(:t AS regclass)"), {"name": name, "t": table})).one()
+
+
+async def _before_fork_sync(conn) -> None:
+    """The checks as the revision before this one left them (not checked against the rows: the
+    store may hold this code's already)."""
+    await conn.execute(text(f"ALTER TABLE {_COMMITS} DROP CONSTRAINT ck_commits_kind"))
+    await conn.execute(text(
+        f"ALTER TABLE {_COMMITS} ADD CONSTRAINT ck_commits_kind CHECK (kind IN ('genesis','edit',"
+        "'checkpoint','squash_publish','import','sync','revert','restore','pull')) NOT VALID"))
+    await conn.execute(text(f"ALTER TABLE {_MRS} DROP CONSTRAINT ck_mr_status"))
+    await conn.execute(text(
+        f"ALTER TABLE {_MRS} ADD CONSTRAINT ck_mr_status "
+        "CHECK (status IN ('open','conflicts','mergeable','approved','merged','closed')) NOT VALID"))
+    await conn.execute(text(f"DELETE FROM {_JOBS} WHERE job_type IN ('fork_update', 'fork_merge')"))
+    await _set_check(conn, _PUBLISH_ERA + ",'purge','package_inspect'")
+
+
+async def _allows_fork_sync(conn) -> list:
+    oids = []
+    for table, name, value in ((_COMMITS, "ck_commits_kind", "'sync_parent'"),
+                               (_MRS, "ck_mr_status", "'merging'"),
+                               (_JOBS, "ck_jobs_type", "'fork_update'"),
+                               (_JOBS, "ck_jobs_type", "'fork_merge'")):
+        oid, definition = await _definition(conn, table, name)
+        assert value in definition, definition
+        oids.append(oid)
+    return oids
+
+
+@e2e
+async def test_a_store_alembic_never_reached_allows_the_fork_sync_values(store):
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await _before_fork_sync(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)
+            oids = await _allows_fork_sync(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+            assert await _allows_fork_sync(conn) == oids
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_a_value_a_check_allows_is_kept_when_it_is_widened(store):
+    """Widen-only: a value the check allows that this code does not write (a later release's) stays."""
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f"ALTER TABLE {_MRS} DROP CONSTRAINT ck_mr_status"))
+            await conn.execute(text(
+                f"ALTER TABLE {_MRS} ADD CONSTRAINT ck_mr_status CHECK (status IN ('open',"
+                "'conflicts','mergeable','approved','merged','closed','queued_elsewhere'))"))
+            await conn.run_sync(models.ensure_fork_sync_checks)
+            _oid, definition = await _definition(conn, _MRS, "ck_mr_status")
+            assert "'merging'" in definition and "'queued_elsewhere'" in definition
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_fork_sync_migration_widens_up_and_never_narrows_down(store):
+    migration = _migration(_FORK_SYNC)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await _before_fork_sync(conn)
+            await conn.run_sync(run("upgrade"))
+            oids = await _allows_fork_sync(conn)
+            await conn.run_sync(run("upgrade"))                     # idempotent
+            assert await _allows_fork_sync(conn) == oids
+            await conn.run_sync(run("downgrade"))                   # widen-only: nothing narrows
+            await _allows_fork_sync(conn)
         finally:
             await trans.rollback()
 
