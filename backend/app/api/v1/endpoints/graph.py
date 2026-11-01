@@ -2346,8 +2346,8 @@ async def search_native(
     from backend.app.db.repositories.data_source_repo import get_data_source_orm
     source = await get_data_source_orm(session, granted.data_source_id) if granted.data_source_id else None
     if source is not None and source.fork_of_data_source_id:
-        # Its root's key serves it: while that is out of FalkorDB, answer as the root would.
-        raise (await _native_loading(request_id, granted.data_source_id)) or _native_refusal(
+        # Never on a fork, whatever its root's state: no load is asked for one either.
+        raise _native_refusal(
             request_id, 501, "native_query_unavailable",
             "Native queries read a graph's own published store; a fork reads through its parent. "
             "Run it on the parent, or open the fork's data in the canvas.",
@@ -2419,9 +2419,8 @@ async def _holds_published_graph(data_source_id: str, provider) -> bool:
 
 
 async def _native_loading(request_id: str, data_source_id: str) -> Optional[HTTPException]:
-    """503 ``graph_loading`` with Retry-After when the key that serves the data source — its
-    graph's, or a fork's root's — is out of FalkorDB under residency (doc 17), whose load this
-    asks for; None when it is not."""
+    """503 ``graph_loading`` with Retry-After when the data source's key is out of FalkorDB under
+    residency (doc 17), whose load this asks for; None when it is not."""
     from backend.app.services.versioning import residency, residency_policy
 
     loading = await residency.non_resident(data_source_id)

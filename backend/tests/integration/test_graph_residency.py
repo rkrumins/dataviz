@@ -1533,10 +1533,10 @@ async def test_falkordb_only_work_on_a_fork_answers_as_its_root_would(
         store, forked, fork_engine, monkeypatch):
     """Deep search on a fork runs in its root's store. While the root is out of FalkorDB — evicted,
     or loading until its key serves reads — it answers as a search of the root would: 503
-    graph_loading with Retry-After, asking for the root's load (a Coldline root's too); and a
-    native query on the fork's data source is told the root is loading (``non_resident`` names the
-    root). Once the root is loaded, the fork's own rules again: its search runs in the root's
-    store, its note saying the fork's own changes are not in it. A fork past the ceiling reads
+    graph_loading with Retry-After, asking for the root's load (a Coldline root's too), and
+    ``non_resident`` names the root (a native query on a fork is 501 whatever the root's state:
+    test_native_query_api). Once the root is loaded, the fork's own rules again: its search runs
+    in the root's store, its note saying the fork's own changes are not in it. A fork past the ceiling reads
     nothing of its root's: its search is the fork's 501 whatever the root's state, and asks for
     no load."""
     from httpx import ASGITransport, AsyncClient
