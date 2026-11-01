@@ -134,7 +134,8 @@ chips change as it loads.
    "Saving evicts 12 graphs, 9.4 GB, on master 10.0.0.2:6379". Select **Save**
    again to apply it.
 
-**You should now see** the new values in force within a minute. A value that is
+**You should now see** the new values in force within 30 seconds; the next
+capacity pass acts on them. A value that is
 out of range, or contradicts another, is named next to its field and nothing is
 saved. If the card says residency is off on this deployment, the values are kept
 but nothing acts on them until it is turned on.
