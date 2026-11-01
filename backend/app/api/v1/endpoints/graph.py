@@ -2342,7 +2342,8 @@ async def search_native(
     from backend.app.db.repositories.data_source_repo import get_data_source_orm
     source = await get_data_source_orm(session, granted.data_source_id) if granted.data_source_id else None
     if source is not None and source.fork_of_data_source_id:
-        raise _native_refusal(
+        # Its root's key serves it: while that is out of FalkorDB, answer as the root would.
+        raise (await _native_loading(request_id, granted.data_source_id)) or _native_refusal(
             request_id, 501, "native_query_unavailable",
             "Native queries read a graph's own published store; a fork reads through its parent. "
             "Run it on the parent, or open the fork's data in the canvas.",
@@ -2365,16 +2366,7 @@ async def search_native(
             "Native queries run on FalkorDB and Neo4j data sources only.",
         )
     if not await _holds_published_graph(granted.data_source_id, provider):
-        from backend.app.services.versioning import residency, residency_policy
-        loading = await residency.non_resident(granted.data_source_id)
-        if loading:                  # out of FalkorDB under residency (doc 17): ask for its load
-            await residency.request_load(loading)
-            raise _native_refusal(
-                request_id, 503, "graph_loading",
-                "This graph is being loaded into memory for queries. Try again shortly.",
-                retry_after=(await residency_policy.resolve()).capacity_interval_secs,
-            )
-        raise _native_refusal(
+        raise (await _native_loading(request_id, granted.data_source_id)) or _native_refusal(
             request_id, 503, "unavailable",
             "The published graph is catching up. Try again in a moment.", retry_after=5,
         )
@@ -2420,6 +2412,23 @@ async def _holds_published_graph(data_source_id: str, provider) -> bool:
     return bool(wm["fresh"]) and versioned_sources.serves_pin(
         getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
         wm.get("falkor_graph_name"), gid)
+
+
+async def _native_loading(request_id: str, data_source_id: str) -> Optional[HTTPException]:
+    """503 ``graph_loading`` with Retry-After when the key that serves the data source — its
+    graph's, or a fork's root's — is out of FalkorDB under residency (doc 17), whose load this
+    asks for; None when it is not."""
+    from backend.app.services.versioning import residency, residency_policy
+
+    loading = await residency.non_resident(data_source_id)
+    if not loading:
+        return None
+    await residency.request_load(loading)
+    return _native_refusal(
+        request_id, 503, "graph_loading",
+        "This graph is being loaded into memory for queries. Try again shortly.",
+        retry_after=(await residency_policy.resolve()).capacity_interval_secs,
+    )
 
 
 def _native_refusal(

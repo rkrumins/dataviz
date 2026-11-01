@@ -252,18 +252,19 @@ async def set_class(graph_id: str, residency: str) -> Optional[str]:
 
 
 async def non_resident(data_source_id: str) -> Optional[str]:
-    """The graph of a data source (not a fork's) whose key is not in FalkorDB under residency,
-    else None."""
+    """The graph whose key serves a data source's reads — its graph's, or a fork's root's — when
+    that key is not in FalkorDB under residency, else None."""
     from .service import GraphVersioningService
 
     if not config.RESIDENCY_ENABLED:
         return None
     svc = GraphVersioningService()
     graph = await svc.get_graph_by_data_source(data_source_id)
-    if graph is None or graph.get("fork_parent_graph_id"):
+    if graph is None:
         return None
-    gid = graph["graph_id"]
-    return gid if (await svc.projection_watermark(gid))["status"] in _OUT else None
+    root = await _root(svc, graph)
+    state = await svc.residency_state(root["graph_id"])
+    return root["graph_id"] if state is not None and state["status"] in _OUT else None
 
 
 @dataclass

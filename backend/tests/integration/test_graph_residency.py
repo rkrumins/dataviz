@@ -1232,6 +1232,53 @@ async def test_a_person_s_read_of_a_fork_counts_for_its_root_and_asks_for_its_lo
     assert _through(await _fork_engine(fork_engine, fork_ds, reader)) == "falkordb"
 
 
+async def test_falkordb_only_work_on_a_fork_answers_as_its_root_would(
+        store, forked, fork_engine, monkeypatch):
+    """Deep search on a fork runs in its root's store. While the root is out of FalkorDB — evicted,
+    or loading until its key serves reads — it answers as a search of the root would: 503
+    graph_loading with Retry-After, asking for the root's load (a Coldline root's too); and a
+    native query on the fork's data source is told the root is loading (``non_resident`` names the
+    root). Once the root is loaded, the fork's own rules again: its search runs in the root's
+    store, its note saying the fork's own changes are not in it."""
+    from httpx import ASGITransport, AsyncClient
+
+    from backend.app.providers.draft_overlay_provider import FORK_SEARCH_NOTE
+    from backend.app.services.versioning.service import Viewer
+    from backend.tests.integration.test_api_graph_draft_journey import _build_app
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    proj = FalkorProjector(graph_client_factory=FakeFalkor())
+    _root_ds, root, fork_ds, _fork = await forked(proj)
+    await _set_ps(root, residency="coldline")
+    app, graph_routes = _build_app()
+    monkeypatch.setattr(graph_routes, "provider_manager", _Registry())
+    path = f"/api/v1/ws_forks/graph/search/discover?dataSourceId={fork_ds}"
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        assert (await client.get(path)).json()["served"] == "falkordb"
+        assert await residency.non_resident(fork_ds) is None
+        await get_broker_redis().delete(f"versioning:lease:{root}")        # the read's lease ends
+        assert await CacheManager(proj).evict(root, drop_graph=_dropped) is True
+        for out in ("evicted", "rehydrating"):
+            if out == "rehydrating":
+                await _loading(root)
+            await get_broker_redis().zrem(residency.LOAD_REQUESTS, root)
+            r = await client.get(path)
+            assert r.status_code == 503, (out, r.text)
+            assert r.json()["detail"]["type"] == "graph_loading" and r.headers["Retry-After"]
+            for _ in range(50):
+                if await _load_requested(root):
+                    break
+                await asyncio.sleep(0.02)
+            assert await _load_requested(root)
+            assert await residency.non_resident(fork_ds) == root
+        await _set_ps(root, status="idle")
+        r = await client.get(path)
+        assert r.status_code == 200 and r.json()["served"] == "falkordb"
+    engine = await _fork_engine(fork_engine, fork_ds, Viewer(actor="usr_reader", can_read=True))
+    assert engine.provider.search_scope_note == FORK_SEARCH_NOTE
+    assert await residency.non_resident(fork_ds) is None
+
+
 async def test_a_fork_never_serves_an_answer_cached_from_its_root_s_evicted_key(
         store, forked, fork_engine, monkeypatch):
     """A fork's cached answers are keyed by the store it read and that store's seqs

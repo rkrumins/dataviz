@@ -334,6 +334,43 @@ async def test_a_fork_is_refused(test_client: AsyncClient, db_session, estate, e
     assert "asked" not in engine                          # no provider was built for it
 
 
+async def test_a_fork_whose_root_is_out_of_falkordb_answers_as_its_root_would(
+        test_client: AsyncClient, db_session, estate, engine, monkeypatch):
+    """Residency (doc 17): a fork reads through its root's key. While that is out of FalkorDB a
+    query on the fork is a 503 ``graph_loading`` with Retry-After, as one on the root would be, and
+    asks for the root's load; once the root is loaded, the fork's own 501 again."""
+    from types import SimpleNamespace
+
+    from backend.app.services.versioning import residency, residency_policy
+
+    db_session.add(WorkspaceDataSourceORM(id="dsfork_native", workspace_id=WS,
+                                          provider_id="prov_native", fork_of_data_source_id=DS))
+    await db_session.commit()
+    out, asked = {"dsfork_native": "graph_root"}, []
+
+    async def non_resident(data_source_id):
+        return out.get(data_source_id)
+
+    async def request_load(graph_id):
+        asked.append(graph_id)
+
+    async def policy():
+        return SimpleNamespace(capacity_interval_secs=45)
+
+    monkeypatch.setattr(residency, "non_resident", non_resident)
+    monkeypatch.setattr(residency, "request_load", request_load)
+    monkeypatch.setattr(residency_policy, "resolve", policy)
+    with signed_in(person("usr_reader"), READER):
+        r = await run(test_client, params={"dataSourceId": "dsfork_native"})
+        assert r.status_code == 503, r.text
+        assert r.json()["detail"]["code"] == "graph_loading" and r.headers["Retry-After"] == "45"
+        assert asked == ["graph_root"]
+        out.clear()
+        r = await run(test_client, params={"dataSourceId": "dsfork_native"})
+    assert r.status_code == 501 and r.json()["detail"]["code"] == "native_query_unavailable"
+    assert asked == ["graph_root"] and "asked" not in engine
+
+
 async def test_an_engine_without_native_queries_is_refused(test_client: AsyncClient, db_session,
                                                           estate, engine):
     engine["engine"] = object()
