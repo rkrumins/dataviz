@@ -361,6 +361,17 @@ services:
         maxReplicas: 8
         targetCPUUtilizationPercentage: 70
         scaleDownStabilizationWindowSeconds: 900
+        # Optional: scale on the lane's queue too. Needs KEDA (keda.sh) in the
+        # cluster and a Prometheus that scrapes viz-service's /api/v1/metrics
+        # (METRICS_ENABLED and METRICS_TOKEN). A KEDA ScaledObject then takes
+        # the HPA's place, with the same bounds, CPU target and scale-down
+        # window, plus a trigger on the lane's running and queued jobs
+        # (versioning_jobs_running + versioning_jobs_claimable): one pod per
+        # jobsPerReplica of them. Keep jobsPerReplica at GRAPHVER_TRANSFER_SLOTS.
+        keda:
+          enabled: false
+          prometheusServerAddress: ""   # e.g. http://prometheus-server.monitoring.svc
+          jobsPerReplica: 2
       resources:
         requests: { cpu: "1", memory: 1Gi }
         limits: { cpu: "2", memory: 4Gi }

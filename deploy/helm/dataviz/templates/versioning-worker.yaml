@@ -97,6 +97,39 @@ spec:
           emptyDir:
             sizeLimit: {{ $v.spoolSize }}
 {{- with $cfg.autoscaling }}
+{{- if and .keda .keda.enabled }}
+---
+# KEDA in place of the HPA below (two autoscalers on one Deployment fight): the
+# same bounds, CPU target and scale-down window, plus the lane's demand, its
+# running and queued jobs as viz-service's /api/v1/metrics reports them.
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "dataviz.labels" $ | nindent 4 }}
+    app.kubernetes.io/name: {{ $name }}
+spec:
+  scaleTargetRef:
+    name: {{ $name }}
+  minReplicaCount: {{ .minReplicas }}
+  maxReplicaCount: {{ .maxReplicas }}
+  advanced:
+    horizontalPodAutoscalerConfig:
+      behavior:
+        scaleDown:
+          stabilizationWindowSeconds: {{ .scaleDownStabilizationWindowSeconds }}
+  triggers:
+    - type: cpu
+      metricType: Utilization
+      metadata:
+        value: {{ .targetCPUUtilizationPercentage | quote }}
+    - type: prometheus
+      metadata:
+        serverAddress: {{ required "autoscaling.keda.prometheusServerAddress is required with KEDA on" .keda.prometheusServerAddress | quote }}
+        query: 'max(versioning_jobs_running{lane="{{ $lane }}"}) + max(versioning_jobs_claimable{lane="{{ $lane }}"})'
+        threshold: {{ .keda.jobsPerReplica | quote }}
+{{- else }}
 ---
 apiVersion: autoscaling/v2
 kind: HorizontalPodAutoscaler
@@ -122,5 +155,6 @@ spec:
   behavior:
     scaleDown:
       stabilizationWindowSeconds: {{ .scaleDownStabilizationWindowSeconds }}
+{{- end }}
 {{- end }}
 {{- end }}
