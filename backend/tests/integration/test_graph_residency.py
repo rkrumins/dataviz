@@ -996,6 +996,35 @@ async def _loads(loop, proj, gid: str) -> None:
 
 
 @live
+async def test_the_retire_pass_drops_a_key_an_eviction_could_not(store, falkor, mine, monkeypatch):
+    """Review finding 3: the graph's own row still names the key its eviction could not drop, and
+    the retire pass kept it for that ("PROTECTED: graph … projects into it") and forgot it, so the
+    key held its memory for good. Out of FalkorDB — evicted, or waiting for room — nothing writes
+    or reads it, and the pass holds the graph's projection lock: it is dropped."""
+    from backend.app.services.versioning import keymigrate
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    proj = FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+
+    async def broken(name, provider_id=None):
+        raise RuntimeError("LOADING Redis is loading the dataset in memory")
+
+    async def nobody(provider, name, ds_id):
+        return []
+
+    for out in ("evicted", "waiting_capacity"):
+        (gid,) = await _live_graphs(store, proj, mine, 1)
+        key = (await _ps(gid)).falkor_graph_name
+        assert await CacheManager(proj).evict(gid, drop_graph=broken, reason="pressure") is True
+        await _set_ps(gid, status=out)
+        assert await falkor.exists(key)
+        retired = [r for r in await keymigrate.retire_moved_keys(proj, key_in_use=nobody)
+                   if r["graphId"] == gid]
+        assert [(r["key"], r["verdict"]) for r in retired] == [(key, "dropped")], retired
+        assert not await falkor.exists(key) and not (await _ps(gid)).retired_keys
+
+
+@live
 @pytest.mark.parametrize("residency_class", ["standard", "always"])
 async def test_a_key_the_master_lost_is_evicted_not_reseeded_outside_admission(
         store, falkor, mine, monkeypatch, residency_class):

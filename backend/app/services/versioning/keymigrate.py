@@ -14,7 +14,7 @@ import re
 from datetime import datetime, timezone
 from typing import Awaitable, Callable, Collection, Dict, List, Optional, Sequence, Tuple
 
-from sqlalchemy import func, null, select, update
+from sqlalchemy import and_, func, null, select, update
 
 from . import config, db
 from .models import GraphORM, ProjectionStateORM
@@ -134,7 +134,11 @@ async def _retire(projector, graph_id: str, entry: dict, ds_id: Optional[str],
     async with projector._session() as s:
         pinned = await s.scalar(select(ps.graph_id).where(
             func.coalesce(func.nullif(ps.falkor_provider, ""), default) == (provider or default),
-            ps.falkor_graph_name == name).limit(1))
+            ps.falkor_graph_name == name,
+            # The graph's own row still names the key an eviction could not drop (residency):
+            # out of FalkorDB nothing writes or reads it, and this pass holds its projection lock.
+            ~and_(ps.graph_id == graph_id, ps.status.in_(("evicted", "waiting_capacity"))),
+        ).limit(1))
     if pinned is not None:
         return f"PROTECTED: graph {pinned} projects into '{name}'"
     try:
