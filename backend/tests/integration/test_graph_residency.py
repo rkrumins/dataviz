@@ -1140,6 +1140,32 @@ async def test_a_broker_outage_holds_every_graph_and_fails_no_pass(store, falkor
 
 
 @live
+async def test_a_copy_admitted_is_reserved_until_it_is_released(store, falkor, mine, monkeypatch):
+    """Review 3, finding 4: a package seed's copy was admitted outside the capacity lock and held
+    nothing while it was written, so the next pass saw its master free and unreserved. Admitted
+    under the lock, its estimate is reserved on its master (the governor's ledger, renewed while
+    it runs, gone with a dead holder) and every pass counts it, until it is released."""
+    from backend.app.services.aggregation.admission import AggregationAdmission
+    from backend.app.services.aggregation.redis_client import get_redis
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    proj = FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(store, proj, mine, 1)
+    ps = await _ps(gid)
+    before = {m.endpoint: m.reserved for m in (await residency.gather(graph_ids=[gid])).masters}
+    admitted, held = await residency.admit_copy(gid, ps.falkor_provider, ps.falkor_graph_name,
+                                                "job_copy_test")
+    try:
+        assert admitted.fits and held is not None
+        after = {m.endpoint: m.reserved for m in (await residency.gather(graph_ids=[gid])).masters}
+        assert after[admitted.master] > before[admitted.master]
+    finally:
+        await AggregationAdmission(get_redis()).release(held)
+    released = {m.endpoint: m.reserved for m in (await residency.gather(graph_ids=[gid])).masters}
+    assert released[admitted.master] == before[admitted.master]
+
+
+@live
 async def test_a_first_seed_is_admitted_as_a_load(store, falkor, mine, monkeypatch):
     """Review finding 12: with residency on, the first seed of a key the platform owns — a new
     graph's whole main, written in one go — was never admitted. It takes its turn in the load

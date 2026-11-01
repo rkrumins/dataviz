@@ -667,17 +667,44 @@ async def admission_on(graph_id: str, provider: str, key: str) -> Admitted:
     ``provider`` — a move's or an Adopt's new key, seeded while the old one still stands — as
     admission decides for a load: never on a master that could not be read, holds, or takes a
     load already, nor for a graph whose size is unknown."""
+    return (await _admission_on(graph_id, provider, key))[0]
+
+
+async def _admission_on(graph_id: str, provider: str,
+                        key: str) -> Tuple[Admitted, Optional[int]]:
+    """:func:`admission_on`'s answer, and the room the copy asks for (None: unknown). No
+    ``provider`` is the default one."""
+    provider = provider or config.DEFAULT_FALKOR_PROVIDER
     policy = await residency_policy.resolve()
     own = await gather(graph_ids=[graph_id])
     graph = next((g for g in own.graphs if g.graph_id == graph_id), None)
     if graph is None:
-        return Admitted(False, None, None, "unmeasured")
+        return Admitted(False, None, None, "unmeasured"), None
     graph = await _sized(graph, own.rows.get(graph_id), policy)
     snap = await gather(providers=[provider])
     endpoint = _master_of(snap.slots, key) if snap.slots else None
     decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
     target = next((p for p in decided.masters if p.master.endpoint == endpoint), None)
-    return _admitted(target, graph, policy, endpoint)
+    return _admitted(target, graph, policy, endpoint), need(graph, policy)
+
+
+async def admit_copy(graph_id: str, provider: str, key: str, holder: str
+                     ) -> Tuple[Admitted, Optional[Any]]:
+    """A full copy written outside the projector (a package seed) admitted as a load is, on the
+    master ``key`` hashes to, and — when it fits — the room it asks for reserved there for
+    ``holder`` in the aggregation write governor's ledger, which every pass counts: renewed while
+    the holder runs, gone with a dead one, until it is released
+    (``AggregationAdmission.release``). Both under the capacity lock, so nothing else is admitted
+    between the check and the reservation."""
+    from backend.app.services.aggregation.admission import AggregationAdmission
+    from backend.app.services.aggregation.redis_client import get_redis
+
+    async with admitting():
+        admitted, needed = await _admission_on(graph_id, provider, key)
+        if not admitted.fits:
+            return admitted, None
+        return admitted, await AggregationAdmission(get_redis()).reserve(
+            admitted.master, holder, needed or 0)
 
 
 @asynccontextmanager

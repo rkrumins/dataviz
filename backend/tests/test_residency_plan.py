@@ -755,30 +755,51 @@ async def test_a_load_waits_for_its_summaries_while_its_edge_types_cannot_be_rea
 
 
 async def test_a_package_seed_writes_its_key_only_when_admitted(monkeypatch):
-    """Review finding 12: a new data source seeded from a view package writes its whole graph into
-    a new key, and was never admitted. With residency on its copy is admitted on the key's master
-    first: when it would not fit, the job stops before writing anything, saying so, and resumes
-    from there; with residency off nothing is asked."""
+    """A new data source seeded from a view package writes its whole graph into a new key. With
+    residency on its copy is admitted on the key's master first, and its estimate reserved there
+    while it is written (``residency.admit_copy``, under the capacity lock). Review 3, finding 4:
+    a master that is busy, holding or unmeasured only makes it wait and ask again; only no room,
+    or no size, stops the job (resumable, nothing written). With residency off nothing is asked."""
     from backend.app.services.versioning import package_seed
     from backend.app.services.versioning.bootstrap_worker import BootstrapFailure
 
-    asked = []
+    answers, asked, slept = [], [], []
 
-    async def admission_on(graph_id, provider, key):
-        asked.append((graph_id, provider, key))
-        return residency.Admitted(False, "10.0.0.2:6379", 3 * 1024 ** 3, "capacity")
+    async def admit_copy(graph_id, provider, key, holder):
+        asked.append((graph_id, provider, key, holder))
+        why = answers.pop(0)
+        return (residency.Admitted(why is None, "10.0.0.2:6379",
+                                   3 * 1024 ** 3 if why == "capacity" else (0 if why is None
+                                                                            else None), why),
+                "reserved" if why is None else None)
 
-    monkeypatch.setattr(residency, "admission_on", admission_on)
+    async def nap(secs):
+        slept.append(secs)
+
+    monkeypatch.setattr(residency, "admit_copy", admit_copy)
+    monkeypatch.setattr(package_seed.asyncio, "sleep", nap)
+    lease = SimpleNamespace(job_id="job_1", check=lambda: None)
     ctx = SimpleNamespace(falkor_graph_name="gvp_new{abc.1}", falkor_provider="prov_A")
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
-    with pytest.raises(BootstrapFailure) as caught:
-        await package_seed._admit_seed("graph_x", ctx)
-    assert (caught.value.code, caught.value.action) == ("capacity", "resume")
-    assert "10.0.0.2:6379" in caught.value.reason and "3.0 GiB" in caught.value.reason
-    assert asked == [("graph_x", "prov_A", "gvp_new{abc.1}")]
+    package_seed._COPIES.clear()
+
+    answers[:] = ["busy", "fork", "unmeasured", None]
+    await package_seed._admit_seed(lease, "graph_x", ctx)
+    assert len(asked) == 4 and len(slept) == 3 and package_seed._COPIES == {"job_1": "reserved"}
+    await package_seed._admit_seed(lease, "graph_x", ctx)       # a later window: admitted already
+    assert len(asked) == 4
+    package_seed._COPIES.clear()
+
+    for why in ("capacity", "unsized"):
+        answers[:] = [why]
+        with pytest.raises(BootstrapFailure) as caught:
+            await package_seed._admit_seed(lease, "graph_x", ctx)
+        assert (caught.value.code, caught.value.action) == ("capacity", "resume")
+    assert "10.0.0.2:6379" in caught.value.reason or "size" in caught.value.reason
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
-    await package_seed._admit_seed("graph_x", ctx)
-    assert len(asked) == 1
+    asked.clear()
+    await package_seed._admit_seed(lease, "graph_x", ctx)
+    assert asked == [] and package_seed._COPIES == {}
 
 
 async def test_a_failed_ontology_read_is_unresolved_not_no_lineage(monkeypatch):

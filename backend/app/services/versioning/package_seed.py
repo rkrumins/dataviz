@@ -65,7 +65,7 @@ from .bootstrap_worker import (
 )
 from .falkor_indexes import ensure_urn_indexes
 from .ids import stable_prefixed_id
-from .job_lease import Lease
+from .job_lease import Lease, is_transient
 from .merkle import content_hash
 from .models import EdgeVersionORM, JobORM, NodeVersionORM, ProjectionStateORM, _now
 from .projection import _READ_TIMEOUT_MS, _Pending, _q
@@ -834,24 +834,50 @@ async def phase_index(run: BootstrapRunner, lease: Lease, graph_id: str) -> bool
     return True
 
 
-async def _admit_seed(graph_id: str, ctx) -> None:
+#: The copies this process writes, admitted and reserved: job id -> the reservation.
+_COPIES: Dict[str, Any] = {}
+
+
+async def _admit_seed(lease: Lease, graph_id: str, ctx) -> None:
     """With residency on (doc 17), the copy is admitted on its key's master before anything is
-    written, as a load is (``residency.admission_on``): when it would not fit, the job stops —
-    resumable, nothing written — and says why."""
-    if not config.RESIDENCY_ENABLED:
+    written, as a load is, and its estimate reserved there while it is written
+    (``residency.admit_copy``, under the capacity lock): every pass counts it. A master that takes
+    a load already, holds or could not be read is waited for, the job asking again each capacity
+    interval; only no room, or no size, stops it — resumable, nothing written — saying why. Once
+    per run of the phase: the reservation is kept across its windows, and released when it ends
+    (:func:`_release_seed`)."""
+    if not config.RESIDENCY_ENABLED or lease.job_id in _COPIES:
         return
     from backend.app.providers.shard_capacity import human_bytes
 
-    from . import residency
+    from . import residency, residency_policy
 
-    admitted = await residency.admission_on(graph_id, ctx.falkor_provider, ctx.falkor_graph_name)
-    if admitted.fits:
-        return
-    room = (f"it needs {human_bytes(admitted.shortfall)} more than master {admitted.master} has "
-            "under its start mark" if admitted.why == "capacity"
-            else f"master {admitted.master} cannot take it now ({admitted.why})")
-    raise BootstrapFailure(f"There is no room in the graph store's memory for this graph yet: "
-                           f"{room}. Resume once there is.", "capacity", "resume")
+    while True:
+        lease.check()
+        admitted, held = await residency.admit_copy(graph_id, ctx.falkor_provider,
+                                                    ctx.falkor_graph_name, lease.job_id)
+        if admitted.fits:
+            _COPIES[lease.job_id] = held
+            return
+        if admitted.why in ("capacity", "unsized"):
+            room = (f"it needs {human_bytes(admitted.shortfall)} more than master "
+                    f"{admitted.master} has under its start mark" if admitted.why == "capacity"
+                    else "its size is not known yet")
+            raise BootstrapFailure(f"There is no room in the graph store's memory for this graph "
+                                   f"yet: {room}. Resume once there is.", "capacity", "resume")
+        logger.info("package seed %s: master %s cannot take the copy now (%s); asking again",
+                    lease.job_id, admitted.master, admitted.why)
+        await asyncio.sleep((await residency_policy.resolve()).capacity_interval_secs)
+
+
+async def _release_seed(lease: Lease) -> None:
+    """The copy's reservation goes: written, or stopped."""
+    held = _COPIES.pop(lease.job_id, None)
+    if held is not None:
+        from backend.app.services.aggregation.admission import AggregationAdmission
+        from backend.app.services.aggregation.redis_client import get_redis
+
+        await AggregationAdmission(get_redis()).release(held)
 
 
 async def phase_project(run: BootstrapRunner, lease: Lease, graph_id: str) -> bool:
@@ -870,8 +896,17 @@ async def phase_project(run: BootstrapRunner, lease: Lease, graph_id: str) -> bo
     async with run._session() as s:
         job = await s.get(JobORM, lease.job_id)
         at, total = job.last_cursor, int(job.total or 0)
-    if not at or not at.startswith("project:"):
-        await _admit_seed(graph_id, ctx)              # its first window: nothing written yet
+    await _admit_seed(lease, graph_id, ctx)
+    try:
+        return await _project_window(run, lease, graph_id, ctx, projector, at, total)
+    except Exception as exc:
+        if not is_transient(exc):                # the job stops here: its room goes
+            await _release_seed(lease)
+        raise
+
+
+async def _project_window(run: BootstrapRunner, lease: Lease, graph_id: str, ctx, projector,
+                          at: Optional[str], total: int) -> bool:
     cursor = at or "project:nodes:"
     kind = "edges" if cursor.startswith("project:edges") else "nodes"
     after = cursor.split(":", 2)[2]
@@ -961,4 +996,5 @@ async def _verify_projection(run: BootstrapRunner, lease: Lease, graph_id: str, 
             f"{pg[0]:,} and {pg[1]:,}. Resume to write it again.", "projection", action="resume")
     logger.info("package seed %s: projected %d items and %d connections (graph=%s)",
                 lease.job_id, pg[0], pg[1], graph_id)
+    await _release_seed(lease)
     return True
