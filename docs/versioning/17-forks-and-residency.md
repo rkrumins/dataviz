@@ -4,13 +4,14 @@
 > data source of its own, how its settings follow its parent's, how it moves through the trash and
 > between workspaces with its parent, how it reads through its root's store with its own changes
 > laid over it, how it reads its parent commit by commit, how it takes its parent's newer changes
-> (Update from parent), and how its review merges once it has. The fork engine itself — copy-on-write
+> (Update from parent), how its review merges once it has, and the screens to work in one (§10).
+> The fork engine itself — copy-on-write
 > reads, pull requests, merge — is in
 > [03 · Branching, Commits & Merge](03-branching-commits-merge.md); the routes and their refusals are
 > in [06 · API Reference](06-api-reference.md); every behaviour change is in the
 > [CHANGELOG](../../CHANGELOG.md).
 
-**Checked against the code on 2026-11-01 (`000a2ba64`).**
+**Checked against the code on 2026-11-01 (`3a3e4310c`).**
 
 **TL;DR.** Forking a graph now makes a data source as well as a graph: the fork's own row in
 `workspace_data_sources`, in its parent's workspace and on its parent's provider. Views, the canvas
@@ -21,14 +22,19 @@ laid over it, as a draft reads main's, so a fork costs FalkorDB nothing. Each of
 which parent commit it reads, so a fork takes its parent's newer work — Update from parent, one
 commit — without rewriting its own history; what both changed is merged there, conflicts and all.
 Its review then merges only up to date with its parent: a copy of its own changes, with nothing
-left to resolve. Either runs as a job when it is large.
+left to resolve. Either runs as a job when it is large. A data source's Versioning tab forks it and
+lists its forks, and a fork's own pages say what it was forked from, with Update from parent and
+Propose to parent (§10).
 
 ## Turning forks on
 
 Forks are **off** on a new deployment and after an upgrade to this release. A system administrator
 turns them on under **Admin → Features → Forks** (`forksEnabled`, in Lineage beside Version control,
-which it needs); only a system administrator can change a switch there. It is a preview: Update from
-parent (§8) is here, and the screens to work in a fork come next.
+which it needs); only a system administrator can change a switch there. It is a preview. The app
+reads it too (seeded off, as the server reads a value it can't find): while it is off, the screens
+(§10) offer neither Fork, Update from parent nor Propose to parent, nor approving or merging a
+fork's review, and say "Forks are turned off for this deployment … An administrator can turn them
+on under Admin → Features."
 
 While it is off nothing new happens in a fork, and no parent graph is touched. Making a fork, any
 change to a fork's graph or its drafts (opening, saving, checkpointing, publishing and pulling a
@@ -493,7 +499,79 @@ merge holds is the parent commit's Merkle tree, built in memory up to `GRAPHVER_
 (1,000,000) changes as a draft's paged publish builds it: with it left unset the paged merge peaks
 at 159 MB, in 15.1 s.
 
-## 10. Upgrading
+## 10. The screens
+
+Everything here calls the routes above; nothing is decided in the app that the server does not
+decide again.
+
+**A data source's Forks list** (its Versioning tab, `DataSourceVersioningTab`). Each fork, live or
+in the trash, by its data source's `label` (its graph id while it has none), who made it and when,
+and for a live one how far it is from this graph: "4 ahead · 2 behind" from `ahead` and `behind`
+(§7), the larger count with a "+" when `countsCapped`, and a line when `updateRecommended` — "its
+parent has changed a lot", or, with `readsFrom: "postgres"`, "it is too far from its parent to read
+quickly". A live fork's actions:
+
+| Action | Who | What it does |
+|---|---|---|
+| **Open** | anyone | The fork's own data source: the workspace page's `?ds=<dsfork_…>&dstab=versioning`, below |
+| **Update from parent** | publishers | `POST …/update-from-parent`, below |
+| **Propose to parent** | anyone | A dialog — title, description, reviewers (the parent's policy says who may approve) — then `POST …/graphs/{fork}/pulls`, and the review opens in the reviews inbox. One the fork already has (**409** `pull_request_exists`) opens instead. While `behind` is above 0 it says "Update from parent first": the review merges only up to date. Opening it is not refused, so neither is the button — someone without publish can't update the fork, and may still propose it |
+| **Delete**, **Restore** | managers | As before (§4): the trash, and back until its purge is queued |
+
+Above the list, **Fork** (managers) opens a dialog asking for a name (1–80 characters; left blank,
+the server names it) and makes the fork; the list reads it again. A refusal is the server's words in
+the dialog: the fork cap (`fork_limit`), paused editing (`graph_not_writable`), forks turned off
+(`feature_disabled`). The list shows for a manager with no forks yet, so there is somewhere to fork
+from.
+
+**Update from parent** (`UpdateFromParentButton`, the loop `PullLatestButton` runs for a pull). An
+update that ran says what it took in, or that the fork was up to date. One the route queues (**202**)
+is followed at `…/update-jobs/{jobId}` as a publish job is followed: the button reads "Updating…"
+until the job ends, and its answer or refusal arrives as the route's would. **409**
+`fork_update_conflicts` opens the pull's conflict resolver, seeded with the refusal's `seeds` (the
+fork's own values), and its resolutions go back with the next update; a job's refusal kept the first
+100 conflicts, and the resolver says how many there were. What an update that wrote rows moved is
+read again: the fork's history, drafts, reviews and canvas, as after a pull.
+
+**A fork's own pages.** A fork's data source is its graph's `dsfork_…` id, so a page knows a data
+source can't be a fork before it reads anything; for one, `forkOf` on its data source says what it
+was forked from. `ForkStrip` sits at the top of a fork's Versioning tab, and as a band above the
+canvas of a view on it (`CanvasVersioningBar`): "Fork of <parent label>" — a link to the parent's
+Versioning tab — how far the fork is, why an update is recommended, and Update from parent and
+Propose to parent. The data-source pickers leave forks out (the lists do, §1); the strip and the
+Forks list are how people go to and from a fork.
+
+**Opening a fork's data source.** The workspace page's `?ds=` opens a fork's data source in the same
+drawer as any other: the workspace's own list leaves forks out, so the page reads
+`…/data-sources?includeForks=true` while the link or the drawer names a `dsfork_…` id. Its drawer
+offers neither Delete nor Move: those routes refuse a fork (`use_fork_endpoints`). **Admin →
+Infrastructure → Versioned graphs** opens a fork's row the same way (**Open source**); only an
+orphan's is disabled.
+
+**A fork's review in the review drawer** (`PrDetailDrawer`). The merge is followed to its end, as a
+draft's publish job is (**202** → `…/publish-jobs/{jobId}` on the parent). A review its job is
+merging (`merging`) says it is merging in the background and offers nothing to press — the server
+refuses another merge, closing it or approving it until the job ends. Merged, the drawer stays on
+it (there is no view to go back to, and the fork lives on) and reads as merged; the receipt, what
+the merge refreshes and **Revert this merge** are the parent's, where it landed. A merge refused
+with `not_up_to_date` (`reason: "parent_moved"`) says the fork is behind its parent by `behind` and
+offers Update from parent — never a draft's Pull latest — after which Merge is the next step.
+
+**While forks are off** the screens offer no Fork, Update from parent or Propose to parent, and a
+fork's review neither Approve nor Merge (Dismiss stays: closing is allowed); each says forks are
+turned off, in the server's words. Forks stay listed, read, open, and go to the trash and back.
+
+**What the screens don't do yet.**
+
+- **No screen builds a view on a fork.** The view wizard lists the workspace's data sources, which
+  leave forks out: the canvas strip shows on a view on a fork made another way (the API).
+- **The conflict resolver speaks of a pull**: "Review changes from main", "Merge with resolutions",
+  "main changed". Its "Incoming" side is the parent's, and a `structure` conflict shows as a
+  whole-entity choice without its `reason`.
+- **A job's progress is not shown step by step**: an update or merge job says it is running, not
+  how far it has got — as with a draft's publish job.
+
+## 11. Upgrading
 
 - **The migration for Update from parent and merging.** `20261101_1000_gv_fork_sync` lets
   `commits.kind` hold `sync_parent`, `merge_requests.status` hold `merging`, and `jobs.job_type` hold
@@ -528,7 +606,7 @@ at 159 MB, in 15.1 s.
   process keeps, drafts' as well as forks', at about 1.2 KB an entry: under 512 MB a process. Lower
   it where a process has less to spare (§2).
 
-## 11. Coming next
+## 12. Coming next
 
 - **Residency.** Which graphs stay loaded in FalkorDB is decided per graph — always, standard
   (evicted when idle) or coldline (loaded only when a request needs it) — and by each FalkorDB

@@ -159,6 +159,21 @@ change and choose **Save**.
 > merged":** the request names reviewers, and not all of them have approved
 > yet. See [Approve a request](#approve-a-request).
 
+### A fork's review
+
+A review proposed from a [fork](/guide/versioning-change-control#work-in-a-fork)
+merges the fork's changes into the data source it came from.
+
+- If the drawer says *This fork is behind its parent*, choose
+  **Update from parent** — the fork takes its parent's changes, resolving any
+  clashes as above — then choose **Merge**.
+- A large one merges in the background. It shows **Merging**, and the drawer
+  says it is *Merging in the background* and offers nothing until it is done.
+- Once it merges, the drawer stays open and shows it **Merged**. The fork lives
+  on; **Revert this merge** undoes the merge in the data source it came from.
+- While forks are turned off, a fork's review can be dismissed, but not
+  approved or merged.
+
 ### Resolve conflicts
 
 A conflict means the draft and Published both changed the same field of the

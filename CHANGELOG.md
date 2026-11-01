@@ -18,8 +18,9 @@ fork and moves with its parent. It reads its root's published graph with its own
 it, as a draft reads main's, and never has a FalkorDB graph of its own: the copies earlier releases
 made of forks can be dropped. Each of a fork's commits records which parent commit it reads, and a
 fork takes its parent's newer commits with Update from parent, settling what both changed there; its
-review then merges only up to date with its parent, as a copy of its own changes. See
-`docs/versioning/17-forks-and-residency.md`.
+review then merges only up to date with its parent, as a copy of its own changes. The screens fork a
+data source, list its forks, and update and propose a fork, from its parent's Versioning tab and from
+the fork's own pages. See `docs/versioning/17-forks-and-residency.md`.
 
 ### Added
 
@@ -81,6 +82,21 @@ review then merges only up to date with its parent, as a copy of its own changes
   reaches `GRAPHVER_FORK_REWIND_WARN`, default 50,000, or its reads are past the ceiling and taking
   in its parent's changes would bring them back under), `readsFrom`
   (`overlay` or `postgres`) and `countsCapped` (a count stopped at `GRAPHVER_FORK_REWIND_MAX`).
+- **Screens to work in a fork.** A data source's Versioning tab has **Fork** (managers: a name, and
+  the server's words when it refuses), and its Forks list shows each fork by its label, who made it
+  and when, "4 ahead · 2 behind" and when an update is recommended, with **Open** (the fork's own data
+  source), **Update from parent** (publishers) and **Propose to parent**. Update from parent says what
+  it took in, follows a large update's job until it ends, and opens the pull's conflict resolver on
+  `fork_update_conflicts`, sending the resolutions back. Propose to parent asks for a title, a
+  description and reviewers and opens the review, or the fork's open one; behind its parent it says
+  "Update from parent first". A fork's own Versioning tab, and the canvas of a view on it, carry a
+  strip: "Fork of <parent>" (a link back), how far it is, and the two actions. The workspace page opens
+  a fork's data source from `?ds=` (without Delete or Move, which a fork's data source refuses), and so
+  does Admin → Infrastructure → Versioned graphs (**Open source** on a fork's row). The review drawer
+  shows a fork's review being merged by its job, stays on it once merged (its receipt and **Revert this
+  merge** are the parent's), and offers Update from parent when the merge says the fork is behind. While
+  forks are off the screens offer none of Fork, Update from parent, Propose to parent, or approving
+  and merging a fork's review, and say forks are turned off; forks stay readable.
 
 ### Changed
 
@@ -191,10 +207,11 @@ review then merges only up to date with its parent, as a copy of its own changes
 
 ### Known limitations
 
-- **The screens do not offer Update from parent yet.** A fork's review behind its parent answers
-  `not_up_to_date` at its merge, as a draft's does, and the update is the route's
-  (`…/update-from-parent`). History lists its `sync_parent` commit with its message ("Update from
-  <parent>@<seq>"), labelled as an edit.
+- **No screen builds a view on a fork.** The view wizard lists the workspace's data sources, which
+  leave forks out, so the canvas strip shows only on a view on a fork made through the API.
+- **The conflict resolver speaks of a pull** on Update from parent ("Review changes from main",
+  "Merge with resolutions"), and shows a `structure` conflict as a whole-entity choice without its
+  `reason`.
 - **Update from parent cascades edges, not containment.** A node the fork made inside a container
   its parent deleted stays, at the top level, as a draft's pull leaves one.
 - **A large fork merge holds its commit's Merkle tree in memory**, as a draft's paged publish does:
