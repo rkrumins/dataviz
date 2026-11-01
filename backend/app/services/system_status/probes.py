@@ -1288,8 +1288,8 @@ def _projection_rows(forks: bool = False):
     """Every versioned graph's projection row — its FalkorDB key, watermark and how far behind it
     is — plus the status buckets the rollup counts (``{bucket: predicate}``). Shared by the lag
     probe and the fleet inventory, so a graph reads the same in both. ``forks``: the rows include
-    forks, each behind on nothing and ``idle``: it reads through its root's store and is never
-    projected, a copy an earlier release made of it included."""
+    forks, each behind on nothing, ``idle`` and with no last error: it reads through its root's
+    store and is never projected, a copy an earlier release made of it included."""
     from sqlalchemy import and_, case, func, select
 
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
@@ -1297,13 +1297,15 @@ def _projection_rows(forks: bool = False):
     lag = GraphORM.main_head_commit_seq - func.coalesce(
         ProjectionStateORM.projected_commit_seq, 0)
     status = func.coalesce(ProjectionStateORM.status, "idle")
+    last_error = ProjectionStateORM.last_error
     if forks:
         # A copy an earlier release made of a fork, evicted by the count budget, is never
-        # projected again: it would read evicted for good.
+        # projected again: it would read evicted for good, and failed with that copy's last error.
         lag = case((GraphORM.fork_parent_graph_id.isnot(None), 0), else_=lag)
         status = case((GraphORM.fork_parent_graph_id.isnot(None), "idle"), else_=status)
+        last_error = case((GraphORM.fork_parent_graph_id.isnot(None), None), else_=last_error)
 
-    err = ProjectionStateORM.last_error.isnot(None)
+    err = last_error.isnot(None)
     buckets = {
         # in sync = caught up AND no projection error (mutually exclusive
         # with failed, so the chips read consistently).
@@ -1326,7 +1328,7 @@ def _projection_rows(forks: bool = False):
             ProjectionStateORM.owns_falkor_graph,
             ProjectionStateORM.projected_commit_seq, ProjectionStateORM.target_commit_seq,
             lag.label("lag"), status.label("status"),
-            ProjectionStateORM.last_error, ProjectionStateORM.last_projected_at,
+            last_error.label("last_error"), ProjectionStateORM.last_projected_at,
             ProjectionStateORM.progress_done, ProjectionStateORM.progress_total,
             ProjectionStateORM.updated_at, ProjectionStateORM.retired_keys,
             ProjectionStateORM.residency, ProjectionStateORM.evicted_reason,
