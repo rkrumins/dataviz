@@ -487,6 +487,67 @@ async def test_a_load_s_size_is_not_taken_from_a_master_that_evicted_in_the_same
     assert set(loop._started) == {"l2"}
 
 
+def _no_key_on_one_slot() -> str:
+    """A graph none of whose first 4096 platform keys hashes to slot 0."""
+    from backend.app.services.versioning import keymigrate
+
+    return next(gid for gid in (f"graph_01JA2B3C4D5E6F7G8H9JKMN{n:03d}" for n in range(200))
+                if keymigrate.placed_key(gid, [(0, 0)], set()) is None)
+
+
+async def test_a_new_key_goes_to_the_next_master_when_none_hashes_to_the_roomiest(monkeypatch):
+    """Review finding 5: after a reshard onto a new, empty master that owns a few slots, that
+    master is the roomiest, and most graphs have no key that hashes there (4096 tries reach one
+    slot for 21 % of graphs). The key goes to the next master with the most room instead."""
+    gid = _no_key_on_one_slot()
+    snap = residency.Snapshot(masters=[_master(used_pct=10), _master(endpoint="m2", used_pct=50)],
+                              slots={"m1": [(0, 0)], "m2": [(1, 16383)]})
+
+    async def gather(**kw):
+        return snap
+
+    monkeypatch.setattr(residency, "gather", gather)
+    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
+    try:
+        key, master = await residency.place_key(gid, "default", taken=set())
+        assert master == "m2" and key.startswith(f"gvp_{gid}")
+    finally:
+        residency_policy.invalidate()
+
+
+async def test_a_load_no_key_lands_on_goes_to_the_next_master_in_the_same_pass(monkeypatch):
+    """The loop's load, likewise: onto the next master of its provider free to take it with room
+    for it, rather than waiting pass after pass for a key that never lands."""
+    from backend.app.services.versioning.residency_plan import Load, MasterPlan, Plan
+
+    async def key(load, snap):
+        return None if load.endpoint == "m1" else (f"k_{load.endpoint}", {"master": load.endpoint})
+
+    started = []
+
+    async def start(graph_id, *, key=None, shard_map=None):
+        started.append((graph_id, key, shard_map["master"]))
+        return True
+
+    monkeypatch.setattr(residency, "_load_key", key)
+    monkeypatch.setattr(residency, "_start_load", start)
+    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
+    decided = Plan(masters=[
+        MasterPlan(master=_master(used_pct=10), reserved=0, used_after=None,
+                   loads=[Load("g", "m1", 10 * MB)]),
+        MasterPlan(master=_master(endpoint="m2", used_pct=79), reserved=0, used_after=None),
+        MasterPlan(master=_master(endpoint="m3", used_pct=50), reserved=0, used_after=None)])
+    snap = residency.Snapshot(masters=[m.master for m in decided.masters],
+                              rows={"g": {"placed": True, "provider": "default", "key": "old"}})
+    loop = residency.CapacityLoop(SimpleNamespace(drop_graph=None))
+    try:
+        await loop._act(decided, snap)
+    finally:
+        residency_policy.invalidate()
+    assert started == [("g", "k_m3", "m3")]              # m2 has no room for it: 79 % + 13 MB
+    assert loop._started["g"][0] == "m3"
+
+
 async def test_a_refused_eviction_is_made_up_from_the_next_candidates(monkeypatch):
     """An eviction the evictor refuses frees nothing: the pass carries on down that master's
     candidates until the stop mark is actually reached."""

@@ -50,7 +50,8 @@ from .messaging import get_broker_redis, nudge_projection
 from .models import GraphORM, ProjectionStateORM, _now
 from backend.app.jobs import metrics
 
-from .residency_plan import Graph, Master, MasterPlan, Plan, admit, need, plan, roomiest
+from .residency_plan import (Graph, Load, Master, MasterPlan, Plan, admit, need, plan, room,
+                             roomiest)
 from .service import bootstrap_unfinished
 
 logger = logging.getLogger(__name__)
@@ -697,17 +698,23 @@ async def place_key(graph_id: str, provider: str,
                     taken: Collection[str]) -> Optional[Tuple[str, str]]:
     """A new platform key for ``graph_id`` on ``provider``, placed (doc 17): on the master with
     the most room after what is held there, among those free to take a load, the first of the
-    graph's keys not ``taken`` that hashes to it. ``(key, master)``; None when no master of the
-    provider is free, or no key lands there within the search's bound."""
+    graph's keys not ``taken`` that hashes to it — or, when none lands there within the search's
+    bound (a master that owns few slots), on the next. ``(key, master)``; None when no master of
+    the provider is free, or no key lands on any."""
     policy = await residency_policy.resolve()
     snap = await gather(providers=[provider])
     decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
-    target = roomiest([p for p in decided.masters
-                       if provider in p.master.providers and _free(p)], policy)
-    if target is None:
-        return None
-    key = keymigrate.placed_key(graph_id, snap.slots.get(target.master.endpoint), taken)
-    return (key, target.master.endpoint) if key else None
+    for target in _by_room([p for p in decided.masters
+                            if provider in p.master.providers and _free(p)], policy):
+        key = keymigrate.placed_key(graph_id, snap.slots.get(target.master.endpoint), taken)
+        if key:
+            return key, target.master.endpoint
+    return None
+
+
+def _by_room(plans: Collection[MasterPlan], policy) -> List[MasterPlan]:
+    """``plans``, the most room first (as :func:`roomiest` picks the first)."""
+    return sorted(plans, key=lambda p: -room(p, policy))
 
 
 async def preview(policy, *, graph_ids: Optional[Collection[str]] = None,
@@ -777,10 +784,16 @@ class CapacityLoop:
                     freed += e.bytes or 0
                     evicted_on.add(e.endpoint)
         used = {m.endpoint: m.used for m in snap.masters}
+        loading_on = {x.endpoint for x in decided.loads}
         for load in decided.loads:
             chosen = await _load_key(load, snap)
             if chosen is None:
+                load, chosen = await _elsewhere(load, decided, snap, loading_on)
+            if chosen is None:
+                logger.warning("residency: graph %s's load waits: no key of it can be chosen now",
+                               load.graph_id)
                 continue
+            loading_on.add(load.endpoint)
             row = snap.rows.get(load.graph_id, {})
             if chosen[0] == row.get("key") and not await self._drop_stale(row):
                 continue
@@ -966,6 +979,29 @@ async def _clear_spent(snap: Snapshot, *, full: bool) -> None:
         logger.debug("residency: spent load requests not taken off the queue", exc_info=True)
 
 
+async def _elsewhere(load: Load, decided: Plan, snap: Snapshot, loading_on: Collection[str]
+                     ) -> Tuple[Load, Optional[Tuple[str, Optional[dict]]]]:
+    """A load whose master no key of the graph hashes to (one that owns few slots, after a
+    reshard onto it) goes, in the same pass, to the next master of its provider with the most
+    room that is free to take it, takes no other load this pass, and has room for it: the load
+    there, with its key; else the load as it was, and None."""
+    row = snap.rows.get(load.graph_id) or {}
+    if not row.get("placed"):
+        return load, None
+    policy = await residency_policy.resolve()
+    needed = -(-load.bytes * policy.load_margin_pct // 100)
+    for p in _by_room([p for p in decided.masters
+                       if row["provider"] in p.master.providers and _free(p)
+                       and p.master.endpoint not in loading_on], policy):
+        if not admit(p.master, needed, policy, p.reserved)[0]:
+            continue
+        moved = replace(load, endpoint=p.master.endpoint)
+        chosen = await _load_key(moved, snap)
+        if chosen is not None:
+            return moved, chosen
+    return load, None
+
+
 async def _load_key(load, snap: Snapshot) -> Optional[Tuple[str, Optional[dict]]]:
     """The key an admitted load seeds, with its ``shard_map``: a fresh platform key placed on the
     master the plan chose (``keymigrate.placed_key``: the first of the graph's keys that exists
@@ -992,8 +1028,7 @@ async def _load_key(load, snap: Snapshot) -> Optional[Tuple[str, Optional[dict]]
                if (e.get("provider") or config.DEFAULT_FALKOR_PROVIDER) == provider}
     key = keymigrate.placed_key(load.graph_id, snap.slots.get(load.endpoint), keys | retired)
     if key is None:
-        logger.warning("residency: no key of graph %s hashes to %s; its load waits", load.graph_id,
-                       load.endpoint)
+        logger.info("residency: no key of graph %s hashes to %s", load.graph_id, load.endpoint)
         return None
     return key, {"tag": key[key.index("{") + 1:-1], "slot": key_slot(key), "master": load.endpoint,
                  "chosenAt": datetime.now(timezone.utc).isoformat(), "chosenBy": "residency"}
