@@ -68,3 +68,43 @@ def test_a_fork_says_how_far_it_is_from_its_parent(monkeypatch):
             assert (await c.delete(f"/api/v1/{WS}/versioning/graphs/{fgid}")).status_code == 204
             assert await item() == {k: None for k in FIELDS}
     _run(case)
+
+
+def test_a_forks_ceiling_count_is_kept_per_version(monkeypatch):
+    """Each engine a request builds for a fork asks ``fork_reads_from`` whether the fork is past
+    the ceiling, which counts its candidates (70 ms at 145,000). The count is kept per version of
+    the fork (its head, the base each layer reads, its root's head) and ceiling: a request at an
+    unchanged version counts nothing, a commit on either side counts anew."""
+    from backend.app.services.versioning.service import GraphVersioningService
+
+    counted = []
+    real = GraphVersioningService._own_change_count
+
+    async def spy(s, graph_id, branch_id, lo, hi, cap):
+        counted.append(graph_id)
+        return await real(s, graph_id, branch_id, lo, hi, cap)
+
+    monkeypatch.setattr(GraphVersioningService, "_own_change_count", staticmethod(spy))
+
+    async def case(svc):
+        _parent_ds, gid = await _parent(svc)
+        await svc.apply_ops(graph_id=gid, actor="alice", message="seed", ops=[_n("A"), _n("B")])
+        async with _client() as c:
+            fgid = (await _fork(c, gid)).json()["graphId"]
+        await svc.apply_ops(graph_id=fgid, actor="u_forker", message="own", ops=[_n("N")])
+        monkeypatch.setattr(config, "FORK_REWIND_MAX", 2)
+
+        async def reads():
+            counted.clear()
+            return await svc.fork_reads_from(fgid), len(counted)
+
+        assert await reads() == ("overlay", 1)          # its own 1, the root's window 0
+        assert await reads() == ("overlay", 0)          # the same version: nothing counted
+        await svc.apply_ops(graph_id=gid, actor="alice", message="root", ops=[_n("P"), _n("Q")])
+        assert await reads() == ("postgres", 1)         # the root moved: 3, past the ceiling
+        assert await reads() == ("postgres", 0)
+        await svc.apply_ops(graph_id=fgid, actor="u_forker", message="own", ops=[_n("M")])
+        assert await reads() == ("postgres", 1)         # the fork moved
+        monkeypatch.setattr(config, "FORK_REWIND_MAX", 50)
+        assert await reads() == ("overlay", 1)          # another ceiling, another count
+    _run(case)

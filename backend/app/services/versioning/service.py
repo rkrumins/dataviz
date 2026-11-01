@@ -515,6 +515,11 @@ _SAVED_SINCE_SCAN = 200
 # What a live fork in a fork list says of how far it is from its parent (_fork_distance).
 _FORK_DISTANCE = ("ahead", "behind", "update_recommended", "reads_from", "counts_capped")
 
+# A fork's candidate count (_fork_candidates) per version of the fork and ceiling, as each engine a
+# request builds for a fork asks for it (fork_reads_from): at 145,000 candidates it costs 70 ms.
+_FORK_COUNTS: "OrderedDict[tuple, int]" = OrderedDict()
+_FORK_COUNTS_KEPT = 4096
+
 # An "enable version control" job in one of these states means its graph isn't a graph yet: the
 # head is parked at genesis and the import is half-written. A failed job counts — it must be
 # resumed or cancelled, never written around (bootstrap_unfinished, main_heads).
@@ -5656,16 +5661,26 @@ class GraphVersioningService:
     async def _fork_candidates(self, s, fork: GraphORM, main_id: str, cap: int) -> int:
         """At least as many entities as a fork's patch set classifies (:meth:`_fork_overlay_delta`):
         its own changes, each fork between up to its base and the root's since the outermost base,
-        each counted no further than ``cap + 1``."""
+        each counted no further than ``cap + 1``. Kept per version of the fork (its head, the base
+        each layer reads, its root's head) and ``cap``: while none of them moves, history being
+        append-only, nothing it counts does."""
         layers = await self._layers(s, fork.id, main_id, fork.main_head_commit_seq)
         root_id, root_main, base = layers[-1]
         root_head = (await s.get(GraphORM, root_id)).main_head_commit_seq
+        key = (fork.id, fork.main_head_commit_seq, tuple(at for _g, _b, at in layers), root_head, cap)
+        if key in _FORK_COUNTS:
+            _FORK_COUNTS.move_to_end(key)
+            return _FORK_COUNTS[key]
         own = select(EntityHeadORM.entity_id).where(
             EntityHeadORM.graph_id == fork.id, EntityHeadORM.branch_id == main_id).limit(cap + 1)
         total = int(await s.scalar(select(func.count()).select_from(own.subquery())) or 0)
         for gid, bid, at in layers[1:-1]:
             total += await self._own_change_count(s, gid, bid, -1, at, cap)
-        return total + await self._own_change_count(s, root_id, root_main, base, root_head, cap)
+        total += await self._own_change_count(s, root_id, root_main, base, root_head, cap)
+        _FORK_COUNTS[key] = total
+        while len(_FORK_COUNTS) > _FORK_COUNTS_KEPT:
+            _FORK_COUNTS.popitem(last=False)
+        return total
 
     async def fork_reads_from(self, graph_id: str) -> str:
         """How a fork's ``main`` is read: ``"overlay"``, its patch set over its root's store, or —

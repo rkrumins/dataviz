@@ -23,8 +23,11 @@ then measures each fork in a process of its own, as peak RSS is per process:
             (a provider of its own, the delta cached), ``base`` the same reads on the root's key
   listing   an unfiltered ``get_nodes`` of 500 through the overlay, the delta cached: it serves
             every node the fork created, each loaded for the request
-  ceiling   ``fork_reads_from`` (each engine a request builds for a fork asks it) and
-            ``overlay_version`` (each read asks it)
+  ceiling   ``fork_reads_from`` (each engine a request builds for a fork asks it): counted, then
+            again at the same version, which the count kept for it answers; ``overlay_version``
+            (each read asks it)
+  cached    the bytes the delta the overlay caches holds per entry, by ``tracemalloc``: what
+            ``GRAPHVER_OVERLAY_CACHE_ENTRIES`` is sized from
 
 Usage, from the repository root, with the backend's environment::
 
@@ -41,6 +44,7 @@ import json
 import sys
 import tempfile
 import time
+import tracemalloc
 import uuid
 from typing import Any, Dict, List
 
@@ -195,6 +199,9 @@ async def _measure(state: Dict[str, Any], which: str) -> Dict[str, Any]:
     reads_from = await svc.fork_reads_from(gid)
     ceiling = time.perf_counter() - started
     started = time.perf_counter()
+    await svc.fork_reads_from(gid)
+    ceiling_kept = time.perf_counter() - started
+    started = time.perf_counter()
     await svc.overlay_version(graph_id=gid, branch_id=main)
     version = time.perf_counter() - started
 
@@ -211,6 +218,16 @@ async def _measure(state: Dict[str, Any], which: str) -> Dict[str, Any]:
     first, cached = await _canvas(overlay()), await _canvas(overlay())
     plain = await _canvas(base)
     listing = await _listing(overlay())
+
+    # What the cached delta holds: built again into an empty cache, under tracemalloc.
+    from backend.app.providers import draft_overlay_provider
+    draft_overlay_provider._DELTAS = draft_overlay_provider._DeltaCache()
+    gc.collect()
+    tracemalloc.start()
+    await overlay()._delta_()
+    gc.collect()
+    held = tracemalloc.get_traced_memory()[0]
+    tracemalloc.stop()
     with contextlib.suppress(Exception):
         await base.close()
     await db.dispose_engine()
@@ -219,7 +236,9 @@ async def _measure(state: Dict[str, Any], which: str) -> Dict[str, Any]:
             "peakBuildMb": round(peak_built), "firstReadSecs": round(first, 2),
             "cachedReadSecs": round(cached, 3), "baseReadSecs": round(plain, 3),
             "listingSecs": round(listing, 2), "peakMb": round(_peak_mb()),
-            "readsFromSecs": round(ceiling, 3), "overlayVersionSecs": round(version, 3)}
+            "readsFromSecs": round(ceiling, 3), "readsFromKeptSecs": round(ceiling_kept, 3),
+            "overlayVersionSecs": round(version, 3), "cachedMb": round(held / 2 ** 20),
+            "cachedBytesPerEntry": round(held / max(1, sum(entries.values())))}
 
 
 async def _drop(key: str) -> None:
