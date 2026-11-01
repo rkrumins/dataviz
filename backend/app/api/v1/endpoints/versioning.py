@@ -979,6 +979,10 @@ class WatermarkModel(_ApiModel):
     # A fork has no projection: the root graph whose store it reads through, whose watermark this
     # is (no key of its own). Null for a graph that is no fork.
     reads_through: Optional[str] = Field(default=None, alias="readsThrough")
+    # A fork's: "overlay", its changes laid over that store, or "postgres" past the ceiling
+    # (GRAPHVER_FORK_REWIND_MAX), when readRoute.main says Postgres too. Null for a graph that is
+    # no fork.
+    reads_from: Optional[Literal["overlay", "postgres"]] = Field(default=None, alias="readsFrom")
 
 
 class SavedSinceModel(_ApiModel):
@@ -2351,7 +2355,8 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           next_retry_at=wm.get("next_retry_at"),
                           liveness_error=wm.get("liveness_error"),
                           external_drift=wm.get("external_drift"),
-                          reads_through=wm.get("reads_through"))
+                          reads_through=wm.get("reads_through"),
+                          reads_from=wm.get("reads_from"))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:

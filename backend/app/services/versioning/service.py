@@ -3805,14 +3805,20 @@ class GraphVersioningService:
         A fork has no projection: it reads through its root's store (``reads_through``, the root's
         graph id), so its watermark is its root's — the root's revisions, freshness and state —
         naming no key, owning none: nothing reads a fork's key through it, and no screen shows a
-        fork behind on a projection it does not have."""
+        fork behind on a projection it does not have. Its route is where its reads come from
+        (``reads_from``, :meth:`fork_reads_from`): past the ceiling its own layered reads in
+        Postgres serve its main, whatever the root's projection holds."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             root = graph
             while root is not None and root.fork_parent_graph_id:
                 root = await s.get(GraphORM, root.fork_parent_graph_id)
         if root is not None and root.id != graph_id:
-            return {**await self.projection_watermark(root.id), "reads_through": root.id,
+            wm = await self.projection_watermark(root.id)
+            reads_from = await self.fork_reads_from(graph_id)
+            if reads_from == "postgres":
+                wm["read_route"] = {**wm["read_route"], "main": "postgres"}
+            return {**wm, "reads_through": root.id, "reads_from": reads_from,
                     "falkor_graph_name": None, "falkor_provider": None,
                     "owns_falkor_graph": False, "retired_keys": [], "external_drift": None}
         async with self._session() as s:

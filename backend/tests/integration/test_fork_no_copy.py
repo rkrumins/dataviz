@@ -95,6 +95,27 @@ def test_a_fork_is_never_projected():
     _run(case)
 
 
+def test_a_forks_read_route_is_where_its_reads_come_from(monkeypatch):
+    """A fork reads through its root's store, so its watermark's route is the root's: FalkorDB
+    while the root's projection holds its head. Past the ceiling its own layered reads in Postgres
+    serve it, whatever the root's projection holds, and its route says Postgres (``reads_from``)."""
+    async def case(svc):
+        root = await _root(svc, "gvt_nc_" + os.urandom(4).hex())
+        await FalkorProjector(graph_client_factory=FakeFalkor()).project_graph(root)
+        fid = (await svc.fork_graph(parent_graph_id=root, workspace_id="ws1", actor="bob"))["graph_id"]
+        await svc.apply_ops(graph_id=fid, actor="bob", message="own", ops=[_n("N")])
+        wm = await svc.projection_watermark(fid)
+        assert wm["read_route"] == {"main": "falkordb", "drafts": "overlay"}
+
+        monkeypatch.setattr(config, "FORK_REWIND_MAX", 0)
+        wm = await svc.projection_watermark(fid)
+        assert (wm["read_route"], wm["fresh"]) == ({"main": "postgres", "drafts": "overlay"}, True)
+        assert wm["reads_from"] == "postgres"
+        root_wm = await svc.projection_watermark(root)
+        assert (root_wm["read_route"]["main"], root_wm.get("reads_from")) == ("falkordb", None)
+    _run(case)
+
+
 @pytest.mark.skipif(os.getenv("RUN_FALKOR_LIVE") != "1", reason="set RUN_FALKOR_LIVE=1")
 def test_a_forks_old_copy_is_dropped_only_when_asked_and_only_if_it_is_ours(monkeypatch):
     from falkordb.asyncio import FalkorDB

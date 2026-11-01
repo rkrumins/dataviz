@@ -106,6 +106,7 @@ async def _projection_fields() -> None:
     assert {k: wm[fork][k] for k in ("projectionKey", "providerId", "providerName", "owned")} == {
         "projectionKey": None, "providerId": None, "providerName": None, "owned": False}
     assert (wm[fork]["readsThrough"], wm[pinned]["readsThrough"]) == (pinned, None)
+    assert (wm[fork]["readsFrom"], wm[pinned]["readsFrom"]) == ("overlay", None)
     # Retry and liveness state: a liveness reset names itself; any other failure is not one.
     assert {k: wm[pinned][k] for k in ("epoch", "failedAttempts", "nextRetryAt", "livenessError")} == {
         "epoch": 7, "failedAttempts": 3, "nextRetryAt": "2026-10-17T12:00:00Z",

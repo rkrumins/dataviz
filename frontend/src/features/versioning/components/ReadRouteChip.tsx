@@ -5,7 +5,9 @@
  * Published served from FalkorDB is the steady state and renders NOTHING, so the bar keeps its
  * `empty:hidden` on main. Published served from Postgres (the projection is catching up, a failed
  * pass is waiting for its retry, or the graph was unloaded) is transient and says so. A draft always says it: it is an overlay of the
- * draft's changes on whatever serves published, and the draft bar is shown anyway.
+ * draft's changes on whatever serves published, and the draft bar is shown anyway. A fork reads
+ * through its root's store; one too far from its parent to lay over (`readsFrom: 'postgres'`) is
+ * served from Postgres until it is merged or catches up, and says why.
  */
 import { Database } from 'lucide-react'
 import { HoverTip } from '@/components/ui/HoverTip'
@@ -22,18 +24,23 @@ export function ReadRouteChip({ workspaceId, graphId, isDraft }: {
   if (!isDraft && route.main === 'falkordb') return null
 
   const onFalkor = route.main === 'falkordb'
+  const farFork = !onFalkor && wm.readsFrom === 'postgres'
   const base = onFalkor
     ? `Serving from FalkorDB · ${wm.providerName ?? wm.providerId ?? 'Default graph store'}`
-    : `Serving from Postgres (${wm.status === 'evicted' ? 'unloaded' : wm.status === 'idle' && wm.lastError ? 'retrying' : 'catching up'})`
+    : `Serving from Postgres (${farFork ? 'far from its parent' : wm.status === 'evicted' ? 'unloaded' : wm.status === 'idle' && wm.lastError ? 'retrying' : 'catching up'})`
   return (
     <HoverTip
       className="inline-flex"
       label={onFalkor
         ? 'Published is read from the fast read layer, which holds its latest version'
-        : 'Published is read from the system of record until the fast read layer has it'}
+        : farFork
+          ? 'This fork changed too much since it parted from its parent to be laid over the parent’s fast read layer'
+          : 'Published is read from the system of record until the fast read layer has it'}
       detail={isDraft
         ? 'This draft’s changes are laid over published as it is read'
-        : 'Reads stay correct, only slower, until then'}
+        : farFork
+          ? 'Reads stay correct, only slower, and search does not reach it'
+          : 'Reads stay correct, only slower, until then'}
     >
       <span className="flex items-center gap-1.5 px-2 py-0.5 rounded-md text-[11px] font-medium bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted border border-glass-border">
         <Database className="w-3 h-3" />
