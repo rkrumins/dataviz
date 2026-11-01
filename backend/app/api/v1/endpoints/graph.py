@@ -48,7 +48,8 @@ from backend.common.models.search import (
 )
 from backend.common.property_patch import (
     InvalidPatch, lift_top_level_node_fields, normalize_update, strip_deletes)
-from backend.app.api.v1.versioning_gate import require_publish_for_main, require_versioning_enabled
+from backend.app.api.v1.versioning_gate import (require_forks_enabled, require_publish_for_main,
+                                                require_versioning_enabled)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.advanced_search_service import (
     SHARED_LINK_RELATIONSHIPS,
@@ -222,8 +223,11 @@ async def require_main_writer(
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> None:
     """A write with no draft on a versioned data source commits to its main, and a person needs
-    publish for that (``require_publish_for_main``). A draft write, and any write to a data source
-    without version control, is left to the route's other gates."""
+    publish for that (``require_publish_for_main``). A write to a fork's data source, on its main or
+    a draft, needs forks on first. Any other draft write, and any write to a data source without
+    version control, is left to the route's other gates."""
+    if (engine._data_source_id or "").startswith("dsfork_"):
+        await require_forks_enabled()
     if engine._writes_main:
         require_publish_for_main(claims, ws_id)
 
@@ -4339,6 +4343,8 @@ async def apply_graph_changes(
     g = await svc.get_graph_by_data_source(dataSourceId)
     if g is None or g.get("workspace_id") != ws_id:
         raise HTTPException(status_code=404, detail="no versioned graph for this data source")
+    if g.get("fork_parent_graph_id"):           # a fork's draft takes no change while forks are off
+        await require_forks_enabled()
     graph_id = g["graph_id"]
 
     from backend.app.ontology.urn import make_urn

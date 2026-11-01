@@ -38,6 +38,8 @@ class _Rules(GraphVersioningService):
 
     def __init__(self, pr: dict):
         super().__init__(session_factory=_untouched)
+        # No source graph: a fork's review, as the store reads one, so the tests that change it
+        # turn forks on.
         self._pr = {"target_graph_id": "g1", "actor": "u_author", **pr}
 
     async def get_graph(self, graph_id):
@@ -64,7 +66,7 @@ def rules():
     ("PATCH", f"{BASE}/pulls/pr_1"),
     ("PATCH", f"{BASE}/merge-requests/pr_1"),
 ])
-async def test_a_service_account_is_never_asked_to_review(test_client, rules, method, path):
+async def test_a_service_account_is_never_asked_to_review(test_client, rules, method, path, forks_on):
     rules()
     r = await test_client.request(method, path, json={"reviewers": ["u_ada", SVC]})
     assert r.status_code == 403, r.text
@@ -72,7 +74,7 @@ async def test_a_service_account_is_never_asked_to_review(test_client, rules, me
 
 
 @pytest.mark.parametrize("route", ["pulls", "merge-requests"])
-async def test_a_service_account_never_approves(test_client, rules, fake_user, route):
+async def test_a_service_account_never_approves(test_client, rules, fake_user, route, forks_on):
     from backend.app.main import app
 
     rules()
@@ -87,7 +89,7 @@ async def test_a_service_account_never_approves(test_client, rules, fake_user, r
 @pytest.mark.parametrize("route", ["pulls", "merge-requests"])
 @pytest.mark.parametrize("through", ["author", "draft_owner"])
 async def test_nobody_approves_what_a_service_account_they_manage_opened_or_proposes(
-    test_client, db_session, rules, fake_user, route, through,
+    test_client, db_session, rules, fake_user, route, through, forks_on,
 ):
     account = await service_account_repo.create(
         db_session, name="Nightly sync", description=None, created_by=fake_user.id)
@@ -112,7 +114,7 @@ def _key(account: str, made_by: str, *, revoked: bool) -> ApiKeyORM:
 @pytest.mark.parametrize("route", ["pulls", "merge-requests"])
 @pytest.mark.parametrize("revoked", [False, True])
 async def test_nobody_approves_what_a_service_account_opened_through_a_key_they_made(
-    test_client, db_session, rules, fake_user, route, revoked,
+    test_client, db_session, rules, fake_user, route, revoked, forks_on,
 ):
     """A manager can leave the account and keep the keys they made (#572), and a purge removes
     every manager and revokes the keys: whoever made one could act as it, so the approval would

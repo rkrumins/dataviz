@@ -565,6 +565,42 @@
       "dependsOn": []
     },
     {
+      "key": "forksEnabled",
+      "name": "Forks",
+      "description": "Let people fork a data source's graph: a copy of its own to work in, with its own drafts and history, that reads the graph it came from and proposes its changes back as a review. Needs Version control.",
+      "category": "lineage",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": null,
+      "adminHint": "Forks need Version control on; with it off, this switch changes nothing. A fork costs its parent nothing in the graph store \u2014 it reads through the parent's graph \u2014 but its reviews merge into the parent, so turn this on where teams should be able to propose changes from a copy of their own.",
+      "impactWhenOff": "No fork can be made, and every fork becomes read-only: nothing is saved, imported, reverted or published on one, and a fork's reviews can't be opened, approved or merged. Forks stay listed and readable, and can still be moved to the trash and restored. Turning this off never touches a parent graph and deletes nothing \u2014 turning it back on restores every fork as it was.",
+      "sortOrder": 1,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "POST /graphs/{id}/forks \u2014 making a fork",
+        "Every write under /versioning to a fork's graph (graph_in_workspace) \u2014 its drafts, saves, publishes, pulls, reverts, restores to a commit, imports and the reviews it opens",
+        "Approving, merging and editing a review from a fork or into one (pr_in_workspace), and the job that publishes or merges a large draft on a fork",
+        "POST /resolve opening a draft on a fork, and every /graph write to one: /graph/changes, node and edge writes, /save and /commands/batch",
+        "Importing a view or a view package into a draft on a fork"
+      ],
+      "uiSurfaces": [],
+      "stillAllowed": [
+        "Listing a graph's forks, and reading a fork: its data, views, canvas and history",
+        "Moving a fork to the trash and restoring it, closing its review, exporting and freezing it",
+        "The purge, the reaper, the backfill and every other background job",
+        "Admin views",
+        "Nothing is deleted \u2014 turning forks back on restores every fork as it was"
+      ],
+      "dependsOn": [
+        "versioningEnabled"
+      ]
+    },
+    {
       "key": "traceEnabled",
       "name": "Lineage trace",
       "description": "Follow a node's lineage upstream and downstream across the graph, from the graph and context views.",
@@ -575,7 +611,7 @@
       "helpUrl": null,
       "adminHint": "Trace can be expensive on very large graphs. Turning it off is a legitimate way to protect a struggling provider without taking the whole view away.",
       "impactWhenOff": "The Trace button disappears from the toolbars and the server refuses trace requests. People can still browse and expand the graph by hand \u2014 they just can't ask it to walk the lineage for them.",
-      "sortOrder": 1,
+      "sortOrder": 2,
       "deprecated": false,
       "stage": "active",
       "implemented": true,
@@ -1359,6 +1395,7 @@
     "serviceAccountUnmanagedGrace": "14",
     "workspaceDirectoryEnabled": false,
     "versioningEnabled": true,
+    "forksEnabled": false,
     "traceEnabled": true,
     "graphExportEnabled": true,
     "nativeQueryEnabled": true,

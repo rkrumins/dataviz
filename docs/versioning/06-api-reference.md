@@ -94,6 +94,7 @@ so a read-only canvas can boot. Every other versioning route is membership-only.
 | Switch (Administration → Features) | Key | Closes |
 |---|---|---|
 | **Version control** | `versioningEnabled` | Every `POST`, `PUT`, `PATCH` and `DELETE` on the versioning router except `…/projection/rebuild`, `…/projection/reconcile`, `POST …/exports` and `…/lifecycle/freeze`; on the graph router, `POST /bootstrap`, `/bootstrap/retry`, `/bootstrap/decision`, `/bootstrap/abandon` and `/resync`. Reads stay open |
+| **Forks** | `forksEnabled` | Off by default. `POST /graphs/{gid}/forks`; on a fork's graph or a review from or into a fork, every `POST`, `PUT`, `PATCH` and `DELETE` except the fork's trash (`DELETE /graphs/{fork}`), closing a review, and the ones **Version control** leaves open; `POST /resolve` for a fork's data source; on the graph router, `/changes`, node and edge writes, `/save` and `/commands/batch` on a fork. Reads and restoring a fork stay open; so does every background job but the one a large publish or merge on a fork runs as ([17](17-forks-and-residency.md#turning-forks-on)) |
 | **Export graph data** | `graphExportEnabled` | Export plan, stream, job creation and download, on both routers |
 | **Build lineage from scratch** | `blankModelsEnabled` | `POST /blank-graphs` |
 | **Edit mode** | `editModeEnabled` | `POST /graph/changes`, `POST /graph/nodes/create`, and `POST`, `PATCH` and `DELETE` on `/graph/edges` |

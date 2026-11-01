@@ -299,6 +299,18 @@ def view_portability_enabled():
     yield
 
 
+@pytest.fixture()
+def forks_on():
+    """Turn forks ON for a test.
+
+    ``forksEnabled`` is an experimental flag, so it ships OFF: no fork is made and a fork is
+    read-only. A test that makes or changes a fork through the routes opts in. Primed in the
+    cache, like ``signup_enabled`` above."""
+    feature_flags._cache = {**(feature_flags._cache or {}), "forksEnabled": True}
+    feature_flags._cache_ts = time.monotonic()
+    yield
+
+
 class _AnyOpenDraft:
     async def check_view_branch(self, **_):
         return None

@@ -275,7 +275,7 @@ async def _run(data_sources: dict) -> None:
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_versioning_api_e2e(data_sources):
+def test_versioning_api_e2e(data_sources, forks_on):
     asyncio.run(_run(data_sources))
 
 

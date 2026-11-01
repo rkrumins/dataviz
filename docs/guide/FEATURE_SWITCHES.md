@@ -196,6 +196,7 @@ will ask for.
 | Switch (key) | Default | What it does | When it's off, who notices | Read more |
 | --- | --- | --- | --- | --- |
 | **Version control** (`versioningEnabled`) | On | Drafts, reviews, publishing, history and rollback for data sources — the whole change workflow. | Everyone who edits or reviews. Every version-control surface is hidden and canvases become view-only: no drafts, reviews, publishing or blank models. History is kept, background sync of versioned data keeps running, and turning it back on restores everything. The widest switch on the page. | [Versioning & Change Control](/guide/versioning-change-control) |
+| **Forks** (`forksEnabled`) | Off (preview) | Lets people fork a data source's graph into a copy of its own to work in, with its own drafts and history, and propose its changes back as a review. Needs **Version control** on. | People working in forks. No fork can be made and every fork becomes read-only: the server refuses its drafts, saves, imports and reviews. Forks stay listed and readable, and can still be moved to the trash and restored. Turning it off never touches the graph a fork came from and deletes nothing; turning it back on restores every fork as it was. | [Versioning: Forks & Residency](/docs/versioning-forks-and-residency#turning-forks-on) |
 | **Lineage trace** (`traceEnabled`) | On | Follows a node's lineage upstream and downstream, from the graph and the Context View. | Everyone who traces. The **Trace Lineage** button disappears from the view's toolbar and the server refuses trace requests. People can still browse and expand the graph by hand. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
 
 ### Semantic Layers
@@ -276,6 +277,7 @@ Match a reported message to its switch:
 | --- | --- |
 | "Publishing views to everyone is turned off for this deployment." | **Publishing views to everyone** |
 | "Version control is turned off for this deployment." | **Version control** |
+| "Forks are turned off for this deployment." | **Forks** |
 | "Lineage tracing is turned off for this deployment." | **Lineage trace** |
 | "Editing is turned off for this deployment, so views are read-only." | **Edit mode** |
 | "Self-registration is turned off. Ask an administrator for an invitation." | **Self-registration** |

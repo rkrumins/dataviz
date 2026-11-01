@@ -21,6 +21,27 @@ laid over it, as a draft reads main's, so a fork costs FalkorDB nothing. Each of
 which parent commit it reads, so a fork can later take its parent's newer work without rewriting its
 own history.
 
+## Turning forks on
+
+Forks are **off** on a new deployment and after an upgrade to this release. A system administrator
+turns them on under **Admin → Features → Forks** (`forksEnabled`, in Lineage beside Version control,
+which it needs); only a system administrator can change a switch there. It is a preview: Update from
+parent and the screens to work in a fork come next (§9).
+
+While it is off nothing new happens in a fork, and no parent graph is touched. Making a fork, any
+change to a fork's graph or its drafts (opening, saving, checkpointing, publishing and pulling a
+draft, writing its `main`, importing, reverting, restoring to a commit) and its reviews (opening,
+approving, editing, merging, and the job a large merge or publish runs as) answer **403**
+`feature_disabled`: "Forks are turned off for this deployment. An administrator can turn them on
+under Admin → Features." What stays open:
+
+- listing a graph's forks, and reading a fork: its data, its views and canvas, its history;
+- moving a fork to the trash and back, closing its review (a fork with a live one can't go to the
+  trash), exporting and freezing it;
+- the purge, the reaper, the backfill and every other background job, and the admin views.
+
+Nothing is deleted: turned back on, every fork is as it was.
+
 ## 1. What a fork is now
 
 Before this release a fork was a graph and nothing else. Its `dsfork_…` id was minted for the graph
@@ -315,6 +336,8 @@ A fork in the trash says none of it (`null`).
   at most five seconds for their locks and are safe to run again. The second refuses to downgrade
   while fork rows exist: the code before it reads a data source that names no graph from the
   provider's default graph. Delete those rows first.
+- **Forks are off** until a system administrator turns them on ([Turning forks on](#turning-forks-on)).
+  Until then existing forks stay readable and go to the trash and back, and take no change.
 - **Existing forks** get their data source on the reaper's first pass after the upgrade, if their
   parent's data source still exists. A fork already in the trash gets none and is purged as before.
 - **The data-source routes refuse fork rows** (`use_fork_endpoints`, `fork_settings_follow_parent`,

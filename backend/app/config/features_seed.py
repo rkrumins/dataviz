@@ -64,6 +64,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "versioningEnabled":
         "Version control is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "forksEnabled":
+        "Forks are turned off for this deployment. "
+        "An administrator can turn them on under Admin → Features.",
     "traceEnabled":
         "Lineage tracing is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
@@ -626,6 +629,37 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "deprecated": False,
     },
     {
+        "key": "forksEnabled",
+        "name": "Forks",
+        "description": (
+            "Let people fork a data source's graph: a copy of its own to work in, with its own "
+            "drafts and history, that reads the graph it came from and proposes its changes back "
+            "as a review. Needs Version control."
+        ),
+        "impact_when_off": (
+            "No fork can be made, and every fork becomes read-only: nothing is saved, imported, "
+            "reverted or published on one, and a fork's reviews can't be opened, approved or "
+            "merged. Forks stay listed and readable, and can still be moved to the trash and "
+            "restored. Turning this off never touches a parent graph and deletes nothing — "
+            "turning it back on restores every fork as it was."
+        ),
+        "category_id": "lineage",
+        "type": "boolean",
+        # OFF by default: forks are still being built — taking a parent's newer work into a fork,
+        # and the screens to work in one, come next — so a deployment opts in.
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Forks need Version control on; with it off, this switch changes nothing. A fork "
+            "costs its parent nothing in the graph store — it reads through the parent's graph — "
+            "but its reviews merge into the parent, so turn this on where teams should be able to "
+            "propose changes from a copy of their own."
+        ),
+        "sort_order": 1,
+        "deprecated": False,
+    },
+    {
         "key": "traceEnabled",
         "name": "Lineage trace",
         "description": (
@@ -646,7 +680,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "Trace can be expensive on very large graphs. Turning it off is a legitimate way to "
             "protect a struggling provider without taking the whole view away."
         ),
-        "sort_order": 1,
+        "sort_order": 2,
         "deprecated": False,
     },
     # ── Data governance ────────────────────────────────────────────────────────

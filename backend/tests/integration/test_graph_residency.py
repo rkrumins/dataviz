@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -1338,8 +1339,10 @@ async def test_a_fork_has_no_residency_of_its_own(store, monkeypatch):
 async def forked(store):
     """``make(projector)``: a root made as a data source on this lane's FalkorDB provider, its
     graph pinned to the data source's key and projected, and a fork of it made as the fork route
-    makes one — ``(root data source, root graph, fork data source, fork graph)``. Both graphs are
-    in the trash after the case, and out of the load queue."""
+    makes one — ``(root data source, root graph, fork data source, fork graph)``. Making it needs
+    the Forks switch; the case then reads it with the switch off, as reading a fork does not. Both
+    graphs are in the trash after the case, and out of the load queue."""
+    from backend.app.services.feature_flags import feature_flags
     from backend.tests.integration.test_fork_data_sources import _client, _fork, _parent
 
     made: list = []
@@ -1349,8 +1352,14 @@ async def forked(store):
         made.append(root)
         await _publish(store, root, "A")
         await _seeded(proj, root)
-        async with _client() as c:
-            fork = (await _fork(c, root)).json()
+        flags = dict(feature_flags._cache or {})
+        feature_flags._cache, feature_flags._cache_ts = ({**flags, "forksEnabled": True},
+                                                         time.monotonic())
+        try:
+            async with _client() as c:
+                fork = (await _fork(c, root)).json()
+        finally:
+            feature_flags._cache = {**flags, "forksEnabled": False}
         made.append(fork["graphId"])
         return root_ds, root, fork["dataSourceId"], fork["graphId"]
 
