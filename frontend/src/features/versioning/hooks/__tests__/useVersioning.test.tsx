@@ -12,17 +12,28 @@ import type { RebuildResponse } from '@/services/versioningApiService'
 const rebuildProjection = vi.fn()
 const decideBootstrapDuplicates = vi.fn()
 const rebaseDraft = vi.fn()
+const createFork = vi.fn()
+const updateFromParent = vi.fn()
+const openForkPullRequest = vi.fn()
+const listDataSources = vi.fn()
 vi.mock('@/services/versioningApiService', () => ({
   rebuildProjection: (...args: unknown[]) => rebuildProjection(...args),
   decideBootstrapDuplicates: (...args: unknown[]) => decideBootstrapDuplicates(...args),
   rebaseDraft: (...args: unknown[]) => rebaseDraft(...args),
+  createFork: (...args: unknown[]) => createFork(...args),
+  updateFromParent: (...args: unknown[]) => updateFromParent(...args),
+  openForkPullRequest: (...args: unknown[]) => openForkPullRequest(...args),
+}))
+vi.mock('@/services/workspaceService', () => ({
+  workspaceService: { listDataSources: (...args: unknown[]) => listDataSources(...args) },
 }))
 vi.mock('@/hooks/useAggregatedLineage', () => ({ invalidateAggregatedEdges: vi.fn() }))
 
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
 import {
-  useDecideBootstrapDuplicates, usePullLatestDraft, useRebuildProjection, VERSIONING_KEYS,
+  useCreateFork, useDataSourcesWithForks, useDecideBootstrapDuplicates, useOpenForkPullRequest, usePullLatestDraft,
+  useRebuildProjection, useUpdateFromParent, VERSIONING_KEYS,
 } from '../useVersioning'
 
 describe('useRebuildProjection', () => {
@@ -109,5 +120,79 @@ describe('usePullLatestDraft', () => {
     expect(await pull({ clean: true, conflicts: [], alreadyUpToDate: true })).toBe(0)
     expect(await pull({ clean: false, conflicts: [{ entity_id: 'A' }] })).toBe(0)
     expect(invalidateAggregatedEdges).not.toHaveBeenCalled()
+  })
+})
+
+describe('the fork hooks', () => {
+  beforeEach(() => vi.mocked(invalidateAggregatedEdges).mockClear())
+
+  const setup = <T,>(hook: () => T) => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } })
+    const invalidate = vi.spyOn(qc, 'invalidateQueries')
+    const wrapper = ({ children }: { children: React.ReactNode }) => (
+      <QueryClientProvider client={qc}>{children}</QueryClientProvider>
+    )
+    const { result } = renderHook(hook, { wrapper })
+    return { result, invalidate }
+  }
+  const invalidated = (spy: { mock: { calls: unknown[][] } }) =>
+    spy.mock.calls.map((c) => JSON.stringify((c[0] as { queryKey: unknown }).queryKey))
+
+  it('makes a fork, and reads the graph’s forks again so the new one shows', async () => {
+    createFork.mockResolvedValue({ graphId: 'g_f', dataSourceId: 'dsfork_1', mainBranchId: 'b', forkBaseCommitSeq: 3 })
+    const { result, invalidate } = setup(() => useCreateFork('ws1', 'g1'))
+    result.current.mutate({ name: 'Q3' })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(createFork).toHaveBeenCalledWith('ws1', 'g1', { name: 'Q3' })
+    expect(invalidated(invalidate)).toContain(JSON.stringify(VERSIONING_KEYS.forks('ws1', 'g1')))
+    expect(invalidated(invalidate)).toContain(JSON.stringify(VERSIONING_KEYS.forkSources('ws1')))
+  })
+
+  it('refreshes the fork after an update that took changes in: its distance, history and canvas', async () => {
+    updateFromParent.mockResolvedValue({ commitId: 'c9', parentSeq: 12, wrote: 3, upToDate: false })
+    const epoch = useBranchStore.getState().mainEpoch
+    const { result, invalidate } = setup(() => useUpdateFromParent('ws1', 'g_f'))
+    result.current.mutate({ resolutions: { n1: null } })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(updateFromParent).toHaveBeenCalledWith('ws1', 'g_f', { resolutions: { n1: null } })
+    expect(invalidated(invalidate)).toEqual(expect.arrayContaining([
+      JSON.stringify([...VERSIONING_KEYS.all, 'forks']),
+      JSON.stringify([...VERSIONING_KEYS.all, 'commits']),
+      JSON.stringify(VERSIONING_KEYS.branches('ws1', 'g_f')),
+    ]))
+    expect(useBranchStore.getState().mainEpoch - epoch).toBe(1)
+    expect(invalidateAggregatedEdges).toHaveBeenCalled()
+  })
+
+  it('leaves the canvas alone when the fork was up to date', async () => {
+    updateFromParent.mockResolvedValue({ commitId: null, parentSeq: 12, wrote: 0, upToDate: true })
+    const epoch = useBranchStore.getState().mainEpoch
+    const { result } = setup(() => useUpdateFromParent('ws1', 'g_f'))
+    result.current.mutate({})
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(useBranchStore.getState().mainEpoch - epoch).toBe(0)
+    expect(invalidateAggregatedEdges).not.toHaveBeenCalled()
+  })
+
+  it('opens a fork’s review, and reads every list of reviews again', async () => {
+    openForkPullRequest.mockResolvedValue({ prId: 'pr_9' })
+    const { result, invalidate } = setup(() => useOpenForkPullRequest('ws1', 'g_f'))
+    result.current.mutate({ title: 'Q3' })
+    await waitFor(() => expect(result.current.isSuccess).toBe(true))
+    expect(openForkPullRequest).toHaveBeenCalledWith('ws1', 'g_f', { title: 'Q3' })
+    expect(invalidated(invalidate)).toEqual(expect.arrayContaining([
+      JSON.stringify([...VERSIONING_KEYS.all, 'mrs']),
+      JSON.stringify([...VERSIONING_KEYS.all, 'dataSourcePrs']),
+    ]))
+  })
+
+  it('reads the data sources with forks only when asked to', async () => {
+    listDataSources.mockResolvedValue([{ id: 'dsfork_1', forkOf: { dataSourceId: 'ds1', graphId: 'g1' } }])
+    const off = setup(() => useDataSourcesWithForks('ws1', false))
+    expect(off.result.current.fetchStatus).toBe('idle')
+    expect(listDataSources).not.toHaveBeenCalled()
+    const on = setup(() => useDataSourcesWithForks('ws1', true))
+    await waitFor(() => expect(on.result.current.isSuccess).toBe(true))
+    expect(listDataSources).toHaveBeenCalledWith('ws1', { includeForks: true })
   })
 })
