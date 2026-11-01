@@ -280,7 +280,7 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                     <span className="inline-flex px-1.5 py-px rounded-full border border-amber-500/20 bg-amber-500/10 text-[9px] uppercase tracking-wide text-amber-600 dark:text-amber-400 shrink-0" title="Its data source no longer exists">Orphan</span>
                                                 )}
                                             </div>
-                                            {!row.forkParentGraphId && row.residency && (
+                                            {!row.forkParentGraphId && row.residency && row.residencyState && (
                                                 <div className="mt-1 flex items-center gap-1">
                                                     <span className={cn(CHIP_CLS, 'border-indigo-500/20 bg-indigo-500/10 text-indigo-600 dark:text-indigo-400')}>
                                                         {CLASS_LABEL[row.residency] ?? row.residency}
@@ -338,7 +338,7 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                 >
                                                     Move…
                                                 </button>
-                                                {!row.forkParentGraphId && (
+                                                {!row.forkParentGraphId && row.residency && (
                                                     <select
                                                         aria-label="Residency class"
                                                         className={cn(SELECT_CLS, 'py-0.5 text-[11px]')}

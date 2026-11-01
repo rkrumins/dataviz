@@ -1481,6 +1481,24 @@ async def list_versioned_graphs(
 
     live = set(present_ids)
     directory = await _resolve_data_sources([r.data_source_id for r in page])
+
+    def residency_of(r) -> dict:
+        """Residency (doc 17): its class, whether its key is in FalkorDB, why it was evicted, its
+        last read, its measured size and, while it is being loaded, since when. A fork has none of
+        its own: no key, and its reads count for its root."""
+        if r.fork_parent_graph_id is not None:
+            return dict.fromkeys(("residency", "residencyState", "evictedReason", "lastReadAt",
+                                  "sizeBytes", "rehydratingSince"))
+        return {
+            "residency": r.residency,
+            "residencyState": (r.status if r.status in ("evicted", "rehydrating",
+                                                        "waiting_capacity") else "resident"),
+            "evictedReason": r.evicted_reason,
+            "lastReadAt": r.last_read_at,
+            "sizeBytes": r.size_bytes,
+            "rehydratingSince": r.rehydrating_since if r.status == "rehydrating" else None,
+        }
+
     return {
         "graphs": [{
             **_projection_row(r, directory.get(r.data_source_id) or {}),
@@ -1491,15 +1509,7 @@ async def list_versioned_graphs(
             "retiredKeys": [{"name": e["name"], "provider": e.get("provider"),
                              "retireAfter": e["retireAfter"], "afterSeq": e["afterSeq"]}
                             for e in r.retired_keys or []],
-            # Residency (doc 17): its class, whether its key is in FalkorDB, why it was evicted,
-            # its last read, its measured size and, while it is being loaded, since when.
-            "residency": r.residency,
-            "residencyState": (r.status if r.status in ("evicted", "rehydrating",
-                                                        "waiting_capacity") else "resident"),
-            "evictedReason": r.evicted_reason,
-            "lastReadAt": r.last_read_at,
-            "sizeBytes": r.size_bytes,
-            "rehydratingSince": r.rehydrating_since if r.status == "rehydrating" else None,
+            **residency_of(r),
         } for r in page],
         "nextCursor": page[-1].id if more else None,
     }

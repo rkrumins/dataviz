@@ -107,6 +107,10 @@ async def _run() -> None:
         "residency": "standard", "residencyState": "resident", "evictedReason": None,
         "lastReadAt": None, "sizeBytes": None, "rehydratingSince": None,
     }
+    # A fork has no residency of its own (doc 17): no key, no class, no state; its root's row has
+    # them, and its reads count there.
+    assert [rows[fork][k] for k in ("residency", "residencyState", "evictedReason", "lastReadAt",
+                                    "sizeBytes", "rehydratingSince")] == [None] * 6
     # A moved graph's old key, until it is dropped.
     assert rows[fork]["retiredKeys"] == [{"name": "gvt_old", "provider": None,
                                           "retireAfter": "2026-10-18T12:00:00+00:00",

@@ -1108,6 +1108,27 @@ async def test_a_reloaded_key_serves_reads_only_once_its_summaries_are_built(
     assert (await svc.projection_watermark(gid))["fresh"] is True
 
 
+# ── forks: no key of their own; they read through their root's store ────────────────────────────
+@live
+async def test_a_fork_has_no_residency_of_its_own(store, monkeypatch):
+    """A fork has no key (doc 17 §6). Its watermark is its root's, so the root's residency state
+    shows through ``readsThrough``, with no class of the fork's own; and what the capacity loop
+    reads — which its policy preview and its metrics read too — never counts a fork, not even one
+    an earlier release's copy is still pinned to."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
+    root = await _resident(svc, proj)
+    fork = (await svc.fork_graph(parent_graph_id=root, workspace_id="ws_res",
+                                 actor="a"))["graph_id"]
+    await _set_ps(fork, falkor_graph_name=f"gvt_{_hex()}__fork_{fork}", owns_falkor_graph=True)
+    assert await CacheManager(proj).evict(root, drop_graph=_dropped) is True
+    wm = await svc.projection_watermark(fork)
+    assert (wm["reads_through"], wm["residency"], wm["residency_state"]) == (root, None, "evicted")
+    out = (await V._watermark_model(None, wm)).model_dump(by_alias=True)
+    assert (out["readsThrough"], out["residency"], out["residencyState"]) == (root, None, "evicted")
+    assert [g.graph_id for g in (await residency.gather(graph_ids=[root, fork])).graphs] == [root]
+
+
 # ── read tracking ──────────────────────────────────────────────────────────────────────────────
 async def test_reads_are_flushed_in_one_update_that_never_moves_a_read_back(store):
     svc = store

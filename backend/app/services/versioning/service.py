@@ -3819,7 +3819,8 @@ class GraphVersioningService:
         naming no key, owning none: nothing reads a fork's key through it, and no screen shows a
         fork behind on a projection it does not have. Its route is where its reads come from
         (``reads_from``, :meth:`fork_reads_from`): past the ceiling its own layered reads in
-        Postgres serve its main, whatever the root's projection holds."""
+        Postgres serve its main, whatever the root's projection holds. Residency (doc 17): the
+        state is its root's, and a fork has no class of its own (``residency`` None)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             root = graph
@@ -3835,7 +3836,8 @@ class GraphVersioningService:
                 wm["read_route"] = {**wm["read_route"], "main": "postgres"}
             return {**wm, "reads_through": root.id, "reads_from": reads_from,
                     "falkor_graph_name": None, "falkor_provider": None,
-                    "owns_falkor_graph": False, "retired_keys": [], "external_drift": None}
+                    "owns_falkor_graph": False, "retired_keys": [], "external_drift": None,
+                    "residency": None}
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)

@@ -153,8 +153,10 @@ export interface VersionedGraphRow extends ProjectionWorstRow {
     forkParentGraphId: string | null
     orphan: boolean
     retiredKeys: RetiredProjectionKey[]
-    residency: ResidencyClass
-    residencyState: ResidencyState
+    /** Null on a fork, which has no residency of its own: no key, and its reads count for its
+     *  root's row. */
+    residency: ResidencyClass | null
+    residencyState: ResidencyState | null
     evictedReason: string | null
     lastReadAt: string | null
     sizeBytes: number | null

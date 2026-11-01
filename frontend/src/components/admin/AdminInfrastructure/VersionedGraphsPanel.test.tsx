@@ -63,6 +63,7 @@ const MAIN = row({})
 const FORK = row({
     graphId: 'graph_b', dataSourceId: 'dsfork_1', dataSourceLabel: null, falkorGraphName: 'gv_fork_b',
     owned: true, forkParentGraphId: 'graph_a', lag: 2, committed: 5, projected: 3,
+    residency: null, residencyState: null,
 })
 const ORPHAN = row({
     graphId: 'graph_c', dataSourceId: 'ds_gone', dataSourceLabel: null, workspaceName: null,
