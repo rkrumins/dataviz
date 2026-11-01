@@ -77,8 +77,10 @@ async def _run() -> None:
         f"graph_{tag}_{n}" for n in ("a_main", "b_fork", "c_orphan", "d_failed", "e_gone", "f_ws2",
                                      "g_waiting"))
     await _seed_graph(main, ws=ws, ds=live_ds, provider=prov, owned=True)
+    # An earlier release's copy of a fork, which the count budget evicted: it is never projected
+    # again, so its row stays evicted.
     await _seed_graph(fork, ws=ws, ds=f"dsfork_{tag}", provider=prov, head=5, projected=2,
-                      fork_of=main, retired=[{"name": "gvt_old", "provider": None,
+                      status="evicted", fork_of=main, retired=[{"name": "gvt_old", "provider": None,
                                               "retireAfter": "2026-10-18T12:00:00+00:00",
                                               "afterSeq": 5, "movedBy": "usr_admin"}])
     await _seed_graph(orphan, ws=ws, ds=f"ds_deleted_{tag}", provider=other_prov,
@@ -108,9 +110,10 @@ async def _run() -> None:
         "lastReadAt": None, "sizeBytes": None, "rehydratingSince": None,
     }
     # A fork has no residency of its own (doc 17): no key, no class, no state; its root's row has
-    # them, and its reads count there.
+    # them, and its reads count there. Nor a projection's state: it is never evicted or behind.
     assert [rows[fork][k] for k in ("residency", "residencyState", "evictedReason", "lastReadAt",
                                     "sizeBytes", "rehydratingSince")] == [None] * 6
+    assert (rows[fork]["status"], rows[fork]["lag"]) == ("idle", 0)
     # A moved graph's old key, until it is dropped.
     assert rows[fork]["retiredKeys"] == [{"name": "gvt_old", "provider": None,
                                           "retireAfter": "2026-10-18T12:00:00+00:00",
