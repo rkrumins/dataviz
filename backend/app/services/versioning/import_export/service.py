@@ -95,7 +95,8 @@ class ImportExportService:
         # API layer, which resolves the ontology and owns those side effects; a refusal comes back
         # as the HTTP answer the route gives when it publishes inside the request.
         self._publish_hook = publish_hook
-        # The same for a fork's jobs (``fork_update``): ``(job) -> its answer | {"error": …}``.
+        # The same for a fork's jobs (``fork_update``, ``fork_merge``): ``(job) -> its answer |
+        # {"error": …}``.
         self._fork_hook = fork_hook
 
     @property
@@ -682,6 +683,47 @@ class ImportExportService:
             await s.flush()
             return {"job_id": job.id}
 
+    async def create_fork_merge_job(
+        self, *, workspace_id: str, pr_id: str, actor: str, message: str,
+    ) -> Dict[str, str]:
+        """The merge of a fork's review too large to merge inside a request, queued like a publish:
+        the job is the parent's (``graph_id``), and the review, the fork and its head now (pinned:
+        what it merges) ride in ``field_scope``. Fenced as a publish job is — the parent's lifecycle
+        and move locks shared, the parent writable and still in ``workspace_id`` — and taken under
+        the review's row lock: open, approved (:class:`ApprovalRequired`) and up to date with the
+        parent (:class:`ForkNotUpToDate`), it becomes ``merging``, which no other merge gets past
+        (:class:`JobActive`) until the job ends. Returns ``{job_id, graph_id}``."""
+        async with db.graphver_session() as s:
+            peek = await s.get(MergeRequestORM, pr_id)
+            if peek is None:
+                raise ValueError(f"unknown pull request {pr_id}")
+            parent_id = peek.target_graph_id
+            await self._svc._lock_lifecycle(s, parent_id, shared=True)
+            await self._lock_in_workspace(s, parent_id, workspace_id)
+            await self._svc._assert_writable(s, parent_id)
+            pr = await self._svc._lock_pr(s, pr_id)
+            if pr is None or pr.status in ("merged", "closed"):
+                raise ValueError(f"pull request {pr_id} is not open")
+            if pr.status == "merging":
+                raise JobActive(await self._svc._merging_job(s, pr_id),
+                                "This review is already being merged by a job.")
+            fork = await s.get(GraphORM, pr.graph_id)
+            parent = await s.get(GraphORM, parent_id)
+            if fork is None or fork.deleted_at is not None or parent is None:
+                raise ValueError("pr endpoints missing")
+            await self._svc._require_approvals(s, pr)
+            pinned = fork.main_head_commit_seq
+            await self._svc._assert_up_to_date(s, fork, pinned, parent)
+            pr.status, pr.updated_at = "merging", _now()
+            job = JobORM(job_type="fork_merge", graph_id=parent_id, workspace_id=workspace_id,
+                         data_source_id=parent.data_source_id,
+                         field_scope={"actor": actor, "message": message, "prId": pr_id,
+                                      "forkId": fork.id, "pinnedSeq": pinned},
+                         status="pending", current_phase=QUEUED, updated_at=_now())
+            s.add(job)
+            await s.flush()
+            return {"job_id": job.id, "graph_id": parent_id}
+
     async def start_fork_job(self, job_id: str) -> str:
         """Queue a fork's job (see :meth:`_start`). Returns the status to report."""
         return await self._start(job_id)
@@ -689,8 +731,10 @@ class ImportExportService:
     async def run_fork_job(self, job_id: str, lease: Optional[Lease] = None) -> Dict[str, Any]:
         """Run a fork's job through the injected hook, on ``lease`` (the transfer lane's; taken here
         when called without one), as :meth:`run_publish` runs a publish: the hook's answer is the
-        job's summary, and a refusal — an update's conflicts — fails the job with it, through the
-        fenced finish. Safe to run again: an update already landed answers up to date."""
+        job's summary, and a refusal — an update's conflicts, a merge no longer up to date — fails
+        the job with it, through the fenced finish; a refused merge hands its review back
+        (``merging`` → open) once the job has failed. Safe to run again: an update already landed
+        answers up to date, and a review already merged answers with its merge."""
         lease = lease or await lease_job(job_id)
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
@@ -705,6 +749,8 @@ class ImportExportService:
         if not await lease.finish(**values):
             raise Superseded(f"{job['jobType']} job {job_id} (epoch {lease.epoch}) was taken over "
                              "before it could finish")
+        if "error" in result and job["jobType"] == "fork_merge":
+            await self._svc.release_merging(pr_id=job["prId"])
         return result
 
     async def run_fork_job_safe(self, job_id: str, lease: Lease) -> None:

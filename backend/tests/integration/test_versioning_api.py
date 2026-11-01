@@ -180,7 +180,7 @@ async def _run(data_sources: dict) -> None:
         base_state = (await c.get(f"{ws1}/graphs/{gid}/branches/{mid}/state", headers=h)).json()
         assert base_state["nodes"]["A"]["displayName"] == "Alpha2"
 
-        # ── conflict → 409 → resolve → 200 (via the API) ─────────────────
+        # ── behind → 409; the update's conflict → 409 → resolve → merge (via the API) ──
         f2 = (await c.post(f"{ws1}/graphs/{gid}/forks", json={}, headers=h)).json()["graphId"]
         f2b = (await c.post(f"{ws1}/graphs/{f2}/branches", json={}, headers=h)).json()["branchId"]
         await c.post(f"{ws1}/graphs/{f2}/branches/{f2b}/changes", headers=h, json={"ops": [{"op": "update", "entityKind": "node", "entityId": "A", "payload": {"displayName": "FromFork"}}]})
@@ -192,10 +192,18 @@ async def _run(data_sources: dict) -> None:
         await c.post(f"{ws1}/graphs/{gid}/branches/{pb}/commit", json={}, headers=h)
         await c.post(f"{ws1}/graphs/{gid}/branches/{pb}/publish", json={"message": "base"}, headers=h)
         pr2 = (await c.post(f"{ws1}/graphs/{f2}/pulls", json={}, headers=_hdr(R))).json()["prId"]
-        conflict = await c.post(f"{ws1}/pulls/{pr2}/merge", json={"message": "m"}, headers=h)
-        assert conflict.status_code == 409 and conflict.json()["detail"]["type"] == "merge_conflict", conflict.text
-        resolved = await c.post(f"{ws1}/pulls/{pr2}/merge", json={"message": "resolved", "resolutions": {"A": {"displayName": "Resolved"}}}, headers=h)
+        behind = await c.post(f"{ws1}/pulls/{pr2}/merge", json={"message": "m"}, headers=h)
+        assert behind.status_code == 409 and behind.json()["detail"]["type"] == "not_up_to_date", behind.text
+        conflict = await c.post(f"{ws1}/graphs/{f2}/update-from-parent", json={}, headers=h)
+        assert conflict.status_code == 409 and conflict.json()["detail"]["type"] == "fork_update_conflicts", conflict.text
+        seed = conflict.json()["detail"]["seeds"]["A"]
+        resolved = await c.post(f"{ws1}/graphs/{f2}/update-from-parent", headers=h, json={
+            "resolutions": {"A": {**seed, "displayName": "Resolved"}}})
         assert resolved.status_code == 200, resolved.text
+        merged = await c.post(f"{ws1}/pulls/{pr2}/merge", json={"message": "resolved"}, headers=h)
+        assert merged.status_code == 200, merged.text
+        assert (await c.get(f"{ws1}/graphs/{gid}/branches/{mid}/state", headers=h)).json()[
+            "nodes"]["A"]["displayName"] == "Resolved"
 
         # ── actor id → display-name resolution (userNames maps) ──────────
         # branches list: each item carries a userNames map covering its owner.

@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 # the job rather than raising.
 _ENTRY_POINTS = {"ingest": "run_import_safe", "export": "run_export_safe",
                  "publish": "run_publish_safe", "package_inspect": "run_inspect_safe",
-                 "fork_update": "run_fork_job_safe"}
+                 "fork_update": "run_fork_job_safe", "fork_merge": "run_fork_job_safe"}
 JOB_TYPES = job_lease.TRANSFER_TYPES
 
 

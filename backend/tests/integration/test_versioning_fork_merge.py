@@ -2,10 +2,11 @@
 
 A fork is merged into its parent more than once: a review, then more work and another review.
 Each review merges what the fork changed since the last one merged, as git merges from the last
-merged commit: a change the parent took and then undid is not proposed again, and a field only
-the parent changed since is no conflict. A review that changes nothing is recorded as merged by
-whom and when; one merged twice at once merges once; one refused for conflicts is left marked
-so; and merged through the review screen it keeps the parent's rules.
+merged commit, once the fork has taken its parent's changes in: a change the parent took and then
+undid is not proposed again, and a field only the parent changed since is no conflict. A review
+that changes nothing is recorded as merged by whom and when; one merged twice at once merges once;
+one of a fork behind its parent is refused, unmarked, until the fork updates, which is where a
+conflict shows; and merged through the review screen it keeps the parent's rules.
 """
 import asyncio
 import os
@@ -14,9 +15,9 @@ import pytest
 from sqlalchemy import func, select
 
 from backend.app.services.versioning import db, models
+from backend.app.services.versioning.errors import ForkNotUpToDate, ForkUpdateConflicts
 from backend.app.services.versioning.ontology import EntityRule, OntologyRules
-from backend.app.services.versioning.service import (
-    GraphVersioningService, MergeConflict, OntologyViolation)
+from backend.app.services.versioning.service import GraphVersioningService, OntologyViolation
 
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(
     not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")]
@@ -59,6 +60,7 @@ async def _a_second_review_merges_what_changed_since_the_first(svc):
     await _publish(svc, pg, "alice", [_node("A", "update", f=1), _node("B", "update", g="parent")],
                    "parent after the merge")
     await _publish(svc, fg, "bob", [_node("X")], "more fork work")
+    await svc.update_fork_from_parent(fork_graph_id=fg, actor="bob")    # the parent moved
 
     second = await svc.open_pr(source_graph_id=fg, actor="bob")
     preview = await svc.preview_pr(pr_id=second)
@@ -99,7 +101,7 @@ async def _a_review_merged_twice_at_once_merges_once(svc):
     assert len(merged) == 1 and len(refused) == 1, done
 
 
-async def _a_review_refused_for_conflicts_is_marked_so(svc):
+async def _a_review_behind_its_parent_waits_for_the_update_that_shows_the_conflict(svc):
     pg, _ = await _graph(svc)
     await _publish(svc, pg, "alice", [_node("A", f=1)], "seed")
     fg = (await svc.fork_graph(parent_graph_id=pg, workspace_id="ws1", actor="bob"))["graph_id"]
@@ -107,10 +109,13 @@ async def _a_review_refused_for_conflicts_is_marked_so(svc):
     pr = await svc.open_pr(source_graph_id=fg, actor="bob")
     assert (await svc.get_pr(pr))["status"] == "mergeable"
     await _publish(svc, pg, "alice", [_node("A", "update", f=3)], "parent work")
-    with pytest.raises(MergeConflict):
+    with pytest.raises(ForkNotUpToDate):
         await svc.merge_pr(pr_id=pr, actor="carol", message="m")
     row = await svc.get_pr(pr)
-    assert row["status"] == "conflicts" and row["conflicts"], row
+    assert row["status"] == "mergeable" and not row["conflicts"], row
+    with pytest.raises(ForkUpdateConflicts) as exc:
+        await svc.update_fork_from_parent(fork_graph_id=fg, actor="bob")
+    assert [(c["entity_id"], c["path"]) for c in exc.value.conflicts] == [("A", ["f"])]
 
 
 async def _the_review_screen_keeps_the_parents_rules(svc):
@@ -145,8 +150,8 @@ def test_a_review_merged_twice_at_once_merges_once():
     asyncio.run(_run(_a_review_merged_twice_at_once_merges_once))
 
 
-def test_a_review_refused_for_conflicts_is_marked_so():
-    asyncio.run(_run(_a_review_refused_for_conflicts_is_marked_so))
+def test_a_review_behind_its_parent_waits_for_the_update_that_shows_the_conflict():
+    asyncio.run(_run(_a_review_behind_its_parent_waits_for_the_update_that_shows_the_conflict))
 
 
 def test_the_review_screen_keeps_the_parents_rules():

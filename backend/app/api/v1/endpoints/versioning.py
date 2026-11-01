@@ -912,15 +912,19 @@ class CommitResponse(_ApiModel):
 
 
 class PublishJobResponse(_ApiModel):
-    """A large draft's publish (or review merge), or a fork's Update from parent, run as a job: poll
-    until it's done. ``error`` is ``{status, detail}``, the answer the route gives when it runs
-    inside the request. An update's says what ``POST …/update-from-parent`` says (``parentSeq``,
-    ``wrote``, ``upToDate``)."""
+    """A large draft's publish (or review merge), or a fork review's merge, run as a job: poll until
+    it's done. ``error`` is ``{status, detail}``, the answer the route gives when it publishes
+    inside the request."""
     job_id: str = Field(alias="jobId")
     graph_id: str = Field(alias="graphId")
     status: str
     commit_id: Optional[str] = Field(default=None, alias="commitId")
     error: Optional[dict] = None
+
+
+class UpdateJobResponse(PublishJobResponse):
+    """A fork's Update from parent run as a job: what ``POST …/update-from-parent`` says once it
+    has run (``commitId``, ``parentSeq``, ``wrote``, ``upToDate``), or its refusal (``error``)."""
     parent_seq: Optional[int] = Field(default=None, alias="parentSeq")
     wrote: Optional[int] = None
     up_to_date: Optional[bool] = Field(default=None, alias="upToDate")
@@ -2160,6 +2164,14 @@ async def _queue_publish(ie, *, workspace_id, meta, graph_id, branch_id, actor, 
                                                   "status": started})
 
 
+async def _queue_fork_merge(ie, *, workspace_id, pr_id, actor, body) -> JSONResponse:
+    job = await ie.create_fork_merge_job(workspace_id=workspace_id, pr_id=pr_id, actor=actor,
+                                         message=body.message)
+    started = await ie.start_fork_job(job["job_id"])
+    return JSONResponse(status_code=202, content={"jobId": job["job_id"], "graphId": job["graph_id"],
+                                                  "status": started})
+
+
 _JOB_REFUSAL_MAX_VIOLATIONS = 100
 
 
@@ -2228,20 +2240,44 @@ async def get_publish_job(
     _meta: dict = Depends(graph_in_workspace),
     ie=Depends(get_import_export_service),
 ):
-    """Where a large draft's publish (or review merge) is, or a fork's Update from parent (the
-    fork's job): pending, running, completed with its commit, or failed with the answer the route
-    would have given inside the request."""
-    job = await ie.get_job(job_id)
-    if job is None or job["jobType"] not in ("publish", "fork_update") or job["graphId"] != graph_id:
-        raise HTTPException(status_code=404, detail="publish job not found")
+    """Where a large draft's publish (or review merge) is, or a fork review's merge (its parent's
+    job): pending, running, completed with its commit, or failed with the answer a publish inside
+    the request would have given."""
+    answer = _job_answer(await ie.get_job(job_id), job_id, graph_id, ("publish", "fork_merge"),
+                         "publish job not found", "publishing failed")
+    answer.pop("summary")
+    return answer
+
+
+@router.get("/graphs/{graph_id}/update-jobs/{job_id}", response_model=UpdateJobResponse)
+async def get_update_job(
+    ws_id: str, graph_id: str, job_id: str,
+    _user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    ie=Depends(get_import_export_service),
+):
+    """Where a fork's Update from parent run as a job is (``graph_id``: the fork): pending,
+    running, completed with what the update did, or failed with the answer the route would have
+    given inside the request (its conflicts)."""
+    answer = _job_answer(await ie.get_job(job_id), job_id, graph_id, ("fork_update",),
+                         "update job not found", "the update failed")
+    summary = answer.pop("summary")
+    return {**answer, "parent_seq": summary.get("parentSeq"), "wrote": summary.get("wrote"),
+            "up_to_date": summary.get("upToDate")}
+
+
+def _job_answer(job: Optional[dict], job_id: str, graph_id: str, types: tuple, missing: str,
+                died: str) -> dict:
+    """A job run instead of a request, as its route answers it: 404 ``missing`` unless it is one of
+    ``types`` on ``graph_id``; a job that died rather than refused says ``died``."""
+    if job is None or job["jobType"] not in types or job["graphId"] != graph_id:
+        raise HTTPException(status_code=404, detail=missing)
     summary = job.get("summary") or {}
     error = summary.get("error")
     if job["status"] == "failed" and error is None:          # died rather than refused
-        error = {"status": 500, "detail": job.get("errorMessage") or "publishing failed"}
+        error = {"status": 500, "detail": job.get("errorMessage") or died}
     return {"job_id": job_id, "graph_id": graph_id, "status": job["status"],
-            "commit_id": summary.get("commitId"), "error": error,
-            "parent_seq": summary.get("parentSeq"), "wrote": summary.get("wrote"),
-            "up_to_date": summary.get("upToDate")}
+            "commit_id": summary.get("commitId"), "error": error, "summary": summary}
 
 
 @router.post("/graphs/{graph_id}/branches/{branch_id}/abandon", response_model=BranchResponse)
@@ -4042,7 +4078,7 @@ async def update_from_parent(
     what both changed (``conflicts``, and ``seeds``: the fork's own values to resolve from); send
     it again with ``resolutions``. 409 ``not_a_fork`` for a graph with no parent. One that would
     merge, or delete in its cascades, more than ``SYNC_PUBLISH_MAX_CHANGES`` entities runs as a job
-    pinned to the parent's head now: 202 with the job to poll (``GET …/publish-jobs/{jobId}``), one
+    pinned to the parent's head now: 202 with the job to poll (``GET …/update-jobs/{jobId}``), one
     at a time per fork (409 ``job_active``)."""
     resolutions = body.resolutions if body is not None else None
     with _domain_errors():
@@ -4088,7 +4124,11 @@ async def _fork_updated(graph_id: str, actor: str) -> None:
 
 async def _fork_from_job(job: dict) -> dict:
     """Run a fork's queued job as the route runs it inside the request — a refusal as the HTTP answer
-    the route gives — then what it sets off. On the versioning worker's transfer lane."""
+    the route gives — then what it sets off. On the versioning worker's transfer lane, so a merged
+    parent's projection is left to the projection lane (``nudge_projection``); a draft's follow-ups
+    have no part in it."""
+    if job["jobType"] == "fork_merge":
+        return await _fork_merge_from_job(job)
     svc = get_versioning_service()
     try:
         with _domain_errors():
@@ -4101,6 +4141,38 @@ async def _fork_from_job(job: dict) -> dict:
         await _fork_updated(job["graphId"], job["actor"])
     return {"commitId": out["commit_id"], "parentSeq": out["parent_seq"], "wrote": out["wrote"],
             "upToDate": out["up_to_date"]}
+
+
+async def _fork_merge_from_job(job: dict) -> dict:
+    """A fork review's queued merge, of the head it pinned, by the parent's live rules. A review
+    already merged — by an earlier attempt at the job, whose worker died before it finished the job —
+    answers with that merge, and only what a merge sets off runs again."""
+    from backend.app.db.engine import get_async_session
+    svc = get_versioning_service()
+    graph_id, actor = job["graphId"], job["actor"]
+    pr = await svc.get_pr(job["prId"])
+    if pr is not None and pr["status"] == "merged":
+        commit_id = pr["resulting_commit_id"] or ""
+    else:
+        try:
+            with _domain_errors():
+                meta = await svc.get_graph(graph_id)
+                if meta is None:                        # trashed, or being purged, since queued
+                    raise HTTPException(status_code=404, detail="graph not found")
+                async with get_async_session() as session:
+                    cset = await _live_containment_types(session, job["workspaceId"], meta.get("data_source_id"))
+                    rules = await _rules_for_meta(session, job["workspaceId"], meta)
+                    policy = await _drafts_policy_of(session, meta.get("data_source_id"))
+                commit_id = await svc.merge_pr(
+                    pr_id=job["prId"], actor=actor, message=job["message"], pinned_seq=job["pinnedSeq"],
+                    queued=True, containment_edge_types=cset, ontology_rules=rules,
+                    self_merge=policy.self_merge)
+        except HTTPException as exc:
+            return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
+    await _bump_main_cache(graph_id)
+    await _touch_views_data_updated(graph_id, actor)
+    await nudge_projection(graph_id)
+    return {"commitId": commit_id}
 
 
 @router.post("/graphs/{graph_id}/pulls", response_model=OpenPrResponse, status_code=201)
@@ -4323,11 +4395,22 @@ async def merge_pull_request(
     _pr: dict = Depends(pr_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
+    ie=Depends(get_import_export_service),
 ):
+    """Merge a fork's review into its parent. Only up to date with the parent: 409
+    ``not_up_to_date`` (``reason: parent_moved``, ``behind``) until the fork has taken its parent's
+    changes (Update from parent). One that changes more than ``SYNC_PUBLISH_MAX_CHANGES`` entities
+    is merged by a job instead: 202 with the job to poll, the review ``merging`` until it ends."""
     target = await svc.get_graph(str(_pr["target_graph_id"]))     # judged by the TARGET's ontology
+    policy = await _drafts_policy_of(session, (target or {}).get("data_source_id"))
+    with _domain_errors():
+        if await svc.fork_merge_size(pr_id=pr_id) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
+            if not policy.self_merge and user.id == _pr.get("actor"):   # refused now, not by the job
+                raise SelfMerge(pr_id)
+            return await _queue_fork_merge(ie, workspace_id=ws_id, pr_id=pr_id, actor=user.id,
+                                           body=body)
     cset = await _live_containment_types(session, ws_id, (target or {}).get("data_source_id"))
     rules = await _rules_for_meta(session, ws_id, target)
-    policy = await _drafts_policy_of(session, (target or {}).get("data_source_id"))
     with _domain_errors():
         commit_id = await svc.merge_pr(
             pr_id=pr_id, actor=user.id, message=body.message, resolutions=body.resolutions,
@@ -4763,7 +4846,8 @@ async def merge_merge_request(
     ie=Depends(get_import_export_service),
 ):
     """Merge a merge request. A draft that changes more than ``SYNC_PUBLISH_MAX_CHANGES``
-    entities is merged by a job instead: 202 with the job to poll, as for publish."""
+    entities is merged by a job instead: 202 with the job to poll, as for publish; so is a fork's
+    review that does (``…/pulls/{id}/merge``), which merges only up to date with its parent."""
     target, source = str(_pr["target_graph_id"]), _pr.get("source_branch_id")
     policy = await _pr_policy(svc, session, _pr)
     if source and await svc.branch_change_count(
@@ -4774,6 +4858,13 @@ async def merge_merge_request(
             return await _queue_publish(ie, workspace_id=ws_id, meta=await svc.get_graph(target),
                                         graph_id=target, branch_id=str(source), actor=user.id,
                                         body=body, merge_request_id=pr_id)
+    if _pr.get("source_graph_id") != target:                             # a fork's review
+        with _domain_errors():
+            if await svc.fork_merge_size(pr_id=pr_id) > vconfig.SYNC_PUBLISH_MAX_CHANGES:
+                if not policy.self_merge and user.id == _pr.get("actor"):
+                    raise SelfMerge(pr_id)
+                return await _queue_fork_merge(ie, workspace_id=ws_id, pr_id=pr_id, actor=user.id,
+                                               body=body)
     cset = await _pr_containment_types(svc, session, ws_id, _pr)
     rules = await _pr_ontology_rules(svc, session, ws_id, _pr)
     identity = await _node_identity_for_meta(session, await svc.get_graph(target))

@@ -8,7 +8,7 @@ what it would merge and the edges its cascades may delete, counted in SQL first 
 ``fork_update`` job on the transfer lane instead (202 ``{jobId}``), one per fork at a time (409
 ``job_active``), pinned to the parent's head when it was asked for. Run, the job lands as the
 route's update would, says why when it cannot (its conflicts), and run again after it landed
-writes nothing more.
+writes nothing more; ``GET …/update-jobs/{jobId}`` says where it is.
 """
 import os
 
@@ -129,7 +129,7 @@ def test_a_large_update_runs_as_a_job_one_at_a_time_pinned_to_the_parent_it_was_
             result = await ie.run_fork_job(job_id)
             assert (result["parentSeq"], result["wrote"], result["upToDate"]) == (asked, 1, False)
             assert (await ie.get_job(job_id))["status"] == "completed"
-            r = await c.get(f"/api/v1/{WS}/versioning/graphs/{fgid}/publish-jobs/{job_id}")
+            r = await c.get(f"/api/v1/{WS}/versioning/graphs/{fgid}/update-jobs/{job_id}")
             assert r.status_code == 200, r.text
             assert {k: r.json()[k] for k in ("status", "commitId", "parentSeq", "wrote", "upToDate")} == {
                 "status": "completed", "commitId": result["commitId"], "parentSeq": asked, "wrote": 1,
@@ -178,7 +178,7 @@ def test_an_update_job_that_finds_conflicts_fails_with_them(monkeypatch):
             assert result["error"]["detail"]["type"] == "fork_update_conflicts"
             assert [x["entity_id"] for x in result["error"]["detail"]["conflicts"]] == ["A"]
             assert (await ie.get_job(job_id))["status"] == "failed"
-            r = await c.get(f"/api/v1/{WS}/versioning/graphs/{fgid}/publish-jobs/{job_id}")
+            r = await c.get(f"/api/v1/{WS}/versioning/graphs/{fgid}/update-jobs/{job_id}")
             assert (r.json()["status"], r.json()["error"]["detail"]["type"]) == (
                 "failed", "fork_update_conflicts"), r.text
             assert (await svc.get_graph(fgid))["main_head_commit_seq"] == head

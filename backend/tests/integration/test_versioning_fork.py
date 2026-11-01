@@ -1,9 +1,10 @@
 """Fork → PR → merge e2e (copy-on-write) — needs Postgres.
 
 Verifies the cross-team flow (plan §8): own a graph → someone forks it → they work
-independently → raise a PR → it merges into the base, 3-way, with conflicts
-surfaced.  Asserts the copy-on-write invariant directly (a fork copies **no**
-version rows; only its divergence is stored).
+independently → raise a PR → it merges into the base once the fork has taken the
+base's changes in (Update from parent, 3-way, with conflicts surfaced there).
+Asserts the copy-on-write invariant directly (a fork copies **no** version rows;
+only its divergence is stored).
 
 Run: ``GRAPHVER_E2E=1 MANAGEMENT_DB_URL=... python backend/tests/integration/test_versioning_fork.py``
 """
@@ -17,12 +18,12 @@ from sqlalchemy import select, update
 
 from backend.app.services.versioning import config, db, models
 from backend.app.services.versioning.errors import (
-    ForkLimit, ForkNotRestorable, LiveForks, NotAFork)
+    ForkLimit, ForkNotRestorable, ForkNotUpToDate, ForkUpdateConflicts, LiveForks, NotAFork)
 from backend.app.services.versioning.models import EdgeVersionORM, GraphORM, NodeVersionORM
 from backend.app.services.versioning.purge_worker import (
     create_purge_job, tombstone_graphs_for_data_source)
 from backend.app.services.versioning.service import (
-    GraphVersioningService, MergeConflict, PullRequestExists)
+    GraphVersioningService, PullRequestExists)
 
 
 async def _version_entity_ids(graph_id: str) -> set:
@@ -87,9 +88,12 @@ async def _run() -> None:
         {"op": "create", "entity_kind": "node", "entity_id": "D", "payload": {"entityType": "Dataset", "displayName": "D"}},
     ], "parent work")
 
-    # ── 5. PR fork -> parent: non-overlapping, auto-merges clean ─────────
+    # ── 5. PR fork -> parent: behind until it updates; non-overlapping, clean ─
     pr = await svc.open_pr(source_graph_id=fg, actor="bob")
     assert (await svc.preview_pr(pr_id=pr))["clean"] is True
+    with pytest.raises(ForkNotUpToDate):
+        await svc.merge_pr(pr_id=pr, actor="carol", message="merge fork")
+    assert (await svc.update_fork_from_parent(fork_graph_id=fg, actor="bob"))["wrote"] == 0
     assert await svc.merge_pr(pr_id=pr, actor="carol", message="merge fork")
     m = await svc.materialize_state(graph_id=pg, branch_id=pmain)
     assert m["nodes"]["A"]["f"] == 10, m                     # fork's edit landed
@@ -105,14 +109,16 @@ async def _run() -> None:
         {"op": "update", "entity_kind": "node", "entity_id": "A", "payload": {"displayName": "A", "f": 99}},
     ], "p99")
     pr2 = await svc.open_pr(source_graph_id=F2["graph_id"], actor="dave")
-    prev2 = await svc.preview_pr(pr_id=pr2)
-    assert prev2["clean"] is False and any(c["entity_id"] == "A" for c in prev2["conflicts"]), prev2
-    try:
+    with pytest.raises(ForkNotUpToDate):
         await svc.merge_pr(pr_id=pr2, actor="carol", message="merge f2")
-        assert False, "expected MergeConflict"
-    except MergeConflict as exc:
+    try:
+        await svc.update_fork_from_parent(fork_graph_id=F2["graph_id"], actor="dave")
+        assert False, "expected ForkUpdateConflicts"
+    except ForkUpdateConflicts as exc:
         assert any(c["entity_id"] == "A" and c["path"] == ["f"] for c in exc.conflicts), exc.conflicts
-    assert await svc.merge_pr(pr_id=pr2, actor="carol", message="resolved", resolutions={"A": {"displayName": "A", "f": 77}})
+    await svc.update_fork_from_parent(fork_graph_id=F2["graph_id"], actor="dave",
+                                      resolutions={"A": {"displayName": "A", "f": 77}})
+    assert await svc.merge_pr(pr_id=pr2, actor="carol", message="resolved")
     final = await svc.materialize_state(graph_id=pg, branch_id=pmain)
     assert final["nodes"]["A"]["f"] == 77, final
 

@@ -47,8 +47,8 @@ from backend.common.service_accounts import is_service_account
 from .entity_serde import edge_payload_from_parts
 from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionExhausted,
                      CurationAtRisk, DraftNotReadable, StagedChangesUnsaved,
-                     DraftRoleRequired, ForkLimit, ForkNotRestorable, ForkUpdateConflicts,
-                     GraphMoved, GraphNotWritable,
+                     DraftRoleRequired, ForkLimit, ForkNotRestorable, ForkNotUpToDate,
+                     ForkUpdateConflicts, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
                      MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
                      PersonRequired,
@@ -313,8 +313,9 @@ _COUNT_TAGS = text(f"SELECT t.tag, count(*) {_live_heads_sql(NodeVersionORM, 'no
 
 def _copy_versions_sql(model, columns: str) -> "TextClause":
     """``INSERT … SELECT``: version rows of ``model`` written onto a branch as copies of the rows
-    ``:src`` names — their payloads, identity ``columns`` and content hashes taken in Postgres,
-    never read out — under the new ids ``:ids`` with ``:ops`` and ``:prevs`` (the narrow squash)."""
+    ``:src`` names in graph ``:src_graph`` — their payloads, identity ``columns`` and content hashes
+    taken in Postgres, never read out — under the new ids ``:ids`` with ``:ops`` and ``:prevs`` (the
+    narrow squash; a fork's merge copies from the fork)."""
     table = model.__table__.fullname
     return text(
         f"INSERT INTO {table} (graph_id, id, entity_id, commit_id, commit_seq, branch_id, op, "
@@ -323,7 +324,7 @@ def _copy_versions_sql(model, columns: str) -> "TextClause":
         f"s.content_hash, v.prev, s.payload, :actor, NULL, :now, "
         f"{', '.join('s.' + c.strip() for c in columns.split(','))} "
         "FROM unnest(:src, :ids, :ops, :prevs) AS v(src, id, op, prev) "
-        f"JOIN {table} AS s ON s.graph_id = :graph_id AND s.id = v.src",
+        f"JOIN {table} AS s ON s.graph_id = :src_graph AND s.id = v.src",
     ).bindparams(*(bindparam(name, type_=ARRAY(Text)) for name in ("src", "ids", "ops", "prevs")))
 
 
@@ -2108,29 +2109,277 @@ class GraphVersioningService:
                 after = ids[-1]
 
     async def _copy_versions(self, s, graph_id, branch_id, commit, rows: Sequence["_SquashRow"],
-                             actor) -> None:
+                             actor, src_graph_id: Optional[str] = None) -> None:
         """Write ``rows`` onto ``branch_id`` as copies of the version rows they name — payload,
         identity columns and content hash taken inside Postgres (``INSERT … SELECT``), a chunk of
-        ``_IN_LIST_MAX`` per statement — and point their heads at the copies."""
+        ``_IN_LIST_MAX`` per statement — and point their heads at the copies. The rows are
+        ``src_graph_id``'s (a fork a merge copies from), else ``graph_id``'s."""
         now = _now()
         for kind, stmt in (("node", _COPY_NODE_VERSIONS), ("edge", _COPY_EDGE_VERSIONS)):
             todo = [r for r in rows if r.kind == kind]
             for chunk in _chunks(todo, _IN_LIST_MAX):
                 new_ids = [prefixed_id("nv" if kind == "node" else "ev") for _ in chunk]
                 done = (await s.execute(stmt, {
-                    "graph_id": graph_id, "branch_id": branch_id, "commit_id": commit.id,
+                    "graph_id": graph_id, "src_graph": src_graph_id or graph_id,
+                    "branch_id": branch_id, "commit_id": commit.id,
                     "commit_seq": commit.commit_seq, "actor": actor, "now": now,
                     "src": [r.version_id for r in chunk], "ids": new_ids,
                     "ops": [r.op for r in chunk], "prevs": [r.prev_content_hash for r in chunk],
                 })).rowcount
                 if done != len(chunk):
                     raise RuntimeError(f"squash copied {done} of {len(chunk)} {kind} versions: a "
-                                       "draft version row is missing")
+                                       "source version row is missing")
                 heads = [{"entity_id": r.entity_id, "entity_kind": kind, "head_version_id": vid,
                           "content_hash": r.content_hash, "is_tombstone": False}
                          for r, vid in zip(chunk, new_ids)]
                 for i in range(0, len(heads), _HEAD_BATCH):
                     await self._upsert_heads(s, graph_id, branch_id, heads[i:i + _HEAD_BATCH], False)
+
+    async def _squash_fork(
+        self, s, parent: GraphORM, fork: GraphORM, took: int, actor: str, message: str, *,
+        containment_edge_types: Optional[Sequence[str]] = None,
+        ontology_rules: Optional[OntologyRules] = None,
+        before_write: Optional[Callable[[], Awaitable[None]]] = None,
+    ) -> Tuple[Optional[CommitORM], List[dict]]:
+        """Write a fork's review onto its parent's ``main``, the fork up to date with it (the
+        caller's gate, under the parent's lock): the fork's own changes since its last merged review
+        — its rows in ``(merge base, took]`` (:meth:`_fork_merge_base`) — each its value at ``took``
+        against the parent's at its head, every difference a change: what :meth:`_fork_merge`
+        previews. Planned from content hashes and copied from the fork's version rows inside
+        Postgres, as a draft's narrow squash is (:meth:`_squash_paged`), in its order — what the
+        review deletes (and the parent's edges on a node it deletes, when the review leaves them
+        alone), its nodes, its edges re-pointed or changed, its new edges — each judged against what
+        the steps before it wrote, by the gate every write shares and the parent's ontology (a
+        strict one refuses; a permissive one's findings are returned). Past ``SQUASH_PAGED_ABOVE``
+        changes, ``SQUASH_PAGE`` at a time: the worker holds a page of the review, never all of it.
+        ``before_write`` runs once, before the first row is written (the review's approvals).
+
+        One commit in the caller's transaction, a refusal anywhere writing nothing. Returns the
+        squash (None: nothing differs) and the ontology findings."""
+        gid, base = parent.id, parent.main_head_commit_seq
+        parent_main = await self._main_branch_id(s, gid)
+        fork_main = await self._main_branch_id(s, fork.id)
+        since = await self._fork_merge_base(s, fork)
+        n = await self._own_change_count(s, fork.id, fork_main, since, took, config.SQUASH_PAGED_ABOVE)
+        page = config.SQUASH_PAGE if n > config.SQUASH_PAGED_ABOVE else None
+        strict = parent.ontology_enforcement == "strict"
+        ontology = Ontology.from_spec(parent.ontology_spec)
+        cset = containment_edge_types or []
+        stats = _delta_stats([])
+        merkle: Optional[Dict[str, Optional[str]]] = None if parent.fork_parent_graph_id else {}
+        findings: List[dict] = []
+        squash: Optional[CommitORM] = None
+
+        def review(ids):
+            return self._review_heads(s, fork.id, fork_main, since, took, ids)
+
+        async def merged_view(ids) -> Dict[str, Optional[dict]]:
+            """Those of ``ids`` the review writes, as it writes them (an end typed, an edge judged)."""
+            out: Dict[str, Optional[dict]] = {}
+            for eid, h in (await review(ids)).items():
+                v = _head_skeleton(h) if h.live and h.table else None
+                if v:
+                    canonicalize_payload_types(v, ontology_rules)
+                out[eid] = v
+            return out
+
+        async def write(copies: List["_SquashRow"], deltas: List[Delta], kinds: Dict[str, str]):
+            nonlocal squash, merkle
+            if not copies and not deltas:
+                return
+            if squash is None:
+                if before_write is not None:
+                    await before_write()
+                main = await s.get(BranchORM, parent_main)
+                source = await self._branch_commit_ids(s, fork.id, fork_main)
+                squash = CommitORM(
+                    graph_id=gid, branch_id=parent_main, commit_seq=base + 1,
+                    parent_commit_id=main.head_commit_id, kind="squash_publish", message=message,
+                    actor=actor, contributors=await self._branch_contributors(s, fork.id, fork_main),
+                    source_branch_id=fork_main, source_commit_ids=source,
+                    source_commit_count=len(source))
+                s.add(squash)
+                await s.flush()
+                main.head_commit_id = squash.id
+                parent.main_head_commit_seq = squash.commit_seq   # what later steps read
+            await self._copy_versions(s, gid, parent_main, squash, copies, actor, src_graph_id=fork.id)
+            await self._write_deltas(s, gid, parent_main, squash, deltas, kinds, actor)
+            for op, eid, chash in ([(r.op, r.entity_id, r.content_hash) for r in copies]
+                                   + [(d.op, d.entity_id, d.content_hash) for d in deltas]):
+                stats[op] += 1
+                if merkle is not None:
+                    merkle[eid] = None if op == "delete" else chash
+            if merkle is not None and len(merkle) > config.BOOTSTRAP_MERKLE_INLINE_MAX:
+                merkle = None
+
+        async def lane(heads: Mapping[str, "_Head"], ids: List[str], held: Mapping[str, "_Stored"]):
+            """The Python lane (a type the ontology spells otherwise), from the fork's payloads."""
+            deltas: List[Delta] = []
+            payload_of = await self._payloads_by_version(
+                s, [(heads[eid].table, fork.id, heads[eid].version_id) for eid in ids])
+            for eid in ids:
+                p = payload_of.get(heads[eid].version_id)
+                if p:
+                    canonicalize_payload_types(p, ontology_rules)
+                b = held.get(eid)
+                if p and b is None:
+                    deltas.append(Delta(eid, "create", p, None, content_hash(p)))
+                elif not p and b is not None:
+                    deltas.append(Delta(eid, "delete", None, b.content_hash, _HASH_NONE))
+                elif p and content_hash(p) != b.content_hash:
+                    deltas.append(Delta(eid, "update", p, b.content_hash, content_hash(p)))
+            return deltas
+
+        def reread(h: _Head) -> bool:
+            if h.table == "edge" and not h.type:
+                return True
+            if ontology_rules is None or not h.type:
+                return False
+            canon = (ontology_rules.canonical_entity_type(h.type) if h.table == "node"
+                     else ontology_rules.canonical_edge_type(h.type))
+            return bool(canon) and canon != h.type
+
+        async def judge(heads, copies, deltas, kinds):
+            written = await asyncio.to_thread(_written_values, copies, heads, deltas)
+            if not written:
+                return
+            viol = validate_entities(
+                [(eid, kinds.get(eid, "node"), v) for eid, v in written.items() if v is not None],
+                ontology)
+            if viol and strict:
+                raise OntologyViolation(viol)
+            findings.extend(viol)
+            prior = await self._skeletons_at(s, gid, parent_main, list(written), base)
+            await self._enforce_written(
+                s, gid, parent_main, written, prior, kinds, containment_edge_types=cset,
+                ontology_rules=ontology_rules, strict=strict, review=merged_view, parentless=False)
+
+        async def planned(heads, held, gone=()):
+            rows, slow = await asyncio.to_thread(_plan_squash, heads, held, gone, reread)
+            deltas = (await lane(heads, slow, held) if slow else []) + [
+                Delta(r.entity_id, "delete", None, r.prev_content_hash, r.content_hash)
+                for r in rows if r.op == "delete"]
+            copies = [r for r in rows if r.op != "delete"]
+            kinds = {r.entity_id: r.kind for r in rows}
+            kinds.update({eid: heads[eid].table for eid in slow})
+            await judge(heads, copies, deltas, kinds)
+            await write(copies, deltas, kinds)
+
+        # 1. What the review deletes, and the parent's edges on it that the review leaves alone.
+        async for heads in self._review_pages(s, fork.id, fork_main, since, took, page, live=False):
+            held = await self._hashes_at(s, gid, parent_main, list(heads), base)
+            deltas = [Delta(eid, "delete", None, held[eid].content_hash, _HASH_NONE)
+                      for eid in sorted(heads) if eid in held]
+            kinds = {eid: heads[eid].kind for eid in heads}
+            incident = await self._incident_live_edge_skeletons(s, gid, parent_main, sorted(heads))
+            mine = set(await review(list(incident))) if incident else set()
+            cascaded = sorted(eid for eid, v in incident.items()
+                              if eid not in mine and v.get("sourceEntityId"))
+            for eid, b in (await self._hashes_at(s, gid, parent_main, cascaded, base)).items():
+                deltas.append(Delta(eid, "delete", None, b.content_hash, _HASH_NONE))
+                kinds[eid] = "edge"
+            await write([], deltas, kinds)
+
+        # 2. The nodes it creates or changes.
+        async for heads in self._review_pages(s, fork.id, fork_main, since, took, page, live=True,
+                                              table="node"):
+            await planned(heads, await self._hashes_at(s, gid, parent_main, list(heads), base))
+
+        # 3 and 4. Its edges: re-pointed or changed ones (and those on a node it deleted, which go),
+        # then new ones — so a new edge is judged against where the changed ones now point.
+        for new in (False, True):
+            async for heads in self._review_pages(s, fork.id, fork_main, since, took, page,
+                                                  live=True, table="edge"):
+                held = await self._hashes_at(s, gid, parent_main, list(heads), base)
+                heads = {eid: h for eid, h in heads.items() if (eid not in held) == new}
+                if not heads:
+                    continue
+                # Its ends as the merge leaves them: the review's where it changes them, else the
+                # parent's, which the fork reads the same (it is up to date).
+                ends = sorted({e for h in heads.values() for e in (h.src, h.tgt) if e})
+                changed = {eid: h.live for eid, h in (await review(ends)).items()}
+                outside = [e for e in ends if e not in changed]
+                stored = await self._skeletons_at(s, gid, parent_main, outside, base) if outside else {}
+                dead = {e for e, live in changed.items() if not live}
+                gone = {eid for eid, h in heads.items() if h.src and (h.src in dead or h.tgt in dead)}
+                for eid, h in sorted(heads.items()):
+                    if eid in gone or not (h.src or h.tgt):
+                        continue
+                    for e in (h.src, h.tgt):
+                        if not (e and (changed[e] if e in changed else stored.get(e) is not None)):
+                            raise ConcurrencyError(
+                                f"edge {eid} would dangle (endpoint tombstoned): {h.src}->{h.tgt}")
+                await planned(heads, held, gone)
+
+        if squash is None:
+            return None, findings
+
+        # 5. Nothing the squash created or un-nested is left outside every parent the ontology
+        # requires one of — asked of what it wrote, now that all of it is there.
+        if strict and ontology_rules is not None and ontology_rules.root_entity_types:
+            async for ids in self._commit_entity_pages(s, gid, parent_main, squash.commit_seq):
+                written = await self._skeletons_at(s, gid, parent_main, ids, squash.commit_seq)
+                written.update({eid: None for eid in ids if eid not in written})
+                prior = await self._skeletons_at(s, gid, parent_main, ids, base)
+                kinds = {eid: ("edge" if _is_edge_payload(v or prior.get(eid) or {}) else "node")
+                         for eid, v in written.items()}
+                viol = await self._parentless_violations(
+                    s, gid, parent_main, written, prior, kinds, ontology_rules)
+                if viol:
+                    raise OntologyViolation(viol)
+
+        squash.stats = stats
+        squash.merkle_root = (await self._merkle.commit_tree(
+            s, gid, parent_main, squash.id, squash.commit_seq, merkle) if merkle is not None else None)
+        parent.updated_at = _now()
+        ps = await s.get(ProjectionStateORM, gid)
+        if ps is not None:
+            ps.target_commit_seq = squash.commit_seq
+        return squash, findings
+
+    async def _review_pages(self, s, fork_id: str, fork_main: str, since: int, took: int,
+                            page: Optional[int], *, live: bool, table: Optional[str] = None):
+        """A fork's review, ``page`` entities at a time (all at once when None) in id order, a table
+        after the other: what the fork changed in ``(since, took]`` as its row at ``took`` says
+        (:meth:`_review_heads`) — the live ones, or the rest. ``table`` keeps to one."""
+        for kind, model in (("node", NodeVersionORM), ("edge", EdgeVersionORM)):
+            if table not in (None, kind):
+                continue
+            after = ""
+            while True:
+                stmt = (select(model.entity_id).where(
+                    model.graph_id == fork_id, model.branch_id == fork_main,
+                    model.commit_seq > since, model.commit_seq <= took, model.entity_id > after)
+                    .distinct().order_by(model.entity_id))
+                ids = (await s.execute(stmt.limit(page) if page else stmt)).scalars().all()
+                heads = {eid: h for eid, h in (await self._review_heads(
+                    s, fork_id, fork_main, since, took, ids)).items() if h.live == live}
+                if heads:
+                    yield heads
+                if not page or len(ids) < page:
+                    break
+                after = ids[-1]
+
+    async def _review_heads(self, s, fork_id: str, fork_main: str, since: int, took: int,
+                            ids) -> Dict[str, "_Head"]:
+        """Of ``ids``, those a fork changed in ``(since, took]``, each as its row at ``took`` says (a
+        :class:`_Head`, without its payload); nothing for the rest."""
+        ids = list(ids)
+        if not ids:
+            return {}
+        conn = await s.connection()
+        rows: List[tuple] = []
+        for kind, model in (("node", NodeVersionORM), ("edge", EdgeVersionORM)):
+            stmt = (select(model.entity_id, model.id, model.op, model.content_hash, model.commit_seq)
+                    .where(model.graph_id == fork_id, model.branch_id == fork_main,
+                           model.entity_id == any_(bindparam("ids", type_=ARRAY(Text))),
+                           model.commit_seq <= took)
+                    .order_by(model.entity_id, model.commit_seq.desc(), model.created_at.desc())
+                    .distinct(model.entity_id))
+            for chunk in _chunks(ids, _IN_LIST_MAX):
+                rows += [(eid, kind, vid, chash, op == "delete") for eid, vid, op, chash, seq in
+                         (await conn.execute(stmt, {"ids": list(chunk)})).all() if seq > since]
+        return await self._heads_from_rows(conn, fork_id, rows)
 
     async def rebase_draft(
         self, *, graph_id: str, branch_id: str, actor: str,
@@ -2876,18 +3125,17 @@ class GraphVersioningService:
                 raise ValueError("source graph is not a fork")
             fork_main = await self._main_branch_id(s, source_graph_id)
             await self._assert_no_live_pr(s, fork_main)
-            merged, conflicts, _theirs = await self._fork_merge(s, fork, {})
             revs = list(dict.fromkeys(reviewers or []))      # dedup, keep order
+            # No conflicts to record: a fork settles them with Update from parent before it merges.
             pr = MergeRequestORM(
                 graph_id=source_graph_id,
                 source_branch_id=fork_main,
                 target_graph_id=fork.fork_parent_graph_id,
                 target_branch="main",
                 base_commit_seq=fork.fork_base_commit_seq,
-                status="conflicts" if conflicts else "mergeable",
+                status="mergeable",
                 title=(title or None),
                 description=(description or None),
-                conflicts=conflicts or None,
                 reviewers=revs or None,
                 approval_status="pending" if revs else None,
                 actor=actor,
@@ -2981,8 +3229,8 @@ class GraphVersioningService:
     async def _fork_distance(self, s, fork: GraphORM) -> Dict[str, object]:
         """How far a fork is from its parent: ``ahead``, the entities it changed since its last
         merged review, or its fork point (:meth:`_fork_merge_base`); ``behind``, those its parent
-        changed that it has not taken in — the parent's window since the base the fork reads
-        (:func:`fork_base_at`); ``update_recommended`` for what Update from parent can fix: when
+        changed that it has not taken in — the parent's window since the base the fork agrees with
+        (:meth:`_fork_agreed_base`); ``update_recommended`` for what Update from parent can fix: when
         that reaches ``config.FORK_REWIND_WARN``, or when the fork's reads are past the ceiling,
         which ``reads_from`` says (``overlay`` | ``postgres``, as :meth:`fork_reads_from`), and
         taking the parent's changes in would bring it back under: a fork of the root whose own
@@ -2997,7 +3245,7 @@ class GraphVersioningService:
         parent = await s.get(GraphORM, fork.fork_parent_graph_id)
         behind = await self._window_count(
             s, parent.id, await self._main_branch_id(s, parent.id),
-            await fork_base_at(s, fork, head), parent.main_head_commit_seq, cap)
+            await self._fork_agreed_base(s, fork, head), parent.main_head_commit_seq, cap)
         n = await self._fork_candidates(s, fork, main_id, cap)
         past = n > cap
         # Of a fork of the root, what its reads overlay beyond its own changes is ``behind``.
@@ -3020,8 +3268,9 @@ class GraphVersioningService:
         parent_seq: Optional[int] = None, parent_label: Optional[str] = None,
     ) -> Dict[str, object]:
         """Take a fork's parent's changes into it ("Update from parent"): the parent's ``main`` from
-        the seq the fork reads it at (``B``, :func:`fork_base_at` at the fork's head) to its head
-        (``P``, read once; ``parent_seq`` pins it, as a queued update does). Returns ``{commit_id,
+        the seq the fork agrees with at its head (``B``, :meth:`_fork_agreed_base`: the base it reads
+        there, past the squashes of its own reviews that landed right after it) to its head (``P``,
+        read once; ``parent_seq`` pins it, as a queued update does). Returns ``{commit_id,
         parent_seq, wrote, up_to_date}``: at ``P`` already, nothing is written, ``commit_id`` is
         None and ``parent_seq`` is ``B``.
 
@@ -3055,7 +3304,7 @@ class GraphVersioningService:
         async with self._session() as s:
             fork, parent = await self._fork_and_parent(s, fork_graph_id)
             fork_main = await self._main_branch_id(s, fork.id)
-            base = await fork_base_at(s, fork, fork.main_head_commit_seq)
+            base = await self._fork_agreed_base(s, fork, fork.main_head_commit_seq)
             to = parent.main_head_commit_seq
             if to <= base:
                 return {"changes": 0, "parent_seq": base, "up_to_date": True}
@@ -3099,7 +3348,7 @@ class GraphVersioningService:
             fork_main = await self._main_branch_id(s, fork.id)
             parent_main = await self._main_branch_id(s, parent.id)
             head = fork.main_head_commit_seq
-            base = await fork_base_at(s, fork, head)
+            base = await self._fork_agreed_base(s, fork, head)
             to = parent.main_head_commit_seq if parent_seq is None else parent_seq
             if to <= base:
                 return {"commit_id": None, "parent_seq": base, "wrote": 0, "up_to_date": True}
@@ -3166,6 +3415,30 @@ class GraphVersioningService:
                 ps.target_commit_seq = new_seq
             return {"commit_id": commit.id, "parent_seq": to, "wrote": len(deltas),
                     "up_to_date": False}
+
+    async def _fork_agreed_base(self, s, fork: GraphORM, seq: int) -> int:
+        """The seq of its parent's ``main`` a fork agrees with at ``seq``: the base it reads there
+        (:func:`fork_base_at`), and past it each squash of one of its own reviews (of its head at
+        ``seq`` or before) that landed right after it. Such a review merged up to date, so its squash
+        wrote the fork's own values: the fork has them already, and reads the parent the same at
+        either seq. What Update from parent merges from — so the fork's own merged changes are not
+        its parent's for it to take, nor a conflict with what it changed since — and what a merge
+        is up to date against."""
+        base = await fork_base_at(s, fork, seq)
+        landed = (await s.execute(
+            select(CommitORM.commit_seq)
+            .join(MergeRequestORM, and_(MergeRequestORM.target_graph_id == CommitORM.graph_id,
+                                        MergeRequestORM.resulting_commit_id == CommitORM.id))
+            .where(MergeRequestORM.graph_id == fork.id,
+                   MergeRequestORM.target_graph_id == fork.fork_parent_graph_id,
+                   MergeRequestORM.status == "merged", MergeRequestORM.merged_source_seq <= seq,
+                   CommitORM.graph_id == fork.fork_parent_graph_id, CommitORM.commit_seq > base)
+            .order_by(CommitORM.commit_seq))).scalars().all()
+        for at in landed:
+            if at != base + 1:
+                break
+            base = at
+        return base
 
     async def _window_chain(self, s, graph_id: str, branch_id: str, lo: int,
                             hi: int) -> List[Tuple[str, str, int, int]]:
@@ -3351,18 +3624,6 @@ class GraphVersioningService:
             pr.updated_at = _now()
             return await self._pr_meta(s, pr)
 
-    @staticmethod
-    def _pr_ontology_check(parent: GraphORM, deltas, kind_by_entity) -> dict:
-        """Re-validate a PR's merged result against the *target* graph's ontology
-        (the PR checks gate, §16.5 #6).  ``ok`` is false only under ``strict``
-        enforcement with violations; ``permissive`` records warnings but passes."""
-        ontology = Ontology.from_spec(parent.ontology_spec)
-        violations = validate_entities(
-            [(d.entity_id, kind_by_entity.get(d.entity_id, "node"), d.payload)
-             for d in deltas if d.op != "delete"], ontology)
-        ok = not violations or parent.ontology_enforcement != "strict"
-        return {"ontology": {"ok": ok, "violations": violations}}
-
     async def preview_pr(self, *, pr_id: str) -> Dict[str, object]:
         """Dry-run a fork PR's merge into the parent (conflicts + change counts)."""
         async with self._session() as s:
@@ -3370,7 +3631,7 @@ class GraphVersioningService:
             if pr is None:
                 raise ValueError(f"unknown pr {pr_id}")
             fork = await s.get(GraphORM, pr.graph_id)
-            merged, conflicts, theirs = await self._fork_merge(s, fork, {})
+            merged, conflicts, theirs = await self._fork_merge(s, fork)
             return {
                 "clean": not conflicts,
                 "conflicts": conflicts,
@@ -3387,15 +3648,26 @@ class GraphVersioningService:
         containment_edge_types: Optional[Sequence[str]] = None,
         ontology_rules: Optional[OntologyRules] = None,
         self_merge: bool = True,
+        pinned_seq: Optional[int] = None,
+        queued: bool = False,
     ) -> str:
-        """Squash-merge a fork PR into the parent's ``main`` — the same 3-way
-        semantics as draft publish, across graphs (plan §8, §12.5).
+        """Squash-merge a fork's review into its parent's ``main`` (plan §8, §12.5). Only up to date
+        with the parent: the base the fork agrees with at the head it merges
+        (:meth:`_fork_agreed_base`) must be the parent's head, read under its lock — else
+        :class:`ForkNotUpToDate`, "Update from parent first", as a draft publishes only up to date
+        with ``main``. Update from parent settles conflicts on the fork's side, so the merge is a copy
+        of the fork's own changes since its last merged review (:meth:`_squash_fork`), with nothing
+        to resolve: ``resolutions`` is not used. The parent's rules gate it (its ontology, the gate
+        every write shares) and its reviewers' approvals, before anything is written.
 
-        Non-overlapping edits auto-merge; genuine conflicts raise
-        :class:`MergeConflict` (resubmit with ``resolutions``), and leave the PR marked
-        ``conflicts``. A merge records the fork's head it took, even when it changed nothing: the
-        fork's next PR merges what it changed since (:meth:`_fork_merge_base`), so the fork can
-        keep diverging. ``self_merge`` as for :meth:`merge_mr`."""
+        The head it merges is the fork's now, or ``pinned_seq``, the head a queued merge pinned; a
+        merge records it even when it changed nothing (``merged_source_seq``): the fork's next review
+        merges what it changed since (:meth:`_fork_merge_base`). ``queued``: a job's merge, of a
+        review it holds ``merging``; any other merge of a review held so is :class:`JobActive`.
+        ``self_merge`` as for :meth:`merge_mr`.
+
+        It holds the parent's graph lock, then the review's row; a path that holds the fork's lock
+        too takes it after the parent's."""
         async def _once():
             async with self._session() as s:
                 pr = await s.get(MergeRequestORM, pr_id)
@@ -3417,88 +3689,86 @@ class GraphVersioningService:
                       ).scalar_one()
                 if pr.status in ("merged", "closed"):
                     raise ValueError(f"pr {pr_id} is {pr.status}")
+                if pr.status == "merging" and not queued:
+                    raise JobActive(await self._merging_job(s, pr_id),
+                                    "This review is being merged by a job; it can be merged again "
+                                    "if that job ends without merging it.")
                 await self._assert_writable(s, parent.id)   # the target; a frozen fork may propose
-                parent_main = await self._main_branch_id(s, parent.id)
-                fork_main = await self._main_branch_id(s, fork.id)
-
-                took = fork.main_head_commit_seq          # what _compute_fork_merge reads as ours
-                merged, conflicts, theirs = await self._fork_merge(s, fork, dict(resolutions or {}))
-                if conflicts:
-                    raise MergeConflict(conflicts)
-                self._assert_referential_integrity(merged)
-
-                deltas = net_delta(theirs, merged)
-                if not deltas:
-                    pr.status = "merged"
-                    pr.merged_at = pr.updated_at = _now()
-                    pr.merged_by = actor
-                    pr.merged_source_seq = took
-                    return ""
-
-                # PR gates (P8): re-validate the merged result against the target's
-                # ontology, then require every requested reviewer's approval — both
-                # checked before any write to main.
-                # The fork's heads, then its parent's, and up a fork of a fork: an edge the cascade
-                # deletes may be one the parent inherited.
-                kind_by_entity = await self._kind_map_multi(
-                    s, [(g, b) for g, b, _seq in await self._layers(s, fork.id, fork_main, 0)],
-                    entity_ids=[d.entity_id for d in deltas],
-                )
-                kind_by_entity = self._resolve_delta_kinds(deltas, kind_by_entity)  # payload wins over stale head
-                checks = self._pr_ontology_check(parent, deltas, kind_by_entity)
-                pr.checks_status = checks
-                if not checks["ontology"]["ok"]:
-                    raise OntologyViolation(checks["ontology"]["violations"])
-                # The gate every write path shares, against the PARENT's main and ontology.
-                await self._enforce_written(
-                    s, parent.id, parent_main, {d.entity_id: d.payload for d in deltas}, theirs,
-                    kind_by_entity, containment_edge_types=containment_edge_types or [],
-                    ontology_rules=ontology_rules,
-                    strict=parent.ontology_enforcement == "strict", known=merged)
-                await self._require_approvals(s, pr)
-
-                new_seq = parent.main_head_commit_seq + 1
-                contributors = await self._branch_contributors(s, fork.id, fork_main)
-                source_commits = await self._branch_commit_ids(s, fork.id, fork_main)
-                main = await s.get(BranchORM, parent_main)
-                squash = CommitORM(
-                    graph_id=parent.id, branch_id=parent_main, commit_seq=new_seq,
-                    parent_commit_id=main.head_commit_id, kind="squash_publish",
-                    message=message, actor=actor, contributors=contributors,
-                    source_branch_id=fork_main, source_commit_ids=source_commits,
-                    source_commit_count=len(source_commits),
-                )
-                s.add(squash)
-                await s.flush()
-
-                await self._write_deltas(s, parent.id, parent_main, squash, deltas, kind_by_entity, actor)
-
-                main.head_commit_id = squash.id
-                parent.main_head_commit_seq = new_seq      # advance head before merkle
-                parent.updated_at = _now()
-                squash.merkle_root = await self._commit_merkle(s, parent.id, parent_main, squash, deltas)
-                squash.stats = _delta_stats(deltas)
-
+                took = fork.main_head_commit_seq if pinned_seq is None else pinned_seq
+                await self._assert_up_to_date(s, fork, took, parent)
+                squash, warnings = await self._squash_fork(
+                    s, parent, fork, took, actor, message,
+                    containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,
+                    before_write=lambda: self._require_approvals(s, pr))
+                pr.checks_status = {"ontology": {"ok": True, "violations": warnings[:100],
+                                                 "total": len(warnings)}}
                 pr.status = "merged"
-                pr.resulting_commit_id = squash.id
-                pr.merged_at = _now()
+                pr.resulting_commit_id = squash.id if squash is not None else None
+                pr.merged_at = pr.updated_at = _now()
                 pr.merged_by = actor
-                pr.updated_at = _now()
                 pr.merged_source_seq = took
-                ps = await s.get(ProjectionStateORM, parent.id)
-                if ps is not None:
-                    ps.target_commit_seq = new_seq
-                return squash.id
-        try:
-            return await self._retry_seq(f"merge_pr {pr_id}", _once)
-        except MergeConflict as exc:
-            # The refusal rolled the attempt back: mark the PR on its own.
-            async with self._session() as s:
-                pr = (await s.execute(select(MergeRequestORM).where(MergeRequestORM.id == pr_id)
-                                      .with_for_update())).scalar_one_or_none()
-                if pr is not None and pr.status not in ("merged", "closed"):
-                    pr.status, pr.conflicts = "conflicts", exc.conflicts
-            raise
+                return squash.id if squash is not None else ""
+        return await self._retry_seq(f"merge_pr {pr_id}", _once)
+
+    async def _assert_up_to_date(self, s, fork: GraphORM, took: int, parent: GraphORM) -> None:
+        """A fork's review of its head at ``took`` merges only up to date with its parent (as it is
+        in ``s``): :class:`ForkNotUpToDate` otherwise, with how far behind it is."""
+        base = await self._fork_agreed_base(s, fork, took)
+        if base != parent.main_head_commit_seq:
+            behind = await self._window_count(
+                s, parent.id, await self._main_branch_id(s, parent.id), base,
+                parent.main_head_commit_seq, config.FORK_REWIND_MAX)
+            raise ForkNotUpToDate(fork.id, min(behind, config.FORK_REWIND_MAX))
+
+    @staticmethod
+    async def _merging_job(s, pr_id: str) -> str:
+        """The job merging a review held ``merging`` (its latest ``fork_merge`` job)."""
+        return await s.scalar(select(JobORM.id).where(
+            JobORM.job_type == "fork_merge", JobORM.field_scope["prId"].astext == pr_id)
+            .order_by(JobORM.created_at.desc()).limit(1)) or ""
+
+    async def fork_merge_size(self, *, pr_id: str) -> int:
+        """How many entities merging a fork's review writes, counted no further than
+        ``SYNC_PUBLISH_MAX_CHANGES + 1``: the fork's own changes since its last merged review. What
+        the merge routes size a merge by, to run it in the request or as a job. A draft's review
+        is not a fork's: 0."""
+        async with self._session() as s:
+            pr = await s.get(MergeRequestORM, pr_id)
+            if pr is None:
+                raise ValueError(f"unknown pr {pr_id}")
+            if self._is_draft_mr(pr):
+                return 0
+            fork = await s.get(GraphORM, pr.graph_id)
+            if fork is None or fork.deleted_at is not None:
+                raise ValueError("pr endpoints missing")
+            fork_main = await self._main_branch_id(s, fork.id)
+            return await self._own_change_count(
+                s, fork.id, fork_main, await self._fork_merge_base(s, fork),
+                fork.main_head_commit_seq, config.SYNC_PUBLISH_MAX_CHANGES)
+
+    async def release_merging(self, *, pr_id: Optional[str] = None) -> List[str]:
+        """Hand back the fork reviews held ``merging`` whose merge job ended without landing them —
+        refused, failed, poisoned or timed out — and return their ids: ``approved`` while their
+        reviewers' approval stands as it was stored, else ``mergeable``. A pending or running job is
+        the whole definition of a live one, as for :meth:`release_publishing`, and a review whose
+        row is locked is skipped, not waited on: after the wait this statement would not see the
+        job a concurrent queueing just made."""
+        mr = aliased(MergeRequestORM)
+        live_job = select(JobORM.id).where(
+            JobORM.job_type == "fork_merge", JobORM.status.in_(("pending", "running")),
+            JobORM.field_scope["prId"].astext == mr.id)
+        stuck = select(mr.id).where(mr.status == "merging", ~live_job.exists())
+        if pr_id is not None:
+            stuck = stuck.where(mr.id == pr_id)
+        async with self._session() as s:
+            return list((await s.execute(
+                update(MergeRequestORM)
+                .where(MergeRequestORM.id.in_(stuck.with_for_update(skip_locked=True)))
+                .values(status=case((MergeRequestORM.approval_status == "approved", "approved"),
+                                    else_="mergeable"), updated_at=_now())
+                .returning(MergeRequestORM.id)
+                .execution_options(synchronize_session=False)
+            )).scalars().all())
 
     # ---- the one-live-PR-per-branch invariant ----------------------------- #
     async def _resolve_live_prs(self, s, branch_id: str, commit_id: Optional[str], actor: str,
@@ -3640,7 +3910,7 @@ class GraphVersioningService:
                 )
             else:
                 fork = await s.get(GraphORM, pr.graph_id)
-                merged, conflicts, theirs = await self._fork_merge(s, fork, {})
+                merged, conflicts, theirs = await self._fork_merge(s, fork)
             return {
                 "clean": not conflicts,
                 "conflicts": conflicts,
@@ -3671,7 +3941,7 @@ class GraphVersioningService:
                 s, graph.id, draft.id, changed, merged, theirs, merged, cset)
         else:
             fork = await s.get(GraphORM, pr.graph_id)
-            merged, _conflicts, theirs = await self._fork_merge(s, fork, {})
+            merged, _conflicts, theirs = await self._fork_merge(s, fork)
             changed = {d.entity_id for d in net_delta(theirs, merged)}
             cset = {t.upper() for t in (containment_edge_types or [])}
             await self._augment_containment_skeleton(
@@ -3860,59 +4130,46 @@ class GraphVersioningService:
             MergeRequestORM.graph_id == fork.id,
             MergeRequestORM.target_graph_id == fork.fork_parent_graph_id,
             MergeRequestORM.status == "merged"))
-        # One base per fork until Update from parent (F2): it adds rows to ``fork_bases`` after the
-        # fork point, and an update moves the common ancestor too, so the base will then be the
-        # later of this and the fork seq of the latest update (:func:`fork_base_at`).
+        # Update from parent does not move it: an edit the fork made before an update is still its
+        # own change since its last merged review, and what the update merged into one of those is
+        # in the window too, its value then the fork's own and its parent's together.
         return fork.fork_base_commit_seq if took is None else took
 
-    async def _fork_merge(self, s, fork, resolutions):
+    async def _fork_merge(self, s, fork, head: Optional[int] = None):
         """:meth:`_compute_fork_merge` with what its cascade reasons about around it
         (:meth:`_fork_merge_neighborhood`), and the cascade run: ``(merged, conflicts, theirs)`` as
-        the merge writes them, for the merge and every read that previews it."""
-        merged, conflicts, theirs = await self._compute_fork_merge(s, fork, resolutions)
-        await self._fork_merge_neighborhood(s, fork, merged, theirs)
+        the merge writes them (:meth:`_squash_fork`), for every read that previews it. No conflict:
+        a fork takes its parent's changes, and settles what both changed, with Update from parent."""
+        merged, theirs, base = await self._compute_fork_merge(s, fork, head)
+        await self._fork_merge_neighborhood(s, fork, merged, theirs, base)
         self._cascade_incident_edges(merged)
-        return merged, conflicts, theirs
+        return merged, [], theirs
 
-    async def _fork_merge_neighborhood(self, s, fork, merged, theirs) -> None:
-        """Add to a fork's SPARSE merge (:meth:`_compute_fork_merge`) what the cascade and
-        integrity guards reason about, each at its merged value — which, for what the fork did not
-        change since the merge base, is the parent's: the parent's live edges on each node the
-        merge deletes, and the ends of every live edge in it, deleted ones too, so an edge the
-        fork drew to a node the parent has deleted since goes with it. Added to ``theirs`` alike,
-        so it nets to nothing unless the cascade then deletes it. Bounded by the degree of the
-        deleted nodes and the edges the fork changed."""
-        parent = await s.get(GraphORM, fork.fork_parent_graph_id)
-        parent_main = await self._main_branch_id(s, parent.id)
-        fork_main = await self._main_branch_id(s, fork.id)
-        base_seq = await self._fork_merge_base(s, fork)
+    async def _fork_merge_neighborhood(self, s, fork, merged, theirs, base: int) -> None:
+        """Add to a fork's SPARSE review (:meth:`_compute_fork_merge`) what the cascade and integrity
+        guards reason about, each as the parent has it at ``base``, what the review is against: the
+        parent's edges on each node the review deletes, and the ends of every live edge in it, the
+        deleted ones too. Added to ``theirs`` alike, so each nets to nothing unless the cascade then
+        deletes it. Bounded by the degree of the deleted nodes and the edges the fork changed."""
+        parent_id = fork.fork_parent_graph_id
+        parent_main = await self._main_branch_id(s, parent_id)
         tomb = [eid for eid, p in merged.items() if p is None]
-        need = set(await self._incident_edge_ids(s, parent.id, parent_main, tomb)) if tomb else set()
-        need -= merged.keys()
+        need = set(await self._incident_edge_ids(s, parent_id, parent_main, tomb)) if tomb else set()
         for _round in range(2):              # the incident edges, then the ends of every live edge
+            need -= merged.keys()
             if need:
-                there = await self._values_at(s, parent.id, parent_main, need,
-                                              parent.main_head_commit_seq)
-                was = await self._values_at(s, fork.id, fork_main, need - there.keys(), base_seq)
-                for eid in need:
-                    if eid in there:
-                        merged[eid] = theirs[eid] = there[eid]
-                    elif eid in was:         # the fork's, never the parent's: theirs deleted it
-                        merged[eid] = None
-            need = {e for p in merged.values() if p for e in _edge_src_tgt(p) if e} - merged.keys()
+                for eid, p in (await self._values_at(s, parent_id, parent_main, need, base)).items():
+                    merged[eid] = theirs[eid] = p
+            need = {e for p in merged.values() if p for e in _edge_src_tgt(p) if e}
 
-    async def _compute_fork_merge(self, s, fork, resolutions):
-        """3-way merge a fork's divergence into its parent's current main, over what the fork
-        changed since the merge base alone: O(changed), never the graph.
-
-        base   = the fork's main where its last merged PR took it (:meth:`_fork_merge_base`) — at
-                 the fork point, parent main there, the common ancestor
-        ours   = the fork's current main (parent@fork_base + fork divergence)
-        theirs = the parent's current main
-        An entity the fork has not changed since the base is the same in ours as in base, so it
-        merges to theirs and nets to nothing. Returns SPARSE ``(merged, conflicts, theirs)`` over
-        the fork's changes (and ``resolutions``): :meth:`_fork_merge` adds what is around them.
-        """
+    async def _compute_fork_merge(self, s, fork, head: Optional[int] = None):
+        """A fork's review as its merge writes it, O(changed): the fork's own changes since its last
+        merged review (:meth:`_fork_merge_base`) — its rows in ``(merge base, head]``, never its
+        parent's window — each the fork's value at ``head`` (its head now when None) against the
+        parent's at the base the fork agrees with there (:meth:`_fork_agreed_base`), which the merge
+        requires to be the parent's head. Every difference is a change: Update from parent settled
+        what both changed on the fork's side. Returns SPARSE ``(merged, theirs, base)``;
+        :meth:`_fork_merge` adds what is around them."""
         parent = await s.get(GraphORM, fork.fork_parent_graph_id)
         if parent is None:
             raise ValueError("fork parent missing")
@@ -3923,32 +4180,24 @@ class GraphVersioningService:
                 f"fork {fork.id} missing fork_base_commit_seq — refusing merge against empty base")
         parent_main = await self._main_branch_id(s, parent.id)
         fork_main = await self._main_branch_id(s, fork.id)
-        base_seq, head_seq = await self._fork_merge_base(s, fork), fork.main_head_commit_seq
-        changed = await self._changed_in_window(s, fork.id, fork_main, base_seq, head_seq)
-        changed |= set(resolutions)
-        base = await self._values_at(s, fork.id, fork_main, changed, base_seq)
-        ours = await self._values_at(s, fork.id, fork_main, changed, head_seq)
-        theirs = await self._values_at(s, parent.id, parent_main, changed,
-                                       parent.main_head_commit_seq)
+        head = fork.main_head_commit_seq if head is None else head
+        base = await self._fork_agreed_base(s, fork, head)
+        changed = await self._own_window(s, fork.id, fork_main, await self._fork_merge_base(s, fork),
+                                         head)
+        ours = await self._values_at(s, fork.id, fork_main, changed, head)
+        theirs = await self._values_at(s, parent.id, parent_main, changed, base)
+        return _collapse_empty_payloads({eid: ours.get(eid) for eid in changed}), theirs, base
 
-        set_fields = frozenset(config.SET_FIELDS)
-        merged: Dict[str, Optional[dict]] = {}
-        conflicts: List[dict] = []
-        for eid in sorted(changed):
-            out = three_way_merge(base.get(eid), ours.get(eid), theirs.get(eid), set_fields)
-            if eid in resolutions:
-                # Settle only the conflicting field-paths (see _settle_conflicts) — never
-                # wholesale-replace — so the other side's non-conflicting changes survive.
-                merged[eid] = _settle_conflicts(
-                    out.merged, _normalize_resolution(resolutions[eid]), out.conflicts)
-                continue
-            merged[eid] = out.merged
-            for c in out.conflicts:
-                conflicts.append({
-                    "entity_id": eid, "path": list(c.path),
-                    "base": c.base, "ours": c.ours, "theirs": c.theirs, "kind": c.kind,
-                })
-        return _collapse_empty_payloads(merged), conflicts, theirs
+    @staticmethod
+    async def _own_window(s, graph_id: str, branch_id: str, lo: int, hi: int) -> set:
+        """Entity ids a branch's own commits in ``(lo, hi]`` touched — its rows alone, where
+        :meth:`_changed_in_window` adds a fork's parent's between its bases."""
+        changed: set = set()
+        for model in (NodeVersionORM, EdgeVersionORM):
+            changed.update((await s.execute(select(model.entity_id).where(
+                model.graph_id == graph_id, model.branch_id == branch_id, model.commit_seq > lo,
+                model.commit_seq <= hi).distinct())).scalars().all())
+        return changed
 
     # ------------------------------------------------------------------ #
     # Reads / audit                                                       #
@@ -5049,6 +5298,7 @@ class GraphVersioningService:
         containment_edge_types: Sequence[str], ontology_rules: Optional[OntologyRules],
         strict: bool, known: Optional[Mapping[str, Optional[dict]]] = None,
         edited: Collection[str] = (), also_writing: Optional[str] = None, parentless: bool = True,
+        review: Optional[Callable[[List[str]], Awaitable[Dict[str, Optional[dict]]]]] = None,
     ) -> None:
         """The ONE gate every write path shares (canvas save, checkpoint, publish): it judges the
         state being WRITTEN (``written``: entity → new value, ``None`` = delete) against what it
@@ -5069,7 +5319,9 @@ class GraphVersioningService:
 
         A write judged a page at a time (:meth:`_squash_paged`) names the branch whose heads its
         other pages write (``also_writing``): an edge on a retyped node that one of them rewrites is
-        judged there, with its new value. ``parentless=False`` leaves the parent check to the
+        judged there, with its new value. A fork's review, judged a step at a time
+        (:meth:`_squash_fork`), gives its own view of that instead (``review``): which of some
+        entities it writes, as it writes them. ``parentless=False`` leaves the parent check to the
         caller, once every page is written."""
         live = {eid: v for eid, v in written.items() if v is not None}
 
@@ -5100,8 +5352,11 @@ class GraphVersioningService:
                    and prior.get(eid) is not None]
         if retyped:
             incident = await self._incident_live_edges(s, graph_id, branch_id, retyped)
-            elsewhere = (await self._heads_present(s, graph_id, also_writing, list(incident))
-                         if also_writing and incident else set())
+            if review is not None and incident:
+                elsewhere = set(await review(list(incident)))
+            else:
+                elsewhere = (await self._heads_present(s, graph_id, also_writing, list(incident))
+                             if also_writing and incident else set())
             for eid, v in incident.items():
                 if eid not in written and eid not in elsewhere:   # judged with their new values
                     rich.append((eid, "edge", v, "create"))
@@ -5122,7 +5377,9 @@ class GraphVersioningService:
             # A page types an end another page writes as the merged state holds it: the draft's own
             # view (``main`` where the draft left it alone), canonical as ``known`` would hold it.
             values = await self._current_skeletons(s, graph_id, also_writing or branch_id, list(unknown))
-            if also_writing:
+            if review is not None:
+                values.update(await review(list(unknown)))
+            elif also_writing:
                 for ep in await self._heads_present(s, graph_id, also_writing, list(values)):
                     if values[ep]:
                         canonicalize_payload_types(values[ep], ontology_rules)
@@ -6827,9 +7084,10 @@ class GraphVersioningService:
 
     async def _pr_meta(self, s, pr: MergeRequestORM) -> dict:
         # A draft MR is "behind" when its base lags the target graph's main head; the FE gates
-        # Merge on this so reviewers pull latest first. Fork PRs aren't gated, so behind stays
-        # null for them. (``s.get`` is identity-mapped, so listing many PRs on one graph doesn't
-        # re-query the head.)
+        # Merge on this so reviewers pull latest first. A fork's PR waits on its fork's Update
+        # from parent instead (ForkNotUpToDate at merge; the fork's listing says how far behind it
+        # is), not on a Pull latest, so behind stays null for it. (``s.get`` is identity-mapped, so
+        # listing many PRs on one graph doesn't re-query the head.)
         #
         # Read the base from the LIVE source branch, never from ``pr.base_commit_seq``: that column
         # is frozen at PR-creation time, but ``rebase_draft`` advances the BRANCH's base and does

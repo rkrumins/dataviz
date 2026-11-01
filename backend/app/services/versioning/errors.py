@@ -274,6 +274,20 @@ class ForkUpdateConflicts(_HttpMapped, RuntimeError):
                              "seeds": self.seeds})
 
 
+class ForkNotUpToDate(_HttpMapped, RuntimeError):
+    """A fork's review reached its merge while its parent has changes the fork has not taken in:
+    a fork merges only up to date with its parent, as a draft publishes only up to date with
+    ``main``. ``behind``: the entities the parent changed since (as the fork's listing counts them,
+    no further than ``GRAPHVER_FORK_REWIND_MAX``)."""
+
+    def __init__(self, graph_id: str, behind: int):
+        self.graph_id, self.behind = graph_id, behind
+        super().__init__("This fork's parent has changed since the fork last took its changes: "
+                         "update from parent first.",
+                         {"type": "not_up_to_date", "reason": "parent_moved", "behind": behind,
+                          "graphId": graph_id})
+
+
 class LiveForks(_HttpMapped, RuntimeError):
     """The graph still has live forks, which read its history."""
 
@@ -427,4 +441,4 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
-               IneligibleOwner, ForkUpdateConflicts)
+               IneligibleOwner, ForkUpdateConflicts, ForkNotUpToDate)
