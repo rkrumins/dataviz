@@ -406,6 +406,11 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                         Changes other tools keep making to {adopting.falkorGraphName} no longer show here, and Bring into history
                         no longer sees them.
                     </p>
+                    <p className="text-amber-700 dark:text-amber-400">
+                        The platform key holds the ontology's spelling of each type: a native query or a saved query written
+                        against the customer's own spelling (<span className="font-mono">:table</span> for
+                        <span className="font-mono"> :Table</span>) needs the ontology's from then.
+                    </p>
                 </ConfirmDialog>
             )}
 

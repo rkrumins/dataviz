@@ -656,8 +656,19 @@ evicted, loaded and moved like any platform copy.
   in the audit record: the graph reads its own copy now, so **changes other tools keep making to the
   customer's key no longer show, and Bring into history no longer sees them**. The confirmation says
   so before anything changes. Bring in what the key holds first if it should be kept.
-- With residency on, the key is placed on the provider's master with the most room and the seed is
-  admission-checked first (409 `capacity_insufficient`); off, it is the first free platform key.
+- **The customer's key keeps its memory**: the graph takes the room of two copies until whoever owns
+  that key clears it. The confirmation says so too.
+- **The platform key is written in the ontology's spelling.** The customer's graph may spell a type
+  its own way (`:table` for the ontology's `Table`, `:has` for `HAS`); the platform key holds the
+  ontology's. A native query or a saved query written against the customer's spelling finds nothing
+  on the platform key: write it in the ontology's. The confirmation says so.
+- With residency on, the key is chosen first — placed on the provider's master with the most room
+  among those free to take a load — and the copy admission-checked on that key's master (409
+  `capacity_insufficient` with its `reason`); the choice, the check and the swap are one step against
+  the capacity pass and any other move or Adopt (§17). Off, it is the first free platform key, and
+  nothing is admitted.
+- **A projection pass in flight** holds the graph's projection lock: Adopt takes it as a try, and
+  while a pass writes the customer's key answers **409** `lock_busy` (retryable), changing nothing.
 - Refused as a move is: an unpinned graph (409 `projection_not_adopted` `unpinned`), a key other
   data sources read (409 `projection_not_adopted` `shared`: they would go on reading a key nobody
   writes), a dedicated rollup graph (422 `projection_mode_unsupported`), a running rollup job (409

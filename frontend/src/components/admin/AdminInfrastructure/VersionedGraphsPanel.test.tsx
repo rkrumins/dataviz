@@ -304,6 +304,8 @@ describe('VersionedGraphsPanel', () => {
         const dialog = await screen.findByRole('dialog')
         expect(dialog).toHaveTextContent('keeps its memory')
         expect(dialog).toHaveTextContent('two copies')
+        // Review finding 7: the platform key is written in the ontology's own spelling.
+        expect(dialog).toHaveTextContent("the ontology's spelling of each type")
         adoptGraph.mockRejectedValueOnce(Object.assign(new Error('409'), {
             status: 409, detail: { type: 'projection_not_adopted', reason: 'unpinned',
                 message: 'this graph has no FalkorDB key yet; nothing to adopt' } }))
