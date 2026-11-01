@@ -50,7 +50,7 @@ from .messaging import get_broker_redis, nudge_projection
 from .models import GraphORM, ProjectionStateORM, _now
 from backend.app.jobs import metrics
 
-from .residency_plan import (Graph, Load, Master, MasterPlan, Plan, admit, need, plan, room,
+from .residency_plan import (Graph, Load, Master, MasterPlan, Plan, admit, need, plan, rank,
                              roomiest)
 from .service import bootstrap_unfinished
 
@@ -723,8 +723,8 @@ async def place_key(graph_id: str, provider: str,
 
 
 def _by_room(plans: Collection[MasterPlan], policy) -> List[MasterPlan]:
-    """``plans``, the most room first (as :func:`roomiest` picks the first)."""
-    return sorted(plans, key=lambda p: -room(p, policy))
+    """``plans``, the highest ranked first (as :func:`roomiest` picks the first)."""
+    return sorted(plans, key=lambda p: rank(p, policy), reverse=True)
 
 
 async def preview(policy, *, graph_ids: Optional[Collection[str]] = None,

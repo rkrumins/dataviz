@@ -309,6 +309,20 @@ def test_no_room_is_made_that_would_not_let_the_load_in():
     assert _evicted(plan(POLICY, _at_72_pct(), room, NOW)) == [("std_5d", "pressure")]
 
 
+def test_a_master_with_no_memory_limit_is_no_roomier_than_one_with_room():
+    """Review finding 12: a master that sets no maxmemory counted as having more room than any,
+    so with one master misconfigured every placed load, Adopt and move went there. Its room is
+    unknown: masters whose room is known come first, and of masters with no limit, the least
+    used."""
+    graphs = [_graph("g", status="evicted", requested_at=1.0)]
+    mixed = [Master(endpoint="no_limit", used=900 * MB, maxmemory=0), _master(endpoint="m2",
+                                                                             used_pct=60)]
+    assert plan(POLICY, mixed, graphs, NOW).loads[0].endpoint == "m2"
+    unlimited = [Master(endpoint="a", used=900 * MB, maxmemory=0),
+                 Master(endpoint="b", used=100 * MB, maxmemory=0)]
+    assert plan(POLICY, unlimited, graphs, NOW).loads[0].endpoint == "b"
+
+
 def test_a_graph_whose_rollup_graph_is_named_from_its_key_loads_back_onto_its_own_master():
     """A dedicated rollup graph is named from the graph's key, so that key never changes: its
     load goes back onto it, on its own master."""
@@ -597,6 +611,33 @@ async def test_a_load_waits_for_its_summaries_while_its_edge_types_cannot_be_rea
     proj._edge_types_resolver = no_lineage
     assert await proj.summaries_built("graph_x", "gvp_graph_x{abc.1}", None, 42,
                                       ask="load7.0") is True
+
+
+async def test_a_package_seed_writes_its_key_only_when_admitted(monkeypatch):
+    """Review finding 12: a new data source seeded from a view package writes its whole graph into
+    a new key, and was never admitted. With residency on its copy is admitted on the key's master
+    first: when it would not fit, the job stops before writing anything, saying so, and resumes
+    from there; with residency off nothing is asked."""
+    from backend.app.services.versioning import package_seed
+    from backend.app.services.versioning.bootstrap_worker import BootstrapFailure
+
+    asked = []
+
+    async def admission_on(graph_id, provider, key):
+        asked.append((graph_id, provider, key))
+        return residency.Admitted(False, "10.0.0.2:6379", 3 * 1024 ** 3, "capacity")
+
+    monkeypatch.setattr(residency, "admission_on", admission_on)
+    ctx = SimpleNamespace(falkor_graph_name="gvp_new{abc.1}", falkor_provider="prov_A")
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    with pytest.raises(BootstrapFailure) as caught:
+        await package_seed._admit_seed("graph_x", ctx)
+    assert (caught.value.code, caught.value.action) == ("capacity", "resume")
+    assert "10.0.0.2:6379" in caught.value.reason and "3.0 GiB" in caught.value.reason
+    assert asked == [("graph_x", "prov_A", "gvp_new{abc.1}")]
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
+    await package_seed._admit_seed("graph_x", ctx)
+    assert len(asked) == 1
 
 
 def test_a_resident_graph_asks_for_no_load():

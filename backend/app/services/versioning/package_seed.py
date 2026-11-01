@@ -834,6 +834,26 @@ async def phase_index(run: BootstrapRunner, lease: Lease, graph_id: str) -> bool
     return True
 
 
+async def _admit_seed(graph_id: str, ctx) -> None:
+    """With residency on (doc 17), the copy is admitted on its key's master before anything is
+    written, as a load is (``residency.admission_on``): when it would not fit, the job stops —
+    resumable, nothing written — and says why."""
+    if not config.RESIDENCY_ENABLED:
+        return
+    from backend.app.providers.shard_capacity import human_bytes
+
+    from . import residency
+
+    admitted = await residency.admission_on(graph_id, ctx.falkor_provider, ctx.falkor_graph_name)
+    if admitted.fits:
+        return
+    room = (f"it needs {human_bytes(admitted.shortfall)} more than master {admitted.master} has "
+            "under its start mark" if admitted.why == "capacity"
+            else f"master {admitted.master} cannot take it now ({admitted.why})")
+    raise BootstrapFailure(f"There is no room in the graph store's memory for this graph yet: "
+                           f"{room}. Resume once there is.", "capacity", "resume")
+
+
 async def phase_project(run: BootstrapRunner, lease: Lease, graph_id: str) -> bool:
     """Write the copy into the new key: keyset windows of ``PACKAGE_PROJECT_WINDOW`` over the
     commit's node versions, then its edge versions (``project:nodes:<entity id>``), each through
@@ -850,6 +870,8 @@ async def phase_project(run: BootstrapRunner, lease: Lease, graph_id: str) -> bo
     async with run._session() as s:
         job = await s.get(JobORM, lease.job_id)
         at, total = job.last_cursor, int(job.total or 0)
+    if not at or not at.startswith("project:"):
+        await _admit_seed(graph_id, ctx)              # its first window: nothing written yet
     cursor = at or "project:nodes:"
     kind = "edges" if cursor.startswith("project:edges") else "nodes"
     after = cursor.split(":", 2)[2]

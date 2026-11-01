@@ -37,10 +37,6 @@ from typing import Dict, List, Optional, Sequence, Tuple
 
 from .residency_policy import ResidencyPolicy
 
-#: The room of a master that sets no memory limit: more than any that does.
-_UNLIMITED = 1 << 62
-
-
 @dataclass(frozen=True)
 class Master:
     """One cluster master, as the pass read it."""
@@ -154,18 +150,25 @@ def admit(master: Master, needed: int, policy: ResidencyPolicy,
 
 def room(plan: MasterPlan, policy: ResidencyPolicy) -> Optional[int]:
     """What a master has left under its start mark after what is held there; None when it could
-    not be read."""
+    not be read, or sets no memory limit (its room is unknown)."""
     m = plan.master
-    if m.used is None:
+    if m.used is None or m.maxmemory <= 0:
         return None
-    mark = m.maxmemory * policy.high_water_pct // 100 if m.maxmemory > 0 else _UNLIMITED
-    return mark - m.used - plan.reserved
+    return m.maxmemory * policy.high_water_pct // 100 - m.used - plan.reserved
+
+
+def rank(plan: MasterPlan, policy: ResidencyPolicy) -> Tuple[bool, int]:
+    """How a read master ranks for a new key or a load, highest first: by its room; one that sets
+    no memory limit, whose room is unknown, after every master whose room is known, the least
+    used first."""
+    r = room(plan, policy)
+    return (True, r) if r is not None else (False, -plan.master.used)
 
 
 def roomiest(plans: Sequence[MasterPlan], policy: ResidencyPolicy) -> Optional[MasterPlan]:
-    """The master with the most room (the first of equals), of those that could be read."""
+    """The master that ranks highest (the first of equals), of those that could be read."""
     readable = [p for p in plans if p.master.used is not None]
-    return max(readable, key=lambda p: room(p, policy)) if readable else None
+    return max(readable, key=lambda p: rank(p, policy)) if readable else None
 
 
 def _candidates(graphs: Sequence[Graph]) -> List[Graph]:

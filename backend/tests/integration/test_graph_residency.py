@@ -48,7 +48,10 @@ async def _set_policy(**columns) -> dict:
 
 @pytest.fixture
 async def store():
+    from backend.app.services.aggregation import redis_client
+
     await models.create_schema_and_partitions()
+    redis_client._client = None     # the bus client a pass reads reservations with: this loop's
     yield GraphVersioningService()
     residency_policy.invalidate()
     # A case leaves graphs evicted or behind on purpose; in the trash, no later suite's poll
@@ -102,13 +105,23 @@ async def _publish(svc, gid: str, *names: str) -> None:
     await svc.publish(graph_id=gid, branch_id=d, actor="a", message="seed")
 
 
+async def _seeded(proj, gid: str) -> None:
+    """``gid``'s first seed, made at once as with residency off: with it on, a first seed takes
+    its turn in the load queue (``test_a_first_seed_is_admitted_as_a_load``)."""
+    was, config.RESIDENCY_ENABLED = config.RESIDENCY_ENABLED, False
+    try:
+        assert not (await proj.project_graph(gid)).get("skipped")
+    finally:
+        config.RESIDENCY_ENABLED = was
+
+
 async def _resident(svc, proj, provider=None) -> str:
     """A graph with its own platform key, projected (so idle, past genesis, evictable)."""
     gid = (await svc.create_graph(data_source_id="ds_" + _hex(), workspace_id="ws_res",
                                   actor="a", falkor_graph_name="gvt_" + _hex(),
                                   falkor_provider=provider, owns_falkor_graph=True))["graph_id"]
     await _publish(svc, gid, "A")
-    assert not (await proj.project_graph(gid)).get("skipped")
+    await _seeded(proj, gid)
     return gid
 
 
@@ -1065,6 +1078,27 @@ async def test_a_broker_outage_holds_every_graph_and_fails_no_pass(store, falkor
 
 
 @live
+async def test_a_first_seed_is_admitted_as_a_load(store, falkor, mine, monkeypatch):
+    """Review finding 12: with residency on, the first seed of a key the platform owns — a new
+    graph's whole main, written in one go — was never admitted. It takes its turn in the load
+    queue now, and the capacity loop seeds it as a load: onto the master with room for it."""
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    proj = FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    gid = (await store.create_graph(data_source_id="ds_" + _hex(), workspace_id="ws_res",
+                                    actor="a", falkor_graph_name="gvt_" + _hex(),
+                                    owns_falkor_graph=True))["graph_id"]
+    mine.append(gid)
+    await _publish(store, gid, "A")
+    assert (await proj.project_graph(gid))["skipped"] == "waiting_capacity"
+    assert (await _ps(gid)).status == "waiting_capacity" and await _load_requested(gid)
+    loop = CapacityLoop(proj)
+    assert [x.graph_id for x in (await loop.run_once(graph_ids=[gid])).loads] == [gid]
+    await _loads(loop, proj, gid)
+    ps = await _ps(gid)
+    assert ps.status == "idle" and ps.projected_commit_seq == ps.target_commit_seq > 1
+
+
+@live
 async def test_the_retire_pass_drops_a_key_an_eviction_could_not(store, falkor, mine, monkeypatch):
     """Review finding 3: the graph's own row still names the key its eviction could not drop, and
     the retire pass kept it for that ("PROTECTED: graph … projects into it") and forgot it, so the
@@ -1290,7 +1324,7 @@ async def forked(store):
         root_ds, root = await _parent(store, pinned=True)
         made.append(root)
         await _publish(store, root, "A")
-        assert not (await proj.project_graph(root)).get("skipped")
+        await _seeded(proj, root)
         async with _client() as c:
             fork = (await _fork(c, root)).json()
         made.append(fork["graphId"])

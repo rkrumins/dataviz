@@ -604,6 +604,27 @@ class FalkorProjector:
             finally:
                 await lock_scope.__aexit__(None, None, None)
 
+    async def _queue_first_seed(self, graph_id: str, seen_epoch: int) -> bool:
+        """Put a graph whose key holds nothing yet in the load queue (``waiting_capacity``),
+        fenced on ``seen_epoch``; False when something moved its row first."""
+        from .residency import request_load
+
+        async with self._session() as s:
+            row = (await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id,
+                       ProjectionStateORM.epoch == seen_epoch,
+                       ProjectionStateORM.projected_commit_seq == 0,
+                       ProjectionStateORM.status == "idle")
+                .values(status="waiting_capacity", epoch=ProjectionStateORM.epoch + 1,
+                        updated_at=_now())
+                .returning(ProjectionStateORM.graph_id)
+                .execution_options(synchronize_session=False))).first()
+        if row is None:
+            return False
+        await request_load(graph_id)
+        return True
+
     # The fenced writes to ``projection_state``. Each is its own short transaction on the store
     # pool — the lock connection stays write-free — and a CAS on ``epoch``: whatever reset the
     # watermark under a pass (evict, rebuild, repin, the bootstrap head flip) bumped it.
@@ -737,6 +758,12 @@ class FalkorProjector:
                 await self._svc._assert_not_bootstrapping(s, graph_id)
             except ConcurrencyError:
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "bootstrapping"}
+        if (config.RESIDENCY_ENABLED and from_seq == 0 and to_seq > 1 and owned
+                and ps.status == "idle" and await self._queue_first_seed(graph_id, seen_epoch)):
+            # Residency (doc 17): the first seed of a key the platform owns — a new graph's whole
+            # main, in one go — is a full write, admitted as a load is: it takes its turn in the
+            # load queue, and the capacity loop seeds it on a master with room for it.
+            return {"projected": 0, "applied": 0, "noop": True, "skipped": "waiting_capacity"}
 
         # Claim the row before touching FalkorDB. Losing the claim means something reset the
         # watermark since the read (an evict, a rebuild, a repin): leave the key alone and let the
