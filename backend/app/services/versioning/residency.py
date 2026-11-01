@@ -125,18 +125,23 @@ async def _flush_every_minute() -> None:
 
 async def flush_reads() -> int:
     """Write the reads noted since the last flush to ``last_read_at``: one UPDATE, which never
-    moves a graph's read back. Returns how many graphs it wrote; a flush that fails keeps the reads
-    for the next."""
+    moves a graph's read back, and passes over a row another process's flush holds (its read is as
+    recent: nothing that matters is lost, and two flushes never wait on each other, nor deadlock).
+    Returns how many graphs it took; a flush that fails keeps the reads for the next."""
     if not _READS:
         return 0
     batch = dict(_READS)
     _READS.clear()
     try:
         async with db.graphver_session() as s:
+            table = f'"{config.graphver_schema()}".projection_state'
             await s.execute(text(
-                f'UPDATE "{config.graphver_schema()}".projection_state ps SET last_read_at = r.at '
+                f"UPDATE {table} ps SET last_read_at = r.at "
                 "FROM unnest(CAST(:ids AS text[]), CAST(:ats AS timestamptz[])) AS r(graph_id, at) "
                 "WHERE ps.graph_id = r.graph_id "
+                f"AND ps.graph_id IN (SELECT graph_id FROM {table} "
+                "WHERE graph_id = ANY(CAST(:ids AS text[])) "
+                "ORDER BY graph_id FOR UPDATE SKIP LOCKED) "
                 "AND (ps.last_read_at IS NULL OR ps.last_read_at < r.at)"),
                 {"ids": list(batch), "ats": list(batch.values())})
     except Exception:  # noqa: BLE001 — the next flush writes them
@@ -157,26 +162,62 @@ async def _root(svc, graph: Mapping) -> Mapping:
     return graph
 
 
-async def on_read(svc, graph: Mapping, *, viewer, wm: Optional[Mapping] = None) -> None:
+#: Graphs whose read lease this process refreshed: graph id -> when (``time.monotonic``).
+_HELD: Dict[str, float] = {}
+#: How often a graph's lease is refreshed at most, per process: well inside its 120 seconds.
+_HOLD_EVERY_S = 30.0
+#: The longest a read waits on the broker.
+_BROKER_WAIT_S = 0.1
+
+
+async def _hold(graph_id: str) -> None:
+    """Hold ``graph_id``'s read lease for ``GRAPHVER_TRACE_LEASE_TTL_SECS`` — refreshed at most
+    every 30 seconds per process, in one round trip, never waiting on the broker more than about
+    100 ms (a lease not taken is tried again on the next read)."""
+    from . import cache_manager
+
+    now = time.monotonic()
+    if now - _HELD.get(graph_id, float("-inf")) < _HOLD_EVERY_S:
+        return
+    try:
+        held = await asyncio.wait_for(
+            cache_manager.acquire_lease(graph_id, ttl=config.TRACE_LEASE_TTL_SECS),
+            _BROKER_WAIT_S)
+    except (asyncio.TimeoutError, Exception):  # noqa: BLE001 — a read never fails over it
+        return
+    if held:
+        if len(_HELD) > 10_000:
+            _HELD.clear()
+        _HELD[graph_id] = now
+
+
+async def hold(svc, graph: Mapping) -> Optional[Mapping]:
+    """A person's read of a versioned graph that FalkorDB may serve, before it reads the graph's
+    watermark: it holds the read lease of the graph whose key serves it (a fork's root), so an
+    eviction that has not committed yet backs off, and one that has is seen by the read; and it is
+    noted for ``last_read_at``. Returns that graph; None with residency off."""
+    if not config.RESIDENCY_ENABLED:
+        return None
+    root = await _root(svc, graph)
+    await _hold(root["graph_id"])
+    _note_read(root["graph_id"])
+    return root
+
+
+async def on_read(svc, graph: Mapping, *, viewer) -> None:
     """What a read of a versioned graph does for residency — ContextEngine's one call, made for
-    every engine it builds over a versioned graph (``wm``: its watermark of a graph that is not a
-    fork, which it already read). Only a person's read counts (``viewer``; a background job has
-    none), with residency on, and it counts for the graph whose key serves it: a fork's root, for
-    a fork. It is noted for ``last_read_at``. One FalkorDB serves takes the graph's read lease. For
-    a graph whose key is not in FalkorDB: :data:`READING` says so for the rest of the request, and
-    a Standard or Always graph's load is asked for, as is a Coldline graph's that is larger than the
-    canvas-load threshold. Its read itself is served from Postgres."""
+    every engine it builds over a versioned graph, before it reads the watermark. Only a person's
+    read counts (``viewer``; a background job has none), with residency on, and it counts for the
+    graph whose key serves it: a fork's root, for a fork. It holds that graph first (:func:`hold`).
+    For a graph whose key is not in FalkorDB: :data:`READING` says so for the rest of the request,
+    and a Standard or Always graph's load is asked for, as is a Coldline graph's that is larger
+    than the canvas-load threshold. Its read itself is served from Postgres."""
     if not config.RESIDENCY_ENABLED or viewer is None:
         return
-    root = await _root(svc, graph)
-    _note_read(root["graph_id"])
-    if wm is None or root is not graph:
-        wm = await svc.projection_watermark(root["graph_id"])
-    if wm["status"] not in _OUT:
+    root = await hold(svc, graph)
+    wm = await svc.residency_state(root["graph_id"])
+    if wm is None or wm["status"] not in _OUT:
         READING.set(None)
-        if wm["fresh"]:
-            from .cache_manager import acquire_lease
-            await acquire_lease(root["graph_id"], ttl=config.TRACE_LEASE_TTL_SECS)
         return
     policy = await residency_policy.resolve()
     READING.set(Reading(root["graph_id"], wm["status"], policy.capacity_interval_secs))
@@ -194,7 +235,10 @@ async def on_read(svc, graph: Mapping, *, viewer, wm: Optional[Mapping] = None) 
                 entities = None
         if entities is None or entities <= policy.coldline_canvas_load_above:
             return
-    await request_load(root["graph_id"])
+    try:
+        await asyncio.wait_for(request_load(root["graph_id"]), _BROKER_WAIT_S)
+    except asyncio.TimeoutError:      # the next read asks again
+        pass
 
 
 async def set_class(graph_id: str, residency: str) -> Optional[str]:

@@ -300,6 +300,53 @@ async def test_a_drop_that_fails_leaves_the_key_to_be_dropped_later(store, monke
     assert [(e["name"], e["movedBy"]) for e in ps.retired_keys] == [(key, "eviction")]
 
 
+async def test_an_eviction_backs_off_when_a_read_holds_the_graph_after_it_committed(
+        store, monkeypatch):
+    """A read holds the lease before it reads the state; the evictor checks the lease once more
+    after its compare-and-swap commits. One whose lease came in between finds the graph as it was,
+    key and all; a read that came later reads the evicted state."""
+    from backend.app.services.versioning import cache_manager
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, fake = store, FakeFalkor()
+    proj = FalkorProjector(graph_client_factory=fake)
+    gid = await _resident(svc, proj)
+    before = await _ps(gid)
+    held = iter([False, True])                 # no lease when it looked first; one right after
+
+    async def pinned(graph_id):
+        return next(held)
+
+    dropped = []
+
+    async def drop(name, provider_id=None):
+        dropped.append(name)
+
+    monkeypatch.setattr(cache_manager, "is_pinned", pinned)
+    assert await CacheManager(proj).evict(gid, drop_graph=drop, reason="pressure") is False
+    ps = await _ps(gid)
+    assert (ps.status, ps.projected_commit_seq, ps.evicted_reason) == (
+        "idle", before.projected_commit_seq, None)
+    assert ps.epoch > before.epoch and dropped == []
+
+
+async def test_concurrent_read_flushes_never_wait_on_each_other(store):
+    """Another pod's flush holding a row is passed over (its read is as recent as anything this
+    one would write), not waited for — so two flushes never deadlock."""
+    from sqlalchemy import text as sql
+
+    gids = [await _resident(store, FalkorProjector(graph_client_factory=FakeFalkor()))
+            for _ in range(2)]
+    async with db.graphver_session() as other:
+        await other.execute(sql(
+            f'SELECT 1 FROM "{config.graphver_schema()}".projection_state '
+            "WHERE graph_id = :g FOR UPDATE"), {"g": gids[0]})
+        await _set_ps(gids[1], last_read_at=None)
+        residency._READS.update({g: datetime.now(timezone.utc) for g in gids})
+        await asyncio.wait_for(residency.flush_reads(), 5)
+    assert (await _ps(gids[1])).last_read_at is not None
+
+
 async def test_with_residency_off_an_evicted_graph_is_reseeded_as_before(store, monkeypatch):
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
     svc, fake = store, FakeFalkor()
@@ -869,6 +916,30 @@ async def _loads(loop, proj, gid: str) -> None:
     key (the lane's nudge), then the pass that sees it done."""
     await proj.project_graph(gid)
     await loop.run_once(graph_ids=[gid])
+
+
+@live
+async def test_a_read_holds_its_graph_before_the_engine_reads_the_watermark(
+        store, falkor, mine, plain_engine, monkeypatch):
+    from backend.app.services.versioning import cache_manager
+    from backend.app.services.versioning.service import GraphVersioningService, Viewer
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(svc, proj, mine, 1)
+    ds = (await svc.get_graph(gid))["data_source_id"]
+    await get_broker_redis().delete(cache_manager._lease_key(gid))
+    getattr(residency, "_HELD", {}).clear()
+    held_then = []
+    real = GraphVersioningService.projection_watermark
+
+    async def watermark(self, graph_id):
+        held_then.append(await cache_manager.is_pinned(graph_id))
+        return await real(self, graph_id)
+
+    monkeypatch.setattr(GraphVersioningService, "projection_watermark", watermark)
+    assert await _served_by(plain_engine, ds, Viewer(actor="usr_1", can_read=True)) == "falkordb"
+    assert held_then and all(held_then)
 
 
 @live

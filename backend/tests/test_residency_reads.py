@@ -1,10 +1,13 @@
 """Reads and residency (doc 17): what a person's read of a versioned graph out of FalkorDB asks
 for, and what FalkorDB-only work answers meanwhile.
 
-ContextEngine calls ``residency.on_read`` once per engine. A person's read (a background job
-passes no viewer) is noted for the graph whose key serves it — a fork's root — and each process
-flushes what it noted once a minute, in one UPDATE that never moves a read back; a read FalkorDB
-serves also takes the graph's read lease, so a graph mid-read is never evicted. For a read of a
+ContextEngine calls ``residency.on_read`` once per engine, before it reads the graph's watermark.
+A person's read (a background job passes no viewer) holds the read lease of the graph whose key
+serves it — a fork's root — first, so an eviction that has not yet committed sees it and backs off,
+and one that has is seen by the read; then the read is noted, and each process flushes what it
+noted once a minute, in one UPDATE that never moves a read back. The lease is refreshed at most
+every 30 seconds per graph per process, in one round trip, and the read never waits on the broker
+for more than about 100 ms. For a read of a
 graph whose key is not in FalkorDB — evicted, waiting for room or being
 loaded — the read is served from Postgres and the request remembers which graph it is
 (``residency.READING``): deep search, node degrees and native queries then answer 503
@@ -27,14 +30,16 @@ _VIEWER = Viewer(actor="usr_1", can_read=True)
 
 
 class _Svc:
-    def __init__(self, wms: dict, parents: dict = None):
-        self.wms, self.parents = wms, parents or {}
+    def __init__(self, wms: dict, parents: dict = None, order: list = None):
+        self.wms, self.parents, self.order = wms, parents or {}, order
 
     async def get_graph(self, gid):
         return {"graph_id": gid, "data_source_id": f"ds_{gid}",
                 "fork_parent_graph_id": self.parents.get(gid)}
 
-    async def projection_watermark(self, gid):
+    async def residency_state(self, gid):
+        if self.order is not None:
+            self.order.append(("state", gid))
         return self.wms[gid]
 
 
@@ -69,13 +74,15 @@ def asked(monkeypatch):
     monkeypatch.setattr(residency, "_note_read", lambda gid: out.append(("read", gid)))
     residency_policy._MEMO.update(policy=residency_policy.defaults(), at=residency_policy._clock())
     residency.READING.set(None)
+    residency._HELD.clear()
     yield out
     residency.READING.set(None)
+    residency._HELD.clear()
     residency_policy.invalidate()
 
 
-async def _read(svc, gid="g", *, viewer=_VIEWER, wm=None):
-    await residency.on_read(svc, await svc.get_graph(gid), viewer=viewer, wm=wm)
+async def _read(svc, gid="g", *, viewer=_VIEWER):
+    await residency.on_read(svc, await svc.get_graph(gid), viewer=viewer)
     return residency.READING.get()
 
 
@@ -131,9 +138,14 @@ async def test_a_fork_reads_through_its_root(asked):
     assert reading.graph_id == "root" and _loads(asked) == ["root"]
 
 
-async def test_the_engine_s_own_watermark_is_used_for_a_graph_that_is_not_a_fork(asked):
-    reading = await _read(_Svc({}), wm=_wm("evicted"))
-    assert reading.graph_id == "g" and _loads(asked) == ["g"]
+async def test_a_read_holds_the_lease_before_it_reads_the_graph_s_state(asked):
+    """An eviction checks the lease again after it commits: a read whose lease it misses reads the
+    state after that commit, and is served from Postgres."""
+    order = []
+    await _read(_Svc({"g": _wm()}, order=order))
+    lease = asked.index(("lease", "g", config.TRACE_LEASE_TTL_SECS))
+    assert lease == 0 and order == [("state", "g")]
+    assert asked[1:] == [("read", "g")]
 
 
 # ── what FalkorDB-only work answers meanwhile ────────────────────────────────────────────────────
@@ -198,6 +210,72 @@ async def test_the_keys_other_readers_hold_are_found_in_two_reads(monkeypatch):
     assert await managed_sources.keys_read_elsewhere(_Session(), []) == set()
 
 
+# ── every read FalkorDB serves ───────────────────────────────────────────────────────────────────
+async def test_a_native_query_holds_its_graph_before_it_reads_the_watermark(monkeypatch):
+    from backend.app.services import versioned_sources
+    from backend.app.services.versioning import service as service_module
+
+    order = []
+
+    class _Gv:
+        async def get_graph_by_data_source(self, ds):
+            return {"graph_id": "g", "data_source_id": ds, "fork_parent_graph_id": None}
+
+        async def projection_watermark(self, gid):
+            order.append("watermark")
+            return {"fresh": True, "falkor_provider": None, "falkor_graph_name": "k"}
+
+    async def versioned(**kw):
+        return {"ds1"}
+
+    async def hold(svc, graph):
+        order.append(("hold", graph["graph_id"]))
+
+    monkeypatch.setattr(versioned_sources, "versioned_data_source_ids", versioned)
+    monkeypatch.setattr(service_module, "GraphVersioningService", _Gv)
+    monkeypatch.setattr(residency, "hold", hold)
+    assert await G._holds_published_graph("ds1", SimpleNamespace()) is True
+    assert order == [("hold", "g"), "watermark"]
+
+
+async def test_a_live_export_reads_as_the_person_it_is_for(monkeypatch):
+    """A person's export: its read is recorded and held like a canvas read (an engine built with
+    no viewer is a background job's)."""
+    from backend.app.api.v1.endpoints import graph_export
+    from backend.app.services.context_engine import ContextEngine
+
+    built = {}
+
+    async def get_ds(session, ds_id):
+        return SimpleNamespace(workspace_id="ws1")
+
+    async def for_workspace(*a, **kw):
+        built.update(kw)
+        return SimpleNamespace(provider="p")
+
+    monkeypatch.setattr(graph_export.data_source_repo, "get_data_source_orm", get_ds)
+    monkeypatch.setattr(ContextEngine, "for_workspace", for_workspace)
+    assert await graph_export._provider("ws1", "ds1", None, SimpleNamespace(id="usr_1")) == "p"
+    assert built["viewer"].actor == "usr_1" and built["viewer"].can_read
+
+
+async def test_the_v2_router_reads_as_the_person_calling_it(monkeypatch):
+    from backend.app.api.v2.endpoints import graph as G2
+    from backend.app.services.context_engine import ContextEngine
+
+    built = {}
+
+    async def for_workspace(*a, **kw):
+        built.update(kw)
+        return "engine"
+
+    monkeypatch.setattr(ContextEngine, "for_workspace", for_workspace)
+    monkeypatch.setattr(G2, "has_permission", lambda claims, perm, workspace_id=None: True)
+    out = await G2.get_context_engine("ws1", dataSourceId="ds1", branchId=None, _admission=None,
+                                      session=None, user=SimpleNamespace(id="usr_2"), claims=None)
+    assert out == "engine" and built["viewer"].actor == "usr_2" and built["actor"] == "usr_2"
+
+
 # ── the stats probe ──────────────────────────────────────────────────────────────────────────────
 async def test_the_stats_probe_skips_a_graph_out_of_falkordb(monkeypatch):
     """Its key is gone: a probe would read an empty graph and record 0 nodes and 0 edges."""
@@ -221,21 +299,73 @@ async def test_the_stats_probe_skips_a_graph_out_of_falkordb(monkeypatch):
 
 
 # ── read tracking and the read lease ─────────────────────────────────────────────────────────────
-async def test_a_person_s_read_is_noted_and_a_read_falkordb_serves_takes_the_lease(asked):
+async def test_a_person_s_read_holds_the_lease_and_is_noted(asked):
     await _read(_Svc({"g": _wm()}))
-    assert asked == [("read", "g"), ("lease", "g", config.TRACE_LEASE_TTL_SECS)]
+    assert asked == [("lease", "g", config.TRACE_LEASE_TTL_SECS), ("read", "g")]
 
 
-async def test_a_read_postgres_serves_is_noted_and_takes_no_lease(asked):
-    await _read(_Svc({"g": _wm("idle", fresh=False)}))             # the projection lags
-    await _read(_Svc({"g": _wm("evicted")}))
-    assert [x for x in asked if isinstance(x, tuple)] == [("read", "g"), ("read", "g")]
+async def test_the_lease_is_refreshed_at_most_every_30_seconds_per_graph(asked, monkeypatch):
+    """The lease lasts 120 seconds: refreshed every 30 at most, it is held through every read
+    while reads keep coming, at one round trip per graph per half minute."""
+    clock = [1000.0]
+    monkeypatch.setattr(residency.time, "monotonic", lambda: clock[0])
+    for _ in range(3):
+        await _read(_Svc({"g": _wm()}))
+    clock[0] += 31
+    await _read(_Svc({"g": _wm()}))
+    assert [x for x in asked if x[0] == "lease"] == [("lease", "g", config.TRACE_LEASE_TTL_SECS)] * 2
 
 
-async def test_a_fork_s_read_counts_for_its_root_and_leases_the_root(asked):
+async def test_a_read_never_waits_on_the_broker(asked, monkeypatch):
+    """A broker that does not answer costs a read about 100 ms, not its 5-10 s timeouts: neither
+    the lease nor a load request is waited for longer."""
+    async def stuck(*a, **kw):
+        await asyncio.sleep(5)
+
+    monkeypatch.setattr(cache_manager, "acquire_lease", stuck)
+    monkeypatch.setattr(residency, "request_load", stuck)
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    reading = await _read(_Svc({"g": _wm("evicted")}))
+    assert loop.time() - started < 1 and reading.graph_id == "g"
+    assert residency._HELD == {}                          # not held: the next read tries again
+
+
+async def test_a_fork_s_read_counts_for_its_root_and_holds_the_root(asked):
     svc = _Svc({"root": _wm()}, parents={"fork2": "fork1", "fork1": "root"})
     await _read(svc, "fork2")
-    assert asked == [("read", "root"), ("lease", "root", config.TRACE_LEASE_TTL_SECS)]
+    assert asked == [("lease", "root", config.TRACE_LEASE_TTL_SECS), ("read", "root")]
+
+
+async def test_the_lease_is_taken_in_one_round_trip(monkeypatch):
+    calls = []
+
+    class _Pipe:
+        def __init__(self):
+            self.queued = []
+
+        def incr(self, key):
+            self.queued.append(("INCR", key))
+
+        def expire(self, key, ttl):
+            self.queued.append(("EXPIRE", key, ttl))
+
+        async def execute(self):
+            calls.append(list(self.queued))
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+    class _Broker:
+        def pipeline(self, transaction=True):
+            return _Pipe()
+
+    monkeypatch.setattr(cache_manager, "get_broker_redis", lambda: _Broker())
+    assert await cache_manager.acquire_lease("g", ttl=120) is True
+    assert calls == [[("INCR", "versioning:lease:g"), ("EXPIRE", "versioning:lease:g", 120)]]
 
 
 async def test_a_background_read_is_not_noted(asked):

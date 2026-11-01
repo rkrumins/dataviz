@@ -85,9 +85,10 @@ def _evictable() -> tuple:
 # fail a read — it just means the lease isn't held for that request.
 async def acquire_lease(graph_id: str, ttl: Optional[int] = None) -> bool:
     try:
-        r = get_broker_redis()
-        await r.incr(_lease_key(graph_id))
-        await r.expire(_lease_key(graph_id), ttl or config.LEASE_TTL)
+        async with get_broker_redis().pipeline(transaction=False) as p:     # one round trip
+            p.incr(_lease_key(graph_id))
+            p.expire(_lease_key(graph_id), ttl or config.LEASE_TTL)
+            await p.execute()
         return True
     except Exception:   # pragma: no cover - infra
         return False
@@ -157,13 +158,13 @@ class CacheManager:
             async with self._session() as s:
                 key = (await s.execute(
                     select(ProjectionStateORM.falkor_graph_name, ProjectionStateORM.falkor_provider,
-                           GraphORM.data_source_id)
+                           GraphORM.data_source_id, ProjectionStateORM.projected_commit_seq)
                     .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                     .where(ProjectionStateORM.graph_id == graph_id, *_evictable())
                 )).first()
             if key is None:
                 return False
-            name, provider_id, ds_id = key
+            name, provider_id, ds_id, projected = key
             if reason and await _rollups_running(ds_id):
                 # A rollup job writes the key: evicted under it, the key would come back with a
                 # summaries stamp the next load would trust (residency, doc 17).
@@ -194,12 +195,14 @@ class CacheManager:
                             epoch=ProjectionStateORM.epoch + 1,
                             **({"evicted_reason": reason} if reason else {}))
                     .returning(ProjectionStateORM.falkor_graph_name,
-                               ProjectionStateORM.falkor_provider)
+                               ProjectionStateORM.falkor_provider, ProjectionStateORM.epoch)
                     .execution_options(synchronize_session=False)
                 )).first()
             if row is None:
                 return False
-            name, provider_id = row
+            name, provider_id, epoch = row
+            if reason and await self._read_since(graph_id, epoch, projected):
+                return False
             if name:
                 try:
                     await drop_graph(name, provider_id)
@@ -220,6 +223,29 @@ class CacheManager:
                     await lock_s.execute(select(func.pg_advisory_unlock(lock_arg)))
             finally:
                 await lock_scope.__aexit__(None, None, None)
+
+    async def _read_since(self, graph_id: str, epoch: int, projected: int) -> bool:
+        """A read holds its lease before it reads the graph's state: one whose lease came after the
+        first check reads the eviction's state only if it came after the compare-and-swap, which
+        this check, after it, sees. Then the graph is put back as it was (its key is still there)
+        and True; an answer that cannot be had counts as a read."""
+        try:
+            leased = await is_pinned(graph_id)
+        except Exception:   # noqa: BLE001 - fail closed
+            leased = True
+        if not leased:
+            return False
+        async with self._session() as s:
+            await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id,
+                       ProjectionStateORM.status == "evicted", ProjectionStateORM.epoch == epoch)
+                .values(status="idle", projected_commit_seq=projected, evicted_reason=None,
+                        epoch=ProjectionStateORM.epoch + 1, updated_at=_now())
+                .execution_options(synchronize_session=False))
+        logger.info("not evicting graph %s: a read took its lease as it was being evicted",
+                    graph_id)
+        return True
 
     async def _retire_later(self, graph_id: str, name: str, provider_id: Optional[str]) -> None:
         """Put a key whose drop failed in the graph's ``retired_keys``, due now, for the retire

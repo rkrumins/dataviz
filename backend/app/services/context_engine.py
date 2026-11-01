@@ -184,6 +184,10 @@ class ContextEngine:
                 raise KeyError(f"Data source not found: {data_source_id}")   # its graph is trashed
             if graph is not None:
                 gid = graph["graph_id"]
+                # Residency (doc 17): a person's read holds the graph's key before the watermark is
+                # read, and asks for the graph's load when it is out of FalkorDB.
+                from .versioning.residency import on_read
+                await on_read(svc, graph, viewer=viewer)
                 main_id = await svc.main_branch_id(gid)
                 is_draft = norm not in ("", "main", main_id)
                 if fork:
@@ -198,9 +202,6 @@ class ContextEngine:
                         getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
                         wm.get("falkor_graph_name"), gid)
                     gap = {}
-                # Residency (doc 17): a person's read of a graph out of FalkorDB asks for its load.
-                from .versioning.residency import on_read
-                await on_read(svc, graph, viewer=viewer, wm=None if fork else wm)
                 read_provider = None
                 read_branch: Optional[str] = None
                 if is_draft:

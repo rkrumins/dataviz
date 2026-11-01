@@ -3785,6 +3785,20 @@ class GraphVersioningService:
                                       else None),
             }
 
+    async def residency_state(self, graph_id: str) -> Optional[Dict[str, object]]:
+        """What a read needs to know of a graph's residency (doc 17), in one small read: its
+        projection ``status``, its class (``residency``), its measured ``size_bytes`` and the head
+        it is at (``committed``). None for a graph with no projection row."""
+        async with self._session() as s:
+            row = (await s.execute(
+                select(ProjectionStateORM.status, ProjectionStateORM.residency,
+                       ProjectionStateORM.size_bytes, GraphORM.main_head_commit_seq)
+                .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
+                .where(ProjectionStateORM.graph_id == graph_id))).first()
+        if row is None:
+            return None
+        return {"status": row[0], "residency": row[1], "size_bytes": row[2], "committed": row[3]}
+
     async def clear_external_changes(self, graph_id: str, seen_at: Optional[str] = None) -> None:
         """What the graph held that history didn't has been brought into it: the flag goes,
         whichever check raised it (``projection_state.external_drift``) — the flag as it was when

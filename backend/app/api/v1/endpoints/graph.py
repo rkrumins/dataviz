@@ -2411,6 +2411,9 @@ async def _holds_published_graph(data_source_id: str, provider) -> bool:
     graph = await svc.get_graph_by_data_source(data_source_id)
     if graph is None:
         return True
+    from backend.app.services.versioning import residency
+
+    await residency.hold(svc, graph)        # before the watermark: no eviction mid-query (doc 17)
     gid = str(graph["graph_id"])
     wm = await svc.projection_watermark(gid)
     return bool(wm["fresh"]) and versioned_sources.serves_pin(
