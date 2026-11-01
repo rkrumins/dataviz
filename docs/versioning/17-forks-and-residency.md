@@ -10,7 +10,7 @@
 > refusals are in [06 · API Reference](06-api-reference.md); every behaviour change is in the
 > [CHANGELOG](../../CHANGELOG.md).
 
-**Checked against the code on 2026-11-01: §1–§9 at `c63c65f08`, §10–§19 at `ac00fc5d7`.**
+**Checked against the code on 2026-11-01: §1–§9 at `c63c65f08`, §10–§19 at `41e82e5eb`.**
 
 **TL;DR.** Forking a graph now makes a data source as well as a graph: the fork's own row in
 `workspace_data_sources`, in its parent's workspace and on its parent's provider. Views, the canvas
@@ -392,8 +392,9 @@ Postgres until it is loaded again.
   by the projection poll within seconds.
 
 `graphver.projection_state` holds each graph's `residency`, `last_read_at`, `evicted_reason`
-(`idle_standard`, `idle_coldline`, `pressure`, `lost` — its master lost the key — or `admin`, which
-nothing writes yet), `size_bytes`, `size_measured_at` and `rehydrating_since`. Its `status` gains
+(`idle_standard`, `idle_coldline`, `pressure`, `lost` when its master lost the key, `load_stalled`
+when its load's ontology could not be read for more than 10 passes (§12), or `admin`, which nothing
+writes yet), `size_bytes`, `size_measured_at` and `rehydrating_since`. Its `status` gains
 `rehydrating` (a load in flight) and `waiting_capacity` (a load no master has room for yet).
 
 ## 11. The capacity loop
@@ -409,15 +410,17 @@ is one master) — not only those holding a versioned graph's key, since the one
 often holds none; for each master, its used memory, `maxmemory` and whether it is forking for
 persistence or loading its dataset, and the aggregation write governor's reservations on it; which
 graphs hold a read lease (one the broker cannot answer for counts as held: an outage there evicts
-nothing and fails no pass); and, in batched reads of the management database, which keys another
-data source or a catalog entry reads and which data sources have a rollup job pending or running.
+nothing and fails no pass; each read waits at most about 100 ms, and once one goes unanswered the
+pass asks no more, counting the rest as held); and, in batched reads of the management database,
+which keys another data source or a catalog entry reads and which data sources have a rollup job
+pending or running.
 
 **Sizes.** A graph's size is its measured `size_bytes`. A graph never measured has no size, not 0:
 it is never a pressure candidate (its eviction would count as freeing nothing), and its load is
 estimated from its nodes and edges at the main head as graphver counts them (rollups are not in
 history), times the bytes-per-entity estimate — the data source's statistics only when graphver's
 counts are missing. A load with neither waits (`unsized`). A pass that could not read the sizes plans
-no pressure eviction.
+no pressure eviction, and makes no room for a load (§12).
 
 **Idle eviction.** A Standard graph unread for longer than the Standard idle time goes
 (`idle_standard`), a Coldline graph unread for longer than the Coldline idle time
@@ -464,11 +467,11 @@ measured, with no size, and the graph keeps its estimate.
 |---|---|
 | A person's read of the graph (§14) | Standard, Always |
 | A canvas read of a graph with more entities than the canvas-load threshold (its count, kept per head, else its last size over bytes per entity) | Coldline |
-| A request only FalkorDB can answer — deep search, node degrees, a native query — which answers **503** `graph_loading` with `Retry-After` (the loop's interval) meanwhile; on a fork, for its root, as on the root (once the root is in, a fork's own rules stand: deep search in the root's store with its note, native queries **501**) | Any |
+| A request only FalkorDB can answer — deep search, node degrees, a native query — which answers **503** `graph_loading` with `Retry-After` (the loop's interval) meanwhile; on a fork, deep search and node degrees ask for its root's load, as on the root (once the root is in, deep search runs in the root's store with its note); a native query on a fork is **501** at once, whatever its root's state, and asks for nothing | Any |
 | Load now: `POST /api/v1/admin/versioning/graphs/{gid}/load` (recorded) | Any |
-| Setting the class to Always (§10, admission-checked first), and an Always graph out of FalkorDB on every pass | Always |
+| Setting the class to Always (§10, its room checked first), and an Always graph out of FalkorDB on every pass | Always |
 | An operator's rebuild of the graph (`POST …/projection/rebuild`), a move of it (§17), a watermark reset that caught its load in flight | Any |
-| The first seed of a key the platform owns: the projector's first pass over a new graph past genesis takes its turn here (`waiting_capacity`) rather than writing the whole graph at once | Any |
+| The first seed of a key the platform owns: the projector's first pass over a new graph past genesis takes its turn here (`waiting_capacity`) rather than writing the whole graph at once; its wait is logged and counted as any other | Any |
 
 A request is kept in the order it was first made (a sorted set on the broker). A broker that loses
 it loses nothing durable: the next read asks again, and a graph waiting for room or an Always graph
@@ -481,26 +484,37 @@ aggregation write governor's reservations, and the estimate times the headroom o
 projection (a rebuild, a move's reseed, a first seed) in flight on it. Fitting under the start mark
 rather than under `maxmemory` is the hysteresis: a load never puts its master under pressure, so the
 next pass never evicts what it just loaded. One load per master at a time; none on a master that is
-forking for persistence, loading its dataset, or cannot be read. A request that fits on no master
+forking for persistence, loading its dataset, or cannot be read. A request that does not fit
 waits (`waiting_capacity`, logged and counted), and each pass tries again; its reads stay on
-Postgres. The first of a provider's that waits for room keeps its place and the master where it
-falls shortest: no later load goes there in that pass, and later requests that fit on another master
-go ahead. **Room is made for it** there: the master's idle-longest Coldline graphs, then Standard by
-oldest read, as pressure eviction picks them (recorded as `pressure`), but never an Always graph, a
-leased one, or one read within the Coldline idle time — it would only come straight back — and only
-as many as make the room it lacks beyond what the pass frees there already; none when they could
-not. The next pass, with the room made, it loads first. The policy preview shows these evictions.
+Postgres. One that room alone would let in on a master that is forking, loading its dataset or
+taking a load now waits for that master (`queued`, or its hold), and nothing is evicted for it. For
+the first of a provider's that fits on neither, **room is made** on the master it would go to, where
+it falls shortest: graphs as pressure eviction picks them (recorded as `pressure`), but never an
+Always graph, a leased one, or one read within the Coldline idle time — it would only come straight
+back. So they are Standard graphs, by oldest read: a Coldline graph unread for longer than the
+Coldline idle time has gone already, idle. Only as many go as make the room it lacks beyond what the
+pass frees there already; none when they could not, nor in a pass that could not read sizes. Once
+room is made, that master is the load's for the pass — no later load, and no route's new key, goes
+there (§17) — and the next pass, with the room made, it loads first. When none can be made (nothing
+there may go, or the load is larger than the master can hold under its start mark), the load holds
+nothing: later requests that fit go ahead, on that master too, and the next of the provider's that
+fits on neither may have room made instead. Later requests that fit on another master go ahead
+either way. Beside masters with a limit, a master without one takes a load only when none of them
+is free (§17): a load short of room on the master with a limit it would go to waits there, and has
+room made there, rather than going to the one without. The policy preview shows these evictions.
 
-Always on a graph out of FalkorDB is checked the same way when it is set: **409**
-`capacity_insufficient` `{master, shortfallBytes, reason, message}` when its load would not fit, and
-nothing changes; otherwise the class is set and its load asked for. `reason` says why: `capacity`
-(`shortfallBytes` short under the start mark), `unsized` (its size is not known), `unmeasured` (the
-master could not be read), `busy` (the master takes a load already) or the master's hold (`fork`,
-`loading`, …), each also in the message.
+Always on a graph out of FalkorDB has its room checked when it is set, on its provider's roomiest
+master (or its own, when its key stays): **409** `capacity_insufficient` `{master, shortfallBytes,
+reason, message}` when its load would not fit there, and nothing changes; otherwise the class is set
+and its load asked for. Only room is checked: setting the class writes nothing, so a master forking
+or taking a load now does not refuse it, and the load waits its turn. `reason` says why: `capacity`
+(`shortfallBytes` short under the start mark), `unsized` (its size is not known) or `unmeasured`
+(the master could not be read), each also in the message. A move and an Adopt, which write, are also
+refused when the master takes a load already (`busy`) or holds (`fork`, `loading`, …).
 
-**The load.** An admitted load pins a fresh platform key placed on the chosen master (§17), marks the
-graph `rehydrating` at watermark 0 with `rehydrating_since` (a compare-and-swap under the row's lock:
-one load per graph), and nudges the projection lane, whose next pass — single-flight under the
+**The load.** An admitted load pins a fresh platform key placed on the chosen master (§17), marks
+the graph `rehydrating` at watermark 0 with `rehydrating_since` (a compare-and-swap under the row's
+lock: one load per graph), and nudges the projection lane, whose next pass — single-flight under the
 graph's projection lock — is the load: a full seed of the key from Postgres, a page at a time above
 `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE` entities. The key the graph had goes to
 `retired_keys`, for the retire pass to drop should its eviction not have. A graph whose rollups live
@@ -510,19 +524,25 @@ is in it (a rollup job may have written it back, summaries stamp and all). The g
 once the seed has published. It serves reads only once its key also holds the summaries its readers
 need: a summaries build's stamp, or none needed (no lineage in its ontology, its rollups in a
 dedicated key, no aggregation wired in). An ontology that cannot be read (the management database
-down) is not "no lineage": the load waits for the next pass. Each load asks for the build under its own idempotency key
-(`gv-rollup-rebuild:<graph>:<seq>:load<epoch>.<attempt>` — the aggregation service answers a key it
-saw within the hour with the job it already ran), and asks again under a new one every 10 passes it
-goes without the stamp. Then the graph is `idle`, its eviction reason and `rehydrating_since` are
-cleared, and its idle time starts again from the load. A load that fails is retried by the poll after
-its backoff, still `rehydrating`. A load has no timeout: its reads stay on Postgres, and how long the
-oldest one has been under way is reported (§15).
+down) is not "no lineage": the load waits for the next pass. One whose ontology stays unreadable for
+more than 10 passes in a row goes back to evicted (`load_stalled`, with a warning) and its key is
+dropped (left to the retire pass when the drop fails): it is not idle, so nothing else would free
+that memory. The next read asks for its load again. Each load asks for the build under its own
+idempotency key (`gv-rollup-rebuild:<graph>:<seq>:load<epoch>.<attempt>` — the aggregation service
+answers a key it saw within the hour with the job it already ran), and asks again under a new one
+every 10 passes it goes without the stamp. Then the graph is `idle`, its eviction reason and
+`rehydrating_since` are cleared, and its idle time starts again from the load. A load that fails is
+retried by the poll after its backoff, still `rehydrating`. A load has no timeout, but for one whose
+ontology stays unreadable (above): its reads stay on Postgres, and how long the oldest one has been
+under way is reported (§15).
 
 **Nothing writes to FalkorDB without admission.** With residency on:
 
 - A move of a graph out of FalkorDB (evicted, waiting, or being loaded) changes only its pin and asks
   for its load again; a load in flight is fenced off (the epoch) and the graph evicted again, to wait
-  its turn. A move of a graph in FalkorDB is admission-checked on its new key's master (§17).
+  its turn. A move of a graph in FalkorDB is admission-checked on its new key's master (§17). A move
+  decides which of the two it is under the capacity lock, from the graph's state read there: a load
+  that finishes meanwhile cannot turn it into a full copy that was never admitted.
 - The watermark reset after a restore reseeds in place what FalkorDB holds; a load in flight it
   would have reseeded goes back to the queue instead. A graph out of FalkorDB is at watermark 0, and
   the reset never touches it. The reset itself is not admitted, and stays so: it rewrites, in place,
@@ -530,8 +550,12 @@ oldest one has been under way is reported (§15).
   recovery must not wait behind loads for it.
 - A first seed is admitted: the projector's first pass over a key the platform owns is a load
   (above), and a new data source seeded from a view package admits its copy on its key's master
-  before its first window — when it would not fit, the job stops, resumable with nothing written,
-  saying which master and how much more it needs.
+  before its first window, under the capacity lock, and reserves the copy's estimate there (in the
+  aggregation write governor's ledger, which every pass counts) until the copy is verified or fails
+  for good; a stopped worker's lapses within two minutes. While that master is forking, loading its
+  dataset, taking a load or cannot be read, the seed waits, asking again every capacity interval;
+  when the copy would not fit, or its size is not known, the job stops, resumable with nothing
+  written, saying which master and how much more it needs.
 - Liveness finding a platform key its master lost (a restart without its data) marks the graph
   evicted (`lost`) rather than lowering it to 0 for the poll to reseed at once: its load is admitted
   like any other, on its next read, or by the next pass for an Always graph. A customer's key is
@@ -672,17 +696,21 @@ past the ceiling reads its own rows and calls nothing.
 ## 17. Placement: each new key on the master with the most room
 
 A platform key's hash tag alone decides its cluster slot, so a new key is placed by choosing its
-tag: on the master with the most room under its start mark after what is held there (the
-aggregation governor's reservations, and the loads and full projections in flight), among those
-free to take a load — none that is forking for persistence, loading its dataset, unreadable, or
-taking a load already — the first of the graph's platform keys (`gvp_<gid>{<tag>.<n>}`, `n` rising)
-that exists nowhere on the provider, is none of its retired keys, and hashes to that master's slots
-(`keymigrate.placed_key`, at most 4096 tries; one master: simply the first free key). When no key
-lands within the bound — a master that owns few slots, after a reshard onto it — the next master
-with the most room is tried, by the routes and by a pass's load alike. A master that sets no
-`maxmemory` has room unknown, not unlimited: it ranks after every master whose room is known, and of
-masters without a limit the least used comes first. The master's slots come from the client's slot
-map (`shard_capacity.master_slots`).
+tag: on the master with the most room under its start mark after what is held there (the aggregation
+governor's reservations, and the loads and full projections in flight), among those free to take a
+load — none that is forking for persistence, loading its dataset, unreadable, taking a load already,
+or kept that pass for a waiting load whose room is being made there (§12) — the first of the graph's
+platform keys (`gvp_<gid>{<tag>.<n>}`, `n` rising) that exists nowhere on the provider, is none of
+its retired keys, and hashes to that master's slots (`keymigrate.placed_key`, at most 4096 tries;
+one master: simply the first free key). When no key lands within the bound — a master that owns few
+slots, after a reshard onto it — the next master with the most room is tried, by the routes and by a
+pass's load alike. A master that sets no `maxmemory` has room unknown, not unlimited: it ranks after
+every master whose room is known, and of masters without a limit the least used comes first. So
+beside masters with a limit it takes a new key or a load only when none of them is free: a route's
+new key goes on the master with a limit and is admission-checked there (**409**
+`capacity_insufficient` when it is short), Always is room-checked there, and a load short of room
+there waits there, with room made for it (§12). None is sent to the master without a limit instead.
+The master's slots come from the client's slot map (`shard_capacity.master_slots`).
 
 - **A reload after eviction** goes onto a fresh key placed this way (§12), whatever master its old
   key was on. A graph whose rollups live in a dedicated graph keeps its key.
@@ -694,7 +722,8 @@ map (`shard_capacity.master_slots`).
 - **Placement, admission and the commit are one step** for a move or an Adopt: they run under the
   capacity pass's leader lock (`residency.admitting`), so neither a load a pass starts nor another
   route's write is admitted between the check and the commit, whose `projection_state` row (a reseed
-  at watermark 0) then reserves its room. A route waits up to 15 seconds for a pass to finish, then
+  at watermark 0) then reserves its room. A move takes the lock whatever the graph's state, and
+  reads that state under it. A route waits up to 15 seconds for a pass to finish, then
   answers **503** `lock_busy`.
 - **A graph's first key**: a blank model's is its data source's name (`blank_<ds>`, or the one its
   creator chose); with residency on its first seed is a load (§12), which places a fresh key. A
@@ -731,9 +760,11 @@ evicted, loaded and moved like any platform copy.
 - Refused as a move is: an unpinned graph (409 `projection_not_adopted` `unpinned`), a key other
   data sources read (409 `projection_not_adopted` `shared`: they would go on reading a key nobody
   writes), a dedicated rollup graph (422 `projection_mode_unsupported`), a running rollup job (409
-  `job_active`), a provider whose keys cannot be listed (503 `provider_unreachable`), version control
-  still being enabled (409 `bootstrapping`); and a graph already on a platform key (409
-  `already_adopted`), a fork (409 `not_for_forks`), an unknown graph (404).
+  `job_active`; checked again under the capacity lock, just before the commit, so one that starts
+  while Adopt waits for the lock is caught), a provider whose keys cannot be listed (503
+  `provider_unreachable`), version control still being enabled (409 `bootstrapping`); and a graph
+  already on a platform key (409 `already_adopted`), a fork (409 `not_for_forks`), an unknown graph
+  (404).
 - Recorded as `platform.versioning.projection_adopted` `{graphId, workspaceId, dataSourceId, from,
   to, externalDrift}`. The reseed is scheduled at once.
 

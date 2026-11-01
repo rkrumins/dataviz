@@ -499,9 +499,10 @@ async def set_graph_residency(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """Always (never evicted), Standard or Coldline (doc 17). Always on a graph whose key is not
-    in FalkorDB is admission-checked now: 409 ``capacity_insufficient``, naming the master and the
-    shortfall, when its load would not fit there; otherwise the class is set and its load asked
-    for. Recorded with the class before and after."""
+    in FalkorDB has its room checked now (room only: setting a class writes nothing): 409
+    ``capacity_insufficient``, naming the master and the shortfall, when its load would not fit
+    there; otherwise the class is set and its load asked for. Recorded with the class before and
+    after."""
     meta = await _graph_with_a_key(graph_id)
     wm = await get_versioning_service().projection_watermark(graph_id)
     cls, out = body.residency_class, wm["residency_state"] in ("evicted", "waiting_capacity")
