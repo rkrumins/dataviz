@@ -147,3 +147,35 @@ def test_a_merge_job_lands_and_one_refused_or_dead_hands_the_review_back(monkeyp
             assert result["commitId"]
             assert await svc.release_merging() == []
     _run(case)
+
+
+def test_a_merge_job_whose_review_merged_under_it_completes_with_that_merge(monkeypatch):
+    """A superseded attempt's merge lands between this attempt's look at the review and its merge:
+    the merge is refused (the review merged), and the job completes with that merge all the same."""
+    from backend.app.services.versioning import config as vconfig
+
+    monkeypatch.setattr(vconfig, "SYNC_PUBLISH_MAX_CHANGES", 0)
+
+    async def case(svc):
+        from backend.app.api.v1.endpoints.versioning import (get_import_export_service,
+                                                             get_versioning_service)
+
+        ie, api_svc = get_import_export_service(), get_versioning_service()
+        async with _client(PERMS) as c:
+            gid, fgid, pr = await _review(svc, c)
+            pinned = (await svc.get_graph(fgid))["main_head_commit_seq"]
+            r = await c.post(_merge_url(pr, "pulls"), json={"message": "raced"})
+            assert r.status_code == 202, r.text
+            looked, zombie = api_svc.get_pr, []
+
+            async def looks_then_the_zombie_lands(pr_id):
+                seen = await looked(pr_id)
+                if not zombie:
+                    zombie.append(await svc.merge_pr(pr_id=pr, actor="u_forker", message="zombie",
+                                                     pinned_seq=pinned, queued=True))
+                return seen
+            monkeypatch.setattr(api_svc, "get_pr", looks_then_the_zombie_lands)
+            result = await ie.run_fork_job(r.json()["jobId"])
+            assert result == {"commitId": zombie[0]}, result
+            assert (await ie.get_job(r.json()["jobId"]))["status"] == "completed"
+    _run(case)

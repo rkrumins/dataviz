@@ -4110,9 +4110,10 @@ async def update_from_parent(
                                                       "status": started})
     rules = await _rules_for_meta(session, ws_id, _meta)
     with _domain_errors():
+        # To the parent's head it was sized at: a publish of the parent since is the next update's.
         out = await svc.update_fork_from_parent(
             fork_graph_id=graph_id, actor=user.id, resolutions=resolutions, parent_label=label,
-            containment_edge_types=cset, ontology_rules=rules)
+            parent_seq=size["parent_seq"], containment_edge_types=cset, ontology_rules=rules)
     if not out["up_to_date"]:
         await _fork_updated(graph_id, user.id)
         await _record_fork_event(session, "updated", ws_id, graph_id, parent_id,
@@ -4138,7 +4139,8 @@ async def _fork_updated(graph_id: str, actor: str) -> None:
 
 async def _fork_from_job(job: dict) -> dict:
     """Run a fork's queued job as the route runs it inside the request — a refusal as the HTTP answer
-    the route gives — then what it sets off. On the versioning worker's transfer lane, so a merged
+    the route gives — then what it sets off, on every attempt that is not refused. On the versioning
+    worker's transfer lane, so a merged
     parent's projection is left to the projection lane (``nudge_projection``); a draft's follow-ups
     have no part in it."""
     if job["jobType"] == "fork_merge":
@@ -4159,8 +4161,8 @@ async def _fork_from_job(job: dict) -> dict:
                 containment_edge_types=cset, ontology_rules=rules)
     except HTTPException as exc:
         return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
-    if not out["up_to_date"]:
-        await _fork_updated(job["graphId"], job["actor"])
+    # Up to date too: an earlier attempt may have landed the update and died before this ran.
+    await _fork_updated(job["graphId"], job["actor"])
     return {"commitId": out["commit_id"], "parentSeq": out["parent_seq"], "wrote": out["wrote"],
             "upToDate": out["up_to_date"]}
 

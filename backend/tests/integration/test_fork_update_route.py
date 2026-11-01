@@ -88,6 +88,32 @@ def test_update_from_parent_needs_the_publish_permission():
     _run(case)
 
 
+def test_the_inline_update_takes_the_parent_head_it_was_sized_at(monkeypatch):
+    """The route sizes an update at the parent's head, then runs it there: a parent publish in
+    between is the next update's, never this one's — which was judged small at that size."""
+    from backend.app.services.versioning.service import GraphVersioningService
+
+    sized = GraphVersioningService.fork_update_size
+
+    async def case(svc):
+        async with _client(PERMS) as c:
+            gid, fgid = await _forked(svc, c, [_n("A")])
+            await svc.apply_ops(graph_id=gid, actor="alice", message="parent", ops=[_n("C")])
+            asked = (await svc.get_graph(gid))["main_head_commit_seq"]
+
+            async def size_then_the_parent_moves(self, **kwargs):
+                out = await sized(self, **kwargs)
+                await svc.apply_ops(graph_id=gid, actor="alice", message="between", ops=[_n("Z")])
+                return out
+            monkeypatch.setattr(GraphVersioningService, "fork_update_size", size_then_the_parent_moves)
+            r = await c.post(_url(fgid), json={})
+            assert r.status_code == 200, r.text
+            assert r.json()["parentSeq"] == asked
+            main = await svc.main_branch_id(fgid)
+            assert "Z" not in (await svc.materialize_state(graph_id=fgid, branch_id=main))["nodes"]
+    _run(case)
+
+
 def test_update_from_parent_answers_conflicts_and_refuses_a_graph_with_no_parent():
     async def case(svc):
         async with _client(PERMS) as c:
@@ -114,10 +140,18 @@ def test_update_from_parent_answers_conflicts_and_refuses_a_graph_with_no_parent
 
 def test_a_large_update_runs_as_a_job_one_at_a_time_pinned_to_the_parent_it_was_asked_of(monkeypatch):
     """Here every update that merges anything is large."""
+    from backend.app.api.v1.endpoints import versioning as ep
     from backend.app.services.versioning import config as vconfig
 
     monkeypatch.setattr(vconfig, "SYNC_PUBLISH_MAX_CHANGES", 0)
     updates = _recorder(monkeypatch)
+    set_off = []
+    followed = ep._fork_updated
+
+    async def follow(graph_id, actor):
+        set_off.append(graph_id)
+        await followed(graph_id, actor)
+    monkeypatch.setattr(ep, "_fork_updated", follow)
 
     async def case(svc):
         from backend.app.api.v1.endpoints.versioning import get_import_export_service
@@ -154,8 +188,9 @@ def test_a_large_update_runs_as_a_job_one_at_a_time_pinned_to_the_parent_it_was_
             assert sorted(nodes) == ["A", "B"] and nodes["A"]["displayName"] == "A fork"
             assert nodes["A"]["properties"] == {"w": 1}
 
+            assert set_off == [fgid]
             # Run again after its update landed (its worker died before it could say so): the next
-            # attempt writes nothing more, and completes.
+            # attempt writes nothing more, and completes — what an update sets off runs again.
             await svc.apply_ops(graph_id=gid, actor="alice", message="again", ops=[_u("A", "A", w=2)])
             r = await c.post(_url(fgid), json={})
             assert r.status_code == 202, r.text
@@ -167,6 +202,7 @@ def test_a_large_update_runs_as_a_job_one_at_a_time_pinned_to_the_parent_it_was_
             result = await ie.run_fork_job(again)            # ...died here; the next attempt runs
             got = await ie.get_job(again)
             assert (got["status"], got["attempt"], result["upToDate"]) == ("completed", 2, True), got
+            assert set_off == [fgid, fgid]
             syncs = [e for e in await svc.commit_log(graph_id=fgid) if e["kind"] == "sync_parent"]
             assert [e["commit_id"] for e in syncs][:1] == [landed["commit_id"]] and len(syncs) == 2
     _run(case)

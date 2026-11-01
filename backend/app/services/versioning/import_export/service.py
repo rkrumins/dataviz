@@ -734,13 +734,20 @@ class ImportExportService:
         job's summary, and a refusal — an update's conflicts, a merge no longer up to date — fails
         the job with it, through the fenced finish; a refused merge hands its review back
         (``merging`` → open) once the job has failed. Safe to run again: an update already landed
-        answers up to date, and a review already merged answers with its merge."""
+        answers up to date, and a review already merged answers with its merge — so too a merge
+        refused because the review merged under it, by a superseded attempt."""
         lease = lease or await lease_job(job_id)
         async with db.graphver_session() as s:
             row = await s.get(JobORM, job_id)
             job = {**(row.field_scope or {}), "jobType": row.job_type, "graphId": row.graph_id,
                    "workspaceId": row.workspace_id, "dataSourceId": row.data_source_id}
         result = await self._fork_hook(job)
+        if "error" in result and job["jobType"] == "fork_merge":
+            # Refused because the review merged under it — a superseded attempt's merge landed
+            # first: the hook answers with that merge.
+            pr = await self._svc.get_pr(job["prId"])
+            if pr is not None and pr["status"] == "merged":
+                result = await self._fork_hook(job)
         values: Dict[str, Any] = {"summary": result}
         if "error" in result:
             detail = result["error"].get("detail")

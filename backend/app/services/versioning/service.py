@@ -3857,6 +3857,9 @@ class GraphVersioningService:
                 await self._assert_writable(s, parent.id)   # the target; a frozen fork may propose
                 took = fork.main_head_commit_seq if pinned_seq is None else pinned_seq
                 await self._assert_up_to_date(s, fork, took, parent)
+                # Its approvals as they stand now (_approvals): a content commit on the fork after
+                # the head a job pinned makes them stale, though that head is what it merges — the
+                # reviewers look again.
                 squash, warnings = await self._squash_fork(
                     s, parent, fork, took, actor, message,
                     containment_edge_types=containment_edge_types, ontology_rules=ontology_rules,

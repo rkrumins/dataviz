@@ -386,8 +386,10 @@ stale.
 **Drafts on the fork** read as behind after the update (their base is the fork's head before it)
 and take it with Pull latest, as any change to the fork's `main`.
 
-**Large updates run as jobs.** The route counts first, in SQL: what the update would merge and the
-edges its cascades may delete, each query stopping past the threshold (`fork_update_size`). Past
+**Large updates run as jobs.** The route counts first, in SQL: what the update would merge, the
+edges its cascades may delete and the parent's edges its hierarchy check judges, each query
+stopping past the threshold (`fork_update_size`), and an update it runs in the request takes the
+parent's head it was sized at: a publish of the parent in between is the next update's. Past
 `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` (20,000) it queues a `fork_update` job on the versioning
 worker's transfer lane: **202** `{jobId, graphId, status}`, pinned to the parent's head now. It is
 fenced as a publish job: the fork's lifecycle and move locks shared, the fork writable and still in
@@ -395,8 +397,8 @@ the workspace, and one update of a fork pending or running at a time (**409 `job
 `GET …/graphs/{fork}/update-jobs/{jobId}`: what the route would have answered (`commitId`,
 `parentSeq`, `wrote`, `upToDate`), or its refusal — conflicts fail the job, with them in `error` (past
 100, the first 100, the seeds of their entities, and `total`); the caller resolves them and asks
-again. Run again after its update landed, a job answers up to date
-and writes nothing.
+again. Run again after its update landed, a job answers up to date, writes nothing, and runs again
+what an update sets off (the fork's canvas reads and its views' "data updated").
 
 The activity log records `workspace.versioning.fork_updated` `{forkParentGraphId, parentSeq,
 wrote}` for an update that ran, or `{…, jobId}` when it was queued (the person's action; what the
@@ -450,10 +452,14 @@ date, under the parent's lifecycle and move locks (shared) and the review's row 
 fork's head, and holds the review `merging`, so no other merge of it gets past (**409 `job_active`**)
 until the job ends. Where the data source's policy has someone else merge, whoever opened the review
 gets **403 `self_merge`** before anything is queued. The job merges the head it pinned, by the
-parent's rules as they are when it runs. Run again after its merge landed, it answers with the
-review's merge. Refused (the parent moved since, say), it fails with the route's answer and hands
-the review back at once (`approved`, or `mergeable`); one whose job died is handed back by the
-versioning worker's reaper (`release_merging`).
+parent's rules as they are when it runs, and its reviewers' approvals as they stand then: a content
+commit on the fork after the job was queued makes them stale, as on any review, though the job
+merges the head it pinned — it is refused (**409 `approval_required`**) for the reviewers to look
+again. Run again after its merge landed, it answers with the review's merge; so too when its merge
+is refused because a superseded attempt of it merged the review first. Refused (the parent moved
+since, say), it fails with the route's answer and hands the review back at once (`approved`, or
+`mergeable`); one whose job died is handed back by the versioning worker's reaper
+(`release_merging`).
 
 **What it costs.** On the same bench, merging a review of 100,000 changes (renames, new columns in
 tables, flow edits) as a job takes 18.8 s at a peak of 299 MB resident (98 MB before it); paged
