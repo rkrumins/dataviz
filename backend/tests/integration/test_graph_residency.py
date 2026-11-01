@@ -348,6 +348,31 @@ async def test_a_drop_that_fails_leaves_the_key_to_be_dropped_later(store, monke
     assert [(e["name"], e["movedBy"]) for e in ps.retired_keys] == [(key, "eviction")]
 
 
+async def test_an_eviction_never_puts_back_a_watermark_liveness_lowered(store, monkeypatch):
+    """Review finding 11: liveness lowers a graph's watermark without the projection lock. One that
+    landed between an eviction's read of the watermark and its compare-and-swap, with a read's
+    lease after it, had the eviction put the graph back at the higher watermark, over a key that
+    lost what it held. The swap now compares the watermark it read."""
+    from backend.app.services.versioning import cache_manager
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
+    gid = await _resident(svc, proj)
+    await get_broker_redis().delete(cache_manager._lease_key(gid))
+
+    async def liveness_resets_then_a_read(ds_id):          # between the read and the swap
+        await _set_ps(gid, projected_commit_seq=0, epoch=ProjectionStateORM.epoch + 1)
+        await cache_manager.acquire_lease(gid)
+        return False
+
+    monkeypatch.setattr(cache_manager, "_rollups_running", liveness_resets_then_a_read)
+    try:
+        assert await CacheManager(proj).evict(gid, drop_graph=_dropped, reason="pressure") is False
+    finally:
+        await get_broker_redis().delete(cache_manager._lease_key(gid))
+    assert (await _ps(gid)).projected_commit_seq == 0
+
+
 async def test_check_sync_skips_a_graph_out_of_falkordb_and_says_why(store, monkeypatch):
     """Review finding 10: Check sync scanned an evicted graph's dropped key (everything missing,
     or a 503), and a loading graph's half-written one; an eviction lasts days under residency."""

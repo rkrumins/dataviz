@@ -190,7 +190,10 @@ class CacheManager:
                     .where(ProjectionStateORM.graph_id == graph_id, *_evictable(),
                            ProjectionStateORM.residency != "always",
                            ProjectionStateORM.falkor_graph_name.is_not_distinct_from(name),
-                           ProjectionStateORM.falkor_provider.is_not_distinct_from(provider_id))
+                           ProjectionStateORM.falkor_provider.is_not_distinct_from(provider_id),
+                           # Liveness lowers it without the projection lock: the read's restore
+                           # (_read_since) must never put a watermark back that it lowered.
+                           ProjectionStateORM.projected_commit_seq == projected)
                     .values(status="evicted", projected_commit_seq=0, updated_at=_now(),
                             epoch=ProjectionStateORM.epoch + 1,
                             **({"evicted_reason": reason} if reason else {}))
