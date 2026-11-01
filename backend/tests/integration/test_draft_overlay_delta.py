@@ -2,8 +2,9 @@
 
 The provider's overlay *application* is proven without infra in test_draft_overlay_provider.py; this
 pins the two service methods that feed it against a real store: ``branch_overlay_delta`` (the draft's
-reader-shaped patch set — empty for a no-change draft) and ``aggregated_overlay_adjust`` (rolling a
-column→column lineage delta up to the table→table rollup via composed-containment ancestors).
+reader-shaped patch set — empty for a no-change draft) and ``ancestor_chains``, by which a rollup read
+places a flow (a column→column flow rolls up to the table→table cell via the draft's composed
+containment).
 """
 import asyncio
 import os
@@ -43,14 +44,18 @@ async def _run() -> None:
     assert await svc.branch_overlay_delta(graph_id=gid, branch_id=d0) == {
         "nodesUpsert": [], "nodesModified": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": [],
         "nodesNew": []}
-    assert await svc.aggregated_overlay_adjust(
-        graph_id=gid, branch_id=d0, source_urns=["A", "B"], target_urns=["A", "B"],
-        lineage_delta=[], containment_edge_types=CONT) == {}
 
-    # ── ancestor rollup: a column→column lineage delta maps to the table→table pair ──
-    adj = await svc.aggregated_overlay_adjust(
-        graph_id=gid, branch_id=d0, source_urns=["A", "B"], target_urns=["A", "B"],
-        lineage_delta=[("A.c", "B.c", "LINEAGE", +1)], containment_edge_types=CONT)
+    # ── ancestor rollup: a column→column flow is placed at the table→table pair, by its ends'
+    #    chains on the draft's composed containment ──
+    from backend.app.providers.draft_overlay_provider import _rollup_cells
+    from backend.common.models.graph import GraphEdge
+    chains = await svc.ancestor_chains(graph_id=gid, branch_id=d0, urns=["A.c", "B.c"],
+                                       containment_edge_types=CONT)
+    assert chains == {"A.c": ["A"], "B.c": ["B"]}, chains
+    adj = {}
+    _rollup_cells([GraphEdge.model_construct(id="f", sourceUrn="A.c", targetUrn="B.c",
+                                             edgeType="LINEAGE", properties={})],
+                  +1, chains, {"A", "B"}, {"A", "B"}, adj)
     assert adj.get(("A", "B"), {}).get("weight") == 1, adj
     assert "LINEAGE" in adj[("A", "B")]["types"]
     assert ("B", "A") not in adj                                  # direction respected
@@ -158,4 +163,4 @@ def test_draft_overlay_delta_e2e():
 
 if __name__ == "__main__":
     asyncio.run(_run())
-    print("draft overlay delta (branch_overlay_delta + aggregated_overlay_adjust) e2e: OK")
+    print("draft overlay delta (branch_overlay_delta + ancestor_chains) e2e: OK")

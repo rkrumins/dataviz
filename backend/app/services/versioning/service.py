@@ -4243,7 +4243,8 @@ class GraphVersioningService:
     ) -> Dict[str, List[str]]:
         """Each urn's containment chain on a branch — ``{urn: [parent, …, root]}``, ``[]`` for a root —
         read from the branch's own state (a draft's moves included). An urn that is not a live node
-        here is absent (UNKNOWN), never a root. Bounded by hierarchy depth; batched per level."""
+        here is absent (UNKNOWN), never a root. Bounded by hierarchy depth; batched per level. A
+        fork finds a node it inherited by its urn among its layers' rows (:meth:`_layer_graph_ids`)."""
         cset = {t.upper() for t in (containment_edge_types or [])}
         if not urns or not cset:
             return {}
@@ -4254,10 +4255,11 @@ class GraphVersioningService:
                 if u.startswith("gv:"):
                     cand.setdefault(u[3:], set()).add(u)
                 cand.setdefault(u, set()).add(u)
+            graphs = await self._layer_graph_ids(s, graph_id)
             for chunk in _chunks(list(urns), _IN_LIST_MAX):
                 for eid, urn in (await s.execute(
                     select(NodeVersionORM.entity_id, NodeVersionORM.urn).where(
-                        NodeVersionORM.graph_id == graph_id, NodeVersionORM.urn.in_(chunk),
+                        NodeVersionORM.graph_id.in_(graphs), NodeVersionORM.urn.in_(chunk),
                     ).distinct()
                 )).all():
                     cand.setdefault(eid, set()).add(urn)
@@ -5728,57 +5730,6 @@ class GraphVersioningService:
             return [_graphedge_dict(eid, v, {e: e for e in _edge_src_tgt(v)})
                     for eid, v in values.items() if v]
         return [_graphnode_dict(eid, v.get("urn") or f"gv:{eid}", v) for eid, v in values.items() if v]
-
-    async def aggregated_overlay_adjust(
-        self, *, graph_id: str, branch_id: str, source_urns: Sequence[str],
-        target_urns: Optional[Sequence[str]], lineage_delta: Sequence[Tuple[str, str, Optional[str], int]],
-        containment_edge_types: Sequence[str],
-    ) -> Dict[Tuple[str, str], Dict[str, object]]:
-        """Rollup adjustments for a draft's LINEAGE-edge delta, so a read-overlay can patch main's
-        materialized aggregated edges instead of recomputing them. ``lineage_delta`` is a list of
-        ``(sourceUrn, targetUrn, edgeType, sign)`` with ``sign`` +1 (draft added) / -1 (draft removed).
-        Each maps to rollup ``(Sx, Tx)`` for every requested **visible** source ``Sx`` that is an
-        ancestor-or-self of ``sourceUrn`` and target ``Tx`` ancestor-or-self of ``targetUrn`` (``Sx`` ≠
-        ``Tx``) — the same ancestor-pair semantics the FalkorDB materialiser bakes in, evaluated on the
-        draft's COMPOSED containment so re-parenting in the draft is honoured. Bounded by the delta size.
-
-        One side may be left open, as the base read allows: no targets means every ancestor-or-self of
-        ``targetUrn`` (every cell out of the sources), no sources every ancestor-or-self of
-        ``sourceUrn``. The named side is walked first, and a delta edge that misses it costs no walk
-        of the other."""
-        cset = {t.upper() for t in (containment_edge_types or [])}
-        src_set = set(source_urns or [])
-        tgt_set = set(target_urns or [])
-        out: Dict[Tuple[str, str], Dict[str, object]] = {}
-        if not (src_set or tgt_set):
-            return out
-        async with self._session() as s:
-            async def _visible_ancestors(urn: str, visible: Optional[set]) -> set:
-                """``urn``'s ancestors-or-self among ``visible``; all of them when it is None."""
-                eid = await self._eid_for_urn(s, graph_id, branch_id, urn)
-                hit = {urn} if visible is None else {urn} & visible  # the node itself, if it is a visible container
-                if eid is not None and cset:
-                    anc_eids, _ = await self._containment_ancestors(s, graph_id, branch_id, {eid}, cset, None)
-                    vals = await self._current_values(s, graph_id, branch_id, anc_eids)
-                    urns = {((vals.get(e) or {}).get("urn") or f"gv:{e}") for e in anc_eids}
-                    hit |= urns if visible is None else urns & visible
-                return hit
-            for su, tu, et, sign in lineage_delta:
-                if src_set:
-                    sxs = await _visible_ancestors(su, src_set)
-                    txs = await _visible_ancestors(tu, tgt_set or None) if sxs else set()
-                else:
-                    txs = await _visible_ancestors(tu, tgt_set)
-                    sxs = await _visible_ancestors(su, None) if txs else set()
-                for sx in sxs:
-                    for tx in txs:
-                        if sx == tx:
-                            continue
-                        slot = out.setdefault((sx, tx), {"weight": 0, "types": set()})
-                        slot["weight"] = int(slot["weight"]) + sign
-                        if et:
-                            slot["types"].add(et)            # type: ignore[union-attr]
-        return out
 
     async def diff_branch_summary(
         self, *, graph_id: str, branch_id: str, containment_edge_types, limit: int = 200,
@@ -9216,13 +9167,9 @@ class GraphVersioningService:
         """Resolve a seed urn to its live node's entity_id on a branch (bounded via
         ix_nv_urn + the ``gv:<eid>`` fast path); ``None`` if absent/tombstoned/not a node. A fork
         (its ``main``, or a draft on it) finds a node it only inherited: the candidates come from
-        the rows of every graph its reads compose (:meth:`_layers`)."""
+        the rows of every graph its reads compose (:meth:`_layer_graph_ids`)."""
         cand: List[str] = [urn[3:]] if urn.startswith("gv:") else []
-        graphs = [graph_id]
-        graph = await s.get(GraphORM, graph_id)
-        if graph is not None and graph.fork_parent_graph_id:
-            main_id = await self._main_branch_id(s, graph_id)
-            graphs = [gid for gid, _b, _at in await self._layers(s, graph_id, main_id, 0)]
+        graphs = await self._layer_graph_ids(s, graph_id)
         cand.extend((await s.execute(
             select(NodeVersionORM.entity_id).where(
                 NodeVersionORM.graph_id.in_(graphs), NodeVersionORM.urn == urn,
@@ -9236,6 +9183,15 @@ class GraphVersioningService:
             if p is not None and not _is_edge_payload(p) and (p.get("urn") == urn or f"gv:{eid}" == urn):
                 return eid
         return None
+
+    async def _layer_graph_ids(self, s, graph_id: str) -> List[str]:
+        """The graphs whose rows a read on ``graph_id`` composes: itself, and for a fork every graph
+        up its chain (:meth:`_layers`) — where a node it only inherited has its version rows."""
+        graph = await s.get(GraphORM, graph_id)
+        if graph is None or not graph.fork_parent_graph_id:
+            return [graph_id]
+        main_id = await self._main_branch_id(s, graph_id)
+        return [gid for gid, _b, _at in await self._layers(s, graph_id, main_id, 0)]
 
     async def entity_recorded(self, *, graph_id: str, entity_id: str) -> bool:
         """Whether main holds any version of the entity, live OR deleted — how the write-through

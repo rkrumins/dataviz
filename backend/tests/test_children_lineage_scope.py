@@ -141,9 +141,6 @@ class _FakeSvc:
     async def overlay_payloads(self, *, graph_id, branch_id, entity_ids):
         return []
 
-    async def aggregated_overlay_adjust(self, **kw):
-        return {}
-
 
 def _lin(eid, s, t):
     return {"id": eid, "sourceUrn": s, "targetUrn": t, "edgeType": "LINEAGE",

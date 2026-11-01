@@ -4,8 +4,8 @@ A draft opened off main must read IDENTICALLY to main until it changes something
 changed entities differ. We prove this against a stub "main" provider with a fixed graph: an empty
 delta is a byte-for-byte pass-through (the invariant), and add/remove/edit deltas patch exactly the
 affected nodes/edges/rollups and nothing else. The delta-computation service methods
-(``branch_overlay_delta`` / ``aggregated_overlay_adjust``) are stubbed here and exercised against live
-Postgres elsewhere — this test pins the provider's overlay *application* logic.
+(``branch_overlay_delta``, and the containment chains rollups are placed by) are stubbed here and
+exercised against live Postgres elsewhere — this test pins the provider's overlay *application* logic.
 """
 import asyncio
 
@@ -18,6 +18,10 @@ from backend.common.models.graph import (
 from backend.app.providers.draft_overlay_provider import (
     DraftOverlayProvider, _DeltaCache, _OverlayDelta,
 )
+
+
+# The stub tree's containment chains: A ⊃ A.c, B ⊃ B.c.
+CHAINS = {"A.c": ["A"], "B.c": ["B"], "A": [], "B": []}
 
 
 class StubMain:
@@ -77,14 +81,17 @@ class StubMain:
         return TraceResult(nodes=list(self.nodes.values()), edges=[],
                            focus=TraceFocus(urn=urn, level=0, entityType="Table"), effectiveLevel=0)
 
+    async def get_ancestor_chains(self, urns):
+        return {u: CHAINS[u] for u in urns if u in CHAINS}
+
     async def expand_aggregated(self, *a, **kw):
         return TraceResult(nodes=list(self.nodes.values()), edges=[],
                            focus=TraceFocus(urn="A", level=0, entityType="Table"), effectiveLevel=0)
 
 
 class FakeSvc:
-    def __init__(self, delta, adjust=None, payloads=None):
-        self._delta, self._adjust = delta, adjust or {}
+    def __init__(self, delta, payloads=None):
+        self._delta = delta
         self._payloads = payloads or {}            # entity id -> the draft's value, reader-shaped
         self.version = (object(),)                 # a fresh draft per stub: nothing cached is shared
         self.builds = 0
@@ -101,15 +108,15 @@ class FakeSvc:
         self.loads.append(list(entity_ids))
         return [self._payloads[e] for e in entity_ids if e in self._payloads]
 
-    async def aggregated_overlay_adjust(self, **kw):
-        return self._adjust
+    async def ancestor_chains(self, *, graph_id, branch_id, urns, containment_edge_types, as_of_seq=None):
+        return {u: CHAINS[u] for u in urns if u in CHAINS}
 
 
 _EMPTY = {"nodesUpsert": [], "nodesRemove": [], "edgesUpsert": [], "edgesRemove": []}
 
 
-def _mk(base, delta, adjust=None):
-    p = DraftOverlayProvider(base, svc=FakeSvc(delta, adjust), graph_id="g", branch_id="d")
+def _mk(base, delta):
+    p = DraftOverlayProvider(base, svc=FakeSvc(delta), graph_id="g", branch_id="d")
     p.set_containment_edge_types(["CONTAINS"])
     return p
 
@@ -138,15 +145,13 @@ async def _run() -> None:
 
     # ── added lineage edge ⇒ that rollup +1, nothing else moves ─────────────────
     p2 = _mk(base, {**_EMPTY, "edgesUpsert": [
-        {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]},
-        adjust={("A", "B"): {"weight": +1, "types": {"LINEAGE"}}})
+        {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]})
     agg2 = await p2.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"])
     assert {(e.source_urn, e.target_urn): e.edge_count for e in agg2.aggregated_edges} == {("A", "B"): 2}
 
     # ── removed base lineage edge ⇒ rollup drops to 0 (edge disappears) ─────────
     p3 = _mk(base, {**_EMPTY, "edgesRemove": [
-        {"id": "lin1", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]},
-        adjust={("A", "B"): {"weight": -1, "types": {"LINEAGE"}}})
+        {"id": "lin1", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]})
     agg3 = await p3.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"])
     assert agg3.aggregated_edges == []
 
@@ -233,8 +238,7 @@ def test_a_lineage_delta_keeps_the_base_answers_freshness():
             })
 
     p = _mk(_ShortMain(), {**_EMPTY, "edgesUpsert": [
-        {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]},
-        adjust={("A", "B"): {"weight": +1, "types": {"LINEAGE"}}})
+        {"id": "lin2", "sourceUrn": "A.c", "targetUrn": "B.c", "edgeType": "LINEAGE", "confidence": 1.0, "properties": {}}]})
     agg = asyncio.run(p.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"]))
 
     assert {(e.source_urn, e.target_urn): e.edge_count for e in agg.aggregated_edges} == {("A", "B"): 2}
@@ -415,20 +419,15 @@ class _EdgesMain(_CountingMain):
 
 
 class _EdgeSvc(_ChainSvc):
-    """Loads the overlay's value of an edge, and records the rollups it is asked to adjust."""
+    """Loads the overlay's value of an edge."""
 
     def __init__(self, delta, values):
         super().__init__(delta)
         self.values = values
-        self.adjusted = []
 
     async def overlay_payloads(self, *, graph_id, branch_id, entity_ids, kind="node"):
         self.loads.append(list(entity_ids))
         return [self.values[e] for e in entity_ids if e in self.values] if kind == "edge" else []
-
-    async def aggregated_overlay_adjust(self, *, lineage_delta, **kw):
-        self.adjusted.append(sorted(lineage_delta))
-        return {}
 
 
 def _edged(delta, values):
@@ -450,7 +449,7 @@ def test_an_edge_changed_where_it_runs_is_served_and_counted_as_main_counts_it()
         main = _EdgesMain()
         agg = await p.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"])
         assert [(e.source_urn, e.target_urn, e.edge_count) for e in agg.aggregated_edges] == [("A", "B", 1)]
-        assert svc.adjusted == []
+        assert svc.chains_asked == []                        # nothing to place
         assert await p.get_node_degrees(URNS, ["LINEAGE"], include_rollups=True) == \
             await main.get_node_degrees(URNS, ["LINEAGE"], include_rollups=True)
         assert (await p.get_node("A")).child_count == 1
@@ -472,8 +471,9 @@ def test_an_edge_the_overlay_moved_is_counted_where_it_runs_now():
         flow = _was(_lin("lin1", "B.c", "A.c"), s="A.c", t="B.c")
         cont = _was(_lin("cA", "B", "A.c", "CONTAINS"), s="A")
         p, svc = _edged({**_EMPTY, "edgesUpsert": [flow, cont]}, {})
-        await p.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"])
-        assert svc.adjusted == [[("A.c", "B.c", "LINEAGE", -1), ("B.c", "A.c", "LINEAGE", 1)]]
+        agg = await p.get_aggregated_edges_between(["A", "B"], ["A", "B"], None, ["CONTAINS"], ["LINEAGE"])
+        # Off where main counted it (A, B), on where it runs now (B, A).
+        assert [(e.source_urn, e.target_urn, e.edge_count) for e in agg.aggregated_edges] == [("B", "A", 1)]
         got = await p.get_node_degrees(["A.c", "B.c"], ["LINEAGE"])
         assert got == {"A.c": {"in": 1, "out": 0}, "B.c": {"in": 0, "out": 1}}
         assert ((await p.get_node("A")).child_count, (await p.get_node("B")).child_count) == (0, 2)

@@ -19,7 +19,7 @@ import asyncio
 import copy
 import logging
 from collections import ChainMap, OrderedDict
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, TypeVar
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 from backend.app.services.versioning import config as vconfig
 from backend.common.interfaces.provider import resolve_identities_by_query
@@ -244,6 +244,36 @@ def _line(key: tuple) -> tuple:
     return key[0], key[1], key[3]
 
 
+def _ends(flows: List[GraphEdge]) -> List[str]:
+    return sorted({u for e in flows for u in (e.source_urn, e.target_urn)})
+
+
+def _rollup_cells(flows: List[GraphEdge], sign: int, chains: Dict[str, List[str]],
+                  sources: set, targets: set, out: Dict[Tuple[str, str], Dict[str, Any]]) -> None:
+    """Move rollup cells ``out`` by ``flows``, each counted ``sign``, as the materialiser rolls a
+    flow up: into every cell (Sx, Tx), Sx ≠ Tx, where Sx is its source or a container above it
+    among ``sources`` and Tx its target or one above it among ``targets``; no sources (or targets)
+    named means every one. ``chains`` places the ends (``{urn: [parent, …, root]}``); an end with
+    none is not a live node there, and only places itself. Pure CPU: no query."""
+    for e in flows:
+        sxs = {e.source_urn, *chains.get(e.source_urn, ())}
+        if sources:
+            sxs &= sources
+        if not sxs:
+            continue
+        txs = {e.target_urn, *chains.get(e.target_urn, ())}
+        if targets:
+            txs &= targets
+        for sx in sxs:
+            for tx in txs:
+                if sx == tx:
+                    continue
+                slot = out.setdefault((sx, tx), {"weight": 0, "types": set()})
+                slot["weight"] += sign
+                if e.edge_type:
+                    slot["types"].add(e.edge_type)
+
+
 class _DeltaCache:
     """This process's recent overlay deltas, keyed by what a delta depends on
     (``GraphVersioningService.overlay_version``): a draft's or fork's reads share one delta until it
@@ -381,14 +411,15 @@ class DraftOverlayProvider:
         return await self._svc.overlay_payloads(
             graph_id=self._gid, branch_id=self._branch, entity_ids=entity_ids, kind="edge")
 
-    async def _chains(self, d: _OverlayDelta, kind: str, urns: List[str]) -> Dict[str, List[str]]:
-        """``urns``' containment chains on this overlay's own state (``{urn: [parent, …, root]}``,
-        ``[]`` for a root, absent when not a live node), for a set of urns its patch set fixes,
-        which ``kind`` names: looked up once per patch set in one batched walk, and kept with it,
-        so later reads of it place them without a query."""
+    async def _chains(self, d: _OverlayDelta, kind: str, urns: List[str],
+                      on: Any = None) -> Dict[str, List[str]]:
+        """``urns``' containment chains (``{urn: [parent, …, root]}``, ``[]`` for a root, absent
+        when not a live node) on this overlay's own state, or on the store's (``on=self._base``),
+        for a set of urns its patch set fixes, which ``kind`` names: looked up once per patch set
+        in one batched walk, and kept with it, so later reads of it place them without a query."""
         task = d.shared.get(kind)
         if task is None or task.get_loop() is not asyncio.get_running_loop():
-            task = d.shared[kind] = asyncio.ensure_future(self.get_ancestor_chains(urns))
+            task = d.shared[kind] = asyncio.ensure_future((on or self).get_ancestor_chains(urns))
         try:
             return await asyncio.shield(task)
         except Exception:
@@ -692,11 +723,21 @@ class DraftOverlayProvider:
         d = await self._delta_()
         if not d.lineage_changed:
             return base                                      # no lineage delta ⇒ main's rollups verbatim
-        delta = ([(e.source_urn, e.target_urn, e.edge_type, +1) for e in d.lineage_added]
-                 + [(e.source_urn, e.target_urn, e.edge_type, -1) for e in d.lineage_removed])
-        adjust = await self._svc.aggregated_overlay_adjust(
-            graph_id=self._gid, branch_id=self._branch, source_urns=source_urns,
-            target_urns=target_urns, lineage_delta=delta, containment_edge_types=containment_edges)
+        # A flow the overlay added goes on where it runs, under its ends' containers on the
+        # overlay's own state; one it removed (or moved away) comes off where the store counted
+        # it, under the store's. Both sets of chains are looked up once per patch set.
+        adjust: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        sources, targets = set(source_urns or []), set(target_urns or [])
+        if sources or targets:
+            if d.lineage_added:
+                _rollup_cells(d.lineage_added, +1,
+                              await self._chains(d, "flows_added", _ends(d.lineage_added)),
+                              sources, targets, adjust)
+            if d.lineage_removed:
+                _rollup_cells(d.lineage_removed, -1,
+                              await self._chains(d, "flows_removed", _ends(d.lineage_removed),
+                                                 on=self._base),
+                              sources, targets, adjust)
         by_pair = {(e.source_urn, e.target_urn): e for e in base.aggregated_edges}
         for (su, tu), adj in adjust.items():
             cur = by_pair.get((su, tu))
@@ -771,8 +812,7 @@ class DraftOverlayProvider:
             v["in"], v["out"] = max(0, v["in"]), max(0, v["out"])
         if include_rollups and added:
             try:
-                chains = await self.get_ancestor_chains(
-                    sorted({u for e in added for u in (e.source_urn, e.target_urn)}))
+                chains = await self._chains(d, "flows_added", _ends(d.lineage_added))
             except Exception:
                 for v in out.values():
                     v.pop("rollupIn", None)

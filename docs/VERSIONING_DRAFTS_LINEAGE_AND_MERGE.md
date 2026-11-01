@@ -86,9 +86,10 @@ stub, so a draft had no rolled-up lineage at any zoom — hence "5 on screen."
 - Delta source: new `GraphVersioningService.branch_overlay_delta(graph_id, branch_id)` — reader-shaped
   upserts/removes (nodes + edges), bounded by draft size, empty for a no-change draft.
 - Aggregated overlay: `get_aggregated_edges_between` takes the base's rollups and adjusts them by the
-  draft's lineage-edge delta via `GraphVersioningService.aggregated_overlay_adjust` (ancestor-pair
-  rollup of added/removed lineage edges, composed-containment aware). No lineage delta ⇒ main's
-  rollups verbatim.
+  draft's lineage-edge delta (`_rollup_cells`, ancestor-pair rollup): an added flow goes on under its
+  ends' containers on the draft's composed containment, a removed one comes off under the base's.
+  Both sets of chains are looked up once per patch set (`ancestor_chains`, batched) and kept with
+  it, so each read places the flows in Python. No lineage delta ⇒ main's rollups verbatim.
 - Node/edge/children/top-level/trace reads delegate to base + `O(delta)` patch helpers; **writes**
   delegate to an internal `VersionedBranchProvider` (commit to the draft, unchanged).
 - Routing: `context_engine.py` sends a live draft to `DraftOverlayProvider`; main + as-of paths
@@ -230,7 +231,7 @@ All backend versioning checks (run with `GRAPHVER_E2E=1`, `PYTHONPATH=<repo>`, a
 | `backend/tests/test_changeset_materialize.py` | none | ⭐ update-as-patch (the §3.3 fix) |
 | `backend/tests/test_node_property_hygiene.py` | none | §3.2 reserved-key leak + invariant |
 | `backend/tests/test_draft_overlay_provider.py` | none | §3.1 overlay identity + delta application |
-| `backend/tests/integration/test_draft_overlay_delta.py` | PG | §3.1 `branch_overlay_delta`/`aggregated_overlay_adjust` |
+| `backend/tests/integration/test_draft_overlay_delta.py` | PG | §3.1 `branch_overlay_delta`/`ancestor_chains` |
 | `backend/tests/integration/test_repair_revert_commit.py` | PG | §3.4 revert restores a truncated node |
 | `backend/tests/integration/test_versioning_draft_read_routing.py` | PG | draft→overlay / main routing |
 | `backend/tests/integration/test_versioning_projection.py` | PG (fake Falkor) | projection seed/incremental/reseed |
