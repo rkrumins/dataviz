@@ -268,8 +268,8 @@ reconciles **live node/edge counts** between Postgres and FalkorDB and bounded-h
 (`projection.py:742-816`). It is best-effort — any count failure skips the check.
 
 - **PG counts** come from `entity_heads` via `reconcile.pg_live_counts` (the single source, shared
-  with the reconciler), but **only for a non-fork main that is fully caught up** (`_pg_live_counts`,
-  `projection.py:720-733`); a fork's composed count is O(graph), a lagging head verifies on catch-up.
+  with the reconciler), but **only for a main that is fully caught up** (`_pg_live_counts`); a
+  lagging head verifies on catch-up. A fork is never projected (§4).
 - **FalkorDB counts** come from `reconcile.falkor_counts` (`projection.py:735-740`), which excludes
   `:AGGREGATED` and meta nodes.
 - **FalkorDB has *more* than committed main** (`projection.py:773-794`): first `_sweep_tombstoned`

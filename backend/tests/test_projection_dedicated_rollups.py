@@ -207,7 +207,7 @@ def _reconcile(monkeypatch, *, expected_edges, actual_edges, node_fp=1):
         return True
 
     monkeypatch.setattr(proj, "_write_rollup_deltas", write_rollup_deltas)
-    out = asyncio.run(proj._reconcile_in_place(client, "g1", "main1", 2, False, {}))
+    out = asyncio.run(proj._reconcile_in_place(client, "g1", "main1", 2, {}))
     return out, _rollup_queries(client.queries) + written
 
 
