@@ -182,6 +182,10 @@ def _scrape(monkeypatch, *, enabled=None, token=None, headers=None):
 
     from backend.app.api.v1.endpoints import metrics as route
 
+    async def no_job_store(_backend):          # these are about the door, not the job store
+        return None
+
+    monkeypatch.setattr(route, "_sample_job_backlog", no_job_store)
     for name, value in (("METRICS_ENABLED", enabled), ("METRICS_TOKEN", token)):
         monkeypatch.delenv(name, raising=False)
         if value is not None:
@@ -391,6 +395,41 @@ def test_sampling_never_fails_a_scrape():
     from backend.app.api.v1.endpoints import metrics as metrics_ep
 
     metrics_ep._sample_process_counters(_Broken())    # and never raises
+
+
+def test_the_job_lanes_queues_reach_the_scrape(monkeypatch):
+    """The versioning lanes serve no HTTP, so the web tier reports their queues, read from
+    ``graphver.jobs`` at scrape: what each lane runs, what it could claim and how long the oldest
+    has waited. The transfer lane's optional KEDA scaler reads the first two."""
+    import contextlib
+
+    from backend.app.api.v1.endpoints import metrics as metrics_ep
+    from backend.app.services.versioning import job_lease
+
+    async def backlog(_s):
+        return {"transfer": {"claimable": 3, "oldestClaimableSecs": 42, "running": 4},
+                "bootstrap": {"claimable": 0, "oldestClaimableSecs": None, "running": 1}}
+
+    @contextlib.asynccontextmanager
+    async def session():
+        yield object()
+
+    monkeypatch.setattr(job_lease, "claimable_backlog", backlog)
+    registry = mp.PrometheusBackend()
+    asyncio.run(metrics_ep._sample_job_backlog(registry, session_factory=session))
+    out = registry.render()
+    assert 'versioning_jobs_running{lane="transfer"} 4' in out
+    assert 'versioning_jobs_claimable{lane="transfer"} 3' in out
+    assert 'versioning_jobs_oldest_claimable_seconds{lane="transfer"} 42' in out
+    assert 'versioning_jobs_oldest_claimable_seconds{lane="bootstrap"} 0' in out
+
+    @contextlib.asynccontextmanager
+    async def unreachable():
+        raise ConnectionRefusedError("the job store is down")
+        yield
+
+    asyncio.run(metrics_ep._sample_job_backlog(registry, session_factory=unreachable))
+    assert registry.render() == out, "an unreachable store never fails a scrape"
 
 
 def test_an_ease_is_counted_where_it_is_decided():
