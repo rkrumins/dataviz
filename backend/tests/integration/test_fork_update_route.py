@@ -20,6 +20,9 @@ from backend.tests.integration.test_fork_overlay_delta import _n, _u
 pytestmark = [pytest.mark.integration, pytest.mark.skipif(
     not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")]
 
+#: Update from parent writes the fork's main, so it takes publish, as sync and publish do.
+PERMS = ("workspace:datasource:read", "workspace:datasource:manage", "workspace:datasource:publish")
+
 
 def _url(gid):
     return f"/api/v1/{WS}/versioning/graphs/{gid}/update-from-parent"
@@ -52,7 +55,7 @@ def test_update_from_parent_answers_its_commit_and_is_recorded(monkeypatch):
     updates = _recorder(monkeypatch)
 
     async def case(svc):
-        async with _client() as c:
+        async with _client(PERMS) as c:
             gid, fgid = await _forked(svc, c, [_n("A"), _n("B")])
             await svc.apply_ops(graph_id=gid, actor="alice", message="parent", ops=[_n("C")])
             head = (await svc.get_graph(gid))["main_head_commit_seq"]
@@ -72,9 +75,22 @@ def test_update_from_parent_answers_its_commit_and_is_recorded(monkeypatch):
     _run(case)
 
 
+def test_update_from_parent_needs_the_publish_permission():
+    async def case(svc):
+        async with _client(PERMS) as c:
+            gid, fgid = await _forked(svc, c, [_n("A")])
+            await svc.apply_ops(graph_id=gid, actor="alice", message="parent", ops=[_n("C")])
+        async with _client(PERMS[:2]) as c:                     # read and manage, no publish
+            r = await c.post(_url(fgid), json={})
+            assert r.status_code == 403, r.text
+            assert r.json()["detail"]["permission"] == "workspace:datasource:publish"
+            assert (await svc.update_fork_from_parent(fork_graph_id=fgid, actor="x"))["wrote"] == 0
+    _run(case)
+
+
 def test_update_from_parent_answers_conflicts_and_refuses_a_graph_with_no_parent():
     async def case(svc):
-        async with _client() as c:
+        async with _client(PERMS) as c:
             gid, fgid = await _forked(svc, c, [_n("A")])
             await svc.apply_ops(graph_id=fgid, actor="bob", message="own", ops=[_u("A", "A fork")])
             await svc.apply_ops(graph_id=gid, actor="alice", message="parent", ops=[_u("A", "A parent")])
@@ -108,7 +124,7 @@ def test_a_large_update_runs_as_a_job_one_at_a_time_pinned_to_the_parent_it_was_
         from backend.app.services.versioning.import_export.import_worker import lease_job
 
         ie = get_import_export_service()
-        async with _client() as c:
+        async with _client(PERMS) as c:
             gid, fgid = await _forked(svc, c, [_n("A"), _n("B")])
             main = await svc.main_branch_id(fgid)
             await svc.apply_ops(graph_id=fgid, actor="bob", message="own", ops=[_u("A", "A fork")])
@@ -165,7 +181,7 @@ def test_an_update_job_that_finds_conflicts_fails_with_them(monkeypatch):
         from backend.app.api.v1.endpoints.versioning import get_import_export_service
 
         ie = get_import_export_service()
-        async with _client() as c:
+        async with _client(PERMS) as c:
             gid, fgid = await _forked(svc, c, [_n("A")])
             await svc.apply_ops(graph_id=fgid, actor="bob", message="own", ops=[_u("A", "A fork")])
             await svc.apply_ops(graph_id=gid, actor="alice", message="parent", ops=[_u("A", "A parent")])

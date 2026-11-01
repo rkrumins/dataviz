@@ -343,3 +343,62 @@ def test_an_update_that_writes_nothing_keeps_the_forks_review_approved():
             meta = await svc.get_pr(pr)
             assert (meta["approval_status"], meta["stale_approved_by"]) == ("pending", ["carol"])
     _run(case)
+
+
+# ── what a resolution may do, and the gate on what an update writes ──────────────────────────
+def test_a_resolution_for_something_not_in_conflict_is_refused():
+    """A resolution settles a conflict the update raised, and nothing else: one for an entity in no
+    conflict is refused, naming it, and nothing is written."""
+    from backend.app.services.versioning.errors import ResolutionsWithoutConflict
+
+    async def case(svc):
+        async with _projected(svc) as root:
+            gid = await root.make([_n("A"), _n("B")])
+            fgid, _fmain = await _fork(svc, gid)
+            await svc.apply_ops(graph_id=fgid, actor="bob", message="own", ops=[_u("A", "A fork")])
+            await root.edit([_u("A", "A parent"), _u("B", "B parent")])
+            head = (await svc.get_graph(fgid))["main_head_commit_seq"]
+            with pytest.raises(ForkUpdateConflicts) as exc:
+                await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob")
+            settled = {"A": {**exc.value.seeds["A"], "displayName": "A both"}}
+            with pytest.raises(ResolutionsWithoutConflict) as refused:
+                await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob", resolutions={
+                    **settled, "B": None, "X1": {"urn": "X1", "entityType": "Table"}})
+            assert refused.value.status_code == 422
+            assert refused.value.detail["ids"] == ["B", "X1"]
+            assert (await svc.get_graph(fgid))["main_head_commit_seq"] == head
+            assert (await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob",
+                                                      resolutions=settled))["wrote"] == 1
+    _run(case)
+
+
+def test_an_update_that_would_write_an_untyped_or_undeclared_node_is_refused_by_the_gate():
+    """What an update writes faces the gate every write does: nothing created untyped, and under a
+    strict ontology no undeclared type."""
+    from backend.app.services.versioning.ontology import EntityRule, OntologyRules
+    from backend.app.services.versioning.service import OntologyViolation
+
+    async def case(svc):
+        async with _projected(svc) as root:
+            gid = await root.make([_n("A")])
+            fgid, _fmain = await _fork(svc, gid)
+            await svc.apply_ops(graph_id=fgid, actor="bob", message="own", ops=[_d("A")])
+            await root.edit([_u("A", "A parent")])
+            with pytest.raises(ForkUpdateConflicts) as exc:
+                await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob")
+            assert [c["kind"] for c in exc.value.conflicts] == ["delete/modify"]
+            head = (await svc.get_graph(fgid))["main_head_commit_seq"]
+            with pytest.raises(OntologyViolation):
+                await svc.update_fork_from_parent(fork_graph_id=fgid, actor="bob", resolutions={
+                    "A": {"displayName": "A kept"}})
+            rules = OntologyRules(entity_types={"Table": EntityRule()})
+            with pytest.raises(OntologyViolation):
+                await svc.update_fork_from_parent(
+                    fork_graph_id=fgid, actor="bob", ontology_rules=rules,
+                    resolutions={"A": {"urn": "A", "entityType": "Whatever", "displayName": "A"}})
+            assert (await svc.get_graph(fgid))["main_head_commit_seq"] == head
+            out = await svc.update_fork_from_parent(
+                fork_graph_id=fgid, actor="bob", ontology_rules=rules,
+                resolutions={"A": {"urn": "A", "entityType": "Table", "displayName": "A kept"}})
+            assert out["wrote"] == 1
+    _run(case)

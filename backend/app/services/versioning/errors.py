@@ -274,6 +274,20 @@ class ForkUpdateConflicts(_HttpMapped, RuntimeError):
                              "seeds": self.seeds})
 
 
+class ResolutionsWithoutConflict(_HttpMapped, RuntimeError):
+    """Update from parent was sent resolutions for entities it found in no conflict (``ids``). A
+    resolution settles a conflict the update raised, and writes nothing else. Nothing was
+    written."""
+
+    status_code = 422
+
+    def __init__(self, ids):
+        self.ids = sorted(ids)
+        super().__init__(f"{len(self.ids)} resolution(s) settle no conflict of this update: send "
+                         "resolutions only for what it answered in conflict",
+                         {"type": "resolutions_without_conflict", "ids": self.ids})
+
+
 class ForkNotUpToDate(_HttpMapped, RuntimeError):
     """A fork's review reached its merge while its parent has changes the fork has not taken in:
     a fork merges only up to date with its parent, as a draft publishes only up to date with
@@ -441,4 +455,4 @@ HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequir
                ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
-               IneligibleOwner, ForkUpdateConflicts, ForkNotUpToDate)
+               IneligibleOwner, ForkUpdateConflicts, ResolutionsWithoutConflict, ForkNotUpToDate)

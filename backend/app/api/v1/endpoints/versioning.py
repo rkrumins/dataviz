@@ -4067,7 +4067,8 @@ async def restore_fork(
              responses={202: {"description": "Queued as a job: ``{jobId, graphId, status}``"}})
 async def update_from_parent(
     ws_id: str, graph_id: str, body: Optional[UpdateFromParentRequest] = None,
-    user: User = Depends(requires(_MANAGE, workspace="ws_id")),
+    # It writes the fork's main, as a publish does.
+    user: User = Depends(requires(_PUBLISH, workspace="ws_id")),
     _meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
@@ -4076,7 +4077,9 @@ async def update_from_parent(
     """Take the parent's changes into this fork (its ``graph_id``): one ``sync_parent`` commit,
     and the fork reads the parent at its head from there on. 409 ``fork_update_conflicts`` names
     what both changed (``conflicts``, and ``seeds``: the fork's own values to resolve from); send
-    it again with ``resolutions``. 409 ``not_a_fork`` for a graph with no parent. One that would
+    it again with ``resolutions``, for those only (422 ``resolutions_without_conflict``). What it
+    writes is judged by the fork's ontology, as every write is (422 ``ontology_violation``). 409
+    ``not_a_fork`` for a graph with no parent. One that would
     merge, or delete in its cascades, more than ``SYNC_PUBLISH_MAX_CHANGES`` entities runs as a job
     pinned to the parent's head now: 202 with the job to poll (``GET …/update-jobs/{jobId}``), one
     at a time per fork (409 ``job_active``)."""
@@ -4096,9 +4099,12 @@ async def update_from_parent(
                                  parentSeq=size["parent_seq"], jobId=job["job_id"])
         return JSONResponse(status_code=202, content={"jobId": job["job_id"], "graphId": graph_id,
                                                       "status": started})
+    cset = await _live_containment_types(session, ws_id, _meta.get("data_source_id"))
+    rules = await _rules_for_meta(session, ws_id, _meta)
     with _domain_errors():
         out = await svc.update_fork_from_parent(
-            fork_graph_id=graph_id, actor=user.id, resolutions=resolutions, parent_label=label)
+            fork_graph_id=graph_id, actor=user.id, resolutions=resolutions, parent_label=label,
+            containment_edge_types=cset, ontology_rules=rules)
     if not out["up_to_date"]:
         await _fork_updated(graph_id, user.id)
         await _record_fork_event(session, "updated", ws_id, graph_id, parent_id,
@@ -4129,12 +4135,20 @@ async def _fork_from_job(job: dict) -> dict:
     have no part in it."""
     if job["jobType"] == "fork_merge":
         return await _fork_merge_from_job(job)
+    from backend.app.db.engine import get_async_session
     svc = get_versioning_service()
     try:
         with _domain_errors():
+            meta = await svc.get_graph(job["graphId"])
+            if meta is None:                            # trashed, or being purged, since queued
+                raise HTTPException(status_code=404, detail="graph not found")
+            async with get_async_session() as session:
+                cset = await _live_containment_types(session, job["workspaceId"], meta.get("data_source_id"))
+                rules = await _rules_for_meta(session, job["workspaceId"], meta)
             out = await svc.update_fork_from_parent(
                 fork_graph_id=job["graphId"], actor=job["actor"], resolutions=job.get("resolutions"),
-                parent_seq=job["parentSeq"], parent_label=job.get("parentLabel"))
+                parent_seq=job["parentSeq"], parent_label=job.get("parentLabel"),
+                containment_edge_types=cset, ontology_rules=rules)
     except HTTPException as exc:
         return {"error": {"status": exc.status_code, "detail": _bounded_refusal(exc.detail)}}
     if not out["up_to_date"]:

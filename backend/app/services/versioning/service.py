@@ -52,8 +52,9 @@ from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionE
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
                      MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
                      PersonRequired,
-                     ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted, ReviewRequired,
-                     SelfMerge, SelfReview, VersionConflict)
+                     ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted,
+                     ResolutionsWithoutConflict, ReviewRequired, SelfMerge, SelfReview,
+                     VersionConflict)
 from .ids import prefixed_id
 from .merge import three_way_merge
 from .merkle import MerkleTree, content_hash
@@ -3266,6 +3267,7 @@ class GraphVersioningService:
         self, *, fork_graph_id: str, actor: str,
         resolutions: Optional[Mapping[str, Optional[dict]]] = None,
         parent_seq: Optional[int] = None, parent_label: Optional[str] = None,
+        containment_edge_types: Sequence[str] = (), ontology_rules: Optional[OntologyRules] = None,
     ) -> Dict[str, object]:
         """Take a fork's parent's changes into it ("Update from parent"): the parent's ``main`` from
         the seq the fork agrees with at its head (``B``, :meth:`_fork_agreed_base`: the base it reads
@@ -3278,10 +3280,13 @@ class GraphVersioningService:
         and the parent changed in ``(B, P]`` goes through the 3-way merge — base the parent at
         ``B``, ours the fork at its head, theirs the parent at ``P`` — and fields both changed,
         differently, are :class:`ForkUpdateConflicts`, which ``resolutions`` (``{entity_id: payload |
-        None}``) settle field by field, as a pull's are. A node the parent deleted in the window takes
-        the fork's own edges on it with it, and an edge the parent drew or pointed in it at a node
-        the fork deleted is deleted on the fork. What is written is what the fork would read
-        otherwise once its base moves: merged and resolved values, and those deletions.
+        None}``) settle field by field, as a pull's are — those and nothing else: a resolution for
+        an entity in no conflict is :class:`ResolutionsWithoutConflict`. A node the parent deleted
+        in the window takes the fork's own edges on it with it, and an edge the parent drew or
+        pointed in it at a node the fork deleted is deleted on the fork. What is written is what
+        the fork would read otherwise once its base moves: merged and resolved values, and those
+        deletions. It faces the gate every write does (:meth:`_enforce_written`), by the fork's
+        ontology (``ontology_rules``, ``containment_edge_types``).
 
         One ``sync_parent`` commit on the fork's ``main`` — written with no rows too, so history
         shows the update — and the base the fork reads from it on, ``(that commit's seq, P)`` in
@@ -3292,7 +3297,8 @@ class GraphVersioningService:
             f"update {fork_graph_id} from its parent",
             lambda: self._update_fork_once(
                 fork_graph_id=fork_graph_id, actor=actor, resolutions=dict(resolutions or {}),
-                parent_seq=parent_seq, parent_label=parent_label))
+                parent_seq=parent_seq, parent_label=parent_label,
+                containment_edge_types=containment_edge_types, ontology_rules=ontology_rules))
 
     async def fork_update_size(self, *, fork_graph_id: str) -> Dict[str, object]:
         """What :meth:`update_fork_from_parent` would take now, counted in SQL without running it:
@@ -3335,6 +3341,7 @@ class GraphVersioningService:
     async def _update_fork_once(
         self, *, fork_graph_id: str, actor: str, resolutions: Dict[str, Optional[dict]],
         parent_seq: Optional[int], parent_label: Optional[str],
+        containment_edge_types: Sequence[str], ontology_rules: Optional[OntologyRules],
     ) -> Dict[str, object]:
         """One attempt at :meth:`update_fork_from_parent`, under the fork's graph lock."""
         async with self._session() as s:
@@ -3351,6 +3358,8 @@ class GraphVersioningService:
             base = await self._fork_agreed_base(s, fork, head)
             to = parent.main_head_commit_seq if parent_seq is None else parent_seq
             if to <= base:
+                if resolutions:
+                    raise ResolutionsWithoutConflict(resolutions)
                 return {"commit_id": None, "parent_seq": base, "wrote": 0, "up_to_date": True}
             new_seq = head + 1
             # The base the fork reads from the update's commit on, first: a read at ``new_seq`` in
@@ -3360,18 +3369,19 @@ class GraphVersioningService:
             await s.flush()
             window = await self._window_chain(s, parent.id, parent_main, base, to)
             changed = await self._ids_of(s, self._both_queries(fork.id, fork_main, window))
-            changed |= set(resolutions)
             was = await self._values_at(s, parent.id, parent_main, changed, base)
             ours = await self._values_at(s, fork.id, fork_main, changed, head)
             theirs = await self._values_at(s, parent.id, parent_main, changed, to)
             set_fields = frozenset(config.SET_FIELDS)
             merged: Dict[str, Optional[dict]] = {}
             conflicts: List[dict] = []
+            settled: set = set()
             for eid in sorted(changed):
                 out = three_way_merge(was.get(eid), ours.get(eid), theirs.get(eid), set_fields)
-                if eid in resolutions:
+                if out.conflicts and eid in resolutions:
                     merged[eid] = _settle_conflicts(
                         out.merged, _normalize_resolution(resolutions[eid]), out.conflicts)
+                    settled.add(eid)
                     continue
                 merged[eid] = out.merged
                 conflicts += [{"entity_id": eid, "path": list(c.path), "base": c.base,
@@ -3380,6 +3390,8 @@ class GraphVersioningService:
             if conflicts:
                 raise ForkUpdateConflicts(conflicts, {
                     eid: ours.get(eid) for eid in sorted({c["entity_id"] for c in conflicts})})
+            if set(resolutions) - settled:
+                raise ResolutionsWithoutConflict(set(resolutions) - settled)
             view = _collapse_empty_payloads(merged)
             await self._sync_neighborhood(s, fork.id, fork_main, window, view, new_seq)
             self._cascade_incident_edges(view)
@@ -3392,6 +3404,14 @@ class GraphVersioningService:
                 kind_by_entity = self._resolve_delta_kinds(deltas, await self._kind_map_multi(
                     s, [(g, b) for g, b, _at in await self._layers(s, fork.id, fork_main, new_seq)],
                     entity_ids=[d.entity_id for d in deltas]))
+                # Judged against the fork as the update leaves it: its head is the update's seq for
+                # what this transaction reads from here on — its base moved, before a row is written.
+                fork.main_head_commit_seq = new_seq
+                await self._enforce_written(
+                    s, fork.id, fork_main, {d.entity_id: d.payload for d in deltas}, after,
+                    kind_by_entity, containment_edge_types=containment_edge_types,
+                    ontology_rules=ontology_rules, strict=fork.ontology_enforcement == "strict",
+                    known=view)
             main = await s.get(BranchORM, fork_main)
             commit = CommitORM(
                 graph_id=fork.id, branch_id=fork_main, commit_seq=new_seq,

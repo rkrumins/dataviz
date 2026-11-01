@@ -313,7 +313,8 @@ A fork in the trash says none of it (`null`).
 
 `POST …/graphs/{fork}/update-from-parent` (`update_fork_from_parent`) takes the parent's changes
 into the fork: the parent's `main` from the base the fork agrees with at its head (`B`) to the
-parent's head (`P`, read once). At `P` already, it answers `upToDate` and writes nothing.
+parent's head (`P`, read once). At `P` already, it answers `upToDate` and writes nothing. It writes
+the fork's `main`, as a publish writes a graph's, so it takes `workspace:datasource:publish`.
 
 **What it takes.** Most of the parent's changes need nothing written: the fork has no row of them,
 so they show through once its base moves. What the fork has rows of and the parent changed in
@@ -328,7 +329,15 @@ move: merged values, and the cascades.
 with `delete/modify` when one side deleted what the other changed), and the fork's own value of
 each entity to resolve from. Nothing is written. Send it again with `resolutions`
 (`{entityId: payload | null}`): each settles only the conflicting fields, as a pull's does, and
-`null` deletes the entity.
+`null` deletes the entity. A resolution settles a conflict the update raised and nothing else: one
+for an entity in no conflict answers **422 `resolutions_without_conflict`** `{ids}`, and nothing is
+written.
+
+**The gate.** What it writes — merged and resolved values, and the cascades — faces the gate every
+write does, by the fork's ontology, judged against the fork as the update leaves it: nothing created
+untyped, no duplicate, second parent or loop among what it writes, and under strict enforcement no
+undeclared type. A refusal is **422 `ontology_violation`**, and nothing is written; a resolution
+that brings back a node the fork deleted carries its type.
 
 **Cascades, both ways.** A node the parent deleted in the window takes the fork's own edges on it
 with it, or, when the fork changed the node, is a `delete/modify` conflict. An edge the parent drew

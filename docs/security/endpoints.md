@@ -655,7 +655,7 @@
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/pulls` | workspace:datasource:read (ws:ws_id) | enforced | resource |
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/restore` | workspace:datasource:manage (ws:ws_id) | enforced | refused |
 | `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/sync` | workspace:datasource:manage (ws:ws_id), workspace:datasource:publish (ws:ws_id) | enforced | refused |
-| `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/update-from-parent` | workspace:datasource:manage (ws:ws_id) | enforced | refused |
+| `POST` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/update-from-parent` | workspace:datasource:publish (ws:ws_id) | enforced | refused |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/update-jobs/{job_id}` | workspace:datasource:manage (ws:ws_id) | n/a | refused |
 | `GET` | `/api/v1/{ws_id}/versioning/graphs/{graph_id}/watermark` | workspace:datasource:read (ws:ws_id) | n/a | resource |
 | `GET` | `/api/v1/{ws_id}/versioning/merge-requests/{pr_id}` | workspace:datasource:read (ws:ws_id) | n/a | resource |
