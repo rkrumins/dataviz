@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Dict, Mapping, Tuple
 
 from backend.app.db.repositories.profiling_repo import INHERIT
@@ -68,7 +68,9 @@ RANGES: Dict[str, Tuple[int, int]] = {
 }
 
 _MEMO_TTL_S = 30.0
-_MEMO: Dict[str, Any] = {"policy": None, "at": 0.0}
+#: ``policy``: the memo, until ``at`` is 30 seconds old; ``good``: the last policy read, kept
+#: through a failed read.
+_MEMO: Dict[str, Any] = {"policy": None, "at": 0.0, "good": None}
 _clock = time.monotonic
 
 
@@ -150,8 +152,10 @@ def invalidate() -> None:
 
 
 async def resolve(session=None) -> ResidencyPolicy:
-    """The policy in force: memoized for up to 30 seconds, and never raising (the defaults when
-    the row cannot be read). Without ``session``, a READONLY-pool session of the management
+    """The policy in force: memoized for up to 30 seconds, and never raising. When the row cannot
+    be read, the last policy read (the defaults would turn eviction back on where an administrator
+    turned it off), or with none yet the defaults with eviction off — loads go on — kept as the
+    memo for its 30 seconds. Without ``session``, a READONLY-pool session of the management
     database is opened when the memo is stale."""
     now = _clock()
     if _MEMO["policy"] is not None and now - _MEMO["at"] < _MEMO_TTL_S:
@@ -167,10 +171,14 @@ async def resolve(session=None) -> ResidencyPolicy:
             async with get_readonly_session() as own:
                 row = await own.get(PlatformSettingsORM, 1)
     except Exception as exc:  # noqa: BLE001 — a policy read must never fail its caller
-        logger.warning("residency policy unreadable, using the defaults: %s", exc)
-        return defaults()
+        fallback = _MEMO["good"] or replace(defaults(), eviction_enabled=False)
+        logger.warning("residency policy unreadable, using %s: %s",
+                       "the last one read" if _MEMO["good"] else "the defaults, evicting nothing",
+                       exc)
+        _MEMO.update(policy=fallback, at=now)
+        return fallback
     policy = effective(saved_values(row))
-    _MEMO.update(policy=policy, at=now)
+    _MEMO.update(policy=policy, at=now, good=policy)
     return policy
 
 

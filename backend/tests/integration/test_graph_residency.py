@@ -522,7 +522,7 @@ async def test_a_reload_never_trusts_a_summaries_stamp_left_in_a_key_it_had(
     async def lineage(svc, gid):
         return ({"CONTAINS"}, {"FLOWS_TO"}, {}, "shared")
 
-    async def build(gid):
+    async def build(gid, **_kw):
         pass
 
     factory = make_falkor_graph_factory()
@@ -543,6 +543,77 @@ async def test_a_reload_never_trusts_a_summaries_stamp_left_in_a_key_it_had(
     names = await falkor.execute_command("GRAPH.LIST")
     if old in names:
         await stale.delete()
+
+
+@live
+async def test_each_load_asks_for_its_own_summaries_build_and_asks_again_while_it_waits(
+        store, falkor, mine, monkeypatch):
+    """The rollup hook's ask was keyed by graph and watermark, and the aggregation service
+    answers a repeated key within the hour with the job it already ran: a second load at the
+    same commit never got its summaries, and stayed rehydrating. Each load asks under its own key
+    (its epoch), and asks again under a new one every few passes without the stamp."""
+    from backend.app.services.projection_target import make_rollup_rebuild_hook
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    keys: list = []
+
+    class _Aggregation:
+        async def trigger(self, ds_id, request, source, session):
+            keys.append(request.idempotency_key)
+
+    async def lineage(svc, gid):
+        return ({"CONTAINS"}, {"FLOWS_TO"}, {}, "shared")
+
+    factory = make_falkor_graph_factory()
+    svc = store
+    (gid,) = await _live_graphs(svc, FalkorProjector(graph_client_factory=factory), mine, 1)
+    proj = FalkorProjector(graph_client_factory=factory, edge_types_resolver=lineage,
+                           on_rollups_stale=make_rollup_rebuild_hook(lambda: _Aggregation()))
+    loop = CapacityLoop(proj)
+    for _ in range(2):                                   # two loads, at the same commit
+        assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+        await residency.request_load(gid)
+        await loop.run_once(graph_ids=[gid])
+        await _loads(loop, proj, gid)
+        assert (await _ps(gid)).status == "rehydrating"
+        graph = await factory((await _ps(gid)).falkor_graph_name)
+        await graph.query("MERGE (m:_AggMeta {id: 'singleton'})")      # the build ran
+        await loop.run_once(graph_ids=[gid])
+        assert (await _ps(gid)).status == "idle"
+    assert len(keys) == 2 and keys[0] != keys[1]
+    assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+    await residency.request_load(gid)
+    await loop.run_once(graph_ids=[gid])
+    await _loads(loop, proj, gid)
+    for _ in range(residency._REASK_PASSES):              # no stamp comes
+        await loop.run_once(graph_ids=[gid])
+    assert len(keys) == 4 and len(set(keys)) == 4
+
+
+@live
+async def test_a_moved_graph_s_old_key_is_dropped_while_the_graph_is_out_of_falkordb(
+        store, falkor, mine, monkeypatch):
+    """Evicted within the move's grace period, the graph's watermark is 0 and never reaches the
+    move's: it counts as caught up, since nothing reads the old key then."""
+    from backend.app.services.versioning import keymigrate
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(svc, proj, mine, 1)
+    old = (await _ps(gid)).falkor_graph_name
+    new = keymigrate.owned_key(gid, 1)
+    await svc.move_projection(graph_id=gid, provider=config.DEFAULT_FALKOR_PROVIDER, key=new,
+                              actor="a", shard_map={})
+    await proj.project_graph(gid)
+    assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+
+    async def nobody(provider, name, ds):
+        return []
+
+    later = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    out = await keymigrate.retire_moved_keys(proj, key_in_use=nobody, now=later)
+    assert [(r["key"], r["verdict"]) for r in out if r["graphId"] == gid] == [(old, "dropped")]
+    assert old not in await falkor.execute_command("GRAPH.LIST")
 
 
 @live
@@ -886,7 +957,7 @@ async def test_a_reloaded_key_serves_reads_only_once_its_summaries_are_built(
     async def lineage(svc, gid):
         return ({"CONTAINS"}, {"FLOWS_TO"}, {}, "shared")
 
-    async def build(gid):
+    async def build(gid, **_kw):
         asked.append(gid)
 
     factory = make_falkor_graph_factory()

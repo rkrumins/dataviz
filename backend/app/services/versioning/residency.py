@@ -64,6 +64,8 @@ _READ_TIMEOUT_S = 5.0
 _MEASURE_PER_PASS = 16
 #: Graphs whose idle clock a pass starts, at most (:func:`_start_idle_clocks`).
 _CLOCKS_PER_PASS = 1000
+#: Passes a load waits for its summaries before it asks for their build again.
+_REASK_PASSES = 10
 
 
 def _clock() -> datetime:
@@ -433,7 +435,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
     query = (
         select(ps.graph_id, ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph,
                ps.status, ps.residency, ps.last_read_at, ps.last_projected_at, ps.size_bytes,
-               ps.size_measured_at, ps.rehydrating_since, ps.retired_keys,
+               ps.size_measured_at, ps.rehydrating_since, ps.retired_keys, ps.epoch,
                ps.projected_commit_seq, ps.target_commit_seq, head,
                GraphORM.data_source_id,
                (head > 1).label("past_genesis"),
@@ -596,6 +598,8 @@ class CapacityLoop:
         # Loads this process started: graph id -> (its master, the master's use then), for the
         # used-memory delta that sizes the key where GRAPH.MEMORY USAGE cannot.
         self._started: Dict[str, Tuple[str, Optional[int]]] = {}
+        # Loads waiting for their summaries: graph id -> (its epoch, passes waited).
+        self._waited: Dict[str, Tuple[int, int]] = {}
 
     async def run_once(self, *, graph_ids: Optional[Collection[str]] = None) -> Optional[Plan]:
         """One pass, under the leader lock: gather, plan, act, measure. Returns the plan, or None
@@ -702,15 +706,21 @@ class CapacityLoop:
         key has the summaries its readers need (``FalkorProjector.summaries_built``, which asks
         for the build meanwhile): then it is ``idle``, no longer evicted, and its idle time starts
         again from now. The key is measured on a later pass, as everything projected since its
-        last measurement is."""
+        last measurement is. Each load asks for the build under its own key (its epoch), and asks
+        again under a new one every ``_REASK_PASSES`` passes it goes without."""
         for r in snap.rows.values():
             head = max(r["target_commit_seq"], r["main_head_commit_seq"])
             projected = r["projected_commit_seq"]
             if r["status"] != "rehydrating" or projected <= 0 or projected < head:
                 continue
+            epoch, waited = self._waited.get(r["graph_id"], (r["epoch"], -1))
+            if epoch != r["epoch"]:
+                epoch, waited = r["epoch"], -1
+            self._waited[r["graph_id"]] = (epoch, waited + 1)
             try:
-                ready = await self._proj.summaries_built(r["graph_id"], r["key"],
-                                                         r["falkor_provider"], projected)
+                ready = await self._proj.summaries_built(
+                    r["graph_id"], r["key"], r["falkor_provider"], projected,
+                    ask=f"load{epoch}.{(waited + 1) // _REASK_PASSES}")
             except Exception:  # noqa: BLE001 — looked at again on the next pass
                 logger.warning("residency: whether %s's load is ready is unknown", r["graph_id"],
                                exc_info=True)
@@ -727,6 +737,7 @@ class CapacityLoop:
                             rehydrating_since=None, updated_at=_now())
                     .returning(ProjectionStateORM.graph_id)
                     .execution_options(synchronize_session=False))).first()
+            self._waited.pop(r["graph_id"], None)
             if done:
                 metrics.increment("versioning_residency_loads_total", outcome="completed")
                 logger.info("residency: graph %s is loaded and serves reads again", r["graph_id"])

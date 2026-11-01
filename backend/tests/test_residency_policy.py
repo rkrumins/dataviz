@@ -134,6 +134,7 @@ class _Session:
 @pytest.fixture(autouse=True)
 def _fresh_memo():
     rp.invalidate()
+    rp._MEMO["good"] = None
     yield
     rp.invalidate()
 
@@ -183,8 +184,22 @@ async def test_a_saved_value_out_of_range_is_clamped_never_refused():
     assert policy.default_residency == "standard"
 
 
-async def test_an_unreadable_row_gives_the_defaults_and_never_raises():
-    assert _values(await rp.resolve(_Session(fail=True))) == _DEFAULTS
+async def test_an_unreadable_row_with_no_good_policy_yet_evicts_nothing_and_never_raises():
+    """The defaults would turn eviction back on where an administrator turned it off: with no
+    policy read yet, the pass plans no eviction (loads go on)."""
+    assert _values(await rp.resolve(_Session(fail=True))) == {**_DEFAULTS,
+                                                              "evictionEnabled": False}
+
+
+async def test_an_unreadable_row_keeps_the_last_good_policy_and_reads_again_later():
+    good = _Session(PlatformSettingsORM(id=1, gv_eviction_enabled=False, gv_high_water_pct=95))
+    assert (await rp.resolve(good)).high_water_pct == 95
+    rp.invalidate()                                      # a save elsewhere, or the memo's age
+    down = _Session(fail=True)
+    policy = await rp.resolve(down)
+    assert (policy.eviction_enabled, policy.high_water_pct) == (False, 95)
+    await rp.resolve(down)
+    assert down.reads == 1                               # kept for the memo's 30 seconds
 
 
 async def test_the_policy_is_memoized_until_a_save_drops_it():

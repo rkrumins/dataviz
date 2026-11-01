@@ -61,7 +61,9 @@ async def retire_moved_keys(
         now: Optional[str] = None) -> List[Dict[str, object]]:
     """Drop each old key a move left in ``retired_keys`` whose time has come: its grace period
     (``retireAfter``) has passed and the graph's current key has caught up to the head at the move
-    (``afterSeq``), so reads have long left the old one. Until then a move back onto it is cheap.
+    (``afterSeq``), so reads have long left the old one — or the graph is out of FalkorDB under
+    residency (evicted, or waiting for room), when nothing reads either key. Until then a move
+    back onto it is cheap.
 
     Under the graph's projection lock (``gvproj``, a try-lock: a pass or an evict holding it means
     the next run), so no pass writes a key as it is dropped. A key is dropped only when no graph
@@ -80,14 +82,16 @@ async def retire_moved_keys(
     async with session() as s:
         rows = (await s.execute(
             select(ProjectionStateORM.graph_id, GraphORM.data_source_id,
-                   ProjectionStateORM.projected_commit_seq, ProjectionStateORM.retired_keys)
+                   ProjectionStateORM.projected_commit_seq, ProjectionStateORM.retired_keys,
+                   ProjectionStateORM.status)
             .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
             .where(ProjectionStateORM.retired_keys.isnot(None))
         )).all()
     out: List[Dict[str, object]] = []
-    for gid, ds_id, projected, entries in rows:
+    for gid, ds_id, projected, entries, status in rows:
+        out_of_falkordb = status in ("evicted", "waiting_capacity")
         due = [e for e in entries or []
-               if e["retireAfter"] <= now and projected >= e["afterSeq"]]
+               if e["retireAfter"] <= now and (projected >= e["afterSeq"] or out_of_falkordb)]
         if not due:
             continue
         lock_scope = (db.graphver_lock_session() if session is db.graphver_session

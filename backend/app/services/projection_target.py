@@ -89,7 +89,7 @@ def make_rollup_rebuild_hook(get_aggregation_service):
     handed over here, since the projector maintains none of its rollups: its summaries are
     marked stale (``source_changed``, which the job's completion clears) and the rebuild is
     queued in dedicated mode."""
-    async def _hook(graph_id: str) -> None:
+    async def _hook(graph_id: str, idempotency_key: Optional[str] = None) -> None:
         svc = GraphVersioningService()
         meta = await svc.get_graph(graph_id)
         ds_id = meta.get("data_source_id") if meta else None
@@ -109,7 +109,7 @@ def make_rollup_rebuild_hook(get_aggregation_service):
             projected = (await svc.projection_watermark(graph_id) or {}).get("projected")
         except Exception:                                # pragma: no cover - infra
             projected = None
-        key = f"gv-rollup-rebuild:{graph_id}:{projected}"
+        key = idempotency_key or f"gv-rollup-rebuild:{graph_id}:{projected}"
         if agg is None:
             await _queue_on_control_plane(str(ds_id), key, mode)
             return

@@ -1084,11 +1084,14 @@ class FalkorProjector:
                            graph_id, exc)
 
     async def summaries_built(self, graph_id: str, name: str, provider_id: Optional[str],
-                              projected: int) -> bool:
+                              projected: int, *, ask: Optional[str] = None) -> bool:
         """Whether a graph's key holds the summaries its readers need: a summaries build stamped
         it, or it needs none here (no lineage in its ontology, its summaries kept in a dedicated
         key, or no aggregation wired into this projector). A key still without them has the build
-        asked for, once per watermark. A key that cannot be read has not got them."""
+        asked for, once per watermark — and per ``ask``, which names the ask under its own
+        idempotency key (a load's epoch and attempt: the aggregation service answers a key it has
+        seen within the hour with the job it already ran). A key that cannot be read has not got
+        them."""
         if self._on_rollups_stale is None or self._edge_types_resolver is None:
             return True
         sets = await self._edge_types_resolver(self._svc, graph_id)
@@ -1103,9 +1106,13 @@ class FalkorProjector:
         rows = getattr(res, "result_set", None) or []
         if rows and rows[0] and int(rows[0][0] or 0) > 0:
             return True
-        if self._summaries_checked.get(graph_id) != projected:
-            self._summaries_checked[graph_id] = projected
-            await self._on_rollups_stale(graph_id)
+        if self._summaries_checked.get(graph_id) != (projected, ask):
+            self._summaries_checked[graph_id] = (projected, ask)
+            if ask is None:
+                await self._on_rollups_stale(graph_id)
+            else:
+                await self._on_rollups_stale(
+                    graph_id, idempotency_key=f"gv-rollup-rebuild:{graph_id}:{projected}:{ask}")
         return False
 
     async def run_publish_hooks(self, graph_id: str, *, full_seed: bool = False,
