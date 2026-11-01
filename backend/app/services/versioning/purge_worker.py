@@ -938,6 +938,11 @@ class Reaper:
                                            "sources still name it; it waits for them", ds_id)
                         continue
                     if row is not None and row.deleted_at is not None:
+                        if getattr(row, "fork_of_data_source_id", None):
+                            # A fork's row whose purge did not take it (_drop_fork_row): its views
+                            # go to its parent all the same.
+                            from backend.app.services import fork_sources
+                            await fork_sources.views_to_parent(s, [ds_id])
                         await s.delete(row)
                         await s.commit()
                         reaped += 1

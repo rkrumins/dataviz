@@ -654,6 +654,44 @@ def test_the_views_on_a_fork_go_to_its_parent_when_its_row_goes():
         assert await _view(on_gone) == (None, None, None)
     _run(case)
 
+def test_the_reapers_expiry_of_a_forks_row_sends_its_views_to_the_parent(monkeypatch):
+    """A fork's row past its undo window whose graph is gone — its purge finished, and a crash
+    came before ``_drop_fork_row`` — is deleted by the reaper's expiry pass, which took no care of
+    the views on it: they fell to no data source, and read the workspace's default. They go to the
+    fork's parent, losing the fork's draft, as when the purge deletes the row itself."""
+    from datetime import datetime, timedelta, timezone
+
+    from backend.app.db.models import WorkspaceDataSourceORM as DS
+    from backend.app.services.versioning import purge_worker
+    from backend.app.services.versioning.purge_worker import PurgeRunner, Reaper, create_purge_job
+    from backend.tests.integration.test_graph_lifecycle_purge import _nobody, _take
+
+    async def crashed(ds_id):
+        return None
+
+    async def case(svc):
+        parent_ds, gid = await _parent(svc)
+        async with _client() as c:
+            fork = (await _fork(c, gid)).json()
+            fork_ds, fgid = fork["dataSourceId"], fork["graphId"]
+            draft = await svc.open_draft(graph_id=fgid, owner="u1")
+            pinned = await _view_on(fork_ds, "Pinned", draft)
+            assert (await c.delete(f"/api/v1/{WS}/versioning/graphs/{fgid}")).status_code == 204
+        monkeypatch.setattr(purge_worker, "_drop_fork_row", crashed)
+        job = await create_purge_job(graph_id=fgid, workspace_id=WS, actor="u",
+                                     require_tombstoned=True)
+        assert (await PurgeRunner(None, key_in_use=_nobody).run_job(await _take(job)))[
+            "status"] == "completed"
+        async with _mgmt() as s:
+            row = await s.get(DS, fork_ds)
+            row.deleted_at = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+            await s.commit()
+        await Reaper().run_once()
+        assert await _row(fork_ds) is None
+        assert await _view(pinned) == (parent_ds, None, None)
+    _run(case)
+
+
 def test_a_parents_permanent_delete_purges_its_trashed_forks_first():
     from backend.app.services.versioning.models import JobORM
 
