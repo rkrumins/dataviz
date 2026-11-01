@@ -58,8 +58,53 @@ can be watched and scaled on its queue, and a load test puts that collaboration 
 
 - **An API process serves about 100 requests a second** of the collaboration load test's mix, then
   sheds with 429: size viz-service's processes by it (§10.4).
-- **A hot graph gets 2 concurrent reads per API process** once many graphs are in use (each graph's
-  reserved share, `PROVIDER_SOURCE_RESERVED`), and its users' reads past that are shed and retried.
+- **A hot graph got 2 concurrent reads per API process** once many graphs were in use (each graph's
+  reserved share, `PROVIDER_SOURCE_RESERVED`), and its users' reads past that were shed and retried.
+  That was measured before the admission change in the next section, which holds room back only for
+  data sources being read.
+
+---
+
+## [Unreleased] — Graph reads: a busy data source takes what idle ones leave, and one with no ontology reads flat
+
+### Fixed
+
+- **A busy data source is no longer held to its reserve by neighbours nobody is reading.** Each
+  web process admits a limited number of graph reads at once (16 by default) and keeps a reserve
+  (2) for every data source. A source past its reserve was admitted only while the room left
+  covered the reserve of every other source the process had read in the last minute, whether or
+  not anyone was still reading it. With seven or more other graphs read in that minute, a busy
+  graph got only its own 2 reads per process while every other one sat idle. In a load test at
+  100 users, this shed 13,921 of 42,472 requests (429s the canvas retries). Room is now held back
+  only for neighbours that are reading — a request in flight, or one that started or finished in
+  the last 1.5 s — and only the part of their reserve they are not using, plus one reserve for a
+  source nobody was reading, which still gets in at once. A source below its reserve is still
+  never refused for its share, and the process ceiling is unchanged.
+- **A data source with no ontology assigned reads flat instead of failing.** The canvas's node read
+  (`POST …/graph/nodes/query`) answered 500 for such a source: with nothing to classify containment,
+  the graph store's containment set was left unset, and the reads that count an item's children
+  failed on it. The set is now configured empty, as when the ontology service is unreachable: no
+  item has children, and the node read says why in a header, `X-Graph-Notice: No ontology is
+  assigned to this data source. Assign one to see its hierarchy.` The canvas does not show it yet.
+  Another data source reading the same graph with an ontology keeps its hierarchy: an empty set
+  never replaces one already configured on the graph store's shared connection.
+  The source's top level, which answered 400 ("Ontology configuration error"), now lists every
+  item. With an ontology assigned nothing changes, and a connection or credential error answers as
+  before.
+
+### Changed
+
+- **A data source alone on a process takes the ceiling less one reserve** (14 of 16 by default),
+  where it took all 16. The reserve kept back is what lets a second data source in at once.
+
+### Upgrading
+
+- `GRAPH_SOURCE_RECENT_SECS` is no longer read. `GRAPH_SOURCE_HOLD_SECS` (default `1.5`) replaces
+  it: how long a data source keeps its reserve after its last request started or finished. Drop
+  the old one if you set it; giving the new one its value (60) would hold every neighbour's reserve
+  for a minute again.
+
+---
 
 ## [Unreleased] — Versioning at millions of entities
 

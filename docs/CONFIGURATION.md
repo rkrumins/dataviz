@@ -241,7 +241,7 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `GRAPH_CACHE_TRACE_EXPAND_TTL_S` | `300` | Per-endpoint TTLs, seconds (1-86400). | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_TRACE_TTL_S` | `300` | Per-endpoint TTLs, seconds (1-86400). | `backend/app/services/graph_cache.py` |
 | `GRAPH_INFLIGHT_HARD_MAX` | `0` | never admit past this — must stay under the pool | `backend/app/providers/manager.py` |
-| `GRAPH_SOURCE_RECENT_SECS` | `60` | how long a source counts toward the reserve after its last request | `backend/app/providers/manager.py` |
+| `GRAPH_SOURCE_HOLD_SECS` | `1.5` | how long a source keeps its reserve after its last request started or finished | `backend/app/providers/manager.py` |
 | `GRAPH_STORE_TOPOLOGY_CACHE_TTL_S` | `30` | one reading of every node serves every viewer this long | `backend/app/services/graph_store/topology.py` |
 | `GRAPH_STORE_TOPOLOGY_DEADLINE_S` | `8` | deadline per wave of 8 nodes; the sweep scales with the fleet, capped at 60s | `backend/app/services/graph_store/topology.py` |
 | `LOCAL_DEV_FALKORDB_OVERRIDE` | (empty) | Local development only: set `true` when the backend runs on your machine and FalkorDB in Docker, so `FALKORDB_HOST` and `FALKORDB_PORT` replace the host and port stored on graph data sources. | `backend/app/providers/manager.py` |
