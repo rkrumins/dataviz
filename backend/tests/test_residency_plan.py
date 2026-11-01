@@ -21,7 +21,7 @@ from backend.app.api.v1.endpoints import versioning_admin as va
 from backend.app.auth import api_key_surface
 from backend.app.db.models import PlatformSettingsORM
 from backend.app.main import app
-from backend.app.services.versioning import config, residency, residency_policy
+from backend.app.services.versioning import config, keymigrate, residency, residency_policy
 from backend.app.services.versioning.residency_plan import Graph, Master, admit, plan
 from backend.app.services.versioning.worker import ProjectionWorker
 
@@ -224,15 +224,14 @@ def test_a_busy_or_held_master_is_passed_over_for_another():
 
 
 def test_when_the_first_load_fits_on_no_master_later_ones_that_fit_go_ahead():
-    """The first waits for room on the master where it falls shortest, and keeps that master: a
-    later load goes to another one, and one that fits nowhere else waits its turn."""
+    """The first waits for room on the master where it falls shortest. With nothing there to make
+    room with it keeps nothing, and later loads go where they fit, that master included."""
     graphs = [_graph("big", status="evicted", requested_at=1.0, size=500 * MB),
               _graph("small", status="evicted", requested_at=2.0, size=1 * MB),
               _graph("next", status="evicted", requested_at=3.0, size=1 * MB)]
     p = plan(POLICY, [_master(used_pct=60), _master(endpoint="m2", used_pct=70)], graphs, NOW)
-    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("small", "m2")]
-    assert [(w.graph_id, w.reason, w.endpoint) for w in p.waits] == [
-        ("big", "capacity", "m1"), ("next", "queued", "m1")]
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("small", "m1"), ("next", "m2")]
+    assert [(w.graph_id, w.reason, w.endpoint) for w in p.waits] == [("big", "capacity", "m1")]
     assert p.waits[0].shortfall == 650 * MB - 200 * MB
 
 
@@ -248,13 +247,14 @@ def _at_72_pct(n=3) -> list:
 
 def test_a_load_that_fits_on_no_master_holds_up_no_later_load():
     """Review finding 1, scenario A: a 2 GB graph needs 2.6 GB, and each master has 2.56 GB under
-    its start mark; a 50 MB graph asked after it, and an Always graph queued behind it, go ahead."""
+    its start mark; a 50 MB graph asked after it, and an Always graph queued behind it, go ahead
+    (with nothing to make room with on m1, it keeps no master)."""
     graphs = [_graph("big", status="waiting_capacity", size=2 * GB, requested_at=100.0),
               _graph("small", status="evicted", size=50 * MB, requested_at=200.0, endpoint="m2"),
               _graph("always", "always", status="evicted", size=10 * MB, requested_at=300.0,
                      endpoint="m3")]
     p = plan(POLICY, _at_72_pct(), graphs, NOW)
-    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("small", "m2"), ("always", "m3")]
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("small", "m1"), ("always", "m2")]
     assert [(w.graph_id, w.endpoint, w.reason) for w in p.waits] == [("big", "m1", "capacity")]
 
 
@@ -294,6 +294,124 @@ def test_room_is_made_for_the_first_load_that_fits_nowhere_and_it_keeps_its_plac
     p = plan(POLICY, freed, [graphs[0], later, *on_m1[:3], on_m1[5]], NOW)
     assert [(x.graph_id, x.endpoint) for x in p.loads] == [("big", "m1"), ("later", "m2")]
     assert p.evictions == []
+
+
+def test_a_load_no_room_can_be_made_for_holds_neither_its_master_nor_the_room_making():
+    """Review 3, finding 1: the first load that fits nowhere took its master and its provider's
+    room-making whether or not room could be made for it — every pass, for good when none can.
+    It takes them only when room is made: (a) a one-master provider where nothing can go, (b) a
+    load too big for any master, (c) Coldline idle equal to Standard idle, where everything past
+    the quiet time is already idle-evicted."""
+    # (a) one master at 72 %, everything on it read within the hour.
+    one = [Master(endpoint="m1", used=32 * GB * 72 // 100, maxmemory=32 * GB)]
+    graphs = [_graph("big", status="waiting_capacity", size=2 * GB, requested_at=1.0),
+              _graph("small", status="evicted", size=50 * MB, requested_at=2.0),
+              _graph("always", "always", status="evicted", size=10 * MB, requested_at=3.0),
+              _graph("hot", read=_ago(minutes=20), size=4 * GB)]
+    p = plan(POLICY, one, graphs, NOW)
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("small", "m1")]
+    assert [(w.graph_id, w.reason) for w in p.waits] == [("big", "capacity"), ("always", "queued")]
+    assert p.evictions == [] and not p.masters[0].claimed
+
+    # (b) a 30 GB graph needs 39 GB, over every master's 25.6 GB start mark: it holds nothing, so
+    # the 2 GB load behind it gets room made (a 4 GB graph idle for 3 days), and 50 MB loads.
+    three = [Master(endpoint="m1", used=32 * GB * 72 // 100, maxmemory=32 * GB),
+             Master(endpoint="m2", used=32 * GB * 74 // 100, maxmemory=32 * GB),
+             Master(endpoint="m3", used=32 * GB * 74 // 100, maxmemory=32 * GB)]
+    graphs = [_graph("huge", status="waiting_capacity", size=30 * GB, requested_at=1.0),
+              _graph("two", status="evicted", size=2 * GB, requested_at=2.0),
+              _graph("small", status="evicted", size=50 * MB, requested_at=3.0),
+              _graph("old", read=_ago(days=3), size=4 * GB)]
+    p = plan(POLICY, three, graphs, NOW)
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("small", "m2")]
+    assert _evicted(p) == [("old", "pressure")]
+    assert [(w.graph_id, w.endpoint, w.reason) for w in p.waits] == [
+        ("huge", "m1", "capacity"), ("two", "m1", "capacity")]
+    assert [m.claimed for m in p.masters] == [True, False, False]
+
+    # (c) Coldline idle = Standard idle: nothing past the quiet time is left to evict.
+    same = residency_policy.effective({"standardIdleSecs": 86400, "coldlineIdleSecs": 86400})
+    graphs = [_graph("big", status="waiting_capacity", size=2 * GB, requested_at=1.0),
+              _graph("small", status="evicted", size=50 * MB, requested_at=2.0),
+              _graph("std_20h", read=_ago(hours=20), size=3 * GB)]
+    p = plan(same, one, graphs, NOW)
+    assert [(x.graph_id, x.endpoint) for x in p.loads] == [("small", "m1")]
+    assert p.evictions == []
+
+
+def test_room_is_made_only_for_a_load_that_fits_on_no_master_by_room_alone():
+    """Review 3, finding 5: with the roomiest master busy for a pass (or forking), room was made
+    on a fuller one — and the next pass the load went to the roomiest anyway. A load that fits on
+    some master by room alone waits for it."""
+    for held in ({"hold": "fork"}, {}):
+        masters = [Master(endpoint="m1", used=32 * GB * 10 // 100, maxmemory=32 * GB, **held),
+                   Master(endpoint="m2", used=32 * GB * 75 // 100, maxmemory=32 * GB)]
+        graphs = [_graph("big", status="waiting_capacity", size=2 * GB, requested_at=1.0),
+                  _graph("old1", read=_ago(days=3), size=1 * GB, endpoint="m2"),
+                  _graph("old2", read=_ago(days=2), size=1 * GB, endpoint="m2")]
+        if not held:
+            graphs.append(_graph("inflight", status="rehydrating", size=10 * MB, seeding=True))
+        p = plan(POLICY, masters, graphs, NOW)
+        assert p.evictions == [] and p.loads == [], held
+        (wait,) = p.waits
+        assert (wait.graph_id, wait.endpoint, wait.reason) == ("big", "m1", held.get("hold",
+                                                                                    "queued"))
+
+
+def test_no_room_is_made_in_a_pass_that_could_not_read_sizes():
+    """Review 3, finding 13: such a pass plans no pressure eviction, room-making's included."""
+    graphs = [_graph("big", status="waiting_capacity", size=2 * GB, requested_at=1.0),
+              _graph("s1", read=_ago(days=3), size=1 * GB)]
+    p = plan(POLICY, _at_72_pct(1), graphs, NOW, sized=False)
+    assert p.evictions == [] and not p.masters[0].claimed
+
+
+async def test_a_master_claimed_for_a_waiting_load_takes_no_other_key_or_load(monkeypatch):
+    """Review 3, finding 11: a route's new key, or a pass's load moved off a master no key lands
+    on, could go onto the master whose room is being made for a waiting load."""
+    from backend.app.services.versioning.residency_plan import Load, MasterPlan, Plan
+
+    masters = [_master(used_pct=60), _master(endpoint="m2", used_pct=70)]
+    claimed = [_graph("big", status="waiting_capacity", size=300 * MB, requested_at=1.0),
+               _graph("old", read=_ago(days=3), size=200 * MB)]
+    snap = residency.Snapshot(masters=masters, graphs=claimed,
+                              slots={"m1": [(0, 8191)], "m2": [(8192, 16383)]})
+
+    async def gather(**kw):
+        return snap
+
+    monkeypatch.setattr(residency, "gather", gather)
+    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
+    try:
+        assert plan(POLICY, masters, claimed, NOW).masters[0].claimed
+        assert (await residency.place_key("graph_01JA2B3C4D5E6F7G8H9JKMNPQR", "default",
+                                          taken=set()))[1] == "m2"
+        on_m1 = keymigrate.placed_key("graph_01JA2B3C4D5E6F7G8H9JKMNPQR", [(0, 8191)], set())
+        assert (await residency.admission_on("big", "default", on_m1))[3] == "busy"
+
+        async def key(load, snap):
+            return None if load.endpoint == "m3" else (f"k_{load.endpoint}", {"master": load.endpoint})
+
+        started = []
+
+        async def start(graph_id, *, key=None, shard_map=None):
+            started.append((graph_id, shard_map["master"]))
+            return True
+
+        monkeypatch.setattr(residency, "_load_key", key)
+        monkeypatch.setattr(residency, "_start_load", start)
+        decided = Plan(masters=[
+            MasterPlan(master=_master(used_pct=10), reserved=0, used_after=None, claimed=True),
+            MasterPlan(master=_master(endpoint="m2", used_pct=50), reserved=0, used_after=None),
+            MasterPlan(master=_master(endpoint="m3", used_pct=5), reserved=0, used_after=None,
+                       loads=[Load("g", "m3", 10 * MB)])])
+        loop = residency.CapacityLoop(SimpleNamespace(drop_graph=None))
+        await loop._act(decided, residency.Snapshot(
+            masters=[m.master for m in decided.masters],
+            rows={"g": {"placed": True, "provider": "default", "key": "old"}}))
+        assert started == [("g", "m2")]
+    finally:
+        residency_policy.invalidate()
 
 
 def test_no_room_is_made_that_would_not_let_the_load_in():

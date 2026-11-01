@@ -614,8 +614,9 @@ class Admitted(NamedTuple):
 
 
 def _free(p: MasterPlan) -> bool:
-    """Free to take a load, as the planner's loads take one: read, holding none, taking none."""
-    return p.master.used is not None and not p.master.hold and not p.seeding
+    """Free to take a load, as the planner's loads take one: read, holding none, taking none, and
+    not kept for a waiting load whose room the pass makes there (``claimed``)."""
+    return p.master.used is not None and not p.master.hold and not p.seeding and not p.claimed
 
 
 def _admitted(target: Optional[MasterPlan], graph: Graph, policy,
@@ -626,7 +627,7 @@ def _admitted(target: Optional[MasterPlan], graph: Graph, policy,
         return Admitted(False, endpoint, None, "unmeasured")
     if target.master.hold:
         return Admitted(False, endpoint, None, target.master.hold)
-    if target.seeding:
+    if target.seeding or target.claimed:
         return Admitted(False, endpoint, None, "busy")
     fits, shortfall = admit(target.master, need(graph, policy), policy, target.reserved)
     return Admitted(fits, endpoint, shortfall, None if fits else "capacity")
