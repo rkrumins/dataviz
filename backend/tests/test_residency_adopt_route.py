@@ -62,15 +62,19 @@ class _Svc:
 
 
 class _Session:
-    def __init__(self, job=None):
-        self.job = job
+    """The management session: only the rollup-job check reads through it; ``jobs`` answers each
+    check in turn (the last one again), so a job can start between two."""
+
+    def __init__(self, job=None, jobs=None):
+        self.jobs = list(jobs) if jobs is not None else [job]
 
     async def execute(self, stmt):
-        return SimpleNamespace(scalar_one_or_none=lambda: self.job)
+        job = self.jobs.pop(0) if len(self.jobs) > 1 else self.jobs[0]
+        return SimpleNamespace(scalar_one_or_none=lambda: job)
 
 
 async def _adopt(svc, *, keys=frozenset(), ds=None, bindings=(), job=None, residency_on=False,
-                 fits=(True, "10.0.0.3:6379", 0, None), placed=None):
+                 fits=(True, "10.0.0.3:6379", 0, None), placed=None, jobs=None):
     ds = ds if ds is not None else SimpleNamespace(projection_mode=None, provider_id="prov_A")
     seen = {"listed": [], "recorded": [], "placed": [], "bindings": []}
 
@@ -121,7 +125,8 @@ async def _adopt(svc, *, keys=frozenset(), ds=None, bindings=(), job=None, resid
                 (va, "_watermark_model", watermark_model),
                 (va.recorder, "record_for_request", record)):
             stack.enter_context(patch.object(target, name, fn))
-        out = await va.adopt_projection(GID, background, user=_ADMIN, session=_Session(job))
+        out = await va.adopt_projection(GID, background, user=_ADMIN,
+                                        session=_Session(job, jobs))
     return out, background, seen
 
 
@@ -239,3 +244,14 @@ def test_the_activity_log_can_say_what_happened():
         "graphId": GID, "from": {"key": "nexus_lineage"}, "to": {"key": "gvp_x"}}})
     assert severity == "info" and GID in summary and "nexus_lineage" in summary
     assert catalogue.LABELS[event] and catalogue.category_of(event) == "platform"
+
+
+async def test_a_rollup_job_that_starts_while_adopt_waits_for_the_lock_refuses_it():
+    """Review 3, finding 7: the rollup-job check came before up to 15 s of waiting for the capacity
+    lock and three gathers; a job starting in between went on writing :AGGREGATED into the
+    customer's key after the commit. It is checked again under the lock, just before the commit."""
+    svc = _Svc()
+    with pytest.raises(JobActive):
+        await _adopt(svc, residency_on=True, placed=(keymigrate.owned_key(GID, 7), "10.0.0.3:6379"),
+                     keys={"nexus_lineage"}, jobs=[None, "job_rollup_1"])
+    assert svc.adopted == []

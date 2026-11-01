@@ -386,3 +386,44 @@ def test_the_activity_log_can_say_what_happened():
     assert GID in summary and "gvp_x" in summary
     assert catalogue.LABELS["platform.versioning.projection_moved"]
     assert catalogue.category_of("platform.versioning.projection_moved") == "platform"
+
+
+@pytest.mark.asyncio
+async def test_with_residency_on_a_move_reads_the_graph_s_state_under_the_capacity_lock(
+        monkeypatch):
+    """Review 3, finding 6: whether a move copies the graph (and so is admitted, under the lock)
+    was decided from a watermark read before the lock. A load finishing meanwhile — rehydrating
+    then, idle at the commit — made a full copy no one admitted. The lock is always taken with
+    residency on, and the state read inside it decides."""
+    held, asked = [], []
+
+    @asynccontextmanager
+    async def admitting(**kw):
+        held.append(True)
+        yield
+        held.append(False)
+
+    async def place_key(graph_id, provider, taken):
+        return keymigrate.owned_key(GID, 3), "10.0.0.3:6379"
+
+    async def admission_on(graph_id, provider, key):
+        asked.append(key)
+        return va.residency.Admitted(True, "10.0.0.3:6379", 0, None)
+
+    monkeypatch.setattr(va.vconfig, "RESIDENCY_ENABLED", True)
+    monkeypatch.setattr(va.residency, "admitting", admitting)
+    monkeypatch.setattr(va.residency, "place_key", place_key)
+    monkeypatch.setattr(va.residency, "admission_on", admission_on)
+    svc = _Svc()
+    states = iter(["rehydrating", "idle"])          # before the lock, then under it
+    real = svc.projection_watermark
+
+    async def watermark(graph_id):
+        wm = await real(graph_id)
+        wm["status"] = next(states, "idle")
+        return wm
+
+    svc.projection_watermark = watermark
+    await _move(svc, {"providerId": "prov_B"})
+    assert held == [True, False] and asked == [keymigrate.owned_key(GID, 3)]
+    assert len(svc.moves) == 1

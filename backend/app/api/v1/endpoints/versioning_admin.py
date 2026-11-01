@@ -160,10 +160,13 @@ async def move_projection(
     else:
         # Its new key is seeded while the old one stands: a full copy, admitted like a load, and
         # committed before anything else is admitted. A graph out of FalkorDB only changes its
-        # pin; its load is admitted when it starts.
-        copied = vconfig.RESIDENCY_ENABLED and wm.get("status") not in (
-            "evicted", "waiting_capacity", "rehydrating")
-        async with residency.admitting() if copied else contextlib.nullcontext():
+        # pin; its load is admitted when it starts. With residency on the lock is always taken,
+        # and the graph's state read under it decides: a load finishing meanwhile makes a copy.
+        async with residency.admitting() if vconfig.RESIDENCY_ENABLED else contextlib.nullcontext():
+            if vconfig.RESIDENCY_ENABLED:
+                wm = await svc.projection_watermark(graph_id)
+            copied = vconfig.RESIDENCY_ENABLED and wm.get("status") not in (
+                "evicted", "waiting_capacity", "rehydrating")
             key, master = await _target_key(graph_id, body, current, wm["retired_keys"])
             if copied:
                 admitted = await residency.admission_on(graph_id, body.provider_id, key)
@@ -417,13 +420,7 @@ async def adopt_projection(
         raise HTTPException(status_code=422, detail={
             "type": "projection_mode_unsupported",
             "message": "a data source with a dedicated rollup graph cannot be adopted"})
-    job = (await session.execute(
-        select(AggregationJobORM.id).where(
-            AggregationJobORM.data_source_id == meta["data_source_id"],
-            AggregationJobORM.status.in_(("pending", "running"))).limit(1)
-    )).scalar_one_or_none()
-    if job is not None:
-        raise JobActive(job, "a rollup rebuild is running for this graph; adopt it when it finishes")
+    await _no_rollup_job(session, meta["data_source_id"])
     provider = wm["falkor_provider"] or vconfig.DEFAULT_FALKOR_PROVIDER
     shared = await managed_sources.graph_key_bindings(
         session, wm["falkor_provider"] or (ds.provider_id if ds else None), pin,
@@ -455,6 +452,9 @@ async def adopt_projection(
         shard_map = {"tag": key[key.index("{") + 1:-1], "slot": key_slot(key),
                      "chosenAt": datetime.now(timezone.utc).isoformat(), "chosenBy": user.id,
                      **({"master": master} if master else {})}
+        # Again, just before the commit: one started while the lock was waited for would go on
+        # writing :AGGREGATED into the customer's key after it.
+        await _no_rollup_job(session, meta["data_source_id"])
         with _domain_errors():
             try:
                 res = await svc.adopt_projection(graph_id=graph_id, key=key, actor=user.id,
@@ -472,6 +472,19 @@ async def adopt_projection(
     )
     return {"graphId": graph_id, "from": res["from"], "to": res["to"],
             "watermark": await _watermark_model(session, await svc.projection_watermark(graph_id))}
+
+
+async def _no_rollup_job(session: AsyncSession, data_source_id: str) -> None:
+    """Adopt waits for a pending or running rollup job of the data source: it writes the key the
+    graph projects into (409 ``job_active``)."""
+    job = (await session.execute(
+        select(AggregationJobORM.id).where(
+            AggregationJobORM.data_source_id == data_source_id,
+            AggregationJobORM.status.in_(("pending", "running"))).limit(1)
+    )).scalar_one_or_none()
+    if job is not None:
+        raise JobActive(job, "a rollup rebuild is running for this graph; adopt it when it "
+                             "finishes")
 
 
 class ResidencyClassRequest(BaseModel):
