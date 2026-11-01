@@ -416,3 +416,42 @@ async def test_reads_are_noted_once_a_graph_and_kept_when_a_flush_fails(monkeypa
     assert await residency.flush_reads() == 0
     assert set(residency._READS) == {"g1", "g2"}
     residency._READS.clear()
+
+
+# ── the watermark route ──────────────────────────────────────────────────────────────────────────
+class _NoKeyVersioning:
+    """A graph with no FalkorDB key yet: what ``projection_watermark`` answers for one."""
+
+    async def get_graph(self, graph_id):
+        return {"graph_id": graph_id, "workspace_id": "ws_a", "data_source_id": "ds_a",
+                "kind": "manual", "main_head_commit_seq": 3, "deleted_at": None,
+                "fork_parent_graph_id": None}
+
+    async def projection_watermark(self, graph_id):
+        from backend.app.services.versioning.service import residency_state_of, serves_head
+
+        return {"committed": 3, "projected": 0, "target": 3, "status": "idle",
+                "fresh": serves_head(0, 3, "idle"),
+                "read_route": {"main": "postgres", "drafts": "overlay"},
+                "falkor_graph_name": None, "falkor_provider": None, "owns_falkor_graph": False,
+                "residency": "standard", "residency_state": residency_state_of("idle", 0, None,
+                                                                               graph_id)}
+
+
+@pytest.mark.parametrize("on", [False, True])
+async def test_the_watermark_of_a_graph_with_no_key_answers_with_no_residency_state(
+        test_client, monkeypatch, on):
+    """Review 3, finding 2: a graph with no key has no residency state (null), and the route typed
+    it as a string, so GET …/watermark answered 500 for every such graph — with residency off too,
+    where nothing may change."""
+    from backend.app.api.v1.endpoints.versioning import get_versioning_service
+    from backend.app.main import app
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", on)
+    app.dependency_overrides[get_versioning_service] = lambda: _NoKeyVersioning()
+    try:
+        r = await test_client.get("/api/v1/ws_a/versioning/graphs/graph_a/watermark")
+    finally:
+        app.dependency_overrides.pop(get_versioning_service, None)
+    assert r.status_code == 200, r.text
+    assert (r.json()["residencyState"], r.json()["projectionKey"]) == (None, None)

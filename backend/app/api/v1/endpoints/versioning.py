@@ -1001,11 +1001,11 @@ class WatermarkModel(_ApiModel):
     reads_from: Optional[Literal["overlay", "postgres"]] = Field(default=None, alias="readsFrom")
     # Residency (doc 17): the class a system admin set (always | standard | coldline; null for a
     # fork, which has none) and whether the key is in FalkorDB — for a fork, its root's, through
-    # which it reads: resident | evicted | rehydrating (being loaded) | waiting_capacity (its
-    # master has no room for it yet). Then why it was evicted, when a person last read it and its
+    # which it reads: resident | evicted | rehydrating (being loaded, or its key written from
+    # nothing) | waiting_capacity (its master has no room for it yet); null with no key. Then why it was evicted, when a person last read it and its
     # measured size; while it is being loaded, since when (a load has no timeout).
     residency: Optional[str] = "standard"
-    residency_state: str = Field(default="resident", alias="residencyState")
+    residency_state: Optional[str] = Field(default="resident", alias="residencyState")
     evicted_reason: Optional[str] = Field(default=None, alias="evictedReason")
     last_read_at: Optional[datetime] = Field(default=None, alias="lastReadAt")
     size_bytes: Optional[int] = Field(default=None, alias="sizeBytes")
