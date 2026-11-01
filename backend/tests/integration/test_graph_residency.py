@@ -239,22 +239,26 @@ async def test_the_watermark_reset_sends_a_load_in_flight_back_to_the_queue(stor
         await get_broker_redis().zrem(residency.LOAD_REQUESTS, resident, loading, out)
 
 
-async def test_a_fork_stays_outside_residency_and_is_reseeded_as_before(store, monkeypatch):
-    """A fork the count budget evicted (before residency was on, or on a pod still without it)
-    is not held evicted: the poll picks it and reseeds it as before, and a native query on it is
-    not told its graph is loading."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
-    svc, fake = store, FakeFalkor()
-    proj = FalkorProjector(graph_client_factory=fake)
-    root = await _resident(svc, proj)
-    fork = await svc.fork_graph(parent_graph_id=root, workspace_id="ws_res", actor="a")
-    assert not (await proj.project_graph(fork["graph_id"])).get("skipped")
-    assert await CacheManager(proj).evict(fork["graph_id"], drop_graph=_dropped) is True
+async def test_a_fork_is_skipped_as_a_fork_before_residency_s_gate(store, monkeypatch):
+    """A fork has no FalkorDB copy (doc 17 §6): whatever its row says — here an earlier release's
+    copy of it, which the count budget evicted — a pass skips it as a fork before residency's gate
+    is asked, the poll never picks it, and neither a rebuild nor a read's rebuild asks for a load
+    of it, with residency on or off."""
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
-    assert await residency.non_resident(fork["data_source_id"]) is None
-    assert await _pending(proj, fork["graph_id"]) is True
-    ps = await _ps(fork["graph_id"])
-    assert ps.status == "idle" and ps.projected_commit_seq == ps.target_commit_seq > 0
+    svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
+    root = await _resident(svc, proj)
+    fork = (await svc.fork_graph(parent_graph_id=root, workspace_id="ws_res",
+                                 actor="a"))["graph_id"]
+    await _set_ps(fork, falkor_graph_name=f"gvt_{_hex()}__fork_{fork}", owns_falkor_graph=True,
+                  status="evicted", projected_commit_seq=0)
+    assert (await proj.project_graph(fork))["skipped"] == "fork"
+    assert await CacheManager(proj).ensure_rebuilt(fork) is False
+    assert await svc.request_projection_rebuild(fork) is False
+    assert not await _load_requested(fork)
+    for flag in (True, False):
+        monkeypatch.setattr(config, "RESIDENCY_ENABLED", flag)
+        assert await _pending(proj, fork) is False
+    assert (await _ps(fork)).status == "evicted"
 
 
 async def test_adopt_moves_the_pin_onto_a_platform_key_and_leaves_the_customer_s_key_alone(
