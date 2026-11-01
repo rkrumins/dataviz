@@ -42,8 +42,8 @@ from backend.app.services.versioning.entity_audit import (
     HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
-from backend.app.api.v1.versioning_gate import (SyncOverrides, require_publish_for_main,
-                                                sync_override_gate)
+from backend.app.api.v1.versioning_gate import (SyncOverrides, fork_write_gate, require_forks_enabled,
+                                                require_publish_for_main, sync_override_gate)
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
@@ -63,6 +63,7 @@ from backend.app.services.managed_sources import (
     same_server_providers,
 )
 from backend.app.services import permission_service
+from backend.app.services.feature_flags import FeatureDisabledError
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
@@ -445,11 +446,14 @@ async def graph_in_workspace(
     A graph in the trash is gone too: deleting its data source hides it from every read at
     once, and one being purged is coming apart row by row.
 
-    An API key must also cover the data source behind the graph."""
+    An API key must also cover the data source behind the graph. A change to a fork needs forks
+    on (``fork_write_gate``)."""
     meta = await svc.get_graph(graph_id)
     if meta is None or meta.get("deleted_at") or meta["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="graph not found in workspace")
     await api_key_auth.hold_to_data_source(request, meta.get("data_source_id"), ws_id)
+    if meta.get("fork_parent_graph_id"):
+        await fork_write_gate(request)
     return meta
 
 
@@ -463,7 +467,8 @@ async def pr_in_workspace(
     """Resolve a PR and assert its **base** graph lives in ``ws_id`` (the merge is governed by the
     base owner's workspace) AND that the caller may see it: its author, an assigned reviewer, or,
     for a draft's review, whoever may read the draft; a fork's PR, a manager. Anyone else gets 404
-    (don't leak that the PR exists). An API key must also cover the base graph's data source."""
+    (don't leak that the PR exists). An API key must also cover the base graph's data source. A
+    change to a fork's review, or to a review into a fork, needs forks on (``fork_write_gate``)."""
     pr = await svc.get_pr(pr_id)
     if pr is None:
         raise HTTPException(status_code=404, detail="pull request not found")
@@ -473,6 +478,9 @@ async def pr_in_workspace(
     if not await _sees_pr(svc, pr, viewer):
         raise HTTPException(status_code=404, detail="pull request not found in workspace")
     await api_key_auth.hold_to_data_source(request, base.get("data_source_id"), ws_id)
+    from_fork = not (pr.get("source_graph_id") and pr["source_graph_id"] == pr.get("target_graph_id"))
+    if from_fork or base.get("fork_parent_graph_id"):
+        await fork_write_gate(request)
     return pr
 
 
@@ -542,6 +550,9 @@ def _domain_errors():
         raise HTTPException(status_code=409, detail={
             "type": "too_large_for_tree", "changed": exc.changed, "limit": exc.limit,
             "message": str(exc)})
+    except FeatureDisabledError as exc:   # as main.py answers it, so a queued publish keeps it too
+        raise HTTPException(status_code=403, detail={
+            "type": "feature_disabled", "feature": exc.feature, "message": exc.message})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -1647,7 +1658,9 @@ async def resolve_graph_open(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Resolve and ensure the caller has an open draft to edit on (opens one if none, at the level
-    its data source's policy starts a draft at)."""
+    its data source's policy starts a draft at). None opens on a fork while forks are off."""
+    if body.data_source_id.startswith("dsfork_"):
+        await require_forks_enabled()
     res = await svc.resolve_graph(
         data_source_id=body.data_source_id, actor=user.id, workspace_id=ws_id,
         open_draft_if_absent=True, originating_view_id=body.originating_view_id,
@@ -2173,6 +2186,8 @@ async def _publish_from_job(job: dict) -> dict:
                 meta = await svc.get_graph(graph_id)
                 if meta is None:                        # trashed, or being purged, since queued
                     raise HTTPException(status_code=404, detail="graph not found")
+                if meta.get("fork_parent_graph_id"):    # forks turned off since it was queued
+                    await require_forks_enabled()
                 async with get_async_session() as session:
                     cset = await _live_containment_types(session, job["workspaceId"], (meta or {}).get("data_source_id"))
                     rules = await _rules_for_meta(session, job["workspaceId"], meta)
@@ -3901,10 +3916,12 @@ async def fork_graph(
     of its own (``dataSourceId``) in this workspace, with this graph's data source's governing
     settings. Management and graphver are separate databases (no 2PC), so the order is the
     blank model's: what would refuse the fork is checked first, the data source commits, the
-    fork is made, and a fork that could not be made takes its data source with it."""
+    fork is made, and a fork that could not be made takes its data source with it. While forks
+    are off, none is made."""
     from backend.app.services.fork_sources import fork_row
     from backend.app.services.versioning.ids import prefixed_id
 
+    await require_forks_enabled()
     with _domain_errors():
         await svc.fork_preflight(parent_graph_id=graph_id, workspace_id=ws_id)
     # FOR SHARE until the row commits: a move of the parent finishes first, and is seen.

@@ -22,7 +22,7 @@ pytestmark = [pytest.mark.integration, pytest.mark.skipif(
 FIELDS = ("ahead", "behind", "updateRecommended", "readsFrom", "countsCapped")
 
 
-def test_a_fork_says_how_far_it_is_from_its_parent(monkeypatch):
+def test_a_fork_says_how_far_it_is_from_its_parent(monkeypatch, forks_on):
     async def case(svc):
         _parent_ds, gid = await _parent(svc)
         await svc.apply_ops(graph_id=gid, actor="alice", message="seed", ops=[_n("A"), _n("B")])
@@ -72,7 +72,7 @@ def test_a_fork_says_how_far_it_is_from_its_parent(monkeypatch):
     _run(case)
 
 
-def test_a_forks_ceiling_count_is_kept_per_version(monkeypatch):
+def test_a_forks_ceiling_count_is_kept_per_version(monkeypatch, forks_on):
     """Each engine a request builds for a fork asks ``fork_reads_from`` whether the fork is past
     the ceiling, which counts its candidates (70 ms at 145,000). The count is kept per version of
     the fork (its head, the base each layer reads, its root's head) and ceiling: a request at an
@@ -112,7 +112,7 @@ def test_a_forks_ceiling_count_is_kept_per_version(monkeypatch):
     _run(case)
 
 
-def test_an_update_is_recommended_only_where_it_would_help(monkeypatch):
+def test_an_update_is_recommended_only_where_it_would_help(monkeypatch, forks_on):
     """``updateRecommended`` is what Update from parent can fix. A fork past the ceiling recommended
     one whatever put it there, and a fork of a busy fork, whose reads count its parent's own
     history up to its base, recommended one for good: taking in its parent's newer work only adds

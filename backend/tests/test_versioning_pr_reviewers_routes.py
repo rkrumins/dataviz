@@ -27,6 +27,8 @@ class _Versioning:
         return {"graph_id": graph_id, "workspace_id": "ws1", "data_source_id": "ds1"}
 
     async def get_pr(self, pr_id):
+        # No source graph: a fork's review, as the store reads one, so the test that edits it
+        # turns forks on.
         return {"pr_id": pr_id, "target_graph_id": "g1", "actor": "u_author"}
 
     async def update_pr(self, **kw):
@@ -47,7 +49,7 @@ def svc():
 
 
 @pytest.mark.parametrize("route", ["pulls", "merge-requests"])
-async def test_both_pr_patch_routes_take_reviewers(test_client, svc, route):
+async def test_both_pr_patch_routes_take_reviewers(test_client, svc, route, forks_on):
     r = await test_client.patch(f"{BASE}/{route}/pr_1", json={"reviewers": ["carol", "dave"]})
     assert r.status_code == 200, r.text
     assert r.json()["reviewers"] == ["carol", "dave"]
