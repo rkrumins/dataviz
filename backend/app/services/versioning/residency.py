@@ -619,15 +619,15 @@ def _free(p: MasterPlan) -> bool:
     return p.master.used is not None and not p.master.hold and not p.seeding and not p.claimed
 
 
-def _admitted(target: Optional[MasterPlan], graph: Graph, policy,
-              endpoint: Optional[str]) -> Admitted:
+def _admitted(target: Optional[MasterPlan], graph: Graph, policy, endpoint: Optional[str], *,
+              room_only: bool = False) -> Admitted:
     if need(graph, policy) is None:
         return Admitted(False, endpoint, None, "unsized")
     if target is None or target.master.used is None:
         return Admitted(False, endpoint, None, "unmeasured")
-    if target.master.hold:
+    if not room_only and target.master.hold:
         return Admitted(False, endpoint, None, target.master.hold)
-    if target.seeding or target.claimed:
+    if not room_only and (target.seeding or target.claimed):
         return Admitted(False, endpoint, None, "busy")
     fits, shortfall = admit(target.master, need(graph, policy), policy, target.reserved)
     return Admitted(fits, endpoint, shortfall, None if fits else "capacity")
@@ -645,9 +645,11 @@ async def _sized(graph: Graph, row: Optional[Mapping], policy) -> Graph:
 
 
 async def admission(graph_id: str) -> Admitted:
-    """Whether a load of ``graph_id`` fits now on the master it would go to — the roomiest free
-    one of its provider's, or its own when its key stays — as the planner's admission decides (its
-    estimate times the headroom under the start mark, after what is held there)."""
+    """Whether a load of ``graph_id`` would fit by room alone on the master it would go to — the
+    roomiest of its provider's, or its own when its key stays — as the planner's admission counts
+    room (its estimate times the headroom under the start mark, after what is held there). A
+    master that holds or takes a load now does not refuse it: setting a class writes nothing, and
+    the load it asks for waits its turn."""
     policy = await residency_policy.resolve()
     snap = await gather()
     graph = next((g for g in snap.graphs if g.graph_id == graph_id), None)
@@ -655,9 +657,9 @@ async def admission(graph_id: str) -> Admitted:
         return Admitted(False, None, None, "unmeasured")
     graph = await _sized(graph, snap.rows.get(graph_id), policy)
     decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
-    pool = _pool(decided, graph)
-    target = roomiest([p for p in pool if _free(p)], policy) or roomiest(pool, policy)
-    return _admitted(target, graph, policy, target.master.endpoint if target else graph.endpoint)
+    target = roomiest(_pool(decided, graph), policy)
+    return _admitted(target, graph, policy, target.master.endpoint if target else graph.endpoint,
+                     room_only=True)
 
 
 async def admission_on(graph_id: str, provider: str, key: str) -> Admitted:

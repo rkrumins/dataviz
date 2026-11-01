@@ -503,7 +503,8 @@ async def test_a_new_key_is_placed_on_the_roomiest_master_of_its_provider(monkey
 async def test_placement_and_admission_pass_over_held_and_busy_masters(monkeypatch):
     """Review finding 2: a master replaying its dataset reads near empty, and one taking a load
     already has its one; neither has a new key placed on it nor a full write admitted onto it, as
-    the planner's own loads never do."""
+    the planner's own loads never do. (Setting a class, which writes nothing, counts room alone:
+    review 3, finding 8.)"""
     from backend.app.services.versioning import keymigrate
 
     snap = residency.Snapshot(
@@ -523,13 +524,35 @@ async def test_placement_and_admission_pass_over_held_and_busy_masters(monkeypat
     gid = "graph_01JA2B3C4D5E6F7G8H9JKMNPQR"
     try:
         assert (await residency.place_key(gid, "default", taken=set()))[1] == "m1"
-        assert await residency.admission("g") == (True, "m1", 0, None)
+        assert await residency.admission("g") == (True, "m3", 0, None)
         on = {m: keymigrate.placed_key(gid, snap.slots[m], set()) for m in ("m1", "m2", "m3")}
         assert await residency.admission_on("g", "default", on["m1"]) == (True, "m1", 0, None)
         assert await residency.admission_on("g", "default", on["m2"]) == (
             False, "m2", None, "loading")
         assert await residency.admission_on("g", "default", on["m3"]) == (
             False, "m3", None, "busy")
+    finally:
+        residency_policy.invalidate()
+
+
+async def test_setting_always_checks_room_only(monkeypatch):
+    """Review 3, finding 8: setting a class writes nothing — the load it asks for waits its turn —
+    so a master that holds or takes a load now does not refuse it; only room does."""
+    snap = residency.Snapshot(
+        masters=[_master(used_pct=10, hold="fork"), _master(endpoint="m2", used_pct=20)],
+        graphs=[_graph("g", status="evicted", size=100 * MB),
+                _graph("loading", status="rehydrating", seeding=True, size=10 * MB,
+                       endpoint="m2")])
+
+    async def gather(**kw):
+        return snap
+
+    monkeypatch.setattr(residency, "gather", gather)
+    residency_policy._MEMO.update(policy=POLICY, at=residency_policy._clock())
+    try:
+        assert await residency.admission("g") == (True, "m1", 0, None)
+        snap.graphs[0] = _graph("g", status="evicted", size=700 * MB)       # 910 MB > 700 MB
+        assert await residency.admission("g") == (False, "m1", 210 * MB, "capacity")
     finally:
         residency_policy.invalidate()
 
