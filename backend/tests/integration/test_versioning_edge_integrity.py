@@ -152,6 +152,16 @@ async def _run() -> None:
         svc.publish(graph_id=gid, branch_id=dB, actor="bob", message="parent Q2",
                     containment_edge_types=CET)), "cross-branch merge composed a second parent!"
 
+    # (11) An edge re-pointed in a batch counts where it NOW points: a new edge where it was is
+    #      no duplicate, and a link moved off a child leaves that child free for a new parent.
+    R, R2, K1, K2 = (f"urn:li:dataset:ei{n}_{sfx}" for n in ("R", "R2", "K1", "K2"))
+    await _apply(svc, gid, d, [_node(R), _node(R2), _node(K1), _node(K2), _edge(f"ek1_{sfx}", R, K1),
+                               _edge(f"lr_{sfx}", R, R2, "FLOWS_TO")])
+    moved = {**_edge(f"lr_{sfx}", R, K2, "FLOWS_TO"), "op": "update"}
+    await _apply(svc, gid, d, [moved, _edge(f"lr2_{sfx}", R, R2, "FLOWS_TO")])
+    moved = {**_edge(f"ek1_{sfx}", R, K2), "op": "update"}
+    await _apply(svc, gid, d, [moved, _edge(f"ek1n_{sfx}", R2, K1)])
+
     print("EDGE-INTEGRITY OK")
 
 

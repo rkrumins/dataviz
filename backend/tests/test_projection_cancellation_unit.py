@@ -122,8 +122,12 @@ async def _run(monkeypatch, hang_at: str, projected=3, target=5) -> _FakePS:
         return [], [], [], []
     monkeypatch.setattr(proj, "_compute_changes", fake_compute_changes)
 
-    # A full seed reconciles in place: what Postgres says and what FalkorDB holds,
+    # A full seed reconciles in place, in one pass: what Postgres says and what FalkorDB holds,
     # both empty here, so the (empty) apply is the next suspension point.
+    async def fake_live_count(s, graph_id, main_id):
+        return 0
+    monkeypatch.setattr(proj, "_live_count", fake_live_count)
+
     async def fake_expected_projection(s, graph, main_id, to_seq, level_map):
         return {}, {}, {}
     monkeypatch.setattr(proj, "_expected_projection", fake_expected_projection)
