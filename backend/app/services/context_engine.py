@@ -331,8 +331,11 @@ class ContextEngine:
         if base is None:
             base = VersionedBranchProvider(svc, graph_id=root_id,
                                            branch_id=await svc.main_branch_id(root_id), actor=actor)
+        # Its cache keys carry the root store's version it reads against: the root's writes and
+        # projections bump only the root's cache (DraftOverlayProvider.physical_graph_id).
         return DraftOverlayProvider(base, svc=svc, graph_id=gid, branch_id=main_id, actor=actor,
-                                    fork=True)
+                                    fork=True,
+                                    read_ns=f"{root_id}@{wm['committed']}:{wm['projected']}")
 
     # ------------------------------------------------------------------ #
     # Connection-aware factory (legacy compat)                             #

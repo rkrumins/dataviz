@@ -369,16 +369,19 @@ class DraftOverlayProvider:
     writes = a commit on the draft. Empty delta ⇒ every read is a pure pass-through to ``base``.
 
     ``fork``: this is a fork's ``main``, read the same way over its root's store (``base``) with
-    the fork's patch set; a draft on the fork overlays this one in turn."""
+    the fork's patch set; a draft on the fork overlays this one in turn. ``read_ns``: which version
+    of its root's store a fork's reads were built against, carried in its cache keys
+    (:meth:`physical_graph_id`)."""
 
     def __init__(self, base, *, svc, graph_id: str, branch_id: str, actor: Optional[str] = None,
-                 fork: bool = False):
+                 fork: bool = False, read_ns: Optional[str] = None):
         self._base = base
         self._svc = svc
         self._gid = graph_id
         self._branch = branch_id
         self._actor = actor or "system"
         self._fork = fork
+        self._read_ns = read_ns
         self._containment_types: List[str] = []
         self._delta: Optional[_OverlayDelta] = None
         # Writes (and as-of-free branch ops) reuse the ordinary branch provider — no duplication.
@@ -416,6 +419,25 @@ class DraftOverlayProvider:
     @property
     def name(self) -> str:
         return f"draft-overlay[{self._gid}:{self._branch}] over {getattr(self._base, 'name', '?')}"
+
+    def physical_graph_id(self) -> Optional[str]:
+        """The physical graph behind this overlay's reads, which cached answers are keyed by: its
+        store's, and for a fork's, the version of its root's store it was read against
+        (``read_ns``). A fork's cache is its own data source's, which its root's writes and
+        projections never bump: its key moving with the root's store is what keeps an answer
+        built across a root publish from being served after it."""
+        base, base_id = self._base, None
+        for _ in range(5):
+            get_id = getattr(base, "physical_graph_id", None)
+            if callable(get_id):
+                base_id = get_id()
+                break
+            base = getattr(base, "_base", None)
+            if base is None:
+                break
+        if self._read_ns is None:
+            return base_id
+        return f"{base_id or ''}|{self._read_ns}"
 
     async def get_ontology_metadata(self):
         # Like VersionedBranchProvider: the engine resolves ontology from the data source and pushes

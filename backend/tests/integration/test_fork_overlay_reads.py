@@ -150,3 +150,32 @@ def test_a_fork_finds_what_it_only_inherited():
         assert [(n["urn"], n["displayName"]) for n in nodes] == [("B", "B"), ("N", "N"), ("A", "Z")]
         assert (await svc.neighbors_from_state(graph_id=fork, urn="C"))["nodes"] == []
     _run(case)
+
+
+def test_a_forks_cached_reads_move_with_its_roots_store():
+    """A fork's cached canvas reads are keyed by its own data source, and its root's writes and
+    projections bump only the root's cache: an answer a fork built across a root publish (its
+    patch set at one root head, the store read at the next) was served for the cache's hour. A
+    fork's key now carries its root's committed and projected seqs as its engine read them: a root
+    commit or projection moves it, and an answer built across one is not served after it."""
+    from backend.app.api.v1.endpoints.graph import _cache_scope
+    from backend.app.providers.manager import provider_manager
+    from backend.app.services.context_engine import ContextEngine
+
+    async def case(svc):
+        _parent_ds, gid = await _parent(svc)
+        await svc.apply_ops(graph_id=gid, actor="alice", message="seed", ops=[_n("A")])
+        async with _client() as c:
+            fork_ds = (await _fork(c, gid)).json()["dataSourceId"]
+
+        async def scope():
+            async with _mgmt() as session:
+                engine = await ContextEngine.for_workspace(WS, provider_manager, session,
+                                                           data_source_id=fork_ds, actor="u_forker")
+                return _cache_scope(engine)
+
+        before = await scope()
+        assert await scope() == before                              # the root stood still
+        await svc.apply_ops(graph_id=gid, actor="alice", message="root", ops=[_n("B")])
+        assert await scope() != before
+    _run(case)
