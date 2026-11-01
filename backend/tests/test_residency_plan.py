@@ -358,6 +358,22 @@ def test_room_is_made_only_for_a_load_that_fits_on_no_master_by_room_alone():
                                                                                     "queued"))
 
 
+def test_a_load_short_on_a_limited_master_has_room_made_there_beside_one_with_no_limit():
+    """A master that sets no limit fits any load by room alone, so the rule above left a load the
+    limited master is short of waiting on the free no-limit master, as if that one took a load —
+    and ranked after every master whose room is known, it never got one: the load waited for
+    good. Room is made on the limited master, as with no such master beside it."""
+    masters = [Master(endpoint="m1", used=32 * GB * 72 // 100, maxmemory=32 * GB),
+               Master(endpoint="m2", used=4 * GB, maxmemory=0)]
+    graphs = [_graph("big", status="waiting_capacity", size=2 * GB, requested_at=1.0),
+              _graph("s1", read=_ago(days=3), size=1 * GB),
+              _graph("s2", read=_ago(days=2), size=1 * GB)]
+    p = plan(POLICY, masters, graphs, NOW)
+    assert _evicted(p) == [("s1", "pressure")] and p.loads == [] and p.masters[0].claimed
+    (wait,) = p.waits
+    assert (wait.graph_id, wait.endpoint, wait.reason) == ("big", "m1", "capacity")
+
+
 def test_no_room_is_made_in_a_pass_that_could_not_read_sizes():
     """Review 3, finding 13: such a pass plans no pressure eviction, room-making's included."""
     graphs = [_graph("big", status="waiting_capacity", size=2 * GB, requested_at=1.0),

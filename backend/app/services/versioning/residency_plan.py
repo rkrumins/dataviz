@@ -16,20 +16,22 @@ Per cluster master:
   under the start mark, after what the aggregation write governor and the loads and full
   projections already in flight on it hold; one at a time per master, none while it forks for
   persistence or cannot be read, in the order the loads were asked for. The rest wait;
-* **room for a load** — for the first load of a provider that fits on no master, not even by
-  room alone on one that holds or takes a load now, room is made on the master where it falls
-  shortest: its graphs as pressure picks them — Coldline before Standard, by oldest read — but none
-  read within the Coldline idle time (it would come straight back; so in practice Standard, a
-  Coldline graph unread that long being idle-evicted already), and only as many as make the room it
-  lacks beyond what the pass frees there already. That master is then the load's: no other load
-  goes there in the pass (``MasterPlan.claimed``). When they could not make the room, nothing is
-  evicted, nothing is claimed, and the next such load may have room made instead. A pass that could
-  not read sizes makes none.
+* **room for a load** — for the first load of a provider that does not fit on the master it would
+  go to, nor by room alone on one that holds or takes a load now, room is made on the master it
+  would go to, where it falls shortest: its graphs as pressure picks them — Coldline before
+  Standard, by oldest read — but none read within the Coldline idle time (it would come straight
+  back; so in practice Standard, a Coldline graph unread that long being idle-evicted already), and
+  only as many as make the room it lacks beyond what the pass frees there already. That master is
+  then the load's: no other load goes there in the pass (``MasterPlan.claimed``). When they could
+  not make the room, nothing is evicted, nothing is claimed, and the next such load may have room
+  made instead. A pass that could not read sizes makes none.
 
 **Placement** — a load seeds a fresh key, so it goes to the master of the graph's provider with the
 most room under its start mark after what is held there (:func:`roomiest`), among those free to
-take a load, whichever master its key was on; the loop then picks a key that hashes there. A graph
-whose dedicated rollup graph is named from its key keeps the key, and loads back onto its own
+take a load, whichever master its key was on; the loop then picks a key that hashes there. One
+that sets no limit ranks after every master whose room is known: it takes a load only when none of
+those is free, and a load short of room on one of those waits there, and has room made there. A
+graph whose dedicated rollup graph is named from its key keeps the key, and loads back onto its own
 master. Loads start in the order they were asked for, per provider: one that does not fit keeps its
 place, and a later one that fits elsewhere goes ahead.
 """
@@ -257,9 +259,9 @@ def _plan_loads(policy: ResidencyPolicy, plans: Sequence[MasterPlan],
                 graphs: Sequence[Graph], now: datetime, sized: bool) -> None:
     """The loads asked for, in the order they were asked for: each onto the roomiest master free
     to take one (see the module's placement), or a wait. One that fits on a master by room alone,
-    which holds or takes a load now, waits for it. For the first of a provider's that fits on none,
-    room is made on the roomiest free one (:func:`_make_room`), which it then keeps: no later load
-    goes there in this pass. Later loads that fit elsewhere go ahead."""
+    which holds or takes a load now, waits for it. For the first of a provider's that fits on
+    neither, room is made on the roomiest free one (:func:`_make_room`), which it then keeps: no
+    later load goes there in this pass. Later loads that fit elsewhere go ahead."""
     by_endpoint = {p.master.endpoint: p for p in plans}
     on: Dict[str, List[Graph]] = {}
     for g in graphs:
@@ -292,9 +294,10 @@ def _plan_loads(policy: ResidencyPolicy, plans: Sequence[MasterPlan],
             continue
         if reason == "capacity":
             # Room alone would let it in on a master that holds or takes a load now: it waits for
-            # that one, and nothing is evicted for it elsewhere.
-            later = roomiest([p for p in readable
-                              if admit(p.master, need(g, policy), policy, p.reserved)[0]], policy)
+            # that one, and nothing is evicted for it elsewhere. (A free master it fits on ranks
+            # below the target only when it sets no limit: that one is not waited for.)
+            later = roomiest([p for p in readable if p not in free
+                              and admit(p.master, need(g, policy), policy, p.reserved)[0]], policy)
             if later is not None:
                 at, reason = later, later.master.hold or "queued"
             elif (sized and g.provider not in heads
