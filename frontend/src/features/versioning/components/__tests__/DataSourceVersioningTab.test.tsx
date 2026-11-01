@@ -13,7 +13,7 @@
  * opens its own data source, and offers Update from parent (publishers) and Propose to parent. A
  * manager forks the graph from the section's header. With forks turned off the section says so, and
  * offers neither Fork, Update from parent nor Propose to parent; forks stay readable, and go to the
- * trash and back.
+ * trash and back. On a fork's own tab, the fork strip sits at the top.
  * Its header says when editing is paused, and someone who both publishes and manages pauses or
  * resumes it, naming the revision they saw.
  * Its Drafts and reviews section shows each setting as the workspace's, naming its value, or this
@@ -65,6 +65,10 @@ vi.mock('../ProposeToParentButton', () => ({
     forkGraphId: string; parentDataSourceId: string; behind: number
   }) => <button data-fork={forkGraphId} data-parent={parentDataSourceId} data-behind={behind}>Propose to parent</button>,
 }))
+vi.mock('../ForkStrip', () => ({
+  ForkStrip: ({ dataSourceId, variant }: { dataSourceId: string; variant: string }) =>
+    <div data-testid="fork-strip" data-source={dataSourceId} data-variant={variant} />,
+}))
 vi.mock('@/hooks/useDataSourceProviderMap', () => ({
   useDataSourceProviderMap: () => ({
     resolve: () => (providerType ? { providerType } : undefined),
@@ -112,10 +116,10 @@ function Where() {
   return <span data-testid="where">{loc.pathname}{loc.search}</span>
 }
 
-const renderTab = () =>
+const renderTab = (dataSourceId = 'ds1') =>
   render(
     <MemoryRouter initialEntries={['/workspaces/ws1?ds=ds1&dstab=versioning']}>
-      <DataSourceVersioningTab wsId="ws1" dataSourceId="ds1" />
+      <DataSourceVersioningTab wsId="ws1" dataSourceId={dataSourceId} />
       <Where />
     </MemoryRouter>,
   )
@@ -390,6 +394,12 @@ describe('DataSourceVersioningTab — forks', () => {
     expect(screen.getByRole('button', { name: 'Open' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Restore' })).toBeInTheDocument()
+  })
+
+  it('puts the fork strip at the top of a fork’s own tab', () => {
+    renderTab('dsfork_1')
+    expect(screen.getByTestId('fork-strip')).toHaveAttribute('data-source', 'dsfork_1')
+    expect(screen.getByTestId('fork-strip')).toHaveAttribute('data-variant', 'tab')
   })
 
   it('deletes nothing when the manager cancels', () => {

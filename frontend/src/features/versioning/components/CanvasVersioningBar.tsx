@@ -52,6 +52,7 @@ import { ChangeCountChips } from './ChangesPanel'
 import { ContributorsStack } from './ContributorsStack'
 import { OthersSavedChip } from './OthersSavedChip'
 import { CommitDialog } from './CommitDialog'
+import { ForkStrip } from './ForkStrip'
 import { PublishReceiptBanner } from './PublishReceiptBanner'
 import { ViewVersioningPanel, type ViewPanelTab } from './ViewVersioningPanel'
 
@@ -289,6 +290,9 @@ export function CanvasVersioningBar({
 
   return (
     <>
+      {/* A fork's view: what it was forked from, how far it is from it, and its two actions. Not
+          transient, so it is a band of its own rather than a chip in the row below. */}
+      <ForkStrip wsId={workspaceId} dataSourceId={dataSourceId} variant="bar" />
       {/* "Your changes are now live" — sits ABOVE the controls: it announces what happened, it isn't
           something to operate. Survives the navigation back from the Reviews inbox. */}
       <PublishReceiptBanner graphId={graphId} onViewCommit={() => setPanelTab('history')} />

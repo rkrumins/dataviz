@@ -6,7 +6,8 @@
  *     they can only look at; an editor of a shared draft gets Publish (to request review) but not
  *     Discard, which needs its owner or a maintainer;
  *   • a draft its reader may no longer read (the poll's 404) is gone, for the guard;
- *   • it says when someone else saved into the draft, and who saved into it.
+ *   • it says when someone else saved into the draft, and who saved into it;
+ *   • it carries the fork strip, which shows only on a fork's views.
  */
 import { render, screen } from '@testing-library/react'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
@@ -57,6 +58,10 @@ vi.mock('../CommitDialog', () => ({ CommitDialog: () => null }))
 vi.mock('../PublishReceiptBanner', () => ({ PublishReceiptBanner: () => null }))
 vi.mock('../ViewVersioningPanel', () => ({ ViewVersioningPanel: () => null }))
 vi.mock('../ChangesPanel', () => ({ ChangeCountChips: () => null }))
+vi.mock('../ForkStrip', () => ({
+  ForkStrip: ({ dataSourceId, variant }: { dataSourceId: string; variant: string }) =>
+    <div data-testid="fork-strip" data-source={dataSourceId} data-variant={variant} />,
+}))
 
 import { CanvasVersioningBar } from '../CanvasVersioningBar'
 
@@ -126,3 +131,13 @@ describe('CanvasVersioningBar on a draft', () => {
   })
 })
 
+
+describe('CanvasVersioningBar on a fork', () => {
+  it('hands the fork strip the view’s data source, as a band above the canvas', () => {
+    branchesData = [draft({})]
+    freshness = { behind: false, behindBy: 0, mainHeadCommitSeq: 5, baseCommitSeq: 5, status: 'open' }
+    render(<CanvasVersioningBar workspaceId="ws1" dataSourceId="dsfork_1" />)
+    expect(screen.getByTestId('fork-strip')).toHaveAttribute('data-source', 'dsfork_1')
+    expect(screen.getByTestId('fork-strip')).toHaveAttribute('data-variant', 'bar')
+  })
+})

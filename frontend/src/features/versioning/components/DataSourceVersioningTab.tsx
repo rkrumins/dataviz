@@ -28,6 +28,7 @@ import { DraftsPolicyFields } from './DraftsPolicyFields'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
 import { ForkDialog } from './ForkDialog'
 import { ForkDistance, ForksOffNote, UpdateRecommendedHint } from './ForkStatusBits'
+import { ForkStrip } from './ForkStrip'
 import { ProjectionHealthCard } from './ProjectionHealthCard'
 import { ProposeToParentButton } from './ProposeToParentButton'
 import { UpdateFromParentButton } from './UpdateFromParentButton'
@@ -192,6 +193,9 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
 
   return (
     <div className="space-y-6">
+      {/* A fork's own tab: what it was forked from, how far it is from it, and its two actions */}
+      <ForkStrip wsId={wsId} dataSourceId={dataSourceId} variant="tab" />
+
       {/* Status header */}
       <div className={cn('flex items-center gap-3 rounded-xl border px-4 py-3',
         frozen ? 'border-amber-500/30 bg-amber-500/[0.06]' : 'border-emerald-500/20 bg-emerald-500/5')}>
