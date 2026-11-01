@@ -124,3 +124,39 @@ def test_a_drafts_own_edit_of_an_edge_main_deleted_or_moved_since_counts_where_i
             assert await counts(_overlay(svc, store, store_gid, draft)) == ({("A", "B"): 1}, 2, 0), \
                 store_gid
     _run(case)
+
+
+def test_a_node_main_moved_since_the_base_is_listed_where_it_was():
+    """A draft lists its nodes as main had them at its branch point, and a fork as its root had
+    them at its base. After main moves C from T1 to T2 (one containment edge deleted, another
+    made) and puts the top-level X under P, the store lists C under T2 and X under P only. The
+    overlay took C away from T2's count but still listed it there, as well as under T1, and showed
+    X under P and nowhere at the top level. A listing now drops a child whose edge from that parent
+    the overlay removed and did not give back, and the top level adds a node that lost every
+    parent edge it had and gained none."""
+    async def listed(p):
+        kids = {t: sorted(c.urn for c in (await p.get_children_with_edges(t, edge_types=CONT)).children)
+                for t in ("T1", "T2", "P")}
+        top = await p.get_top_level_or_orphan_nodes(limit=100)
+        return kids, sorted(n.urn for n in top.nodes), top.total_count
+
+    async def case(svc):
+        gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
+                                      workspace_id="ws1", actor="alice"))["graph_id"]
+        main = await svc.main_branch_id(gid)
+        await svc.apply_ops(graph_id=gid, actor="alice", message="seed", containment_edge_types=CONT,
+                            ops=[_n("T1"), _n("T2"), _n("P"), _n("C"), _n("X"),
+                                 _e("k1", "T1", "C", "CONTAINS")])
+        at_base = await listed(_reader(svc, gid, main))
+        assert at_base == ({"T1": ["C"], "T2": [], "P": []}, ["P", "T1", "T2", "X"], 4)
+        draft = await svc.open_draft(graph_id=gid, owner="alice")
+        fork = await svc.fork_graph(parent_graph_id=gid, workspace_id="ws1", actor="bob")
+        await svc.apply_ops(graph_id=gid, actor="alice", message="move", containment_edge_types=CONT,
+                            ops=[_d("k1", "edge"), _e("k2", "T2", "C", "CONTAINS"),
+                                 _e("k3", "P", "X", "CONTAINS")])
+        store = _reader(svc, gid, main)
+        assert await listed(store) == ({"T1": [], "T2": ["C"], "P": ["X"]}, ["P", "T1", "T2"], 3)
+        for p in (_overlay(svc, store, gid, draft),
+                  _overlay(svc, store, fork["graph_id"], fork["main_branch_id"], fork=True)):
+            assert await listed(p) == at_base
+    _run(case)

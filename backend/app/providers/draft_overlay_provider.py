@@ -76,6 +76,9 @@ class _OverlayDelta:
         self.child_count_delta: Dict[str, int] = {}
         self.cont_added: List[GraphEdge] = []
         self.cont_removed: List[GraphEdge] = []
+        # What reads of this delta look up once and share (:meth:`DraftOverlayProvider._chains`):
+        # a request's view (:meth:`for_request`) is a shallow copy, so it holds this same dict.
+        self.shared: Dict[str, Any] = {}
 
         # Nodes the draft modified or created, by urn → entity id: a read loads the ones it serves
         # (load()).
@@ -378,6 +381,21 @@ class DraftOverlayProvider:
         return await self._svc.overlay_payloads(
             graph_id=self._gid, branch_id=self._branch, entity_ids=entity_ids, kind="edge")
 
+    async def _chains(self, d: _OverlayDelta, kind: str, urns: List[str]) -> Dict[str, List[str]]:
+        """``urns``' containment chains on this overlay's own state (``{urn: [parent, …, root]}``,
+        ``[]`` for a root, absent when not a live node), for a set of urns its patch set fixes,
+        which ``kind`` names: looked up once per patch set in one batched walk, and kept with it,
+        so later reads of it place them without a query."""
+        task = d.shared.get(kind)
+        if task is None or task.get_loop() is not asyncio.get_running_loop():
+            task = d.shared[kind] = asyncio.ensure_future(self.get_ancestor_chains(urns))
+        try:
+            return await asyncio.shield(task)
+        except Exception:
+            if d.shared.get(kind) is task:
+                del d.shared[kind]                       # the next read asks again
+            raise
+
     @staticmethod
     def _matches(node: GraphNode, query: NodeQuery) -> bool:
         if query.urns and node.urn not in set(query.urns):
@@ -535,6 +553,9 @@ class DraftOverlayProvider:
             return base
         first_page = offset == 0 and not cursor
         targets = [e.target_urn for e in d.cont_added if e.source_urn == parent_urn]
+        # A child the overlay took away from this parent (its edge from here removed, or moved
+        # elsewhere) and did not give back is not listed here, though the store lists it.
+        gone = {e.target_urn for e in d.cont_removed if e.source_urn == parent_urn} - set(targets)
         # The draft's new children are served on the first page only (compose_page); past it they
         # are only counted, which a created child's skeleton is enough for.
         await d.load([c.urn for c in base.children]
@@ -557,11 +578,12 @@ class DraftOverlayProvider:
                      if q in (n.display_name or "").lower() or q in (n.urn or "").lower()]
         removed = sum(1 for e in d.cont_removed if e.source_urn == parent_urn)
         children, total_children = d.compose_page(
-            base.children, added, first_page=first_page,
+            [c for c in base.children if c.urn not in gone], added, first_page=first_page,
             base_total=base.total_children, removed=removed)
         present = {c.urn for c in children}
         # containment edges under this parent
-        cont = [e for e in base.containment_edges if e.id not in d.edge_remove]
+        cont = [e for e in base.containment_edges
+                if e.id not in d.edge_remove and e.target_urn not in gone]
         cont = await d.edges(cont + [e for e in d.cont_added if e.source_urn == parent_urn])
         # lineage edges among the (now overlaid) visible child scope
         lineage = base.lineage_edges
@@ -634,6 +656,20 @@ class DraftOverlayProvider:
         # Served on the first page only (compose_page); past it only counted, by their skeletons.
         added = [d.with_child_count(n) for n in (
             await d.served(roots) if not cursor else [d.node_index[u] for u in roots])]
+        # A node of main the overlay took every parent edge from, and gave none, is a root here
+        # though the store lists it under a parent: its chain on the overlay's state says so.
+        lost = sorted({e.target_urn for e in d.cont_removed} - has_parent - d.node_remove)
+        if lost:
+            chains = await self._chains(d, "lost_parents", lost)
+            lost = [u for u in lost if chains.get(u) == []]
+        if lost:
+            found = await self._base.get_nodes(NodeQuery(urns=lost, limit=len(lost)))
+            await d.load(n.urn for n in found)
+            for n in found:
+                m = d.overlay_existing(n)
+                if m is not None and (not et or m.entity_type in et) and (
+                        not q or q in (m.display_name or "").lower() or q in m.urn.lower()):
+                    added.append(d.with_child_count(m))
         # A removed node was a root of main unless the draft also removed a parent link to it.
         had_parent = {e.target_urn for e in d.cont_removed}
         removed = sum(1 for urn in d.node_remove if urn not in had_parent and urn not in d.node_new)
