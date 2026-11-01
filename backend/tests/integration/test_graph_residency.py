@@ -21,7 +21,7 @@ from backend.app.db.models import PlatformSettingsORM
 from backend.app.services.versioning import config, db, models, residency, residency_policy
 from backend.app.services.versioning.cache_manager import CacheManager
 from backend.app.services.versioning.messaging import close_broker_redis, get_broker_redis
-from backend.app.services.versioning.models import ProjectionStateORM
+from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
 from backend.app.services.versioning.projection import FalkorProjector, make_falkor_graph_factory
 from backend.app.services.versioning.residency import CapacityLoop
 from backend.app.services.versioning.service import GraphVersioningService
@@ -51,6 +51,12 @@ async def store():
     await models.create_schema_and_partitions()
     yield GraphVersioningService()
     residency_policy.invalidate()
+    # A case leaves graphs evicted or behind on purpose; in the trash, no later suite's poll
+    # (project_pending, a hundred at a time, most behind first) has to work through them.
+    async with db.graphver_session() as s:
+        await s.execute(update(GraphORM).where(GraphORM.workspace_id == "ws_res",
+                                               GraphORM.deleted_at.is_(None))
+                        .values(deleted_at=models._now()))
     await close_broker_redis()
     await db.dispose_engine()
 
