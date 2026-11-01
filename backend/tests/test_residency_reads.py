@@ -298,6 +298,21 @@ async def test_the_stats_probe_skips_a_graph_out_of_falkordb(monkeypatch):
     assert asked == []
 
 
+async def test_the_stats_probe_never_fails_on_residency_s_read(monkeypatch):
+    """Review finding 13: the freshness read is documented never to fail; residency's question
+    (``non_resident``, a graphver read) was asked outside the probe's try, and a graphver error
+    failed it. It degrades to no probe, as a slow or failing provider does."""
+    from backend.app.services.aggregation.service import AggregationService
+
+    async def down(ds_id):
+        raise ConnectionError("graphver unreachable")
+
+    monkeypatch.setattr(residency, "non_resident", down)
+    probe = SimpleNamespace(_registry=None)
+    assert await AggregationService._probe_live_stats(probe, "ws1", "ds1", None) == (
+        None, None, None)
+
+
 # ── read tracking and the read lease ─────────────────────────────────────────────────────────────
 async def test_a_person_s_read_holds_the_lease_and_is_noted(asked):
     await _read(_Svc({"g": _wm()}))

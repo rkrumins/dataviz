@@ -1040,6 +1040,31 @@ async def _loads(loop, proj, gid: str) -> None:
 
 
 @live
+async def test_a_broker_outage_holds_every_graph_and_fails_no_pass(store, falkor, mine,
+                                                                   monkeypatch):
+    """Review finding 13: a pass reads each candidate's read lease from the broker, and an outage
+    there raised out of gather: every pass failed, so no load started, and Adopt, move, Always and
+    the preview answered 500. A lease that cannot be read now counts as held — nothing is evicted
+    for want of it — and the pass goes on."""
+    from backend.app.services.versioning import cache_manager
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    proj = FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (gid,) = await _live_graphs(store, proj, mine, 1)
+    await _set_ps(gid, last_read_at=datetime.now(timezone.utc) - timedelta(days=30))
+
+    async def down(graph_id):
+        raise ConnectionError("Error 111 connecting to the broker")
+
+    monkeypatch.setattr(cache_manager, "is_pinned", down)
+    (graph,) = (await residency.gather(graph_ids=[gid])).graphs
+    assert graph.leased is True
+    decided = await CapacityLoop(proj).run_once(graph_ids=[gid])
+    assert decided is not None and decided.evictions == []
+    assert (await _ps(gid)).status == "idle"
+
+
+@live
 async def test_the_retire_pass_drops_a_key_an_eviction_could_not(store, falkor, mine, monkeypatch):
     """Review finding 3: the graph's own row still names the key its eviction could not drop, and
     the retire pass kept it for that ("PROTECTED: graph … projects into it") and forgot it, so the

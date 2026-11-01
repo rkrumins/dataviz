@@ -3430,14 +3430,14 @@ class AggregationService:
 
         from .fingerprint import fingerprint_from_stats
 
-        if await residency.non_resident(ds_id):
-            # Its key is out of FalkorDB (residency): a probe would read an empty graph and
-            # record 0 nodes and 0 edges for it.
-            return (None, None, None)
         timeout = float(
             __import__("os").getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5")
         )
         try:
+            if await residency.non_resident(ds_id):
+                # Its key is out of FalkorDB (residency): a probe would read an empty graph and
+                # record 0 nodes and 0 edges for it.
+                return (None, None, None)
             provider = await asyncio.wait_for(
                 self._registry.get_provider_for_workspace(
                     workspace_id, session, data_source_id=ds_id,

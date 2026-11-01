@@ -482,8 +482,6 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
     master of each of their providers (and of ``providers``): its memory, its hold, what the
     aggregation write governor holds on it and its slots. Waiting graphs whose request the broker
     lost go to the end of the queue, and so does an Always graph that is not resident."""
-    from .cache_manager import is_pinned
-
     ps, head = ProjectionStateORM, GraphORM.main_head_commit_seq
     provider_of = func.coalesce(func.nullif(ps.falkor_provider, ""), config.DEFAULT_FALKOR_PROVIDER)
     query = (
@@ -570,13 +568,25 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
             graph_id=r.graph_id, endpoint=endpoint_of[r.graph_id], residency=r.residency,
             status=r.status, owned=bool(r.owns_falkor_graph),
             evictable=bool(r.past_genesis and r.enable_finished) and r.graph_id not in held,
-            leased=candidate and await is_pinned(r.graph_id),
+            leased=candidate and await _leased(r.graph_id),
             last_read=_ts(r.last_read_at),       # none on record: its clock starts this pass
             size_bytes=r.size_bytes, entities=estimate.get(r.graph_id),
             seeding=_seeding(r, target),
             requested_at=asked.get(r.graph_id),
             provider=r.falkor_provider or config.DEFAULT_FALKOR_PROVIDER, placed=placed))
     return snap
+
+
+async def _leased(graph_id: str) -> bool:
+    """Whether a read lease holds ``graph_id``: True when the broker cannot say, so an outage
+    there evicts nothing and fails no pass."""
+    from .cache_manager import is_pinned
+
+    try:
+        return await is_pinned(graph_id)
+    except Exception:  # noqa: BLE001 — fail closed
+        logger.debug("residency: the read lease of %s could not be read", graph_id, exc_info=True)
+        return True
 
 
 def _seeding(r, target: int) -> bool:
