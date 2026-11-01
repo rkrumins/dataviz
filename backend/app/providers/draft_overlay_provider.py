@@ -56,11 +56,12 @@ class _OverlayDelta:
 
     def __init__(self, raw: Dict[str, Any], containment_types: List[str]):
         cset = {t.upper() for t in (containment_types or [])}
-        # What the cache counts this delta as holding; and a fork's patch set itself, which the
-        # next build of the fork extends when only its root moved (``since`` says what it is of).
+        # What the cache counts this delta as holding; and a fork's patch set, which the next
+        # build of the fork extends when only its root moved (``since`` says what it is of), kept
+        # compact (:func:`_keep`).
         self.size = max(1, sum(len(raw.get(k) or ()) for k in (
             "nodesUpsert", "nodesModified", "nodesRemove", "edgesUpsert", "edgesRemove")))
-        self.raw: Optional[Dict[str, Any]] = raw if raw.get("since") else None
+        self.raw: Optional[Dict[str, Any]] = _keep(raw) if raw.get("since") else None
         self.node_upsert: Dict[str, GraphNode] = {}         # values to serve, by urn
         # Every node the patch set gives a value or a skeleton for, by urn: what listings, matches
         # and searches read. A skeleton is served once loaded.
@@ -244,6 +245,42 @@ def _line(key: tuple) -> tuple:
     return key[0], key[1], key[3]
 
 
+# A fork's patch set as its delta keeps it for the next extension: each list's entries as tuples
+# of these fields, over the strings the index holds already — no dict per entry (1,043 bytes an
+# entry with the index became 865; the index alone holds 737).
+_KEPT_FIELDS = {"nodesUpsert": ("urn", "entityId", "entityType", "displayName", "qualifiedName", "lazy"),
+                "nodesModified": ("entityId", "urn"), "nodesRemove": ("entityId", "urn"),
+                "edgesUpsert": ("id", "sourceUrn", "targetUrn", "edgeType", "lazy", "was"),
+                "edgesRemove": ("id", "sourceUrn", "targetUrn", "edgeType")}
+_WAS_FIELDS = ("sourceUrn", "targetUrn", "edgeType")
+
+
+def _keep(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """``raw``, a fork's patch set, as its delta keeps it: what its next extension needs, compact."""
+    kept: Dict[str, Any] = {"since": raw["since"], "nodesNew": list(raw.get("nodesNew") or ())}
+    for key, fields in _KEPT_FIELDS.items():
+        kept[key] = [tuple((tuple(x["was"][f] for f in _WAS_FIELDS) if x.get("was") else None)
+                           if f == "was" else x.get(f) for f in fields)
+                     for x in raw.get(key) or ()]
+    return kept
+
+
+def _unkept(kept: Dict[str, Any]) -> Dict[str, Any]:
+    """The patch set :func:`_keep` kept, reader-shaped again, for the service to extend."""
+    out: Dict[str, Any] = {"since": kept["since"], "nodesNew": list(kept["nodesNew"])}
+    for key, fields in _KEPT_FIELDS.items():
+        rows = []
+        for t in kept[key]:
+            x = dict(zip(fields, t))
+            if key == "edgesUpsert":
+                was = x.pop("was")
+                if was is not None:
+                    x["was"] = dict(zip(_WAS_FIELDS, was))
+            rows.append(x)
+        out[key] = rows
+    return out
+
+
 def _ends(flows: List[GraphEdge]) -> List[str]:
     return sorted({u for e in flows for u in (e.source_urn, e.target_urn)})
 
@@ -292,7 +329,7 @@ class _DeltaCache:
 
     def latest(self, line: tuple) -> Optional[Dict[str, Any]]:
         """The patch set of the newest delta held of ``line`` (:func:`_line`) that the next build
-        may extend — a fork's — or None."""
+        may extend — a fork's, as kept (:func:`_unkept` gives it back) — or None."""
         for key in reversed(self._items):
             if _line(key) == line and self._items[key].raw is not None:
                 return self._items[key].raw
@@ -394,6 +431,8 @@ class DraftOverlayProvider:
             async def build() -> _OverlayDelta:
                 # A fork's patch set as it was before its root moved, for the service to extend.
                 prev = _DELTAS.latest(_line(key))
+                if prev is not None:
+                    prev = await asyncio.to_thread(_unkept, prev)
                 raw = await self._svc.branch_overlay_delta(
                     graph_id=self._gid, branch_id=self._branch, **({"extend": prev} if prev else {}))
                 # Indexing a large draft's patch set is pure CPU: off the event loop.

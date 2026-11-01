@@ -297,7 +297,7 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` | `5000` | longest wait for any one graph, draft, lifecycle, move, PR or graph-row lock; a write `_retry_seq` retries (save, checkpoint, pull, publish, merge, revert, restore, sync, bulk ingest) tries `GRAPHVER_COMMIT_MAX_RETRIES` times before 503 `lock_busy`, anything else answers it after one wait |
 | `GRAPHVER_MAX_FORKS_PER_GRAPH` | `10` | live forks per graph; one more is 409 `fork_limit` |
 | `GRAPHVER_FORK_REWIND_MAX` / `_WARN` | `200000` / `50000` | entities a fork's patch set may classify before its reads go to Postgres / parent changes not taken in that recommend an update ([17](17-forks-and-residency.md) §2, §7) |
-| `GRAPHVER_OVERLAY_CACHE_ENTRIES` | `1000000` | entries the overlay deltas a process keeps for drafts' and forks' reads hold together |
+| `GRAPHVER_OVERLAY_CACHE_ENTRIES` | `400000` | entries the overlay deltas a process keeps for drafts' and forks' reads hold together: about 1.2 KB each (0.74 KB a draft's, 0.87 KB a fork's, measured, before allocator slack and the chains a rollup read keeps), so under 512 MB a process; an evicted delta is built again on its next read, 2 to 6 s at 50,000 to 145,000 entries |
 | `GRAPHVER_SET_FIELDS` | `tags` | payload fields merged as unordered sets in 3-way merge |
 | `IMPORT_COMMIT_WINDOW` / `INLINE_IMPORT_MAX` | `10000` / `5000` | import windowing / inline-vs-async threshold |
 | `OBJECT_STORE_BACKEND` | `database` | where import/export artifacts live: `database`, `local` (a shared mount) or `s3` (opt-in) |

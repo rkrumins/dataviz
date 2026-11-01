@@ -595,6 +595,7 @@ Drafts and commits, projection into the graph store, and import and export.
 |---|---|---|---|
 | `GRAPHVER_DROP_FORK_COPIES` | `false` | Set `true` once every pod runs a release whose forks read through their parent's graph: the versioning worker then drops the FalkorDB copies earlier releases made of forks (`<parent key>__fork_<id>`), each only if it is the fork's own and nothing else projects into it or reads it. Off by default, because a pod on an earlier release still reads them. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_LIVENESS_SECS` | `60` | How often, in seconds, the versioning worker checks that each versioned graph's FalkorDB key still holds what was projected into it, and reseeds one that was lost or restored to an older state. The same check asks for the first summaries build of a key no build has covered yet. `0` turns the check off. | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_OVERLAY_CACHE_ENTRIES` | `400000` | Entries the overlay deltas of drafts' and forks' reads may hold together in each process; the least recently read go first, and the newest is kept whatever its size. An entry holds about 1.2 KB (0.74 KB a draft's, 0.87 KB a fork's, measured, before allocator slack and the chains a rollup read keeps), so the default, 400,000, holds under 512 MB in each web process. An evicted delta is built again on its next read: 2 to 6 s at 50,000 to 145,000 entries. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_INPROCESS` | (empty) | Run the versioning worker lanes inside the API process (`1`, `true` or `yes`), only under `SYNODIC_ROLE=dev`, for a single-process development run; any other role ignores it. Off by default: the versioning worker lanes do it. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PROJECTION_WAIT_REPLICAS` | `0` | Replicas that must confirm a versioned graph's projection before reads are served from it. Fewer within `GRAPHVER_PROJECTION_WAIT_MS` hold it back as `replica_unconfirmed` and retry later. `0` waits for none; set it the same on the API and the versioning worker, which both project. | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_TRANSFER_INPROCESS` | — | No longer read: import, export and publish jobs always run on the versioning worker's transfer lane (`GRAPHVER_WORKER_LANES`). A process that still finds it set logs a warning; remove it. | `backend/app/services/versioning/config.py` |
@@ -643,7 +644,6 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_MERKLE_DEPTH` | `4` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_NARROW_SQUASH` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_ONTOLOGY_ENFORCEMENT` | `strict` | `backend/app/services/versioning/config.py` |
-| `GRAPHVER_OVERLAY_CACHE_ENTRIES` | `1000000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PACKAGE_PROJECT_WINDOW` | `20000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PACKAGE_SEED_WINDOW` | `20000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_PARTITIONS` | `64` | `backend/app/services/versioning/config.py` |

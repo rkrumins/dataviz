@@ -114,9 +114,11 @@ the next step — taking the parent's newer commits into a fork — builds on. S
   The versioning worker's reaper then drops each copy that is the fork's own and that nothing else
   projects into or reads, and clears the fork's pin. Until then the copies stay, neither read nor
   projected; a pod on an earlier release still reads them, which is why it is off by default.
-- **New settings**, whose defaults fit: `GRAPHVER_FORK_REWIND_MAX` (200,000),
-  `GRAPHVER_FORK_REWIND_WARN` (50,000) and `GRAPHVER_OVERLAY_CACHE_ENTRIES` (1,000,000 entries for
-  every overlay delta a process keeps, drafts' included).
+- **New settings**: `GRAPHVER_FORK_REWIND_MAX` (200,000), `GRAPHVER_FORK_REWIND_WARN` (50,000) and
+  `GRAPHVER_OVERLAY_CACHE_ENTRIES` (400,000 entries for every overlay delta a process keeps, drafts'
+  included). An entry holds about 1.2 KB, so the default holds under 512 MB in each web process;
+  lower it where a process has less to spare. An evicted delta is built again on its next read, 2 to
+  6 s at 50,000 to 145,000 entries.
 
 ### Known limitations
 

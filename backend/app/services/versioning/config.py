@@ -275,8 +275,11 @@ FORK_REWIND_WARN: int = int(os.getenv("GRAPHVER_FORK_REWIND_WARN", "50000"))
 # pods still running such a release read and project them. Turn it on once every pod runs this one.
 DROP_FORK_COPIES: bool = os.getenv("GRAPHVER_DROP_FORK_COPIES", "false").lower() in ("1", "true", "yes")
 # Entries the overlay deltas a process keeps for drafts' and forks' reads may hold together; the
-# least recently read go first, the newest is kept whatever its size.
-OVERLAY_CACHE_ENTRIES: int = int(os.getenv("GRAPHVER_OVERLAY_CACHE_ENTRIES", "1000000"))
+# least recently read go first, the newest is kept whatever its size. Sized at about 1.2 KB an
+# entry (measured: 0.74 KB a draft's, 0.87 KB a fork's, before allocator slack and the chains a
+# rollup read keeps), so a web process holds under 512 MB of them. An evicted delta is built again
+# on its next read: 2 to 6 s for 50,000 to 145,000 entries.
+OVERLAY_CACHE_ENTRIES: int = int(os.getenv("GRAPHVER_OVERLAY_CACHE_ENTRIES", "400000"))
 
 # Default per-data-source audit tier (plan decision #8): commit_only | full_wip.
 DEFAULT_AUDIT_TIER: str = os.getenv("GRAPHVER_DEFAULT_AUDIT_TIER", "commit_only")

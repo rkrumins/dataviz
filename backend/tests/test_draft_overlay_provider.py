@@ -597,11 +597,51 @@ def test_a_forks_next_delta_is_handed_its_last_to_extend():
         await fork().get_node("A")
         svc.version = (object(),)                                # its root moved
         await fork().get_node("A")
-        assert svc.handed == [None, {**_EMPTY, "since": {"rootHead": 1}}]
+        assert svc.handed == [None, {**_EMPTY, "nodesModified": [], "nodesNew": [],
+                                     "since": {"rootHead": 1}}]
         draft = FakeSvc(_EMPTY)
         await DraftOverlayProvider(StubMain(), svc=draft, graph_id="g_ext", branch_id="d").get_node("A")
         assert draft.builds == 1                                 # no extend handed (none to give)
     asyncio.run(run())
+
+def test_a_forks_delta_keeps_its_patch_set_compact_for_the_next_extension():
+    """A fork's delta kept its patch set as built, a dict per entry beside the index built from
+    it, for the next extension: 1,043 bytes an entry with the index, where the index alone holds
+    737. It keeps what the extension needs, each entry's fields as a tuple over the strings the
+    index holds already (865 bytes an entry with the index), and the extension gets the patch set
+    back as it was built."""
+    import copy as _copy
+    raw = {"nodesUpsert": [{"urn": "N", "entityId": "eN", "entityType": "Table", "displayName": "N",
+                            "qualifiedName": None, "lazy": True}],
+           "nodesModified": [{"entityId": "e1", "urn": "A.c"}],
+           "nodesRemove": [{"entityId": "e2", "urn": "B.c"}],
+           "edgesUpsert": [{"id": "f1", "sourceUrn": "A.c", "targetUrn": "N", "edgeType": "FLOWS",
+                            "lazy": True},
+                           {"id": "f2", "sourceUrn": "A.c", "targetUrn": "N", "edgeType": "FLOWS",
+                            "lazy": True,
+                            "was": {"sourceUrn": "A.c", "targetUrn": "A", "edgeType": "FLOWS"}}],
+           "edgesRemove": [{"id": "f3", "sourceUrn": "B.c", "targetUrn": "A.c", "edgeType": "FLOWS"}],
+           "nodesNew": ["N"], "since": {"head": "c1", "layers": [3, 1], "rootHead": 7}}
+    d = _OverlayDelta(_copy.deepcopy(raw), ["CONTAINS"])
+    kept = [x for key in ("nodesUpsert", "nodesModified", "nodesRemove", "edgesUpsert", "edgesRemove")
+            for x in d.raw[key]]
+    assert len(kept) == 6 and not any(isinstance(x, dict) for x in kept)
+    from backend.app.providers.draft_overlay_provider import _unkept
+    assert _unkept(d.raw) == raw
+    assert _OverlayDelta(_copy.deepcopy({**raw, "since": None}), ["CONTAINS"]).raw is None  # a draft's
+
+
+def test_the_overlay_caches_default_holds_under_half_a_gigabyte():
+    """GRAPHVER_OVERLAY_CACHE_ENTRIES bounds the entries a process's cached deltas hold together.
+    At about 1.2 KB an entry (measured: 0.74 KB a draft's, 0.87 KB a fork's, before allocator
+    slack and the chains a rollup read keeps), its old default of 1,000,000 let one web process
+    hold 1.2 GB. Its default keeps them under 512 MB."""
+    import re
+    from backend.app.services.versioning import config
+    default = int(re.search(r'"GRAPHVER_OVERLAY_CACHE_ENTRIES", "(\d+)"',
+                            open(config.__file__).read()).group(1))
+    assert default * 1_200 <= 512 * 2 ** 20, default
+
 
 if __name__ == "__main__":
     asyncio.run(_run())

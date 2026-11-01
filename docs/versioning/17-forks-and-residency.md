@@ -93,9 +93,13 @@ many nodes at its top level, or a listing with no filter, loads each of those on
 
 **Cached, then extended.** A process keeps a patch set per fork head, base and root head. When only
 the root moved, the next one is the last one extended by what the root changed since, instead of
-built again; a commit on the fork, or a new base, builds it again. The deltas kept, drafts' and
-forks', hold at most `GRAPHVER_OVERLAY_CACHE_ENTRIES` entries together (default 1,000,000; the
-coldest go first, and the newest is kept whatever its size).
+built again; a commit on the fork, or a new base, builds it again. A fork's delta keeps its patch
+set for that, compact: each entry's fields as a tuple. The deltas kept, drafts' and forks', hold at
+most `GRAPHVER_OVERLAY_CACHE_ENTRIES` entries together (default 400,000; the coldest go first, and
+the newest is kept whatever its size). An entry holds about 1.2 KB (measured: 0.74 KB a draft's,
+0.87 KB a fork's, before allocator slack and the chains a rollup read keeps), so the default holds
+under 512 MB in each web process; an evicted delta is built again on its next read, 2 to 6 s for
+50,000 to 145,000 entries.
 
 **The ceiling.** A fork whose patch set would classify more than `GRAPHVER_FORK_REWIND_MAX`
 entities (default 200,000, counted cheaply as an upper bound) is read from its own layered rows in
@@ -280,9 +284,10 @@ A fork in the trash says none of it (`null`).
   data-source answer carries `forkOf`.
 - **Free the old fork copies' memory**: set `GRAPHVER_DROP_FORK_COPIES=true` once every pod runs this
   release (§6). Until then they stay, unread.
-- **New settings**, whose defaults fit: `GRAPHVER_FORK_REWIND_MAX` (200,000) and
-  `GRAPHVER_FORK_REWIND_WARN` (50,000) (§2, §7), and `GRAPHVER_OVERLAY_CACHE_ENTRIES` (1,000,000),
-  which bounds the overlay deltas a process keeps for drafts as well as forks (§2).
+- **New settings**: `GRAPHVER_FORK_REWIND_MAX` (200,000) and `GRAPHVER_FORK_REWIND_WARN` (50,000)
+  (§2, §7), and `GRAPHVER_OVERLAY_CACHE_ENTRIES` (400,000), which bounds the overlay deltas each
+  process keeps, drafts' as well as forks', at about 1.2 KB an entry: under 512 MB a process. Lower
+  it where a process has less to spare (§2).
 
 ## 9. Coming next
 
