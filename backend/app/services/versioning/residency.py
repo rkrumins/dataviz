@@ -204,25 +204,27 @@ async def hold(svc, graph: Mapping) -> Optional[Mapping]:
     return root
 
 
-async def on_read(svc, graph: Mapping, *, viewer) -> None:
+async def on_read(svc, graph: Mapping, *, viewer) -> Optional[Mapping]:
     """What a read of a versioned graph does for residency — ContextEngine's one call, made for
-    every engine it builds over a versioned graph, before it reads the watermark. Only a person's
-    read counts (``viewer``; a background job has none), with residency on, and it counts for the
-    graph whose key serves it: a fork's root, for a fork. It holds that graph first (:func:`hold`).
-    For a graph whose key is not in FalkorDB: :data:`READING` says so for the rest of the request,
-    and a Standard or Always graph's load is asked for, as is a Coldline graph's that is larger
-    than the canvas-load threshold. Its read itself is served from Postgres."""
+    every engine it builds over a versioned graph before it reads the graph's store: for a fork,
+    with its root, once its read plan says it reads through the root's store. Only a person's read
+    counts (``viewer``; a background job has none), with residency on, and it counts for the graph
+    whose key serves it. It holds that graph first (:func:`hold`). For a graph whose key is not in
+    FalkorDB: :data:`READING` says so for the rest of the request, and a Standard or Always graph's
+    load is asked for, as is a Coldline graph's that is larger than the canvas-load threshold. Its
+    read itself is served from Postgres. Returns the graph's state as it read it after the hold
+    (``residency_state``), None when it read none."""
     if not config.RESIDENCY_ENABLED or viewer is None:
-        return
+        return None
     root = await hold(svc, graph)
     wm = await svc.residency_state(root["graph_id"])
     if wm is None or wm["status"] not in _OUT:
         READING.set(None)
-        return
+        return wm
     policy = await residency_policy.resolve()
     READING.set(Reading(root["graph_id"], wm["status"], policy.capacity_interval_secs))
     if wm["status"] == "rehydrating":
-        return
+        return wm
     if wm["residency"] == "coldline":
         entities = _COUNTS.get((root["graph_id"], wm["committed"]))
         if entities is None and wm.get("size_bytes"):
@@ -234,11 +236,12 @@ async def on_read(svc, graph: Mapping, *, viewer) -> None:
             except _Unread:
                 entities = None
         if entities is None or entities <= policy.coldline_canvas_load_above:
-            return
+            return wm
     try:
         await asyncio.wait_for(request_load(root["graph_id"]), _BROKER_WAIT_S)
     except asyncio.TimeoutError:      # the next read asks again
         pass
+    return wm
 
 
 async def set_class(graph_id: str, residency: str) -> Optional[str]:
@@ -252,8 +255,9 @@ async def set_class(graph_id: str, residency: str) -> Optional[str]:
 
 
 async def non_resident(data_source_id: str) -> Optional[str]:
-    """The graph whose key serves a data source's reads — its graph's, or a fork's root's — when
-    that key is not in FalkorDB under residency, else None."""
+    """The graph whose key serves a data source's reads — its graph's, or a fork's root's, unless
+    the fork reads past the ceiling — when that key is not in FalkorDB under residency, else
+    None."""
     from .service import GraphVersioningService
 
     if not config.RESIDENCY_ENABLED:
@@ -262,6 +266,9 @@ async def non_resident(data_source_id: str) -> Optional[str]:
     graph = await svc.get_graph_by_data_source(data_source_id)
     if graph is None:
         return None
+    if graph.get("fork_parent_graph_id") and await svc.fork_reads_from(graph["graph_id"]) == \
+            "postgres":
+        return None           # past the ceiling, its own rows: nothing of its root's is read
     root = await _root(svc, graph)
     state = await svc.residency_state(root["graph_id"])
     return root["graph_id"] if state is not None and state["status"] in _OUT else None

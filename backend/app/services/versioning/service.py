@@ -534,6 +534,12 @@ _EMPTY_INCOMING: Dict[str, object] = {
 }
 
 
+def serves_head(projected: int, committed: int, status: Optional[str]) -> bool:
+    """Whether a projection serves reads of main at its head: it holds the head and, with residency
+    on, no load of it is under way — a loaded key serves once its summaries are built too."""
+    return projected >= committed and not (config.RESIDENCY_ENABLED and status == "rehydrating")
+
+
 def bootstrap_unfinished(graph_id) -> tuple:
     """The ``jobs`` rows that say a graph's "enable version control" job has not COMPLETED
     (:meth:`GraphVersioningService._assert_not_bootstrapping`). ``graph_id`` is an id or a
@@ -3863,9 +3869,7 @@ class GraphVersioningService:
                     "actor": c.actor, "message": c.message,
                 }
             status = ps.status if ps else "idle"
-            # A load's key serves reads only once it is ready, summaries and all (residency).
-            fresh = projected >= committed and not (config.RESIDENCY_ENABLED
-                                                    and status == "rehydrating")
+            fresh = serves_head(projected, committed, status)
             return {
                 "committed_revision": _rev(committed),
                 "projected_revision": _rev(projected),
@@ -3916,17 +3920,22 @@ class GraphVersioningService:
 
     async def residency_state(self, graph_id: str) -> Optional[Dict[str, object]]:
         """What a read needs to know of a graph's residency (doc 17), in one small read: its
-        projection ``status``, its class (``residency``), its measured ``size_bytes`` and the head
-        it is at (``committed``). None for a graph with no projection row."""
+        projection ``status``, its class (``residency``), its measured ``size_bytes``, the head it
+        is at (``committed``), and its store — ``projected``, ``fresh`` (:func:`serves_head`) and
+        its pin. None for a graph with no projection row."""
         async with self._session() as s:
             row = (await s.execute(
                 select(ProjectionStateORM.status, ProjectionStateORM.residency,
-                       ProjectionStateORM.size_bytes, GraphORM.main_head_commit_seq)
+                       ProjectionStateORM.size_bytes, GraphORM.main_head_commit_seq,
+                       ProjectionStateORM.projected_commit_seq, ProjectionStateORM.falkor_provider,
+                       ProjectionStateORM.falkor_graph_name)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(ProjectionStateORM.graph_id == graph_id))).first()
         if row is None:
             return None
-        return {"status": row[0], "residency": row[1], "size_bytes": row[2], "committed": row[3]}
+        return {"status": row[0], "residency": row[1], "size_bytes": row[2], "committed": row[3],
+                "projected": row[4], "fresh": serves_head(row[4], row[3], row[0]),
+                "falkor_provider": row[5], "falkor_graph_name": row[6]}
 
     async def clear_external_changes(self, graph_id: str, seen_at: Optional[str] = None) -> None:
         """What the graph held that history didn't has been brought into it: the flag goes,
@@ -5849,10 +5858,10 @@ class GraphVersioningService:
         compute it again); how it is read (``reads_from``, :meth:`fork_reads_from`'s answer from
         the count kept per version); its root (graph, ``main``, data source, in the trash or not);
         and the root's store as its ``projection_state`` row says it is now: its committed and
-        projected seqs (``fresh`` when the projection holds the head and, with residency on, no
-        load of the root is under way, as :meth:`projection_watermark` has it) and its pin. That
-        row is read every time: an eviction moves the store without moving any seq the version
-        holds."""
+        projected seqs, its status (``fresh`` by :func:`serves_head`) and its pin. That row is read
+        every time: an eviction moves the store without moving any seq the version holds. With
+        residency on, a person's read holds the root's read lease after this, and its store as
+        then read decides instead (``ContextEngine._fork_main_reader``)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or not graph.fork_parent_graph_id:
@@ -5867,7 +5876,7 @@ class GraphVersioningService:
             ps = await s.get(ProjectionStateORM, root_id)
             committed = root.main_head_commit_seq
             projected = ps.projected_commit_seq if ps is not None else 0
-            loading = config.RESIDENCY_ENABLED and ps is not None and ps.status == "rehydrating"
+            status = ps.status if ps is not None else "idle"
             return {
                 "main_id": main_id,
                 "version": (branch.head_commit_id, tuple(at for _g, _b, at in layers), committed,
@@ -5875,8 +5884,8 @@ class GraphVersioningService:
                 "reads_from": "postgres" if n > config.FORK_REWIND_MAX else "overlay",
                 "root_id": root_id, "root_main": root_main,
                 "root_data_source_id": root.data_source_id, "root_trashed": root.deleted_at is not None,
-                "committed": committed, "projected": projected,
-                "fresh": projected >= committed and not loading,
+                "committed": committed, "projected": projected, "status": status,
+                "fresh": serves_head(projected, committed, status),
                 "falkor_provider": ps.falkor_provider if ps is not None else None,
                 "falkor_graph_name": ps.falkor_graph_name if ps is not None else None,
             }

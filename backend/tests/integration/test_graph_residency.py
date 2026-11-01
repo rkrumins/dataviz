@@ -900,9 +900,6 @@ class _LiveProvider:
     store serves the read is under test here."""
     name = "live"
 
-    def physical_graph_id(self) -> str:          # what keys the answers cached from it
-        return "localhost:6379:the-live-key"
-
     async def deep_search_discover(self, *, sample_per_label=200):
         return {"labels": {}, "served": "falkordb"}
 
@@ -1195,6 +1192,14 @@ async def _loading(root: str) -> None:
                       root))["committed"])
 
 
+async def _past_the_ceiling(svc, fork: str, monkeypatch) -> None:
+    """The fork changed more than ``GRAPHVER_FORK_REWIND_MAX`` entities: it reads its own rows."""
+    await svc.apply_ops(graph_id=fork, actor="a", message="own", ops=[
+        {"op": "create", "entity_kind": "node", "entity_id": "N",
+         "payload": {"urn": f"urn:{fork}:N", "displayName": "N", "entityType": "Dataset"}}])
+    monkeypatch.setattr(config, "FORK_REWIND_MAX", 0)
+
+
 @pytest.mark.parametrize("residency_class, loads", [("standard", True), ("always", True),
                                                     ("coldline", False)])
 async def test_a_person_s_read_of_a_fork_counts_for_its_root_and_asks_for_its_load(
@@ -1203,7 +1208,10 @@ async def test_a_person_s_read_of_a_fork_counts_for_its_root_and_asks_for_its_lo
     through the root's FalkorDB store. With the root out of FalkorDB the fork reads the root's
     Postgres, and the read asks for the root's load — a Standard or an Always one's; a small
     Coldline root waits for work only FalkorDB can do. While the root's load is not done the fork
-    reads Postgres, as reads of the root do."""
+    reads Postgres, as reads of the root do. A fork past the ceiling reads its own rows in
+    Postgres, nothing of its root's: its read holds nothing, counts for nothing, and asks for no
+    load."""
+    from backend.app.providers.versioned_branch_provider import VersionedBranchProvider
     from backend.app.services.versioning import cache_manager
     from backend.app.services.versioning.service import Viewer
 
@@ -1231,6 +1239,18 @@ async def test_a_person_s_read_of_a_fork_counts_for_its_root_and_asks_for_its_lo
     await _set_ps(root, status="idle")
     assert _through(await _fork_engine(fork_engine, fork_ds, reader)) == "falkordb"
 
+    await _past_the_ceiling(store, fork, monkeypatch)
+    await _set_ps(root, status="evicted", projected_commit_seq=0)
+    await broker.delete(cache_manager._lease_key(root))
+    await broker.zrem(residency.LOAD_REQUESTS, root)
+    residency._HELD.clear()
+    residency._READS.clear()
+    residency.READING.set(None)
+    engine = await _fork_engine(fork_engine, fork_ds, reader)
+    assert isinstance(engine.provider, VersionedBranchProvider) and engine.provider._gid == fork
+    assert not await cache_manager.is_pinned(root) and residency._READS == {}
+    assert not await _load_requested(root) and residency.READING.get() is None
+
 
 async def test_falkordb_only_work_on_a_fork_answers_as_its_root_would(
         store, forked, fork_engine, monkeypatch):
@@ -1239,7 +1259,9 @@ async def test_falkordb_only_work_on_a_fork_answers_as_its_root_would(
     graph_loading with Retry-After, asking for the root's load (a Coldline root's too); and a
     native query on the fork's data source is told the root is loading (``non_resident`` names the
     root). Once the root is loaded, the fork's own rules again: its search runs in the root's
-    store, its note saying the fork's own changes are not in it."""
+    store, its note saying the fork's own changes are not in it. A fork past the ceiling reads
+    nothing of its root's: its search is the fork's 501 whatever the root's state, and asks for
+    no load."""
     from httpx import ASGITransport, AsyncClient
 
     from backend.app.providers.draft_overlay_provider import FORK_SEARCH_NOTE
@@ -1248,7 +1270,7 @@ async def test_falkordb_only_work_on_a_fork_answers_as_its_root_would(
 
     monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     proj = FalkorProjector(graph_client_factory=FakeFalkor())
-    _root_ds, root, fork_ds, _fork = await forked(proj)
+    _root_ds, root, fork_ds, fork = await forked(proj)
     await _set_ps(root, residency="coldline")
     app, graph_routes = _build_app()
     monkeypatch.setattr(graph_routes, "provider_manager", _Registry())
@@ -1274,9 +1296,19 @@ async def test_falkordb_only_work_on_a_fork_answers_as_its_root_would(
         await _set_ps(root, status="idle")
         r = await client.get(path)
         assert r.status_code == 200 and r.json()["served"] == "falkordb"
-    engine = await _fork_engine(fork_engine, fork_ds, Viewer(actor="usr_reader", can_read=True))
-    assert engine.provider.search_scope_note == FORK_SEARCH_NOTE
-    assert await residency.non_resident(fork_ds) is None
+        reader = Viewer(actor="usr_reader", can_read=True)
+        engine = await _fork_engine(fork_engine, fork_ds, reader)
+        assert engine.provider.search_scope_note == FORK_SEARCH_NOTE
+        assert await residency.non_resident(fork_ds) is None
+
+        await _past_the_ceiling(store, fork, monkeypatch)
+        await _set_ps(root, status="evicted", projected_commit_seq=0)
+        await get_broker_redis().zrem(residency.LOAD_REQUESTS, root)
+        r = await client.get(path)
+        assert r.status_code == 501 and "fork" in r.text, r.text
+        await asyncio.sleep(0.1)                     # what a refusal would ask for, asked by now
+        assert not await _load_requested(root)
+        assert await residency.non_resident(fork_ds) is None
 
 
 async def test_a_fork_never_serves_an_answer_cached_from_its_root_s_evicted_key(
@@ -1310,8 +1342,8 @@ async def test_a_fork_never_serves_an_answer_cached_from_its_root_s_evicted_key(
 
 async def test_what_residency_adds_to_a_person_s_read(store, forked, fork_engine, monkeypatch):
     """Warm, residency adds one statement to a person's read — the state of the graph whose key
-    serves it — and on a fork one more, finding its root (a row per fork level). The read lease
-    and the read's note cost none: the broker at most every 30 seconds, and memory."""
+    serves it, a fork's root's for a fork, which its read plan names. The read lease and the
+    read's note cost none: the broker at most every 30 seconds, and memory."""
     from sqlalchemy import event
 
     from backend.app.services.versioning.service import Viewer
@@ -1337,7 +1369,7 @@ async def test_what_residency_adds_to_a_person_s_read(store, forked, fork_engine
         return len(sent)
 
     assert await cost(root_ds, True) == await cost(root_ds, False) + 1
-    assert await cost(fork_ds, True) == await cost(fork_ds, False) + 2
+    assert await cost(fork_ds, True) == await cost(fork_ds, False) + 1
 
 
 # ── read tracking ──────────────────────────────────────────────────────────────────────────────
