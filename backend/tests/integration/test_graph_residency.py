@@ -348,6 +348,25 @@ async def test_a_drop_that_fails_leaves_the_key_to_be_dropped_later(store, monke
     assert [(e["name"], e["movedBy"]) for e in ps.retired_keys] == [(key, "eviction")]
 
 
+async def test_check_sync_skips_a_graph_out_of_falkordb_and_says_why(store, monkeypatch):
+    """Review finding 10: Check sync scanned an evicted graph's dropped key (everything missing,
+    or a 503), and a loading graph's half-written one; an eviction lasts days under residency."""
+    from backend.app.services.versioning.reconcile import ProjectionReconciler
+
+    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+    svc, fake = store, FakeFalkor()
+    proj = FalkorProjector(graph_client_factory=fake)
+    gid = await _resident(svc, proj)
+    assert await CacheManager(proj).evict(gid, drop_graph=_dropped) is True
+    check = ProjectionReconciler(db.graphver_session, fake)
+    for status, why in (("evicted", "out of FalkorDB"), ("waiting_capacity", "out of FalkorDB"),
+                        ("rehydrating", "being loaded")):
+        await _set_ps(gid, status=status)
+        report = await check.reconcile(gid)
+        assert why in (report.skipped_reason or ""), (status, report)
+        assert report.missing_nodes == [] and report.falkor_nodes == 0
+
+
 async def test_an_eviction_backs_off_when_a_read_holds_the_graph_after_it_committed(
         store, monkeypatch):
     """A read holds the lease before it reads the state; the evictor checks the lease once more
