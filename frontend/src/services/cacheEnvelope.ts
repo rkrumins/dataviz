@@ -35,7 +35,7 @@ import { isNetworkError, isProviderOutageSignal, toApiStatusError } from './grap
 import { useProviderHealthStore } from '@/store/providerHealth'
 import { useCacheStalenessStore } from '@/store/cacheStaleness'
 
-export type CacheStatus = 'fresh' | 'stale' | 'computing' | 'partial' | 'error'
+export type CacheStatus = 'fresh' | 'stale' | 'computing' | 'partial' | 'error' | 'unavailable'
 export type CacheSource = 'postgres' | 'ontology' | 'none' | 'error'
 export type StatsServiceStatus =
     | 'healthy'
@@ -84,6 +84,18 @@ export function isCacheEnvelope<T = unknown>(
         'ttl_seconds' in metaObj &&
         'missing_fields' in metaObj
     )
+}
+
+/** Why a fork's stats read answers `unavailable` (`meta.missing_fields`): a fork's data source
+ *  keeps no stats, which would count its parent's graph too. */
+export const FORK_STATS = 'not_available_for_a_fork'
+
+/**
+ * True when the envelope says the data source keeps no stats at all (a fork's). That is neither a
+ * cache miss, which a poll fills, nor a failure: nothing will ever fill it.
+ */
+export function statsNotKept(meta: CacheMeta | null | undefined): boolean {
+    return meta?.status === 'unavailable' && meta.missing_fields.includes(FORK_STATS)
 }
 
 /**

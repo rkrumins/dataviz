@@ -1,4 +1,4 @@
-import { unwrapEnvelope } from '@/services/cacheEnvelope'
+import { isCacheEnvelope, statsNotKept, unwrapEnvelope } from '@/services/cacheEnvelope'
 import { getCircuitBreaker, classifyEndpoint } from '@/services/circuitBreaker'
 import { fetchWithTimeout } from '@/services/fetchWithTimeout'
 import { readJsonLossless } from '@/lib/losslessJson'
@@ -1117,8 +1117,10 @@ export class RemoteGraphProvider implements GraphDataProvider {
         nodeCount: number
         edgeCount: number
         entityTypeCounts: Record<EntityType, number>
-    }> {
+    } | null> {
         const raw = await this.fetch<unknown>('/stats')
+        // A fork's data source keeps no stats: not a cache miss or a failure.
+        if (isCacheEnvelope(raw) && statsNotKept(raw.meta)) return null
         const data = unwrapEnvelope<{
             nodeCount: number
             edgeCount: number
