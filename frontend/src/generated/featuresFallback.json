@@ -618,6 +618,42 @@
       ]
     },
     {
+      "key": "residencyEnabled",
+      "name": "Graph residency",
+      "description": "FalkorDB keeps graphs by their class and each master's memory: Always, Standard and Coldline, the capacity loop, admission, placement. Needs Version control.",
+      "category": "lineage",
+      "type": "boolean",
+      "default": false,
+      "options": null,
+      "helpUrl": "/docs/versioning-forks-and-residency#16-turning-residency-on",
+      "adminHint": "Graph residency needs Version control on. Before turning it on, give every FalkorDB master a maxmemory and run this release on every pod, and set the classes and values you want under Admin \u2192 Infrastructure \u2192 Versioned graphs. Each change of this switch, the grace period, and every eviction and load are recorded in the activity log.",
+      "impactWhenOff": "Every graph stays loaded, as before residency. Turning it off brings evicted graphs back as memory allows \u2014 until then they read from Postgres \u2014 so make room first. The classes and the values are kept, and apply again once it is on.",
+      "impactWhenOn": "FalkorDB keeps each graph by its class \u2014 Always, Standard or Coldline \u2014 and by each master's memory. The first eviction waits 90 seconds after it is turned on. An evicted graph reads from Postgres, more slowly, until it is loaded again when it is needed, and loads wait for room on their master. Every FalkorDB master needs a maxmemory, and every pod must run this release first. The values are under Admin \u2192 Infrastructure \u2192 Versioned graphs \u2192 Residency & eviction. Turning it off brings graphs back as memory allows.",
+      "sortOrder": 2,
+      "deprecated": false,
+      "stage": "experimental",
+      "implemented": true,
+      "enforcedServerSide": true,
+      "posture": "capability",
+      "serverGates": [
+        "Evicting graphs from FalkorDB \u2014 by class, idle time and each master's memory, after a 90-second grace \u2014 in the versioning worker's capacity pass; off, the pass only brings evicted graphs back, through admission, as memory allows",
+        "Holding a person's read lease on a graph and noting when it was read (last_read_at)",
+        "Admission on a new graph's first seed, a move, an Adopt and a package seed, and a new graph's class from the policy"
+      ],
+      "uiSurfaces": [
+        "The Residency & eviction card on Admin \u2192 Infrastructure \u2192 Versioned graphs: whether residency is on, its grace period, and the graphs being brought back",
+        "Each graph's class, Load now and Adopt controls in the versioned graphs list"
+      ],
+      "stillAllowed": [
+        "Every graph stays loaded, as before residency; an evicted graph reads from Postgres until it is brought back",
+        "Setting classes and the residency values, Load now and Adopt",
+        "Nothing is deleted \u2014 Postgres is the source of truth"
+      ],
+      "dependsOn": [
+        "versioningEnabled"
+      ]
+    },
+    {
       "key": "traceEnabled",
       "name": "Lineage trace",
       "description": "Follow a node's lineage upstream and downstream across the graph, from the graph and context views.",
@@ -629,7 +665,7 @@
       "adminHint": "Trace can be expensive on very large graphs. Turning it off is a legitimate way to protect a struggling provider without taking the whole view away.",
       "impactWhenOff": "The Trace button disappears from the toolbars and the server refuses trace requests. People can still browse and expand the graph by hand \u2014 they just can't ask it to walk the lineage for them.",
       "impactWhenOn": null,
-      "sortOrder": 2,
+      "sortOrder": 3,
       "deprecated": false,
       "stage": "active",
       "implemented": true,
@@ -1433,6 +1469,7 @@
     "workspaceDirectoryEnabled": false,
     "versioningEnabled": true,
     "forksEnabled": false,
+    "residencyEnabled": false,
     "traceEnabled": true,
     "graphExportEnabled": true,
     "nativeQueryEnabled": true,

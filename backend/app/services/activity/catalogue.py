@@ -711,6 +711,8 @@ def _summary_sa_policy(p: dict) -> str:
 def _summary_flag(p: dict) -> str:
     key = _detail(p, "key") or _subject(p)
     value = _detail(p, "value")
+    if isinstance(value, bool):           # a switch: "Turned Graph residency on"
+        return f"Turned {_subject(p)} {'on' if value else 'off'}"
     return f"Feature '{key}' set to {json.dumps(value)}" if value is not None else f"Feature '{key}' changed"
 
 

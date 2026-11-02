@@ -253,12 +253,14 @@ async def patch_features(
         actor_name=actor_name,
     )
     # And in the activity ledger, one event per flag that moved — beside
-    # everything else people changed, with the reason they gave.
+    # everything else people changed, with the reason they gave — filed under the
+    # switch's name as the page shows it, at the time.
+    names = {d["key"]: d.get("name") or d["key"] for d in definitions}
     for key, value in merged.items():
         if before.get(key) != value:
             await recorder.record_for_request(
                 session, "platform.feature_flag.changed",
-                target_type="feature_flag", target_id=key, target_label=key,
+                target_type="feature_flag", target_id=key, target_label=names.get(key, key),
                 details={"key": key, "from": before.get(key), "value": value},
             )
 
