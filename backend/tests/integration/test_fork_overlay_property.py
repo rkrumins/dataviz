@@ -211,7 +211,7 @@ async def _run(seed: int) -> None:
         try:
             await handle.select_graph(key).delete()
         except Exception:
-            pass
+            pass  # cleanup is best effort: the key may already be gone
         await pool.disconnect()
         await db.dispose_engine()
 

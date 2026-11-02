@@ -198,6 +198,6 @@ def test_a_forks_old_copy_is_dropped_only_when_asked_and_only_if_it_is_ours(monk
                 try:
                     await handle.select_graph(names[f]).delete()
                 except Exception:
-                    pass
+                    pass  # cleanup is best effort: the key may already be gone
             await pool.disconnect()
     _run(case)

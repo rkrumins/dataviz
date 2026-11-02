@@ -24,6 +24,7 @@ from backend.app.services.versioning.import_export.runner import (
     QUEUED,
     JobReaper,
     TransferRunner,
+    never_runs,
 )
 from backend.app.services.versioning.import_export.service import ImportExportService
 from backend.app.services.versioning.job_lease import Lease
@@ -148,12 +149,12 @@ async def test_the_reaper_fails_jobs_queued_too_long_and_uploads_that_never_fini
 
     assert await JobReaper(session_factory=session).run_once() == {"timedOut": 2,
                                                                    "neverQueued": 2}
-    timed_out, abandoned = (stmt.compile().params for stmt in executed)
+    _waited, timed_out, abandoned = (stmt.compile().params for stmt in executed)
     assert timed_out["status"] == "failed" and "No worker started the job" in timed_out["error_message"]
     assert timed_out["current_phase_1"] == QUEUED and timed_out["status_1"] == "pending"
     assert set(timed_out["job_type_1"]) == set(JOB_TYPES + INSPECT_TYPES)
     assert abandoned["status"] == "failed" and "upload never finished" in abandoned["error_message"]
-    assert "current_phase IS NULL" in str(executed[1].compile())
+    assert "current_phase IS NULL" in str(executed[2].compile())
 
 
 async def test_the_reaper_can_judge_one_job_alone():
@@ -170,6 +171,28 @@ async def test_the_reaper_can_judge_one_job_alone():
         "timedOut": 1, "neverQueued": 1}
     for stmt in executed:
         assert stmt.compile().params["id_1"] == "vjob_7"
+
+
+async def test_a_job_queued_behind_busy_workers_is_not_timed_out():
+    """Queued past the timeout is not enough: the transfer lane must also have shown no life in
+    that time — no job of it claimed (``started_at``) or beating (a running one's ``updated_at``).
+    A job waiting behind busy workers is waiting its turn. The lane is only asked once a job has
+    waited that long (proven on Postgres in integration/test_transfer_queue.py)."""
+    rule = str(never_runs()[0].compile())
+    assert rule.count("EXISTS") == 2 and "started_at >=" in rule and "updated_at >=" in rule
+
+    executed = []
+
+    @contextlib.asynccontextmanager
+    async def session():
+        async with _session(executed=executed, ahead=0) as s:      # nothing has waited that long
+            yield s
+
+    assert await JobReaper(session_factory=session).run_once() == {"timedOut": 0,
+                                                                   "neverQueued": 0}
+    waited, abandoned = executed
+    assert "EXISTS" in str(waited.compile()) and "started_at" not in str(waited.compile())
+    assert "current_phase IS NULL" in str(abandoned.compile())
 
 
 # ── The worker's slot loop ───────────────────────────────────────────────────

@@ -375,6 +375,105 @@ them used to load every entity of it.
   is read from Postgres); whether forks get one at all is an open decision.
 - **Forks have no screens**: forking, opening a fork's review and merging it are API calls.
 
+---
+
+## [Unreleased] — Versioning with hundreds of people at once
+
+Sized for about 300 people on about 50 versioned graphs, 20 of them editing one graph at once: the
+versioning worker's transfer lane — imports, exports and queued publishes — is shared fairly and
+can be watched and scaled on its queue, and a load test puts that collaboration under load.
+
+### Changed
+
+- **A waiting publish runs next.** A queued publish, or a review's merge, holds its draft closed until
+  it lands and its person is waiting on it; it queued behind every older import and export. It now
+  runs right after package inspections.
+- **The transfer lane is shared between colleagues.** Beside each workspace's share, a worker now
+  prefers someone running fewer than `GRAPHVER_JOBS_PER_USER` (1) jobs, then whoever runs fewest, so
+  one person's ten large imports no longer hold a colleague's export back. Both shares are soft: when
+  every waiting job is at one, the oldest still runs.
+- **The job lanes' queues are metrics.** `/api/v1/metrics` reports, per lane, the jobs running, the
+  jobs waiting and how long the oldest has waited (`versioning_jobs_running`,
+  `versioning_jobs_claimable`, `versioning_jobs_oldest_claimable_seconds`). The Helm chart can scale
+  the transfer lane on them with KEDA (`services.versioning.transfer.autoscaling.keda`, off by default).
+- **A script whose import is too large for one request is told how to send it**: the 413 names
+  NDJSON and CSV, and uploading in parts, as the uploads API does.
+
+### Fixed
+
+- **A job queued behind busy transfer workers waits its turn.** One queued for
+  `GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS` (6 hours) was failed with a message blaming a stopped worker,
+  even while the lane was busy with other jobs. It now times out only when nothing on the lane
+  started or ran for that whole time.
+- **A large draft behind main is refused before its publish is queued** (409 `not_up_to_date`, as a
+  publish inside the request is), instead of being closed for a job that then failed. The job still
+  checks again: main can move while it waits.
+
+### Added
+
+- **A load test of people editing drafts together** (`loadtest/runners/versioning_collab.py`):
+  editors open drafts, save, pull, poll and publish through the canvas's own endpoints, some on one
+  hot graph, while the other users read published canvases. See `loadtest/README.md`. Run against
+  the real API at 100 and 300 users on one machine, it found no error but shed load
+  (`docs/SCALING_CONCURRENT_USERS.md` §10.4).
+
+### Upgrading
+
+- Nothing to do. The KEDA scaler is off unless enabled, and needs KEDA and a Prometheus that scrapes
+  viz-service.
+
+### Known limitations
+
+- **An API process serves about 100 requests a second** of the collaboration load test's mix, then
+  sheds with 429: size viz-service's processes by it (§10.4).
+- **A hot graph got 2 concurrent reads per API process** once many graphs were in use (each graph's
+  reserved share, `PROVIDER_SOURCE_RESERVED`), and its users' reads past that were shed and retried.
+  That was measured before the admission change in the next section, which holds room back only for
+  data sources being read.
+
+---
+
+## [Unreleased] — Graph reads: a busy data source takes what idle ones leave, and one with no ontology reads flat
+
+### Fixed
+
+- **A busy data source is no longer held to its reserve by neighbours nobody is reading.** Each
+  web process admits a limited number of graph reads at once (16 by default) and keeps a reserve
+  (2) for every data source. A source past its reserve was admitted only while the room left
+  covered the reserve of every other source the process had read in the last minute, whether or
+  not anyone was still reading it. With seven or more other graphs read in that minute, a busy
+  graph got only its own 2 reads per process while every other one sat idle. In a load test at
+  100 users, this shed 13,921 of 42,472 requests (429s the canvas retries). Room is now held back
+  only for neighbours that are reading — a request in flight, or one that started or finished in
+  the last 1.5 s — and only the part of their reserve they are not using, plus one reserve for a
+  source nobody was reading, which still gets in at once. A source below its reserve is still
+  never refused for its share, and the process ceiling is unchanged.
+- **A data source with no ontology assigned reads flat instead of failing.** The canvas's node read
+  (`POST …/graph/nodes/query`) answered 500 for such a source: with nothing to classify containment,
+  the graph store's containment set was left unset, and the reads that count an item's children
+  failed on it. The set is now configured empty, as when the ontology service is unreachable: no
+  item has children, and the node read says why in a header, `X-Graph-Notice: No ontology is
+  assigned to this data source. Assign one to see its hierarchy.` The canvas does not show it yet.
+  Another data source reading the same graph with an ontology keeps its hierarchy: an empty set
+  never replaces one already configured on the graph store's shared connection.
+  The source's top level, which answered 400 ("Ontology configuration error"), now lists every
+  item. With an ontology assigned nothing changes, and a connection or credential error answers as
+  before.
+
+### Changed
+
+- **A data source alone on a process takes the ceiling less one reserve** (14 of 16 by default),
+  where it took all 16. The reserve kept back is what lets a second data source in at once.
+
+### Upgrading
+
+- `GRAPH_SOURCE_RECENT_SECS` is no longer read. `GRAPH_SOURCE_HOLD_SECS` (default `1.5`) replaces
+  it: how long a data source keeps its reserve after its last request started or finished. Drop
+  the old one if you set it; giving the new one its value (60) would hold every neighbour's reserve
+  for a minute again.
+
+---
+
 ## [Unreleased] — Versioning at millions of entities
 
 On a graph of millions of entities, everyday work on drafts no longer reads the whole graph, and

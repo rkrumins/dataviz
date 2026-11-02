@@ -2777,14 +2777,22 @@ class _BodySizeLimitMiddleware(BaseHTTPMiddleware):
                 )
                 return JSONResponse(
                     status_code=413,
-                    content={
-                        "detail": (
-                            f"Request body is {declared} bytes; the limit for "
-                            f"this endpoint is {cap}."
-                        )
-                    },
+                    content={"detail": self._refusal(request, declared, cap)},
                 )
         return await call_next(request)
+
+    @staticmethod
+    def _refusal(request: Request, declared: int, cap: int) -> str:
+        """What a body past the cap is told. An import sent whole to
+        ``…/imports`` is told how to send a larger one: a file read whole
+        (JSON, Excel) as NDJSON or CSV, any other in parts."""
+        if request.url.path.endswith("/imports"):
+            from backend.app.services.versioning.import_export.uploads import too_large
+
+            return too_large(declared, request.query_params.get("format") or "ndjson") or (
+                f"One request can carry at most {cap // (1024 * 1024)} MB of a file. Send a "
+                "larger one in parts: POST …/imports/uploads, then each part.")
+        return f"Request body is {declared} bytes; the limit for this endpoint is {cap}."
 
 
 class _TimeoutMiddleware:
@@ -3139,9 +3147,10 @@ app.add_middleware(
     # A list's full size (``X-Total-Count``), the id to quote about a request
     # (``X-Request-ID``) and when the calling key expires (``X-API-Key-Expires-At``):
     # a page calling the API from another origin reads them as the app does.
+    # ``X-Graph-Notice`` says why a node read came back flat (no ontology assigned).
     expose_headers=["X-Provider-Health", "X-Cache-Status", "Retry-After", "Content-Disposition",
                     "X-Bundle-Hash", "X-Definition-Hash", "X-View-Version", "X-Next-Cursor",
-                    "X-Total-Count", "X-Request-ID", "X-API-Key-Expires-At"],
+                    "X-Total-Count", "X-Request-ID", "X-API-Key-Expires-At", "X-Graph-Notice"],
 )
 
 # GZip compression for responses > 1 KB. WS1.4: compresslevel=1 (was 6, was
