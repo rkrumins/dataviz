@@ -789,6 +789,25 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Search's Layer filter places by the shared rule either way",
         ),
     ),
+    "viewMembershipEnabled": FeatureWiring(
+        key="viewMembershipEnabled",
+        posture="capability",
+        # Preview: ships OFF, and every read passes default=False — a flag that cannot be read
+        # means no Focus, the same answer the browser's seed gives.
+        stage="experimental",
+        server_gates=(
+            "POST /graph/members — resolves a scope: seeds, what is inside them, their sources "
+            "and consumers",
+        ),
+        ui_surfaces=(
+            "Context View: Focus… on a selection, Focus on this in an entity's right-click "
+            "menu, Focus on matches in Advanced Search, and the Focus chip",
+        ),
+        still_allowed=(
+            "Views, searches, Isolate and traces work as before — Focus only filters the canvas "
+            "and saves nothing",
+        ),
+    ),
 }
 
 

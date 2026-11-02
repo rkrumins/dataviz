@@ -316,6 +316,8 @@ tests/test_view_layout_rules_preserved.py
 tests/test_view_library.py
 tests/test_view_library_schema.py
 tests/test_view_live_filter.py
+tests/test_view_membership_api.py
+tests/test_view_membership_resolver.py
 tests/test_view_placement.py
 tests/test_view_portability_switch.py
 tests/test_view_source_kinds.py

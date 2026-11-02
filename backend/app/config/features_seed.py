@@ -70,6 +70,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "traceEnabled":
         "Lineage tracing is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
+    "viewMembershipEnabled":
+        "Focus — narrowing a view to chosen entities and what they reach — is a preview that "
+        "is turned off for this deployment. An administrator can turn it on under Admin → Features.",
     "nativeQueryEnabled":
         "Running your own queries on a data source is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
@@ -1214,6 +1217,32 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "at any time."
         ),
         "sort_order": 3,
+        "deprecated": False,
+    },
+    {
+        "key": "viewMembershipEnabled",
+        "name": "Focus: chosen entities and what they reach",
+        "description": (
+            "Narrow a Context View to the entities you choose and what they reach — what is "
+            "inside them, their sources and consumers one step out or the whole way — worked "
+            "out on the server, so it is the same answer for everyone and for any script."
+        ),
+        "impact_when_off": (
+            "Focus is not offered on the canvas and POST /graph/members is refused. Nothing "
+            "saved changes: views, searches, Isolate and traces work exactly as before. This is "
+            "a preview; it ships off until you switch it on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Sources and consumers also need Lineage trace on. Each Focus is one resolution, "
+            "cached and shared by everyone who asks the same question, and paced by the trace's "
+            "fair-share bucket when fair share is on."
+        ),
+        "sort_order": 4,
         "deprecated": False,
     },
 ]

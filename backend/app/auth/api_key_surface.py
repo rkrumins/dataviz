@@ -151,6 +151,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         reads_only=True,
     ),
     **_entries("canvas", RESOURCE, "canvas_bootstrap", "canvas_expand", reads_only=True),
+    **_entries("graph_members", RESOURCE, "resolve_members", reads_only=True),
     **_entries("assignments", RESOURCE, "compute_assignments", reads_only=True),
     **_entries("graph_export", DATA_SOURCE, "plan_live_export", "stream_live_export"),
     # Workspace metadata read through the capability gate; changing it is

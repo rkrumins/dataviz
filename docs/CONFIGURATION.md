@@ -349,6 +349,7 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `GRAPH_CACHE_ENABLED_CHILDREN` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_EDGES_BETWEEN` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_LAYER_ASSIGNMENT` | `true` | `backend/app/services/graph_cache.py` |
+| `GRAPH_CACHE_ENABLED_MEMBERS` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_NODES_DEGREE` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_NODES_QUERY` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_TOP_LEVEL` | `true` | `backend/app/services/graph_cache.py` |
