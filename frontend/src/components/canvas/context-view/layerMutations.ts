@@ -19,6 +19,23 @@ export function appendLayer(layers: ViewLayerConfig[], newLayer: ViewLayerConfig
   return [...layers, { ...newLayer, order: layers.length }]
 }
 
+/**
+ * Insert a new layer at `index` (clamped to 0..length), shifting the layers from there one place
+ * right; order re-normalized. Inserting at `length` is an append. The new layer's own `order` is
+ * ignored — where it lands is its order.
+ */
+export function insertLayer(layers: ViewLayerConfig[], newLayer: ViewLayerConfig, index: number): ViewLayerConfig[] {
+  const at = Math.max(0, Math.min(Math.trunc(index), layers.length))
+  return renumber([...layers.slice(0, at), newLayer, ...layers.slice(at)])
+}
+
+/** Recolour one layer by id; no-op (same array) if not found or already that colour. */
+export function recolorLayer(layers: ViewLayerConfig[], id: string, color: string): ViewLayerConfig[] {
+  const target = layers.find((l) => l.id === id)
+  if (!target || target.color === color) return layers
+  return layers.map((l) => (l.id === id ? { ...l, color } : l))
+}
+
 /** Rename one layer by id; no-op if not found. Order untouched. */
 export function renameLayer(layers: ViewLayerConfig[], id: string, name: string): ViewLayerConfig[] {
   return layers.map((l) => (l.id === id ? { ...l, name } : l))

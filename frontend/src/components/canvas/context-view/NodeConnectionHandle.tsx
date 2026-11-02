@@ -19,6 +19,7 @@ export function NodeConnectionHandle({ visible, onBeginConnect }: NodeConnection
   return (
     <button
       type="button"
+      data-connect-handle
       aria-label="Connect — click, then click the target (or drag to it)"
       title="Click, then click the target — or drag to it"
       // pointerdown (not click) so the drag starts immediately; stop propagation

@@ -3154,7 +3154,7 @@ export function ContextViewCanvas({
     targetId: string,
     before: NormalizedReferenceLayout,
     after: NormalizedReferenceLayout,
-    action: 'add' | 'rename' | 'delete' | 'reorder' | 'sort' | 'move',
+    action: 'add' | 'rename' | 'recolor' | 'delete' | 'reorder' | 'sort' | 'move',
     summary: string,
   ) => {
     useStagedChangesStore.getState().stage({
@@ -3168,22 +3168,65 @@ export function ContextViewCanvas({
     })
   }, [persistReferenceLayout])
 
-  const addLayer = useCallback((name: string) => {
+  // Add a layer — at the end (the Add layer tile), or at `at` in display order (Insert layer
+  // left / right, the gutter "+"). Returns its id, so the caller can open its name.
+  const addLayer = useCallback((name: string, opts?: { at?: number }): string => {
     const before = currentLayout()
     const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#ef4444', '#84cc16']
     const id = `layer-${Date.now()}`
-    const layers = layerOps.appendLayer(before.layers, {
-      id,
-      name,
-      description: '',
-      icon: 'Layers',
-      color: palette[before.layers.length % palette.length],
-      entityTypes: [],
-      order: before.layers.length,
-    })
+    // Display order, whatever order the stored array happens to be in.
+    const ordered = [...before.layers].sort((a, b) => a.order - b.order)
+    const at = opts?.at == null ? ordered.length : Math.max(0, Math.min(opts.at, ordered.length))
+    // A colour its neighbours don't already wear, so the new column reads as its own.
+    const neighbours = new Set([ordered[at - 1]?.color, ordered[at]?.color].filter(Boolean).map((c) => String(c).toLowerCase()))
+    const start = before.layers.length % palette.length
+    const color = palette.map((_, i) => palette[(start + i) % palette.length]).find((c) => !neighbours.has(c)) ?? palette[start]
+    const fresh = { id, name, description: '', icon: 'Layers', color, entityTypes: [], order: at }
+    // Appending keeps the stored array exactly as it was; inserting works in display order.
+    const layers = opts?.at == null
+      ? layerOps.appendLayer(before.layers, fresh)
+      : layerOps.insertLayer(ordered, fresh, at)
     const after = { ...before, layers }
     persistReferenceLayout(after)
-    stageLayerChange(`layer:${id}`, before, after, 'add', `Added layer “${name}”`)
+    stageLayerChange(`layer:${id}`, before, after, 'add',
+      opts?.at == null ? `Added layer “${name}”` : `Inserted layer “${name}”`)
+    return id
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // A layer just inserted: its column fades in, and its name opens for editing at once.
+  const [newLayerId, setNewLayerId] = useState<string | null>(null)
+  const [renameRequest, setRenameRequest] = useState<{ layerId: string; nonce: number } | null>(null)
+  const requestLayerRename = useCallback((layerId: string) => {
+    setRenameRequest((r) => ({ layerId, nonce: (r?.nonce ?? 0) + 1 }))
+  }, [])
+  const insertLayerAt = useCallback((index: number) => {
+    if (traceWriteLockedRef.current()) return
+    const taken = new Set(currentLayout().layers.map((l) => l.name.toLowerCase()))
+    let name = 'New layer'
+    for (let n = 2; taken.has(name.toLowerCase()); n++) name = `New layer ${n}`
+    const id = addLayer(name, { at: index })
+    setNewLayerId(id)
+    requestLayerRename(id)
+    // Bring it into view once it has rendered — it may sit anywhere in a wide canvas.
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-layer-id="${id}"]`)?.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' })
+    })
+  }, [addLayer, currentLayout, requestLayerRename])
+  const insertLayerBeside = useCallback((layerId: string, side: 'left' | 'right') => {
+    const ordered = [...currentLayout().layers].sort((a, b) => a.order - b.order)
+    const index = ordered.findIndex((l) => l.id === layerId)
+    if (index >= 0) insertLayerAt(side === 'left' ? index : index + 1)
+  }, [currentLayout, insertLayerAt])
+  const insertLayerBefore = useCallback((layerId: string) => insertLayerBeside(layerId, 'left'), [insertLayerBeside])
+
+  const recolorLayer = useCallback((id: string, color: string) => {
+    const before = currentLayout()
+    const target = before.layers.find((l) => l.id === id)
+    const layers = layerOps.recolorLayer(before.layers, id, color)
+    if (!target || layers === before.layers) return
+    const after = { ...before, layers }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${id}`, before, after, 'recolor', `Recoloured layer “${target.name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
   // ── Groups: view-only containers inside a layer (the wizard's logicalNodes), managed here ──────
@@ -5145,6 +5188,70 @@ export function ContextViewCanvas({
     revealTarget,
     selectedNodeId: selectedNodeIds.length === 1 ? selectedNodeId : null,
   })
+
+  // ── The layer menu: right-click a column header or a Layer Strip pill ──────────────────────────
+  // Every layout edit it offers is a staged layer change (reviewable, undoable); outside a draft it
+  // offers what a reader can do (fold) and the way into a draft.
+  const layerEditsAllowed = isDraft && !traceActive
+  const openLayerMenu = useCallback((e: React.MouseEvent, layerId: string) => {
+    interactions.openContextMenu(e, { type: 'layer', layerId })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.openContextMenu])
+  const deleteLayerWithUndo = useCallback((layerId: string) => {
+    const before = currentLayout()
+    const target = before.layers.find((l) => l.id === layerId)
+    if (!target) return
+    const ordered = [...before.layers].sort((a, b) => a.order - b.order)
+    const heir = ordered.find((l) => l.id !== layerId)
+    const placed = Object.values(before.assignments).filter((a) => a.layerId === layerId).length
+    deleteLayer(layerId)
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: placed > 0 && heir
+        ? `Deleted layer “${target.name}” — its ${placed.toLocaleString()} placed ${placed === 1 ? 'entity moves' : 'entities move'} to “${heir.name}”.`
+        : `Deleted layer “${target.name}”.`,
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          const staged = useStagedChangesStore.getState()
+          const changes = staged.getChangesForTarget(`layer:${layerId}`)
+          const last = changes[changes.length - 1]
+          if (last) staged.discard(last.id)
+        },
+      },
+      durationMs: 8000,
+    })
+  }, [currentLayout, deleteLayer])
+  const contextTarget = interactions.state.contextMenu.target
+  const menuLayerId = contextTarget?.type === 'layer' ? contextTarget.layerId : null
+  const layerMenu = useMemo(() => {
+    if (!menuLayerId) return null
+    const index = sortedLayers.findIndex((l) => l.id === menuLayerId)
+    const layer = sortedLayers[index]
+    if (!layer) return null
+    const neighbour = (dir: -1 | 1) => sortedLayers[index + dir]
+    return {
+      name: layer.name,
+      color: layer.color ?? '#6366f1',
+      index,
+      count: sortedLayers.length,
+      folded: layerFold.folded.has(layer.id),
+      canEdit: layerEditsAllowed,
+      onInsert: (side: 'left' | 'right') => insertLayerBeside(layer.id, side),
+      onRename: () => requestLayerRename(layer.id),
+      onRecolor: (color: string) => recolorLayer(layer.id, color),
+      // A move is a reorder onto the neighbour: right lands after it, left before it.
+      onMove: (dir: -1 | 1) => { const n = neighbour(dir); if (n) reorderLayer(layer.id, n.id) },
+      onToggleFold: layerFoldOffered && foldLayersEnabled
+        ? () => layerFold.setLayerFolded(layer.id, !layerFold.folded.has(layer.id))
+        : undefined,
+      onDelete: () => deleteLayerWithUndo(layer.id),
+      onStartEditing: !isDraft && canEnterEdit ? handleEnterEdit : undefined,
+    }
+  }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, insertLayerBeside, requestLayerRename,
+    recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
+    canEnterEdit, handleEnterEdit])
+
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
   //     anchors and pins: these lines are drawn, onto the spine;
@@ -6948,6 +7055,7 @@ export function ContextViewCanvas({
               el?.scrollTo({ left: el.scrollWidth, behavior: 'smooth' })
             } : undefined}
             onFit={handleFitToWidth}
+            onLayerContextMenu={openLayerMenu}
             fold={layerFold.active ? {
               openIds: layerFold.openIds,
               focusLayer: layerFold.focusLayer,
@@ -7281,6 +7389,11 @@ export function ContextViewCanvas({
                 onRenameLayer={isDraft ? renameLayer : undefined}
                 onDeleteLayer={isDraft ? deleteLayer : undefined}
                 onReorderLayer={isDraft ? reorderLayer : undefined}
+                // The layer menu (right-click the header), and inserting a layer right here.
+                onHeaderContextMenu={openLayerMenu}
+                onInsertLayerBefore={layerEditsAllowed ? insertLayerBefore : undefined}
+                renameNonce={renameRequest?.layerId === layer.id ? renameRequest.nonce : 0}
+                isNew={newLayerId === layer.id}
                 // Node sorting — the menu is available to everyone (viewers get a
                 // device-local override); persisted actions are draft-gated
                 // inside; the whole surface sits behind the nodeSortingEnabled
@@ -7517,6 +7630,7 @@ export function ContextViewCanvas({
         onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
         customActions={reorderMenuActions}
         queryActions={queryMenuActions}
+        layerMenu={layerMenu}
       />
 
       {/* Inline Node Editor - Double-click to edit names */}

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { ViewLayerConfig } from '@/types/schema'
-import { appendLayer, renameLayer, removeLayer, reorderLayer, setLayerNodeSortMode, setViewDefaultSortMode, clearLayerOrderKeys } from './layerMutations'
+import { appendLayer, insertLayer, recolorLayer, renameLayer, removeLayer, reorderLayer, setLayerNodeSortMode, setViewDefaultSortMode, clearLayerOrderKeys } from './layerMutations'
 
 const L = (id: string, name: string, order: number): ViewLayerConfig => ({
   id,
@@ -24,6 +24,41 @@ describe('appendLayer', () => {
   })
   it('appends onto an empty list at order 0', () => {
     expect(appendLayer([], L('a', 'Alpha', 5))[0].order).toBe(0)
+  })
+})
+
+describe('insertLayer', () => {
+  it('inserts between two layers and renumbers everything after it', () => {
+    const out = insertLayer(base(), L('n', 'New', 99), 1)
+    expect(out.map((l) => l.id)).toEqual(['a', 'n', 'b', 'c'])
+    expect(out.map((l) => l.order)).toEqual([0, 1, 2, 3])
+  })
+  it('inserts first at 0 and appends at length', () => {
+    expect(insertLayer(base(), L('n', 'New', 0), 0).map((l) => l.id)).toEqual(['n', 'a', 'b', 'c'])
+    expect(insertLayer(base(), L('n', 'New', 0), 3).map((l) => l.id)).toEqual(['a', 'b', 'c', 'n'])
+  })
+  it('clamps an index out of range rather than losing the layer', () => {
+    expect(insertLayer(base(), L('n', 'New', 0), -4).map((l) => l.id)).toEqual(['n', 'a', 'b', 'c'])
+    expect(insertLayer(base(), L('n', 'New', 0), 42).map((l) => l.id)).toEqual(['a', 'b', 'c', 'n'])
+  })
+  it('does not mutate the input array', () => {
+    const input = base()
+    insertLayer(input, L('n', 'New', 0), 1)
+    expect(input.map((l) => l.id)).toEqual(['a', 'b', 'c'])
+  })
+})
+
+describe('recolorLayer', () => {
+  it('recolours only the matching layer', () => {
+    const out = recolorLayer(base(), 'b', '#10b981')
+    expect(out.find((l) => l.id === 'b')?.color).toBe('#10b981')
+    expect(out.filter((l) => l.id !== 'b').every((l) => l.color === undefined)).toBe(true)
+  })
+  it('returns the same array when nothing changes', () => {
+    const input = base()
+    expect(recolorLayer(input, 'zzz', '#000')).toBe(input)
+    const coloured = recolorLayer(input, 'a', '#111111')
+    expect(recolorLayer(coloured, 'a', '#111111')).toBe(coloured)
   })
 })
 
