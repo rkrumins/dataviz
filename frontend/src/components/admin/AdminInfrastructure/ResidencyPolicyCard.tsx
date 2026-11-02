@@ -7,8 +7,9 @@
  * on it (from the planner's preview of the values as they stand). Save first asks the planner what
  * the next pass would do with the new values — "Saving evicts 12 graphs, 9.4 GB, on master 2" — and
  * only a confirmation saves them; a value the server refuses is shown next to the field it names.
- * The card also says who changed the values last, and when, and when residency is off on this
- * deployment (``GRAPHVER_RESIDENCY_ENABLED``), in which case the values are kept but not acted on.
+ * The card also says who changed the values last, and when, and where the Graph residency switch
+ * (Admin → Features) is: off (the values are kept, and apply once it is on), bringing graphs back
+ * after it was turned off, in its grace period (when evictions start), or on.
  */
 import { useState } from 'react'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
@@ -22,6 +23,7 @@ import {
     type ResidencyPolicyField,
     type ResidencyPreview,
     type ResidencyPreviewMaster,
+    type ResidencySwitch,
 } from '@/services/systemStatusService'
 import { ConfirmDialog } from './ConfirmDialog'
 
@@ -35,6 +37,27 @@ function formatSecs(secs: number): string {
     if (secs >= 3600 && secs % 3600 === 0) return unit(secs / 3600, 'hour')
     if (secs >= 60 && secs % 60 === 0) return unit(secs / 60, 'minute')
     return unit(secs, 'second')
+}
+
+/** Where the Graph residency switch is, in words. */
+function SwitchStatus({ status }: { status: ResidencySwitch }) {
+    const tone = status.enabled ? 'text-ink-muted' : 'text-amber-700 dark:text-amber-400'
+    let text: string
+    if (status.phase === 'grace') {
+        const at = status.evictionsFrom
+            && new Date(status.evictionsFrom).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+        text = at
+            ? `Graph residency is on. Evictions start at ${at} (grace period).`
+            : 'Graph residency is on. Evictions start after its grace period.'
+    } else if (status.phase === 'on') {
+        text = 'Graph residency is on.'
+    } else if (status.phase === 'reloading') {
+        const n = status.reloading ?? 0
+        text = `Graph residency is off. ${n.toLocaleString()} ${n === 1 ? 'graph is' : 'graphs are'} being brought back as memory allows.`
+    } else {
+        text = 'Graph residency is off. An administrator can turn it on under Admin → Features. These values are kept and apply once it is on.'
+    }
+    return <p className={cn('text-[11px]', tone)}>{text}</p>
 }
 
 /** Binary units, as the masters count them: "9.4 GB". */
@@ -224,11 +247,7 @@ export function ResidencyPolicyCard() {
                 </div>
             </div>
 
-            {!policy.enabled && (
-                <p className="text-[11px] text-amber-700 dark:text-amber-400">
-                    Residency is off on this deployment (GRAPHVER_RESIDENCY_ENABLED): these values are kept, and nothing acts on them until it is turned on.
-                </p>
-            )}
+            <SwitchStatus status={policy.switch} />
 
             <MasterGauges masters={mastersQ.data?.masters ?? null} start={marks.start} stop={marks.stop} loading={mastersQ.isLoading} />
 

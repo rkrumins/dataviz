@@ -51,6 +51,10 @@ function policy(over: Partial<ResidencyPolicy['values']> = {}, rest: Partial<Res
         },
         ranges: { highWaterPct: { min: 50, max: 95 }, lowWaterPct: { min: 30, max: 90 } },
         updatedBy: 'usr_ops', updatedAt: '2026-10-30T10:00:00Z',
+        switch: {
+            enabled: true, onSince: '2026-10-30T09:00:00Z', evictionsFrom: '2026-10-30T09:01:30Z',
+            phase: 'on', reloading: 0,
+        },
         ...rest,
     }
 }
@@ -106,10 +110,44 @@ describe('ResidencyPolicyCard', () => {
         expect(screen.getByText(/Last changed by usr_ops/)).toBeInTheDocument()
     })
 
-    it('says when residency is off on this deployment', async () => {
-        residencyPolicy.mockResolvedValue(policy({}, { enabled: false }))
+    it('says when Graph residency is off, where to turn it on, and that the values are kept', async () => {
+        residencyPolicy.mockResolvedValue(policy({}, {
+            enabled: false,
+            switch: { enabled: false, onSince: null, evictionsFrom: null, phase: 'off', reloading: 0 },
+        }))
         renderCard()
-        expect(await screen.findByText(/Residency is off on this deployment/)).toBeInTheDocument()
+        expect(await screen.findByText(
+            'Graph residency is off. An administrator can turn it on under Admin → Features. These values are kept and apply once it is on.',
+        )).toBeInTheDocument()
+    })
+
+    it('says how many graphs are being brought back while it is off', async () => {
+        residencyPolicy.mockResolvedValue(policy({}, {
+            enabled: false,
+            switch: { enabled: false, onSince: null, evictionsFrom: null, phase: 'reloading', reloading: 12 },
+        }))
+        renderCard()
+        expect(await screen.findByText(
+            'Graph residency is off. 12 graphs are being brought back as memory allows.',
+        )).toBeInTheDocument()
+    })
+
+    it('says when evictions start while it is in its grace period', async () => {
+        const evictionsFrom = '2026-11-02T10:42:00Z'
+        residencyPolicy.mockResolvedValue(policy({}, {
+            switch: { enabled: true, onSince: '2026-11-02T10:40:30Z', evictionsFrom, phase: 'grace', reloading: 0 },
+        }))
+        renderCard()
+        const at = new Date(evictionsFrom).toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' })
+        expect(await screen.findByText(
+            `Graph residency is on. Evictions start at ${at} (grace period).`,
+        )).toBeInTheDocument()
+    })
+
+    it('says it is on once the grace period is over', async () => {
+        renderCard()
+        expect(await screen.findByText('Graph residency is on.')).toBeInTheDocument()
+        expect(screen.queryByText(/grace period/)).not.toBeInTheDocument()
     })
 
     it("draws each master's memory with the start and stop marks on it", async () => {

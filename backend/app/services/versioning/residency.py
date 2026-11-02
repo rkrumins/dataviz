@@ -299,6 +299,29 @@ async def non_resident(data_source_id: str) -> Optional[str]:
     return root["graph_id"] if state is not None and state["status"] in _OUT else None
 
 
+async def switch_status(row, enabled: bool) -> Dict[str, Any]:
+    """Where the Graph residency switch is, for the admin screens: ``enabled`` as the caller read
+    it; ``onSince`` and ``evictionsFrom`` — when the capacity leader first saw it on, and when its
+    grace period ends (null until the leader's next pass); ``phase`` — ``grace`` then ``on`` while
+    on, ``reloading`` then ``off`` while off — and ``reloading``: how many graphs are still out of
+    FalkorDB to bring back (null when that cannot be read)."""
+    since = _ts(getattr(row, "gv_residency_on_since", None)) if enabled else None
+    until = since + timedelta(seconds=residency_policy.GRACE_SECS) if since else None
+    if enabled:
+        phase = "on" if until and datetime.now(timezone.utc) >= until else "grace"
+        reloading: Optional[int] = 0
+    else:
+        try:
+            reloading = await out_of_falkordb()
+        except Exception:  # noqa: BLE001 — the card still says it is off
+            logger.warning("residency: graphs out of FalkorDB could not be counted", exc_info=True)
+            reloading = None
+        phase = "reloading" if reloading else "off"
+    return {"enabled": enabled, "onSince": since.isoformat() if since else None,
+            "evictionsFrom": until.isoformat() if until else None, "phase": phase,
+            "reloading": reloading}
+
+
 async def out_of_falkordb() -> int:
     """How many live graphs have their key out of FalkorDB — evicted, waiting for room or being
     loaded: with the switch off, what is left to bring back. Forks have no key of their own."""

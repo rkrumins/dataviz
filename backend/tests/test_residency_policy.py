@@ -394,3 +394,43 @@ def test_the_activity_log_can_say_what_happened():
     assert severity == "info" and "residency" in summary
     assert catalogue.LABELS["platform.residency_policy.updated"]
     assert catalogue.category_of("platform.residency_policy.updated") == "platform"
+
+
+# ── where the switch is: the card's status ──────────────────────────────────────────────────────
+def _switch(on: bool) -> None:
+    """Graph residency (Admin → Features) as this process's flag cache has it."""
+    import time
+
+    from backend.app.services.feature_flags import feature_flags
+
+    feature_flags._cache = {**(feature_flags._cache or {}), "residencyEnabled": on}
+    feature_flags._cache_ts = time.monotonic()
+
+
+@pytest.mark.parametrize("on, since_secs_ago, out, phase", [
+    (False, None, 0, "off"),
+    (False, None, 12, "reloading"),
+    (True, None, 0, "grace"),                 # the leader has not seen it on yet
+    (True, 30, 0, "grace"),
+    (True, rp.GRACE_SECS + 1, 0, "on"),
+])
+async def test_get_says_where_the_switch_is(monkeypatch, on, since_secs_ago, out, phase):
+    """On: in its grace period until evictionsFrom (from when the leader first saw it on), then on.
+    Off: bringing back what is out of FalkorDB — how many — then simply off."""
+    from datetime import datetime, timedelta, timezone
+
+    async def outside():
+        return out
+
+    monkeypatch.setattr(va.residency, "out_of_falkordb", outside)
+    _switch(on)
+    since = (datetime.now(timezone.utc) - timedelta(seconds=since_secs_ago)
+             if since_secs_ago is not None else None)
+    row = PlatformSettingsORM(id=1, gv_residency_on_since=since.isoformat() if since else None,
+                              gv_residency_phase="on" if since else None)
+    got = (await va.get_residency_policy(_user=_ADMIN, session=_Session(row)))["switch"]
+    assert (got["enabled"], got["phase"], got["reloading"]) == (on, phase, out)
+    shown = since if on else None
+    assert got["onSince"] == (shown.isoformat() if shown else None)
+    assert got["evictionsFrom"] == (
+        (shown + timedelta(seconds=rp.GRACE_SECS)).isoformat() if shown else None)

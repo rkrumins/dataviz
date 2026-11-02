@@ -187,14 +187,25 @@ export interface ResidencyPolicyValues {
 
 export type ResidencyPolicyField = keyof ResidencyPolicyValues
 
-/** ``GET /api/v1/admin/versioning/residency-policy``: ``enabled`` is the deploy
- *  flag (``GRAPHVER_RESIDENCY_ENABLED``); who changed the values last, and when. */
+/** Where the Graph residency switch is: on, in its grace period until ``evictionsFrom`` and then
+ *  on; off, bringing back the graphs still out of FalkorDB (``reloading``) and then off. */
+export interface ResidencySwitch {
+    enabled: boolean
+    onSince: string | null
+    evictionsFrom: string | null
+    phase: 'off' | 'grace' | 'on' | 'reloading'
+    reloading: number | null
+}
+
+/** ``GET /api/v1/admin/versioning/residency-policy``: ``enabled`` is the Graph residency switch
+ *  (Admin → Features), ``switch`` where it is; who changed the values last, and when. */
 export interface ResidencyPolicy {
     enabled: boolean
     values: ResidencyPolicyValues
     ranges: Partial<Record<ResidencyPolicyField, { min: number; max: number }>>
     updatedBy: string | null
     updatedAt: string | null
+    switch: ResidencySwitch
 }
 
 /** A partial change: ``-1`` clears a value back to its default. */

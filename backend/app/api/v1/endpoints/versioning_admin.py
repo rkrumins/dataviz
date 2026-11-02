@@ -237,12 +237,15 @@ async def get_residency_policy(
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
     """What the capacity loop evicts and loads by (doc 17), with ``enabled``: whether a system
-    administrator has turned Graph residency on (Admin → Features)."""
+    administrator has turned Graph residency on (Admin → Features), and ``switch``: where it is —
+    its grace period, or the graphs still being brought back after it was turned off."""
     return await _policy(await session.get(PlatformSettingsORM, 1))
 
 
 async def _policy(row) -> dict:
-    return {**residency_policy.describe(row), "enabled": await residency_policy.enabled()}
+    enabled = await residency_policy.enabled()
+    return {**residency_policy.describe(row), "enabled": enabled,
+            "switch": await residency.switch_status(row, enabled)}
 
 
 @router.put("/residency-policy", summary="Change residency policy values")
