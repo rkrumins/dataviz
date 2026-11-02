@@ -6,6 +6,7 @@ Each case puts the platform settings row back as it found it.
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
 import json
 import os
 import time
@@ -78,6 +79,32 @@ async def _in_store(on):
         row.config = json.dumps(saved)
         await s.commit()
     return before
+
+
+@asynccontextmanager
+async def _others_set_aside():
+    """Graphs earlier tests in the run left out of FalkorDB — evicted, waiting or being loaded —
+    count in the leader's ``out_of_falkordb``, and a reload-only pass brings every one back. One
+    database serves the whole e2e run, so a case that counts them sets them aside (in the trash) for
+    its duration and puts them back after."""
+    ps = ProjectionStateORM
+    async with db.graphver_session() as s:
+        ids = list((await s.scalars(
+            select(ps.graph_id).join(GraphORM, GraphORM.id == ps.graph_id)
+            .where(ps.status.in_(("evicted", "waiting_capacity", "rehydrating")),
+                   GraphORM.deleted_at.is_(None), GraphORM.fork_parent_graph_id.is_(None)))).all())
+        if ids:
+            await s.execute(update(GraphORM).where(GraphORM.id.in_(ids))
+                            .values(deleted_at=models._now()))
+            await s.commit()
+    try:
+        yield
+    finally:
+        if ids:
+            async with db.graphver_session() as s:
+                await s.execute(update(GraphORM).where(GraphORM.id.in_(ids))
+                                .values(deleted_at=None))
+                await s.commit()
 
 
 async def _leader() -> tuple:
@@ -1773,6 +1800,11 @@ async def test_the_leader_starts_the_grace_ends_it_and_clears_it_with_no_restart
     leader starts the grace period on the platform settings row — and every graph's idle clock,
     since reads are not noted while it is off; GRACE_SECS later it ends it, once. Seeing it off, it
     clears it and brings back what is out of FalkorDB until nothing is; then the pass idles."""
+    async with _others_set_aside():
+        await _leader_follows_the_switch(store)
+
+
+async def _leader_follows_the_switch(store) -> None:
     svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
     gid = await _resident(svc, proj)
     await _set_ps(gid, last_read_at=datetime.now(timezone.utc) - timedelta(days=7))
@@ -1865,6 +1897,11 @@ async def test_turned_off_it_brings_evicted_graphs_back_through_admission_one_at
     """Off, a pass only loads: every evicted graph, through the load queue and admission — one load
     per master at a time, as room allows — and evicts nothing, not even an idle Coldline graph.
     No pass reseeds one on its own meanwhile, and its reads go to Postgres until it is back."""
+    async with _others_set_aside():
+        await _off_reloads_through_admission(store, mine)
+
+
+async def _off_reloads_through_admission(store, mine) -> None:
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     first, second, cold = await _live_graphs(svc, proj, mine, 3)
     for gid in (first, second):

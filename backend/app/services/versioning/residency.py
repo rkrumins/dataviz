@@ -246,7 +246,7 @@ async def mark(graph: Mapping, state: Optional[Mapping]) -> None:
     threshold. Its read itself is served from Postgres (the state's freshness says so). Whatever the
     Graph residency switch says: only residency writes those states, and off they are being brought
     back. Reads nothing but, for a Coldline graph of unknown size, its entities."""
-    if state is None or state["status"] not in _OUT:
+    if state is None or state.get("status") not in _OUT:      # no status: a key in FalkorDB
         READING.set(None)
         return
     policy = await residency_policy.resolve()
