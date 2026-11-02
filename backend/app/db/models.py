@@ -291,11 +291,45 @@ class PlatformSettingsORM(Base):
     sa_who_may_create = Column(Text, nullable=True)
     sa_per_person_limit = Column(Integer, nullable=True)
     sa_require_team_manager = Column(Boolean, nullable=True)
+    # The versioned graphs' residency policy (``services.versioning.residency_policy``): whether
+    # the capacity loop evicts, the class a new graph gets, the idle times, each master's start
+    # and stop marks, the load headroom, the per-entity size estimate, the Coldline canvas
+    # threshold and the loop's interval. Same NULL-means-unset semantics: the environment default
+    # applies.
+    gv_eviction_enabled = Column(Boolean, nullable=True)
+    gv_default_residency = Column(Text, nullable=True)
+    gv_standard_idle_secs = Column(Integer, nullable=True)
+    gv_coldline_idle_secs = Column(Integer, nullable=True)
+    gv_high_water_pct = Column(Integer, nullable=True)
+    gv_low_water_pct = Column(Integer, nullable=True)
+    gv_load_margin_pct = Column(Integer, nullable=True)
+    gv_bytes_per_entity = Column(Integer, nullable=True)
+    gv_coldline_canvas_load_above = Column(Integer, nullable=True)
+    gv_capacity_interval_secs = Column(Integer, nullable=True)
+    # Who last changed the residency policy, and when: its own, as the row's are shared by every
+    # platform setting.
+    gv_policy_updated_by = Column(Text, nullable=True)
+    gv_policy_updated_at = Column(Text, nullable=True)
+    # What the capacity leader keeps of the Graph residency switch (Admin → Features): since when
+    # it first saw it on (ISO-8601 UTC; evictions wait GRACE_SECS from then) and its phase —
+    # ``grace``, ``on``, ``reloading`` (off, bringing evicted graphs back) or NULL (off). Written by
+    # the leader alone, each change once, with its activity event.
+    gv_residency_on_since = Column(Text, nullable=True)
+    gv_residency_phase = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
     __table_args__ = (
         CheckConstraint("id = 1", name="ck_platform_settings_single_row"),
+        CheckConstraint(
+            "gv_default_residency IS NULL OR "
+            "gv_default_residency IN ('always','standard','coldline')",
+            name="ck_platform_settings_gv_default_residency",
+        ),
+        CheckConstraint(
+            "gv_residency_phase IS NULL OR gv_residency_phase IN ('grace','on','reloading')",
+            name="ck_platform_settings_gv_residency_phase",
+        ),
     )
 
     def __repr__(self) -> str:
@@ -348,6 +382,9 @@ class FeatureDefinitionORM(Base):
     # BEFORE flipping a switch that affects everybody. Seeded from app/config/features_seed.py
     # and editable from the admin UI, like the other prose columns.
     impact_when_off = Column(Text, nullable=True)
+    # "What does turning it on mean?" — for a switch whose ON is the consequential direction. Unset,
+    # the switch turns on at once; set, the page asks first. Seeded and editable like the above.
+    impact_when_on = Column(Text, nullable=True)
     sort_order = Column(Integer, nullable=False, default=0)
     deprecated = Column(Boolean, nullable=False, default=False)
     # DERIVED FROM CODE — reconciled from app/config/feature_wiring.py on every startup, and NOT

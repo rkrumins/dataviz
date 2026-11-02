@@ -212,6 +212,22 @@ DEFAULT_FALKOR_PROVIDER: str = "default"
 RETIRE_GRACE_SECS: int = 900
 EVICT_SECS: int = int(os.getenv("GRAPHVER_EVICT_SECS", "300"))
 
+# Residency (doc 17): each graph's class (Always / Standard / Coldline) and each cluster master's
+# memory decide whether its key stays in FalkorDB, through the projection lane's capacity loop,
+# once a system administrator turns on Graph residency (Admin → Features, ``residencyEnabled``;
+# ``residency_policy.switch_state``). The worker no longer runs the count budget above, whatever
+# the switch says. The residency policy's defaults follow; each is overridden live from the admin UI
+# (platform_settings) and clamped to its range by ``residency_policy``.
+EVICTION_ENABLED: bool = os.getenv("GRAPHVER_EVICTION_ENABLED", "1").lower() not in ("0", "false", "no")
+STANDARD_IDLE_SECS: int = int(os.getenv("GRAPHVER_STANDARD_IDLE_SECS", "604800"))
+COLDLINE_IDLE_SECS: int = int(os.getenv("GRAPHVER_COLDLINE_IDLE_SECS", "3600"))
+MASTER_HIGH_WATER_PCT: int = int(os.getenv("GRAPHVER_MASTER_HIGH_WATER_PCT", "80"))
+MASTER_LOW_WATER_PCT: int = int(os.getenv("GRAPHVER_MASTER_LOW_WATER_PCT", "70"))
+LOAD_MARGIN_PCT: int = int(os.getenv("GRAPHVER_LOAD_MARGIN_PCT", "130"))
+BYTES_PER_ENTITY: int = int(os.getenv("GRAPHVER_BYTES_PER_ENTITY", "550"))
+COLDLINE_CANVAS_LOAD_ABOVE: int = int(os.getenv("GRAPHVER_COLDLINE_CANVAS_LOAD_ABOVE", "500000"))
+CAPACITY_SECS: int = int(os.getenv("GRAPHVER_CAPACITY_SECS", "60"))
+
 # DERIVED_LABELS / not_derived_clause are imported at the top of this module and
 # re-exported here for this package's callers. The definition moved OUT to
 # ``backend/common/derived_artifacts`` because the provider and profiling read

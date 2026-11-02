@@ -377,7 +377,7 @@ class DriftReport:
     in_sync: bool
     checked_at: str
     duration_ms: int
-    skipped_reason: Optional[str] = None                 # "no projection target" | "projection in flight"
+    skipped_reason: Optional[str] = None                 # why nothing was compared, if not
     rollups: Optional[dict] = None                        # {status, aggregated, stubs} — see RollupHealth
 
 
@@ -488,6 +488,13 @@ class ProjectionReconciler:
         # best-effort operator tool, so re-running the reconcile once the cache is fresh resolves it.
         if status in ("projecting", "rebuilding") and not fresh:
             return _report(skipped_reason="projection in flight")
+        # Out of FalkorDB (residency, doc 17): its key was dropped, or is being written again, and
+        # its reads are on Postgres meanwhile — a scan would report everything missing.
+        if status in ("evicted", "waiting_capacity"):
+            return _report(skipped_reason="out of FalkorDB: its reads are on Postgres until it is "
+                                          "loaded again")
+        if status == "rehydrating":
+            return _report(skipped_reason="being loaded into FalkorDB: check again once it is")
 
         # Factory contract is (name, provider_id=None); a registry-backed factory may
         # resolve the provider asynchronously — await the result when it's awaitable.

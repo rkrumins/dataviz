@@ -29,7 +29,9 @@
  *
  * One asymmetry, and it matters more than the layout: TURNING A FEATURE OFF ASKS FIRST
  * (ConfirmTurnOff); turning it back on does not. Off silently takes something away from every user
- * at once, and the person doing it is by definition not the person who will notice.
+ * at once, and the person doing it is by definition not the person who will notice. The exception
+ * is a switch that says what turning it ON means (``impactWhenOn``): that asks first too
+ * (ConfirmTurnOn).
  */
 import { useMemo, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
@@ -39,6 +41,7 @@ import { useAdminFeatures, SEARCH_MIN_FEATURES } from '@/hooks/useAdminFeatures'
 import { PageContainer } from '@/components/layout/PageContainer'
 import { useAppNotifications } from '@/components/ui/notifications'
 import { ConfirmTurnOff } from './ConfirmTurnOff'
+import { ConfirmTurnOn } from './ConfirmTurnOn'
 import { ExperimentalNoticeBanner } from './ExperimentalNoticeBanner'
 import { FeatureHero } from './FeatureHero'
 import { FeatureList } from './FeatureList'
@@ -84,6 +87,8 @@ export function AdminFeatures() {
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   /** The feature we are about to turn OFF, pending confirmation. */
   const [pendingOff, setPendingOff] = useState<FeatureDefinition | null>(null)
+  /** The feature we are about to turn ON, pending confirmation: only one that says what that means. */
+  const [pendingOn, setPendingOn] = useState<FeatureDefinition | null>(null)
 
   const schema = data?.schema ?? featuresService.getSchema()
   const categories: FeatureCategory[] = data?.categories ?? featuresService.getCategories()
@@ -141,7 +146,7 @@ export function AdminFeatures() {
   }
 
   /**
-   * ON is instant. OFF asks first.
+   * ON is instant — unless the switch says what turning it on means. OFF asks first.
    *
    * Not friction for its own sake: this is the only moment an admin is guaranteed to be looking at
    * the consequence of what they are about to do to every user at once.
@@ -163,7 +168,17 @@ export function AdminFeatures() {
       setPendingOff(feature)
       return
     }
+    if (next && feature.impactWhenOn && !isOn(feature, values)) {
+      setPendingOn(feature)
+      return
+    }
     void applyChange(feature, next)
+  }
+
+  const confirmTurnOn = async () => {
+    if (!pendingOn) return
+    await applyChange(pendingOn, true)
+    setPendingOn(null)
   }
 
   const confirmTurnOff = async () => {
@@ -338,6 +353,12 @@ export function AdminFeatures() {
         values={values}
         onCancel={() => setPendingOff(null)}
         onConfirm={confirmTurnOff}
+      />
+
+      <ConfirmTurnOn
+        feature={pendingOn}
+        onCancel={() => setPendingOn(null)}
+        onConfirm={confirmTurnOn}
       />
 
       <ResetConfirmModal

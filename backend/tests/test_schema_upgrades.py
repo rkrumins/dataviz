@@ -1331,3 +1331,113 @@ async def test_the_draft_visibility_step_never_stalls_draft_reads_for_long(store
 
         _, waited, _ = await asyncio.gather(upgrade(), read(), release())
     assert waited < 1, f"a draft read waited {waited:.1f}s behind the schema step"
+
+
+# ── projection_state residency: a graph's class, its last read, why it was evicted and its size;
+#    the rehydrating and waiting_capacity statuses (20261030_1300_gv_ps_residency) ──
+_PS_RESIDENCY = _VERSIONS / "20261030_1300_gv_ps_residency.py"
+_RESIDENCY_COLUMNS = {"residency", "last_read_at", "evicted_reason", "size_bytes", "size_measured_at",
+                      "rehydrating_since"}
+_STATUSES_BEFORE = "'idle','projecting','rebuilding','evicted','reseeding'"
+
+
+def _check_sql(name: str) -> str:
+    check = next(c for c in models.ProjectionStateORM.__table__.constraints
+                 if getattr(c, "name", "") == name)
+    return str(check.sqltext)
+
+
+def test_the_residency_columns_are_declared_and_migrated():
+    """A store ``create_all`` builds must equal the migrated one: every graph has a class,
+    Standard unless set; the rest is unknown until measured, read or evicted."""
+    table = models.ProjectionStateORM.__table__
+    assert not table.c.residency.nullable
+    assert str(table.c.residency.server_default.arg) == "'standard'"
+    for name in ("last_read_at", "evicted_reason", "size_bytes", "size_measured_at",
+                 "rehydrating_since"):
+        assert table.c[name].nullable, name
+    assert table.c.last_read_at.type.timezone and table.c.size_measured_at.type.timezone
+    assert table.c.rehydrating_since.type.timezone
+    assert "residency IN ('always','standard','coldline')" in _check_sql("ck_ps_residency")
+    assert ("evicted_reason IN ('idle_standard','idle_coldline','pressure','lost','admin',"
+            "'load_stalled')" in _check_sql("ck_ps_evicted_reason"))
+    assert {"'rehydrating'", "'waiting_capacity'", "'reseeding'"} <= {
+        s.strip() for s in _check_sql("ck_proj_status").split("(")[1].rstrip(")").split(",")}
+    migration = _migration(_PS_RESIDENCY)
+    assert migration.revision == _PS_RESIDENCY.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261030_1200_ds_fork_of"
+    assert "ensure_ps_residency" in _PS_RESIDENCY.read_text()
+
+
+async def _checks(conn) -> dict:
+    return dict((await conn.execute(text(
+        "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conrelid = CAST(:ps AS regclass) AND contype = 'c'"), {"ps": _PS})).all())
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_residency_columns(store):
+    """The columns, their checks and the two statuses arrive on start; a second start finds
+    nothing to do and rebuilds no check."""
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            for column in sorted(_RESIDENCY_COLUMNS):
+                await conn.execute(text(f"ALTER TABLE {_PS} DROP COLUMN {column}"))
+            await conn.execute(text(f"ALTER TABLE {_PS} DROP CONSTRAINT ck_proj_status"))
+            await conn.execute(text(f"ALTER TABLE {_PS} ADD CONSTRAINT ck_proj_status "
+                                    f"CHECK (status IN ({_STATUSES_BEFORE}))"))
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert _RESIDENCY_COLUMNS <= await _ps_columns(conn)
+            checks = await _checks(conn)
+            assert "'waiting_capacity'" in checks["ck_proj_status"]
+            assert "'coldline'" in checks["ck_ps_residency"]
+            assert "'pressure'" in checks["ck_ps_evicted_reason"]
+            assert "'load_stalled'" in checks["ck_ps_evicted_reason"]
+            oid = (await _status_check(conn))[0]
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+            assert (await _status_check(conn))[0] == oid
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_residency_migration_round_trips(store):
+    """Down, a graph waiting for its load or being loaded reads evicted at watermark 0, which the
+    code before reseeds as it reseeded every evicted graph; up again, every graph is Standard."""
+    migration = _migration(_PS_RESIDENCY)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            for gid, status, seq in (("g_res_wait", "waiting_capacity", 0),
+                                     ("g_res_load", "rehydrating", 4)):
+                await conn.execute(text(
+                    f"INSERT INTO {_PS} (graph_id, projected_commit_seq, target_commit_seq, status, "
+                    "owns_falkor_graph, updated_at, residency, evicted_reason, epoch) "
+                    "VALUES (:g, :seq, 4, :st, true, '2026-10-30', 'coldline', 'pressure', 3)"),
+                    {"g": gid, "st": status, "seq": seq})
+            await conn.run_sync(run("downgrade"))
+            assert not _RESIDENCY_COLUMNS & await _ps_columns(conn)
+            assert "'waiting_capacity'" not in (await _status_check(conn))[1]
+            rows = (await conn.execute(text(
+                f"SELECT graph_id, status, projected_commit_seq, epoch FROM {_PS} "
+                "WHERE graph_id LIKE 'g_res_%' ORDER BY 1"))).all()
+            assert [tuple(r) for r in rows] == [("g_res_load", "evicted", 0, 4),
+                                                ("g_res_wait", "evicted", 0, 4)]
+            await conn.run_sync(run("upgrade"))
+            assert _RESIDENCY_COLUMNS <= await _ps_columns(conn)
+            assert "'waiting_capacity'" in (await _status_check(conn))[1]
+            assert (await conn.execute(text(
+                f"SELECT DISTINCT residency FROM {_PS} WHERE graph_id LIKE 'g_res_%'"))).scalar() \
+                == "standard"
+            await conn.run_sync(run("upgrade"))                     # idempotent
+        finally:
+            await trans.rollback()

@@ -4,7 +4,7 @@
 to know which endpoint a switch turns off.*
 
 This page is the reference for the feature-switch API behind **Administration → Features**:
-every route with its request and answer, how a change is saved safely, and all 37 switches
+every route with its request and answer, how a change is saved safely, and all 38 switches
 with their defaults and the server routes each one controls.
 
 - **Administrators:** what each switch does on screen, and how to change one, is in
@@ -60,6 +60,7 @@ To read only the values — what the app loads when it starts — use
       "name": "Lineage trace",
       "description": "Follow a node's lineage upstream and downstream across the graph, from the graph and context views.",
       "impactWhenOff": "The Trace button disappears from the toolbars and the server refuses trace requests. …",
+      "impactWhenOn": null,
       "category": "lineage",
       "type": "boolean",
       "default": true,
@@ -97,6 +98,9 @@ To read only the values — what the app loads when it starts — use
   `enforcedServerSide`, `serverGates`, `uiSurfaces`, `stillAllowed` and `dependsOn` are facts
   read from the code (`backend/app/config/feature_wiring.py`), not from the database: no request
   can change them. `implemented` is `true` when the switch changes anything at all.
+  `impactWhenOn` says what turning a switch on means, for a switch whose ON is the consequential
+  direction (Graph residency); it is `null` for the rest, and the Features page asks before turning
+  on a switch that has one.
 - **`values`** — every switch's value in force: the saved value, or the definition's default
   where nothing has been saved.
 - **`version`** — the token you send back when you save.
@@ -164,15 +168,15 @@ required. `type` is `boolean` or `string[]`; a `string[]` switch also needs
 
 **Change** — `PATCH /api/v1/admin/features/definitions/{key}` takes any of `name`,
 `description`, `category`, `type`, `default`, `options`, `helpUrl`, `adminHint`,
-`impactWhenOff`, `sortOrder` and `deprecated`.
+`impactWhenOff`, `impactWhenOn`, `sortOrder` and `deprecated`.
 
-> **Warning:** `options`, `helpUrl`, `adminHint` and `impactWhenOff` are cleared when you leave
-> them out. Send their current values with every change.
+> **Warning:** `options`, `helpUrl`, `adminHint`, `impactWhenOff` and `impactWhenOn` are cleared
+> when you leave them out. Send their current values with every change.
 
-> **Note:** For the 35 built-in switches, the API service rewrites `name`, `description`,
-> `adminHint`, `impactWhenOff`, `helpUrl`, `category`, `type`, `options` and `sortOrder` from
-> the code every time it starts, so a change to those lasts only until the next restart.
-> Change the text in `backend/app/config/features_seed.py` instead.
+> **Note:** For the 38 built-in switches, the API service rewrites `name`, `description`,
+> `adminHint`, `impactWhenOff`, `impactWhenOn`, `helpUrl`, `category`, `type`, `options` and
+> `sortOrder` from the code every time it starts, so a change to those lasts only until the next
+> restart. Change the text in `backend/app/config/features_seed.py` instead.
 
 **Retire** — `POST /api/v1/admin/features/definitions/{key}/deprecate` marks the definition
 deprecated and removes its value. It stays in the database, but leaves `schema` and `values`.
@@ -188,7 +192,7 @@ An unknown key answers `404`.
 
 ## Feature flags (authoritative set)
 
-All 37 switches, grouped as **Administration → Features** groups them. **Switch** is the name
+All 38 switches, grouped as **Administration → Features** groups them. **Switch** is the name
 an administrator sees. **When it is off** names the routes the server refuses — `403` with
 `{"detail": {"type": "feature_disabled", "feature": "<key>", "message": "…"}}` unless the row
 says otherwise — or what it does instead. Paths are relative to `/api/v1`. Every switch whose
@@ -236,6 +240,7 @@ feature open to anyone who knows the URL.
 |---|---|---|---|---|
 | Version control | `versioningEnabled` | On | Every `POST`, `PUT`, `PATCH` and `DELETE` under `/{ws_id}/versioning/` except `…/projection/rebuild`, `…/projection/reconcile` and `POST …/exports`; `POST /{ws_id}/graph/bootstrap`, `…/bootstrap/retry`, `…/bootstrap/decision`, `…/bootstrap/abandon` and `POST /{ws_id}/graph/resync`; view packages and staging a view import in a draft; and every write through a versioned graph | Reads stay open and history is kept. The widest switch: it withdraws editing too |
 | Forks | `forksEnabled` | Off | `POST /{ws_id}/versioning/graphs/{graph_id}/forks`; on a fork's graph, every `POST`, `PUT`, `PATCH` and `DELETE` under `/{ws_id}/versioning/` except `DELETE …/graphs/{graph_id}`, `…/projection/rebuild`, `…/projection/reconcile`, `POST …/exports` and `…/lifecycle/freeze`; approving, editing and merging a review from a fork or into one (closing it stays open), and the job a large publish or merge on a fork runs as; `POST /{ws_id}/versioning/resolve` for a fork's data source; `POST /{ws_id}/graph/changes`, `…/nodes/create`, `…/save`, `…/commands/batch`, and `POST`, `PATCH` and `DELETE` on `…/edges`, on a fork; staging a view import or a view package's data in a draft on a fork | Experimental preview; needs Version control. Reads, the trash and restoring a fork stay open. An unreadable value counts as off |
+| Graph residency | `residencyEnabled` | Off | None: it refuses no request. The versioning worker reads it from the feature store at the start of each capacity pass: on, it evicts by class and each master's memory after a 90-second grace; off, it only brings evicted graphs back, through admission. The API reads it for read leases, read notes, a new graph's class and admission on moves and Adopt | Experimental preview; needs Version control. Reads of a graph out of FalkorDB never depend on it. An unreadable value: the pass does nothing, and the API counts it as off |
 | Lineage trace | `traceEnabled` | On | `POST /{ws_id}/graph/trace/v2`, `…/trace/closure`, `…/trace/expand`, `…/trace/expand-batch`, and the retired `…/trace` | Browsing and expanding by hand keep working |
 
 ### Data Governance

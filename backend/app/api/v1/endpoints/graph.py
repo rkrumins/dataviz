@@ -1998,6 +1998,26 @@ def _map_validation_error(detail: str) -> HTTPException:
     return HTTPException(status_code=400, detail=detail)
 
 
+def _graph_loading() -> Optional[HTTPException]:
+    """503 ``graph_loading`` with Retry-After when the graph this request reads is out of
+    FalkorDB under residency (doc 17): work only FalkorDB can do waits for the graph's load,
+    which this asks for. None when FalkorDB holds it."""
+    from backend.app.services.background import spawn_detached
+    from backend.app.services.versioning import residency
+
+    reading = residency.READING.get()
+    if reading is None:
+        return None
+    spawn_detached(residency.request_load(reading.graph_id),
+                   name=f"residency load {reading.graph_id}")
+    return HTTPException(
+        status_code=503,
+        detail={"type": "graph_loading", "retryAfter": reading.retry_after,
+                "message": "This graph is being loaded into memory for this. Try again shortly."},
+        headers={"Retry-After": str(reading.retry_after)},
+    )
+
+
 def _map_not_implemented(
     engine: ContextEngine, exc: NotImplementedError,
 ) -> HTTPException:
@@ -2008,8 +2028,12 @@ def _map_not_implemented(
     product copy, and swallowing it would leave the user reading about
     FalkorDB. A bare ``NotImplementedError`` (a provider that simply has
     no deep-search implementation) keeps the developer-facing fallback
-    naming the provider.
+    naming the provider. A graph out of FalkorDB under residency is a 503
+    instead, while it loads (:func:`_graph_loading`).
     """
+    loading = _graph_loading()
+    if loading is not None:
+        return loading
     return HTTPException(
         status_code=501,
         detail=str(exc) or (
@@ -2323,6 +2347,7 @@ async def search_native(
     from backend.app.db.repositories.data_source_repo import get_data_source_orm
     source = await get_data_source_orm(session, granted.data_source_id) if granted.data_source_id else None
     if source is not None and source.fork_of_data_source_id:
+        # Never on a fork, whatever its root's state: no load is asked for one either.
         raise _native_refusal(
             request_id, 501, "native_query_unavailable",
             "Native queries read a graph's own published store; a fork reads through its parent. "
@@ -2346,7 +2371,7 @@ async def search_native(
             "Native queries run on FalkorDB and Neo4j data sources only.",
         )
     if not await _holds_published_graph(granted.data_source_id, provider):
-        raise _native_refusal(
+        raise (await _native_loading(request_id)) or _native_refusal(
             request_id, 503, "unavailable",
             "The published graph is catching up. Try again in a moment.", retry_after=5,
         )
@@ -2384,11 +2409,32 @@ async def _holds_published_graph(data_source_id: str, provider) -> bool:
     graph = await svc.get_graph_by_data_source(data_source_id)
     if graph is None:
         return True
+    from backend.app.services.versioning import residency
+
+    await residency.hold(svc, graph)        # before the watermark: no eviction mid-query (doc 17)
     gid = str(graph["graph_id"])
     wm = await svc.projection_watermark(gid)
+    await residency.mark(graph, wm)         # out of FalkorDB? whatever the switch says
     return bool(wm["fresh"]) and versioned_sources.serves_pin(
         getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
         wm.get("falkor_graph_name"), gid)
+
+
+async def _native_loading(request_id: str) -> Optional[HTTPException]:
+    """503 ``graph_loading`` with Retry-After when the graph the query reads is out of FalkorDB
+    (residency, doc 17) — as its watermark said (:data:`residency.READING`), whatever the Graph
+    residency switch says — whose load this asks for; None when it is not."""
+    from backend.app.services.versioning import residency
+
+    reading = residency.READING.get()
+    if reading is None:
+        return None
+    await residency.request_load(reading.graph_id)
+    return _native_refusal(
+        request_id, 503, "graph_loading",
+        "This graph is being loaded into memory for queries. Try again shortly.",
+        retry_after=reading.retry_after,
+    )
 
 
 def _native_refusal(
@@ -3396,7 +3442,7 @@ async def get_node_degrees(
             expected_compute_s=_compute_budget(ENDPOINT_NODES_DEGREE),
         )
     except NotImplementedError as exc:
-        raise HTTPException(status_code=501, detail=str(exc)) from exc
+        raise (_graph_loading() or HTTPException(status_code=501, detail=str(exc))) from exc
     return result.root
 
 

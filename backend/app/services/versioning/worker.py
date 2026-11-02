@@ -13,7 +13,10 @@ the poll loop. Per-``graph_id`` serialization keeps the two mechanisms from
 projecting the same graph concurrently. Mirrors the aggregation worker runtime. A **liveness
 loop** (every ``LIVENESS_SECS``) lowers the watermark of an idle graph whose FalkorDB key is gone
 or restored behind it, so the poll reseeds it. A **retire loop** drops the old key a moved graph
-left, once its new key has caught up (``keymigrate.retire_moved_keys``).
+left, once its new key has caught up (``keymigrate.retire_moved_keys``). A **capacity loop**
+(``residency.CapacityLoop``) always runs: each pass reads the Graph residency switch (Admin →
+Features) and decides — on, which keys FalkorDB holds; off, bringing evicted graphs back; unreadable,
+nothing. The per-provider count budget (``evict_once``) is no longer run.
 
 The **transfer** lane (import / export / publish, and a dedicated package-inspect slot) and the
 **bootstrap** lane (bootstraps, purges) run jobs from ``graphver.jobs`` through one
@@ -192,8 +195,9 @@ class ProjectionWorker:
             loops += [self._poll_loop(), self._stream_loop()]
             if self._versioning is not None:
                 loops.append(self._sweep_loop())
-            if self._cache is not None:
-                loops.append(self._evict_loop())
+            # Each pass reads the switch and decides; the count budget is not run: off, what it
+            # evicted would only be loaded back.
+            loops.append(self._capacity_loop())
             if config.LIVENESS_SECS > 0:
                 loops.append(self._liveness_loop())
             loops.append(self._retire_loop())
@@ -369,6 +373,26 @@ class ProjectionWorker:
                 await asyncio.wait_for(self._stop.wait(), timeout=self._evict_secs)
             except asyncio.TimeoutError:
                 pass
+
+    async def _capacity_loop(self) -> None:
+        """Residency (doc 17): a capacity pass every policy interval — evictions by class, idle
+        time and each master's memory, and the loads admission lets start, as the Graph residency
+        switch read at the start of the pass allows. One leader across workers: a pass another
+        worker holds is skipped here."""
+        from .residency import CapacityLoop
+        from .residency_policy import resolve
+
+        capacity = CapacityLoop(self._proj)
+        while not self._stop.is_set():
+            try:
+                await capacity.run_once()
+            except Exception:
+                logger.exception("capacity loop error")
+            try:
+                await asyncio.wait_for(self._stop.wait(),
+                                       timeout=(await resolve()).capacity_interval_secs)
+            except asyncio.TimeoutError:
+                pass                                # the interval elapsed: run the next pass
 
     async def _liveness_loop(self) -> None:
         while not self._stop.is_set():

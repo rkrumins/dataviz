@@ -184,6 +184,13 @@ class ContextEngine:
                 raise KeyError(f"Data source not found: {data_source_id}")   # its graph is trashed
             if graph is not None:
                 gid = graph["graph_id"]
+                # Residency (doc 17): with it on, a person's read holds the graph's key before the
+                # watermark is read; whatever the switch says, the watermark then marks a graph
+                # out of FalkorDB and asks for its load. A fork's read does both for its root, once
+                # its plan says it reads through the root's store.
+                from .versioning import residency
+                if not fork and viewer is not None:
+                    await residency.hold(svc, graph)
                 main_id = await svc.main_branch_id(gid)
                 is_draft = norm not in ("", "main", main_id)
                 main_reader = None
@@ -192,9 +199,11 @@ class ContextEngine:
                     # draft on it overlays that.
                     main_fresh = False
                     main_reader = await cls._fork_main_reader(
-                        registry, session, workspace_id, svc, gid, main_id, actor)
+                        registry, session, workspace_id, svc, gid, main_id, actor, viewer)
                 else:
                     wm = await svc.projection_watermark(gid)
+                    if viewer is not None:
+                        await residency.mark(graph, wm)
                     # Main is served from FalkorDB only from the key the projection publishes.
                     main_fresh = wm["fresh"] and serves_pin(
                         getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
@@ -298,16 +307,20 @@ class ContextEngine:
 
     @staticmethod
     async def _fork_main_reader(registry, session, workspace_id: str, svc, gid: str, main_id: str,
-                                actor: Optional[str]):
+                                actor: Optional[str], viewer=None):
         """What reads a fork's ``main``: its root's store — the root's FalkorDB provider, built from
         the root's data source, while its projection holds its head in the key it publishes; else
         the root's Postgres reader — with the fork's patch set over it (``DraftOverlayProvider``).
         Past ``GRAPHVER_FORK_REWIND_MAX`` entities to classify (``fork_reads_from``), the fork's
-        own layered Postgres reads. Who may read is the fork's to decide, as it was decided: the
-        root's source is read on its behalf."""
+        own layered Postgres reads, which read nothing of its root's. Who may read is the fork's to
+        decide, as it was decided: the root's source is read on its behalf. A person's read through
+        the root's store is a read of the root's for residency (``residency.on_read``), marked by
+        the root's state as its plan read it — or, with residency on, as read again after the
+        root's hold."""
         from ..providers.draft_overlay_provider import DraftOverlayProvider
         from ..providers.versioned_branch_provider import FORK_NO_DEEP_SEARCH, VersionedBranchProvider
         from .versioned_sources import serves_pin
+        from .versioning.residency import on_read
 
         # One session reads the fork's version, its ceiling, its root and the root's store.
         try:
@@ -318,6 +331,14 @@ class ContextEngine:
             return VersionedBranchProvider(svc, graph_id=gid, branch_id=main_id, actor=actor,
                                            deep_search_gap=FORK_NO_DEEP_SEARCH)
         root_id = plan["root_id"]
+        # Residency (doc 17): with it on, the root's read lease is held before its store is read
+        # for what follows — the plan read it before — and the read counts for the root.
+        store = await on_read(svc, {"graph_id": root_id,
+                                    "data_source_id": plan["root_data_source_id"]},
+                              viewer=viewer, state=plan)
+        if store is not None:
+            plan.update({k: store[k] for k in ("projected", "status", "fresh", "falkor_provider",
+                                               "falkor_graph_name")})
         base = None
         if plan["fresh"] and not plan["root_trashed"]:
             try:
@@ -335,10 +356,12 @@ class ContextEngine:
             base = VersionedBranchProvider(svc, graph_id=root_id, branch_id=plan["root_main"],
                                            actor=actor)
         # Its cache keys carry the root store's version it reads against: the root's writes and
-        # projections bump only the root's cache (DraftOverlayProvider.physical_graph_id).
-        return DraftOverlayProvider(base, svc=svc, graph_id=gid, branch_id=main_id, actor=actor,
-                                    fork=True, version=plan["version"],
-                                    read_ns=f"{root_id}@{plan['committed']}:{plan['projected']}")
+        # projections bump only the root's cache (DraftOverlayProvider.physical_graph_id); and the
+        # store's status, so nothing read while the root was out or loading outlives that.
+        return DraftOverlayProvider(
+            base, svc=svc, graph_id=gid, branch_id=main_id, actor=actor, fork=True,
+            version=plan["version"],
+            read_ns=f"{root_id}@{plan['committed']}:{plan['projected']}:{plan['status']}")
 
     # ------------------------------------------------------------------ #
     # Connection-aware factory (legacy compat)                             #

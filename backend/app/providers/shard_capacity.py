@@ -38,7 +38,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -755,6 +755,43 @@ async def owner_endpoint(
         return "unknown"
 
 
+async def master_slots(
+    db: Any, *, mode: Optional[str], timeout: float,
+) -> Optional[Dict[str, Optional[List[Tuple[int, int]]]]]:
+    """Every master behind ``db`` — ``host:port`` — with the cluster slots it owns, as sorted
+    ``(first, last)`` ranges: from the client's slot map (fetched when it has none), so a master
+    that holds no key the caller knows of is named too. Outside a cluster, the one master with
+    None (every slot is its). Never raises: None when the client cannot say."""
+    conn = getattr(db, "connection", None)
+    if conn is None:
+        return None
+    try:
+        async with asyncio.timeout(timeout):
+            if mode != "cluster":
+                return {_endpoint_of(conn): None}
+            cache = getattr(getattr(conn, "nodes_manager", None), "slots_cache", None)
+            if not cache:
+                await conn.initialize()
+                cache = conn.nodes_manager.slots_cache
+    except Exception as exc:                          # noqa: BLE001 — by contract
+        logger.info("the cluster's masters are unknown: %s", exc)
+        return None
+    owned: Dict[str, List[int]] = {}
+    for slot, chain in (cache or {}).items():
+        if chain:
+            owned.setdefault(f"{chain[0].host}:{chain[0].port}", []).append(int(slot))
+    out: Dict[str, Optional[List[Tuple[int, int]]]] = {}
+    for endpoint, slots in owned.items():
+        ranges: List[Tuple[int, int]] = []
+        for slot in sorted(slots):
+            if ranges and slot == ranges[-1][1] + 1:
+                ranges[-1] = (ranges[-1][0], slot)
+            else:
+                ranges.append((slot, slot))
+        out[endpoint] = ranges
+    return out or None
+
+
 async def _config_get(conn: Any, node: Any, name: str) -> Dict[str, str]:
     """One Redis-level ``CONFIG GET`` on ``node`` as ``{name: value}``."""
     from backend.app.services.graph_store import info_parse
@@ -917,6 +954,31 @@ async def read_query_mem_capacity(
     except Exception as exc:                          # noqa: BLE001 — by contract
         logger.info("QUERY_MEM_CAPACITY for %r unknown: %s", graph_key, exc)
         return None
+
+
+async def read_graph_memory(
+    db: Any, *, mode: Optional[str], graph_key: str, timeout: float,
+) -> Optional[int]:
+    """What one graph key holds on the node that owns it, in bytes (``GRAPH.MEMORY USAGE``,
+    sampled as the graph store's sweep samples it). None when the server has no such command,
+    or did not answer. Never raises."""
+    from backend.app.services.graph_store.discovery import (
+        GRAPH_MEMORY_SAMPLES, parse_graph_memory_reply,
+    )
+
+    conn = getattr(db, "connection", None)
+    if conn is None:
+        return None
+    args = ("GRAPH.MEMORY", "USAGE", graph_key, "SAMPLES", GRAPH_MEMORY_SAMPLES)
+    try:
+        async with asyncio.timeout(timeout):
+            _endpoint, node = await _owner(conn, mode, graph_key, refresh=False)
+            raw = await (conn.execute_command(*args, target_nodes=node) if node is not None
+                         else conn.execute_command(*args))
+    except Exception as exc:                          # noqa: BLE001 — by contract
+        logger.info("memory of graph %r unknown: %s", graph_key, exc)
+        return None
+    return parse_graph_memory_reply(raw)[0]
 
 
 # ── The allowance ────────────────────────────────────────────────────────

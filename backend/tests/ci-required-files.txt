@@ -224,6 +224,12 @@ tests/test_reconcile_sweeper.py
 tests/test_refresh_wait_deadline.py
 tests/test_reply_capped_parser.py
 tests/test_request_body_limit.py
+tests/test_residency_adopt_route.py
+tests/test_residency_feature_flag.py
+tests/test_residency_graph_routes.py
+tests/test_residency_plan.py
+tests/test_residency_policy.py
+tests/test_residency_reads.py
 tests/test_rollup_health.py
 tests/test_rollup_rebuild_hook_proxy.py
 tests/test_run_step_ledger.py

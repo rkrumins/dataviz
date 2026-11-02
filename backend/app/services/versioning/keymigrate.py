@@ -12,9 +12,9 @@ from __future__ import annotations
 import logging
 import re
 from datetime import datetime, timezone
-from typing import Awaitable, Callable, Dict, List, Optional
+from typing import Awaitable, Callable, Collection, Dict, List, Optional, Sequence, Tuple
 
-from sqlalchemy import func, null, select, update
+from sqlalchemy import and_, func, null, select, update
 
 from . import config, db
 from .models import GraphORM, ProjectionStateORM
@@ -28,6 +28,28 @@ def owned_key(graph_id: str, n: int) -> str:
     return f"gvp_{graph_id}{{{graph_id[-8:].lower()}.{n}}}"
 
 
+#: How many of a graph's platform keys :func:`placed_key` tries before it gives up.
+PLACEMENT_TRIES = 4096
+
+
+def placed_key(graph_id: str, slots: Optional[Sequence[Tuple[int, int]]],
+               taken: Collection[str], *, limit: int = PLACEMENT_TRIES) -> Optional[str]:
+    """The first of ``graph_id``'s platform keys, in turn, that is not ``taken`` and whose cluster
+    slot is one of ``slots`` — the ranges the chosen master owns (residency, doc 17: a new key
+    goes to the master with the most room). The hash tag alone decides the slot. ``slots`` None:
+    one master owns every slot (standalone, Sentinel), so the first free key. None when no key
+    within ``limit`` tries lands there."""
+    from backend.app.services.graph_store.topology import key_slot
+
+    for n in range(1, limit + 1):
+        key = owned_key(graph_id, n)
+        if key in taken:
+            continue
+        if slots is None or any(lo <= key_slot(key) <= hi for lo, hi in slots):
+            return key
+    return None
+
+
 def is_owned_key(graph_id: str, name: str) -> bool:
     """True when ``name`` is one of ``graph_id``'s platform keys (doc 14's
     ``^gvp_<gid>\\{[0-9a-z]{8}\\.\\d+\\}$``)."""
@@ -39,7 +61,9 @@ async def retire_moved_keys(
         now: Optional[str] = None) -> List[Dict[str, object]]:
     """Drop each old key a move left in ``retired_keys`` whose time has come: its grace period
     (``retireAfter``) has passed and the graph's current key has caught up to the head at the move
-    (``afterSeq``), so reads have long left the old one. Until then a move back onto it is cheap.
+    (``afterSeq``), so reads have long left the old one — or the graph is out of FalkorDB under
+    residency (evicted, or waiting for room), when nothing reads either key. Until then a move
+    back onto it is cheap.
 
     Under the graph's projection lock (``gvproj``, a try-lock: a pass or an evict holding it means
     the next run), so no pass writes a key as it is dropped. A key is dropped only when no graph
@@ -58,14 +82,16 @@ async def retire_moved_keys(
     async with session() as s:
         rows = (await s.execute(
             select(ProjectionStateORM.graph_id, GraphORM.data_source_id,
-                   ProjectionStateORM.projected_commit_seq, ProjectionStateORM.retired_keys)
+                   ProjectionStateORM.projected_commit_seq, ProjectionStateORM.retired_keys,
+                   ProjectionStateORM.status)
             .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
             .where(ProjectionStateORM.retired_keys.isnot(None))
         )).all()
     out: List[Dict[str, object]] = []
-    for gid, ds_id, projected, entries in rows:
+    for gid, ds_id, projected, entries, status in rows:
+        out_of_falkordb = status in ("evicted", "waiting_capacity")
         due = [e for e in entries or []
-               if e["retireAfter"] <= now and projected >= e["afterSeq"]]
+               if e["retireAfter"] <= now and (projected >= e["afterSeq"] or out_of_falkordb)]
         if not due:
             continue
         lock_scope = (db.graphver_lock_session() if session is db.graphver_session
@@ -108,7 +134,11 @@ async def _retire(projector, graph_id: str, entry: dict, ds_id: Optional[str],
     async with projector._session() as s:
         pinned = await s.scalar(select(ps.graph_id).where(
             func.coalesce(func.nullif(ps.falkor_provider, ""), default) == (provider or default),
-            ps.falkor_graph_name == name).limit(1))
+            ps.falkor_graph_name == name,
+            # The graph's own row still names the key an eviction could not drop (residency):
+            # out of FalkorDB nothing writes or reads it, and this pass holds its projection lock.
+            ~and_(ps.graph_id == graph_id, ps.status.in_(("evicted", "waiting_capacity"))),
+        ).limit(1))
     if pinned is not None:
         return f"PROTECTED: graph {pinned} projects into '{name}'"
     try:

@@ -14,6 +14,7 @@ import os
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import update
 
 from backend.app.api.v1.endpoints import versioning_admin as va
 from backend.app.services.versioning import db, models
@@ -72,10 +73,14 @@ async def _run() -> None:
     await _seed_data_source(live_ds, ws, f"Customer 360 {tag}")
     await _seed_data_source(other_ds, other_ws, f"Billing {tag}")
 
-    main, fork, orphan, failed, gone, elsewhere = (
-        f"graph_{tag}_{n}" for n in ("a_main", "b_fork", "c_orphan", "d_failed", "e_gone", "f_ws2"))
+    main, fork, orphan, failed, gone, elsewhere, waiting = (
+        f"graph_{tag}_{n}" for n in ("a_main", "b_fork", "c_orphan", "d_failed", "e_gone", "f_ws2",
+                                     "g_waiting"))
     await _seed_graph(main, ws=ws, ds=live_ds, provider=prov, owned=True)
+    # An earlier release's copy of a fork, which the count budget evicted: it is never projected
+    # again, so its row stays evicted, with the last error that copy's projection left.
     await _seed_graph(fork, ws=ws, ds=f"dsfork_{tag}", provider=prov, head=5, projected=2,
+                      status="evicted", error="connection reset by peer",
                       fork_of=main, retired=[{"name": "gvt_old", "provider": None,
                                               "retireAfter": "2026-10-18T12:00:00+00:00",
                                               "afterSeq": 5, "movedBy": "usr_admin"}])
@@ -85,6 +90,9 @@ async def _run() -> None:
                       error="connection refused")
     await _seed_graph(gone, ws=ws, ds=f"ds_deleted3_{tag}", provider=prov, deleted=True)
     await _seed_graph(elsewhere, ws=other_ws, ds=other_ds, provider=other_prov)
+    # Residency (doc 17): a graph whose load waits for room on its master.
+    await _seed_graph(waiting, ws=other_ws, ds=f"ds_waiting_{tag}", provider=other_prov,
+                      status="waiting_capacity", projected=0, owned=True)
 
     # Everything in the workspace but the deleted graph, forks and orphans included, by graph id.
     page = await _list(workspace_id=ws)
@@ -99,7 +107,15 @@ async def _run() -> None:
         "projected": 3, "target": 3, "lag": 0, "status": "idle", "lastError": None,
         "lastProjectedAt": None, "progressDone": None, "progressTotal": None, "updatedAt": None,
         "owned": True, "forkParentGraphId": None, "orphan": False, "retiredKeys": [],
+        "residency": "standard", "residencyState": "resident", "evictedReason": None,
+        "lastReadAt": None, "sizeBytes": None, "rehydratingSince": None,
     }
+    # A fork has no residency of its own (doc 17): no key, no class, no state; its root's row has
+    # them, and its reads count there. Nor a projection's state: it is never evicted, behind or
+    # failed.
+    assert [rows[fork][k] for k in ("residency", "residencyState", "evictedReason", "lastReadAt",
+                                    "sizeBytes", "rehydratingSince")] == [None] * 6
+    assert (rows[fork]["status"], rows[fork]["lag"], rows[fork]["lastError"]) == ("idle", 0, None)
     # A moved graph's old key, until it is dropped.
     assert rows[fork]["retiredKeys"] == [{"name": "gvt_old", "provider": None,
                                           "retireAfter": "2026-10-18T12:00:00+00:00",
@@ -125,17 +141,29 @@ async def _run() -> None:
     assert await _ids(workspace_id=ws, kind="main") == [main]
     assert await _ids(workspace_id=ws, kind="fork") == [fork]
     assert await _ids(workspace_id=ws, kind="orphan") == [orphan, failed]
-    assert await _ids(provider=other_prov) == [orphan, elsewhere]
+    assert await _ids(provider=other_prov) == [orphan, elsewhere, waiting]
     assert await _ids(workspace_id=ws, status="failed") == [failed]
     assert await _ids(workspace_id=ws, status="lagging") == []
     assert await _ids(workspace_id=ws, status="evicted") == [orphan]
     assert await _ids(workspace_id=ws, status="fresh") == [main, fork]
+    assert await _ids(workspace_id=other_ws, status="waiting_capacity") == [waiting]
+    assert await _ids(workspace_id=other_ws, status="rehydrating") == []
+    row = (await _list(workspace_id=other_ws, status="waiting_capacity"))["graphs"][0]
+    assert (row["residency"], row["residencyState"]) == ("standard", "waiting_capacity")
+    # The health probe counts the residency states; an evicted graph is not one of the worst.
+    from backend.app.services.system_status import probes
+    lag = await probes.probe_projection_lag()
+    assert {"rehydrating", "waitingCapacity"} <= set(lag)
+    assert orphan not in [w["graphId"] for w in lag["worst"]]
     assert await _ids(q=f"Customer 360 {tag}") == [main], "the data-source label matches"
     assert await _ids(q=f"gvt_{fork}") == [fork], "the FalkorDB key matches"
     assert await _ids(q=f"ds_deleted_{tag}") == [orphan], "the data source id matches"
     assert await _ids(q=f"{tag}_f_ws2") == [elsewhere], "the graph id matches"
     assert await _ids(q=f"{tag}%") == [], "a search is literal, not a LIKE pattern"
 
+    async with db.graphver_session() as s:          # leave no graph waiting on the shared store
+        await s.execute(update(ProjectionStateORM).where(ProjectionStateORM.graph_id == waiting)
+                        .values(status="evicted"))
     await db.dispose_engine()
     await close_db()
 

@@ -293,7 +293,9 @@ class ProjectionStateORM(VersioningBase):
     projected_commit_seq = Column(BigInteger, nullable=False, default=0)
     target_commit_seq = Column(BigInteger, nullable=False, default=0)
     # idle|projecting|rebuilding|evicted, or reseeding: an operator reset the watermark (DR) and
-    # the next pass reseeds the key; that pass's claim makes it rebuilding.
+    # the next pass reseeds the key; that pass's claim makes it rebuilding. An evicted graph stays
+    # evicted until a load, whatever the Graph residency switch says: waiting_capacity while its
+    # master has no room for it, rehydrating while it is loaded (20261030_1300_gv_ps_residency).
     status = Column(Text, nullable=False, default="idle")
     falkor_graph_name = Column(Text, nullable=True)
     falkor_provider = Column(Text, nullable=True)   # FalkorDB instance hosting this cache (per-provider eviction)
@@ -336,11 +338,37 @@ class ProjectionStateORM(VersioningBase):
     failed_attempts = Column(Integer, nullable=False, default=0, server_default=text("0"))
     next_retry_at = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+    # Residency (20261030_1300_gv_ps_residency). The class a system admin set: ``always`` (never
+    # evicted), ``standard`` (evicted when unread for the Standard idle time or under memory
+    # pressure, loaded again on the next read) or ``coldline`` (loaded only when a request needs
+    # FalkorDB, evicted after the Coldline idle time).
+    residency = Column(Text, nullable=False, default="standard", server_default=text("'standard'"))
+    # When a person last read the graph (a fork's reads count for its root), flushed by each
+    # process once a minute. NULL: never read since the column existed.
+    last_read_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    # Why it was evicted (idle_standard | idle_coldline | pressure, by the capacity loop; lost:
+    # its master lost the key, as liveness found; load_stalled: its load could not tell whether
+    # its key needs summaries, its ontology unreadable; admin), NULL while it is resident.
+    evicted_reason = Column(Text, nullable=True)
+    # The key's measured size in bytes, and when: what evicting it frees and loading it costs.
+    size_bytes = Column(BigInteger, nullable=True)
+    size_measured_at = Column(TIMESTAMP(timezone=True), nullable=True)
+    # When its load in flight started (status ``rehydrating``); NULL once it is done. A load has no
+    # timeout, so one that never finishes is told by this.
+    rehydrating_since = Column(TIMESTAMP(timezone=True), nullable=True)
 
     __table_args__ = _plain(
         CheckConstraint(
-            "status IN ('idle','projecting','rebuilding','evicted','reseeding')",
+            "status IN ('idle','projecting','rebuilding','evicted','reseeding','rehydrating',"
+            "'waiting_capacity')",
             name="ck_proj_status",
+        ),
+        CheckConstraint("residency IN ('always','standard','coldline')", name="ck_ps_residency"),
+        CheckConstraint(
+            "evicted_reason IS NULL OR "
+            "evicted_reason IN ('idle_standard','idle_coldline','pressure','lost','admin',"
+            "'load_stalled')",
+            name="ck_ps_evicted_reason",
         ),
         # One versioned graph per FalkorDB graph: two projecting into one key would each reconcile
         # the other's entities away (``ensure_ps_key_index``; 20261017_1500_gv_ps_keys).
@@ -810,6 +838,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261030_1100_gv_fork_bases (``create_all`` makes the table; this fills it in).
     _bounded_step(conn, "the forks' bases were not filled in",
                   lambda: ensure_fork_bases(conn), required=True)
+    # 20261030_1300_gv_ps_residency.
+    _bounded_step(conn, "the residency columns were not added",
+                  lambda: ensure_ps_residency(conn), required=True)
 
 
 def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
@@ -1011,6 +1042,50 @@ def ensure_fork_bases(conn) -> None:
         "ON CONFLICT DO NOTHING")).rowcount
     if filled:
         logger.info("fork_bases: gave %d fork(s) their fork point", filled)
+
+
+def ensure_ps_residency(conn) -> None:
+    """Add ``projection_state``'s residency columns (``residency``, Standard for every graph,
+    ``last_read_at``, ``evicted_reason``, ``size_bytes``, ``size_measured_at``,
+    ``rehydrating_since``) with the checks on
+    the class and the reason, and let ``ck_proj_status`` allow ``rehydrating`` and
+    ``waiting_capacity``. A no-op without the table, and once it is all there: an ALTER takes the
+    table's ACCESS EXCLUSIVE lock even when it adds nothing, and every worker start runs this.
+    ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("projection_state", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    ps = f'"{_SCHEMA}"."projection_state"'
+    present = {c["name"] for c in inspector.get_columns("projection_state", schema=_SCHEMA)}
+    checks = dict(conn.execute(text(
+        "SELECT conname, pg_get_constraintdef(oid) FROM pg_constraint "
+        "WHERE conrelid = CAST(:ps AS regclass) AND contype = 'c'"), {"ps": ps}).all())
+    columns = {"residency", "last_read_at", "evicted_reason", "size_bytes", "size_measured_at",
+               "rehydrating_since"}
+    widened = "'waiting_capacity'" in (checks.get("ck_proj_status") or "")
+    reasons = "'load_stalled'" in (checks.get("ck_ps_evicted_reason") or "")
+    if columns <= present and widened and reasons and "ck_ps_residency" in checks:
+        return
+    conn.execute(text(
+        f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS residency TEXT NOT NULL DEFAULT 'standard'"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS last_read_at TIMESTAMPTZ"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS evicted_reason TEXT"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS size_bytes BIGINT"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS size_measured_at TIMESTAMPTZ"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD COLUMN IF NOT EXISTS rehydrating_since TIMESTAMPTZ"))
+    conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_ps_residency"))
+    conn.execute(text(f"ALTER TABLE {ps} ADD CONSTRAINT ck_ps_residency "
+                      "CHECK (residency IN ('always','standard','coldline'))"))
+    conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_ps_evicted_reason"))
+    conn.execute(text(
+        f"ALTER TABLE {ps} ADD CONSTRAINT ck_ps_evicted_reason CHECK (evicted_reason IS NULL OR "
+        "evicted_reason IN ('idle_standard','idle_coldline','pressure','lost','admin',"
+        "'load_stalled'))"))
+    if not widened:
+        conn.execute(text(f"ALTER TABLE {ps} DROP CONSTRAINT IF EXISTS ck_proj_status"))
+        conn.execute(text(
+            f"ALTER TABLE {ps} ADD CONSTRAINT ck_proj_status CHECK (status IN ('idle','projecting',"
+            "'rebuilding','evicted','reseeding','rehydrating','waiting_capacity'))"))
 
 
 def ensure_graph_lifecycle_columns(conn) -> None:

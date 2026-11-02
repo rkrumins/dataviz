@@ -13,7 +13,7 @@ projection to another FalkorDB provider or key (doc 14 §6 KeyMigration, phase 1
 The swap, the reseed and the old key's retirement run against Postgres in
 ``integration/test_versioning_projection_provider_routing.py``.
 """
-from contextlib import ExitStack
+from contextlib import ExitStack, asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -151,6 +151,93 @@ async def test_a_minted_key_skips_keys_that_exist_and_the_graphs_retired_keys():
     await _move(svc, {"providerId": "prov_B"}, keys={keymigrate.owned_key(GID, 1), "other"})
     assert svc.moves[0]["key"] == keymigrate.owned_key(GID, 3)
     assert svc.moves[0]["shard_map"]["tag"] == f"{GID[-8:].lower()}.3"
+
+
+@pytest.mark.asyncio
+async def test_with_residency_on_a_minted_key_is_placed_on_the_master_with_the_most_room(
+        monkeypatch, residency_on):
+    """Placement (doc 17): the new key hashes to the provider's master with the most room. With
+    no master to read, the first free key, as without residency."""
+    placed, asked = keymigrate.owned_key(GID, 5), []
+
+    async def place_key(graph_id, provider, taken):
+        asked.append((graph_id, provider, set(taken)))
+        return placed, "10.0.0.3:6379"
+
+    async def fits(graph_id, provider, key):
+        asked.append(("admit", key))
+        return va.residency.Admitted(True, "10.0.0.3:6379", 0, None)
+
+    held = []
+
+    @asynccontextmanager
+    async def admitting(**kw):
+        held.append(True)
+        yield
+        held.append(False)
+
+    monkeypatch.setattr(va.residency, "place_key", place_key)
+    monkeypatch.setattr(va.residency, "admission_on", fits)
+    monkeypatch.setattr(va.residency, "admitting", admitting)
+    svc = _Svc(retired=[{"name": keymigrate.owned_key(GID, 2), "provider": "prov_C"}])
+    real_move = svc.move_projection
+
+    async def move_held(**kw):        # review finding 2: committed before anything else admits
+        assert held == [True]
+        return await real_move(**kw)
+
+    svc.move_projection = move_held
+    await _move(svc, {"providerId": "prov_B"}, keys={keymigrate.owned_key(GID, 1)})
+    assert held == [True, False] and asked[-1] == ("admit", placed)
+    asked.pop()
+    (move,) = svc.moves
+    assert move["key"] == placed and move["shard_map"]["master"] == "10.0.0.3:6379"
+    assert move["shard_map"]["slot"] == key_slot(placed)
+    assert asked == [(GID, "prov_B", {keymigrate.owned_key(GID, 1), keymigrate.owned_key(GID, 2)})]
+
+    async def nowhere(graph_id, provider, taken):
+        return None
+
+    monkeypatch.setattr(va.residency, "place_key", nowhere)
+    svc = _Svc()
+    await _move(svc, {"providerId": "prov_B"})
+    assert svc.moves[0]["key"] == keymigrate.owned_key(GID, 1)
+    assert "master" not in svc.moves[0]["shard_map"]
+
+
+@pytest.mark.asyncio
+async def test_with_residency_on_a_move_that_would_not_fit_its_new_master_is_refused(
+        monkeypatch, residency_on):
+    """A move of a graph in FalkorDB copies it onto its new key's master before the old key goes:
+    admission-checked like a load (409 capacity_insufficient), and nothing moves."""
+    asked = []
+
+    async def place_key(graph_id, provider, taken):
+        return keymigrate.owned_key(GID, 3), "10.0.0.3:6379"
+
+    async def admission_on(graph_id, provider, key):
+        asked.append((graph_id, provider, key))
+        return va.residency.Admitted(False, "10.0.0.3:6379", 512 * 1024 ** 2, "capacity")
+
+    @asynccontextmanager
+    async def admitting(**kw):        # the capacity pass's lock, which needs graphver's database
+        yield
+
+    monkeypatch.setattr(va.residency, "place_key", place_key)
+    monkeypatch.setattr(va.residency, "admission_on", admission_on)
+    monkeypatch.setattr(va.residency, "admitting", admitting)
+    svc = _Svc()
+    with pytest.raises(HTTPException) as caught:
+        await _move(svc, {"providerId": "prov_B"})
+    detail = caught.value.detail
+    assert caught.value.status_code == 409 and detail["type"] == "capacity_insufficient"
+    assert detail["master"] == "10.0.0.3:6379" and svc.moves == []
+    assert asked == [(GID, "prov_B", keymigrate.owned_key(GID, 3))]
+    # A graph out of FalkorDB only changes its pin: its load is admitted when it starts.
+    svc = _Svc()
+    svc.wm["status"] = "evicted"
+    await _move(svc, {"providerId": "prov_B"})
+    assert len(svc.moves) == 1 and len(asked) == 1
 
 
 @pytest.mark.asyncio
@@ -298,3 +385,43 @@ def test_the_activity_log_can_say_what_happened():
     assert GID in summary and "gvp_x" in summary
     assert catalogue.LABELS["platform.versioning.projection_moved"]
     assert catalogue.category_of("platform.versioning.projection_moved") == "platform"
+
+
+@pytest.mark.asyncio
+async def test_with_residency_on_a_move_reads_the_graph_s_state_under_the_capacity_lock(
+        monkeypatch, residency_on):
+    """Review 3, finding 6: whether a move copies the graph (and so is admitted, under the lock)
+    was decided from a watermark read before the lock. A load finishing meanwhile — rehydrating
+    then, idle at the commit — made a full copy no one admitted. The lock is always taken with
+    residency on, and the state read inside it decides."""
+    held, asked = [], []
+
+    @asynccontextmanager
+    async def admitting(**kw):
+        held.append(True)
+        yield
+        held.append(False)
+
+    async def place_key(graph_id, provider, taken):
+        return keymigrate.owned_key(GID, 3), "10.0.0.3:6379"
+
+    async def admission_on(graph_id, provider, key):
+        asked.append(key)
+        return va.residency.Admitted(True, "10.0.0.3:6379", 0, None)
+
+    monkeypatch.setattr(va.residency, "admitting", admitting)
+    monkeypatch.setattr(va.residency, "place_key", place_key)
+    monkeypatch.setattr(va.residency, "admission_on", admission_on)
+    svc = _Svc()
+    states = iter(["rehydrating", "idle"])          # before the lock, then under it
+    real = svc.projection_watermark
+
+    async def watermark(graph_id):
+        wm = await real(graph_id)
+        wm["status"] = next(states, "idle")
+        return wm
+
+    svc.projection_watermark = watermark
+    await _move(svc, {"providerId": "prov_B"})
+    assert held == [True, False] and asked == [keymigrate.owned_key(GID, 3)]
+    assert len(svc.moves) == 1

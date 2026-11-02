@@ -18,6 +18,8 @@ const CHIP_DEFS: { key: keyof ProjectionSection; label: string; cls: string; alw
     { key: 'rebuilding', label: 'rebuilding', cls: 'bg-violet-500/10 border-violet-500/20 text-violet-600 dark:text-violet-400' },
     { key: 'failed', label: 'failed', cls: 'bg-red-500/10 border-red-500/20 text-red-600 dark:text-red-400' },
     { key: 'evicted', label: 'evicted', cls: 'bg-black/5 dark:bg-white/5 border-glass-border text-ink-muted' },
+    { key: 'rehydrating', label: 'loading', cls: 'bg-sky-500/10 border-sky-500/20 text-sky-600 dark:text-sky-400' },
+    { key: 'waitingCapacity', label: 'waiting for room', cls: 'bg-amber-500/10 border-amber-500/20 text-amber-600 dark:text-amber-400' },
 ]
 
 const ROW_STATUS_CLS: Record<string, string> = {
@@ -25,6 +27,8 @@ const ROW_STATUS_CLS: Record<string, string> = {
     projecting: 'text-indigo-600 dark:text-indigo-400',
     rebuilding: 'text-violet-600 dark:text-violet-400',
     evicted: 'text-ink-muted',
+    rehydrating: 'text-sky-600 dark:text-sky-400',
+    waiting_capacity: 'text-amber-600 dark:text-amber-400',
 }
 
 const KIND_LABEL: Record<string, string> = {

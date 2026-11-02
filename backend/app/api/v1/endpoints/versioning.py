@@ -27,6 +27,7 @@ import inspect
 import json
 import logging
 from contextlib import contextmanager
+from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
@@ -275,7 +276,8 @@ async def rebuild_now(graph_id: str) -> None:
     whose 10s ceiling exists to keep post-write catch-ups snappy but cancels any non-trivial
     full reseed. NEVER raises: on failure/timeout `project_graph`'s own handler has already
     reset status→idle and recorded `last_error`, which the watermark endpoint now surfaces —
-    the Data health UI converges to a terminal failed state instead of spinning forever."""
+    the Data health UI converges to a terminal failed state instead of spinning forever. An
+    evicted graph's rebuild is a request for its load (residency, doc 17)."""
     if graph_id in _rebuild_inflight:
         return
     _rebuild_inflight.add(graph_id)
@@ -289,6 +291,9 @@ async def rebuild_now(graph_id: str) -> None:
         if result.get("skipped") in ("in-flight", "superseded"):
             # Another pass held the graph, or overtook this one: the rebuild still has to run.
             await nudge_projection(graph_id)
+        elif result.get("skipped") in ("evicted", "waiting_capacity"):
+            from backend.app.services.versioning.residency import request_load
+            await request_load(graph_id)
     except (Exception, asyncio.CancelledError) as exc:
         # `except Exception` alone would let the wait_for timeout (CancelledError, a
         # BaseException) escape into the BackgroundTasks runner unlogged — the old
@@ -994,6 +999,17 @@ class WatermarkModel(_ApiModel):
     # (GRAPHVER_FORK_REWIND_MAX), when readRoute.main says Postgres too. Null for a graph that is
     # no fork.
     reads_from: Optional[Literal["overlay", "postgres"]] = Field(default=None, alias="readsFrom")
+    # Residency (doc 17): the class a system admin set (always | standard | coldline; null for a
+    # fork, which has none) and whether the key is in FalkorDB — for a fork, its root's, through
+    # which it reads: resident | evicted | rehydrating (being loaded, or its key written from
+    # nothing) | waiting_capacity (its master has no room for it yet); null with no key. Then why it was evicted, when a person last read it and its
+    # measured size; while it is being loaded, since when (a load has no timeout).
+    residency: Optional[str] = "standard"
+    residency_state: Optional[str] = Field(default="resident", alias="residencyState")
+    evicted_reason: Optional[str] = Field(default=None, alias="evictedReason")
+    last_read_at: Optional[datetime] = Field(default=None, alias="lastReadAt")
+    size_bytes: Optional[int] = Field(default=None, alias="sizeBytes")
+    rehydrating_since: Optional[datetime] = Field(default=None, alias="rehydratingSince")
 
 
 class SavedSinceModel(_ApiModel):
@@ -2376,7 +2392,13 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           liveness_error=wm.get("liveness_error"),
                           external_drift=wm.get("external_drift"),
                           reads_through=wm.get("reads_through"),
-                          reads_from=wm.get("reads_from"))
+                          reads_from=wm.get("reads_from"),
+                          residency=wm.get("residency", "standard"),
+                          residency_state=wm.get("residency_state", "resident"),
+                          evicted_reason=wm.get("evicted_reason"),
+                          last_read_at=wm.get("last_read_at"),
+                          size_bytes=wm.get("size_bytes"),
+                          rehydrating_since=wm.get("rehydrating_since"))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:
@@ -2904,7 +2926,8 @@ async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction
     is_head_main = as_of_seq is None and not fork and (
         branch_id is None or branch_id == await svc.main_branch_id(graph_id))
     can_falkor = bool(
-        is_head_main and read_factory is not None and wm["status"] != "evicted" and wm["falkor_graph_name"]
+        is_head_main and read_factory is not None and wm["falkor_graph_name"]
+        and wm["status"] not in ("evicted", "rehydrating")  # a load serves once it is ready
         and wm["projected"] >= wm["committed"] - vconfig.READ_MAX_LAG
         and wm["projected"] > 0       # at 0 the key is empty or mid-reconcile (moved, reseeding)
     )

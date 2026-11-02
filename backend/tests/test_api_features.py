@@ -320,3 +320,43 @@ async def test_patch_version_conflict(test_client: AsyncClient):
     )
     assert resp3.status_code == 409
     assert resp3.json()["detail"]["code"] == "CONFLICT"
+
+
+# ── What turning a switch on means (impact_when_on) ───────────────────
+
+async def test_what_turning_a_switch_on_means_is_served_and_reworded_like_the_other_prose(
+    test_client: AsyncClient, seeded_registry,
+):
+    """``impact_when_on`` is flag prose, like ``impact_when_off``: served as ``impactWhenOn`` (null
+    for a switch that says nothing about turning it on) and reworded over PATCH /definitions."""
+    schema = (await test_client.get("/api/v1/admin/features")).json()["schema"]
+    assert schema and all("impactWhenOn" in d for d in schema)
+
+    said = "Everyone who can read a graph can walk its lineage."
+    resp = await test_client.patch(
+        "/api/v1/admin/features/definitions/traceEnabled", json={"impactWhenOn": said},
+    )
+    assert resp.status_code == 200, resp.text
+    trace = next(d for d in resp.json()["schema"] if d["key"] == "traceEnabled")
+    assert trace["impactWhenOn"] == said
+
+
+async def test_the_code_owns_what_turning_a_switch_on_means(db_session, monkeypatch):
+    """Like the rest of the prose, the copy ships with the code: the registry sync writes it into a
+    row that lacks it, and puts back a row someone reworded."""
+    from backend.app.db import seed_feature_registry as seeding
+    from backend.app.db.models import FeatureDefinitionORM
+
+    said = "Everyone who can read a graph can walk its lineage."
+    monkeypatch.setattr(seeding, "SEED_DEFINITIONS", [
+        {**d, "impact_when_on": said} if d["key"] == "traceEnabled" else d
+        for d in seeding.SEED_DEFINITIONS
+    ])
+    await seeding.seed_feature_registry(db_session)
+    row = await db_session.get(FeatureDefinitionORM, "traceEnabled")
+    assert row.impact_when_on == said
+
+    row.impact_when_on = "Reworded."
+    await db_session.flush()
+    await seeding.seed_feature_registry(db_session)
+    assert (await db_session.get(FeatureDefinitionORM, "traceEnabled")).impact_when_on == said
