@@ -1015,7 +1015,7 @@ export async function renderCanvasWithTrace(
         .filter(b => /^edit$/i.test(b.textContent?.trim() ?? '')).length,
     connectHandle: (id: string) => {
       const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)
-      return !!row?.querySelector('[aria-label="Drag to connect"]')
+      return !!row?.querySelector('[data-connect-handle]')
     },
     async toggle(id: string) {
       const row = document.querySelector<HTMLElement>(`#${CSS.escape(CARD_ID_PREFIX + id)}`)

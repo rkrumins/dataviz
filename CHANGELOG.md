@@ -9,6 +9,45 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Context View editing: connect by clicking, layers anywhere, Duplicate…
+
+Three everyday edits on a wide Context View were harder than they had to be: a link had to be dragged
+across the canvas with the mouse held down, a new layer could only be added at the far end, and
+Duplicate dropped every relationship to the rest of the graph. See *Editing in a Draft* in the User
+Guide.
+
+### Added
+
+- **Connect by clicking.** A click on a row's **+** arms a link; the next click on an entity makes it.
+  Nothing is held, so the target can be scrolled to, jumped to with the Layer Strip, or searched for.
+  The source glows, a line follows the pointer, and the entity under it is ringed green when a
+  relationship fits or red with the reason when none does. A strip at the top of the canvas says
+  what it is waiting for; a stray click shakes it rather than cancelling. When only one relationship
+  fits, the link is made at once with **Undo**; `⌘`/`Ctrl`-click picks several targets for the bulk
+  card. Dragging still works.
+- **A Connect tool** in the edit toolbar (`C` with nothing selected): click where a link starts, then
+  where it goes, and repeat. **Done** or `Esc` turns it off.
+- **A layer menu** on every column header and every Layer Strip pill: insert a layer to the left or
+  right, rename, recolour in one click, move left or right, fold, delete with **Undo**. A **+** on each
+  header's left edge inserts a layer in the gutter there. A new layer lands in place, in a colour its
+  neighbours don't wear, with its name open for typing.
+- **Duplicate…** (`⌘⇧D` / `Ctrl-Shift-D`, and in the right-click menu): copy an entity alone or with
+  everything inside it, with the links inside the copy, its incoming relationships and its outgoing
+  ones — read from the server, each counted before anything is staged — under a name you choose.
+  More than 2,000 entities, or 500 relationships either way, is refused in words.
+
+### Changed
+
+- **⌘D** (Duplicate) says what it made and offers **Undo**, which takes the whole copy back at once.
+- A selection holding a parent and its child duplicates the parent once, not the child twice.
+
+### Fixed
+
+- A duplicate's description is its own description again, not a user property named `description`,
+  and its source system is copied. Its qualified name, an identifier, is not.
+
+---
+
 ## [Unreleased] — Versioning: graph residency
 
 FalkorDB holds a copy of every versioned graph, and until now nothing chose which: a graph stayed

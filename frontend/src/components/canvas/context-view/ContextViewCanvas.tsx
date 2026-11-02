@@ -51,7 +51,8 @@ import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/feat
 import { useActiveDraftAccess } from '@/features/versioning/hooks/useActiveDraftAccess'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
-import { edgeTypeCopy } from '@/lib/relationshipLabel'
+import { edgeTypeCopy, relationshipLabel } from '@/lib/relationshipLabel'
+import { connectedEdgeTypes, deriveConnectableEdges } from '@/services/ontologyPreflightService'
 import { useGraphProvider } from '@/providers'
 import type { AggregatedEdgeInfo, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
 import { layerClaimedTypes, useGraphHydration } from '@/hooks/useGraphHydration'
@@ -123,6 +124,7 @@ import { InlineNodeEditor } from '../InlineNodeEditor'
 import { CommandPalette, type CommandItem } from '../CommandPalette'
 import { useEdgeConnect } from '../edge-create/useEdgeConnect'
 import { ConnectionDragLayer } from '../edge-create/ConnectionDragLayer'
+import { ConnectModePill } from '../edge-create/ConnectModePill'
 import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
 import { CreateLinkPopover } from '../edge-create/CreateLinkPopover'
 import { useCreateLinkStore } from '../edge-create/createLinkStore'
@@ -132,6 +134,7 @@ import { FirstStepsChecklist } from './FirstStepsChecklist'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
+import { DuplicateDialog } from './DuplicateDialog'
 
 import type { ViewLayerConfig, LayerNodeSortAlgo, LayerNodeSortMode } from '@/types/schema'
 
@@ -245,6 +248,8 @@ function makeConnectionTypeResolver(
  *  come from its own ledger, so the browse lineage has nothing to say and
  *  projecting it only produces noise (see the call site). */
 const EMPTY_EDGES: unknown[] = []
+/** No cards — a stable value, so a callback keyed on it isn't remade every render. */
+const EMPTY_IDS: string[] = []
 const EMPTY_AGG_EDGES: Map<string, unknown> = new Map()
 const NO_HOLDER_EDGES: ReadonlyMap<string, AggregatedEdgeInfo> = new Map()
 const NO_MATCHED_EDGES: readonly MatchedEdge[] = []
@@ -705,7 +710,10 @@ export function ContextViewCanvas({
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   // Forward ref so the keyboard 'C' handler (wired into useCanvasInteractions
   // before useEdgeConnect exists) can arm connect-mode on the selected node.
-  const edgeConnectRef = useRef<{ armConnect: (id: string) => void } | null>(null)
+  const edgeConnectRef = useRef<{
+    armConnect: (id: string, at?: { x: number; y: number }) => void
+    toggleTool: () => void
+  } | null>(null)
 
   // Forward ref to the TRACE OVERLAY (declared far below, after the layer
   // assignment it reads). Every interaction that would write the canvas —
@@ -773,7 +781,41 @@ export function ContextViewCanvas({
   // its real urn on save — same as a create) and the optimistic session
   // assignment (immediate render feedback before the canonical write's
   // debounce/re-render lands).
-  const { duplicateSubtree } = useDuplicateSubtree({
+  // Duplicate… — the dialog's entity (null when closed).
+  const [duplicateFor, setDuplicateFor] = useState<string | null>(null)
+  // After a copy is staged (⌘D or Duplicate…): reveal it beside the original —
+  // expand the original's parent (shows the new sibling) and the copy (shows its
+  // just-staged children) — and say what was made, with Undo. Undo discards the
+  // root create, which cascades to everything staged under and onto it.
+  const revealCopy = (originalId: string, rootCopyUrn: string, summary?: string) => {
+    const wiring = duplicateWiringRef.current
+    if (wiring) {
+      const parentId = wiring.parentMap.get(originalId)
+      wiring.setExpandedNodes((prev) => {
+        const next = new Set(prev)
+        if (parentId) next.add(parentId)
+        next.add(rootCopyUrn)
+        return next
+      })
+    }
+    const original = useCanvasStore.getState().nodes.find((x) => x.id === originalId)
+    const name = (original?.data?.label as string) || originalId
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: summary ? `Duplicated “${name}” — ${summary}.` : `Duplicated “${name}” with everything inside it.`,
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          const staged = useStagedChangesStore.getState()
+          const change = staged.getChangesForTarget(rootCopyUrn).find((c) => c.type === 'create_entity')
+          if (change) staged.discard(change.id)
+        },
+      },
+      durationMs: 8000,
+    })
+  }
+
+  const { duplicateSubtree, prepareDuplicate, commitDuplicate } = useDuplicateSubtree({
     onNodeCopied: (originalId, _originalUrn, copyUrn) => {
       const wiring = duplicateWiringRef.current
       if (!wiring) return
@@ -789,20 +831,13 @@ export function ContextViewCanvas({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
     duplicateSubtree,
-    onNodeDuplicated: (originalId, rootCopyUrn) => {
-      // Reveal the copy: expand the original's parent (shows the new sibling)
-      // and the root copy itself (shows its just-staged children). Mirrors
-      // GraphCanvas's onNodeDuplicated, using this file's parentMap /
-      // setExpandedNodes (via the forward-ref).
-      const wiring = duplicateWiringRef.current
-      if (!wiring) return
-      const parentId = wiring.parentMap.get(originalId)
-      wiring.setExpandedNodes((prev) => {
-        const next = new Set(prev)
-        if (parentId) next.add(parentId)
-        next.add(rootCopyUrn)
-        return next
-      })
+    // Reveal the copy and offer Undo. Mirrors GraphCanvas's onNodeDuplicated,
+    // using this file's parentMap / setExpandedNodes (via the forward-ref).
+    onNodeDuplicated: (originalId, rootCopyUrn) => revealCopy(originalId, rootCopyUrn),
+    onDuplicateWithOptions: (nodeId) => {
+      // A copy is staged straight into the draft — never while a trace holds the canvas.
+      if (traceWriteLockedRef.current()) return
+      setDuplicateFor(nodeId)
     },
     onConnectMode: (nodeId) => {
       // Draft-gated on the SCOPED isDraft: on Published (or a draft open on a different data
@@ -813,6 +848,12 @@ export function ContextViewCanvas({
       // with no affordance to withdraw, so the refusal has to live here.
       if (traceWriteLockedRef.current()) return
       edgeConnectRef.current?.armConnect(nodeId)
+    },
+    onConnectTool: () => {
+      // Same gates as arming: a draft, and never while a trace holds the canvas.
+      if (!isDraft) return
+      if (traceWriteLockedRef.current()) return
+      edgeConnectRef.current?.toggleTool()
     },
     layers: layers,
     onMoveToLayer: (_nodeId, _layerId) => {
@@ -842,15 +883,60 @@ export function ContextViewCanvas({
   // A card that is part of a multi-selection drags the whole selection, and
   // one card dropped on a selected card links into the whole selection —
   // both open the bulk card at the drop (BulkLinkCard).
+  // Click-to-connect (no hold needed) arms the same machine: the toolbar's
+  // Connect tool, a click on a row's handle, 'C', or "Connect To…".
   const edgeConnect = useEdgeConnect({
-    onConnect: (sourceUrn, targetUrn, edgeType) =>
-      interactions.stageEdgeCreate(sourceUrn, targetUrn, edgeType),
+    onConnect: (sourceUrn, targetUrn, edgeType, how) => {
+      const stagedEdgeId = interactions.stageEdgeCreate(sourceUrn, targetUrn, edgeType)
+      // Made without asking (the only relationship that fits): say which, with a way back.
+      if (!stagedEdgeId || !how?.auto) return
+      const labelOf = (id: string) => {
+        const n = useCanvasStore.getState().nodes.find((x) => x.id === id || (x.data?.urn as string) === id)
+        return (n?.data?.label as string) || id
+      }
+      useNotificationStore.getState().add({
+        type: 'success',
+        message: `Linked ${labelOf(sourceUrn)} → ${labelOf(targetUrn)} · ${relationshipLabel(edgeType)}`,
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            const staged = useStagedChangesStore.getState()
+            const change = staged.getChangesForTarget(stagedEdgeId)[0]
+            if (change) staged.discard(change.id)
+          },
+        },
+        durationMs: 8000,
+      })
+    },
     groupOf: (id) => {
       const sel = useCanvasStore.getState().selectedNodeIds.filter(isSelectableNode)
       return sel.length > 1 && sel.includes(id) ? sel : null
     },
     onBulkDrop: ({ direction, picked, at }) =>
       useBulkLinkStore.getState().openCard({ direction, picked, anchor: at }),
+    // Exactly one relationship fits → link at once. The same reading the picker
+    // makes (its schema, minus relationships these two already share), so
+    // "linked without asking" is only ever what the picker would have offered alone.
+    singleTypeFor: (sourceUrn, targetUrn) => {
+      const schemaNow = useSchemaStore.getState().schema
+      const { nodes: storeNodes, edges: storeEdges } = useCanvasStore.getState()
+      const typeOf = (id: string) => {
+        const n = storeNodes.find((x) => x.id === id || (x.data?.urn as string) === id)
+        return (n?.data?.type as string) || null
+      }
+      const already = connectedEdgeTypes(storeEdges, sourceUrn, targetUrn)
+      const fits = deriveConnectableEdges(
+        typeOf(sourceUrn), typeOf(targetUrn),
+        schemaNow?.relationshipTypes ?? [], schemaNow?.containmentEdgeTypes ?? [], schemaNow?.entityTypes ?? [],
+      ).filter((o) => o.allowed && !already.has(o.edgeType.toUpperCase()))
+      return fits.length === 1 ? fits[0].edgeType : null
+    },
+    // Several targets picked with ⌘/Ctrl-click: they become the selection, and
+    // the bulk card links the source into each — judged pair by pair.
+    onMultiTarget: ({ sourceId, targets, at }) => {
+      useCanvasStore.getState().setSelection(targets)
+      useBulkLinkStore.getState().openCard({ direction: 'feeds-selection', picked: [sourceId], anchor: at })
+    },
   })
   edgeConnectRef.current = edgeConnect
 
@@ -1015,7 +1101,7 @@ export function ContextViewCanvas({
     enabled: true,
     handlers: isDraft
       ? { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onTrace: onTraceSelection }
-      : { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onTrace: onTraceSelection, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
+      : { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onTrace: onTraceSelection, onDelete: () => {}, onDuplicate: () => {}, onDuplicateWithOptions: () => {}, onCreate: () => {} },
   })
 
   // ─── Canonical reference-layout persistence ─────────────────────────────────────────────────────
@@ -2163,6 +2249,13 @@ export function ContextViewCanvas({
   // columns still show browse and every authoring affordance on them still
   // looks (and, ungated, still is) live.
   const canvasWritable = canEditGraph && !traceActive
+  // Connect mode only makes sense on a writable canvas: leaving the draft or
+  // starting a trace ends it, rather than leaving a tool on that can't link.
+  const connectEngaged = edgeConnect.state.tool || edgeConnect.state.mode === 'armed'
+  const setConnectTool = edgeConnect.setTool
+  useEffect(() => {
+    if (connectEngaged && !canvasWritable) setConnectTool(false)
+  }, [connectEngaged, canvasWritable, setConnectTool])
   // Bulk links: the Link panel, the card a drag drops, picking on the canvas.
   const bulkLinkSurface = useBulkLinkStore((s) => s.surface)
   const bulkLinkPicked = useBulkLinkStore((s) => s.picked)
@@ -2229,6 +2322,28 @@ export function ContextViewCanvas({
       existingEdges: useCanvasStore.getState().edges,
     })
   }, [dragHoverId, dragSourceIds, relationshipTypes, containmentEdgeTypes, schemaEntityTypes])
+  // Armed (click-to-connect): the same verdict, asked by the overlay once per
+  // card hovered — the pointer itself never passes through the canvas's state.
+  const armedSourceIds = edgeConnect.state.mode === 'armed' ? edgeConnect.state.sourceIds : EMPTY_IDS
+  const connectHintFor = useCallback((hoverId: string) => {
+    if (armedSourceIds.length === 0) return null
+    const typeOf = new Map<string, string>()
+    for (const n of useCanvasStore.getState().nodes) {
+      const t = n.data?.type as string | undefined
+      if (t) typeOf.set(n.id, t)
+    }
+    const sel = useCanvasStore.getState().selectedNodeIds.filter(isSelectableNode)
+    const targets = armedSourceIds.length === 1 && sel.length > 1 && sel.includes(hoverId) && !sel.includes(armedSourceIds[0])
+      ? sel
+      : [hoverId]
+    return dropVerdict(armedSourceIds, targets, {
+      typeOf: (id) => typeOf.get(id) ?? null,
+      relationshipTypes,
+      containmentEdgeTypes,
+      entityTypes: schemaEntityTypes,
+      existingEdges: useCanvasStore.getState().edges,
+    })
+  }, [armedSourceIds, relationshipTypes, containmentEdgeTypes, schemaEntityTypes])
   const traceModel = canvasTrace.walkEntry?.model ?? null
   // A SHARED TRACE (`?trace=…`) — decoded once during the first render, so
   // the trace opens on the shared picture with no un-restored flash, and so
@@ -3067,7 +3182,7 @@ export function ContextViewCanvas({
     targetId: string,
     before: NormalizedReferenceLayout,
     after: NormalizedReferenceLayout,
-    action: 'add' | 'rename' | 'delete' | 'reorder' | 'sort' | 'move',
+    action: 'add' | 'rename' | 'recolor' | 'delete' | 'reorder' | 'sort' | 'move',
     summary: string,
   ) => {
     useStagedChangesStore.getState().stage({
@@ -3081,22 +3196,65 @@ export function ContextViewCanvas({
     })
   }, [persistReferenceLayout])
 
-  const addLayer = useCallback((name: string) => {
+  // Add a layer — at the end (the Add layer tile), or at `at` in display order (Insert layer
+  // left / right, the gutter "+"). Returns its id, so the caller can open its name.
+  const addLayer = useCallback((name: string, opts?: { at?: number }): string => {
     const before = currentLayout()
     const palette = ['#6366f1', '#8b5cf6', '#ec4899', '#f59e0b', '#10b981', '#06b6d4', '#ef4444', '#84cc16']
     const id = `layer-${Date.now()}`
-    const layers = layerOps.appendLayer(before.layers, {
-      id,
-      name,
-      description: '',
-      icon: 'Layers',
-      color: palette[before.layers.length % palette.length],
-      entityTypes: [],
-      order: before.layers.length,
-    })
+    // Display order, whatever order the stored array happens to be in.
+    const ordered = [...before.layers].sort((a, b) => a.order - b.order)
+    const at = opts?.at == null ? ordered.length : Math.max(0, Math.min(opts.at, ordered.length))
+    // A colour its neighbours don't already wear, so the new column reads as its own.
+    const neighbours = new Set([ordered[at - 1]?.color, ordered[at]?.color].filter(Boolean).map((c) => String(c).toLowerCase()))
+    const start = before.layers.length % palette.length
+    const color = palette.map((_, i) => palette[(start + i) % palette.length]).find((c) => !neighbours.has(c)) ?? palette[start]
+    const fresh = { id, name, description: '', icon: 'Layers', color, entityTypes: [], order: at }
+    // Appending keeps the stored array exactly as it was; inserting works in display order.
+    const layers = opts?.at == null
+      ? layerOps.appendLayer(before.layers, fresh)
+      : layerOps.insertLayer(ordered, fresh, at)
     const after = { ...before, layers }
     persistReferenceLayout(after)
-    stageLayerChange(`layer:${id}`, before, after, 'add', `Added layer “${name}”`)
+    stageLayerChange(`layer:${id}`, before, after, 'add',
+      opts?.at == null ? `Added layer “${name}”` : `Inserted layer “${name}”`)
+    return id
+  }, [currentLayout, persistReferenceLayout, stageLayerChange])
+
+  // A layer just inserted: its column fades in, and its name opens for editing at once.
+  const [newLayerId, setNewLayerId] = useState<string | null>(null)
+  const [renameRequest, setRenameRequest] = useState<{ layerId: string; nonce: number } | null>(null)
+  const requestLayerRename = useCallback((layerId: string) => {
+    setRenameRequest((r) => ({ layerId, nonce: (r?.nonce ?? 0) + 1 }))
+  }, [])
+  const insertLayerAt = useCallback((index: number) => {
+    if (traceWriteLockedRef.current()) return
+    const taken = new Set(currentLayout().layers.map((l) => l.name.toLowerCase()))
+    let name = 'New layer'
+    for (let n = 2; taken.has(name.toLowerCase()); n++) name = `New layer ${n}`
+    const id = addLayer(name, { at: index })
+    setNewLayerId(id)
+    requestLayerRename(id)
+    // Bring it into view once it has rendered — it may sit anywhere in a wide canvas.
+    requestAnimationFrame(() => {
+      document.querySelector(`[data-layer-id="${id}"]`)?.scrollIntoView({ behavior: 'smooth', inline: 'nearest', block: 'nearest' })
+    })
+  }, [addLayer, currentLayout, requestLayerRename])
+  const insertLayerBeside = useCallback((layerId: string, side: 'left' | 'right') => {
+    const ordered = [...currentLayout().layers].sort((a, b) => a.order - b.order)
+    const index = ordered.findIndex((l) => l.id === layerId)
+    if (index >= 0) insertLayerAt(side === 'left' ? index : index + 1)
+  }, [currentLayout, insertLayerAt])
+  const insertLayerBefore = useCallback((layerId: string) => insertLayerBeside(layerId, 'left'), [insertLayerBeside])
+
+  const recolorLayer = useCallback((id: string, color: string) => {
+    const before = currentLayout()
+    const target = before.layers.find((l) => l.id === id)
+    const layers = layerOps.recolorLayer(before.layers, id, color)
+    if (!target || layers === before.layers) return
+    const after = { ...before, layers }
+    persistReferenceLayout(after)
+    stageLayerChange(`layer:${id}`, before, after, 'recolor', `Recoloured layer “${target.name}”`)
   }, [currentLayout, persistReferenceLayout, stageLayerChange])
 
   // ── Groups: view-only containers inside a layer (the wizard's logicalNodes), managed here ──────
@@ -3693,9 +3851,9 @@ export function ContextViewCanvas({
   // resolves a target, the picker opens, and confirming writes a create_edge
   // into the store. One choke point for both entry points (the 'C' key and
   // the drawer's "Link to…"), so neither can start the flow while locked.
-  const armConnectGuarded = useCallback((nodeId: string) => {
+  const armConnectGuarded = useCallback((nodeId: string, at?: { x: number; y: number }) => {
     if (traceWriteLocked()) return
-    edgeConnectRef.current?.armConnect(nodeId)
+    edgeConnectRef.current?.armConnect(nodeId, at)
   }, [traceWriteLocked])
 
   // Fill the forward refs declared at the top of the component. In an effect,
@@ -5058,6 +5216,70 @@ export function ContextViewCanvas({
     revealTarget,
     selectedNodeId: selectedNodeIds.length === 1 ? selectedNodeId : null,
   })
+
+  // ── The layer menu: right-click a column header or a Layer Strip pill ──────────────────────────
+  // Every layout edit it offers is a staged layer change (reviewable, undoable); outside a draft it
+  // offers what a reader can do (fold) and the way into a draft.
+  const layerEditsAllowed = isDraft && !traceActive
+  const openLayerMenu = useCallback((e: React.MouseEvent, layerId: string) => {
+    interactions.openContextMenu(e, { type: 'layer', layerId })
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.openContextMenu])
+  const deleteLayerWithUndo = useCallback((layerId: string) => {
+    const before = currentLayout()
+    const target = before.layers.find((l) => l.id === layerId)
+    if (!target) return
+    const ordered = [...before.layers].sort((a, b) => a.order - b.order)
+    const heir = ordered.find((l) => l.id !== layerId)
+    const placed = Object.values(before.assignments).filter((a) => a.layerId === layerId).length
+    deleteLayer(layerId)
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: placed > 0 && heir
+        ? `Deleted layer “${target.name}” — its ${placed.toLocaleString()} placed ${placed === 1 ? 'entity moves' : 'entities move'} to “${heir.name}”.`
+        : `Deleted layer “${target.name}”.`,
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          const staged = useStagedChangesStore.getState()
+          const changes = staged.getChangesForTarget(`layer:${layerId}`)
+          const last = changes[changes.length - 1]
+          if (last) staged.discard(last.id)
+        },
+      },
+      durationMs: 8000,
+    })
+  }, [currentLayout, deleteLayer])
+  const contextTarget = interactions.state.contextMenu.target
+  const menuLayerId = contextTarget?.type === 'layer' ? contextTarget.layerId : null
+  const layerMenu = useMemo(() => {
+    if (!menuLayerId) return null
+    const index = sortedLayers.findIndex((l) => l.id === menuLayerId)
+    const layer = sortedLayers[index]
+    if (!layer) return null
+    const neighbour = (dir: -1 | 1) => sortedLayers[index + dir]
+    return {
+      name: layer.name,
+      color: layer.color ?? '#6366f1',
+      index,
+      count: sortedLayers.length,
+      folded: layerFold.folded.has(layer.id),
+      canEdit: layerEditsAllowed,
+      onInsert: (side: 'left' | 'right') => insertLayerBeside(layer.id, side),
+      onRename: () => requestLayerRename(layer.id),
+      onRecolor: (color: string) => recolorLayer(layer.id, color),
+      // A move is a reorder onto the neighbour: right lands after it, left before it.
+      onMove: (dir: -1 | 1) => { const n = neighbour(dir); if (n) reorderLayer(layer.id, n.id) },
+      onToggleFold: layerFoldOffered && foldLayersEnabled
+        ? () => layerFold.setLayerFolded(layer.id, !layerFold.folded.has(layer.id))
+        : undefined,
+      onDelete: () => deleteLayerWithUndo(layer.id),
+      onStartEditing: !isDraft && canEnterEdit ? handleEnterEdit : undefined,
+    }
+  }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, insertLayerBeside, requestLayerRename,
+    recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
+    canEnterEdit, handleEnterEdit])
+
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
   //     anchors and pins: these lines are drawn, onto the spine;
@@ -6140,6 +6362,8 @@ export function ContextViewCanvas({
         canRedo={stagedRedoStack.length > 0}
         onUndo={undoStagedChange}
         onRedo={redoStagedChange}
+        connectToolOn={edgeConnect.state.tool}
+        onToggleConnectTool={canvasWritable ? edgeConnect.toggleTool : undefined}
         canvasZoom={canvasZoom}
         onSetCanvasZoom={setCanvasZoom}
         onFitToWidth={handleFitToWidth}
@@ -6210,6 +6434,40 @@ export function ContextViewCanvas({
             onCancel={exitCanvasTrace}
             onContinue={canvasTrace.continuePastCheckpoint}
             onRetry={canvasTrace.retryWalk}
+          />
+        )}
+
+        {/* Connect mode — what a click-to-connect is waiting for, and the way
+            out. Same top slot as the trace capsule: the two never coexist
+            (a trace makes the canvas read-only). */}
+        {canvasWritable && (edgeConnect.state.mode === 'armed' || (edgeConnect.state.mode === 'idle' && edgeConnect.state.tool)) && (
+          <ConnectModePill
+            phase={edgeConnect.state.mode === 'armed' ? 'armed' : 'tool'}
+            sourceLabel={(() => {
+              const id = edgeConnect.state.sourceId
+              if (!id) return null
+              const n = nodes.find((x) => x.id === id || (x.data?.urn as string) === id)
+              return (n?.data?.label as string) || null
+            })()}
+            sourceCount={edgeConnect.state.sourceIds.length}
+            targetCount={edgeConnect.state.targets.length}
+            nudge={edgeConnect.state.nudge}
+            tool={edgeConnect.state.tool}
+            onLinkTargets={() => edgeConnect.commitTargets()}
+            onClearTargets={edgeConnect.clearTargets}
+            onCancel={edgeConnect.cancel}
+            onExitTool={() => edgeConnect.setTool(false)}
+            onSearchTarget={() => {
+              // The keyboard path: the same link, its target chosen from a searchable list.
+              const id = edgeConnect.state.sourceId
+              if (!id) return
+              const n = nodes.find((x) => x.id === id || (x.data?.urn as string) === id)
+              edgeConnect.cancel()
+              useCreateLinkStore.getState().open({
+                sourceUrn: (n?.data?.urn as string) || id,
+                anchor: { x: Math.round(window.innerWidth / 2) - 150, y: 140 },
+              })
+            }}
           />
         )}
 
@@ -6825,6 +7083,7 @@ export function ContextViewCanvas({
               el?.scrollTo({ left: el.scrollWidth, behavior: 'smooth' })
             } : undefined}
             onFit={handleFitToWidth}
+            onLayerContextMenu={openLayerMenu}
             fold={layerFold.active ? {
               openIds: layerFold.openIds,
               focusLayer: layerFold.focusLayer,
@@ -7000,9 +7259,14 @@ export function ContextViewCanvas({
           {/* In-progress edge while dragging a connection (shares the overlay
               coordinate space — absolute sibling inside the scroll container). */}
           <ConnectionDragLayer
-            sourceIds={edgeConnect.state.mode === 'dragging' ? edgeConnect.state.sourceIds : []}
+            sourceIds={edgeConnect.state.mode === 'dragging' || edgeConnect.state.mode === 'armed' ? edgeConnect.state.sourceIds : EMPTY_IDS}
             pointer={edgeConnect.state.pointer}
             hint={dragHint}
+            live={edgeConnect.state.mode === 'armed'
+              ? 'armed'
+              : edgeConnect.state.mode === 'idle' && edgeConnect.state.tool ? 'tool' : null}
+            hintFor={connectHintFor}
+            targetIds={edgeConnect.state.targets}
           />
 
           {/* Ghost-edge overlay — dashed pulsing connectors between ghost
@@ -7153,6 +7417,11 @@ export function ContextViewCanvas({
                 onRenameLayer={isDraft ? renameLayer : undefined}
                 onDeleteLayer={isDraft ? deleteLayer : undefined}
                 onReorderLayer={isDraft ? reorderLayer : undefined}
+                // The layer menu (right-click the header), and inserting a layer right here.
+                onHeaderContextMenu={openLayerMenu}
+                onInsertLayerBefore={layerEditsAllowed ? insertLayerBefore : undefined}
+                renameNonce={renameRequest?.layerId === layer.id ? renameRequest.nonce : 0}
+                isNew={newLayerId === layer.id}
                 // Node sorting — the menu is available to everyone (viewers get a
                 // device-local override); persisted actions are draft-gated
                 // inside; the whole surface sits behind the nodeSortingEnabled
@@ -7363,9 +7632,10 @@ export function ContextViewCanvas({
         onClose={interactions.closeContextMenu}
         onEditNode={canvasWritable ? interactions.editNode : undefined}
         onDuplicateNode={canvasWritable ? interactions.duplicateNode : undefined}
+        onDuplicateWithOptions={canvasWritable ? (id) => setDuplicateFor(id) : undefined}
         onDeleteNode={canvasWritable ? interactions.deleteNode : undefined}
         onCreateChild={canvasWritable ? interactions.createChild : undefined}
-        onConnect={canvasWritable ? (id) => armConnectGuarded(id) : undefined}
+        onConnect={canvasWritable ? (id) => armConnectGuarded(id, interactions.state.contextMenu.position) : undefined}
         onLinkNode={canvasWritable ? (id) => {
           const node = nodes.find(n => n.id === id || (n.data?.urn as string) === id)
           useCreateLinkStore.getState().open({
@@ -7389,6 +7659,7 @@ export function ContextViewCanvas({
         onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
         customActions={reorderMenuActions}
         queryActions={queryMenuActions}
+        layerMenu={layerMenu}
       />
 
       {/* Inline Node Editor - Double-click to edit names */}
@@ -7428,6 +7699,24 @@ export function ContextViewCanvas({
           position={edgeConnect.state.pickerPos}
           onPick={edgeConnect.confirm}
           onCancel={edgeConnect.cancel}
+        />
+      )}
+
+      {/* Duplicate… — what comes with the copy, counted before anything is staged. */}
+      {duplicateFor && canvasWritable && (
+        <DuplicateDialog
+          nodeId={duplicateFor}
+          prepare={prepareDuplicate}
+          commit={commitDuplicate}
+          onDone={(originalId, rootCopyUrn, counts) => {
+            selectNode(rootCopyUrn)
+            const relationships = counts.internal + counts.incoming + counts.outgoing
+            revealCopy(originalId, rootCopyUrn, [
+              `${counts.entities.toLocaleString()} ${counts.entities === 1 ? 'entity' : 'entities'}`,
+              relationships > 0 ? `${relationships.toLocaleString()} ${relationships === 1 ? 'relationship' : 'relationships'}` : null,
+            ].filter(Boolean).join(' and '))
+          }}
+          onClose={() => setDuplicateFor(null)}
         />
       )}
 

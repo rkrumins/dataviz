@@ -8,6 +8,7 @@
 import { useState, useCallback } from 'react'
 import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
+import { topmostOf } from './planDuplicate'
 import { useGraphProvider } from '@/providers/GraphProviderContext'
 import { useStagedChangesStore, type StagedChange } from '@/store/stagedChangesStore'
 import { stageNodeEdit } from '@/features/versioning/model/stageNodeEdit'
@@ -84,6 +85,10 @@ export interface UseCanvasInteractionsOptions {
     onExitTrace?: () => boolean
     /** Arm edge connect-mode from the currently selected node (e.g. 'C' key). */
     onConnectMode?: (sourceNodeId: string) => void
+    /** 'C' with no single node selected: turn the Connect tool on or off. */
+    onConnectTool?: () => void
+    /** ⇧⌘D on one selected entity: open Duplicate… for it. */
+    onDuplicateWithOptions?: (nodeId: string) => void
 }
 
 export interface UseCanvasInteractionsResult {
@@ -132,6 +137,7 @@ export interface UseCanvasInteractionsResult {
     keyboardHandlers: {
         onDelete: () => void
         onDuplicate: () => void
+        onDuplicateWithOptions: () => void
         onSelectAll: () => void
         onCopy: () => void
         onEdit: () => void
@@ -197,6 +203,8 @@ export function useCanvasInteractions(
         onCloseEntityDrawer,
         onExitTrace,
         onConnectMode,
+        onConnectTool,
+        onDuplicateWithOptions,
     } = options
     
     const provider = useGraphProvider()
@@ -558,9 +566,27 @@ export function useCanvasInteractions(
         clearSelection()
     }, [deleteNode, deleteEdge, clearSelection])
     
+    // Each selected entity once — never one that sits inside another selected one, whose copy
+    // already carries it (copying both made two copies of the same child).
+    const topmostSelection = useCallback((): string[] => {
+        const { selectedNodeIds, edges } = useCanvasStore.getState()
+        const containment = new Set((useSchemaStore.getState().schema?.containmentEdgeTypes ?? []).map(t => t.toUpperCase()))
+        const parent = new Map<string, string>()
+        for (const e of edges) {
+            const t = (e.data?.edgeType || e.data?.relationship || '').toUpperCase()
+            if (containment.has(t)) parent.set(e.target, e.source)
+        }
+        return topmostOf(selectedNodeIds, (id) => parent.get(id))
+    }, [])
+
     const duplicateSelected = useCallback(() => {
-        useCanvasStore.getState().selectedNodeIds.forEach(id => duplicateNode(id))
-    }, [duplicateNode])
+        topmostSelection().forEach(id => duplicateNode(id))
+    }, [duplicateNode, topmostSelection])
+
+    const duplicateSelectedWithOptions = useCallback(() => {
+        const ids = topmostSelection()
+        if (ids.length === 1) onDuplicateWithOptions?.(ids[0])
+    }, [topmostSelection, onDuplicateWithOptions])
     
     const copySelectedUrns = useCallback(async () => {
         const { selectedNodeIds, nodes } = useCanvasStore.getState()
@@ -581,6 +607,7 @@ export function useCanvasInteractions(
     const keyboardHandlers = {
         onDelete: deleteSelected,
         onDuplicate: duplicateSelected,
+        onDuplicateWithOptions: duplicateSelectedWithOptions,
         onSelectAll: selectAll,
         onCopy: copySelectedUrns,
         onEdit: () => {
@@ -622,6 +649,7 @@ export function useCanvasInteractions(
         onConnectMode: () => {
             const { selectedNodeIds } = useCanvasStore.getState()
             if (selectedNodeIds.length === 1) onConnectMode?.(selectedNodeIds[0])
+            else onConnectTool?.()
         },
         onCommandPalette: openCommandPalette,
     }

@@ -12,6 +12,7 @@ import React, { useCallback, useEffect, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
+import { LAYER_COLORS } from '@/components/views/ViewWizard/layerColors'
 
 // ============================================
 // Types
@@ -21,6 +22,30 @@ export type ContextMenuTarget =
     | { type: 'node'; id: string; data?: Record<string, unknown> }
     | { type: 'edge'; id: string; source: string; target: string }
     | { type: 'canvas'; position: { x: number; y: number }; layerId?: string }
+    | { type: 'layer'; layerId: string }
+
+/**
+ * A layer's menu (Context View) — opened from its column header or its Layer Strip chip, so a
+ * layer can be inserted beside any other without scrolling to the end of the canvas. Layout edits
+ * need a draft; outside one the menu says so and offers to start editing.
+ */
+export interface LayerMenuModel {
+    name: string
+    color: string
+    /** Where the layer sits, so a move past either end is not offered. */
+    index: number
+    count: number
+    folded: boolean
+    canEdit: boolean
+    onInsert: (side: 'left' | 'right') => void
+    onRename: () => void
+    onRecolor: (color: string) => void
+    onMove: (dir: -1 | 1) => void
+    onToggleFold?: () => void
+    onDelete: () => void
+    /** Outside a draft: open one, to change the layers. */
+    onStartEditing?: () => void
+}
 
 export interface ContextMenuAction {
     id: string
@@ -45,6 +70,8 @@ export interface CanvasContextMenuProps {
     /** Node actions */
     onEditNode?: (id: string) => void
     onDuplicateNode?: (id: string) => void
+    /** Duplicate… — choose what comes with the copy (children, incoming, outgoing). */
+    onDuplicateWithOptions?: (id: string) => void
     onDeleteNode?: (id: string) => void
     onCreateChild?: (parentId: string) => void
     onTraceNode?: (id: string) => void
@@ -72,6 +99,8 @@ export interface CanvasContextMenuProps {
     /** Layer options for moving nodes */
     layers?: Array<{ id: string; name: string; color: string }>
     onMoveToLayer?: (nodeId: string, layerId: string) => void
+    /** The right-clicked layer's menu (target type `layer`). */
+    layerMenu?: LayerMenuModel | null
 }
 
 // ============================================
@@ -85,6 +114,7 @@ export function CanvasContextMenu({
     onClose,
     onEditNode,
     onDuplicateNode,
+    onDuplicateWithOptions,
     onDeleteNode,
     onCreateChild,
     onTraceNode,
@@ -102,6 +132,7 @@ export function CanvasContextMenu({
     queryActions = [],
     layers = [],
     onMoveToLayer,
+    layerMenu = null,
 }: CanvasContextMenuProps) {
     const menuRef = useRef<HTMLDivElement>(null)
     const [showLayerSubmenu, setShowLayerSubmenu] = React.useState(false)
@@ -229,6 +260,16 @@ export function CanvasContextMenu({
                 })
             }
 
+            if (onDuplicateWithOptions) {
+                result.push({
+                    id: 'duplicate-options',
+                    label: 'Duplicate…',
+                    icon: 'CopyPlus',
+                    shortcut: '⇧⌘D',
+                    onClick: () => { onDuplicateWithOptions(target.id); onClose() }
+                })
+            }
+
             if (layers.length > 0 && onMoveToLayer) {
                 result.push({
                     id: 'move-to-layer',
@@ -311,15 +352,80 @@ export function CanvasContextMenu({
                     onClick: () => { onSelectAll(); onClose() }
                 })
             }
+        } else if (target.type === 'layer' && layerMenu) {
+            const m = layerMenu
+            if (m.canEdit) {
+                result.push(
+                    {
+                        id: 'insert-left',
+                        label: 'Insert layer to the left',
+                        icon: 'BetweenVerticalStart',
+                        onClick: () => { m.onInsert('left'); onClose() },
+                    },
+                    {
+                        id: 'insert-right',
+                        label: 'Insert layer to the right',
+                        icon: 'BetweenVerticalEnd',
+                        dividerAfter: true,
+                        onClick: () => { m.onInsert('right'); onClose() },
+                    },
+                    {
+                        id: 'rename-layer',
+                        label: 'Rename',
+                        icon: 'Pencil',
+                        onClick: () => { m.onRename(); onClose() },
+                    },
+                    {
+                        id: 'move-left',
+                        label: 'Move left',
+                        icon: 'ChevronLeft',
+                        disabled: m.index <= 0,
+                        onClick: () => { if (m.index > 0) { m.onMove(-1); onClose() } },
+                    },
+                    {
+                        id: 'move-right',
+                        label: 'Move right',
+                        icon: 'ChevronRight',
+                        disabled: m.index >= m.count - 1,
+                        dividerAfter: true,
+                        onClick: () => { if (m.index < m.count - 1) { m.onMove(1); onClose() } },
+                    },
+                )
+            }
+            if (m.onToggleFold) {
+                result.push({
+                    id: 'fold-layer',
+                    label: m.folded ? 'Unfold layer' : 'Fold layer',
+                    icon: m.folded ? 'UnfoldHorizontal' : 'FoldHorizontal',
+                    dividerAfter: m.canEdit,
+                    onClick: () => { m.onToggleFold?.(); onClose() },
+                })
+            }
+            if (m.canEdit) {
+                result.push({
+                    id: 'delete-layer',
+                    label: 'Delete layer',
+                    icon: 'Trash2',
+                    danger: true,
+                    onClick: () => { m.onDelete(); onClose() },
+                })
+            } else if (m.onStartEditing) {
+                result.push({
+                    id: 'start-editing',
+                    label: 'Start editing to change layers',
+                    icon: 'PencilLine',
+                    onClick: () => { m.onStartEditing?.(); onClose() },
+                })
+            }
         }
 
         // Add custom actions
         result.push(...customActions)
 
         return result
-    }, [target, onEditNode, onDuplicateNode, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections,
+    }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
-        onSelectAll, customActions, queryActions, layers, onMoveToLayer, onClose])
+        onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose])
 
     // Get icon component
     const getIcon = (iconName: keyof typeof LucideIcons) => {
@@ -354,12 +460,52 @@ export function CanvasContextMenu({
                     }}
                 >
                     {/* Menu Header */}
-                    <div className="px-3 py-1.5 border-b border-glass-border bg-black/5 dark:bg-white/5">
-                        <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
-                            {target.type === 'node' ? 'Node Actions' :
-                                target.type === 'edge' ? 'Edge Actions' : 'Canvas Actions'}
-                        </span>
-                    </div>
+                    {target.type === 'layer' && layerMenu ? (
+                        <div className="px-3 pt-2 pb-2 border-b border-glass-border bg-black/5 dark:bg-white/5">
+                            <span className="flex items-center gap-2 min-w-0">
+                                <span className="w-2.5 h-2.5 rounded-full flex-none ring-2 ring-white/40 dark:ring-black/30" style={{ backgroundColor: layerMenu.color }} />
+                                <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted flex-none">Layer</span>
+                                <span className="text-xs font-semibold text-ink truncate">{layerMenu.name}</span>
+                            </span>
+                            {/* Colour, one click — the layer's own colour ticked. */}
+                            {layerMenu.canEdit && (
+                                <div className="mt-2 flex items-center gap-1.5" role="radiogroup" aria-label="Layer colour">
+                                    {LAYER_COLORS.map((c) => {
+                                        const on = c.toLowerCase() === layerMenu.color.toLowerCase()
+                                        return (
+                                            <button
+                                                key={c}
+                                                type="button"
+                                                role="radio"
+                                                aria-checked={on}
+                                                aria-label={`Colour ${c}`}
+                                                onClick={() => { layerMenu.onRecolor(c); onClose() }}
+                                                className={cn(
+                                                    'w-5 h-5 rounded-full grid place-items-center transition-transform hover:scale-110',
+                                                    on && 'ring-2 ring-offset-2 ring-offset-canvas-elevated',
+                                                )}
+                                                style={{ backgroundColor: c, ...(on ? { ['--tw-ring-color' as string]: c } : {}) }}
+                                            >
+                                                {on && <LucideIcons.Check className="w-3 h-3 text-white" strokeWidth={3} />}
+                                            </button>
+                                        )
+                                    })}
+                                </div>
+                            )}
+                            {!layerMenu.canEdit && (
+                                <p className="mt-1 text-[11px] leading-snug text-ink-muted">
+                                    Layers change in a draft — start editing to insert, rename, recolour or move them.
+                                </p>
+                            )}
+                        </div>
+                    ) : (
+                        <div className="px-3 py-1.5 border-b border-glass-border bg-black/5 dark:bg-white/5">
+                            <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
+                                {target.type === 'node' ? 'Node Actions' :
+                                    target.type === 'edge' ? 'Edge Actions' : 'Canvas Actions'}
+                            </span>
+                        </div>
+                    )}
 
                     {/* Layer Submenu */}
                     {showLayerSubmenu && target.type === 'node' ? (

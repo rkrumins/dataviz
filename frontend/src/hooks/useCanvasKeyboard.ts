@@ -31,6 +31,8 @@ export interface CanvasKeyboardHandlers {
     onDelete?: () => void
     /** Duplicate selected nodes */
     onDuplicate?: () => void
+    /** Shift + Cmd/Ctrl + D: Duplicate… with its choices. */
+    onDuplicateWithOptions?: () => void
     /** Select all nodes */
     onSelectAll?: () => void
     /** Copy URN to clipboard */
@@ -189,6 +191,13 @@ export function useCanvasKeyboard({
             return
         }
         
+        // Duplicate with options: Shift + Cmd/Ctrl + D
+        if (isMod && isShift && e.key.toLowerCase() === 'd') {
+            e.preventDefault()
+            handlersRef.current.onDuplicateWithOptions?.()
+            return
+        }
+
         // Duplicate: Cmd/Ctrl + D
         if (isMod && e.key === 'd') {
             e.preventDefault()

@@ -16,6 +16,7 @@ import { useVirtualizer } from '@tanstack/react-virtual'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { DynamicIcon } from '@/components/ui/DynamicIcon'
+import { HoverTip } from '@/components/ui/HoverTip'
 import { useSchemaStore } from '@/store/schema'
 import { useViewEntityTypes } from '@/hooks/useViewSchema'
 import { usePreferencesStore } from '@/store/preferences'
@@ -150,6 +151,16 @@ interface LayerColumnProps {
   onUngroup?: (layerId: string, groupId: string, groupName: string) => void
   onDeleteLayer?: (layerId: string) => void
   onReorderLayer?: (draggedLayerId: string, targetLayerId: string) => void
+  /** Right-click on the header (folded or not): this layer's menu — insert a layer beside it,
+   *  rename, colour, move, delete. Reachable from the Layer Strip too, so no scrolling is needed. */
+  onHeaderContextMenu?: (e: React.MouseEvent, layerId: string) => void
+  /** Draft: insert a new layer just before this one — the "+" on the header's left edge, which
+   *  sits in the gutter between this column and the one before it. */
+  onInsertLayerBefore?: (layerId: string) => void
+  /** Bumped to open this layer's name for editing: Rename in its menu, or a layer just inserted. */
+  renameNonce?: number
+  /** Just inserted: the column fades in where it lands (its neighbours glide aside on their own). */
+  isNew?: boolean
   /** Effective node sort mode for this column (override → layer → view default). */
   sortMode?: LayerNodeSortMode
   /** True when the column deviates from the view default (sort menu indicator dot). */
@@ -358,6 +369,10 @@ export const LayerColumn = React.memo(function LayerColumn({
   onUngroup,
   onDeleteLayer,
   onReorderLayer,
+  onHeaderContextMenu,
+  onInsertLayerBefore,
+  renameNonce = 0,
+  isNew = false,
   sortMode = 'alpha-asc',
   sortIsOverride = false,
   viewDefaultSortMode = 'alpha-asc',
@@ -477,6 +492,14 @@ export const LayerColumn = React.memo(function LayerColumn({
   const [draftGroupName, setDraftGroupName] = useState('')
   const headerNameTaken = draftGroupName.trim() !== '' && !!groupNameClash([layer], layer.id, null, [draftGroupName])
   const [draftName, setDraftName] = useState(layer.name)
+  // A rename asked for from outside (the layer menu, or a layer just inserted): open the name the
+  // moment the request is new — adjusted during render, so there is no effect and no extra paint.
+  const [renameSeen, setRenameSeen] = useState(0)
+  if (renameNonce > renameSeen && onRenameLayer) {
+    setRenameSeen(renameNonce)
+    setDraftName(layer.name)
+    setIsRenaming(true)
+  }
   const [confirmingDelete, setConfirmingDelete] = useState(false)
   const [dragKind, setDragKind] = useState<'entity' | 'layer' | 'group' | null>(null)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -1641,6 +1664,10 @@ export const LayerColumn = React.memo(function LayerColumn({
         ? { width: spineWidth, minWidth: spineWidth, maxWidth: spineWidth }
         : { minWidth: effectiveWidth ?? 320, maxWidth: effectiveWidth ?? 480 }}
       layout
+      initial={isNew ? { opacity: 0, y: 8 } : false}
+      animate={{ opacity: 1, y: 0 }}
+      // Only the fade is timed here; the layout animation keeps its own default.
+      transition={{ opacity: { duration: 0.22, ease: 'easeOut' }, y: { duration: 0.22, ease: 'easeOut' } }}
       // Measure for a layout animation only when the column's box can have
       // moved: its fold, width or place — or any other column's fold. Left
       // to itself framer measures after EVERY render, and the virtualizer
@@ -1788,6 +1815,7 @@ export const LayerColumn = React.memo(function LayerColumn({
           boxShadow: isDragOver ? `inset 0 0 0 2px ${layer.color}80, 0 0 20px ${layer.color}20` : undefined,
         }}
         onClick={() => isCollapsed && requestFold(false)}
+        onContextMenu={onHeaderContextMenu ? (e) => onHeaderContextMenu(e, layer.id) : undefined}
         onDragOver={(e) => {
           const types = e.dataTransfer.types
           const isLayer = types.includes('text/x-layer-id')
@@ -1820,6 +1848,32 @@ export const LayerColumn = React.memo(function LayerColumn({
           if (entityId && onAssignToLayer) onAssignToLayer(entityId, layer.id)
         }}
       >
+        {/* Insert a layer here — the "+" on the header's left edge sits in the gutter between this
+            column and the one before it, so a layer goes exactly where the reader is looking, with
+            no scrolling to the end. Revealed on hover (and on keyboard focus). */}
+        {onInsertLayerBefore && !isCollapsed && (
+          <HoverTip
+            className="absolute -left-3 top-1/2 -translate-y-1/2 z-20"
+            label="Insert a layer here"
+            detail={`A new layer just before ${layer.name}`}
+          >
+            <button
+              type="button"
+              aria-label={`Insert a layer before ${layer.name}`}
+              onClick={(e) => { e.stopPropagation(); onInsertLayerBefore(layer.id) }}
+              className={cn(
+                "w-6 h-6 rounded-full grid place-items-center",
+                "bg-canvas-elevated text-ink-muted border border-glass-border shadow-sm",
+                "opacity-0 group-hover/column:opacity-100 focus-visible:opacity-100",
+                "hover:text-white hover:bg-accent-lineage hover:border-accent-lineage hover:scale-110",
+                "transition-[opacity,transform,background-color,color] duration-150",
+              )}
+            >
+              <LucideIcons.Plus className="w-3.5 h-3.5" strokeWidth={2.5} />
+            </button>
+          </HoverTip>
+        )}
+
         {/* Drop hint overlay */}
         {isDragOver && (
           <div

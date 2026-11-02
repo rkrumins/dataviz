@@ -1,8 +1,10 @@
 /**
  * NodeConnectionHandle — the hover-reveal affordance on a node card's right edge
- * that starts an edge drag. pointerdown begins the connection and stops
- * propagation so it never triggers the card's HTML5 drag (layer assignment) or
- * selection. Shown only in authoring (draft) mode.
+ * that starts a connection. Drag it to a target, or just click it: a press that
+ * barely moves arms the connection, and the next click on a card picks the
+ * target (useEdgeConnect). pointerdown stops propagation so it never triggers
+ * the card's HTML5 drag (layer assignment) or selection. Shown only in
+ * authoring (draft) mode.
  */
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -17,8 +19,9 @@ export function NodeConnectionHandle({ visible, onBeginConnect }: NodeConnection
   return (
     <button
       type="button"
-      aria-label="Drag to connect"
-      title="Drag to connect"
+      data-connect-handle
+      aria-label="Connect — click, then click the target (or drag to it)"
+      title="Click, then click the target — or drag to it"
       // pointerdown (not click) so the drag starts immediately; stop propagation
       // + prevent default so the card's dragstart/selection never fire.
       onPointerDown={(e) => {

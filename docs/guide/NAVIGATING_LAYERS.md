@@ -45,6 +45,9 @@ chip per layer, each with the layer's colour dot and name:
   jump from one end of a wide canvas to the other.
 - A **Fit** control (also `⌘0` / `Ctrl-0`) frames all layers to the window, so
   orientation and the way back to "see everything" live on the same surface.
+- **Right-click a chip** for that layer's menu. In a draft it inserts a layer
+  beside it, renames, recolours or moves it — without scrolling to it. See
+  [Change the layers](/guide/editing-in-a-draft#change-the-layers).
 
 The strip stays docked to the canvas frame, never drifting into the scroll area,
 so it's always exactly where you left it.

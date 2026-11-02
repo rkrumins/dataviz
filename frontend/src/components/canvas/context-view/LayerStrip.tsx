@@ -69,6 +69,7 @@ export function LayerStrip({
   fold,
   foldToggle,
   trailing,
+  onLayerContextMenu,
 }: {
   layers: LayerStripLayer[]
   /** The canvas's horizontal scroll container. */
@@ -84,6 +85,9 @@ export function LayerStrip({
    *  lineage guide. In the bar, not floating over the columns: the bar's band
    *  is already reserved, so nothing it shows can cover a card. */
   trailing?: React.ReactNode
+  /** Right-click a pill: that layer's menu — insert a layer beside it, rename, recolour, move.
+   *  The strip is always on screen, so any layer is reachable without scrolling the canvas. */
+  onLayerContextMenu?: (e: React.MouseEvent, layerId: string) => void
 }) {
   // Layer ids whose columns are currently (mostly) inside the viewport.
   const [visibleIds, setVisibleIds] = useState<Set<string>>(() => new Set())
@@ -289,6 +293,7 @@ export function LayerStrip({
                   key={layer.id}
                   type="button"
                   onClick={() => (fold ? fold.focusLayer(layer.id) : jumpTo(layer.id))}
+                  onContextMenu={onLayerContextMenu ? (e) => onLayerContextMenu(e, layer.id) : undefined}
                   data-layer-pill={layer.id}
                   title={fold && !active ? `Unfold ${layer.name}` : `Jump to ${layer.name}`}
                   aria-current={active}

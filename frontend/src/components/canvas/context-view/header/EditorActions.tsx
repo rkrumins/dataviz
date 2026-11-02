@@ -29,6 +29,10 @@ export interface EditorActionsProps extends ComprehensionToolsProps {
   pendingChangeCount?: number
   /** Opens the staged-changes review panel (the only save path). */
   onOpenStagedChanges?: () => void
+  /** The Connect tool is on: a click on an entity starts a link, the next one ends it. */
+  connectToolOn?: boolean
+  /** Turns the Connect tool on or off; absent → not offered. */
+  onToggleConnectTool?: () => void
   // Import / Export are inherited from ComprehensionToolsProps and rendered by the shared
   // ImportExportMenu (both modes) — no standalone buttons here.
   onExitEdit: () => void
@@ -42,9 +46,12 @@ export function EditorActions({
   pendingChangeCount = 0,
   onOpenStagedChanges,
   onExitEdit,
+  connectToolOn = false,
+  onToggleConnectTool,
   ...tools
 }: EditorActionsProps) {
   // Short of room, these show their icon alone (see toolbarFold.ts).
+  const connectFolded = useFolded('connect')
   const undoFolded = useFolded('undo')
   const redoFolded = useFolded('redo')
   const reviewFolded = useFolded('review')
@@ -53,6 +60,36 @@ export function EditorActions({
       <ComprehensionTools {...tools} />
 
       <div className="w-px h-6 bg-gradient-to-b from-transparent via-black/15 dark:via-white/10 to-transparent" />
+
+      {/* Connect — link entities by clicking, no dragging: click where a link
+          starts, then where it goes. Stays on for the next link until turned
+          off (Done, Esc, or C again). */}
+      {onToggleConnectTool && (
+        <HoverTip
+          className="flex"
+          label={connectToolOn ? 'Stop connecting' : 'Connect entities by clicking'}
+          detail={connectToolOn ? undefined : 'Click where a link starts, then where it goes — no dragging. Stays on for the next link.'}
+          shortcut="C"
+        >
+          <button
+            type="button"
+            onClick={onToggleConnectTool}
+            aria-pressed={connectToolOn}
+            aria-label="Connect"
+            data-toolbar-item="connect"
+            className={cn(
+              'flex items-center gap-1.5 px-3 py-2 rounded-xl text-[11.5px] font-semibold tracking-tight transition border',
+              connectToolOn
+                ? 'bg-accent-lineage text-white border-accent-lineage shadow-sm shadow-accent-lineage/30'
+                : 'text-ink/85 bg-black/[0.03] dark:bg-white/[0.04] border-black/[0.10] dark:border-white/[0.08] hover:bg-black/[0.06] hover:text-ink dark:hover:bg-white/[0.07]',
+              connectFolded && 'px-2.5',
+            )}
+          >
+            <LucideIcons.Spline className="w-3.5 h-3.5" strokeWidth={2.4} />
+            <span data-toolbar-label className={connectFolded ? 'sr-only' : undefined}>Connect</span>
+          </button>
+        </HoverTip>
+      )}
 
       {/* Undo / Redo — labelled segmented pair (icon + word, mirrored like
           bookends) so both actions read at a glance, not only on hover. */}
