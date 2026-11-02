@@ -1726,6 +1726,22 @@ async def test_reads_are_flushed_in_one_update_that_never_moves_a_read_back(stor
 
 
 # ── the switch, as each capacity pass reads it ──────────────────────────────────────────────────
+_LIFECYCLE = ("platform.residency.grace_started", "platform.residency.evictions_allowed",
+              "platform.residency.turned_off", "platform.residency.reload_finished")
+
+
+async def _events(*types: str, since: str) -> list:
+    """The activity events of these types recorded since ``since``, oldest first: (type, payload)."""
+    from backend.app.db.models import OutboxEventORM
+
+    async with get_async_session() as s:
+        rows = (await s.execute(
+            select(OutboxEventORM).where(OutboxEventORM.event_type.in_(types),
+                                         OutboxEventORM.created_at >= since)
+            .order_by(OutboxEventORM.created_at))).scalars().all()
+    return [(r.event_type, json.loads(r.payload)) for r in rows]
+
+
 async def test_a_switch_that_cannot_be_read_evicts_and_loads_nothing(
         store, residency_on, monkeypatch):
     """The worker takes no decision it cannot undo on a switch it could not read: the pass does
@@ -1761,6 +1777,7 @@ async def test_the_leader_starts_the_grace_ends_it_and_clears_it_with_no_restart
     gid = await _resident(svc, proj)
     await _set_ps(gid, last_read_at=datetime.now(timezone.utc) - timedelta(days=7))
     assert await residency.out_of_falkordb() == 0, "the store holds graphs out of FalkorDB already"
+    t0 = models._now()
     was = await _in_store(False)
     before = await _set_policy(gv_residency_on_since=None, gv_residency_phase=None)
     loop = CapacityLoop(proj)
@@ -1789,6 +1806,21 @@ async def test_the_leader_starts_the_grace_ends_it_and_clears_it_with_no_restart
         await _set_ps(gid, status="idle", projected_commit_seq=ps.target_commit_seq)
         assert await loop.run_once(graph_ids=[]) is None
         assert await _leader() == (None, None)
+        assert await loop.run_once(graph_ids=[]) is None
+
+        # Each change in the activity log once, as the system's, filed under the switch.
+        events = await _events(*_LIFECYCLE, since=t0)
+        assert [(t, p.get("details")) for t, p in events] == [
+            ("platform.residency.grace_started", {
+                "onSince": since.isoformat(), "graceSecs": residency_policy.GRACE_SECS,
+                "evictionsFrom": (since + timedelta(seconds=residency_policy.GRACE_SECS))
+                .isoformat()}),
+            ("platform.residency.evictions_allowed", {"onSince": ended.isoformat()}),
+            ("platform.residency.turned_off", {"toBringBack": 1}),
+            ("platform.residency.reload_finished", None),
+        ]
+        assert all("actor_id" not in p and p["target_label"] == "Graph residency"
+                   for _t, p in events)
     finally:
         await _set_policy(**before)
         await _in_store(was)
@@ -1804,6 +1836,7 @@ async def test_no_eviction_within_the_grace_period_and_eviction_after_it(
     (cold,) = await _live_graphs(svc, proj, mine, 1)
     await _set_ps(cold, residency="coldline",
                   last_read_at=datetime.now(timezone.utc) - timedelta(hours=2))
+    t0 = models._now()
     now = datetime.now(timezone.utc)
     await _set_policy(gv_residency_on_since=now.isoformat(), gv_residency_phase="grace")
     loop = CapacityLoop(proj)
@@ -1815,6 +1848,15 @@ async def test_no_eviction_within_the_grace_period_and_eviction_after_it(
     p = await loop.run_once(graph_ids=[cold])
     assert _evicted(p) == [(cold, "idle_coldline")]
     assert await _leader() == (ended, "on")
+    assert [t for t, _p in await _events(*_LIFECYCLE, since=t0)] == [
+        "platform.residency.evictions_allowed"]
+    meta = await svc.get_graph(cold)
+    (evicted,) = [p["details"] for _t, p in await _events("platform.versioning.graph_evicted",
+                                                          since=t0)
+                  if p["details"]["graphId"] == cold]
+    assert evicted == {"graphId": cold, "workspaceId": "ws_res",
+                       "dataSourceId": meta["data_source_id"], "master": p.evictions[0].endpoint,
+                       "bytes": p.evictions[0].bytes, "reason": "idle_coldline"}
 
 
 @live
@@ -1830,6 +1872,7 @@ async def test_turned_off_it_brings_evicted_graphs_back_through_admission_one_at
     await _set_ps(cold, residency="coldline",
                   last_read_at=datetime.now(timezone.utc) - timedelta(days=30))
     assert await residency.out_of_falkordb() == 2
+    t0 = models._now()
     was = await _in_store(False)
     before = await _set_policy(                                   # it was on until now
         gv_residency_on_since=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
@@ -1856,6 +1899,13 @@ async def test_turned_off_it_brings_evicted_graphs_back_through_admission_one_at
         assert (await _ps(other)).status == "idle"
         assert await loop.run_once(graph_ids=scope) is None       # nothing left out: it idles
         assert await _leader() == (None, None)
+        assert [(t, p.get("details")) for t, p in await _events(*_LIFECYCLE, since=t0)] == [
+            ("platform.residency.turned_off", {"toBringBack": 2}),
+            ("platform.residency.reload_finished", None)]
+        loaded = {p["details"]["graphId"]: p["details"]
+                  for _t, p in await _events("platform.versioning.graph_loaded", since=t0)}
+        assert set(loaded) == {first, second}
+        assert all(d["master"] and d["secs"] >= 0 and "bytes" in d for d in loaded.values())
     finally:
         await _set_policy(**before)
         await _in_store(was)

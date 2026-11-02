@@ -31,6 +31,10 @@ Reads, with the switch on: each process notes the graphs people read (:func:`hol
 when, once a minute, to ``last_read_at`` (:func:`flush_reads`); a read FalkorDB serves takes the
 graph's read lease for ``GRAPHVER_TRACE_LEASE_TTL_SECS``, so no pass evicts a graph mid-read.
 
+Activity (the system's, under the switch): the leader records each change of the switch's phase
+once — the grace started, its end, residency off and what it brings back, the reload finished —
+and each eviction and each finished load (:func:`_emit_event`).
+
 Metrics (``jobs.metrics``), from the projection lane: each master's used and maximum memory
 (``versioning_residency_master_used_bytes`` / ``_max_bytes``), the graphs per class and state
 (``versioning_residency_graphs``), evictions by reason (``versioning_residency_evictions_total``),
@@ -521,7 +525,7 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
                ps.status, ps.residency, ps.last_read_at, ps.last_projected_at, ps.size_bytes,
                ps.size_measured_at, ps.rehydrating_since, ps.retired_keys, ps.epoch,
                ps.projected_commit_seq, ps.target_commit_seq, head,
-               GraphORM.data_source_id,
+               GraphORM.data_source_id, GraphORM.workspace_id,
                (head > 1).label("past_genesis"),
                (~select(1).where(*bootstrap_unfinished(ps.graph_id)).correlate(ps).exists())
                .label("enable_finished"))
@@ -866,14 +870,14 @@ class CapacityLoop:
         for m in decided.masters:
             freed, spare = 0, list(m.spare)
             for e in m.evictions:
-                if await self._evict(evictor, e):
+                if await self._evict(evictor, e, snap.rows.get(e.graph_id, {})):
                     freed += e.bytes or 0
                     evicted_on.add(e.endpoint)
             # An eviction the evictor refused freed nothing: carry on down the master's
             # candidates until the stop mark is actually reached.
             while spare and freed < m.to_free:
                 e = spare.pop(0)
-                if await self._evict(evictor, e):
+                if await self._evict(evictor, e, snap.rows.get(e.graph_id, {})):
                     freed += e.bytes or 0
                     evicted_on.add(e.endpoint)
         used = {m.endpoint: m.used for m in snap.masters}
@@ -934,12 +938,15 @@ class CapacityLoop:
                 return False
         return True
 
-    async def _evict(self, evictor, e) -> bool:
+    async def _evict(self, evictor, e, row: Mapping) -> bool:
         if not await evictor.evict(e.graph_id, drop_graph=self._proj.drop_graph, reason=e.reason):
             return False
         metrics.increment("versioning_residency_evictions_total", reason=e.reason)
         logger.info("residency: evicted graph %s from %s (%s, %s bytes)",
                     e.graph_id, e.endpoint, e.reason, e.bytes)
+        await _emit_event("platform.versioning.graph_evicted", {
+            **_graph_ids(e.graph_id, row), "master": e.endpoint, "bytes": e.bytes,
+            "reason": e.reason})
         return True
 
     async def _finish_loads(self, snap: Snapshot) -> None:
@@ -992,6 +999,12 @@ class CapacityLoop:
             if done:
                 metrics.increment("versioning_residency_loads_total", outcome="completed")
                 logger.info("residency: graph %s is loaded and serves reads again", r["graph_id"])
+                since = r.get("rehydrating_since")
+                await _emit_event("platform.versioning.graph_loaded", {
+                    **_graph_ids(r["graph_id"], r), "master": r["endpoint"],
+                    "bytes": r["size_bytes"],
+                    "secs": int((datetime.now(timezone.utc) - since).total_seconds())
+                    if since else None})
 
     async def _stall(self, r, passes: int) -> None:
         """A load whose seed has published but whose ontology could not be read for ``passes``
@@ -1019,6 +1032,9 @@ class CapacityLoop:
             return
         name, provider = row
         metrics.increment("versioning_residency_evictions_total", reason="load_stalled")
+        await _emit_event("platform.versioning.graph_evicted", {
+            **_graph_ids(gid, r), "master": r["endpoint"], "bytes": r["size_bytes"],
+            "reason": "load_stalled"})
         logger.warning("residency: graph %s's load stalled: its ontology could not be read for %d "
                        "passes, so whether its key needs summaries is unknown; it is evicted again "
                        "(load_stalled), and its next read asks for it", gid, passes)
@@ -1106,20 +1122,30 @@ async def _switch_phase() -> Optional[str]:
         latch = getattr(row, "gv_residency_phase", None)
         since = _ts(getattr(row, "gv_residency_on_since", None))
         now = datetime.now(timezone.utc)
+        grace = timedelta(seconds=residency_policy.GRACE_SECS)
         if on:
             if latch not in ("grace", "on") or since is None:
                 await _restart_idle_clocks()
                 await _latch(s, row, phase="grace", on_since=now)
+                await _emit_event("platform.residency.grace_started", {
+                    "onSince": now.isoformat(), "evictionsFrom": (now + grace).isoformat(),
+                    "graceSecs": residency_policy.GRACE_SECS}, session=s, **_SWITCH_TARGET)
                 return "grace"
-            if latch == "grace" and now - since >= timedelta(seconds=residency_policy.GRACE_SECS):
+            if latch == "grace" and now - since >= grace:
                 await _latch(s, row, phase="on", on_since=since)
+                await _emit_event("platform.residency.evictions_allowed",
+                                  {"onSince": since.isoformat()}, session=s, **_SWITCH_TARGET)
                 return "on"
             return latch
         out = await out_of_falkordb()
         if latch in ("grace", "on"):
             await _latch(s, row, phase="reloading" if out else None, on_since=None)
+            await _emit_event("platform.residency.turned_off", {"toBringBack": out}, session=s,
+                              **_SWITCH_TARGET)
         elif latch == "reloading" and not out:
             await _latch(s, row, phase=None, on_since=None)
+            await _emit_event("platform.residency.reload_finished", {}, session=s,
+                              **_SWITCH_TARGET)
         return "reloading" if out else "off"
 
 
@@ -1136,6 +1162,37 @@ async def _latch(s, row, *, phase: Optional[str], on_since: Optional[datetime]) 
     await s.execute(update(PlatformSettingsORM).where(PlatformSettingsORM.id == 1)
                     .values(**values, updated_at=PlatformSettingsORM.updated_at)
                     .execution_options(synchronize_session=False))
+
+
+#: Where the switch's own events are filed: under it, as its changes are (``features.py``).
+_SWITCH_TARGET = {"target_type": "feature_flag", "target_id": residency_policy.SWITCH,
+                  "target_label": "Graph residency"}
+
+
+def _graph_ids(graph_id: str, row: Mapping) -> Dict[str, Any]:
+    return {"graphId": graph_id, "workspaceId": row.get("workspace_id"),
+            "dataSourceId": row.get("data_source_id")}
+
+
+async def _emit_event(event_type: str, details: Dict[str, Any], *, session=None,
+                      **target: Any) -> None:
+    """A system event in the activity log — nobody did it: the capacity loop did (no actor). In
+    ``session``'s transaction, so a phase change commits with its event; else in a short one of its
+    own, best effort: the eviction or load it records has happened already."""
+    from backend.app.services.activity import recorder
+
+    if session is not None:
+        await recorder.record_activity(session, event_type=event_type, provenance=None,
+                                       details=details, **target)
+        return
+    from backend.app.db.engine import get_async_session
+
+    try:
+        async with get_async_session() as s:
+            await recorder.record_activity(s, event_type=event_type, provenance=None,
+                                           details=details, best_effort=True, **target)
+    except Exception:  # noqa: BLE001 — the activity log must never fail a pass
+        logger.warning("residency: %s not recorded", event_type, exc_info=True)
 
 
 async def _restart_idle_clocks() -> None:
