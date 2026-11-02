@@ -393,7 +393,10 @@ async def test_the_lease_is_refreshed_at_most_every_30_seconds_per_graph(asked, 
     """The lease lasts 120 seconds: refreshed every 30 at most, it is held through every read
     while reads keep coming, at one round trip per graph per half minute."""
     clock = [1000.0]
-    monkeypatch.setattr(residency.time, "monotonic", lambda: clock[0])
+    # residency's clock only: the process-wide ``time.monotonic`` also dates the flag cache, which
+    # then reads stale (and the switch off) on a machine up for less than ~1000 s
+    monkeypatch.setattr(residency, "time", SimpleNamespace(monotonic=lambda: clock[0],
+                                                          time=time.time))
     for _ in range(3):
         await _read(_Svc({"g": _wm()}))
     clock[0] += 31
