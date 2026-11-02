@@ -132,6 +132,10 @@ Change `stage` to `"active"` and flip `default_value` to `True`. The guard now d
 
 Also add, if they apply:
 
+- `impact_when_on` — what turning it ON means, for a switch whose ON is the consequential direction:
+  one that starts the platform doing something to everyone's data, as Graph residency starts
+  evicting graphs from memory. The page then asks before it is turned on (`ConfirmTurnOn`), as it
+  asks before any switch is turned off. Set `help_url` with it, so the dialog links the docs.
 - `still_allowed` — what KEEPS working. Not decoration: an admin who doesn't know a switch is
   non-destructive will avoid one they should feel free to use.
 - `depends_on` — a flag that needs another to be on. The page lists the dependent under

@@ -10,7 +10,7 @@
 > refusals are in [06 · API Reference](06-api-reference.md); every behaviour change is in the
 > [CHANGELOG](../../CHANGELOG.md).
 
-**Checked against the code on 2026-11-01: §1–§9 at `c63c65f08`, §10–§19 at `41e82e5eb`.**
+**Checked against the code on 2026-11-02: §1–§9 at `c63c65f08`, §10–§19 at `c29f05f08`.**
 
 **TL;DR.** Forking a graph now makes a data source as well as a graph: the fork's own row in
 `workspace_data_sources`, in its parent's workspace and on its parent's provider. Views, the canvas
@@ -369,10 +369,11 @@ Postgres until it is loaded again.
 | **Standard** (the default) | When unread for the Standard idle time (7 days), or earlier when its master is under memory pressure | On its next read |
 | **Coldline** | When unread for the Coldline idle time (1 hour), and first under memory pressure | Only when a request needs FalkorDB (§12), or on a canvas read of a graph larger than the canvas-load threshold |
 
-- **The idle clock starts when residency first runs.** A graph with no read on record is never idle:
-  each pass starts the clock of up to 1000 such graphs (`last_read_at` = now). So on the day the flag
-  is turned on every graph's idle time starts from that day, however long ago it was published, and
-  a new graph's from its first pass.
+- **The idle clock starts when residency is turned on.** Reads are not noted while it is off, so
+  when the capacity leader starts the grace period after the switch is turned on (§16) it sets every
+  graph's `last_read_at` to now: each graph's idle time starts from that moment, however long ago it
+  was published or last read. A graph with no read on record is never idle: each pass starts the
+  clock of up to 1000 such graphs, so a new graph's starts from its first pass.
 - **Only keys the platform minted are ever evicted** (`owns_falkor_graph`): a customer's own graph,
   which version control was enabled on, behaves as Always until it is adopted (§18).
 - **Forks are outside residency.** A fork has no key (§6): nothing of its own to evict, load or
@@ -387,9 +388,10 @@ Postgres until it is loaded again.
   (§19) or `PUT /api/v1/admin/versioning/graphs/{gid}/residency {"class": "always" | "standard" |
   "coldline"}`. A new graph gets the policy's default class. Workspaces see the class and the state
   on the graph's watermark and its Versioning tab.
-- **The flag.** None of this applies unless the deployment sets `GRAPHVER_RESIDENCY_ENABLED`
-  (§16). Off, eviction is the per-provider count budget, as before, and an evicted graph is reseeded
-  by the projection poll within seconds.
+- **The switch.** None of this applies until a system administrator turns on **Graph residency**
+  under Admin → Features (§16). Off, every graph stays loaded: nothing is evicted, and a graph still
+  out of FalkorDB is brought back through admission as memory allows, reading from Postgres until it
+  is.
 
 `graphver.projection_state` holds each graph's `residency`, `last_read_at`, `evicted_reason`
 (`idle_standard`, `idle_coldline`, `pressure`, `lost` when its master lost the key, `load_stalled`
@@ -400,9 +402,12 @@ writes yet), `size_bytes`, `size_measured_at` and `rehydrating_since`. Its `stat
 ## 11. The capacity loop
 
 The projection lane runs one capacity pass every policy interval (60 seconds by default), under a
-Postgres advisory lock so one worker leads; a pass another worker holds is skipped. A pass starts
-idle clocks, gathers, asks a pure planner (`residency_plan.plan`, no I/O) and acts. The policy
-preview (§13) and admission checks run the same planner.
+Postgres advisory lock so one worker leads; a pass another worker holds is skipped. A pass first
+reads the Graph residency switch from the feature store (§16): unreadable, it does nothing; in the
+grace period after it was turned on, and while it is off, it evicts nothing; off with nothing left
+out of FalkorDB, it idles. Then it starts idle clocks, gathers, asks a pure planner
+(`residency_plan.plan`, no I/O) and acts. The policy preview (§13) and admission checks run the
+same planner.
 
 **What it reads.** Every live graph that is not a fork and has a key of its own; every master of
 each of their providers' topologies, from the client's slot map (a standalone or Sentinel instance
@@ -433,7 +438,7 @@ it. The plan keeps the next candidates in order: an eviction the evictor refuses
 the pass carries on down them until the stop mark is actually reached. A master without
 `maxmemory` is never under pressure.
 
-**Never evicted:** an Always graph (also by the count budget, flag on or off), a key the platform
+**Never evicted:** an Always graph (the evictor refuses one, whatever asks), a key the platform
 did not mint, a key another data source or a catalog entry reads, a graph whose data source has a
 rollup job pending or running (the job would write the dropped key back), a graph with a read lease
 or a pass in flight (any status but `idle`), one that is not evictable at all (in the trash, at
@@ -472,6 +477,7 @@ measured, with no size, and the graph keeps its estimate.
 | Setting the class to Always (§10, its room checked first), and an Always graph out of FalkorDB on every pass | Always |
 | An operator's rebuild of the graph (`POST …/projection/rebuild`), a move of it (§17), a watermark reset that caught its load in flight | Any |
 | The first seed of a key the platform owns: the projector's first pass over a new graph past genesis takes its turn here (`waiting_capacity`) rather than writing the whole graph at once; its wait is logged and counted as any other | Any |
+| With the switch off, the capacity pass itself: every graph out of FalkorDB, until none is left (§16) | Any |
 
 A request is kept in the order it was first made (a sorted set on the broker). A broker that loses
 it loses nothing durable: the next read asks again, and a graph waiting for room or an Always graph
@@ -536,15 +542,17 @@ retried by the poll after its backoff, still `rehydrating`. A load has no timeou
 ontology stays unreadable (above): its reads stay on Postgres, and how long the oldest one has been
 under way is reported (§15).
 
-**Nothing writes to FalkorDB without admission.** With residency on:
+**Nothing writes to FalkorDB without admission.** A graph out of FalkorDB comes back only through a
+load, whatever the switch says, and no projection pass reseeds one on its own. With residency on —
+or its switch unreadable — new writes are admitted too:
 
-- A move of a graph out of FalkorDB (evicted, waiting, or being loaded) changes only its pin and asks
-  for its load again; a load in flight is fenced off (the epoch) and the graph evicted again, to wait
+- A move of a graph out of FalkorDB (evicted, waiting, or being loaded), on or off, changes only its
+  pin and asks for its load again; a load in flight is fenced off (the epoch) and the graph evicted again, to wait
   its turn. A move of a graph in FalkorDB is admission-checked on its new key's master (§17). A move
   decides which of the two it is under the capacity lock, from the graph's state read there: a load
   that finishes meanwhile cannot turn it into a full copy that was never admitted.
 - The watermark reset after a restore reseeds in place what FalkorDB holds; a load in flight it
-  would have reseeded goes back to the queue instead. A graph out of FalkorDB is at watermark 0, and
+  would have reseeded goes back to the queue instead, on or off. A graph out of FalkorDB is at watermark 0, and
   the reset never touches it. The reset itself is not admitted, and stays so: it rewrites, in place,
   keys the restored server already holds — the room they take is taken already — and a disaster
   recovery must not wait behind loads for it.
@@ -558,8 +566,9 @@ under way is reported (§15).
   written, saying which master and how much more it needs.
 - Liveness finding a platform key its master lost (a restart without its data) marks the graph
   evicted (`lost`) rather than lowering it to 0 for the poll to reseed at once: its load is admitted
-  like any other, on its next read, or by the next pass for an Always graph. A customer's key is
-  reseeded as before; the liveness check leaves forks out (§6).
+  like any other, on its next read, or by the next pass for an Always graph. With residency off it is
+  reseeded at once, as before residency. A customer's key is reseeded as before; the liveness check
+  leaves forks out (§6).
 
 ## 13. The policy: every value
 
@@ -586,10 +595,11 @@ eviction off; loads go on.
 
 Routes, under `/api/v1/admin/versioning`, `system:admin` only and never with an API key:
 
-- `GET /residency-policy` → `{enabled, values: {<value>: {saved, default, effective}}, ranges:
-  {<value>: {min, max}}, updatedBy, updatedAt}`. `enabled` is the deploy flag. `updatedBy` and
-  `updatedAt` are the policy's own (`gv_policy_updated_by`, `gv_policy_updated_at`): who last
-  changed a residency value, and when.
+- `GET /residency-policy` → `{enabled, switch, values: {<value>: {saved, default, effective}},
+  ranges: {<value>: {min, max}}, updatedBy, updatedAt}`. `enabled` is the Graph residency switch
+  (Admin → Features); `switch` says where it is: `{enabled, onSince, evictionsFrom, phase: off |
+  grace | on | reloading, reloading}` (§16). `updatedBy` and `updatedAt` are the policy's own
+  (`gv_policy_updated_by`, `gv_policy_updated_at`): who last changed a residency value, and when.
 - `PUT /residency-policy` — partial: only the values named change, and `-1` clears one to its
   default. A value out of its range, of the wrong kind or unknown, or contradicting another
   (Coldline idle longer than Standard idle; a stop mark less than 5 points under the start mark) is
@@ -604,16 +614,18 @@ Routes, under `/api/v1/admin/versioning`, `system:admin` only and never with an 
 
 ## 14. Read tracking and the read lease
 
-`ContextEngine` calls `residency.on_read` once for each engine it builds over a versioned graph,
-before it reads the graph's watermark. Live exports and the v2 router build their engine with the
-person's viewer, as the canvas does; a native query holds its graph (`residency.hold`) before it
-reads the watermark. Only a person's read counts — a background job builds its engine with no
-viewer — and it counts for the graph whose key serves it. For a fork that is its root: the fork's
-read plan names the root and whether the fork reads through the root's store (§2), and only then
-is `on_read` called, with the root, before the root's store is read for the read's route; a fork
-past the ceiling reads its own rows and calls nothing.
+For each engine it builds over a versioned graph, `ContextEngine` holds the graph with residency on
+(`residency.hold`) before it reads the graph's watermark, and then marks the read by that watermark
+(`residency.mark`), whatever the switch says. Live exports and the v2 router build their engine with
+the person's viewer, as the canvas does; a native query holds its graph before it reads the
+watermark, and marks the read by it. Only a person's read counts — a background job builds its
+engine with no viewer — and it counts for the graph whose key serves it. For a fork that is its
+root: the fork's read plan names the root, reads the root's state, and says whether the fork reads
+through the root's store (§2); only then is `residency.on_read` called, with the root and the plan:
+with residency on the root is held and its state read again after the hold, and off the plan's
+serves. A fork past the ceiling reads its own rows and calls nothing.
 
-- **The read lease, first.** The read holds the graph's read lease (the one the neighbors route
+- **The read lease, first, with residency on.** The read holds the graph's read lease (the one the neighbors route
   takes) for `GRAPHVER_TRACE_LEASE_TTL_SECS` (120 seconds) before it reads anything: refreshed at most
   every 30 seconds per graph per process, INCR and EXPIRE in one round trip, and never waited on
   for more than about 100 ms. The evictor checks the lease before its compare-and-swap and again
@@ -621,19 +633,19 @@ past the ceiling reads its own rows and calls nothing.
   evicted state and is served from Postgres. What this does not cover: a lease the broker did not
   take within 100 ms (that read goes on without one), and a lease lost from the broker before it
   lapses.
-- **Last read.** Each process notes the graphs read in memory and writes them once a minute: one
-  UPDATE of `last_read_at`, which never moves a read back and passes over a row another process's
-  flush holds (rows in id order, `SKIP LOCKED`: two flushes never wait on each other). A process
-  that stops loses at most a minute of reads.
-- **A read of a graph out of FalkorDB** is served from Postgres and asks for its load (§12), never
-  waiting on the broker more than about 100 ms. For the rest of the request the graph is known to be
-  out (`residency.READING`), so deep search and node degrees answer **503** `graph_loading`
-  `{retryAfter, message}` with `Retry-After`, and ask for the load; native queries answer **503**
-  with code `graph_loading`.
-- **Cost.** A person's read of a resident graph costs one small read of the graph's state (measured:
-  1.4 ms here) and, at most every 30 seconds per graph per process, one broker round trip; a read
-  of a fork, the same read of its root's. Counted as §2 counts a request: 18 statements on a small
-  root, where it was 17, and 23 on a fork of it, where it was 22.
+- **Last read, with residency on.** Each process notes the graphs read in memory and writes them
+  once a minute: one UPDATE of `last_read_at`, which never moves a read back and passes over a row
+  another process's flush holds (rows in id order, `SKIP LOCKED`: two flushes never wait on each
+  other). A process that stops loses at most a minute of reads.
+- **A read of a graph out of FalkorDB**, whatever the switch says, is served from Postgres and asks
+  for its load (§12), never waiting on the broker more than about 100 ms. For the rest of the
+  request the graph is known to be out (`residency.READING`), so deep search and node degrees
+  answer **503** `graph_loading` `{retryAfter, message}` with `Retry-After`, and ask for the load;
+  native queries answer **503** with code `graph_loading`.
+- **Cost.** A person's read of a graph costs no statement of residency's own, on or off: whether its
+  key is in FalkorDB is read from the watermark the read loads anyway. A fork's read with residency
+  on reads its root's state once more, after holding the root (one small read); off, the read plan's
+  serves. With residency on, at most every 30 seconds per graph per process, one broker round trip.
 
 ## 15. Health and metrics
 
@@ -667,31 +679,93 @@ past the ceiling reads its own rows and calls nothing.
 
 ## 16. Turning residency on
 
-- **Two migrations.** `20261030_1300_gv_ps_residency` (graphver: the residency columns, their
-  checks, and the two statuses) follows `20261030_1200_ds_fork_of`; with a separate
-  `GRAPHVER_DB_URL` the versioning worker adds it on start. `20261030_1400_residency_policy`
-  (management: the policy's values and who changed them last, all unset) follows it. Both wait at
-  most five seconds for their locks and can be run again. Downgrading the first turns a graph
-  waiting for room or being loaded into an evicted one at watermark 0, which the code before reseeds.
-- **The flag, `GRAPHVER_RESIDENCY_ENABLED`**, is off by default: nothing changes until it is set
-  (creating a graph does not even read the policy). Set it once every pod runs this release, on the
-  API pods first and then on the versioning workers, so reads are recorded and leased before
-  anything is evicted.
-- **A mixed rollout**, while pods disagree: a worker without the flag runs the count budget (which
-  never evicts an Always graph) and its poll reseeds every evicted and waiting graph at once,
-  unadmitted; API pods without it record no reads and take no leases, so a worker with it idle-evicts
-  graphs people are reading and nothing asks for them back, and their `project_now` reseeds without
-  the gate. Keep the window short, in the order above.
-- **With it on, the per-provider count budget is not used**: `GRAPHVER_FALKOR_MAX_RESIDENT`,
-  `GRAPHVER_FALKOR_BUDGETS` and a provider's `falkorMaxResident` stop evicting; the capacity loop
-  replaces that loop.
+Residency is off by default. A system administrator turns it on, and off, under **Admin → Features
+→ Graph residency** (`residencyEnabled`, a preview in Lineage, needing **Version control**), with no
+redeploy and no restart. Turning it on asks first, saying what it means, with **Read more** (this
+section).
+
+**What it changes.** On, FalkorDB keeps each graph by its class — Always, Standard or Coldline
+(§10) — and by each master's memory (§11): what goes unread, or does not fit, is evicted, and loaded
+again when something needs it (§12), each load admitted onto a master with room. Off, every graph
+stays loaded, as before residency.
+
+**Who reads the switch.**
+
+- **The versioning worker**, at the start of every capacity pass, from the feature store itself
+  (`residency_policy.switch_state`): on, off, or unreadable. Only the worker evicts graphs or brings
+  them back, and it decides there; a switch it cannot read makes the pass do nothing.
+- **The API**, through its flag cache (30 seconds), as every switch is read. On, a person's read
+  holds its graph's read lease and is noted for `last_read_at` (§14), and a new graph gets the
+  policy's class (off, Standard). A first seed, a move, an Adopt and a package seed are admitted
+  with it on, and while it cannot be read (§12). The policy routes say `enabled`.
+- **Reads never depend on it.** What only residency writes — `evicted`, `waiting_capacity`,
+  `rehydrating` — means "not in FalkorDB" whatever the switch says: such a graph is read from
+  Postgres, FalkorDB-only work answers **503** `graph_loading`, and a person's read asks for its
+  load. An API process that sees the switch late is safe either way.
+
+**The grace period.** The first capacity pass that sees the switch on writes when, on the platform
+settings row (`gv_residency_on_since`), and starts every graph's idle clock, since reads are not
+noted while the switch is off. Nothing is evicted for 90 seconds from then (`GRACE_SECS`: the flag
+cache's 30 seconds three times over), by which time every API process takes read leases and notes
+reads; loads and admission go on meanwhile. The grace period is the same for every worker, and
+survives restarts and a change of leader. The leader keeps the switch's phase beside it
+(`gv_residency_phase`: `grace`, `on`, `reloading`) and changes it once each time.
+
+**Before you turn it on.**
+
+- **Run this release on every pod.** One on an earlier release neither honours the switch nor reads
+  a graph out of FalkorDB from Postgres.
 - **Give every master a `maxmemory`.** Without one there is no pressure to measure: idle eviction
   still runs, loads are admitted without a limit, and placement ranks the master after every master
   whose room is known (§17).
-- **Turning it off again** reseeds every evicted and waiting graph at once, without admission: make
-  room first (Always on the graphs that must stay, or more memory), or it fills every master up to
-  its `maxmemory`. A graph whose load had published its seed keeps reading `rehydrating` until its
-  next projection pass, while its reads come from FalkorDB.
+- **Set the classes and values first** (§13, §19): Always on the graphs that must stay loaded, the
+  idle times, and the start and stop marks.
+
+**While a graph is out of FalkorDB**, its reads come from Postgres, more slowly; its watermark says
+`fresh: false`, with `residencyState` `evicted`, `waiting_capacity` or `rehydrating`; deep search,
+node degrees and native queries answer **503** `graph_loading` with `Retry-After` until its load is
+done; and its Versioning and Data health tabs read it as evicted, waiting for room or loading (§15,
+§19).
+
+**Turning it off** evicts nothing more. The capacity pass then only loads: every graph out of
+FalkorDB, through the load queue and admission, one load per master at a time, as room allows, until
+none is left; then it idles. Until each is back it reads from Postgres, and no projection pass
+reseeds one on its own. A graph that never fits waits (`waiting_capacity`) until memory is freed, so
+make room first if many are out. Turned off and on again before the next pass, the switch is never
+seen off by the leader: no new grace period starts, though API processes that saw it off took no
+leases meanwhile.
+
+**Where it is recorded.**
+
+- Each change of the switch: its history (`feature_flag_changes`: who, when, from and to), and
+  `platform.feature_flag.changed` in the activity log, which reads "Turned Graph residency on".
+- What the leader then does, as the system's (no actor), filed under the switch, each once:
+  `platform.residency.grace_started` `{onSince, evictionsFrom, graceSecs}`,
+  `platform.residency.evictions_allowed` `{onSince}`, `platform.residency.turned_off`
+  `{toBringBack}`, and `platform.residency.reload_finished`.
+- Each graph evicted or loaded: `platform.versioning.graph_evicted` `{graphId, workspaceId,
+  dataSourceId, master, bytes, reason}` — `idle_standard`, `idle_coldline`, `pressure` or
+  `load_stalled` — and `platform.versioning.graph_loaded` `{graphId, workspaceId, dataSourceId,
+  master, bytes, secs}`.
+
+**On the card.** Residency & eviction (§19) says where the switch is: "Graph residency is on.
+Evictions start at 10:42 (grace period).", "Graph residency is on.", "Graph residency is off. 12
+graphs are being brought back as memory allows.", or, fully off, that an administrator can turn it
+on and the values are kept. `GET /residency-policy` carries the same as `switch` (§13).
+
+**The count budget is no longer used.** `GRAPHVER_FALKOR_MAX_RESIDENT`, `GRAPHVER_FALKOR_BUDGETS`,
+`GRAPHVER_EVICT_SECS` and a provider's `falkor_max_resident` are not acted on, whether residency is
+on or off: Graph residency replaces them (off, what the count budget evicted would only be loaded
+back). A later release removes them.
+
+**Migrations.** `20261030_1300_gv_ps_residency` (graphver: the residency columns, their checks, and
+the two statuses) follows `20261030_1200_ds_fork_of`; with a separate `GRAPHVER_DB_URL` the
+versioning worker adds it on start. `20261030_1400_residency_policy` (management: the policy's
+values, who changed them last, and the leader's `gv_residency_on_since` and `gv_residency_phase`,
+all unset) follows it, and `20261102_1000_feature_impact_on` (management:
+`feature_definitions.impact_when_on`, what turning a switch on means) follows that. Each waits at
+most five seconds for its locks and can be run again. Downgrading the first turns a graph waiting
+for room or being loaded into an evicted one at watermark 0, which the code before reseeds.
 
 ## 17. Placement: each new key on the master with the most room
 
@@ -782,8 +856,9 @@ panel's **All versioned graphs**):
   **Waiting for room**.
 - **Residency & eviction** opens the policy card: every value with the one in force, its default and
   its unit, **Reset** (saves `-1`), each master's memory as a gauge with the start and stop marks
-  drawn on it, who changed the values last and when, and a note when residency is off on the
-  deployment. A duration's unit can be switched: the value is shown, or converted, in it. **Save**
+  drawn on it, who changed the values last and when, and where the Graph residency switch is (§16):
+  on, in its grace period (when evictions start), bringing graphs back after it was turned off, or
+  off. A duration's unit can be switched: the value is shown, or converted, in it. **Save**
   asks the planner first and confirms with what the next pass would do ("Saving evicts 12 graphs,
   9.4 GB and 2 of unknown size, on master 10.0.0.2:6379") and when: every server reads new values
   within 30 seconds, and the next capacity pass acts on them; a value the server refuses shows next

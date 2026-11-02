@@ -137,8 +137,8 @@ chips change as it loads.
 **You should now see** the new values in force within 30 seconds; the next
 capacity pass acts on them. A value that is
 out of range, or contradicts another, is named next to its field and nothing is
-saved. If the card says residency is off on this deployment, the values are kept
-but nothing acts on them until it is turned on.
+saved. If the card says Graph residency is off, the values are kept and apply once
+a Super Admin turns it on under **Administration → Features → Graph residency**.
 
 ### Adjust the graph store's limits
 

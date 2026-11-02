@@ -60,6 +60,7 @@ To read only the values — what the app loads when it starts — use
       "name": "Lineage trace",
       "description": "Follow a node's lineage upstream and downstream across the graph, from the graph and context views.",
       "impactWhenOff": "The Trace button disappears from the toolbars and the server refuses trace requests. …",
+      "impactWhenOn": null,
       "category": "lineage",
       "type": "boolean",
       "default": true,
@@ -97,6 +98,9 @@ To read only the values — what the app loads when it starts — use
   `enforcedServerSide`, `serverGates`, `uiSurfaces`, `stillAllowed` and `dependsOn` are facts
   read from the code (`backend/app/config/feature_wiring.py`), not from the database: no request
   can change them. `implemented` is `true` when the switch changes anything at all.
+  `impactWhenOn` says what turning a switch on means, for a switch whose ON is the consequential
+  direction (Graph residency); it is `null` for the rest, and the Features page asks before turning
+  on a switch that has one.
 - **`values`** — every switch's value in force: the saved value, or the definition's default
   where nothing has been saved.
 - **`version`** — the token you send back when you save.
@@ -164,15 +168,15 @@ required. `type` is `boolean` or `string[]`; a `string[]` switch also needs
 
 **Change** — `PATCH /api/v1/admin/features/definitions/{key}` takes any of `name`,
 `description`, `category`, `type`, `default`, `options`, `helpUrl`, `adminHint`,
-`impactWhenOff`, `sortOrder` and `deprecated`.
+`impactWhenOff`, `impactWhenOn`, `sortOrder` and `deprecated`.
 
-> **Warning:** `options`, `helpUrl`, `adminHint` and `impactWhenOff` are cleared when you leave
-> them out. Send their current values with every change.
+> **Warning:** `options`, `helpUrl`, `adminHint`, `impactWhenOff` and `impactWhenOn` are cleared
+> when you leave them out. Send their current values with every change.
 
-> **Note:** For the 35 built-in switches, the API service rewrites `name`, `description`,
-> `adminHint`, `impactWhenOff`, `helpUrl`, `category`, `type`, `options` and `sortOrder` from
-> the code every time it starts, so a change to those lasts only until the next restart.
-> Change the text in `backend/app/config/features_seed.py` instead.
+> **Note:** For the 38 built-in switches, the API service rewrites `name`, `description`,
+> `adminHint`, `impactWhenOff`, `impactWhenOn`, `helpUrl`, `category`, `type`, `options` and
+> `sortOrder` from the code every time it starts, so a change to those lasts only until the next
+> restart. Change the text in `backend/app/config/features_seed.py` instead.
 
 **Retire** — `POST /api/v1/admin/features/definitions/{key}/deprecate` marks the definition
 deprecated and removes its value. It stays in the database, but leaves `schema` and `values`.

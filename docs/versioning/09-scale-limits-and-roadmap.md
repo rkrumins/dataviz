@@ -175,7 +175,7 @@ not to the projector.) See [04](04-projection-and-cache.md).
 
 | Feature | State | Consequence |
 |---------|-------|-------------|
-| **Per-provider RAM-budget eviction** | The loop always starts, in both worker paths. Each provider's budget is its `falkorMaxResident` setting, falling back to `GRAPHVER_FALKOR_MAX_RESIDENT`/`GRAPHVER_FALKOR_BUDGETS`; a budget of 0 skips it | FalkorDB caches are still **unbounded per provider** by default: no manifest, chart or compose file sets a budget, and no screen sets `falkorMaxResident`. `falkor_eviction_configured()` has no callers. Called out in code as "the riskiest scale bet." |
+| **Per-provider RAM-budget eviction** | Superseded: the worker no longer starts the loop, and `falkorMaxResident`, `GRAPHVER_FALKOR_MAX_RESIDENT`, `GRAPHVER_FALKOR_BUDGETS` and `GRAPHVER_EVICT_SECS` are not acted on | Graph residency replaces it once a system administrator turns it on: each graph kept by its class and each master's memory ([17 §16](17-forks-and-residency.md#16-turning-residency-on)). Off, FalkorDB caches are unbounded per provider. A later release removes the budget's settings. |
 | **Ephemeral time-travel pool** | `EPHEMERAL_POOL_MAX_GRAPHS`/`EPHEMERAL_TTL_SECS`/`TRACE_LEASE_TTL_SECS` exist with **zero call sites** | Time-travel is served from Postgres (`_state_as_of` / `materialize_state(as_of_seq=…)`), not a dedicated FalkorDB pool. The active read lease uses `LEASE_TTL`, not `TRACE_LEASE_TTL_SECS`. |
 
 ## 6. Correctness & operational gaps
@@ -295,7 +295,7 @@ hashes/partitions) are marked ⚠. The table is the load-bearing subset.
 | `GRAPHVER_PROJECTION_VERIFY` | on | post-projection count reconcile + bounded heal |
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | `900` | budget for an explicit operator rebuild |
 | `GRAPHVER_VERSIONED_WRITES` | on | write-through: every provider write → an audited commit, which the projector carries to FalkorDB. `0` opts out only data sources without version control; a versioned graph is always written through versioning |
-| `GRAPHVER_FALKOR_MAX_RESIDENT` / `_BUDGETS` | `0` (dormant) | per-provider RAM-budget eviction |
+| `GRAPHVER_FALKOR_MAX_RESIDENT` / `_BUDGETS` | `0` (not acted on) | per-provider RAM-budget eviction, which Graph residency replaces |
 | `GRAPHVER_DRAFT_TTL_DAYS` / `_SWEEP_SECS` | `30` / daily | auto-abandon idle drafts (not those with a live PR or staged edits, nor on a deleted, frozen or recently unfrozen graph) |
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `commit_seq`-collision retry budget |
 | `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` | `5000` | longest wait for any one graph, draft, lifecycle, move, PR or graph-row lock; a write `_retry_seq` retries (save, checkpoint, pull, publish, merge, revert, restore, sync, bulk ingest) tries `GRAPHVER_COMMIT_MAX_RETRIES` times before 503 `lock_busy`, anything else answers it after one wait |
