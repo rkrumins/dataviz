@@ -120,16 +120,61 @@ All of these are staged too — nothing is saved until **Review & Save**.
   entity inside it. **Paste a list** adds many at once.
 - **Add a child:** choose the **+** on an entity's row (**Add child entity**),
   or right-click the entity and choose **Add Child Entity**.
-- **Connect two entities:** drag from an entity's connection handle to another
-  entity, or right-click it and choose **Connect To…** or **Link to…**. Then
-  pick the relationship type — only the types your
-  [semantic layer](/guide/semantic-layer) allows are offered.
-- **Copy, move or remove:** right-click an entity for **Duplicate**, **Move to
-  Layer** and **Delete**; right-click a line for **Edit Edge**, **Reverse
-  Direction** and **Delete Edge**.
+- **Connect two entities — no dragging needed:** click the **+** on an
+  entity's row (it appears as you hover), then click the entity the link goes
+  to. Nothing is held down in between, so you can scroll, jump with the Layer
+  Strip or search for a target that's off screen. A strip at the top of the
+  canvas says what it's waiting for, and the entity under your pointer is
+  ringed green when a relationship can join them — or red, with the reason,
+  when none can. `Esc` backs out one step at a time. You can still drag from
+  the **+** to the target, or right-click an entity and choose **Connect To…**
+  or **Link to…**.
+  - When only one relationship type fits, the link is made at once, and the
+    message that confirms it offers **Undo**. Otherwise pick the type — only
+    the types your [semantic layer](/guide/semantic-layer) allows are offered.
+  - To link one entity to several, hold `⌘` / `Ctrl` and click each target,
+    then press `Enter` (or **Link N**).
+  - For many links in a row, turn on **Connect** in the toolbar (or press `C`
+    with nothing selected): click where a link starts, then where it goes, and
+    repeat. **Done** or `Esc` turns it off.
+- **Copy:** right-click an entity and choose **Duplicate** (`⌘D` / `Ctrl-D`)
+  for a quick copy of it and everything inside it, beside the original, with
+  **Undo** in the message that confirms it. **Duplicate…** (`⌘⇧D` /
+  `Ctrl-Shift-D`) lets you choose: the entity alone or with everything inside
+  it, the links inside the copy, its **Incoming** relationships (what feeds the
+  original feeds the copy too) and its **Outgoing** ones (the copy feeds what
+  the original feeds) — each counted before anything is staged — and the
+  copy's name. A copy of more than 2,000 entities, or more than 500
+  relationships either way, is too big to make in one go and the dialog says
+  so.
+- **Move or remove:** right-click an entity for **Move to Layer** and
+  **Delete**; right-click a line for **Edit Edge**, **Reverse Direction** and
+  **Delete Edge**.
 
 **Undo** (`⌘Z` / `Ctrl-Z`) and **Redo** (`⌘⇧Z` / `Ctrl-Shift-Z`) step through
 your staged edits.
+
+## Change the layers
+
+In a draft you can also reshape the View's columns. These change the View,
+not the data: they appear in **Review & Save** as layout changes, and **Undo**
+takes them back.
+
+- **Insert a layer anywhere:** right-click a column's header — or its pill in
+  the **Layer Strip** at the bottom of the canvas, which is always in reach —
+  and choose **Insert layer to the left** or **Insert layer to the right**. Or
+  hover a header and choose the **+** at its left edge, between it and the
+  column before. The new layer appears right there with its name ready to type.
+- **Rename, recolour or move a layer:** the same menu offers **Rename**, a row
+  of colours, and **Move left** / **Move right**. You can also drag a column's
+  header onto another.
+- **Delete a layer:** choose **Delete layer** in its menu. Its hand-placed
+  entities move to the first remaining layer, and the message that confirms it
+  offers **Undo**.
+- **Add a layer at the end:** choose **Add layer** after the last column.
+
+Outside a draft, the menu says layers change in a draft and offers **Start
+editing to change layers**.
 
 ## Review & Save
 
