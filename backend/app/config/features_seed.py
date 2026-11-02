@@ -660,6 +660,43 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "deprecated": False,
     },
     {
+        "key": "residencyEnabled",
+        "name": "Graph residency",
+        "description": (
+            "FalkorDB keeps graphs by their class and each master's memory: Always, Standard and "
+            "Coldline, the capacity loop, admission, placement. Needs Version control."
+        ),
+        "impact_when_off": (
+            "Every graph stays loaded, as before residency. Turning it off brings evicted graphs "
+            "back as memory allows — until then they read from Postgres — so make room first. "
+            "The classes and the values are kept, and apply again once it is on."
+        ),
+        "impact_when_on": (
+            "FalkorDB keeps each graph by its class — Always, Standard or Coldline — and by each "
+            "master's memory. The first eviction waits 90 seconds after it is turned on. An "
+            "evicted graph reads from Postgres, more slowly, until it is loaded again when it is "
+            "needed, and loads wait for room on their master. Every FalkorDB master needs a "
+            "maxmemory, and every pod must run this release first. The values are under Admin → "
+            "Infrastructure → Versioned graphs → Residency & eviction. Turning it off brings "
+            "graphs back as memory allows."
+        ),
+        "category_id": "lineage",
+        "type": "boolean",
+        # OFF by default: residency starts evicting graphs from memory, and that needs every pod on
+        # this release and a maxmemory on every master first — so a deployment opts in.
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": "/docs/versioning-forks-and-residency#16-turning-residency-on",
+        "admin_hint": (
+            "Graph residency needs Version control on. Before turning it on, give every FalkorDB "
+            "master a maxmemory and run this release on every pod, and set the classes and values "
+            "you want under Admin → Infrastructure → Versioned graphs. Each change of this switch, "
+            "the grace period, and every eviction and load are recorded in the activity log."
+        ),
+        "sort_order": 2,
+        "deprecated": False,
+    },
+    {
         "key": "traceEnabled",
         "name": "Lineage trace",
         "description": (
@@ -680,7 +717,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "Trace can be expensive on very large graphs. Turning it off is a legitimate way to "
             "protect a struggling provider without taking the whole view away."
         ),
-        "sort_order": 2,
+        "sort_order": 3,
         "deprecated": False,
     },
     # ── Data governance ────────────────────────────────────────────────────────

@@ -492,18 +492,19 @@ provider per request:
   or catalog entry reads, or whose readers can't be asked (`purge_worker.graph_key_readers`); marks `status=evicted` +
   `projected_commit_seq=0` (so the poll loop rebuilds it), and drops the FalkorDB key on the graph's
   pinned provider. Reads of an evicted graph serve the bounded Postgres fallback meanwhile.
-- **Per-provider RAM budget** — `ProjectionWorker.evict_once` (`worker.py:86`) evicts the coldest
+- **Per-provider RAM budget** (no longer run: see the note below) — `ProjectionWorker.evict_once`
+  (`worker.py:86`) evicts the coldest
   resident graphs per provider (`lru_candidates` by `last_projected_at`, `cache_manager.py:159`) down
   to that provider's budget, taking the next coldest when one is refused, so a provider whose other
   graphs are all refused stays above it. Budgets come from `make_registry_budget_resolver` (`eviction_budget.py:24`,
   provider row → `vconfig.falkor_budget_for` fallback).
 
-> **Limitation (no budget set by default).** RAM is a property of a FalkorDB *instance*, so each
-> provider has its own budget — its `falkorMaxResident` setting, falling back to
-> `GRAPHVER_FALKOR_MAX_RESIDENT` / `GRAPHVER_FALKOR_BUDGETS`. The eviction loop always runs, but a
-> budget of **0** ("unlimited", the default, `config.py:182`) skips the provider, and no manifest,
-> chart or compose file sets one. In practice caches are unbounded per provider until an operator
-> does. (`falkor_eviction_configured` no longer gates anything; it has no callers.)
+> **Superseded (the count budget is not run).** The versioning worker no longer starts this loop:
+> `GRAPHVER_FALKOR_MAX_RESIDENT`, `GRAPHVER_FALKOR_BUDGETS`, `GRAPHVER_EVICT_SECS` and a provider's
+> `falkorMaxResident` are not acted on, whether Graph residency is on or off. Graph residency
+> replaces them: FalkorDB keeps each graph by its class and each master's memory once a system
+> administrator turns it on ([17 §16](17-forks-and-residency.md#16-turning-residency-on)). A later
+> release removes them.
 
 > **Limitation (ephemeral pool unimplemented).** The `EPHEMERAL_POOL_MAX_GRAPHS` /
 > `EPHEMERAL_TTL_SECS` / `TRACE_LEASE_TTL_SECS` knobs (`config.py:189-194`) have **no call sites** —
@@ -573,8 +574,8 @@ boot via `XAUTOCLAIM`. `_project_one` (`worker.py:65`) serializes per-graph via 
 | `GRAPHVER_PROJECTION_INPROCESS` | off | Run the worker lanes in the web process, only with `SYNODIC_ROLE=dev` (`config.py:158`). |
 | `GRAPHVER_REBUILD_TIMEOUT_SECS` | 900 | Operator-rebuild budget (`config.py:130`). |
 | `GRAPHVER_REBUILD_LOCK_TTL` / `GRAPHVER_LEASE_TTL` | 120 / 60 | Single-flight rebuild lock / read-lease TTLs (`config.py:139-140`). |
-| `GRAPHVER_FALKOR_MAX_RESIDENT` / `_BUDGETS` | 0 / {} | Per-provider eviction budget (off by default, `config.py:151`). |
-| `GRAPHVER_EVICT_SECS` | 300 | Eviction sweep cadence (`config.py:154`). |
+| `GRAPHVER_FALKOR_MAX_RESIDENT` / `_BUDGETS` | 0 / {} | Per-provider eviction budget — no longer acted on; Graph residency replaces it. |
+| `GRAPHVER_EVICT_SECS` | 300 | Eviction sweep cadence — no longer acted on. |
 
 ---
 

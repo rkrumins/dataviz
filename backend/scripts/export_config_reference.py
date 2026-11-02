@@ -277,8 +277,8 @@ NOTES: dict[str, tuple[str, str | None]] = {
     "METRICS_ENABLED": (
         "Serve Prometheus metrics: `true`, `1`, `yes` or `on`. The API serves them at "
         "`/api/v1/metrics`, the control plane at `/metrics` on its port 8091, and the aggregation "
-        "worker at `/metrics` on `METRICS_PORT`. Also needs `METRICS_TOKEN`: without one the "
-        "endpoint answers 404.",
+        "and versioning workers at `/metrics` on `METRICS_PORT`. Also needs `METRICS_TOKEN`: "
+        "without one the endpoint answers 404.",
         None,
     ),
     "DATABASE_URL": (

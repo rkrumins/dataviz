@@ -85,6 +85,7 @@ def _row_to_definition(row: FeatureDefinitionORM) -> dict[str, Any]:
         "helpUrl": row.help_url,
         "adminHint": row.admin_hint,
         "impactWhenOff": getattr(row, "impact_when_off", None),
+        "impactWhenOn": getattr(row, "impact_when_on", None),
         "sortOrder": row.sort_order,
         "deprecated": row.deprecated,
         # Derived, and reconciled into the row on every startup. `implemented` stays in the
@@ -158,7 +159,7 @@ async def update_definition(
     # API caller can make that true or false by saying so.
     allowed = {
         "name", "description", "category_id", "type", "default_value",
-        "options", "help_url", "admin_hint", "impact_when_off",
+        "options", "help_url", "admin_hint", "impact_when_off", "impact_when_on",
         "sort_order", "deprecated",
     }
     for k, v in fields.items():

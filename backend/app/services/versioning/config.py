@@ -212,6 +212,22 @@ DEFAULT_FALKOR_PROVIDER: str = "default"
 RETIRE_GRACE_SECS: int = 900
 EVICT_SECS: int = int(os.getenv("GRAPHVER_EVICT_SECS", "300"))
 
+# Residency (doc 17): each graph's class (Always / Standard / Coldline) and each cluster master's
+# memory decide whether its key stays in FalkorDB, through the projection lane's capacity loop,
+# once a system administrator turns on Graph residency (Admin → Features, ``residencyEnabled``;
+# ``residency_policy.switch_state``). The worker no longer runs the count budget above, whatever
+# the switch says. The residency policy's defaults follow; each is overridden live from the admin UI
+# (platform_settings) and clamped to its range by ``residency_policy``.
+EVICTION_ENABLED: bool = os.getenv("GRAPHVER_EVICTION_ENABLED", "1").lower() not in ("0", "false", "no")
+STANDARD_IDLE_SECS: int = int(os.getenv("GRAPHVER_STANDARD_IDLE_SECS", "604800"))
+COLDLINE_IDLE_SECS: int = int(os.getenv("GRAPHVER_COLDLINE_IDLE_SECS", "3600"))
+MASTER_HIGH_WATER_PCT: int = int(os.getenv("GRAPHVER_MASTER_HIGH_WATER_PCT", "80"))
+MASTER_LOW_WATER_PCT: int = int(os.getenv("GRAPHVER_MASTER_LOW_WATER_PCT", "70"))
+LOAD_MARGIN_PCT: int = int(os.getenv("GRAPHVER_LOAD_MARGIN_PCT", "130"))
+BYTES_PER_ENTITY: int = int(os.getenv("GRAPHVER_BYTES_PER_ENTITY", "550"))
+COLDLINE_CANVAS_LOAD_ABOVE: int = int(os.getenv("GRAPHVER_COLDLINE_CANVAS_LOAD_ABOVE", "500000"))
+CAPACITY_SECS: int = int(os.getenv("GRAPHVER_CAPACITY_SECS", "60"))
+
 # DERIVED_LABELS / not_derived_clause are imported at the top of this module and
 # re-exported here for this package's callers. The definition moved OUT to
 # ``backend/common/derived_artifacts`` because the provider and profiling read
@@ -376,7 +392,8 @@ if os.getenv("GRAPHVER_TRANSFER_INPROCESS"):
 TRANSFER_SLOTS: int = int(os.getenv("GRAPHVER_TRANSFER_SLOTS", "2"))
 # How often an idle worker looks for a queued job: about how long a queued job waits for a free one.
 TRANSFER_POLL_SECS: float = float(os.getenv("GRAPHVER_TRANSFER_POLL_SECS", "1"))
-# A queued job no worker has started in this long reads as failed: none may be running.
+# A queued job no worker has started in this long reads as failed, when no job of the lane was
+# claimed or beat in that time either: none is running. Behind busy workers it waits its turn.
 TRANSFER_QUEUE_TIMEOUT_SECS: int = int(os.getenv("GRAPHVER_TRANSFER_QUEUE_TIMEOUT_SECS", str(6 * 3600)))
 # The transfer lane's JobReaper rules (import_export/runner.py), here so the schema upgrade that
 # fails such jobs before building uq_jobs_ingest_active (models.py) applies the same ones.
@@ -522,6 +539,11 @@ BOOTSTRAP_PER_PROVIDER: int = int(os.getenv("GRAPHVER_BOOTSTRAP_PER_PROVIDER", "
 # running fewer than this, so one tenant queueing 50 imports doesn't hold every slot while
 # another's single job waits. Soft (work-conserving): with nobody else waiting it still runs.
 JOBS_PER_WORKSPACE: int = int(os.getenv("GRAPHVER_JOBS_PER_WORKSPACE", "2"))
+# The same SOFT share per person, after the workspace's: a claim prefers the job of someone running
+# fewer than this, so one person queueing ten large imports doesn't hold their workspace's share
+# while a colleague's export waits. A job is the person's who asked for it (an export, a publish);
+# an import is its draft owner's. Soft too: with nobody else waiting, their jobs still run.
+JOBS_PER_USER: int = int(os.getenv("GRAPHVER_JOBS_PER_USER", "1"))
 # How long a stopping worker gives its running jobs to hand themselves back at a window boundary
 # (release: pending again, cursor kept) before cancelling them. Inside the deployment's 60 s
 # termination grace, with time left to release the cancelled ones.

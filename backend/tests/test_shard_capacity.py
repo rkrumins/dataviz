@@ -384,6 +384,45 @@ def test_owner_endpoint_uses_the_client_map_it_has_and_the_reading_refreshes_it(
     assert conn.initialized is True
 
 
+def test_master_slots_names_every_master_and_the_slots_it_owns():
+    """Every master of a cluster, from the client's slot map — whether or not it holds anything
+    the caller knows of — with its slots as ranges; a replica is not a master."""
+    class _N:
+        def __init__(self, host):
+            self.host, self.port = host, 6379
+
+    a, b, replica = _N("10.0.0.1"), _N("10.0.0.2"), _N("10.0.0.9")
+    conn = _Cluster({"used_memory": "1"})
+    conn.nodes_manager.slots_cache = {0: [a, replica], 1: [a], 2: [b], 3: [a], 5: [b]}
+    out = _run(sc.master_slots(_db(conn), mode="cluster", timeout=1))
+    assert out == {"10.0.0.1:6379": [(0, 1), (3, 3)], "10.0.0.2:6379": [(2, 2), (5, 5)]}
+    assert conn.initialized is False                         # the map in hand is used
+    fresh = _Cluster({"used_memory": "1"})
+    fresh.nodes_manager.slots_cache = {}
+
+    async def initialize():
+        fresh.initialized = True
+        fresh.nodes_manager.slots_cache = {7: [a]}
+
+    fresh.initialize = initialize
+    assert _run(sc.master_slots(_db(fresh), mode="cluster", timeout=1)) == {
+        "10.0.0.1:6379": [(7, 7)]}
+
+
+def test_master_slots_is_one_master_outside_a_cluster_and_none_when_unreadable():
+    single = _Standalone({"used_memory": "1"})
+    assert _run(sc.master_slots(_db(single), mode="standalone", timeout=1)) == {"falkor:6379": None}
+
+    class _Broken:
+        nodes_manager = types.SimpleNamespace(slots_cache=None)
+
+        async def initialize(self):
+            raise RuntimeError("cluster down")
+
+    assert _run(sc.master_slots(_db(_Broken()), mode="cluster", timeout=1)) is None
+    assert _run(sc.master_slots(types.SimpleNamespace(), mode="cluster", timeout=1)) is None
+
+
 def test_owner_endpoint_is_unknown_when_the_client_cannot_say():
     class _Broken:
         nodes_manager = None

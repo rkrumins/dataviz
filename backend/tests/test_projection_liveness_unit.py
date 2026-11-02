@@ -183,7 +183,8 @@ def test_liveness_can_be_turned_off(monkeypatch):
     async def idle():
         return None
 
-    for name in ("_poll_loop", "_stream_loop", "_reclaim_pending", "_retire_loop"):
+    for name in ("_poll_loop", "_stream_loop", "_reclaim_pending", "_retire_loop",
+                 "_capacity_loop"):
         monkeypatch.setattr(w, name, idle)
     monkeypatch.setattr(worker, "ensure_consumer_group", idle)
     _run(asyncio.wait_for(w.run(), 5))

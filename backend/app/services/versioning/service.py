@@ -51,7 +51,7 @@ from .errors import (AccessDenied, AmbiguousSpelling, BranchNotOpen, ContentionE
                      ForkUpdateConflicts, GraphMoved, GraphNotWritable,
                      GroupsUnavailable, HeadMoved, IneligibleMember, JobActive, LiveForks, LockBusy,
                      MainWriteForbidden, MassDeleteBlocked, NotAFork, NotAnEdge, NotDraftOwner,
-                     PersonRequired,
+                     PersonRequired, ProjectionAlreadyAdopted, ProjectionPassInFlight,
                      ProjectionKeyInUse, ProjectionKeyInvalid, ProjectionNotAdopted,
                      ResolutionsWithoutConflict, ReviewRequired, SelfMerge, SelfReview,
                      VersionConflict)
@@ -537,6 +537,26 @@ _EMPTY_INCOMING: Dict[str, object] = {
 }
 
 
+def serves_head(projected: int, committed: int, status: Optional[str]) -> bool:
+    """Whether a projection serves reads of main at its head: it holds the head and no load of it is
+    under way — a loaded key serves once its summaries are built too. Whatever the Graph residency
+    switch says: only residency writes ``rehydrating``, and its load is finished either way."""
+    return projected >= committed and status != "rehydrating"
+
+
+def residency_state_of(status: str, projected: int, key: Optional[str],
+                       graph_id: str) -> Optional[str]:
+    """Whether a graph's key is in FalkorDB, as residency shows it (doc 17): ``evicted``,
+    ``rehydrating`` (being loaded) or ``waiting_capacity`` as its status says; None with no key
+    (unpinned); ``rehydrating`` too while its key is written from nothing (a move's, an Adopt's,
+    a first seed: watermark 0); else ``resident``."""
+    if status in ("evicted", "rehydrating", "waiting_capacity"):
+        return status
+    if key in (None, f"gv_{graph_id}"):
+        return None
+    return "rehydrating" if projected == 0 else "resident"
+
+
 def bootstrap_unfinished(graph_id) -> tuple:
     """The ``jobs`` rows that say a graph's "enable version control" job has not COMPLETED
     (:meth:`GraphVersioningService._assert_not_bootstrapping`). ``graph_id`` is an id or a
@@ -646,7 +666,8 @@ class GraphVersioningService:
         session=None,
     ) -> Dict[str, str]:
         """Create a blank versioned graph: graph row + ``main`` branch + empty
-        genesis commit + projection state.  Returns ids and the genesis seq.
+        genesis commit + projection state, in the residency class the policy gives a new graph
+        (``residency_policy.default_class``).  Returns ids and the genesis seq.
 
         ``provider_aliases``: the providers on ``falkor_provider``'s server, through any of which
         another graph may already hold ``falkor_graph_name`` (:meth:`_claim_projection_key`).
@@ -695,9 +716,12 @@ class GraphVersioningService:
             # full-seed into it, so it starts parked and its first projection is the first
             # commit's window.
             parked = bool(falkor_graph_name) and not owns_falkor_graph
+            from .residency_policy import default_class, enabled
             s.add(
                 ProjectionStateORM(
                     graph_id=graph.id, projected_commit_seq=1 if parked else 0, target_commit_seq=1,
+                    # The policy's class for a new graph; with residency off, no policy is read.
+                    residency=await default_class() if await enabled() else "standard",
                     falkor_graph_name=falkor_graph_name,   # the data source's real graph
                     falkor_provider=falkor_provider,       # FalkorDB instance (per-provider eviction)
                     # THE GUARDRAIL, recorded at birth from a fact we actually know: we own the
@@ -4469,7 +4493,8 @@ class GraphVersioningService:
         naming no key, owning none: nothing reads a fork's key through it, and no screen shows a
         fork behind on a projection it does not have. Its route is where its reads come from
         (``reads_from``, :meth:`fork_reads_from`): past the ceiling its own layered reads in
-        Postgres serve its main, whatever the root's projection holds."""
+        Postgres serve its main, whatever the root's projection holds. Residency (doc 17): the
+        state is its root's, and a fork has no class of its own (``residency`` None)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             root = graph
@@ -4485,7 +4510,8 @@ class GraphVersioningService:
                 wm["read_route"] = {**wm["read_route"], "main": "postgres"}
             return {**wm, "reads_through": root.id, "reads_from": reads_from,
                     "falkor_graph_name": None, "falkor_provider": None,
-                    "owns_falkor_graph": False, "retired_keys": [], "external_drift": None}
+                    "owns_falkor_graph": False, "retired_keys": [], "external_drift": None,
+                    "residency": None}
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             ps = await s.get(ProjectionStateORM, graph_id)
@@ -4510,20 +4536,22 @@ class GraphVersioningService:
                     "commit_id": c.id, "created_at": c.created_at,
                     "actor": c.actor, "message": c.message,
                 }
+            status = ps.status if ps else "idle"
+            fresh = serves_head(projected, committed, status)
             return {
                 "committed_revision": _rev(committed),
                 "projected_revision": _rev(projected),
                 "committed": committed,
                 "projected": projected,
                 "target": ps.target_commit_seq if ps else 0,
-                "status": ps.status if ps else "idle",
+                "status": status,
                 "falkor_graph_name": ps.falkor_graph_name if ps else None,
                 "falkor_provider": ps.falkor_provider if ps else None,
-                "fresh": projected >= committed,
+                "fresh": fresh,
                 # Where reads go, by ContextEngine.for_workspace's rule: main from FalkorDB only
                 # while the projection holds the head, else Postgres; a draft always overlays
                 # whatever serves main.
-                "read_route": {"main": "falkordb" if projected >= committed else "postgres",
+                "read_route": {"main": "falkordb" if fresh else "postgres",
                                "drafts": "overlay"},
                 # Failure reason + last success + live full-reseed progress — the Data
                 # health UI needs these to converge to an honest done/failed state.
@@ -4544,7 +4572,38 @@ class GraphVersioningService:
                 "retired_keys": list(ps.retired_keys or []) if ps else [],
                 # What a customer's key holds that history doesn't, kept and flagged.
                 "external_drift": ps.external_drift if ps else None,
+                # Residency (doc 17): the class a system admin set, whether the key is in
+                # FalkorDB (resident, evicted, rehydrating: being loaded, waiting_capacity: its
+                # master has no room for it yet), why it was evicted, its last read and its size.
+                "residency": ps.residency if ps else "standard",
+                "residency_state": residency_state_of(
+                    status, projected, ps.falkor_graph_name if ps else None, graph_id),
+                "evicted_reason": ps.evicted_reason if ps else None,
+                "last_read_at": ps.last_read_at if ps else None,
+                "size_bytes": ps.size_bytes if ps else None,
+                # When its load in flight started; a load has no timeout.
+                "rehydrating_since": (ps.rehydrating_since if ps and status == "rehydrating"
+                                      else None),
             }
+
+    async def residency_state(self, graph_id: str) -> Optional[Dict[str, object]]:
+        """What a read needs to know of a graph's residency (doc 17), in one small read: its
+        projection ``status``, its class (``residency``), its measured ``size_bytes``, the head it
+        is at (``committed``), and its store — ``projected``, ``fresh`` (:func:`serves_head`) and
+        its pin. None for a graph with no projection row."""
+        async with self._session() as s:
+            row = (await s.execute(
+                select(ProjectionStateORM.status, ProjectionStateORM.residency,
+                       ProjectionStateORM.size_bytes, GraphORM.main_head_commit_seq,
+                       ProjectionStateORM.projected_commit_seq, ProjectionStateORM.falkor_provider,
+                       ProjectionStateORM.falkor_graph_name)
+                .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
+                .where(ProjectionStateORM.graph_id == graph_id))).first()
+        if row is None:
+            return None
+        return {"status": row[0], "residency": row[1], "size_bytes": row[2], "committed": row[3],
+                "projected": row[4], "fresh": serves_head(row[4], row[3], row[0]),
+                "falkor_provider": row[5], "falkor_graph_name": row[6]}
 
     async def clear_external_changes(self, graph_id: str, seen_at: Optional[str] = None) -> None:
         """What the graph held that history didn't has been brought into it: the flag goes,
@@ -4615,7 +4674,12 @@ class GraphVersioningService:
 
         Refused (:class:`ConcurrencyError`) while the graph's "enable version control" job is
         unfinished: a rebuild would wipe the data source's own FalkorDB graph and reseed it from a
-        main parked at genesis. ``False`` for a fork, which has no FalkorDB copy to rebuild."""
+        main parked at genesis. ``False`` for a fork, which has no FalkorDB copy to rebuild.
+
+        An evicted graph (or one waiting for room) is left as it is and its load asked for instead,
+        for the capacity loop to admit (``residency.request_load``) — whatever the Graph residency
+        switch says: off, the loop brings such graphs back through admission too. A load in flight
+        is a rebuild already running."""
         async with self._session() as s:
             await self._lock_graph(s, graph_id)
             await self._assert_not_bootstrapping(s, graph_id)
@@ -4623,6 +4687,12 @@ class GraphVersioningService:
             graph = await s.get(GraphORM, graph_id)
             if ps is None or graph is None or graph.fork_parent_graph_id:
                 return False
+            if ps.status == "rehydrating":
+                return False
+            if ps.status in ("evicted", "waiting_capacity"):
+                from .residency import request_load
+                await request_load(graph_id)
+                return True
             if ps.status in ("projecting", "rebuilding") and ps.projected_commit_seq < ps.target_commit_seq:
                 return False
             ps.projected_commit_seq = 0
@@ -4650,8 +4720,12 @@ class GraphVersioningService:
         (:class:`ProjectionKeyInvalid`), and no other graph's pin (:class:`ProjectionKeyInUse`).
         Moving to the current pin changes nothing (``changed: False``). Refused
         (:class:`ConcurrencyError`) while the graph's "enable version control" job is unfinished.
-        No FalkorDB I/O: the caller checks the key is free there and schedules the reseed."""
+        No FalkorDB I/O: the caller checks the key is free there and schedules the reseed. A graph
+        that is not in FalkorDB — whatever the Graph residency switch says — only changes its pin,
+        and its load is asked for again (``residency.request_load``) to seed the new key once
+        admitted; a load in flight is fenced off and the graph is evicted again, to wait its turn."""
         default = config.DEFAULT_FALKOR_PROVIDER
+        out = False                      # not in FalkorDB under residency: its load is asked for
         try:
             async with self._session() as s:
                 await self._lock_graph(s, graph_id)
@@ -4692,7 +4766,11 @@ class GraphVersioningService:
                 ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
                 ps.projected_commit_seq = 0
                 ps.target_commit_seq = graph.main_head_commit_seq
-                ps.status = "reseeding"
+                out = ps.status in ("evicted", "waiting_capacity", "rehydrating")
+                if not out:
+                    ps.status = "reseeding"
+                elif ps.status == "rehydrating":
+                    ps.status, ps.rehydrating_since = "evicted", None
                 ps.last_error = None
                 ps.failed_attempts = 0
                 ps.next_retry_at = None
@@ -4702,7 +4780,94 @@ class GraphVersioningService:
                 ps.shard_map = shard_map
         except IntegrityError:
             raise ProjectionKeyInUse(provider, key) from None     # uq_ps_key: a concurrent claim won
+        if out:
+            from .residency import request_load
+            await request_load(graph_id)
         return {"changed": True, "from": cur, "to": tgt, "retiring": entry}
+
+    async def adopt_projection(self, *, graph_id: str, key: str, actor: str,
+                               shard_map: dict) -> Dict[str, object]:
+        """Adopt (doc 17): move a graph that projects into the customer's own FalkorDB key onto
+        its platform key ``key`` on the same provider — the reseed move of doc 14 §6. The pin
+        swaps, the platform owns the key from then (its residency class applies), the epoch is
+        bumped so a pass in flight cannot publish over it, and the watermark goes to 0
+        (``reseeding``): the next pass seeds the key from Postgres, which serves the graph's reads
+        until it catches up. The customer's key is left exactly as it was: never written,
+        dropped, renamed, relabelled or retired. What it held that history didn't is no longer
+        flagged (``external_drift``, returned as ``externalDrift``): the graph reads its own copy,
+        and Bring into history no longer sees that key.
+
+        Refused: an unpinned graph (:class:`ProjectionNotAdopted`), one already on a platform key
+        (:class:`ProjectionAlreadyAdopted`), a key that is not this graph's platform key
+        (:class:`ProjectionKeyInvalid`) or that another graph holds (:class:`ProjectionKeyInUse`),
+        and while the graph's "enable version control" job is unfinished
+        (:class:`ConcurrencyError`). No FalkorDB I/O: the caller checks the key is free there and
+        schedules the reseed.
+
+        Under the graph's projection lock, taken as a try: a pass in flight is fenced only when it
+        finishes, after it has written its window and its marker into the customer's key, so
+        while one holds the lock Adopt waits for it (:class:`ProjectionPassInFlight`)."""
+        default = config.DEFAULT_FALKOR_PROVIDER
+        lock_scope = (db.graphver_lock_session() if self._session is db.graphver_session
+                      else self._session())
+        lock_s = await lock_scope.__aenter__()
+        lock_arg = func.hashtext(f"gvproj:{graph_id}")
+        acquired = False
+        try:
+            acquired = bool(await lock_s.scalar(select(func.pg_try_advisory_lock(lock_arg))))
+            if not acquired:
+                raise ProjectionPassInFlight(graph_id)
+            return await self._adopt_locked(graph_id, key, actor, shard_map, default)
+        finally:
+            try:
+                if acquired:
+                    await lock_s.execute(select(func.pg_advisory_unlock(lock_arg)))
+            finally:
+                await lock_scope.__aexit__(None, None, None)
+
+    async def _adopt_locked(self, graph_id: str, key: str, actor: str, shard_map: dict,
+                            default: str) -> Dict[str, object]:
+        try:
+            async with self._session() as s:
+                await self._lock_graph(s, graph_id)
+                graph = await s.get(GraphORM, graph_id)
+                if graph is None or graph.deleted_at is not None:
+                    raise ValueError(f"unknown graph {graph_id}")
+                await self._assert_not_bootstrapping(s, graph_id)
+                ps = (await s.execute(
+                    select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+                    .with_for_update().execution_options(populate_existing=True)
+                )).scalar_one_or_none()
+                if ps is None:
+                    raise ValueError(f"unknown graph {graph_id}")
+                if ps.falkor_graph_name in (None, f"gv_{graph_id}"):
+                    raise ProjectionNotAdopted(
+                        "unpinned", "this graph has no FalkorDB key yet; nothing to adopt")
+                if ps.owns_falkor_graph:
+                    raise ProjectionAlreadyAdopted(ps.falkor_graph_name)
+                if not keymigrate.is_owned_key(graph_id, key):
+                    raise ProjectionKeyInvalid(key)
+                try:
+                    await self._claim_projection_key(s, key, ps.falkor_provider,
+                                                     exclude_graph_id=graph_id)
+                except ConcurrencyError:
+                    raise ProjectionKeyInUse(ps.falkor_provider or default, key) from None
+                cur = {"providerId": ps.falkor_provider or default, "key": ps.falkor_graph_name}
+                drift = ps.external_drift
+                ps.falkor_graph_name, ps.owns_falkor_graph, ps.shard_map = key, True, shard_map
+                ps.projected_commit_seq = 0
+                ps.target_commit_seq = graph.main_head_commit_seq
+                ps.status = "reseeding"
+                ps.external_drift = None
+                ps.last_error = None
+                ps.failed_attempts = 0
+                ps.next_retry_at = None
+                ps.progress_done = ps.progress_total = None
+                ps.epoch = ProjectionStateORM.epoch + 1     # a pass in flight must not write over it
+        except IntegrityError:
+            raise ProjectionKeyInUse(cur["providerId"], key) from None   # uq_ps_key: claimed
+        return {"from": cur, "to": {"providerId": cur["providerId"], "key": key},
+                "externalDrift": drift}
 
     async def reset_projection_watermarks(self, *, provider: str, actor: str,
                                           dry_run: bool = False) -> List[str]:
@@ -4713,8 +4878,11 @@ class GraphVersioningService:
         nothing failed) and bumps its epoch, so a pass in flight cannot publish over it; the poll
         then reseeds each key in place, writing only what differs. Graphs the poll does not
         project (unpinned, tombstoned, still being enabled for version control) are left alone,
-        as are graphs parked at genesis on their data source's own key. Returns the ids reset;
-        ``dry_run`` returns the ids it would reset and changes nothing."""
+        as are graphs parked at genesis on their data source's own key. A load in flight is not
+        reseeded outside admission, whatever the Graph residency switch says: it is fenced off,
+        evicted again and its load asked for again; a graph not in FalkorDB is at watermark 0,
+        with nothing to reset.
+        Returns the ids reset; ``dry_run`` returns the ids it would reset and changes nothing."""
         ps = ProjectionStateORM
         resettable = (
             func.coalesce(func.nullif(ps.falkor_provider, ""),
@@ -4734,19 +4902,33 @@ class GraphVersioningService:
                 return list((await s.execute(
                     select(ps.graph_id).where(*resettable).order_by(ps.graph_id)
                 )).scalars().all())
+        loading = ps.status == "rehydrating"
         async with self._session() as s:
             ids = (await s.execute(
                 update(ps)
-                .where(*resettable)
+                .where(*resettable, ~loading)
                 .values(projected_commit_seq=0, epoch=ps.epoch + 1, status="reseeding",
                         last_error=None,
                         failed_attempts=0, next_retry_at=None, updated_at=_now())
                 .returning(ps.graph_id)
                 .execution_options(synchronize_session=False)
             )).scalars().all()
+            requeued = (await s.execute(
+                update(ps)
+                .where(*resettable, loading)
+                .values(projected_commit_seq=0, epoch=ps.epoch + 1, status="evicted",
+                        rehydrating_since=None, last_error=None,
+                        failed_attempts=0, next_retry_at=None, updated_at=_now())
+                .returning(ps.graph_id)
+                .execution_options(synchronize_session=False)
+            )).scalars().all()
+        if requeued:
+            from .residency import request_load
+            for gid in requeued:
+                await request_load(gid)
         logger.warning("%s reset the projection watermarks of %d graph(s) on FalkorDB provider %s",
-                       actor, len(ids), provider)
-        return list(ids)
+                       actor, len(ids) + len(requeued), provider)
+        return [*ids, *requeued]
 
     async def fence_projection_passes(self, *, provider: str) -> None:
         """FalkorDB ``provider`` moved to another server: bump the epoch of its graphs at
@@ -6375,8 +6557,11 @@ class GraphVersioningService:
         compute it again); how it is read (``reads_from``, :meth:`fork_reads_from`'s answer from
         the count kept per version); its root (graph, ``main``, data source, in the trash or not);
         and the root's store as its ``projection_state`` row says it is now: its committed and
-        projected seqs (``fresh`` when the projection holds the head) and its pin. That row is
-        read every time: an eviction moves the store without moving any seq the version holds."""
+        projected seqs, its status (``fresh`` by :func:`serves_head`), its pin, and its class and
+        size (what marks a read of it while it is out of FalkorDB, ``residency.mark``). That row is
+        read every time: an eviction moves the store without moving any seq the version holds.
+        With residency on, a person's read holds the root's read lease after this, and its store as
+        then read decides instead (``ContextEngine._fork_main_reader``)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or not graph.fork_parent_graph_id:
@@ -6391,6 +6576,7 @@ class GraphVersioningService:
             ps = await s.get(ProjectionStateORM, root_id)
             committed = root.main_head_commit_seq
             projected = ps.projected_commit_seq if ps is not None else 0
+            status = ps.status if ps is not None else "idle"
             return {
                 "main_id": main_id,
                 "version": (branch.head_commit_id, tuple(at for _g, _b, at in layers), committed,
@@ -6398,9 +6584,12 @@ class GraphVersioningService:
                 "reads_from": "postgres" if n > config.FORK_REWIND_MAX else "overlay",
                 "root_id": root_id, "root_main": root_main,
                 "root_data_source_id": root.data_source_id, "root_trashed": root.deleted_at is not None,
-                "committed": committed, "projected": projected, "fresh": projected >= committed,
+                "committed": committed, "projected": projected, "status": status,
+                "fresh": serves_head(projected, committed, status),
                 "falkor_provider": ps.falkor_provider if ps is not None else None,
                 "falkor_graph_name": ps.falkor_graph_name if ps is not None else None,
+                "residency": ps.residency if ps is not None else None,
+                "size_bytes": ps.size_bytes if ps is not None else None,
             }
 
     async def fork_reads_from(self, graph_id: str) -> str:

@@ -1,5 +1,6 @@
 /**
- * Turning a feature OFF asks first. Turning it back ON does not.
+ * Turning a feature OFF asks first. Turning it back ON does not — unless the switch says what
+ * turning it on means (ConfirmTurnOn).
  *
  * The asymmetry is the point. These directions are not equally consequential: turning a feature on
  * gives a capability back, while turning one off silently removes something from every user of the

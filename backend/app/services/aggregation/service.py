@@ -3426,11 +3426,28 @@ class AggregationService:
         share the observation Probe already paid for. Write failure never
         fails the doc.
         """
+        from backend.app.services.versioning import residency
+
         from .fingerprint import fingerprint_from_stats
 
         timeout = float(
             __import__("os").getenv("SCHEDULER_DRIFT_CHECK_TIMEOUT", "5")
         )
+        try:
+            out = await asyncio.wait_for(residency.non_resident(ds_id), timeout=timeout)
+        except Exception as exc:
+            # Asked of every source, whatever the switch says: unreadable (graphver down), the
+            # probe goes ahead as with residency never on. A versioned source's pin read then
+            # fails, as every read of it does with graphver down.
+            logger.warning(
+                "assemble_source_freshness: residency state unreadable for %s: %s",
+                ds_id, exc,
+            )
+            out = None
+        if out:
+            # Its key is out of FalkorDB (residency): a probe would read an empty graph and
+            # record 0 nodes and 0 edges for it.
+            return (None, None, None)
         try:
             provider = await asyncio.wait_for(
                 self._registry.get_provider_for_workspace(

@@ -31,7 +31,7 @@ from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tup
 from sqlalchemy import Text, any_, bindparam, case, func, literal, null, or_, select, update
 from sqlalchemy.dialects.postgresql import ARRAY
 
-from . import config, db
+from . import config, db, residency_policy
 from .errors import AmbiguousSpelling
 from .falkor_indexes import ensure_urn_indexes
 from .merkle import content_hash
@@ -475,6 +475,27 @@ def _retry_at(attempts: int) -> str:
     return (datetime.now(timezone.utc) + timedelta(seconds=delay)).isoformat()
 
 
+def _unless_loading(status: str):
+    """``status`` for a pass to write, except over a load in flight: a ``rehydrating`` graph stays so
+    until the capacity loop finds its key ready to serve reads (``residency.CapacityLoop``) — with
+    the Graph residency switch on, or off, when the loop brings evicted graphs back."""
+    return case((ProjectionStateORM.status == "rehydrating", "rehydrating"), else_=status)
+
+
+class _Unresolved(tuple):
+    """An edge-type resolver's answer when the ontology could not be read (an outage), as against
+    ``None`` for one with no lineage: falsy, so every caller that skips rollup maintenance for
+    "no lineage" skips it alike, and :meth:`FalkorProjector.summaries_built` tells them apart."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "UNRESOLVED"
+
+
+UNRESOLVED = _Unresolved()
+
+
 class FalkorProjector:
     """Projects committed `main` state of a graph into its FalkorDB graph."""
 
@@ -581,6 +602,27 @@ class FalkorProjector:
             finally:
                 await lock_scope.__aexit__(None, None, None)
 
+    async def _queue_first_seed(self, graph_id: str, seen_epoch: int) -> bool:
+        """Put a graph whose key holds nothing yet in the load queue (``waiting_capacity``),
+        fenced on ``seen_epoch``; False when something moved its row first."""
+        from .residency import request_load
+
+        async with self._session() as s:
+            row = (await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id,
+                       ProjectionStateORM.epoch == seen_epoch,
+                       ProjectionStateORM.projected_commit_seq == 0,
+                       ProjectionStateORM.status == "idle")
+                .values(status="waiting_capacity", epoch=ProjectionStateORM.epoch + 1,
+                        updated_at=_now())
+                .returning(ProjectionStateORM.graph_id)
+                .execution_options(synchronize_session=False))).first()
+        if row is None:
+            return False
+        await request_load(graph_id)
+        return True
+
     # The fenced writes to ``projection_state``. Each is its own short transaction on the store
     # pool — the lock connection stays write-free — and a CAS on ``epoch``: whatever reset the
     # watermark under a pass (evict, rebuild, repin, the bootstrap head flip) bumped it.
@@ -590,9 +632,10 @@ class FalkorProjector:
         neither the epoch nor the watermark moved since they were read. Returns ``(epoch,
         failed_attempts)``, or None when something else got there first."""
         # Honest lifecycle label: a full replay (explicit rebuild, first seed, repin)
-        # reports "rebuilding"; an incremental window reports "projecting".
-        values = {"epoch": ProjectionStateORM.epoch + 1,
-                  "status": "rebuilding" if from_seq <= 0 else "projecting"}
+        # reports "rebuilding"; an incremental window reports "projecting". A load (residency,
+        # doc 17) stays "rehydrating" through its passes.
+        status = "rebuilding" if from_seq <= 0 else "projecting"
+        values = {"epoch": ProjectionStateORM.epoch + 1, "status": _unless_loading(status)}
         if from_seq <= 0:
             values.update(progress_done=0, progress_total=None)
         async with self._session() as s:
@@ -619,7 +662,7 @@ class FalkorProjector:
         hold: ``surplus`` (nodes, edges) becomes ``external_drift``, and none clears the count it
         recorded before. A flag a change notification raised stays (its ``via`` says so) until
         the changes are brought into history."""
-        values = {"status": "idle", "last_error": error,
+        values = {"status": _unless_loading("idle"), "last_error": error,
                   "progress_done": None, "progress_total": None}      # progress is over either way
         if published:
             values.update(projected_commit_seq=to_seq, last_projected_at=_now(),
@@ -688,6 +731,13 @@ class FalkorProjector:
                 # A fork has no FalkorDB copy: it reads through its root's store. A key an earlier
                 # release pinned for one is never written again (the reaper drops it, when asked).
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "fork"}
+            if ps.status in ("evicted", "waiting_capacity"):
+                # Residency (doc 17): an evicted graph stays evicted, its reads on Postgres, until
+                # the capacity loop admits its load — whatever the Graph residency switch says:
+                # off, the loop brings it back through admission, never a pass on its own. Fenced:
+                # an eviction after this read bumped the epoch the claim below compares. (A fork
+                # never reaches this: above.)
+                return {"projected": from_seq, "applied": 0, "noop": True, "skipped": ps.status}
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
             if name == self.default_graph_name(graph_id):
@@ -708,6 +758,14 @@ class FalkorProjector:
                 await self._svc._assert_not_bootstrapping(s, graph_id)
             except ConcurrencyError:
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "bootstrapping"}
+        if (from_seq == 0 and to_seq > 1 and owned and ps.status == "idle"
+                and await residency_policy.switch_state() is not False
+                and await self._queue_first_seed(graph_id, seen_epoch)):
+            # Residency (doc 17): the first seed of a key the platform owns — a new graph's whole
+            # main, in one go — is a full write, admitted as a load is: it takes its turn in the
+            # load queue, and the capacity loop seeds it on a master with room for it. Also while
+            # the switch cannot be read: nothing is written unadmitted on a guess.
+            return {"projected": 0, "applied": 0, "noop": True, "skipped": "waiting_capacity"}
 
         # Claim the row before touching FalkorDB. Losing the claim means something reset the
         # watermark since the read (an evict, a rebuild, a repin): leave the key alone and let the
@@ -978,7 +1036,7 @@ class FalkorProjector:
             rows = (await s.execute(
                 select(ProjectionStateORM.graph_id, ProjectionStateORM.falkor_graph_name,
                        ProjectionStateORM.falkor_provider, ProjectionStateORM.projected_commit_seq,
-                       ProjectionStateORM.epoch)
+                       ProjectionStateORM.epoch, ProjectionStateORM.owns_falkor_graph)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(
                     ProjectionStateORM.status == "idle",
@@ -995,8 +1053,10 @@ class FalkorProjector:
                 )
             )).all()
         sem = asyncio.Semaphore(config.PROJECTION_CONCURRENCY)
+        residency_on = await residency_policy.switch_state() is not False
 
-        async def _one(gid, name, provider_id, projected, epoch) -> Optional[Dict[str, object]]:
+        async def _one(gid, name, provider_id, projected, epoch,
+                       owned) -> Optional[Dict[str, object]]:
             async with sem:
                 try:
                     client = await self._graph_client(name, provider_id)
@@ -1014,6 +1074,11 @@ class FalkorProjector:
                 return None
             reason = ("liveness: projection key missing" if not exists
                       else f"liveness: marker seq {seq} < projected {projected}")
+            # Residency (doc 17): a key the master lost, of a graph whose key the platform owns, is
+            # evicted (lost) rather than reseeded at once and unadmitted: its load is admitted
+            # like any other — on its next read, or by the next pass for an Always graph. Also
+            # while the switch cannot be read; off, it is reseeded at once, as before residency.
+            lost = residency_on and to_seq == 0 and owned
             async with self._session() as s:
                 row = (await s.execute(
                     update(ProjectionStateORM)
@@ -1023,15 +1088,17 @@ class FalkorProjector:
                            ProjectionStateORM.status == "idle")
                     .values(projected_commit_seq=to_seq, epoch=ProjectionStateORM.epoch + 1,
                             last_error=reason, failed_attempts=0, next_retry_at=None,
-                            updated_at=_now())
+                            updated_at=_now(),
+                            **({"status": "evicted", "evicted_reason": "lost"} if lost else {}))
                     .returning(ProjectionStateORM.graph_id)
                     .execution_options(synchronize_session=False)
                 )).first()
             if row is None:
                 return None                     # a pass or a reset got there first
-            logger.error("%s for graph %s (%s): watermark %s -> %s",
-                         reason, gid, name, projected, to_seq)
-            await nudge_projection(gid)
+            logger.error("%s for graph %s (%s): watermark %s -> %s%s",
+                         reason, gid, name, projected, to_seq, " (evicted, lost)" if lost else "")
+            if not lost:
+                await nudge_projection(gid)
             return {"graph_id": gid, "projected": projected, "reset_to": to_seq, "reason": reason}
 
         done = await asyncio.gather(*[_one(*r) for r in rows])
@@ -1069,6 +1136,41 @@ class FalkorProjector:
         except Exception as exc:                          # pragma: no cover - app-layer hooks
             logger.warning("liveness: the first summaries build of %s was not asked for: %s",
                            graph_id, exc)
+
+    async def summaries_built(self, graph_id: str, name: str, provider_id: Optional[str],
+                              projected: int, *, ask: Optional[str] = None) -> Optional[bool]:
+        """Whether a graph's key holds the summaries its readers need: a summaries build stamped
+        it, or it needs none here (no lineage in its ontology, its summaries kept in a dedicated
+        key, or no aggregation wired into this projector). A key still without them has the build
+        asked for, once per watermark — and per ``ask``, which names the ask under its own
+        idempotency key (a load's epoch and attempt: the aggregation service answers a key it has
+        seen within the hour with the job it already ran). A key that cannot be read has not got
+        them. None — falsy, but not "not yet" — when its ontology could not be read
+        (:data:`UNRESOLVED`): it may need them, and nothing can tell."""
+        if self._on_rollups_stale is None or self._edge_types_resolver is None:
+            return True
+        sets = await self._edge_types_resolver(self._svc, graph_id)
+        if sets is UNRESOLVED:
+            return None
+        if not (sets and sets[1]) or "dedicated" in sets[3:]:
+            return True
+        try:
+            res = await _q(await self._graph_client(name, provider_id), _SUMMARIES_BUILT,
+                           read_only=True, timeout_ms=5000)
+        except Exception as exc:
+            logger.warning("cannot read whether %s was summarised: %s", graph_id, exc)
+            return False
+        rows = getattr(res, "result_set", None) or []
+        if rows and rows[0] and int(rows[0][0] or 0) > 0:
+            return True
+        if self._summaries_checked.get(graph_id) != (projected, ask):
+            self._summaries_checked[graph_id] = (projected, ask)
+            if ask is None:
+                await self._on_rollups_stale(graph_id)
+            else:
+                await self._on_rollups_stale(
+                    graph_id, idempotency_key=f"gv-rollup-rebuild:{graph_id}:{projected}:{ask}")
+        return False
 
     async def run_publish_hooks(self, graph_id: str, *, full_seed: bool = False,
                                 rollups_stale: bool = False) -> None:
@@ -1147,6 +1249,9 @@ class FalkorProjector:
                     GraphORM.deleted_at.is_(None),
                     # A fork has no FalkorDB copy (project_graph skips one whatever its row says).
                     GraphORM.fork_parent_graph_id.is_(None),
+                    # An evicted graph waits for its load, whatever the switch says
+                    # (project_graph's gate).
+                    ProjectionStateORM.status.notin_(("evicted", "waiting_capacity")),
                 ).order_by(
                     (func.greatest(ProjectionStateORM.target_commit_seq,
                                    GraphORM.main_head_commit_seq)

@@ -29,10 +29,38 @@ const plural = (n: number, one: string, many: string) => `${n.toLocaleString()} 
 
 function watermarkText(wm: Watermark): string {
   if (wm.status === 'evicted') return 'Unloaded to free memory'
+  if (wm.status === 'rehydrating') return 'Loading into memory'
+  if (wm.status === 'waiting_capacity') return 'Waiting for room in memory'
   const at = `#${wm.projected} of #${wm.committed}`
   if (wm.status === 'rebuilding') return `${at} · rebuilding`
   if (wm.status === 'projecting') return `${at} · catching up`
   return at
+}
+
+const CLASS_LABEL: Record<string, string> = { always: 'Always', standard: 'Standard', coldline: 'Coldline' }
+
+const CLASS_DETAIL: Record<string, string> = {
+  always: 'Kept in memory; never unloaded.',
+  standard: 'Unloaded when unread for a while or when memory runs short; loaded again on its next read.',
+  coldline: 'Unloaded soon after its last read; loaded only when a request needs the graph store.',
+}
+
+const EVICTED_BECAUSE: Record<string, string> = {
+  idle_standard: 'unread past its idle time', idle_coldline: 'unread past its idle time',
+  pressure: 'to make room', lost: 'its graph store lost it', admin: 'by an administrator',
+  load_stalled: 'its load stalled; it loads again on its next read',
+}
+
+/** Whether the graph is in memory, in plain words (residency, doc 17). */
+function residencyText(wm: Watermark): string {
+  switch (wm.residencyState) {
+    case 'evicted':
+      return wm.evictedReason && EVICTED_BECAUSE[wm.evictedReason]
+        ? `Out of memory · ${EVICTED_BECAUSE[wm.evictedReason]}` : 'Out of memory'
+    case 'rehydrating': return 'Loading into memory'
+    case 'waiting_capacity': return 'Waiting for room in memory'
+    default: return 'In memory'
+  }
 }
 
 function notInHistory(d: ExternalDrift): string {
@@ -119,6 +147,17 @@ export function ProjectionHealthCard({ wsId, graphId, showActions = false, dataS
         <dd className="font-mono text-[11px] text-ink-secondary break-all">{wm.projectionKey}</dd>
         <dt className="text-ink-muted">Watermark</dt>
         <dd className="text-ink tabular-nums">{watermarkText(wm)}</dd>
+        {wm.residency && (
+          <>
+            <dt className="text-ink-muted">Residency</dt>
+            <dd className="text-ink min-w-0">
+              <HoverTip label={CLASS_LABEL[wm.residency] ?? wm.residency} detail={CLASS_DETAIL[wm.residency] ?? ''}>
+                <span className="font-medium">{CLASS_LABEL[wm.residency] ?? wm.residency}</span>
+              </HoverTip>
+              <span className="text-ink-muted"> · {residencyText(wm)}</span>
+            </dd>
+          </>
+        )}
         <dt className="text-ink-muted">Epoch</dt>
         <dd className="text-ink tabular-nums">{wm.epoch ?? 0}</dd>
         <dt className="text-ink-muted">Backoff</dt>

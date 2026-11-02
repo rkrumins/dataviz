@@ -424,3 +424,66 @@ def test_a_transfer_reads_from_the_side_it_is_filed_under(event_type, leaving, a
     out = catalogue.project(event_type=event_type, payload={**_TRANSFER, "workspace_id": "ws_b",
                                                             "data_source_id": "ds_1"})
     assert (out["workspace_id"], out["audience"]) == ("ws_b", "workspace")
+
+
+# ── Graph residency: what the capacity loop did, as the system ──────────
+
+_RESIDENCY_EVENTS = (
+    "platform.residency.grace_started", "platform.residency.evictions_allowed",
+    "platform.residency.turned_off", "platform.residency.reload_finished",
+    "platform.versioning.graph_evicted", "platform.versioning.graph_loaded",
+)
+
+
+@pytest.mark.parametrize("event_type", _RESIDENCY_EVENTS)
+def test_residency_s_events_are_the_platform_s_and_the_system_s(event_type):
+    """Nobody does them — the capacity leader does — so no one is their actor, and only the
+    platform's audience reads them."""
+    entry = next(e for e in catalogue.catalogue_entries() if e["type"] == event_type)
+    assert entry["category"] == "platform" and entry["workspaceVisible"] is False
+    assert event_type in catalogue.LABELS and event_type in catalogue._EVENT_META
+    out = catalogue.project(event_type=event_type, payload={"details": {"graphId": "g1"}},
+                            event_version=2)
+    assert (out["actor_id"], out["actor_kind"], out["audience"]) == (None, "system", "platform")
+
+
+def test_graph_residency_s_lifecycle_reads_as_what_happened():
+    switch = {"target_type": "feature_flag", "target_id": "residencyEnabled",
+              "target_label": "Graph residency"}
+
+    def says(event_type, **details):
+        return catalogue.summarize(event_type, {**switch, "details": details})[1]
+
+    assert says("platform.residency.grace_started", onSince="2026-11-02T10:40:30+00:00",
+                evictionsFrom="2026-11-02T10:42:00+00:00", graceSecs=90) == (
+        "Graph residency is on: evictions may start at 10:42:00 UTC, after a 90-second grace "
+        "period")
+    assert says("platform.residency.evictions_allowed", onSince="2026-11-02T10:40:30+00:00") == (
+        "Graph residency's grace period is over: graphs may be evicted")
+    assert says("platform.residency.turned_off", toBringBack=12) == (
+        "Graph residency is off: 12 graphs out of FalkorDB are being brought back as memory "
+        "allows")
+    assert says("platform.residency.turned_off", toBringBack=1) == (
+        "Graph residency is off: 1 graph out of FalkorDB is being brought back as memory allows")
+    assert says("platform.residency.turned_off", toBringBack=0) == (
+        "Graph residency is off: no graph is out of FalkorDB")
+    assert says("platform.residency.reload_finished") == (
+        "Graph residency is off, and every evicted graph is back in FalkorDB")
+
+
+def test_each_eviction_and_load_says_which_graph_where_how_big_and_why_or_how_long():
+    def says(event_type, **details):
+        return catalogue.summarize(event_type, {"details": details})[1]
+
+    gib = 1024 ** 3
+    assert says("platform.versioning.graph_evicted", graphId="g1", master="10.0.0.2:6379",
+                bytes=3 * gib, reason="idle_coldline") == (
+        "Evicted versioned graph g1 from FalkorDB master 10.0.0.2:6379, unread past the "
+        "Coldline idle time (3.0 GiB)")
+    assert says("platform.versioning.graph_evicted", graphId="g1", master="10.0.0.2:6379",
+                bytes=None, reason="pressure") == (
+        "Evicted versioned graph g1 from FalkorDB master 10.0.0.2:6379, for memory (size "
+        "unknown)")
+    assert says("platform.versioning.graph_loaded", graphId="g1", master="10.0.0.2:6379",
+                bytes=512 * 1024 ** 2, secs=42) == (
+        "Loaded versioned graph g1 into FalkorDB master 10.0.0.2:6379 in 42 s (512.0 MiB)")

@@ -1288,19 +1288,24 @@ def _projection_rows(forks: bool = False):
     """Every versioned graph's projection row — its FalkorDB key, watermark and how far behind it
     is — plus the status buckets the rollup counts (``{bucket: predicate}``). Shared by the lag
     probe and the fleet inventory, so a graph reads the same in both. ``forks``: the rows include
-    forks, each behind on nothing: it reads through its root's store and is never projected, a
-    copy an earlier release made of it included."""
+    forks, each behind on nothing, ``idle`` and with no last error: it reads through its root's
+    store and is never projected, a copy an earlier release made of it included."""
     from sqlalchemy import and_, case, func, select
 
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
 
     lag = GraphORM.main_head_commit_seq - func.coalesce(
         ProjectionStateORM.projected_commit_seq, 0)
-    if forks:
-        lag = case((GraphORM.fork_parent_graph_id.isnot(None), 0), else_=lag)
     status = func.coalesce(ProjectionStateORM.status, "idle")
+    last_error = ProjectionStateORM.last_error
+    if forks:
+        # A copy an earlier release made of a fork, evicted by the count budget, is never
+        # projected again: it would read evicted for good, and failed with that copy's last error.
+        lag = case((GraphORM.fork_parent_graph_id.isnot(None), 0), else_=lag)
+        status = case((GraphORM.fork_parent_graph_id.isnot(None), "idle"), else_=status)
+        last_error = case((GraphORM.fork_parent_graph_id.isnot(None), None), else_=last_error)
 
-    err = ProjectionStateORM.last_error.isnot(None)
+    err = last_error.isnot(None)
     buckets = {
         # in sync = caught up AND no projection error (mutually exclusive
         # with failed, so the chips read consistently).
@@ -1310,6 +1315,9 @@ def _projection_rows(forks: bool = False):
         # reseeding = an operator reset the watermark; the pass that reseeds it is a rebuild.
         "rebuilding": status.in_(("rebuilding", "reseeding")),
         "evicted": status == "evicted",
+        # Residency (doc 17): a load in flight, and one whose master has no room for it yet.
+        "rehydrating": status == "rehydrating",
+        "waiting_capacity": status == "waiting_capacity",
         "failed": err,
     }
     rows = (
@@ -1320,9 +1328,12 @@ def _projection_rows(forks: bool = False):
             ProjectionStateORM.owns_falkor_graph,
             ProjectionStateORM.projected_commit_seq, ProjectionStateORM.target_commit_seq,
             lag.label("lag"), status.label("status"),
-            ProjectionStateORM.last_error, ProjectionStateORM.last_projected_at,
+            last_error.label("last_error"), ProjectionStateORM.last_projected_at,
             ProjectionStateORM.progress_done, ProjectionStateORM.progress_total,
             ProjectionStateORM.updated_at, ProjectionStateORM.retired_keys,
+            ProjectionStateORM.residency, ProjectionStateORM.evicted_reason,
+            ProjectionStateORM.last_read_at, ProjectionStateORM.size_bytes,
+            ProjectionStateORM.rehydrating_since,
         )
         .select_from(GraphORM)
         .outerjoin(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
@@ -1386,6 +1397,8 @@ async def probe_projection_lag() -> Optional[dict]:
         rows
         .where(present)
         .where(or_(lag > 0, buckets["failed"], buckets["projecting"], buckets["rebuilding"]))
+        # An evicted graph lags by design: its reads are on Postgres until something loads it.
+        .where(~buckets["evicted"])
         .order_by(lag.desc())
         .limit(8)
     )
@@ -1412,6 +1425,8 @@ async def probe_projection_lag() -> Optional[dict]:
         "projecting": agg.projecting,
         "rebuilding": agg.rebuilding,
         "evicted": agg.evicted,
+        "rehydrating": agg.rehydrating,
+        "waitingCapacity": agg.waiting_capacity,
         "failed": agg.failed,
         "maxLag": agg.max_lag,
         "worst": [_projection_row(r, directory.get(r.data_source_id) or {}) for r in worst_rows],
@@ -1471,6 +1486,26 @@ async def list_versioned_graphs(
 
     live = set(present_ids)
     directory = await _resolve_data_sources([r.data_source_id for r in page])
+
+    def residency_of(r) -> dict:
+        """Residency (doc 17): its class, whether its key is in FalkorDB, why it was evicted, its
+        last read, its measured size and, while it is being loaded, since when. A fork has none of
+        its own: no key, and its reads count for its root."""
+        if r.fork_parent_graph_id is not None:
+            return dict.fromkeys(("residency", "residencyState", "evictedReason", "lastReadAt",
+                                  "sizeBytes", "rehydratingSince"))
+        from backend.app.services.versioning.service import residency_state_of
+
+        return {
+            "residency": r.residency,
+            "residencyState": residency_state_of(r.status, r.projected_commit_seq or 0,
+                                                 r.falkor_graph_name, r.id),
+            "evictedReason": r.evicted_reason,
+            "lastReadAt": r.last_read_at,
+            "sizeBytes": r.size_bytes,
+            "rehydratingSince": r.rehydrating_since if r.status == "rehydrating" else None,
+        }
+
     return {
         "graphs": [{
             **_projection_row(r, directory.get(r.data_source_id) or {}),
@@ -1481,6 +1516,7 @@ async def list_versioned_graphs(
             "retiredKeys": [{"name": e["name"], "provider": e.get("provider"),
                              "retireAfter": e["retireAfter"], "afterSeq": e["afterSeq"]}
                             for e in r.retired_keys or []],
+            **residency_of(r),
         } for r in page],
         "nextCursor": page[-1].id if more else None,
     }

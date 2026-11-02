@@ -358,7 +358,7 @@ PVC **250 Gi** per pod (`hyperdisk-balanced`) ≈ 8× `maxmemory` for AOF/RDB gr
 | `FALKORDB_MODE` | `cluster` | Enables cluster client + `MOVED` following |
 | `FALKORDB_CLUSTER_NODES` | 3 shard-0 pod DNS names | Any three seeds; the client discovers the rest |
 | `REDIS_CACHE_*` (legacy `CACHE_REDIS_URL`) | `synodic-redis-cache` (§6) | **Required** — the provider's ancestor/idempotency cache needs cross-slot SCAN/pipelines a cluster can't serve; without it the provider runs cache-disabled and (per ADR-020/ADR-022) refuses to co-locate on FalkorDB |
-| `GRAPHVER_FALKOR_BUDGETS` / `GRAPHVER_FALKOR_MAX_RESIDENT` | ≈ shard `maxmemory` × 0.8 per provider | Turns on cold-graph eviction so residency tracks the ~40M working set, not the full 45M+growth corpus |
+| `GRAPHVER_FALKOR_BUDGETS` / `GRAPHVER_FALKOR_MAX_RESIDENT` | — | No longer acted on. Turn on **Graph residency** (Admin → Features) and give every shard a `maxmemory`, so FalkorDB keeps the ~40M working set, not the full 45M+growth corpus ([17 §16](versioning/17-forks-and-residency.md#16-turning-residency-on)) |
 | `AGGREGATION_SHARD_RESERVE_PCT` | `20` (default) | Share of a shard's `maxmemory` a rebuild must leave free: the write budget reads the owning shard's `used_memory` before storing rollups and refuses, naming the shortfall, rather than filling it |
 | `GRAPHVER_READ_MAX_LAG` | `0` (strict) — small `>0` acceptable during bulk imports | Governs FalkorDB-vs-Cloud-SQL read-freshness fallback |
 

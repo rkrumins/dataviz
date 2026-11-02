@@ -15,7 +15,11 @@ safely, then describes all 34 switches on **Administration → Features**.
 flowchart LR
   A["Select a switch"] --> B["Read the right-hand pane"]
   B --> C{"Turning it off?"}
-  C -->|"No"| D["Saved at once"]
+  C -->|"No"| H{"Says what turning it on means?"}
+  H -->|"No"| D["Saved at once"]
+  H -->|"Yes"| I["Turn on … dialog"]
+  I --> J["Turn on for everyone"]
+  J --> D
   C -->|"Yes"| E["Turn off … dialog"]
   E --> F["Turn off for everyone"]
   F --> D
@@ -36,10 +40,16 @@ flowchart LR
 3. Select the switch's name. The right-hand pane explains it: what it does,
    **What changes** (**When it's on** and **When it's off**, with the one in
    force marked **right now**), **Still works when it's off**, **Worth
-   knowing** and, for some switches, **Only works while these are on**.
+   knowing** and, for some switches, **Only works while these are on**. A
+   switch with a page in these docs has a **Read more** link under its
+   description.
 4. Use the toggle in the switch's row, or the one at the top of the right-hand
    pane.
-   - Turning a switch **on** saves straight away.
+   - Turning a switch **on** saves straight away — unless the switch says what
+     turning it on means, as **Graph residency** does: then the **Turn on
+     <name>?** dialog opens first, with **What turning it on means** and
+     **Read more**. Select **Turn on for everyone**, or **Keep it off** to back
+     out.
    - Turning a switch **off** opens the **Turn off <name>?** dialog first.
 5. If the dialog opened, read it, then select **Turn off for everyone** — or
    **Keep it on** to back out. The dialog shows **What your users lose**,
@@ -197,6 +207,7 @@ will ask for.
 | --- | --- | --- | --- | --- |
 | **Version control** (`versioningEnabled`) | On | Drafts, reviews, publishing, history and rollback for data sources — the whole change workflow. | Everyone who edits or reviews. Every version-control surface is hidden and canvases become view-only: no drafts, reviews, publishing or blank models. History is kept, background sync of versioned data keeps running, and turning it back on restores everything. The widest switch on the page. | [Versioning & Change Control](/guide/versioning-change-control) |
 | **Forks** (`forksEnabled`) | Off (preview) | Lets people fork a data source's graph into a copy of its own to work in, with its own drafts and history, and propose its changes back as a review. Needs **Version control** on. | People working in forks. No fork can be made and every fork becomes read-only: the server refuses its drafts, saves, imports, updates from its parent and reviews, and the screens stop offering **Fork**, **Update from parent**, **Propose to parent** and approving or merging a fork's review, saying that forks are turned off. Forks stay listed and readable, and can still be moved to the trash and restored. Turning it off never touches the graph a fork came from and deletes nothing; turning it back on restores every fork as it was. | [Versioning: Forks & Residency](/docs/versioning-forks-and-residency#turning-forks-on) |
+| **Graph residency** (`residencyEnabled`) | Off (preview) | FalkorDB keeps each versioned graph by its class (Always, Standard or Coldline) and by each master's memory: what goes unread, or doesn't fit, is evicted and loaded again when it's needed, and an evicted graph reads from Postgres meanwhile. The first eviction waits 90 seconds after it's turned on. Turning it on asks first, and says what it means. Needs **Version control** on. | Administrators of the graph store. Every graph stays loaded, as before residency. Turning it off brings evicted graphs back as memory allows; until then they read from Postgres, more slowly. Classes and values are kept and apply again once it's on. | [Versioning: Forks & Residency](/docs/versioning-forks-and-residency#16-turning-residency-on) |
 | **Lineage trace** (`traceEnabled`) | On | Follows a node's lineage upstream and downstream, from the graph and the Context View. | Everyone who traces. The **Trace Lineage** button disappears from the view's toolbar and the server refuses trace requests. People can still browse and expand the graph by hand. | [Tracing Lineage on the Canvas](/guide/exploring-graph) |
 
 ### Semantic Layers

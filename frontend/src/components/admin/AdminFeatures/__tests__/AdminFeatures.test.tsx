@@ -10,7 +10,7 @@
  */
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AdminFeatures } from '../index'
 import { NotificationStack, useNotificationStore } from '@/components/ui/notifications'
 import type { FeatureDefinition } from '@/services/featuresService'
@@ -33,7 +33,8 @@ beforeAll(() => {
 /** Resolves TRUE — "the save landed" — which is what makes the page speak. */
 const handleChange = vi.fn()
 
-const hookState = { savingKey: null as string | null }
+/** ``extra``: switches a test adds to the page, each off. */
+const hookState = { savingKey: null as string | null, extra: [] as FeatureDefinition[] }
 
 /** The impact probe is a network call; each test says what it should answer. */
 const impact = vi.fn()
@@ -77,13 +78,16 @@ vi.mock('@/hooks/useAdminFeatures', () => ({
     SEARCH_MIN_FEATURES: 100, // keep the search box out of the way
     useAdminFeatures: () => ({
         data: {
-            schema: [TRACE, SIGNUP],
+            schema: [TRACE, SIGNUP, ...hookState.extra],
             categories: [
                 { id: 'lineage', label: 'Lineage', icon: 'GitBranch', color: 'amber', preview: false },
                 { id: 'auth', label: 'Authentication', icon: 'UserPlus', color: 'emerald', preview: false },
             ],
             // traceEnabled ON, signupEnabled OFF.
-            values: { traceEnabled: true, signupEnabled: false },
+            values: {
+                traceEnabled: true, signupEnabled: false,
+                ...Object.fromEntries(hookState.extra.map(f => [f.key, false])),
+            },
             version: 1,
             updatedAt: '2026-07-14T12:00:00Z',
         },
@@ -204,6 +208,83 @@ describe('AdminFeatures — what the page says about itself', () => {
         // signupEnabled is off, so the row shows the CONSEQUENCE rather than the description —
         // that's the sentence that matters while you're scanning for what your users have lost.
         expect(screen.getByText(/Strangers cannot create accounts/i)).toBeInTheDocument()
+    })
+})
+
+// ── A switch that says what turning it ON means asks first ─────────────────────────
+
+const RESIDENCY: FeatureDefinition = {
+    key: 'residencyEnabled',
+    name: 'Graph residency',
+    description: 'FalkorDB keeps graphs by their class and each master’s memory.',
+    category: 'lineage',
+    type: 'boolean',
+    default: false,
+    stage: 'experimental',
+    enforcedServerSide: true,
+    implemented: true,
+    impactWhenOff: 'Every graph stays loaded, as before residency.',
+    impactWhenOn: 'The first eviction waits 90 seconds after it is turned on.',
+    helpUrl: '/docs/versioning-forks-and-residency#16-turning-residency-on',
+}
+
+describe('ConfirmTurnOn — what turning it on means, for a switch that says', () => {
+    beforeEach(() => {
+        hookState.extra = [RESIDENCY]
+    })
+    afterEach(() => {
+        hookState.extra = []
+    })
+
+    it('shows what turning it on means, and saves only once confirmed', async () => {
+        const user = userEvent.setup()
+        render(<AdminFeatures />)
+
+        await user.click(switchesFor(/Turn Graph residency on/i)[0])
+        expect(handleChange).not.toHaveBeenCalled()
+
+        const dialog = await screen.findByRole('dialog')
+        expect(within(dialog).getByText(/Turn on Graph residency\?/i)).toBeInTheDocument()
+        expect(within(dialog).getByText(/first eviction waits 90 seconds/i)).toBeInTheDocument()
+        expect(within(dialog).getByRole('link', { name: /Read more/i }))
+            .toHaveAttribute('href', RESIDENCY.helpUrl)
+
+        await user.click(within(dialog).getByRole('button', { name: /Turn on for everyone/i }))
+        await waitFor(() => expect(handleChange).toHaveBeenCalledWith('residencyEnabled', true))
+    })
+
+    it('backing out changes nothing', async () => {
+        const user = userEvent.setup()
+        render(<AdminFeatures />)
+
+        await user.click(switchesFor(/Turn Graph residency on/i)[0])
+        await user.click(await screen.findByRole('button', { name: /Keep it off/i }))
+
+        expect(handleChange).not.toHaveBeenCalled()
+        await waitFor(() =>
+            expect(screen.queryByText(/Turn on Graph residency\?/i)).not.toBeInTheDocument(),
+        )
+    })
+
+    it('a switch that says nothing about turning it on still turns on at once', async () => {
+        const user = userEvent.setup()
+        render(<AdminFeatures />)
+
+        await user.click(switchesFor(/Turn Self-registration on/i)[0])
+        expect(handleChange).toHaveBeenCalledWith('signupEnabled', true)
+        expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    })
+
+    it('the spec pane leads its "when it’s on" side with it, and links the docs', async () => {
+        const user = userEvent.setup()
+        render(<AdminFeatures />)
+
+        // Its row in the index, or its name in the hero's list of what users cannot do: both pick it.
+        await user.click(screen.getAllByRole('button', { name: /^Graph residency/ })[0])
+
+        expect(screen.getByText(/first eviction waits 90 seconds/i)).toBeInTheDocument()
+        expect(screen.getByRole('link', { name: /Read more/i }))
+            .toHaveAttribute('href', RESIDENCY.helpUrl)
     })
 })
 

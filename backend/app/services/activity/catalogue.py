@@ -711,7 +711,59 @@ def _summary_sa_policy(p: dict) -> str:
 def _summary_flag(p: dict) -> str:
     key = _detail(p, "key") or _subject(p)
     value = _detail(p, "value")
+    if isinstance(value, bool):           # a switch: "Turned Graph residency on"
+        return f"Turned {_subject(p)} {'on' if value else 'off'}"
     return f"Feature '{key}' set to {json.dumps(value)}" if value is not None else f"Feature '{key}' changed"
+
+
+def _bytes(n: Any) -> str:
+    """Bytes in the binary units a FalkorDB master counts in; "size unknown" for none."""
+    if not isinstance(n, (int, float)):
+        return "size unknown"
+    value = float(n)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if abs(value) < 1024:
+            return f"{int(value)} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} TiB"
+
+
+def _summary_grace_started(p: dict) -> str:
+    at, secs = str(_detail(p, "evictionsFrom") or "")[11:19], _detail(p, "graceSecs")
+    if not (at and secs):
+        return "Graph residency is on: evictions start after a grace period"
+    return f"Graph residency is on: evictions may start at {at} UTC, after a {secs}-second grace period"
+
+
+def _summary_turned_off(p: dict) -> str:
+    n = _detail(p, "toBringBack") or 0
+    if not n:
+        return "Graph residency is off: no graph is out of FalkorDB"
+    return (f"Graph residency is off: {n} graph{'s' if n != 1 else ''} out of FalkorDB "
+            f"{'are' if n != 1 else 'is'} being brought back as memory allows")
+
+
+#: Why the capacity loop evicted a graph, in words (``evicted_reason``).
+_EVICTED_BECAUSE = {
+    "idle_standard": "unread past the Standard idle time",
+    "idle_coldline": "unread past the Coldline idle time",
+    "pressure": "for memory",
+    "load_stalled": "its load stalled",
+}
+
+
+def _summary_graph_evicted(p: dict) -> str:
+    why = _EVICTED_BECAUSE.get(_detail(p, "reason"))
+    return (f"Evicted versioned graph {_detail(p, 'graphId') or '?'} from FalkorDB master "
+            f"{_detail(p, 'master') or '?'}{', ' + why if why else ''} "
+            f"({_bytes(_detail(p, 'bytes'))})")
+
+
+def _summary_graph_loaded(p: dict) -> str:
+    secs = _detail(p, "secs")
+    took = f" in {secs:,} s" if isinstance(secs, int) else ""
+    return (f"Loaded versioned graph {_detail(p, 'graphId') or '?'} into FalkorDB master "
+            f"{_detail(p, 'master') or '?'}{took} ({_bytes(_detail(p, 'bytes'))})")
 
 
 def _transfer_summary(leaving: str, arriving: str) -> Callable[[dict], str]:
@@ -808,6 +860,31 @@ _EVENT_META.update({
         f"Moved versioned graph {_detail(p, 'graphId') or '?'} to FalkorDB key "
         f"{(_detail(p, 'to') or {}).get('key', '?')}"
     )),
+    "platform.residency_policy.updated": ("info", lambda p: (
+        "Changed the residency policy of versioned graphs"
+    )),
+    "platform.versioning.residency_changed": ("info", lambda p: (
+        f"Set versioned graph {_detail(p, 'graphId') or '?'} to "
+        f"{(_detail(p, 'to') or '?').capitalize()} residency"
+    )),
+    "platform.versioning.load_requested": ("info", lambda p: (
+        f"Asked for versioned graph {_detail(p, 'graphId') or '?'} to be loaded into FalkorDB"
+    )),
+    "platform.versioning.projection_adopted": ("info", lambda p: (
+        f"Adopted versioned graph {_detail(p, 'graphId') or '?'} from FalkorDB graph "
+        f"{(_detail(p, 'from') or {}).get('key') or '?'} onto a platform key"
+    )),
+    # Graph residency's own: nobody did these, the capacity loop did (actor kind "system").
+    "platform.residency.grace_started": ("info", _summary_grace_started),
+    "platform.residency.evictions_allowed": ("info", lambda p: (
+        "Graph residency's grace period is over: graphs may be evicted"
+    )),
+    "platform.residency.turned_off": ("info", _summary_turned_off),
+    "platform.residency.reload_finished": ("info", lambda p: (
+        "Graph residency is off, and every evicted graph is back in FalkorDB"
+    )),
+    "platform.versioning.graph_evicted": ("info", _summary_graph_evicted),
+    "platform.versioning.graph_loaded": ("info", _summary_graph_loaded),
     "platform.activity.exported": ("info", lambda p: (
         f"Exported the activity of {_subject(p)} as CSV" if p.get("workspace_id")
         else "Exported platform activity as CSV"
@@ -878,6 +955,16 @@ LABELS: dict[str, str] = {
     "platform.node_identity.updated": "Changed node identity",
     "platform.versioning.watermarks_reset": "Reseeded versioned graphs",
     "platform.versioning.projection_moved": "Moved a versioned graph projection",
+    "platform.residency_policy.updated": "Changed residency policy",
+    "platform.versioning.residency_changed": "Changed a versioned graph's residency",
+    "platform.versioning.load_requested": "Asked for a versioned graph's load",
+    "platform.versioning.projection_adopted": "Adopted a versioned graph's projection",
+    "platform.residency.grace_started": "Graph residency turned on",
+    "platform.residency.evictions_allowed": "Graph residency's grace period ended",
+    "platform.residency.turned_off": "Graph residency turned off",
+    "platform.residency.reload_finished": "Every evicted graph brought back",
+    "platform.versioning.graph_evicted": "Evicted a versioned graph from memory",
+    "platform.versioning.graph_loaded": "Loaded a versioned graph into memory",
     "platform.activity.exported": "Exported activity",
     "rbac.group.member_added": "Added to a group",
     "rbac.group.member_removed": "Removed from a group",

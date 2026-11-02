@@ -182,6 +182,10 @@ def _scrape(monkeypatch, *, enabled=None, token=None, headers=None):
 
     from backend.app.api.v1.endpoints import metrics as route
 
+    async def no_job_store(_backend):          # these are about the door, not the job store
+        return None
+
+    monkeypatch.setattr(route, "_sample_job_backlog", no_job_store)
     for name, value in (("METRICS_ENABLED", enabled), ("METRICS_TOKEN", token)):
         monkeypatch.delenv(name, raising=False)
         if value is not None:
@@ -276,6 +280,7 @@ def test_every_emitting_process_installs_the_backend():
         "main.py",
         "services/aggregation/__main__.py",
         "services/aggregation/controlplane.py",
+        "services/versioning/__main__.py",            # the capacity loop's (residency)
     ):
         src = (root / rel).read_text()
         assert "metrics_prometheus import install" in src, (
@@ -292,20 +297,25 @@ def test_every_emitting_process_installs_the_backend():
 # reach is the same as not counted.
 
 
-def test_the_worker_starts_nothing_when_the_switch_is_off(monkeypatch):
-    from backend.app.services.aggregation.__main__ import _serve_metrics
+@pytest.mark.parametrize("worker", ["aggregation", "versioning"])
+def test_the_worker_starts_nothing_when_the_switch_is_off(monkeypatch, worker):
+    import importlib
+
+    _serve_metrics = importlib.import_module(f"backend.app.services.{worker}.__main__")._serve_metrics
 
     monkeypatch.delenv("METRICS_ENABLED", raising=False)
     assert asyncio.run(_serve_metrics()) is None
 
 
-def test_the_worker_still_runs_when_its_metrics_port_cannot_be_served(monkeypatch):
+@pytest.mark.parametrize("worker", ["aggregation", "versioning"])
+def test_the_worker_still_runs_when_its_metrics_port_cannot_be_served(monkeypatch, worker):
     """Metrics are for watching the work, never a precondition for it. A
     worker that cannot bind — port taken, uvicorn absent, anything — must
     process jobs regardless."""
     import builtins
+    import importlib
 
-    from backend.app.services.aggregation import __main__ as worker_main
+    worker_main = importlib.import_module(f"backend.app.services.{worker}.__main__")
 
     monkeypatch.setenv("METRICS_ENABLED", "1")
     real_import = builtins.__import__
@@ -317,6 +327,29 @@ def test_the_worker_still_runs_when_its_metrics_port_cannot_be_served(monkeypatc
 
     monkeypatch.setattr(builtins, "__import__", _no_uvicorn)
     assert asyncio.run(worker_main._serve_metrics()) is None   # and never raises
+
+
+def test_the_versioning_worker_survives_a_metrics_port_that_is_taken(monkeypatch):
+    """uvicorn exits (SystemExit) when it cannot bind, and asyncio re-raises that from the task:
+    the scrape endpoint's task must swallow it, or the whole worker stops."""
+    import importlib
+
+    import uvicorn
+
+    worker_main = importlib.import_module("backend.app.services.versioning.__main__")
+    monkeypatch.setenv("METRICS_ENABLED", "1")
+
+    async def taken(self, sockets=None):
+        raise SystemExit(3)
+
+    monkeypatch.setattr(uvicorn.Server, "serve", taken)
+
+    async def run():
+        assert await worker_main._serve_metrics() is not None
+        await asyncio.sleep(0.05)              # the task runs, and fails to bind
+        return "still running"
+
+    assert asyncio.run(run()) == "still running"
 
 
 # ── the request path, which had no series at all ─────────────────────────
@@ -391,6 +424,41 @@ def test_sampling_never_fails_a_scrape():
     from backend.app.api.v1.endpoints import metrics as metrics_ep
 
     metrics_ep._sample_process_counters(_Broken())    # and never raises
+
+
+def test_the_job_lanes_queues_reach_the_scrape(monkeypatch):
+    """The versioning lanes serve no HTTP, so the web tier reports their queues, read from
+    ``graphver.jobs`` at scrape: what each lane runs, what it could claim and how long the oldest
+    has waited. The transfer lane's optional KEDA scaler reads the first two."""
+    import contextlib
+
+    from backend.app.api.v1.endpoints import metrics as metrics_ep
+    from backend.app.services.versioning import job_lease
+
+    async def backlog(_s):
+        return {"transfer": {"claimable": 3, "oldestClaimableSecs": 42, "running": 4},
+                "bootstrap": {"claimable": 0, "oldestClaimableSecs": None, "running": 1}}
+
+    @contextlib.asynccontextmanager
+    async def session():
+        yield object()
+
+    monkeypatch.setattr(job_lease, "claimable_backlog", backlog)
+    registry = mp.PrometheusBackend()
+    asyncio.run(metrics_ep._sample_job_backlog(registry, session_factory=session))
+    out = registry.render()
+    assert 'versioning_jobs_running{lane="transfer"} 4' in out
+    assert 'versioning_jobs_claimable{lane="transfer"} 3' in out
+    assert 'versioning_jobs_oldest_claimable_seconds{lane="transfer"} 42' in out
+    assert 'versioning_jobs_oldest_claimable_seconds{lane="bootstrap"} 0' in out
+
+    @contextlib.asynccontextmanager
+    async def unreachable():
+        raise ConnectionRefusedError("the job store is down")
+        yield
+
+    asyncio.run(metrics_ep._sample_job_backlog(registry, session_factory=unreachable))
+    assert registry.render() == out, "an unreachable store never fails a scrape"
 
 
 def test_an_ease_is_counted_where_it_is_decided():

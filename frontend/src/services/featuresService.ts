@@ -61,6 +61,11 @@ export interface FeatureDefinition {
    * switch that affects everybody, and the one this page never answered.
    */
   impactWhenOff?: string
+  /**
+   * "What does turning it on mean?" — for a switch whose ON is the consequential direction. A
+   * switch that says gets a confirmation before it is turned on; one that doesn't turns on at once.
+   */
+  impactWhenOn?: string
 
   // ── The facts the CODE owns (backend/app/config/feature_wiring.py) ───────
   //

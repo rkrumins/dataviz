@@ -40,7 +40,7 @@ from __future__ import annotations
 import os
 import random
 import time
-from typing import Callable, Optional
+from typing import Callable, Collection, Optional
 
 #: Statuses the real client comes back from. 429 is load shedding; the 5xx
 #: trio is a provider that is warming, rotating or briefly gone.
@@ -121,14 +121,16 @@ def request_with_retries(
     *,
     name: str,
     on_success: Optional[Callable[[object], bool]] = None,
+    ok: Collection[int] = (200,),
     **kwargs,
 ):
     """One logical client action, retried the way the canvas retries it.
 
-    Returns the final response. ``on_success`` may inspect a 200 body and
-    return False to mark it a failure (a malformed payload is not a success
-    however fast it arrived) — it is NOT retried, because a bad body is a bug
-    rather than backpressure.
+    Returns the final response. ``ok`` is what the action may answer (a draft
+    opened is a 201). ``on_success`` may inspect such an answer and return
+    False to mark it a failure (a malformed payload is not a success however
+    fast it arrived) — it is NOT retried, because a bad body is a bug rather
+    than backpressure.
 
     Every attempt after the first is recorded under ``<name>:retry``, so the
     stats show amplification instead of averaging it away.
@@ -141,7 +143,7 @@ def request_with_retries(
             method, url, name=label, catch_response=True, **kwargs,
         ) as resp:
             status = resp.status_code
-            if status == 200:
+            if status in ok:
                 # A callback that RAISES must not kill the scenario: a load
                 # test that dies on one malformed response reports a
                 # throughput collapse it caused itself.

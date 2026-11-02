@@ -291,13 +291,15 @@ def test_the_fork_endpoints_take_its_data_source_through_the_trash_and_away(fork
         async with _client() as c:
             fork = (await _fork(c, gid)).json()
             ds_id, url = fork["dataSourceId"], f"/api/v1/{WS}/versioning/graphs/{fork['graphId']}"
-            assert (await c.delete(url)).status_code == 204
+            deleted = await c.delete(url)
+            assert deleted.status_code == 204
             row = await _row(ds_id)
             assert row.deleted_at is not None and row.deleted_by == "u_forker"
             assert (await c.post(url + "/restore")).status_code == 204
             row = await _row(ds_id)
             assert row.deleted_at is None and row.deleted_by is None
-            assert (await c.delete(url)).status_code == 204
+            deleted = await c.delete(url)
+            assert deleted.status_code == 204
         # Its purge takes the row once the graph is gone, never before.
         job = await create_purge_job(graph_id=fork["graphId"], workspace_id=WS, actor="reaper",
                                      require_tombstoned=True)
@@ -634,7 +636,8 @@ def test_the_views_on_a_fork_go_to_its_parent_when_its_row_goes(forks_on):
             async with _mgmt() as s:
                 (await s.get(ViewORM, trashed)).deleted_at = "2026-10-01T00:00:00+00:00"
                 await s.commit()
-            assert (await c.delete(f"/api/v1/{WS}/versioning/graphs/{fgid}")).status_code == 204
+            deleted = await c.delete(f"/api/v1/{WS}/versioning/graphs/{fgid}")
+            assert deleted.status_code == 204
         job = await create_purge_job(graph_id=fgid, workspace_id=WS, actor="u",
                                      require_tombstoned=True)
         assert (await PurgeRunner(None, key_in_use=_nobody).run_job(await _take(job)))[
@@ -667,7 +670,8 @@ def test_the_views_on_a_fork_go_to_its_parent_when_its_row_goes(forks_on):
         async with _client() as c:
             gone = (await _fork(c, held)).json()
             on_gone = await _view_on(gone["dataSourceId"], "On a fork", "draft_of_the_fork")
-            assert (await c.delete(f"/api/v1/{WS}/versioning/graphs/{gone['graphId']}")).status_code == 204
+            deleted = await c.delete(f"/api/v1/{WS}/versioning/graphs/{gone['graphId']}")
+            assert deleted.status_code == 204
             r = await c.delete(f"/api/v1/admin/workspaces/{WS}/data-sources/{held_ds}",
                                params={"permanent": "true"})
             assert r.status_code == 204, r.text
@@ -696,7 +700,8 @@ def test_the_reapers_expiry_of_a_forks_row_sends_its_views_to_the_parent(monkeyp
             fork_ds, fgid = fork["dataSourceId"], fork["graphId"]
             draft = await svc.open_draft(graph_id=fgid, owner="u1")
             pinned = await _view_on(fork_ds, "Pinned", draft)
-            assert (await c.delete(f"/api/v1/{WS}/versioning/graphs/{fgid}")).status_code == 204
+            deleted = await c.delete(f"/api/v1/{WS}/versioning/graphs/{fgid}")
+            assert deleted.status_code == 204
         monkeypatch.setattr(purge_worker, "_drop_fork_row", crashed)
         job = await create_purge_job(graph_id=fgid, workspace_id=WS, actor="u",
                                      require_tombstoned=True)
@@ -725,7 +730,8 @@ def test_a_parents_permanent_delete_purges_its_trashed_forks_first(forks_on):
         held_ds, held = await _parent(svc)
         async with _client() as c:
             fork = (await _fork(c, gid)).json()
-            assert (await c.delete(f"/api/v1/{WS}/versioning/graphs/{fork['graphId']}")).status_code == 204
+            deleted = await c.delete(f"/api/v1/{WS}/versioning/graphs/{fork['graphId']}")
+            assert deleted.status_code == 204
             r = await c.delete(f"/api/v1/admin/workspaces/{WS}/data-sources/{parent_ds}",
                                params={"permanent": "true"})
             assert r.status_code == 204, r.text

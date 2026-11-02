@@ -22,7 +22,7 @@ import json
 import logging
 import os
 import re
-from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -115,6 +115,38 @@ async def graph_key_bindings(session: AsyncSession, provider_id: Optional[str], 
     out.extend({"kind": "catalogItem", "catalogItemId": cat_id, "name": name}
                for cat_id, name in cats)
     return out
+
+
+async def keys_read_elsewhere(
+        session: AsyncSession,
+        keys: Sequence[Tuple[Optional[str], str, Optional[str]]]) -> Set[Tuple[str, str]]:
+    """Of ``keys`` — each ``(provider_id, graph_name, exclude_ds)`` — those another binding reads,
+    by :func:`graph_key_bindings`' rule (a live data source reading it by name or as its dedicated
+    key, or a catalog entry publishing it, through any provider on the same server; never
+    ``exclude_ds``), in two reads for them all: ``{(provider_id or 'default', graph_name)}``."""
+    from backend.app.db.models import CatalogItemORM, WorkspaceDataSourceORM
+    from backend.app.services.versioning.config import DEFAULT_FALKOR_PROVIDER as default
+
+    if not keys:
+        return set()
+    names = sorted({name for _p, name, _x in keys})
+    servers = {p: set(await same_server_providers(session, p)) for p in {p for p, _n, _x in keys}}
+    ds = WorkspaceDataSourceORM
+    bound = (await session.execute(select(ds.id, ds.provider_id, ds.graph_name,
+                                          ds.dedicated_graph_name).where(
+        ds.deleted_at.is_(None),
+        ds.graph_name.in_(names) | ds.dedicated_graph_name.in_(names)))).all()
+    published = (await session.execute(select(CatalogItemORM.provider_id,
+                                              CatalogItemORM.source_identifier).where(
+        CatalogItemORM.source_identifier.in_(names)))).all()
+    held = set()
+    for provider, name, exclude in keys:
+        on = servers[provider]
+        if any(pid in on and name in (graph, dedicated) and ds_id != exclude
+               for ds_id, pid, graph, dedicated in bound) or any(
+                pid in on and source == name for pid, source in published):
+            held.add((provider or default, name))
+    return held
 
 
 async def shared_with(session: AsyncSession, ds) -> Dict[str, object]:

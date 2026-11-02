@@ -27,6 +27,21 @@ describe('watermarkPollInterval', () => {
     expect(watermarkPollInterval({ fresh: true, status: 'idle', lastError: 'boom' }, false, 1_000, 5_000)).toBe(false)
   })
 
+  it('keeps polling while a graph is loaded into memory, and slowly while it waits for room', () => {
+    // A load has no timeout; the poll stopping on it left the tab saying so long after it was done.
+    expect(watermarkPollInterval({ fresh: false, status: 'rehydrating' }, false, undefined, 0)).toBe(3_000)
+    expect(watermarkPollInterval({ fresh: false, status: 'waiting_capacity' }, false, undefined, 0)).toBe(15_000)
+  })
+
+  it('backs off to a minute once a load or a wait for room has gone on for a few minutes', () => {
+    // Review finding 8: a wait for room can last days; the poll went on every 15 s (3 s loading).
+    const since = 10_000
+    expect(watermarkPollInterval({ fresh: false, status: 'rehydrating' }, false, undefined, since + 60_000, since)).toBe(3_000)
+    expect(watermarkPollInterval({ fresh: false, status: 'rehydrating' }, false, undefined, since + 180_000, since)).toBe(60_000)
+    expect(watermarkPollInterval({ fresh: false, status: 'waiting_capacity' }, false, undefined, since + 180_000, since)).toBe(60_000)
+    expect(watermarkPollInterval({ fresh: false, status: 'waiting_capacity' }, true, undefined, since + 180_000, since)).toBe(3_000)
+  })
+
   it('polls while catching up, rebuilding or waiting for an operator\'s reseed, and always when forced', () => {
     expect(watermarkPollInterval({ fresh: false, status: 'projecting' }, false, undefined, 0)).toBe(3_000)
     expect(watermarkPollInterval({ fresh: false, status: 'rebuilding' }, false, undefined, 0)).toBe(3_000)

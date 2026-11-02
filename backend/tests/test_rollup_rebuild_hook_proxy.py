@@ -141,17 +141,20 @@ def test_in_process_the_rebuild_is_queued_in_the_sources_mode(monkeypatch, mode)
     ("dedicated", (["CONTAINS"], ["FLOWS"], {}, "dedicated")),
 ])
 def test_the_edge_types_mark_a_dedicated_source(monkeypatch, mode, types):
-    from backend.app.ontology import service as ontology_service
+    from backend.app.ontology import resolver
     from backend.app.ontology.adapters import sqlalchemy_repo
     from backend.app.services import ontology_levels
 
-    class _Ontology:
-        def __init__(self, repo):
+    class _Repo:
+        def __init__(self, session):
             pass
 
-        async def resolve(self, *, workspace_id, data_source_id):
-            return SimpleNamespace(containment_edge_types=["CONTAINS"],
-                                   lineage_edge_types=["FLOWS"])
+        async def get_for_data_source(self, workspace_id, data_source_id):
+            return "assigned"
+
+    def _resolve(*, system_default, assigned):
+        assert assigned == "assigned"
+        return SimpleNamespace(containment_edge_types=["CONTAINS"], lineage_edge_types=["FLOWS"])
 
     class _Svc:
         async def get_graph(self, graph_id):
@@ -166,7 +169,7 @@ def test_the_edge_types_mark_a_dedicated_source(monkeypatch, mode, types):
 
     monkeypatch.setattr(pt, "_projection_mode", _mode)
     monkeypatch.setattr(pt, "get_async_session", session)
-    monkeypatch.setattr(ontology_service, "LocalOntologyService", _Ontology)
-    monkeypatch.setattr(sqlalchemy_repo, "SQLAlchemyOntologyRepository", lambda s: None)
+    monkeypatch.setattr(sqlalchemy_repo, "SQLAlchemyOntologyRepository", _Repo)
+    monkeypatch.setattr(resolver, "resolve_ontology", _resolve)
     monkeypatch.setattr(ontology_levels, "derive_level_map", lambda resolved: {"Dataset": 1})
     assert asyncio.run(pt.resolve_aggregation_edge_types(_Svc(), "graph_1")) == types

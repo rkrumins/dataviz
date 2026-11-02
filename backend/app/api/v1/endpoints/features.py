@@ -253,12 +253,14 @@ async def patch_features(
         actor_name=actor_name,
     )
     # And in the activity ledger, one event per flag that moved — beside
-    # everything else people changed, with the reason they gave.
+    # everything else people changed, with the reason they gave — filed under the
+    # switch's name as the page shows it, at the time.
+    names = {d["key"]: d.get("name") or d["key"] for d in definitions}
     for key, value in merged.items():
         if before.get(key) != value:
             await recorder.record_for_request(
                 session, "platform.feature_flag.changed",
-                target_type="feature_flag", target_id=key, target_label=key,
+                target_type="feature_flag", target_id=key, target_label=names.get(key, key),
                 details={"key": key, "from": before.get(key), "value": value},
             )
 
@@ -385,7 +387,7 @@ async def patch_definition(
     """
     Update a feature definition (metadata). Partial update: only provided fields are changed.
     Body can include: name, description, category, type, default, options, helpUrl,
-    adminHint, impactWhenOff, sortOrder, deprecated.
+    adminHint, impactWhenOff, impactWhenOn, sortOrder, deprecated.
 
     NOT "implemented" — that is a fact about the code, derived from config/feature_wiring.py.
     """
@@ -399,13 +401,15 @@ async def patch_definition(
         "helpUrl": "help_url",
         "adminHint": "admin_hint",
         "impactWhenOff": "impact_when_off",
+        "impactWhenOn": "impact_when_on",
         "sortOrder": "sort_order",
         "deprecated": "deprecated",
     }
     fields = {}
     for api_key, col in mapping.items():
         v = body.get(api_key)
-        if v is None and api_key in ("helpUrl", "adminHint", "impactWhenOff", "options"):
+        if v is None and api_key in ("helpUrl", "adminHint", "impactWhenOff", "impactWhenOn",
+                                     "options"):
             fields[col] = None
             continue
         if v is None:

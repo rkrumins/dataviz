@@ -25,8 +25,11 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.app.auth.dependencies import get_optional_user, get_permission_claims
 from backend.app.db.engine import get_graph_read_db_session
 from backend.app.api.v1.endpoints.graph import _admit_graph_request
+from backend.app.services.permission_service import PermissionClaims, has_permission
+from backend.app.services.versioning.service import Viewer
 from backend.app.providers.manager import provider_manager
 from backend.app.services.context_engine import ContextEngine
 from backend.common.adapters import ProviderUnavailable  # noqa: F401  (used by global handler)
@@ -65,14 +68,22 @@ async def get_context_engine(
     # connection from the pool every other endpoint in the app shares.
     _admission: None = Depends(_admit_graph_request),
     session: AsyncSession = Depends(get_graph_read_db_session),
+    user=Depends(get_optional_user),
+    claims: PermissionClaims = Depends(get_permission_claims),
 ) -> ContextEngine:
     """Resolve the workspace-scoped engine. v2 drops the legacy connectionId
-    fallback — workspace scope is the only supported entry point."""
+    fallback — workspace scope is the only supported entry point. The viewer is
+    built as v1's is, so a person's read is scoped, held and recorded alike."""
     try:
         if ws_id:
+            viewer = Viewer(actor=user.id if user else "",
+                            can_manage=has_permission(claims, "workspace:datasource:manage",
+                                                      workspace_id=ws_id),
+                            can_read=has_permission(claims, "workspace:datasource:read",
+                                                    workspace_id=ws_id))
             return await ContextEngine.for_workspace(
                 ws_id, provider_manager, session, data_source_id=dataSourceId,
-                branch_id=branchId,
+                actor=(user.id if user else None), branch_id=branchId, viewer=viewer,
             )
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))

@@ -267,6 +267,36 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         ),
         depends_on=("versioningEnabled",),
     ),
+    # Preview, like forks: residency is new, so it ships OFF and a deployment opts in once every pod
+    # runs this release and every FalkorDB master has a maxmemory. It refuses no request: the
+    # versioning worker reads it from the feature store at the start of each capacity pass
+    # (residency_policy.switch_state) and decides there, and the API reads it lazily, with
+    # default=False. Reads of a graph out of FalkorDB never depend on it.
+    "residencyEnabled": FeatureWiring(
+        key="residencyEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "Evicting graphs from FalkorDB — by class, idle time and each master's memory, after a "
+            "90-second grace — in the versioning worker's capacity pass; off, the pass only brings "
+            "evicted graphs back, through admission, as memory allows",
+            "Holding a person's read lease on a graph and noting when it was read (last_read_at)",
+            "Admission on a new graph's first seed, a move, an Adopt and a package seed, and a new "
+            "graph's class from the policy",
+        ),
+        ui_surfaces=(
+            "The Residency & eviction card on Admin → Infrastructure → Versioned graphs: whether "
+            "residency is on, its grace period, and the graphs being brought back",
+            "Each graph's class, Load now and Adopt controls in the versioned graphs list",
+        ),
+        still_allowed=(
+            "Every graph stays loaded, as before residency; an evicted graph reads from Postgres "
+            "until it is brought back",
+            "Setting classes and the residency values, Load now and Adopt",
+            "Nothing is deleted — Postgres is the source of truth",
+        ),
+        depends_on=("versioningEnabled",),
+    ),
     # SECURITY: it decides whether a person's own query reaches a data source.
     # An unreadable value must refuse it, not guess.
     "nativeQueryEnabled": FeatureWiring(

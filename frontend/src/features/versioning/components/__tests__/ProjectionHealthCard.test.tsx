@@ -134,6 +134,18 @@ describe('ProjectionHealthCard', () => {
     expect(screen.queryByText('#0 of #12')).not.toBeInTheDocument()
   })
 
+  it('shows the graph\'s residency class and whether it is in memory, to everyone', () => {
+    wmQ.data = { ...WM, residency: 'coldline', residencyState: 'evicted', evictedReason: 'idle_coldline',
+      projected: 0, fresh: false, status: 'evicted' }
+    renderCard()
+    expect(screen.getByText('Coldline')).toBeInTheDocument()
+    expect(screen.getByText(/Out of memory · unread past its idle time/)).toBeInTheDocument()
+    wmQ.data = { ...WM, residency: 'always', residencyState: 'rehydrating', status: 'rehydrating' }
+    renderCard()
+    expect(screen.getByText('Always')).toBeInTheDocument()
+    expect(screen.getAllByText(/Loading into memory/).length).toBeGreaterThan(0)
+  })
+
   it('shows a skeleton while the watermark loads', () => {
     wmQ = { data: undefined, isLoading: true, isError: false }
     renderCard()

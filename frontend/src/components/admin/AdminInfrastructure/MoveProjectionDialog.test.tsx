@@ -32,6 +32,8 @@ const ROW: VersionedGraphRow = {
     falkorGraphName: 'gvt_graph_b', falkorProvider: 'falkor-eu', committed: 3, projected: 3, target: 3,
     lag: 0, status: 'idle', lastError: null, lastProjectedAt: null, progressDone: null, progressTotal: null,
     updatedAt: null, owned: true, forkParentGraphId: null, orphan: false, retiredKeys: [],
+    residency: 'standard', residencyState: 'resident', evictedReason: null, lastReadAt: null,
+    sizeBytes: null, rehydratingSince: null,
 }
 
 const MOVED = {
