@@ -839,18 +839,18 @@ _COPIES: Dict[str, Any] = {}
 
 
 async def _admit_seed(lease: Lease, graph_id: str, ctx) -> None:
-    """With residency on (doc 17), the copy is admitted on its key's master before anything is
-    written, as a load is, and its estimate reserved there while it is written
+    """With residency on (doc 17), or the switch unreadable, the copy is admitted on its key's
+    master before anything is written, as a load is, and its estimate reserved there while it is written
     (``residency.admit_copy``, under the capacity lock): every pass counts it. A master that takes
     a load already, holds or could not be read is waited for, the job asking again each capacity
     interval; only no room, or no size, stops it — resumable, nothing written — saying why. Once
     per run of the phase: the reservation is kept across its windows, and released when it ends
     (:func:`_release_seed`)."""
-    if not config.RESIDENCY_ENABLED or lease.job_id in _COPIES:
+    from . import residency, residency_policy
+
+    if lease.job_id in _COPIES or await residency_policy.switch_state() is False:
         return
     from backend.app.providers.shard_capacity import human_bytes
-
-    from . import residency, residency_policy
 
     while True:
         lease.check()

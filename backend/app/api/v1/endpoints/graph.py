@@ -2371,7 +2371,7 @@ async def search_native(
             "Native queries run on FalkorDB and Neo4j data sources only.",
         )
     if not await _holds_published_graph(granted.data_source_id, provider):
-        raise (await _native_loading(request_id, granted.data_source_id)) or _native_refusal(
+        raise (await _native_loading(request_id)) or _native_refusal(
             request_id, 503, "unavailable",
             "The published graph is catching up. Try again in a moment.", retry_after=5,
         )
@@ -2414,24 +2414,26 @@ async def _holds_published_graph(data_source_id: str, provider) -> bool:
     await residency.hold(svc, graph)        # before the watermark: no eviction mid-query (doc 17)
     gid = str(graph["graph_id"])
     wm = await svc.projection_watermark(gid)
+    await residency.mark(graph, wm)         # out of FalkorDB? whatever the switch says
     return bool(wm["fresh"]) and versioned_sources.serves_pin(
         getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
         wm.get("falkor_graph_name"), gid)
 
 
-async def _native_loading(request_id: str, data_source_id: str) -> Optional[HTTPException]:
-    """503 ``graph_loading`` with Retry-After when the data source's key is out of FalkorDB under
-    residency (doc 17), whose load this asks for; None when it is not."""
-    from backend.app.services.versioning import residency, residency_policy
+async def _native_loading(request_id: str) -> Optional[HTTPException]:
+    """503 ``graph_loading`` with Retry-After when the graph the query reads is out of FalkorDB
+    (residency, doc 17) — as its watermark said (:data:`residency.READING`), whatever the Graph
+    residency switch says — whose load this asks for; None when it is not."""
+    from backend.app.services.versioning import residency
 
-    loading = await residency.non_resident(data_source_id)
-    if not loading:
+    reading = residency.READING.get()
+    if reading is None:
         return None
-    await residency.request_load(loading)
+    await residency.request_load(reading.graph_id)
     return _native_refusal(
         request_id, 503, "graph_loading",
         "This graph is being loaded into memory for queries. Try again shortly.",
-        retry_after=(await residency_policy.resolve()).capacity_interval_secs,
+        retry_after=reading.retry_after,
     )
 
 

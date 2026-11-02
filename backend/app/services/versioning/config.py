@@ -213,13 +213,11 @@ RETIRE_GRACE_SECS: int = 900
 EVICT_SECS: int = int(os.getenv("GRAPHVER_EVICT_SECS", "300"))
 
 # Residency (doc 17): each graph's class (Always / Standard / Coldline) and each cluster master's
-# memory decide whether its key stays in FalkorDB, through the projection lane's capacity loop. A
-# DEPLOY setting, off until every pod runs this release: off, eviction is the per-provider count
-# budget above and an evicted graph is reseeded by the poll, as before; on, the count budget is no
-# longer used and an evicted graph stays evicted until something asks for it.
-RESIDENCY_ENABLED: bool = os.getenv("GRAPHVER_RESIDENCY_ENABLED", "").lower() in ("1", "true", "yes")
-# The residency policy's defaults. Each is overridden live from the admin UI (platform_settings)
-# and clamped to its range by ``residency_policy``.
+# memory decide whether its key stays in FalkorDB, through the projection lane's capacity loop,
+# once a system administrator turns on Graph residency (Admin → Features, ``residencyEnabled``;
+# ``residency_policy.switch_state``). The worker no longer runs the count budget above, whatever
+# the switch says. The residency policy's defaults follow; each is overridden live from the admin UI
+# (platform_settings) and clamped to its range by ``residency_policy``.
 EVICTION_ENABLED: bool = os.getenv("GRAPHVER_EVICTION_ENABLED", "1").lower() not in ("0", "false", "no")
 STANDARD_IDLE_SECS: int = int(os.getenv("GRAPHVER_STANDARD_IDLE_SECS", "604800"))
 COLDLINE_IDLE_SECS: int = int(os.getenv("GRAPHVER_COLDLINE_IDLE_SECS", "3600"))

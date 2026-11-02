@@ -381,14 +381,6 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "worker, which both project.",
         None,
     ),
-    "GRAPHVER_RESIDENCY_ENABLED": (
-        "Turn on graph residency (`1`, `true` or `yes`): each versioned graph's class and each "
-        "FalkorDB master's memory decide whether its key stays loaded, an evicted graph stays "
-        "evicted until something asks for it, and the per-provider count budget "
-        "(`GRAPHVER_FALKOR_MAX_RESIDENT`) is no longer used. Off by default; turn it on once every "
-        "pod runs a release that has it. Its values are set in the admin UI.",
-        None,
-    ),
     "GRAPHVER_LIVENESS_SECS": (
         "How often, in seconds, the versioning worker checks that each versioned graph's FalkorDB "
         "key still holds what was projected into it, and reseeds one that was lost or restored "

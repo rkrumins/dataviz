@@ -31,7 +31,7 @@ from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tup
 from sqlalchemy import Text, any_, bindparam, case, func, literal, null, or_, select, update
 from sqlalchemy.dialects.postgresql import ARRAY
 
-from . import config, db
+from . import config, db, residency_policy
 from .errors import AmbiguousSpelling
 from .falkor_indexes import ensure_urn_indexes
 from .merkle import content_hash
@@ -476,11 +476,9 @@ def _retry_at(attempts: int) -> str:
 
 
 def _unless_loading(status: str):
-    """``status`` for a pass to write, except over a load in flight: with residency on, a
-    ``rehydrating`` graph stays so until the capacity loop finds its key ready to serve reads
-    (``residency.CapacityLoop``)."""
-    if not config.RESIDENCY_ENABLED:
-        return status
+    """``status`` for a pass to write, except over a load in flight: a ``rehydrating`` graph stays so
+    until the capacity loop finds its key ready to serve reads (``residency.CapacityLoop``) — with
+    the Graph residency switch on, or off, when the loop brings evicted graphs back."""
     return case((ProjectionStateORM.status == "rehydrating", "rehydrating"), else_=status)
 
 
@@ -733,10 +731,12 @@ class FalkorProjector:
                 # A fork has no FalkorDB copy: it reads through its root's store. A key an earlier
                 # release pinned for one is never written again (the reaper drops it, when asked).
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "fork"}
-            if ps.status in ("evicted", "waiting_capacity") and config.RESIDENCY_ENABLED:
+            if ps.status in ("evicted", "waiting_capacity"):
                 # Residency (doc 17): an evicted graph stays evicted, its reads on Postgres, until
-                # the capacity loop admits its load. Fenced: an eviction after this read bumped
-                # the epoch the claim below compares. (A fork never reaches this: above.)
+                # the capacity loop admits its load — whatever the Graph residency switch says:
+                # off, the loop brings it back through admission, never a pass on its own. Fenced:
+                # an eviction after this read bumped the epoch the claim below compares. (A fork
+                # never reaches this: above.)
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": ps.status}
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
@@ -758,11 +758,13 @@ class FalkorProjector:
                 await self._svc._assert_not_bootstrapping(s, graph_id)
             except ConcurrencyError:
                 return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "bootstrapping"}
-        if (config.RESIDENCY_ENABLED and from_seq == 0 and to_seq > 1 and owned
-                and ps.status == "idle" and await self._queue_first_seed(graph_id, seen_epoch)):
+        if (from_seq == 0 and to_seq > 1 and owned and ps.status == "idle"
+                and await residency_policy.switch_state() is not False
+                and await self._queue_first_seed(graph_id, seen_epoch)):
             # Residency (doc 17): the first seed of a key the platform owns — a new graph's whole
             # main, in one go — is a full write, admitted as a load is: it takes its turn in the
-            # load queue, and the capacity loop seeds it on a master with room for it.
+            # load queue, and the capacity loop seeds it on a master with room for it. Also while
+            # the switch cannot be read: nothing is written unadmitted on a guess.
             return {"projected": 0, "applied": 0, "noop": True, "skipped": "waiting_capacity"}
 
         # Claim the row before touching FalkorDB. Losing the claim means something reset the
@@ -1051,6 +1053,7 @@ class FalkorProjector:
                 )
             )).all()
         sem = asyncio.Semaphore(config.PROJECTION_CONCURRENCY)
+        residency_on = await residency_policy.switch_state() is not False
 
         async def _one(gid, name, provider_id, projected, epoch,
                        owned) -> Optional[Dict[str, object]]:
@@ -1073,8 +1076,9 @@ class FalkorProjector:
                       else f"liveness: marker seq {seq} < projected {projected}")
             # Residency (doc 17): a key the master lost, of a graph whose key the platform owns, is
             # evicted (lost) rather than reseeded at once and unadmitted: its load is admitted
-            # like any other — on its next read, or by the next pass for an Always graph.
-            lost = config.RESIDENCY_ENABLED and to_seq == 0 and owned
+            # like any other — on its next read, or by the next pass for an Always graph. Also
+            # while the switch cannot be read; off, it is reseeded at once, as before residency.
+            lost = residency_on and to_seq == 0 and owned
             async with self._session() as s:
                 row = (await s.execute(
                     update(ProjectionStateORM)
@@ -1245,9 +1249,9 @@ class FalkorProjector:
                     GraphORM.deleted_at.is_(None),
                     # A fork has no FalkorDB copy (project_graph skips one whatever its row says).
                     GraphORM.fork_parent_graph_id.is_(None),
-                    # With residency on, an evicted graph waits for its load (project_graph's gate).
-                    *((ProjectionStateORM.status.notin_(("evicted", "waiting_capacity")),)
-                      if config.RESIDENCY_ENABLED else ()),
+                    # An evicted graph waits for its load, whatever the switch says
+                    # (project_graph's gate).
+                    ProjectionStateORM.status.notin_(("evicted", "waiting_capacity")),
                 ).order_by(
                     (func.greatest(ProjectionStateORM.target_commit_seq,
                                    GraphORM.main_head_commit_seq)

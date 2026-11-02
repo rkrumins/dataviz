@@ -155,7 +155,7 @@ async def test_a_minted_key_skips_keys_that_exist_and_the_graphs_retired_keys():
 
 @pytest.mark.asyncio
 async def test_with_residency_on_a_minted_key_is_placed_on_the_master_with_the_most_room(
-        monkeypatch):
+        monkeypatch, residency_on):
     """Placement (doc 17): the new key hashes to the provider's master with the most room. With
     no master to read, the first free key, as without residency."""
     placed, asked = keymigrate.owned_key(GID, 5), []
@@ -176,7 +176,6 @@ async def test_with_residency_on_a_minted_key_is_placed_on_the_master_with_the_m
         yield
         held.append(False)
 
-    monkeypatch.setattr(va.vconfig, "RESIDENCY_ENABLED", True)
     monkeypatch.setattr(va.residency, "place_key", place_key)
     monkeypatch.setattr(va.residency, "admission_on", fits)
     monkeypatch.setattr(va.residency, "admitting", admitting)
@@ -207,7 +206,8 @@ async def test_with_residency_on_a_minted_key_is_placed_on_the_master_with_the_m
 
 
 @pytest.mark.asyncio
-async def test_with_residency_on_a_move_that_would_not_fit_its_new_master_is_refused(monkeypatch):
+async def test_with_residency_on_a_move_that_would_not_fit_its_new_master_is_refused(
+        monkeypatch, residency_on):
     """A move of a graph in FalkorDB copies it onto its new key's master before the old key goes:
     admission-checked like a load (409 capacity_insufficient), and nothing moves."""
     asked = []
@@ -223,7 +223,6 @@ async def test_with_residency_on_a_move_that_would_not_fit_its_new_master_is_ref
     async def admitting(**kw):        # the capacity pass's lock, which needs graphver's database
         yield
 
-    monkeypatch.setattr(va.vconfig, "RESIDENCY_ENABLED", True)
     monkeypatch.setattr(va.residency, "place_key", place_key)
     monkeypatch.setattr(va.residency, "admission_on", admission_on)
     monkeypatch.setattr(va.residency, "admitting", admitting)
@@ -390,7 +389,7 @@ def test_the_activity_log_can_say_what_happened():
 
 @pytest.mark.asyncio
 async def test_with_residency_on_a_move_reads_the_graph_s_state_under_the_capacity_lock(
-        monkeypatch):
+        monkeypatch, residency_on):
     """Review 3, finding 6: whether a move copies the graph (and so is admitted, under the lock)
     was decided from a watermark read before the lock. A load finishing meanwhile — rehydrating
     then, idle at the commit — made a full copy no one admitted. The lock is always taken with
@@ -410,7 +409,6 @@ async def test_with_residency_on_a_move_reads_the_graph_s_state_under_the_capaci
         asked.append(key)
         return va.residency.Admitted(True, "10.0.0.3:6379", 0, None)
 
-    monkeypatch.setattr(va.vconfig, "RESIDENCY_ENABLED", True)
     monkeypatch.setattr(va.residency, "admitting", admitting)
     monkeypatch.setattr(va.residency, "place_key", place_key)
     monkeypatch.setattr(va.residency, "admission_on", admission_on)

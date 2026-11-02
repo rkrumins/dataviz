@@ -21,7 +21,7 @@ from backend.app.api.v1.endpoints import versioning_admin as va
 from backend.app.auth import api_key_surface
 from backend.app.db.models import PlatformSettingsORM
 from backend.app.main import app
-from backend.app.services.versioning import config, keymigrate, residency, residency_policy
+from backend.app.services.versioning import keymigrate, residency, residency_policy
 from backend.app.services.versioning.residency_plan import Graph, Master, admit, plan
 from backend.app.services.versioning.worker import ProjectionWorker
 
@@ -772,7 +772,7 @@ async def test_a_load_waits_for_its_summaries_while_its_edge_types_cannot_be_rea
                                       ask="load7.0") is True
 
 
-async def test_a_package_seed_writes_its_key_only_when_admitted(monkeypatch):
+async def test_a_package_seed_writes_its_key_only_when_admitted(monkeypatch, residency_on):
     """A new data source seeded from a view package writes its whole graph into a new key. With
     residency on its copy is admitted on the key's master first, and its estimate reserved there
     while it is written (``residency.admit_copy``, under the capacity lock). Review 3, finding 4:
@@ -798,7 +798,6 @@ async def test_a_package_seed_writes_its_key_only_when_admitted(monkeypatch):
     monkeypatch.setattr(package_seed.asyncio, "sleep", nap)
     lease = SimpleNamespace(job_id="job_1", check=lambda: None)
     ctx = SimpleNamespace(falkor_graph_name="gvp_new{abc.1}", falkor_provider="prov_A")
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     package_seed._COPIES.clear()
 
     answers[:] = ["busy", "fork", "unmeasured", None]
@@ -814,7 +813,7 @@ async def test_a_package_seed_writes_its_key_only_when_admitted(monkeypatch):
             await package_seed._admit_seed(lease, "graph_x", ctx)
         assert (caught.value.code, caught.value.action) == ("capacity", "resume")
     assert "10.0.0.2:6379" in caught.value.reason or "size" in caught.value.reason
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
+    _switch(False)
     asked.clear()
     await package_seed._admit_seed(lease, "graph_x", ctx)
     assert asked == [] and package_seed._COPIES == {}
@@ -943,9 +942,18 @@ def test_the_preview_is_for_platform_admins_only():
 
 
 # ── the loop's place in the projection lane ──────────────────────────────────────────────────────
-async def _lane_loops(monkeypatch, *, residency_on: bool) -> set:
+def _switch(on: bool) -> None:
+    """Graph residency (Admin → Features) as this process's flag cache has it."""
+    import time
+
+    from backend.app.services.feature_flags import feature_flags
+
+    feature_flags._cache = {**(feature_flags._cache or {}), "residencyEnabled": on}
+    feature_flags._cache_ts = time.monotonic()
+
+
+async def _lane_loops(monkeypatch) -> set:
     """Which of the eviction loops the projection lane runs (each stubbed to note it ran)."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", residency_on)
     ran = set()
     worker = ProjectionWorker(SimpleNamespace(), evict_budget=lambda provider: 1,
                               lanes={"projection"})
@@ -967,12 +975,14 @@ async def _lane_loops(monkeypatch, *, residency_on: bool) -> set:
     return ran
 
 
-async def test_with_residency_on_the_capacity_loop_runs_and_the_count_budget_does_not(monkeypatch):
-    assert await _lane_loops(monkeypatch, residency_on=True) == {"capacity"}
-
-
-async def test_with_residency_off_the_count_budget_runs_as_before(monkeypatch):
-    assert await _lane_loops(monkeypatch, residency_on=False) == {"count budget"}
+@pytest.mark.parametrize("on", [True, False])
+async def test_the_projection_lane_always_runs_the_capacity_loop_and_never_the_count_budget(
+        monkeypatch, on):
+    """Each capacity pass reads the switch and decides — on, residency; off, it only brings evicted
+    graphs back — so the loop runs whatever the switch says when the worker starts. The count
+    budget never evicts any more: off, its evictions would only be loaded again."""
+    _switch(on)
+    assert await _lane_loops(monkeypatch) == {"capacity"}
 
 
 # ── what a pass reports ──────────────────────────────────────────────────────────────────────────

@@ -6,6 +6,7 @@ Each case puts the platform settings row back as it found it.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -19,6 +20,7 @@ from backend.app.api.v1.endpoints import versioning as V
 from backend.app.api.v1.endpoints import versioning_admin as va
 from backend.app.db.engine import get_async_session
 from backend.app.db.models import PlatformSettingsORM
+from backend.app.services.feature_flags import feature_flags
 from backend.app.services.versioning import config, db, models, residency, residency_policy
 from backend.app.services.versioning.cache_manager import CacheManager
 from backend.app.services.versioning.messaging import close_broker_redis, get_broker_redis
@@ -45,6 +47,60 @@ async def _set_policy(**columns) -> dict:
         await s.commit()
     residency_policy.invalidate()
     return before
+
+
+def _switch(on: bool) -> None:
+    """Graph residency as this process's flag cache has it: what the API and a projection pass read
+    (conftest's ``residency_on`` primes it on)."""
+    feature_flags._cache = {**(feature_flags._cache or {}), "residencyEnabled": on}
+    feature_flags._cache_ts = time.monotonic()
+
+
+async def _in_store(on):
+    """Graph residency saved in the feature store, as an admin's save leaves it — what the capacity
+    pass reads, itself — the registry seeded so that the switch is defined. None takes the saved
+    value away. Returns the value saved before (None: none)."""
+    from backend.app.db.models import FeatureFlagsORM
+    from backend.app.db.seed_feature_registry import seed_feature_registry
+
+    async with get_async_session() as s:
+        await seed_feature_registry(s)
+        row = await s.get(FeatureFlagsORM, 1)
+        if row is None:
+            row = FeatureFlagsORM(id=1, config="{}", version=1)
+            s.add(row)
+        saved = json.loads(row.config or "{}")
+        before = saved.get("residencyEnabled")
+        if on is None:
+            saved.pop("residencyEnabled", None)
+        else:
+            saved["residencyEnabled"] = on
+        row.config = json.dumps(saved)
+        await s.commit()
+    return before
+
+
+async def _leader() -> tuple:
+    """What the capacity leader keeps of the switch: since when it saw it on, and its phase."""
+    async with get_async_session() as s:
+        row = await s.get(PlatformSettingsORM, 1)
+    if row is None:
+        return None, None
+    since = row.gv_residency_on_since
+    return (datetime.fromisoformat(since) if since else None), row.gv_residency_phase
+
+
+@pytest.fixture
+async def residency_on(residency_on):
+    """conftest's ``residency_on``, and in the feature store too, with its grace long over on the
+    platform settings row: what the capacity pass reads itself. Each put back after the case."""
+    was = await _in_store(True)
+    before = await _set_policy(
+        gv_residency_on_since=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+        gv_residency_phase="on")
+    yield
+    await _set_policy(**before)
+    await _in_store(was)
 
 
 @pytest.fixture
@@ -75,11 +131,11 @@ async def test_a_new_graph_gets_the_class_the_policy_names(store, monkeypatch):
     svc = store
     before = await _set_policy(gv_default_residency="coldline")
     try:
-        monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
+        _switch(False)
         off = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
                                       workspace_id="ws_res", actor="a"))["graph_id"]
         assert await _residency(off) == "standard"
-        monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+        _switch(True)
         gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(),
                                       workspace_id="ws_res", actor="a"))["graph_id"]
         assert await _residency(gid) == "coldline"
@@ -109,11 +165,12 @@ async def _publish(svc, gid: str, *names: str) -> None:
 async def _seeded(proj, gid: str) -> None:
     """``gid``'s first seed, made at once as with residency off: with it on, a first seed takes
     its turn in the load queue (``test_a_first_seed_is_admitted_as_a_load``)."""
-    was, config.RESIDENCY_ENABLED = config.RESIDENCY_ENABLED, False
+    was = bool((feature_flags._cache or {}).get("residencyEnabled"))
+    _switch(False)
     try:
         assert not (await proj.project_graph(gid)).get("skipped")
     finally:
-        config.RESIDENCY_ENABLED = was
+        _switch(was)
 
 
 async def _resident(svc, proj, provider=None) -> str:
@@ -156,11 +213,11 @@ async def _load_requested(gid: str) -> bool:
     return await get_broker_redis().zscore(residency.LOAD_REQUESTS, gid) is not None
 
 
-async def test_an_evicted_graph_stays_evicted_whatever_asks_for_a_pass(store, monkeypatch):
+async def test_an_evicted_graph_stays_evicted_whatever_asks_for_a_pass(
+        store, residency_on, monkeypatch):
     """With residency on, no caller of project_graph reseeds an evicted graph, nor one waiting
     for room: the poll does not pick it, a nudge and project_now skip it, and ensure_rebuilt and
     an operator's rebuild become a request for a load, which admission decides."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, fake = store, FakeFalkor()
     proj = FalkorProjector(graph_client_factory=fake)
     gid = await _resident(svc, proj)
@@ -196,11 +253,10 @@ async def test_an_evicted_graph_stays_evicted_whatever_asks_for_a_pass(store, mo
     ("rehydrating", "evicted"),                  # its load in flight starts again, admitted again
 ])
 async def test_a_move_of_a_graph_out_of_falkordb_changes_only_its_pin(
-        store, monkeypatch, status, after):
+        store, residency_on, monkeypatch, status, after):
     """Nothing writes to FalkorDB without admission: moving a graph that is not in FalkorDB
     moves its pin, and its load is asked for again; no pass seeds the new key until the load is
     admitted. A load in flight is fenced off (the epoch) and goes back to the queue."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, fake = store, FakeFalkor()
     proj = FalkorProjector(graph_client_factory=fake)
     gid = await _resident(svc, proj)
@@ -223,11 +279,11 @@ async def test_a_move_of_a_graph_out_of_falkordb_changes_only_its_pin(
         await _set_ps(gid, status="evicted")     # the schema tests narrow ck_proj_status here
 
 
-async def test_the_watermark_reset_sends_a_load_in_flight_back_to_the_queue(store, monkeypatch):
+async def test_the_watermark_reset_sends_a_load_in_flight_back_to_the_queue(
+        store, residency_on, monkeypatch):
     """A reset after a restore reseeds what FalkorDB holds in place; a load in flight is not
     reseeded outside admission: it goes back to the queue, fenced, and is admitted again. A graph
     out of FalkorDB (watermark 0) has nothing to reset."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, fake = store, FakeFalkor()
     proj = FalkorProjector(graph_client_factory=fake)
     provider = "p_" + _hex()                     # the reset is scoped to it
@@ -253,12 +309,12 @@ async def test_the_watermark_reset_sends_a_load_in_flight_back_to_the_queue(stor
         await get_broker_redis().zrem(residency.LOAD_REQUESTS, resident, loading, out)
 
 
-async def test_a_fork_is_skipped_as_a_fork_before_residency_s_gate(store, monkeypatch):
+async def test_a_fork_is_skipped_as_a_fork_before_residency_s_gate(
+        store, residency_on, monkeypatch):
     """A fork has no FalkorDB copy (doc 17 §6): whatever its row says — here an earlier release's
     copy of it, which the count budget evicted — a pass skips it as a fork before residency's gate
     is asked, the poll never picks it, and neither a rebuild nor a read's rebuild asks for a load
     of it, with residency on or off."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
     root = await _resident(svc, proj)
     fork = (await svc.fork_graph(parent_graph_id=root, workspace_id="ws_res",
@@ -270,7 +326,7 @@ async def test_a_fork_is_skipped_as_a_fork_before_residency_s_gate(store, monkey
     assert await svc.request_projection_rebuild(fork) is False
     assert not await _load_requested(fork)
     for flag in (True, False):
-        monkeypatch.setattr(config, "RESIDENCY_ENABLED", flag)
+        _switch(flag)
         assert await _pending(proj, fork) is False
     assert (await _ps(fork)).status == "evicted"
 
@@ -344,10 +400,10 @@ async def test_adopt_waits_for_a_pass_writing_the_customer_s_key(store):
     assert res["to"]["key"] == keymigrate.owned_key(gid, 1)
 
 
-async def test_a_drop_that_fails_leaves_the_key_to_be_dropped_later(store, monkeypatch):
+async def test_a_drop_that_fails_leaves_the_key_to_be_dropped_later(
+        store, residency_on, monkeypatch):
     """The graph reads evicted, so nothing would ever drop its key again: it is marked to be
     dropped by the retire pass."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, fake = store, FakeFalkor()
     proj = FalkorProjector(graph_client_factory=fake)
     gid = await _resident(svc, proj)
@@ -362,12 +418,11 @@ async def test_a_drop_that_fails_leaves_the_key_to_be_dropped_later(store, monke
     assert [(e["name"], e["movedBy"]) for e in ps.retired_keys] == [(key, "eviction")]
 
 
-async def test_a_graph_with_no_key_in_falkordb_is_not_in_memory(store, monkeypatch):
+async def test_a_graph_with_no_key_in_falkordb_is_not_in_memory(store, residency_on, monkeypatch):
     """Review finding 8: residencyState read "resident" (In memory) for a graph with no key, and
     for one whose new key a move or an Adopt is writing from nothing (watermark 0)."""
     from backend.app.services.system_status import probes
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
 
     async def states(gid):
@@ -386,14 +441,14 @@ async def test_a_graph_with_no_key_in_falkordb_is_not_in_memory(store, monkeypat
     assert await states(gid) == ("rehydrating", "rehydrating")
 
 
-async def test_an_eviction_never_puts_back_a_watermark_liveness_lowered(store, monkeypatch):
+async def test_an_eviction_never_puts_back_a_watermark_liveness_lowered(
+        store, residency_on, monkeypatch):
     """Review finding 11: liveness lowers a graph's watermark without the projection lock. One that
     landed between an eviction's read of the watermark and its compare-and-swap, with a read's
     lease after it, had the eviction put the graph back at the higher watermark, over a key that
     lost what it held. The swap now compares the watermark it read."""
     from backend.app.services.versioning import cache_manager
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
     gid = await _resident(svc, proj)
     await get_broker_redis().delete(cache_manager._lease_key(gid))
@@ -411,13 +466,13 @@ async def test_an_eviction_never_puts_back_a_watermark_liveness_lowered(store, m
     assert (await _ps(gid)).projected_commit_seq == 0
 
 
-async def test_a_load_whose_ontology_stays_unreadable_goes_back_to_evicted(store, monkeypatch):
+async def test_a_load_whose_ontology_stays_unreadable_goes_back_to_evicted(
+        store, residency_on, monkeypatch):
     """Review 3, finding 3: a load whose ontology cannot be read waits for its summaries, rightly —
     but for good, its key in memory and never evictable (it is not idle). Past 10 passes it goes
     back to evicted (load_stalled) with its key dropped, and the next read asks for it again."""
     from backend.app.services.versioning.projection import UNRESOLVED
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
 
     async def unreadable(svc, gid):
         return UNRESOLVED
@@ -448,12 +503,12 @@ async def test_a_load_whose_ontology_stays_unreadable_goes_back_to_evicted(store
     assert ps.rehydrating_since is None and dropped == [key]
 
 
-async def test_check_sync_skips_a_graph_out_of_falkordb_and_says_why(store, monkeypatch):
+async def test_check_sync_skips_a_graph_out_of_falkordb_and_says_why(
+        store, residency_on, monkeypatch):
     """Review finding 10: Check sync scanned an evicted graph's dropped key (everything missing,
     or a 503), and a loading graph's half-written one; an eviction lasts days under residency."""
     from backend.app.services.versioning.reconcile import ProjectionReconciler
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, fake = store, FakeFalkor()
     proj = FalkorProjector(graph_client_factory=fake)
     gid = await _resident(svc, proj)
@@ -468,13 +523,12 @@ async def test_check_sync_skips_a_graph_out_of_falkordb_and_says_why(store, monk
 
 
 async def test_an_eviction_backs_off_when_a_read_holds_the_graph_after_it_committed(
-        store, monkeypatch):
+        store, residency_on, monkeypatch):
     """A read holds the lease before it reads the state; the evictor checks the lease once more
     after its compare-and-swap commits. One whose lease came in between finds the graph as it was,
     key and all; a read that came later reads the evicted state."""
     from backend.app.services.versioning import cache_manager
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, fake = store, FakeFalkor()
     proj = FalkorProjector(graph_client_factory=fake)
     gid = await _resident(svc, proj)
@@ -514,10 +568,9 @@ async def test_concurrent_read_flushes_never_wait_on_each_other(store):
     assert (await _ps(gids[1])).last_read_at is not None
 
 
-async def test_the_count_budget_never_evicts_an_always_graph(store, monkeypatch):
-    """Residency off — or a pod without the flag in a mixed rollout — the count budget's evictor
-    leaves an Always graph alone too."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
+async def test_the_count_budget_never_evicts_an_always_graph(store):
+    """The evictor the count budget used leaves an Always graph alone too, residency on or off (the
+    worker no longer runs the count budget at all)."""
     svc, fake = store, FakeFalkor()
     proj = FalkorProjector(graph_client_factory=fake)
     gid = await _resident(svc, proj)
@@ -526,15 +579,19 @@ async def test_the_count_budget_never_evicts_an_always_graph(store, monkeypatch)
     assert (await _ps(gid)).status == "idle"
 
 
-async def test_with_residency_off_an_evicted_graph_is_reseeded_as_before(store, monkeypatch):
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
-    svc, fake = store, FakeFalkor()
-    proj = FalkorProjector(graph_client_factory=fake)
+async def test_with_residency_off_the_poll_never_reseeds_an_evicted_graph_on_its_own(store):
+    """Turning residency off brings evicted graphs back through admission, one load per master as
+    room allows (the capacity pass's reload, below). The poll reseeding every one at once,
+    unadmitted, as it did with the deploy flag off, is gone: no pass reseeds an evicted graph,
+    whatever the switch says."""
+    svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
     gid = await _resident(svc, proj)
     assert await CacheManager(proj).evict(gid, drop_graph=_dropped) is True
-    assert await _pending(proj, gid) is True
+    _switch(False)
+    assert await _pending(proj, gid) is False
+    assert (await proj.project_graph(gid))["skipped"] == "evicted"
     ps = await _ps(gid)
-    assert ps.status == "idle" and ps.projected_commit_seq == ps.target_commit_seq > 0
+    assert (ps.status, ps.projected_commit_seq) == ("evicted", 0)
 
 
 # ── the capacity loop, live: this lane's FalkorDB with a small maxmemory ──────────────────────
@@ -618,11 +675,10 @@ def _counting(monkeypatch) -> dict:
 
 @live
 async def test_pressure_evicts_coldline_before_standard_and_never_always(
-        store, falkor, mine, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch):
     """At 85 % of maxmemory the master must come down to 70 %: the Coldline graph is enough,
     so the Standard one stays, and the Always one — idle for a month and the largest — is never
     a candidate. The evicted graph stays evicted across the poll."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     cold, std, always = await _live_graphs(svc, proj, mine, 3)
     used = await _used(falkor)
@@ -646,11 +702,11 @@ async def test_pressure_evicts_coldline_before_standard_and_never_always(
 
 
 @live
-async def test_the_idle_clock_starts_when_residency_first_runs(store, falkor, mine, monkeypatch):
+async def test_the_idle_clock_starts_when_residency_first_runs(
+        store, falkor, mine, residency_on, monkeypatch):
     """A graph with no read on record — every graph, the day residency is turned on — is never
     idle: the pass starts its idle clock instead. A graph read daily but last published ten days
     ago is not evicted on the first pass."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     now = datetime.now(timezone.utc)
@@ -664,10 +720,9 @@ async def test_the_idle_clock_starts_when_residency_first_runs(store, falkor, mi
 
 @live
 async def test_a_graph_queued_by_the_loop_is_queued_once_and_keeps_its_place(
-        store, falkor, mine, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch):
     """An Always graph out of FalkorDB, or a waiting graph whose request the broker lost, is
     queued once (ZADD NX), not behind every request each pass."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
@@ -685,8 +740,8 @@ async def test_a_graph_queued_by_the_loop_is_queued_once_and_keeps_its_place(
 
 
 @live
-async def test_idle_graphs_go_by_class_and_eviction_off_stops_it(store, falkor, mine, monkeypatch):
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+async def test_idle_graphs_go_by_class_and_eviction_off_stops_it(
+        store, falkor, mine, residency_on, monkeypatch):
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     cold, std = await _live_graphs(svc, proj, mine, 2)
     two_hours = datetime.now(timezone.utc) - timedelta(hours=2)
@@ -707,12 +762,11 @@ async def test_idle_graphs_go_by_class_and_eviction_off_stops_it(store, falkor, 
 
 @live
 async def test_no_eviction_while_a_rollup_job_for_the_source_is_pending_or_running(
-        store, falkor, mine, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch):
     """A rollup job writes the graph's key; evicted under it, the key comes back with a summaries
     stamp the next load would trust. Neither the plan nor the evictor takes such a graph."""
     from backend.app.services.aggregation.models import AggregationJobORM
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     await _set_ps(gid, residency="coldline",
@@ -740,10 +794,9 @@ async def test_no_eviction_while_a_rollup_job_for_the_source_is_pending_or_runni
 
 @live
 async def test_a_reload_never_trusts_a_summaries_stamp_left_in_a_key_it_had(
-        store, falkor, mine, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch):
     """A rollup job that ran against the evicted key put it back, stamp and all: the load seeds a
     key without it, so the stamp is not taken for this load's summaries."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
 
     async def lineage(svc, gid):
         return ({"CONTAINS"}, {"FLOWS_TO"}, {}, "shared")
@@ -773,14 +826,13 @@ async def test_a_reload_never_trusts_a_summaries_stamp_left_in_a_key_it_had(
 
 @live
 async def test_each_load_asks_for_its_own_summaries_build_and_asks_again_while_it_waits(
-        store, falkor, mine, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch):
     """The rollup hook's ask was keyed by graph and watermark, and the aggregation service
     answers a repeated key within the hour with the job it already ran: a second load at the
     same commit never got its summaries, and stayed rehydrating. Each load asks under its own key
     (its epoch), and asks again under a new one every few passes without the stamp."""
     from backend.app.services.projection_target import make_rollup_rebuild_hook
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     keys: list = []
 
     class _Aggregation:
@@ -818,12 +870,11 @@ async def test_each_load_asks_for_its_own_summaries_build_and_asks_again_while_i
 
 @live
 async def test_a_moved_graph_s_old_key_is_dropped_while_the_graph_is_out_of_falkordb(
-        store, falkor, mine, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch):
     """Evicted within the move's grace period, the graph's watermark is 0 and never reaches the
     move's: it counts as caught up, since nothing reads the old key then."""
     from backend.app.services.versioning import keymigrate
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     old = (await _ps(gid)).falkor_graph_name
@@ -844,8 +895,7 @@ async def test_a_moved_graph_s_old_key_is_dropped_while_the_graph_is_out_of_falk
 
 @live
 async def test_lowering_the_start_mark_through_the_admin_route_evicts_at_the_next_pass(
-        store, falkor, mine, monkeypatch):
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+        store, falkor, mine, residency_on, monkeypatch):
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     used = await _used(falkor)
@@ -867,8 +917,7 @@ async def test_lowering_the_start_mark_through_the_admin_route_evicts_at_the_nex
 
 @live
 async def test_admission_holds_a_load_that_does_not_fit_and_starts_it_when_room_appears(
-        store, falkor, mine, monkeypatch):
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+        store, falkor, mine, residency_on, monkeypatch):
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
@@ -897,14 +946,13 @@ async def test_admission_holds_a_load_that_does_not_fit_and_starts_it_when_room_
 
 @live
 async def test_a_reload_seeds_a_fresh_key_placed_on_the_master_with_the_most_room(
-        store, falkor, mine, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch):
     """Its key went with its eviction: the load pins a fresh platform key that hashes to the
     master the plan chose — here one master, so the first free one — and the key it had goes to
     retired_keys, for the retire pass to drop should the eviction not have. Reads then serve the
     new key."""
     from backend.app.services.versioning import keymigrate
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     old = (await _ps(gid)).falkor_graph_name
@@ -942,13 +990,12 @@ async def _urns(graph) -> set:
 
 @live
 async def test_adopt_never_touches_the_customer_s_key_through_an_eviction_and_a_reload(
-        store, falkor, mine, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch):
     """The customer's key holds what another tool wrote and what version control projected there
     before Adopt. After Adopt, and after the platform key is evicted and loaded again, it holds
     exactly that: same counts, same nodes, same properties."""
     from backend.app.services.versioning import keymigrate
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     factory = make_falkor_graph_factory()
     svc, proj = store, FalkorProjector(graph_client_factory=factory)
     customer = "cust_" + _hex()
@@ -988,10 +1035,9 @@ async def test_adopt_never_touches_the_customer_s_key_through_an_eviction_and_a_
 
 @live
 async def test_a_graph_never_measured_is_estimated_from_its_own_history(
-        store, falkor, mine, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch):
     """Its estimate is its nodes and edges at the main head, as graphver counts them, times the
     bytes per entity — not the data source's statistics, which a probe of an evicted key zeroes."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)                  # one node in its history
     assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
@@ -1003,12 +1049,11 @@ async def test_a_graph_never_measured_is_estimated_from_its_own_history(
 
 @live
 async def test_a_key_under_the_measurement_s_resolution_is_left_unmeasured(
-        store, falkor, mine, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch):
     """GRAPH.MEMORY USAGE answers in whole MiB, so a small key reads 0: that is no size, and
     the graph keeps its estimate rather than a size of 0."""
     from backend.app.providers.shard_capacity import read_graph_memory
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     key = (await _ps(gid)).falkor_graph_name
@@ -1021,10 +1066,9 @@ async def test_a_key_under_the_measurement_s_resolution_is_left_unmeasured(
 
 
 @live
-async def test_a_projected_key_is_measured(store, falkor, mine, monkeypatch):
+async def test_a_projected_key_is_measured(store, falkor, mine, residency_on, monkeypatch):
     """A key that was never measured, or was projected since, is measured on the next pass (this
     one is under the reading's resolution, so it has no size)."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     await _set_ps(gid, size_bytes=5, size_measured_at=None)
@@ -1033,14 +1077,14 @@ async def test_a_projected_key_is_measured(store, falkor, mine, monkeypatch):
     assert ps.size_measured_at is not None and ps.size_bytes != 5
 
 
-async def test_admission_and_its_commit_hold_off_a_pass_and_each_other(store, monkeypatch):
+async def test_admission_and_its_commit_hold_off_a_pass_and_each_other(
+        store, residency_on, monkeypatch):
     """Review finding 2: a move's or an Adopt's admission and its commit are one step against the
     capacity pass and each other (the pass's leader lock), so neither a load the pass starts nor
     another route's write is admitted between the two. A route waits a while for a pass, then
     answers lock_busy."""
     from backend.app.services.versioning.errors import LockBusy
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     proj = FalkorProjector(graph_client_factory=FakeFalkor())
     async with residency.admitting():
         assert await CapacityLoop(proj).run_once(graph_ids=[]) is None
@@ -1050,8 +1094,7 @@ async def test_admission_and_its_commit_hold_off_a_pass_and_each_other(store, mo
     assert await CapacityLoop(proj).run_once(graph_ids=[]) is not None
 
 
-async def test_one_pass_at_a_time_across_workers(store, monkeypatch):
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
+async def test_one_pass_at_a_time_across_workers(store, residency_on, monkeypatch):
     proj = FalkorProjector(graph_client_factory=FakeFalkor())
     async with db.graphver_lock_session() as other:
         assert await other.scalar(select(func.pg_try_advisory_lock(func.hashtext("gvresidency"))))
@@ -1116,14 +1159,13 @@ async def _loads(loop, proj, gid: str) -> None:
 
 @live
 async def test_a_broker_outage_holds_every_graph_and_fails_no_pass(store, falkor, mine,
-                                                                   monkeypatch):
+                                                                   residency_on, monkeypatch):
     """Review finding 13: a pass reads each candidate's read lease from the broker, and an outage
     there raised out of gather: every pass failed, so no load started, and Adopt, move, Always and
     the preview answered 500. A lease that cannot be read now counts as held — nothing is evicted
     for want of it — and the pass goes on."""
     from backend.app.services.versioning import cache_manager
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     proj = FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(store, proj, mine, 1)
     await _set_ps(gid, last_read_at=datetime.now(timezone.utc) - timedelta(days=30))
@@ -1140,7 +1182,8 @@ async def test_a_broker_outage_holds_every_graph_and_fails_no_pass(store, falkor
 
 
 @live
-async def test_a_copy_admitted_is_reserved_until_it_is_released(store, falkor, mine, monkeypatch):
+async def test_a_copy_admitted_is_reserved_until_it_is_released(
+        store, falkor, mine, residency_on, monkeypatch):
     """Review 3, finding 4: a package seed's copy was admitted outside the capacity lock and held
     nothing while it was written, so the next pass saw its master free and unreserved. Admitted
     under the lock, its estimate is reserved on its master (the governor's ledger, renewed while
@@ -1148,7 +1191,6 @@ async def test_a_copy_admitted_is_reserved_until_it_is_released(store, falkor, m
     from backend.app.services.aggregation.admission import AggregationAdmission
     from backend.app.services.aggregation.redis_client import get_redis
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     proj = FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(store, proj, mine, 1)
     ps = await _ps(gid)
@@ -1166,11 +1208,10 @@ async def test_a_copy_admitted_is_reserved_until_it_is_released(store, falkor, m
 
 
 @live
-async def test_a_first_seed_is_admitted_as_a_load(store, falkor, mine, monkeypatch):
+async def test_a_first_seed_is_admitted_as_a_load(store, falkor, mine, residency_on, monkeypatch):
     """Review finding 12: with residency on, the first seed of a key the platform owns — a new
     graph's whole main, written in one go — was never admitted. It takes its turn in the load
     queue now, and the capacity loop seeds it as a load: onto the master with room for it."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     proj = FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     gid = (await store.create_graph(data_source_id="ds_" + _hex(), workspace_id="ws_res",
                                     actor="a", falkor_graph_name="gvt_" + _hex(),
@@ -1187,11 +1228,11 @@ async def test_a_first_seed_is_admitted_as_a_load(store, falkor, mine, monkeypat
 
 
 @live
-async def test_a_first_seed_s_wait_is_logged_and_counted(store, falkor, mine, monkeypatch, caplog):
+async def test_a_first_seed_s_wait_is_logged_and_counted(
+        store, falkor, mine, residency_on, monkeypatch, caplog):
     """Review 3, finding 12: a first seed goes straight to waiting_capacity (the projector queues
     it), and a pass logged and counted a wait only as a graph went from evicted to waiting, so a new
     graph's wait was never told. It is, once, with the reason the pass found."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     proj = FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     gid = (await store.create_graph(data_source_id="ds_" + _hex(), workspace_id="ws_res",
                                     actor="a", falkor_graph_name="gvt_" + _hex(),
@@ -1211,14 +1252,14 @@ async def test_a_first_seed_s_wait_is_logged_and_counted(store, falkor, mine, mo
 
 
 @live
-async def test_the_retire_pass_drops_a_key_an_eviction_could_not(store, falkor, mine, monkeypatch):
+async def test_the_retire_pass_drops_a_key_an_eviction_could_not(
+        store, falkor, mine, residency_on, monkeypatch):
     """Review finding 3: the graph's own row still names the key its eviction could not drop, and
     the retire pass kept it for that ("PROTECTED: graph … projects into it") and forgot it, so the
     key held its memory for good. Out of FalkorDB — evicted, or waiting for room — nothing writes
     or reads it, and the pass holds the graph's projection lock: it is dropped."""
     from backend.app.services.versioning import keymigrate
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     proj = FalkorProjector(graph_client_factory=make_falkor_graph_factory())
 
     async def broken(name, provider_id=None):
@@ -1242,12 +1283,11 @@ async def test_the_retire_pass_drops_a_key_an_eviction_could_not(store, falkor, 
 @live
 @pytest.mark.parametrize("residency_class", ["standard", "always"])
 async def test_a_key_the_master_lost_is_evicted_not_reseeded_outside_admission(
-        store, falkor, mine, monkeypatch, residency_class):
+        store, falkor, mine, residency_on, monkeypatch, residency_class):
     """A master that restarts without its data loses every key it held, and liveness used to
     lower them all to 0 for the poll to reseed at once, unadmitted. With residency on such a graph
     is evicted (lost): a Standard one loads on its next read, an Always one is queued by the next
     pass, and each load is admitted like any other."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     factory = make_falkor_graph_factory()
     svc, proj = store, FalkorProjector(graph_client_factory=factory)
     (gid,) = await _live_graphs(svc, proj, mine, 1)
@@ -1267,11 +1307,10 @@ async def test_a_key_the_master_lost_is_evicted_not_reseeded_outside_admission(
 
 @live
 async def test_a_read_holds_its_graph_before_the_engine_reads_the_watermark(
-        store, falkor, mine, plain_engine, monkeypatch):
+        store, falkor, mine, plain_engine, residency_on, monkeypatch):
     from backend.app.services.versioning import cache_manager
     from backend.app.services.versioning.service import GraphVersioningService, Viewer
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     ds = (await svc.get_graph(gid))["data_source_id"]
@@ -1290,12 +1329,12 @@ async def test_a_read_holds_its_graph_before_the_engine_reads_the_watermark(
 
 
 @live
-async def test_a_read_reloads_a_standard_graph(store, falkor, mine, plain_engine, monkeypatch):
+async def test_a_read_reloads_a_standard_graph(
+        store, falkor, mine, plain_engine, residency_on, monkeypatch):
     """Reads are served from Postgres while the graph is evicted and while it loads, and from
     FalkorDB once its key holds everything again."""
     from backend.app.services.versioning.service import Viewer
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     ds = (await svc.get_graph(gid))["data_source_id"]
@@ -1330,7 +1369,8 @@ async def test_a_read_reloads_a_standard_graph(store, falkor, mine, plain_engine
 
 
 @live
-async def test_a_deep_search_loads_a_coldline_graph(store, falkor, mine, plain_engine, monkeypatch):
+async def test_a_deep_search_loads_a_coldline_graph(
+        store, falkor, mine, plain_engine, residency_on, monkeypatch):
     """Coldline: a canvas read of a small graph stays on Postgres and loads nothing, but deep
     search needs FalkorDB — 503 graph_loading with Retry-After, and the load asked for — and
     answers once the graph is loaded."""
@@ -1338,7 +1378,6 @@ async def test_a_deep_search_loads_a_coldline_graph(store, falkor, mine, plain_e
 
     from backend.tests.integration.test_api_graph_draft_journey import _build_app
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
     (gid,) = await _live_graphs(svc, proj, mine, 1)
     await _set_ps(gid, residency="coldline")
@@ -1365,11 +1404,10 @@ async def test_a_deep_search_loads_a_coldline_graph(store, falkor, mine, plain_e
 
 @live
 async def test_a_reloaded_key_serves_reads_only_once_its_summaries_are_built(
-        store, falkor, mine, monkeypatch):
+        store, falkor, mine, residency_on, monkeypatch):
     """A graph whose ontology has lineage needs the summaries a build stamps into its key: its
     load stays rehydrating (reads on Postgres) until the stamp is there, and the build is asked
     for meanwhile."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     asked: list = []
 
     async def lineage(svc, gid):
@@ -1403,12 +1441,11 @@ async def test_a_reloaded_key_serves_reads_only_once_its_summaries_are_built(
 
 # ── forks: no key of their own; they read through their root's store ────────────────────────────
 @live
-async def test_a_fork_has_no_residency_of_its_own(store, monkeypatch):
+async def test_a_fork_has_no_residency_of_its_own(store, residency_on, monkeypatch):
     """A fork has no key (doc 17 §6). Its watermark is its root's, so the root's residency state
     shows through ``readsThrough``, with no class of the fork's own; and what the capacity loop
     reads — which its policy preview and its metrics read too — never counts a fork, not even one
     an earlier release's copy is still pinned to."""
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
     root = await _resident(svc, proj)
     fork = (await svc.fork_graph(parent_graph_id=root, workspace_id="ws_res",
@@ -1504,7 +1541,7 @@ async def _past_the_ceiling(svc, fork: str, monkeypatch) -> None:
 @pytest.mark.parametrize("residency_class, loads", [("standard", True), ("always", True),
                                                     ("coldline", False)])
 async def test_a_person_s_read_of_a_fork_counts_for_its_root_and_asks_for_its_load(
-        store, forked, fork_engine, monkeypatch, residency_class, loads):
+        store, forked, fork_engine, residency_on, monkeypatch, residency_class, loads):
     """A person's read of a fork holds its root's read lease and counts for its root, as it reads
     through the root's FalkorDB store. With the root out of FalkorDB the fork reads the root's
     Postgres, and the read asks for the root's load — a Standard or an Always one's; a small
@@ -1516,7 +1553,6 @@ async def test_a_person_s_read_of_a_fork_counts_for_its_root_and_asks_for_its_lo
     from backend.app.services.versioning import cache_manager
     from backend.app.services.versioning.service import Viewer
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     proj = FalkorProjector(graph_client_factory=FakeFalkor())
     _root_ds, root, fork_ds, fork = await forked(proj)
     reader, broker = Viewer(actor="usr_reader", can_read=True), get_broker_redis()
@@ -1554,7 +1590,7 @@ async def test_a_person_s_read_of_a_fork_counts_for_its_root_and_asks_for_its_lo
 
 
 async def test_falkordb_only_work_on_a_fork_answers_as_its_root_would(
-        store, forked, fork_engine, monkeypatch):
+        store, forked, fork_engine, residency_on, monkeypatch):
     """Deep search on a fork runs in its root's store. While the root is out of FalkorDB — evicted,
     or loading until its key serves reads — it answers as a search of the root would: 503
     graph_loading with Retry-After, asking for the root's load (a Coldline root's too), and
@@ -1569,7 +1605,6 @@ async def test_falkordb_only_work_on_a_fork_answers_as_its_root_would(
     from backend.app.services.versioning.service import Viewer
     from backend.tests.integration.test_api_graph_draft_journey import _build_app
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     proj = FalkorProjector(graph_client_factory=FakeFalkor())
     _root_ds, root, fork_ds, fork = await forked(proj)
     await _set_ps(root, residency="coldline")
@@ -1613,7 +1648,7 @@ async def test_falkordb_only_work_on_a_fork_answers_as_its_root_would(
 
 
 async def test_a_fork_never_serves_an_answer_cached_from_its_root_s_evicted_key(
-        store, forked, fork_engine, monkeypatch):
+        store, forked, fork_engine, residency_on, monkeypatch):
     """A fork's cached answers are keyed by the store it read and that store's seqs
     (``_cache_scope``). Evicting its root moves the key — the root's projected seq goes to 0, the
     reads to Postgres — and it stays moved while the root's load is not done, so no answer built
@@ -1622,7 +1657,6 @@ async def test_a_fork_never_serves_an_answer_cached_from_its_root_s_evicted_key(
     from backend.app.api.v1.endpoints.graph import _cache_scope
     from backend.app.services.versioning.service import Viewer
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     proj = FalkorProjector(graph_client_factory=FakeFalkor())
     _root_ds, root, fork_ds, _fork = await forked(proj)
     reader = Viewer(actor="usr_reader", can_read=True)
@@ -1641,10 +1675,13 @@ async def test_a_fork_never_serves_an_answer_cached_from_its_root_s_evicted_key(
     assert await scope() == resident
 
 
-async def test_what_residency_adds_to_a_person_s_read(store, forked, fork_engine, monkeypatch):
-    """Warm, residency adds one statement to a person's read — the state of the graph whose key
-    serves it, a fork's root's for a fork, which its read plan names. The read lease and the
-    read's note cost none: the broker at most every 30 seconds, and memory."""
+async def test_what_residency_adds_to_a_person_s_read(store, forked, fork_engine):
+    """Warm, a person's read costs the same statements with residency on or off: whether the
+    graph's key is in FalkorDB is read from the watermark the read loads anyway — reads never
+    depend on the switch. A fork's read plan reads its root's state before anything holds it; with
+    residency on, the root's read lease is then held and its state read once more, after the hold.
+    The read lease and the read's note cost none: the broker at most every 30 seconds, and
+    memory."""
     from sqlalchemy import event
 
     from backend.app.services.versioning.service import Viewer
@@ -1654,7 +1691,7 @@ async def test_what_residency_adds_to_a_person_s_read(store, forked, fork_engine
     reader = Viewer(actor="usr_reader", can_read=True)
 
     async def cost(ds: str, on: bool) -> int:
-        monkeypatch.setattr(config, "RESIDENCY_ENABLED", on)
+        _switch(on)
         await _fork_engine(fork_engine, ds, reader)               # warm, the lease held
         sent: list = []
 
@@ -1669,7 +1706,7 @@ async def test_what_residency_adds_to_a_person_s_read(store, forked, fork_engine
             event.remove(engine, "before_cursor_execute", record)
         return len(sent)
 
-    assert await cost(root_ds, True) == await cost(root_ds, False) + 1
+    assert await cost(root_ds, True) == await cost(root_ds, False)
     assert await cost(fork_ds, True) == await cost(fork_ds, False) + 1
 
 
@@ -1686,3 +1723,167 @@ async def test_reads_are_flushed_in_one_update_that_never_moves_a_read_back(stor
     assert (await _ps(g1)).last_read_at == now
     assert (await _ps(g2)).last_read_at == now + timedelta(minutes=1)
     assert await residency.flush_reads() == 0
+
+
+# ── the switch, as each capacity pass reads it ──────────────────────────────────────────────────
+async def test_a_switch_that_cannot_be_read_evicts_and_loads_nothing(
+        store, residency_on, monkeypatch):
+    """The worker takes no decision it cannot undo on a switch it could not read: the pass does
+    nothing — no eviction, no load — and leaves what the leader keeps of the switch as it is."""
+    from backend.app.services.feature_flags import FeatureFlagService
+
+    svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
+    idle, out = await _resident(svc, proj), await _resident(svc, proj)
+    assert await CacheManager(proj).evict(out, drop_graph=_dropped) is True
+    await _set_ps(idle, residency="coldline",
+                  last_read_at=datetime.now(timezone.utc) - timedelta(days=30))
+    await residency.request_load(out)
+
+    async def unreadable(*_a, **_kw):
+        raise ConnectionError("the management database is down")
+
+    monkeypatch.setattr(FeatureFlagService, "is_enabled", unreadable)
+    before = await _leader()
+    try:
+        assert await CapacityLoop(proj).run_once(graph_ids=[idle, out]) is None
+        assert (await _ps(idle)).status == "idle" and (await _ps(out)).status == "evicted"
+        assert await _leader() == before
+    finally:
+        await get_broker_redis().zrem(residency.LOAD_REQUESTS, out)
+
+
+async def test_the_leader_starts_the_grace_ends_it_and_clears_it_with_no_restart(store):
+    """One capacity loop, never restarted, follows an admin's switch pass by pass. Seeing it on, the
+    leader starts the grace period on the platform settings row — and every graph's idle clock,
+    since reads are not noted while it is off; GRACE_SECS later it ends it, once. Seeing it off, it
+    clears it and brings back what is out of FalkorDB until nothing is; then the pass idles."""
+    svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
+    gid = await _resident(svc, proj)
+    await _set_ps(gid, last_read_at=datetime.now(timezone.utc) - timedelta(days=7))
+    assert await residency.out_of_falkordb() == 0, "the store holds graphs out of FalkorDB already"
+    was = await _in_store(False)
+    before = await _set_policy(gv_residency_on_since=None, gv_residency_phase=None)
+    loop = CapacityLoop(proj)
+    try:
+        assert await loop.run_once(graph_ids=[]) is None          # off, nothing out: it idles
+        assert await _leader() == (None, None)
+
+        await _in_store(True)                                     # an admin turns it on
+        started = datetime.now(timezone.utc)
+        assert await loop.run_once(graph_ids=[]) is not None
+        since, phase = await _leader()
+        assert phase == "grace" and since >= started - timedelta(seconds=1)
+        assert (await _ps(gid)).last_read_at >= started - timedelta(seconds=1)
+        await loop.run_once(graph_ids=[])
+        assert await _leader() == (since, "grace")                # started once
+        ended = since - timedelta(seconds=residency_policy.GRACE_SECS + 1)
+        await _set_policy(gv_residency_on_since=ended.isoformat())
+        await loop.run_once(graph_ids=[])
+        assert await _leader() == (ended, "on")
+
+        assert await CacheManager(proj).evict(gid, drop_graph=_dropped) is True
+        await _in_store(False)                                    # and off again
+        assert await loop.run_once(graph_ids=[]) is not None
+        assert await _leader() == (None, "reloading")
+        ps = await _ps(gid)                                       # its load done, as a pass ends one
+        await _set_ps(gid, status="idle", projected_commit_seq=ps.target_commit_seq)
+        assert await loop.run_once(graph_ids=[]) is None
+        assert await _leader() == (None, None)
+    finally:
+        await _set_policy(**before)
+        await _in_store(was)
+
+
+@live
+async def test_no_eviction_within_the_grace_period_and_eviction_after_it(
+        store, falkor, mine, residency_on):
+    """The first eviction waits GRACE_SECS after the leader first saw the switch on — anchored on
+    the platform settings row, so the same for every worker and across restarts — by which time
+    every API process takes read leases and notes reads. Loads and admission go on meanwhile."""
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    (cold,) = await _live_graphs(svc, proj, mine, 1)
+    await _set_ps(cold, residency="coldline",
+                  last_read_at=datetime.now(timezone.utc) - timedelta(hours=2))
+    now = datetime.now(timezone.utc)
+    await _set_policy(gv_residency_on_since=now.isoformat(), gv_residency_phase="grace")
+    loop = CapacityLoop(proj)
+    p = await loop.run_once(graph_ids=[cold])
+    assert p.evictions == [] and (await _ps(cold)).status == "idle"
+    assert await _leader() == (now, "grace")
+    ended = now - timedelta(seconds=residency_policy.GRACE_SECS + 1)
+    await _set_policy(gv_residency_on_since=ended.isoformat())
+    p = await loop.run_once(graph_ids=[cold])
+    assert _evicted(p) == [(cold, "idle_coldline")]
+    assert await _leader() == (ended, "on")
+
+
+@live
+async def test_turned_off_it_brings_evicted_graphs_back_through_admission_one_at_a_time(
+        store, falkor, mine):
+    """Off, a pass only loads: every evicted graph, through the load queue and admission — one load
+    per master at a time, as room allows — and evicts nothing, not even an idle Coldline graph.
+    No pass reseeds one on its own meanwhile, and its reads go to Postgres until it is back."""
+    svc, proj = store, FalkorProjector(graph_client_factory=make_falkor_graph_factory())
+    first, second, cold = await _live_graphs(svc, proj, mine, 3)
+    for gid in (first, second):
+        assert await CacheManager(proj).evict(gid, drop_graph=proj.drop_graph) is True
+    await _set_ps(cold, residency="coldline",
+                  last_read_at=datetime.now(timezone.utc) - timedelta(days=30))
+    assert await residency.out_of_falkordb() == 2
+    was = await _in_store(False)
+    before = await _set_policy(                                   # it was on until now
+        gv_residency_on_since=(datetime.now(timezone.utc) - timedelta(days=1)).isoformat(),
+        gv_residency_phase="on")
+    scope = [first, second, cold]
+    loop = CapacityLoop(proj)
+    try:
+        p = await loop.run_once(graph_ids=scope)
+        assert p.evictions == [] and (await _ps(cold)).status == "idle"
+        assert await _leader() == (None, "reloading")
+        (load,) = p.loads                                         # one master: one load
+        other = second if load.graph_id == first else first
+        assert (await _ps(load.graph_id)).status == "rehydrating"
+        assert [(w.graph_id, w.reason) for w in p.waits] == [(other, "queued")]
+        assert await _pending(proj, other) is False
+        assert (await svc.projection_watermark(other))["fresh"] is False
+
+        await proj.project_graph(load.graph_id)                   # its seed, as the lane runs it
+        p = await loop.run_once(graph_ids=scope)
+        assert (await _ps(load.graph_id)).status == "idle"        # done…
+        assert [x.graph_id for x in p.loads] == [other]           # …and the next one starts
+        await proj.project_graph(other)
+        await loop.run_once(graph_ids=scope)
+        assert (await _ps(other)).status == "idle"
+        assert await loop.run_once(graph_ids=scope) is None       # nothing left out: it idles
+        assert await _leader() == (None, None)
+    finally:
+        await _set_policy(**before)
+        await _in_store(was)
+
+
+async def test_with_residency_off_a_person_s_read_still_says_a_graph_is_out_and_asks_for_it(
+        store, plain_engine):
+    """Reads never depend on the switch. Off, a person's read of a graph still out of FalkorDB —
+    being brought back, or read in an API process that lags the switch — reads it from Postgres,
+    tells the request's FalkorDB-only work so (503 graph_loading) and asks for its load; it holds
+    no read lease and notes no read."""
+    from backend.app.services.versioning import cache_manager
+    from backend.app.services.versioning.service import Viewer
+
+    svc, proj = store, FalkorProjector(graph_client_factory=FakeFalkor())
+    gid = await _resident(svc, proj)
+    ds = (await svc.get_graph(gid))["data_source_id"]
+    assert await CacheManager(proj).evict(gid, drop_graph=_dropped) is True
+    await get_broker_redis().zrem(residency.LOAD_REQUESTS, gid)
+    residency._READS.pop(gid, None)
+    residency.READING.set(None)
+    try:
+        assert await _served_by(plain_engine, ds, Viewer(actor="usr_reader", can_read=True)) == (
+            "postgres")
+        reading = residency.READING.get()
+        assert (reading.graph_id, reading.state) == (gid, "evicted")
+        assert await _load_requested(gid)
+        assert not await cache_manager.is_pinned(gid) and gid not in residency._READS
+    finally:
+        residency.READING.set(None)
+        await get_broker_redis().zrem(residency.LOAD_REQUESTS, gid)

@@ -73,7 +73,7 @@ class _Session:
         return SimpleNamespace(scalar_one_or_none=lambda: job)
 
 
-async def _adopt(svc, *, keys=frozenset(), ds=None, bindings=(), job=None, residency_on=False,
+async def _adopt(svc, *, keys=frozenset(), ds=None, bindings=(), job=None,
                  fits=(True, "10.0.0.3:6379", 0, None), placed=None, jobs=None):
     ds = ds if ds is not None else SimpleNamespace(projection_mode=None, provider_id="prov_A")
     seen = {"listed": [], "recorded": [], "placed": [], "bindings": []}
@@ -121,7 +121,6 @@ async def _adopt(svc, *, keys=frozenset(), ds=None, bindings=(), job=None, resid
                 (va.residency, "admission_on", admission_on),
                 (va.residency, "place_key", place_key),
                 (va.residency, "admitting", admitting),
-                (va.vconfig, "RESIDENCY_ENABLED", residency_on),
                 (va, "_watermark_model", watermark_model),
                 (va.recorder, "record_for_request", record)):
             stack.enter_context(patch.object(target, name, fn))
@@ -149,10 +148,10 @@ async def test_adopt_reseeds_a_fresh_platform_key_on_the_same_provider_and_is_re
                                  "from": out["from"], "to": out["to"], "externalDrift": _DRIFT}
 
 
-async def test_with_residency_on_the_key_is_placed_and_the_seed_admitted_first():
+async def test_with_residency_on_the_key_is_placed_and_the_seed_admitted_first(residency_on):
     placed = keymigrate.owned_key(GID, 7)
     svc = _Svc()
-    _out, _bg, seen = await _adopt(svc, residency_on=True, placed=(placed, "10.0.0.3:6379"),
+    _out, _bg, seen = await _adopt(svc, placed=(placed, "10.0.0.3:6379"),
                                    keys={"nexus_lineage"})
     assert svc.adopted[0]["key"] == placed
     assert svc.adopted[0]["shard_map"]["master"] == "10.0.0.3:6379"
@@ -164,15 +163,14 @@ async def test_with_residency_on_the_key_is_placed_and_the_seed_admitted_first()
     # A key placed nowhere (no master read, or none hashes there): the first free key, admitted
     # on whichever master it hashes to all the same.
     svc = _Svc()
-    await _adopt(svc, residency_on=True, placed=None, keys={"nexus_lineage"})
+    await _adopt(svc, placed=None, keys={"nexus_lineage"})
     first = keymigrate.owned_key(GID, 2)
     assert svc.calls == [("lock",), ("place", "prov_A"), ("admit", first), ("commit", first),
                          ("unlock",)]
 
     svc = _Svc()
     with pytest.raises(HTTPException) as caught:
-        await _adopt(svc, residency_on=True, fits=(False, "10.0.0.2:6379", 2 * 1024 ** 3,
-                                                   "capacity"))
+        await _adopt(svc, fits=(False, "10.0.0.2:6379", 2 * 1024 ** 3, "capacity"))
     detail = caught.value.detail
     assert caught.value.status_code == 409 and detail["type"] == "capacity_insufficient"
     assert (detail["master"], detail["shortfallBytes"]) == ("10.0.0.2:6379", 2 * 1024 ** 3)
@@ -246,12 +244,12 @@ def test_the_activity_log_can_say_what_happened():
     assert catalogue.LABELS[event] and catalogue.category_of(event) == "platform"
 
 
-async def test_a_rollup_job_that_starts_while_adopt_waits_for_the_lock_refuses_it():
+async def test_a_rollup_job_that_starts_while_adopt_waits_for_the_lock_refuses_it(residency_on):
     """Review 3, finding 7: the rollup-job check came before up to 15 s of waiting for the capacity
     lock and three gathers; a job starting in between went on writing :AGGREGATED into the
     customer's key after the commit. It is checked again under the lock, just before the commit."""
     svc = _Svc()
     with pytest.raises(JobActive):
-        await _adopt(svc, residency_on=True, placed=(keymigrate.owned_key(GID, 7), "10.0.0.3:6379"),
+        await _adopt(svc, placed=(keymigrate.owned_key(GID, 7), "10.0.0.3:6379"),
                      keys={"nexus_lineage"}, jobs=[None, "job_rollup_1"])
     assert svc.adopted == []

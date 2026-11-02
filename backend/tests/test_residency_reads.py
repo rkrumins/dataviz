@@ -18,13 +18,15 @@ larger than the canvas-load threshold. A fork reads through its root, so it is t
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 
 import pytest
 
 from backend.app.api.v1.endpoints import graph as G
+from backend.app.services.feature_flags import feature_flags
 from backend.app.services.versioning import cache_manager, config, residency, residency_policy
-from backend.app.services.versioning.service import Viewer
+from backend.app.services.versioning.service import Viewer, serves_head
 
 _VIEWER = Viewer(actor="usr_1", can_read=True)
 
@@ -52,8 +54,14 @@ def _loads(asked) -> list:
     return [x for x in asked if isinstance(x, str)]
 
 
+def _switch(on: bool) -> None:
+    """Graph residency (Admin → Features) as this process's flag cache has it."""
+    feature_flags._cache = {**(feature_flags._cache or {}), "residencyEnabled": on}
+    feature_flags._cache_ts = time.monotonic()
+
+
 @pytest.fixture
-def asked(monkeypatch):
+def asked(monkeypatch, residency_on):
     """The loads asked for, and a clean slate for the request's reading."""
     out = []
 
@@ -67,7 +75,6 @@ def asked(monkeypatch):
         out.append(("lease", gid, ttl))
         return True
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
     monkeypatch.setattr(residency, "request_load", request_load)
     monkeypatch.setattr(residency, "_entity_count", no_count)
     monkeypatch.setattr(cache_manager, "acquire_lease", lease)
@@ -81,8 +88,8 @@ def asked(monkeypatch):
     residency_policy.invalidate()
 
 
-async def _read(svc, gid="g", *, viewer=_VIEWER):
-    await residency.on_read(svc, await svc.get_graph(gid), viewer=viewer)
+async def _read(svc, gid="g", *, viewer=_VIEWER, state=None):
+    await residency.on_read(svc, await svc.get_graph(gid), viewer=viewer, state=state)
     return residency.READING.get()
 
 
@@ -127,9 +134,41 @@ async def test_a_background_read_neither_asks_nor_marks_the_request(asked):
     assert await _read(_Svc({"g": _wm("evicted")}), viewer=None) is None and asked == []
 
 
-async def test_with_residency_off_nothing_changes(asked, monkeypatch):
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
-    assert await _read(_Svc({"g": _wm("evicted")})) is None and asked == []
+async def test_with_residency_off_a_read_still_says_a_graph_is_out_and_asks_for_its_load(asked):
+    """Reads never depend on the switch: what only residency writes — evicted, waiting for room,
+    being loaded — is honoured with it off too, while an evicted graph is brought back, and in an
+    API process that lags the switch. Off, nothing is held or noted, and the read goes by the state
+    it loaded anyway (``state``): no statement of residency's own (``_Svc`` has no states)."""
+    _switch(False)
+    reading = await _read(_Svc({}), state=_wm("evicted"))
+    assert reading == residency.Reading(graph_id="g", state="evicted", retry_after=60)
+    assert asked == ["g"]                     # its load, and no lease taken nor read noted
+    assert await _read(_Svc({}), state=_wm()) is None
+
+
+@pytest.mark.parametrize("on", [False, True])
+def test_a_graph_being_loaded_serves_no_read_from_falkordb_whatever_the_switch(on):
+    """Its key holds main, but not yet the summaries its readers need: Postgres serves it."""
+    _switch(on)
+    assert serves_head(7, 7, "rehydrating") is False
+    assert serves_head(7, 7, "idle") is True and serves_head(0, 7, "evicted") is False
+
+
+async def test_with_residency_off_a_native_query_and_the_stats_probe_still_see_a_graph_out(
+        monkeypatch):
+    """A key out of FalkorDB is not read as an empty graph, whatever the switch says."""
+    from backend.app.services.versioning.service import GraphVersioningService
+
+    async def by_source(_self, ds):
+        return {"graph_id": "g", "data_source_id": ds, "fork_parent_graph_id": None}
+
+    async def state(_self, gid):
+        return _wm("evicted")
+
+    monkeypatch.setattr(GraphVersioningService, "get_graph_by_data_source", by_source)
+    monkeypatch.setattr(GraphVersioningService, "residency_state", state)
+    _switch(False)
+    assert await residency.non_resident("ds_g") == "g"
 
 
 async def test_a_fork_reads_through_its_root(asked):
@@ -223,7 +262,8 @@ async def test_a_native_query_holds_its_graph_before_it_reads_the_watermark(monk
 
         async def projection_watermark(self, gid):
             order.append("watermark")
-            return {"fresh": True, "falkor_provider": None, "falkor_graph_name": "k"}
+            return {"fresh": True, "status": "idle", "falkor_provider": None,
+                    "falkor_graph_name": "k"}
 
     async def versioned(**kw):
         return {"ds1"}
@@ -407,9 +447,9 @@ async def test_a_background_read_is_not_noted(asked):
     assert asked == []
 
 
-async def test_with_residency_off_no_read_is_noted(asked, monkeypatch):
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", False)
-    await _read(_Svc({"g": _wm()}))
+async def test_with_residency_off_no_read_is_noted(asked):
+    _switch(False)
+    await _read(_Svc({"g": _wm()}), state=_wm())
     assert asked == []
 
 
@@ -466,7 +506,7 @@ async def test_the_watermark_of_a_graph_with_no_key_answers_with_no_residency_st
     from backend.app.api.v1.endpoints.versioning import get_versioning_service
     from backend.app.main import app
 
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", on)
+    _switch(on)
     app.dependency_overrides[get_versioning_service] = lambda: _NoKeyVersioning()
     try:
         r = await test_client.get("/api/v1/ws_a/versioning/graphs/graph_a/watermark")

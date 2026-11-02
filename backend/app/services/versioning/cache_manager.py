@@ -26,7 +26,7 @@ from typing import Awaitable, Callable, List, Optional
 
 from sqlalchemy import select, func, update
 
-from . import config, db
+from . import config, db, residency_policy
 from .messaging import get_broker_redis
 from .models import GraphORM, ProjectionStateORM, _now
 from .service import bootstrap_unfinished
@@ -269,15 +269,15 @@ class CacheManager:
         """If the graph is evicted, rebuild it from Postgres under a single-flight
         lock. Returns ``True`` iff THIS caller performed the rebuild (concurrent
         callers return ``False`` while the holder rebuilds). Never a fork: it has no FalkorDB
-        copy to rebuild. With residency on, an evicted graph (or one waiting for room) is not
-        rebuilt here: its load is asked for, for the capacity loop to admit
-        (``residency.request_load``)."""
+        copy to rebuild. With residency on, or the switch unreadable, an evicted graph (or one
+        waiting for room) is not rebuilt here: its load is asked for, for the capacity loop to
+        admit (``residency.request_load``)."""
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
             graph = await s.get(GraphORM, graph_id)
             if ps is None or graph is None or graph.fork_parent_graph_id:
                 return False
-            if config.RESIDENCY_ENABLED:
+            if await residency_policy.switch_state() is not False:
                 if ps.status in ("evicted", "waiting_capacity"):
                     from .residency import request_load
                     await request_load(graph_id)

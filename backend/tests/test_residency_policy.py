@@ -34,6 +34,9 @@ _POLICY_COLUMNS = {
     "gv_coldline_idle_secs", "gv_high_water_pct", "gv_low_water_pct", "gv_load_margin_pct",
     "gv_bytes_per_entity", "gv_coldline_canvas_load_above", "gv_capacity_interval_secs",
     "gv_policy_updated_by", "gv_policy_updated_at",
+    # What the capacity leader keeps of the Graph residency switch: since when it saw it on, and
+    # where it is (grace, on, reloading), each change recorded once.
+    "gv_residency_on_since", "gv_residency_phase",
 }
 
 e2e = pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres")
@@ -55,6 +58,9 @@ def test_the_policy_columns_are_declared_and_migrated():
     check = next(c for c in table.constraints
                  if getattr(c, "name", "") == "ck_platform_settings_gv_default_residency")
     assert "gv_default_residency IN ('always','standard','coldline')" in str(check.sqltext)
+    phase = next(c for c in table.constraints
+                 if getattr(c, "name", "") == "ck_platform_settings_gv_residency_phase")
+    assert "gv_residency_phase IN ('grace','on','reloading')" in str(phase.sqltext)
     migration = _migration()
     assert migration.revision == _POLICY_MIGRATION.stem and len(migration.revision) <= 32
     assert migration.down_revision == "20261030_1300_gv_ps_residency"
@@ -216,10 +222,11 @@ async def test_a_new_graph_gets_the_default_class(monkeypatch):
     assert await rp.default_class() == "coldline"
 
 
-def test_the_flag_is_off_unless_the_deployment_turns_it_on(monkeypatch):
-    assert rp.enabled() is config.RESIDENCY_ENABLED
-    monkeypatch.setattr(config, "RESIDENCY_ENABLED", True)
-    assert rp.enabled() is True
+async def test_residency_is_off_unless_an_admin_turns_it_on(request):
+    """No deploy setting: the Graph residency switch, as the flag cache has it."""
+    assert await rp.enabled() is False
+    request.getfixturevalue("residency_on")
+    assert await rp.enabled() is True
 
 
 # ── the routes ───────────────────────────────────────────────────────────────────────────────
@@ -243,7 +250,7 @@ async def test_get_says_each_value_as_saved_its_default_and_what_is_in_force():
                               gv_policy_updated_by="usr_res",
                               updated_at="2026-10-30T11:00:00+00:00", updated_by="usr_ops")
     out = await va.get_residency_policy(_user=_ADMIN, session=_Session(row))
-    assert out["enabled"] is config.RESIDENCY_ENABLED
+    assert out["enabled"] is False                   # Graph residency ships off
     assert out["updatedBy"] == "usr_res" and out["updatedAt"] == "2026-10-30T10:00:00+00:00"
     assert set(out["values"]) == set(_DEFAULTS)
     assert out["values"]["lowWaterPct"] == {"saved": 60, "default": 70, "effective": 60}
@@ -252,6 +259,11 @@ async def test_get_says_each_value_as_saved_its_default_and_what_is_in_force():
     nothing = await va.get_residency_policy(_user=_ADMIN, session=_Session(None))
     assert nothing["updatedBy"] is None
     assert {k: v["effective"] for k, v in nothing["values"].items()} == _DEFAULTS
+
+
+async def test_get_says_residency_is_on_once_an_admin_turns_it_on(residency_on):
+    out = await va.get_residency_policy(_user=_ADMIN, session=_Session(PlatformSettingsORM(id=1)))
+    assert out["enabled"] is True
 
 
 async def test_put_saves_what_it_names_and_records_from_and_to():

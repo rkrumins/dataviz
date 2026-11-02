@@ -535,9 +535,10 @@ _EMPTY_INCOMING: Dict[str, object] = {
 
 
 def serves_head(projected: int, committed: int, status: Optional[str]) -> bool:
-    """Whether a projection serves reads of main at its head: it holds the head and, with residency
-    on, no load of it is under way — a loaded key serves once its summaries are built too."""
-    return projected >= committed and not (config.RESIDENCY_ENABLED and status == "rehydrating")
+    """Whether a projection serves reads of main at its head: it holds the head and no load of it is
+    under way — a loaded key serves once its summaries are built too. Whatever the Graph residency
+    switch says: only residency writes ``rehydrating``, and its load is finished either way."""
+    return projected >= committed and status != "rehydrating"
 
 
 def residency_state_of(status: str, projected: int, key: Optional[str],
@@ -712,13 +713,12 @@ class GraphVersioningService:
             # full-seed into it, so it starts parked and its first projection is the first
             # commit's window.
             parked = bool(falkor_graph_name) and not owns_falkor_graph
-            from .residency_policy import default_class
+            from .residency_policy import default_class, enabled
             s.add(
                 ProjectionStateORM(
                     graph_id=graph.id, projected_commit_seq=1 if parked else 0, target_commit_seq=1,
                     # The policy's class for a new graph; with residency off, no policy is read.
-                    residency=(await default_class() if config.RESIDENCY_ENABLED
-                               else "standard"),
+                    residency=await default_class() if await enabled() else "standard",
                     falkor_graph_name=falkor_graph_name,   # the data source's real graph
                     falkor_provider=falkor_provider,       # FalkorDB instance (per-provider eviction)
                     # THE GUARDRAIL, recorded at birth from a fact we actually know: we own the
@@ -4021,9 +4021,10 @@ class GraphVersioningService:
         unfinished: a rebuild would wipe the data source's own FalkorDB graph and reseed it from a
         main parked at genesis. ``False`` for a fork, which has no FalkorDB copy to rebuild.
 
-        With residency on, an evicted graph (or one waiting for room) is left as it is and its
-        load asked for instead, for the capacity loop to admit (``residency.request_load``); a
-        load in flight is a rebuild already running."""
+        An evicted graph (or one waiting for room) is left as it is and its load asked for instead,
+        for the capacity loop to admit (``residency.request_load``) — whatever the Graph residency
+        switch says: off, the loop brings such graphs back through admission too. A load in flight
+        is a rebuild already running."""
         async with self._session() as s:
             await self._lock_graph(s, graph_id)
             await self._assert_not_bootstrapping(s, graph_id)
@@ -4031,9 +4032,9 @@ class GraphVersioningService:
             graph = await s.get(GraphORM, graph_id)
             if ps is None or graph is None or graph.fork_parent_graph_id:
                 return False
-            if config.RESIDENCY_ENABLED and ps.status == "rehydrating":
+            if ps.status == "rehydrating":
                 return False
-            if config.RESIDENCY_ENABLED and ps.status in ("evicted", "waiting_capacity"):
+            if ps.status in ("evicted", "waiting_capacity"):
                 from .residency import request_load
                 await request_load(graph_id)
                 return True
@@ -4064,11 +4065,10 @@ class GraphVersioningService:
         (:class:`ProjectionKeyInvalid`), and no other graph's pin (:class:`ProjectionKeyInUse`).
         Moving to the current pin changes nothing (``changed: False``). Refused
         (:class:`ConcurrencyError`) while the graph's "enable version control" job is unfinished.
-        No FalkorDB I/O: the caller checks the key is free there and schedules the reseed. With
-        residency on, nothing is written to FalkorDB without admission: a graph that is not in
-        FalkorDB only changes its pin, and its load is asked for again (``residency.request_load``)
-        to seed the new key once admitted; a load in flight is fenced off and the graph is
-        evicted again, to wait its turn."""
+        No FalkorDB I/O: the caller checks the key is free there and schedules the reseed. A graph
+        that is not in FalkorDB — whatever the Graph residency switch says — only changes its pin,
+        and its load is asked for again (``residency.request_load``) to seed the new key once
+        admitted; a load in flight is fenced off and the graph is evicted again, to wait its turn."""
         default = config.DEFAULT_FALKOR_PROVIDER
         out = False                      # not in FalkorDB under residency: its load is asked for
         try:
@@ -4111,8 +4111,7 @@ class GraphVersioningService:
                 ps.falkor_graph_name, ps.falkor_provider, ps.owns_falkor_graph = key, provider, True
                 ps.projected_commit_seq = 0
                 ps.target_commit_seq = graph.main_head_commit_seq
-                out = config.RESIDENCY_ENABLED and ps.status in (
-                    "evicted", "waiting_capacity", "rehydrating")
+                out = ps.status in ("evicted", "waiting_capacity", "rehydrating")
                 if not out:
                     ps.status = "reseeding"
                 elif ps.status == "rehydrating":
@@ -4224,9 +4223,10 @@ class GraphVersioningService:
         nothing failed) and bumps its epoch, so a pass in flight cannot publish over it; the poll
         then reseeds each key in place, writing only what differs. Graphs the poll does not
         project (unpinned, tombstoned, still being enabled for version control) are left alone,
-        as are graphs parked at genesis on their data source's own key. With residency on, a
-        load in flight is not reseeded outside admission: it is fenced off, evicted again and its
-        load asked for again; a graph not in FalkorDB is at watermark 0, with nothing to reset.
+        as are graphs parked at genesis on their data source's own key. A load in flight is not
+        reseeded outside admission, whatever the Graph residency switch says: it is fenced off,
+        evicted again and its load asked for again; a graph not in FalkorDB is at watermark 0,
+        with nothing to reset.
         Returns the ids reset; ``dry_run`` returns the ids it would reset and changes nothing."""
         ps = ProjectionStateORM
         resettable = (
@@ -4251,7 +4251,7 @@ class GraphVersioningService:
         async with self._session() as s:
             ids = (await s.execute(
                 update(ps)
-                .where(*resettable, *((~loading,) if config.RESIDENCY_ENABLED else ()))
+                .where(*resettable, ~loading)
                 .values(projected_commit_seq=0, epoch=ps.epoch + 1, status="reseeding",
                         last_error=None,
                         failed_attempts=0, next_retry_at=None, updated_at=_now())
@@ -4266,7 +4266,7 @@ class GraphVersioningService:
                         failed_attempts=0, next_retry_at=None, updated_at=_now())
                 .returning(ps.graph_id)
                 .execution_options(synchronize_session=False)
-            )).scalars().all() if config.RESIDENCY_ENABLED else []
+            )).scalars().all()
         if requeued:
             from .residency import request_load
             for gid in requeued:
@@ -5894,9 +5894,10 @@ class GraphVersioningService:
         compute it again); how it is read (``reads_from``, :meth:`fork_reads_from`'s answer from
         the count kept per version); its root (graph, ``main``, data source, in the trash or not);
         and the root's store as its ``projection_state`` row says it is now: its committed and
-        projected seqs, its status (``fresh`` by :func:`serves_head`) and its pin. That row is read
-        every time: an eviction moves the store without moving any seq the version holds. With
-        residency on, a person's read holds the root's read lease after this, and its store as
+        projected seqs, its status (``fresh`` by :func:`serves_head`), its pin, and its class and
+        size (what marks a read of it while it is out of FalkorDB, ``residency.mark``). That row is
+        read every time: an eviction moves the store without moving any seq the version holds.
+        With residency on, a person's read holds the root's read lease after this, and its store as
         then read decides instead (``ContextEngine._fork_main_reader``)."""
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
@@ -5924,6 +5925,8 @@ class GraphVersioningService:
                 "fresh": serves_head(projected, committed, status),
                 "falkor_provider": ps.falkor_provider if ps is not None else None,
                 "falkor_graph_name": ps.falkor_graph_name if ps is not None else None,
+                "residency": ps.residency if ps is not None else None,
+                "size_bytes": ps.size_bytes if ps is not None else None,
             }
 
     async def fork_reads_from(self, graph_id: str) -> str:

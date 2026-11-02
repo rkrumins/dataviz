@@ -1,17 +1,24 @@
 """Graph residency (doc 17): which versioned graphs' keys FalkorDB holds.
 
-With ``GRAPHVER_RESIDENCY_ENABLED`` on, an evicted graph stays evicted: no projection pass reseeds
-it (``FalkorProjector.project_graph``'s gate), and its reads are served from Postgres. It comes
-back only through a load, which is asked for here (:func:`request_load`) and admitted by the
+A system administrator turns residency on and off at runtime: Graph residency (Admin → Features,
+``residencyEnabled``). An evicted graph stays evicted whatever the switch says: no projection pass
+reseeds it (``FalkorProjector.project_graph``'s gate), and its reads are served from Postgres. It
+comes back only through a load, which is asked for here (:func:`request_load`) and admitted by the
 capacity loop, in the order the loads were first asked for. What asks: a person's read of a
 Standard or Always graph, and of a Coldline graph larger than the canvas-load threshold
-(:func:`on_read`, which ContextEngine calls); FalkorDB-only work on a Coldline graph (deep search,
-node degrees, native queries answer 503 ``graph_loading`` meanwhile, by :data:`READING`); an
-administrator's "Load now" or Always; an operator's rebuild.
+(:func:`mark`, after ContextEngine reads the graph's watermark); FalkorDB-only work on a Coldline
+graph (deep search, node degrees, native queries answer 503 ``graph_loading`` meanwhile, by
+:data:`READING`); an administrator's "Load now" or Always; an operator's rebuild; and, with the
+switch off, the capacity loop itself, which brings every evicted graph back. Reads honour what only
+residency writes (``evicted``, ``waiting_capacity``, ``rehydrating``) whatever the switch says.
 
 The capacity loop (:class:`CapacityLoop`: the projection lane, every policy interval, one leader
-across workers) reads each cluster master's memory and every graph with a key of its own
-(:func:`gather`), asks the planner what to do (``residency_plan.plan``) and does it: an eviction
+across workers) reads the switch from the feature store first (``residency_policy.switch_state``):
+unreadable, the pass does nothing; on, nothing is evicted for ``GRACE_SECS`` after the leader first
+saw it on (kept on the platform settings row, :func:`_switch_phase`); off, the pass only loads,
+until no graph is left out of FalkorDB. It reads each cluster master's memory and every graph with
+a key of its own (:func:`gather`), asks the planner what to do (``residency_plan.plan``) and does
+it: an eviction
 through ``CacheManager.evict`` (its guarded UPDATE and drop) with its reason, after which the graph
 stays evicted; a load by marking the graph ``rehydrating`` and nudging the projection lane, whose
 full seed of the graph's key is the load; a load that does not fit by marking the graph
@@ -20,9 +27,9 @@ summaries are built too; then the graph is ``idle``. It measures what keys hold 
 are outside residency: they have no key of their own to evict, load or count, and their reads
 count for their root, whose key they read.
 
-Reads: each process notes the graphs people read (:func:`on_read`) and writes when, once a minute,
-to ``last_read_at`` (:func:`flush_reads`); a read FalkorDB serves takes the graph's read lease
-for ``GRAPHVER_TRACE_LEASE_TTL_SECS``, so no pass evicts a graph mid-read.
+Reads, with the switch on: each process notes the graphs people read (:func:`hold`) and writes
+when, once a minute, to ``last_read_at`` (:func:`flush_reads`); a read FalkorDB serves takes the
+graph's read lease for ``GRAPHVER_TRACE_LEASE_TTL_SECS``, so no pass evicts a graph mid-read.
 
 Metrics (``jobs.metrics``), from the projection lane: each master's used and maximum memory
 (``versioning_residency_master_used_bytes`` / ``_max_bytes``), the graphs per class and state
@@ -40,7 +47,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, AsyncIterator, Collection, Dict, List, Mapping, NamedTuple, Optional, Tuple
 
 from sqlalchemy import func, literal, select, text, update
@@ -93,7 +100,7 @@ class Reading:
     retry_after: int
 
 
-#: The request's read of a graph out of FalkorDB, set by :func:`on_read`; None when FalkorDB holds
+#: The request's read of a graph out of FalkorDB, set by :func:`mark`; None when FalkorDB holds
 #: it, or for a read that is not a person's.
 READING: ContextVar[Optional[Reading]] = ContextVar("residency_reading", default=None)
 
@@ -197,8 +204,9 @@ async def hold(svc, graph: Mapping) -> Optional[Mapping]:
     """A person's read of a versioned graph that FalkorDB may serve, before it reads the graph's
     watermark: it holds the read lease of the graph whose key serves it (a fork's root), so an
     eviction that has not committed yet backs off, and one that has is seen by the read; and it is
-    noted for ``last_read_at``. Returns that graph; None with residency off."""
-    if not config.RESIDENCY_ENABLED:
+    noted for ``last_read_at``. Returns that graph; None with residency off (nothing evicts then,
+    and no read is noted), as this process's flag cache has the switch."""
+    if not await residency_policy.enabled():
         return None
     root = await _root(svc, graph)
     await _hold(root["graph_id"])
@@ -206,44 +214,57 @@ async def hold(svc, graph: Mapping) -> Optional[Mapping]:
     return root
 
 
-async def on_read(svc, graph: Mapping, *, viewer) -> Optional[Mapping]:
-    """What a read of a versioned graph does for residency — ContextEngine's one call, made for
-    every engine it builds over a versioned graph before it reads the graph's store: for a fork,
-    with its root, once its read plan says it reads through the root's store. Only a person's read
-    counts (``viewer``; a background job has none), with residency on, and it counts for the graph
-    whose key serves it. It holds that graph first (:func:`hold`). For a graph whose key is not in
-    FalkorDB: :data:`READING` says so for the rest of the request, and a Standard or Always graph's
-    load is asked for, as is a Coldline graph's that is larger than the canvas-load threshold. Its
-    read itself is served from Postgres. Returns the graph's state as it read it after the hold
-    (``residency_state``), None when it read none."""
-    if not config.RESIDENCY_ENABLED or viewer is None:
+async def on_read(svc, graph: Mapping, *, viewer, state: Optional[Mapping] = None
+                  ) -> Optional[Mapping]:
+    """What a person's read through a graph whose state the caller read BEFORE anything held it does
+    for residency — a fork's read through its root's store (ContextEngine), whose read plan read
+    the root's state first. Only a person's read counts (``viewer``; a background job has none),
+    and it counts for the graph whose key serves it. With residency on, that graph is held
+    (:func:`hold`) and its state read again, after the hold, and returned; off, nothing is held and
+    ``state`` — what the caller read — serves, and None is returned. Either way the read is marked
+    by the state (:func:`mark`): reads never depend on the switch."""
+    if viewer is None:
         return None
     root = await hold(svc, graph)
-    wm = await svc.residency_state(root["graph_id"])
-    if wm is None or wm["status"] not in _OUT:
+    if root is None:
+        await mark(await _root(svc, graph), state)
+        return None
+    fresh = await svc.residency_state(root["graph_id"])
+    await mark(root, fresh)
+    return fresh
+
+
+async def mark(graph: Mapping, state: Optional[Mapping]) -> None:
+    """A person's read of ``graph`` — the graph whose key serves it — by its state as the read loaded
+    it (its watermark, or :meth:`residency_state`): for a key not in FalkorDB (evicted, waiting for
+    room or being loaded), :data:`READING` says so for the rest of the request, and a Standard or
+    Always graph's load is asked for, as is a Coldline graph's that is larger than the canvas-load
+    threshold. Its read itself is served from Postgres (the state's freshness says so). Whatever the
+    Graph residency switch says: only residency writes those states, and off they are being brought
+    back. Reads nothing but, for a Coldline graph of unknown size, its entities."""
+    if state is None or state["status"] not in _OUT:
         READING.set(None)
-        return wm
+        return
     policy = await residency_policy.resolve()
-    READING.set(Reading(root["graph_id"], wm["status"], policy.capacity_interval_secs))
-    if wm["status"] == "rehydrating":
-        return wm
-    if wm["residency"] == "coldline":
-        entities = _COUNTS.get((root["graph_id"], wm["committed"]))
-        if entities is None and wm.get("size_bytes"):
-            entities = wm["size_bytes"] // policy.bytes_per_entity
+    READING.set(Reading(graph["graph_id"], state["status"], policy.capacity_interval_secs))
+    if state["status"] == "rehydrating":
+        return
+    if state.get("residency") == "coldline":
+        entities = _COUNTS.get((graph["graph_id"], state["committed"]))
+        if entities is None and state.get("size_bytes"):
+            entities = state["size_bytes"] // policy.bytes_per_entity
         if entities is None:
             try:
-                entities = await _entity_count(root["graph_id"], root["data_source_id"],
-                                               wm["committed"])
+                entities = await _entity_count(graph["graph_id"], graph["data_source_id"],
+                                               state["committed"])
             except _Unread:
                 entities = None
         if entities is None or entities <= policy.coldline_canvas_load_above:
-            return wm
+            return
     try:
-        await asyncio.wait_for(request_load(root["graph_id"]), _BROKER_WAIT_S)
+        await asyncio.wait_for(request_load(graph["graph_id"]), _BROKER_WAIT_S)
     except asyncio.TimeoutError:      # the next read asks again
         pass
-    return wm
 
 
 async def set_class(graph_id: str, residency: str) -> Optional[str]:
@@ -258,12 +279,10 @@ async def set_class(graph_id: str, residency: str) -> Optional[str]:
 
 async def non_resident(data_source_id: str) -> Optional[str]:
     """The graph whose key serves a data source's reads — its graph's, or a fork's root's, unless
-    the fork reads past the ceiling — when that key is not in FalkorDB under residency, else
-    None."""
+    the fork reads past the ceiling — when that key is not in FalkorDB, else None. Whatever the
+    Graph residency switch says."""
     from .service import GraphVersioningService
 
-    if not config.RESIDENCY_ENABLED:
-        return None
     svc = GraphVersioningService()
     graph = await svc.get_graph_by_data_source(data_source_id)
     if graph is None:
@@ -274,6 +293,17 @@ async def non_resident(data_source_id: str) -> Optional[str]:
     root = await _root(svc, graph)
     state = await svc.residency_state(root["graph_id"])
     return root["graph_id"] if state is not None and state["status"] in _OUT else None
+
+
+async def out_of_falkordb() -> int:
+    """How many live graphs have their key out of FalkorDB — evicted, waiting for room or being
+    loaded: with the switch off, what is left to bring back. Forks have no key of their own."""
+    ps = ProjectionStateORM
+    async with db.graphver_session() as s:
+        return int(await s.scalar(
+            select(func.count()).select_from(ps).join(GraphORM, GraphORM.id == ps.graph_id)
+            .where(ps.status.in_(_OUT), GraphORM.deleted_at.is_(None),
+                   GraphORM.fork_parent_graph_id.is_(None))))
 
 
 @dataclass
@@ -475,13 +505,15 @@ async def _read_masters(provider: str, client, mode) -> Tuple[List[Master], Dict
 
 
 async def gather(*, graph_ids: Optional[Collection[str]] = None,
-                 providers: Optional[Collection[str]] = None) -> Snapshot:
+                 providers: Optional[Collection[str]] = None,
+                 reload_all: bool = False) -> Snapshot:
     """Read what a pass decides from: every live graph that is not a fork and has a key of its
     own (only ``graph_ids``, when given; only those on ``providers``, when given), when each load
     was asked for, which graphs a read lease holds, whether each graph's key may change, and every
     master of each of their providers (and of ``providers``): its memory, its hold, what the
     aggregation write governor holds on it and its slots. Waiting graphs whose request the broker
-    lost go to the end of the queue, and so does an Always graph that is not resident."""
+    lost go to the end of the queue, and so does an Always graph that is not resident — and, with
+    ``reload_all`` (the switch off), every evicted graph."""
     ps, head = ProjectionStateORM, GraphORM.main_head_commit_seq
     provider_of = func.coalesce(func.nullif(ps.falkor_provider, ""), config.DEFAULT_FALKOR_PROVIDER)
     query = (
@@ -513,8 +545,8 @@ async def gather(*, graph_ids: Optional[Collection[str]] = None,
     snap.queued = list(asked)
     now = time.time()
     for r in found:
-        if r.graph_id not in asked and (r.status == "waiting_capacity" or
-                                        (r.status == "evicted" and r.residency == "always")):
+        if r.graph_id not in asked and (r.status == "waiting_capacity" or (
+                r.status == "evicted" and (reload_all or r.residency == "always"))):
             asked[r.graph_id] = snap.requeue[r.graph_id] = now
     estimate: Dict[str, Optional[int]] = {}
     for r in found:              # only a load asked for, or one in flight, needs an estimate
@@ -788,8 +820,12 @@ class CapacityLoop:
         self._told: set = set()
 
     async def run_once(self, *, graph_ids: Optional[Collection[str]] = None) -> Optional[Plan]:
-        """One pass, under the leader lock: gather, plan, act, measure. Returns the plan, or None
-        when another worker's pass holds the lock."""
+        """One pass, under the leader lock: the Graph residency switch read from the feature store
+        (:func:`_switch_phase`), then gather, plan, act, measure. In the grace period after it was
+        turned on, and while it brings graphs back after it was turned off, a pass evicts nothing;
+        loads and admission go on. Returns the plan, or None when no pass ran: another worker's
+        pass holds the lock, the switch could not be read, or it is off with nothing to bring
+        back."""
         lock_scope = db.graphver_lock_session()
         lock_s = await lock_scope.__aenter__()
         lock_arg = func.hashtext(_LEADER)
@@ -798,9 +834,15 @@ class CapacityLoop:
             acquired = bool(await lock_s.scalar(select(func.pg_try_advisory_lock(lock_arg))))
             if not acquired:
                 return None
+            phase = await _switch_phase()
+            if phase in (None, "off"):
+                return None
             policy = await residency_policy.resolve()
-            await _start_idle_clocks(graph_ids)
-            snap = await gather(graph_ids=graph_ids)
+            if phase != "on":
+                policy = replace(policy, eviction_enabled=False)
+            if phase != "reloading":
+                await _start_idle_clocks(graph_ids)
+            snap = await gather(graph_ids=graph_ids, reload_all=phase == "reloading")
             await _requeue(snap)
             decided = plan(policy, snap.masters, snap.graphs, _clock(), sized=snap.sized)
             await self._measure(snap, first={e.graph_id for e in decided.evictions})
@@ -1041,6 +1083,67 @@ def _report(snap: Snapshot) -> None:
              if r["status"] == "rehydrating" and r.get("rehydrating_since") is not None]
     metrics.gauge_set("versioning_residency_oldest_rehydrating_seconds",
                       max(((now - s).total_seconds() for s in since), default=0))
+
+
+async def _switch_phase() -> Optional[str]:
+    """What this pass may do, by the Graph residency switch read now from the feature store and what
+    the capacity leader keeps of it on the platform settings row, brought up to date here, under
+    the leader lock: ``grace`` — on, less than ``GRACE_SECS`` since the leader first saw it on
+    (``gv_residency_on_since``) — loads but evicts nothing; ``on``; ``reloading`` — off, with
+    graphs out of FalkorDB — brings them back, evicting nothing; ``off`` — off, nothing out — does
+    nothing; None — the switch could not be read — does nothing either. Seeing it on with no grace
+    started starts one, and every graph's idle clock with it: reads are not noted while the switch
+    is off. Seeing it off clears it. ``gv_residency_phase`` is the leader's latch: each of its
+    changes is made once, whichever worker leads and however often it restarts."""
+    from backend.app.db.engine import get_async_session
+    from backend.app.db.models import PlatformSettingsORM
+
+    async with get_async_session() as s:
+        on = await residency_policy.switch_state(s)
+        if on is None:
+            return None
+        row = await s.get(PlatformSettingsORM, 1)
+        latch = getattr(row, "gv_residency_phase", None)
+        since = _ts(getattr(row, "gv_residency_on_since", None))
+        now = datetime.now(timezone.utc)
+        if on:
+            if latch not in ("grace", "on") or since is None:
+                await _restart_idle_clocks()
+                await _latch(s, row, phase="grace", on_since=now)
+                return "grace"
+            if latch == "grace" and now - since >= timedelta(seconds=residency_policy.GRACE_SECS):
+                await _latch(s, row, phase="on", on_since=since)
+                return "on"
+            return latch
+        out = await out_of_falkordb()
+        if latch in ("grace", "on"):
+            await _latch(s, row, phase="reloading" if out else None, on_since=None)
+        elif latch == "reloading" and not out:
+            await _latch(s, row, phase=None, on_since=None)
+        return "reloading" if out else "off"
+
+
+async def _latch(s, row, *, phase: Optional[str], on_since: Optional[datetime]) -> None:
+    """Keep the switch's phase on the platform settings row (``s``'s commit makes it durable),
+    without touching who changed a platform setting last: the leader is nobody."""
+    from backend.app.db.models import PlatformSettingsORM
+
+    values = {"gv_residency_phase": phase,
+              "gv_residency_on_since": on_since.isoformat() if on_since else None}
+    if row is None:
+        s.add(PlatformSettingsORM(id=1, **values))
+        return
+    await s.execute(update(PlatformSettingsORM).where(PlatformSettingsORM.id == 1)
+                    .values(**values, updated_at=PlatformSettingsORM.updated_at)
+                    .execution_options(synchronize_session=False))
+
+
+async def _restart_idle_clocks() -> None:
+    """Every graph's idle clock starts now: the switch was off, and no read was noted meanwhile, so
+    a read on record is no measure of how long a graph has gone unread."""
+    async with db.graphver_session() as s:
+        await s.execute(update(ProjectionStateORM).values(last_read_at=func.now())
+                        .execution_options(synchronize_session=False))
 
 
 async def _start_idle_clocks(graph_ids: Optional[Collection[str]] = None) -> None:

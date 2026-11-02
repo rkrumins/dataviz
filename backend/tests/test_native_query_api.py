@@ -564,7 +564,8 @@ def versioned(monkeypatch):
     async def ids(**_kw):
         return frozenset({DS})
 
-    holder = {"wm": {"fresh": True, "falkor_provider": None, "falkor_graph_name": DS}}
+    holder = {"wm": {"fresh": True, "status": "idle", "falkor_provider": None,
+                     "falkor_graph_name": DS}}
 
     async def graph_by_ds(self, data_source_id):
         return {"graph_id": "g_native", "workspace_id": WS, "data_source_id": data_source_id}
@@ -587,10 +588,10 @@ async def test_a_versioned_source_whose_projection_holds_main_runs(
 
 
 @pytest.mark.parametrize("wm", [
-    # Behind main: just published, or evicted, or re-seeding after a liveness reset.
-    {"fresh": False, "falkor_provider": None, "falkor_graph_name": DS},
+    # Behind main: just published, or re-seeding after a liveness reset.
+    {"fresh": False, "status": "projecting", "falkor_provider": None, "falkor_graph_name": DS},
     # Moved: the key this provider reads is no longer the one the projection publishes.
-    {"fresh": True, "falkor_provider": None, "falkor_graph_name": "gvp_moved"},
+    {"fresh": True, "status": "idle", "falkor_provider": None, "falkor_graph_name": "gvp_moved"},
 ])
 async def test_a_versioned_source_whose_projection_is_behind_says_so_and_runs_nothing(
         test_client: AsyncClient, db_session, estate, engine, versioned, wm):
@@ -604,3 +605,30 @@ async def test_a_versioned_source_whose_projection_is_behind_says_so_and_runs_no
     assert r.json()["detail"]["code"] == "unavailable"
     assert r.headers.get("Retry-After")
     assert engine["engine"].calls == []
+
+
+async def test_a_versioned_source_out_of_falkordb_is_loading_whatever_the_switch(
+        test_client: AsyncClient, db_session, estate, engine, versioned, monkeypatch):
+    """Residency (doc 17): a graph whose key is out of FalkorDB, as the watermark the query reads
+    says, answers 503 graph_loading and asks for its load — with Graph residency off too, when
+    evicted graphs are being brought back — and nothing runs."""
+    from backend.app.services.versioning import residency, residency_policy
+
+    asked = []
+
+    async def request_load(graph_id):
+        asked.append(graph_id)
+
+    monkeypatch.setattr(residency, "request_load", request_load)
+    residency_policy._MEMO.update(policy=residency_policy.defaults(), at=residency_policy._clock())
+    versioned["wm"] = {"fresh": False, "status": "evicted", "residency": "standard", "committed": 3,
+                       "size_bytes": None, "falkor_provider": None, "falkor_graph_name": DS}
+    engine["engine"].manager_cache_key = ("prov_native", DS)
+    try:
+        with signed_in(person("usr_reader"), READER):
+            r = await run(test_client)
+    finally:
+        residency_policy.invalidate()
+    assert r.status_code == 503, r.text
+    assert r.json()["detail"]["code"] == "graph_loading" and r.headers.get("Retry-After")
+    assert set(asked) == {"g_native"} and engine["engine"].calls == []

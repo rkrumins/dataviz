@@ -293,9 +293,9 @@ class ProjectionStateORM(VersioningBase):
     projected_commit_seq = Column(BigInteger, nullable=False, default=0)
     target_commit_seq = Column(BigInteger, nullable=False, default=0)
     # idle|projecting|rebuilding|evicted, or reseeding: an operator reset the watermark (DR) and
-    # the next pass reseeds the key; that pass's claim makes it rebuilding. With residency on, an
-    # evicted graph stays evicted until a load: waiting_capacity while its master has no room for
-    # it, rehydrating while it is loaded (20261030_1300_gv_ps_residency).
+    # the next pass reseeds the key; that pass's claim makes it rebuilding. An evicted graph stays
+    # evicted until a load, whatever the Graph residency switch says: waiting_capacity while its
+    # master has no room for it, rehydrating while it is loaded (20261030_1300_gv_ps_residency).
     status = Column(Text, nullable=False, default="idle")
     falkor_graph_name = Column(Text, nullable=True)
     falkor_provider = Column(Text, nullable=True)   # FalkorDB instance hosting this cache (per-provider eviction)

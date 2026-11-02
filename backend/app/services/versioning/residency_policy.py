@@ -8,15 +8,17 @@ stop mark stays five points under the start mark), memoized for up to 30 seconds
 never raising: a row that cannot be read resolves to the defaults. The routes refuse what
 :func:`resolve` would clamp, naming the field (:func:`validate`).
 
-Whether any of it applies is a deploy setting, not a policy value: ``GRAPHVER_RESIDENCY_ENABLED``
-(:func:`enabled`).
+Whether any of it applies is not a policy value but a switch a system administrator turns on and
+off at runtime: Graph residency (Admin → Features, ``residencyEnabled``; :func:`switch_state`). The
+versioning worker reads it from the feature store at the start of every capacity pass and decides
+there; the API reads it through the flag cache (:func:`enabled`). Reads never depend on it.
 """
 from __future__ import annotations
 
 import logging
 import time
 from dataclasses import dataclass, replace
-from typing import Any, Dict, Mapping, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from backend.app.db.repositories.profiling_repo import INHERIT
 
@@ -74,6 +76,16 @@ _MEMO: Dict[str, Any] = {"policy": None, "at": 0.0, "good": None}
 _clock = time.monotonic
 
 
+#: The Graph residency switch (Admin → Features).
+SWITCH = "residencyEnabled"
+#: How long after the capacity leader first sees the switch on before anything is evicted. An API
+#: process reads the switch through its flag cache, which may be up to 30 seconds old, and until it
+#: sees it on it takes no read leases and notes no reads: an eviction in that window could drop a
+#: key a read is using, or a graph people read every day. 90 seconds is that window three times
+#: over, and it is anchored on the platform settings row, so it is the same for every worker.
+GRACE_SECS = 90
+
+
 class PolicyInvalid(ValueError):
     """A value the routes refuse: out of its range, of the wrong kind, or contradicting another."""
 
@@ -82,9 +94,27 @@ class PolicyInvalid(ValueError):
         self.field = field
 
 
-def enabled() -> bool:
-    """Whether residency applies on this deployment (``GRAPHVER_RESIDENCY_ENABLED``)."""
-    return config.RESIDENCY_ENABLED
+async def switch_state(session=None) -> Optional[bool]:
+    """The Graph residency switch: True or False, or None when it cannot be read — never a default
+    in place of a read that failed. Through ``session`` (the management database), read now from the
+    feature store, as an admin's save left it, whatever this process's flag cache holds; without,
+    through the flag cache (30 seconds), as every gate reads a flag. A switch the registry has not
+    seeded yet reads as off, its shipped default."""
+    from backend.app.services.feature_flags import FeatureFlagService, feature_flags
+
+    try:
+        if session is None:
+            return await feature_flags.is_enabled_self_session(SWITCH, default=False)
+        return await FeatureFlagService(ttl=0).is_enabled(SWITCH, session, default=False)
+    except Exception:  # noqa: BLE001 — unread is not off
+        logger.warning("residency: the Graph residency switch could not be read", exc_info=True)
+        return None
+
+
+async def enabled() -> bool:
+    """Whether residency is on, as this process's flag cache has it: what the API reads for read
+    leases and read notes, a new graph's class and the policy routes. Unreadable counts as off."""
+    return await switch_state() is True
 
 
 def _env() -> Dict[str, Any]:
@@ -243,11 +273,10 @@ def apply(row, values: Mapping[str, Any]) -> None:
 
 def describe(row) -> Dict[str, Any]:
     """Each value as saved, its default and its effective value, with each whole number's range,
-    who changed the policy last and when, and whether residency is on here."""
+    and who changed the policy last and when."""
     saved = saved_values(row)
     default, effect = defaults(), effective(saved)
     return {
-        "enabled": enabled(),
         "values": {wire: {"saved": saved[wire], "default": getattr(default, attr),
                           "effective": getattr(effect, attr)}
                    for wire, attr in WIRE_NAMES.items()},

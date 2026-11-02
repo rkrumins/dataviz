@@ -310,6 +310,12 @@ class PlatformSettingsORM(Base):
     # platform setting.
     gv_policy_updated_by = Column(Text, nullable=True)
     gv_policy_updated_at = Column(Text, nullable=True)
+    # What the capacity leader keeps of the Graph residency switch (Admin → Features): since when
+    # it first saw it on (ISO-8601 UTC; evictions wait GRACE_SECS from then) and its phase —
+    # ``grace``, ``on``, ``reloading`` (off, bringing evicted graphs back) or NULL (off). Written by
+    # the leader alone, each change once, with its activity event.
+    gv_residency_on_since = Column(Text, nullable=True)
+    gv_residency_phase = Column(Text, nullable=True)
     updated_at = Column(Text, nullable=True, onupdate=_now)
     updated_by = Column(Text, nullable=True)
 
@@ -319,6 +325,10 @@ class PlatformSettingsORM(Base):
             "gv_default_residency IS NULL OR "
             "gv_default_residency IN ('always','standard','coldline')",
             name="ck_platform_settings_gv_default_residency",
+        ),
+        CheckConstraint(
+            "gv_residency_phase IS NULL OR gv_residency_phase IN ('grace','on','reloading')",
+            name="ck_platform_settings_gv_residency_phase",
         ),
     )
 

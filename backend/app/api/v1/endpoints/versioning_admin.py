@@ -160,14 +160,16 @@ async def move_projection(
     else:
         # Its new key is seeded while the old one stands: a full copy, admitted like a load, and
         # committed before anything else is admitted. A graph out of FalkorDB only changes its
-        # pin; its load is admitted when it starts. With residency on the lock is always taken,
-        # and the graph's state read under it decides: a load finishing meanwhile makes a copy.
-        async with residency.admitting() if vconfig.RESIDENCY_ENABLED else contextlib.nullcontext():
-            if vconfig.RESIDENCY_ENABLED:
+        # pin; its load is admitted when it starts. With residency on (or the switch unreadable)
+        # the lock is always taken, and the graph's state read under it decides: a load finishing
+        # meanwhile makes a copy.
+        on = await residency_policy.switch_state() is not False
+        async with residency.admitting() if on else contextlib.nullcontext():
+            if on:
                 wm = await svc.projection_watermark(graph_id)
-            copied = vconfig.RESIDENCY_ENABLED and wm.get("status") not in (
-                "evicted", "waiting_capacity", "rehydrating")
-            key, master = await _target_key(graph_id, body, current, wm["retired_keys"])
+            copied = on and wm.get("status") not in ("evicted", "waiting_capacity", "rehydrating")
+            key, master = await _target_key(graph_id, body, current, wm["retired_keys"],
+                                            placed=on)
             if copied:
                 admitted = await residency.admission_on(graph_id, body.provider_id, key)
                 if not admitted.fits:
@@ -197,10 +199,11 @@ async def move_projection(
 
 
 async def _target_key(graph_id: str, body: ProjectionMoveRequest, current: dict,
-                      retired: list) -> Tuple[str, Optional[str]]:
+                      retired: list, *, placed: bool) -> Tuple[str, Optional[str]]:
     """The key a move goes to, and the master it was placed on: ``body.key``, or a platform key
     of the graph's that neither exists on the provider nor is one of its retired keys — with
-    residency on, placed on the provider's master with the most room (doc 17), else the first.
+    residency on (``placed``), on the provider's master with the most room (doc 17), else the
+    first.
     An explicit key must be this graph's platform key, one of its retired keys on that provider
     or its current key, and must not exist there unless it is one of those."""
     keys = await falkor_graph_registry.list_graph_keys(body.provider_id)
@@ -211,10 +214,9 @@ async def _target_key(graph_id: str, body: ProjectionMoveRequest, current: dict,
     ours = {((e.get("provider") or vconfig.DEFAULT_FALKOR_PROVIDER), e["name"]) for e in retired}
     if body.key is None:
         taken = keys | {name for _p, name in ours}
-        placed = (await residency.place_key(graph_id, body.provider_id, taken)
-                  if vconfig.RESIDENCY_ENABLED else None)
-        if placed is not None:
-            return placed
+        chosen = await residency.place_key(graph_id, body.provider_id, taken) if placed else None
+        if chosen is not None:
+            return chosen
         n = 1
         while keymigrate.owned_key(graph_id, n) in taken:
             n += 1
@@ -234,9 +236,13 @@ async def get_residency_policy(
     _user: User = Depends(requires("system:admin")),
     session: AsyncSession = Depends(get_db_session),
 ) -> dict:
-    """What the capacity loop evicts and loads by (doc 17), with ``enabled``: whether residency
-    applies on this deployment at all (``GRAPHVER_RESIDENCY_ENABLED``)."""
-    return residency_policy.describe(await session.get(PlatformSettingsORM, 1))
+    """What the capacity loop evicts and loads by (doc 17), with ``enabled``: whether a system
+    administrator has turned Graph residency on (Admin → Features)."""
+    return await _policy(await session.get(PlatformSettingsORM, 1))
+
+
+async def _policy(row) -> dict:
+    return {**residency_policy.describe(row), "enabled": await residency_policy.enabled()}
 
 
 @router.put("/residency-policy", summary="Change residency policy values")
@@ -267,7 +273,7 @@ async def put_residency_policy(
             details={"from": {w: before[w] for w in changed}, "to": {w: after[w] for w in changed}})
     await session.commit()
     residency_policy.invalidate()
-    return residency_policy.describe(await session.get(PlatformSettingsORM, 1))
+    return await _policy(await session.get(PlatformSettingsORM, 1))
 
 
 def _validate(body: Dict[str, Any], saved: Dict[str, Any]) -> None:
@@ -436,16 +442,16 @@ async def adopt_projection(
     taken = keys | {e["name"] for e in wm["retired_keys"]}
     # The key first, then its copy admitted on the master it hashes to, as a move's, and the
     # commit made before anything else is admitted.
-    async with residency.admitting() if vconfig.RESIDENCY_ENABLED else contextlib.nullcontext():
-        placed = (await residency.place_key(graph_id, provider, taken)
-                  if vconfig.RESIDENCY_ENABLED else None)
+    on = await residency_policy.switch_state() is not False
+    async with residency.admitting() if on else contextlib.nullcontext():
+        placed = await residency.place_key(graph_id, provider, taken) if on else None
         if placed is None:
             n = 1
             while keymigrate.owned_key(graph_id, n) in taken:
                 n += 1
             placed = keymigrate.owned_key(graph_id, n), None
         key, master = placed
-        if vconfig.RESIDENCY_ENABLED:
+        if on:
             admitted = await residency.admission_on(graph_id, provider, key)
             if not admitted.fits:
                 raise _capacity_insufficient(admitted, "this graph's copy")
