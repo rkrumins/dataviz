@@ -507,7 +507,7 @@ async def test_the_watermark_of_a_graph_with_no_key_answers_with_no_residency_st
     from backend.app.main import app
 
     _switch(on)
-    app.dependency_overrides[get_versioning_service] = lambda: _NoKeyVersioning()
+    app.dependency_overrides[get_versioning_service] = _NoKeyVersioning
     try:
         r = await test_client.get("/api/v1/ws_a/versioning/graphs/graph_a/watermark")
     finally:

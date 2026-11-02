@@ -96,7 +96,7 @@ export function ConfirmTurnOn({
                                 )}
                             </div>
 
-                            <div className="sticky bottom-0 flex items-center justify-end gap-2 p-6 pt-5 bg-canvas-elevated/95 backdrop-blur">
+                            <div className="sticky bottom-0 flex items-center justify-end gap-2 p-6 pt-5 bg-canvas-elevated">
                                 <button
                                     type="button"
                                     onClick={onCancel}

@@ -11,7 +11,6 @@ A fork has no key of its own: 409 ``not_for_forks``. System administrators only,
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import patch
 
 import pytest
 from fastapi import HTTPException

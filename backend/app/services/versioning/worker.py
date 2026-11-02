@@ -392,7 +392,7 @@ class ProjectionWorker:
                 await asyncio.wait_for(self._stop.wait(),
                                        timeout=(await resolve()).capacity_interval_secs)
             except asyncio.TimeoutError:
-                pass
+                pass                                # the interval elapsed: run the next pass
 
     async def _liveness_loop(self) -> None:
         while not self._stop.is_set():
