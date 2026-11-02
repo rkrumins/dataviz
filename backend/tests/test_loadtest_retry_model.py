@@ -187,6 +187,21 @@ def test_a_bad_body_fails_without_being_retried():
     assert resp.outcome.startswith("failure")
 
 
+def test_an_action_that_answers_otherwise_says_what_it_may_answer():
+    """Opening a draft answers 201 and a queued publish 202, and a publish refused by its draft's
+    policy (409) is an answer in a collaboration test, not an error. ``ok`` names what the action
+    may answer; the callback sees which one came, and shed responses still come back."""
+    seen = []
+    opened = _Resp(201, body={"branchId": "br_1"})
+    client = _Client(_Resp(503, headers={"Retry-After": "1"}), opened)
+    retry.request_with_retries(client, "POST", "/x", name="n", ok=(201, 409),
+                               on_success=lambda r: seen.append(r.status_code) or True)
+    assert opened.outcome == "success" and seen == [201] and len(client.calls) == 2
+    other = _Resp(200, body={})
+    retry.request_with_retries(_Client(other), "POST", "/x", name="n", ok=(201,))
+    assert other.outcome.startswith("failure"), "a 200 is not what this action answers"
+
+
 def test_zero_attempts_restores_the_old_fire_once_behaviour(monkeypatch):
     """So a run can be compared against the historical numbers this change
     invalidates."""

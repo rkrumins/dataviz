@@ -95,6 +95,51 @@ bottom:
 7. Further panels for **Enabling version control**, **Versioned graph
    projection** and **Delivery pipelines** (queue depth and consumer lag).
 
+### Versioned graphs: what stays in memory
+
+**What it's for:** deciding which versioned graphs the graph store keeps in
+memory, and getting one back when it matters. **Who:** Super Admins. Postgres
+holds every graph; a graph out of memory is read from it, more slowly, until it
+is loaded again. [Forks & Residency](/docs/versioning-forks-and-residency)
+explains every rule.
+
+1. In **Versioned graph projection**, select **All versioned graphs**. Each row
+   shows the graph's class — **Always**, **Standard** or **Coldline** — and
+   whether it is **In memory**, **Evicted**, **Loading** or **Waiting for
+   room**.
+2. To keep a graph in memory for good, set its class to **Always**. If its
+   master has no room, the row says which master and how much more it needs,
+   and nothing changes.
+3. To bring an evicted graph back now, select **Load now**. It is loaded as soon
+   as its master has room.
+4. To move a customer's own graph onto a copy the platform manages, select
+   **Adopt…**, read what changes and select **Adopt**. From then the platform
+   reads its own copy: changes other tools keep making to the customer's graph
+   no longer show, and **Bring into history** no longer sees them. The
+   customer's graph itself is left exactly as it is. Bring in what it holds
+   first if it should be kept.
+
+**You should now see** a note on the row saying what happened; the graph's
+chips change as it loads.
+
+### Change when graphs leave memory
+
+1. In **All versioned graphs**, select **Residency & eviction**. The card shows
+   each master's memory with its **start** and **stop** marks, every value with
+   the one in force and its default, and who changed them last.
+2. Change a value — how long an unread Standard or Coldline graph stays, the
+   start and stop marks, the headroom a load needs — or select **Reset** to go
+   back to its default.
+3. Select **Save**. The confirmation says what the next pass would do, such as
+   "Saving evicts 12 graphs, 9.4 GB, on master 10.0.0.2:6379". Select **Save**
+   again to apply it.
+
+**You should now see** the new values in force within 30 seconds; the next
+capacity pass acts on them. A value that is
+out of range, or contradicts another, is named next to its field and nothing is
+saved. If the card says Graph residency is off, the values are kept and apply once
+a Super Admin turns it on under **Administration → Features → Graph residency**.
+
 ### Adjust the graph store's limits
 
 Each node under **Memory headroom** shows its current limits. To change them:

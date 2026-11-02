@@ -241,7 +241,7 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `GRAPH_CACHE_TRACE_EXPAND_TTL_S` | `300` | Per-endpoint TTLs, seconds (1-86400). | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_TRACE_TTL_S` | `300` | Per-endpoint TTLs, seconds (1-86400). | `backend/app/services/graph_cache.py` |
 | `GRAPH_INFLIGHT_HARD_MAX` | `0` | never admit past this — must stay under the pool | `backend/app/providers/manager.py` |
-| `GRAPH_SOURCE_RECENT_SECS` | `60` | how long a source counts toward the reserve after its last request | `backend/app/providers/manager.py` |
+| `GRAPH_SOURCE_HOLD_SECS` | `1.5` | how long a source keeps its reserve after its last request started or finished | `backend/app/providers/manager.py` |
 | `GRAPH_STORE_TOPOLOGY_CACHE_TTL_S` | `30` | one reading of every node serves every viewer this long | `backend/app/services/graph_store/topology.py` |
 | `GRAPH_STORE_TOPOLOGY_DEADLINE_S` | `8` | deadline per wave of 8 nodes; the sweep scales with the fleet, capped at 60s | `backend/app/services/graph_store/topology.py` |
 | `LOCAL_DEV_FALKORDB_OVERRIDE` | (empty) | Local development only: set `true` when the backend runs on your machine and FalkorDB in Docker, so `FALKORDB_HOST` and `FALKORDB_PORT` replace the host and port stored on graph data sources. | `backend/app/providers/manager.py` |
@@ -616,6 +616,10 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_BOOTSTRAP_SCAN_WIDTH` | `100000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_SLOTS` | `2` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_BOOTSTRAP_WINDOW` | `50000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_BYTES_PER_ENTITY` | `550` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_CAPACITY_SECS` | `60` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_COLDLINE_CANVAS_LOAD_ABOVE` | `500000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_COLDLINE_IDLE_SECS` | `3600` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_COMMIT_MAX_RETRIES` | `5` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DB_URL` | — | `backend/app/services/system_status/probes.py`, `backend/app/services/versioning/config.py` |
 | `GRAPHVER_DEFAULT_AUDIT_TIER` | `commit_only` | `backend/app/services/versioning/config.py` |
@@ -625,6 +629,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_DRAIN_SECS` | `40` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EPHEMERAL_MAX_GRAPHS` | `32` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EPHEMERAL_TTL_SECS` | `900` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_EVICTION_ENABLED` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_EVICT_SECS` | `300` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_FALKOR_BUDGETS` | (empty) | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_FALKOR_MAX_RESIDENT` | `0` | `backend/app/services/versioning/config.py` |
@@ -637,9 +642,13 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_INGEST_HEARTBEAT_SECS` | computed | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_INGEST_POLL_SECS` | `5` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_INGEST_STALE_SECS` | `120` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_JOBS_PER_USER` | `1` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_JOBS_PER_WORKSPACE` | `2` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_JOB_WEDGE_SECS` | `900` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_LEASE_TTL` | `60` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_LOAD_MARGIN_PCT` | `130` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_MASTER_HIGH_WATER_PCT` | `80` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_MASTER_LOW_WATER_PCT` | `70` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_MAX_FORKS_PER_GRAPH` | `10` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_MERKLE_DEPTH` | `4` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_NARROW_SQUASH` | `1` | `backend/app/services/versioning/config.py` |
@@ -674,6 +683,7 @@ Drafts and commits, projection into the graph store, and import and export.
 | `GRAPHVER_SET_FIELDS` | `tags` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SQUASH_PAGE` | `20000` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SQUASH_PAGED_ABOVE` | `200000` | `backend/app/services/versioning/config.py` |
+| `GRAPHVER_STANDARD_IDLE_SECS` | `604800` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_DELETE_MAX_ABS` | `500` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_DELETE_MAX_FRACTION` | `0.05` | `backend/app/services/versioning/config.py` |
 | `GRAPHVER_SYNC_PUBLISH_MAX_CHANGES` | `20000` | `backend/app/services/versioning/config.py` |
@@ -790,8 +800,8 @@ Logs, metrics, health probes and the system status checks.
 | Variable | Default | Description | Read in |
 |---|---|---|---|
 | `LOG_LEVEL` | (empty) / `INFO` / `info` *(differs by call site)* | Log level for every backend service: `DEBUG`, `INFO`, `WARNING` or `ERROR`. | `backend/app/middleware/logging.py`, `backend/app/services/aggregation/__main__.py`, `backend/app/services/aggregation/controlplane.py` +2 more |
-| `METRICS_ENABLED` | — | Serve Prometheus metrics: `true`, `1`, `yes` or `on`. The API serves them at `/api/v1/metrics`, the control plane at `/metrics` on its port 8091, and the aggregation worker at `/metrics` on `METRICS_PORT`. Also needs `METRICS_TOKEN`: without one the endpoint answers 404. | `backend/app/api/v1/endpoints/metrics.py` |
-| `METRICS_PORT` | `9100` | the aggregation worker's own scrape port | `backend/app/services/aggregation/__main__.py` |
+| `METRICS_ENABLED` | — | Serve Prometheus metrics: `true`, `1`, `yes` or `on`. The API serves them at `/api/v1/metrics`, the control plane at `/metrics` on its port 8091, and the aggregation and versioning workers at `/metrics` on `METRICS_PORT`. Also needs `METRICS_TOKEN`: without one the endpoint answers 404. | `backend/app/api/v1/endpoints/metrics.py` |
+| `METRICS_PORT` | `9100` | the aggregation and versioning workers' own scrape port | `backend/app/services/aggregation/__main__.py`, `backend/app/services/versioning/__main__.py` |
 | `METRICS_TOKEN` | — (secret, set your own) | Bearer token a scraper must present to read the metrics. | `backend/app/api/v1/endpoints/metrics.py` |
 
 ### Internal tuning

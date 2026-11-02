@@ -26,7 +26,7 @@ from alembic import op
 from backend.app.services.versioning.models import ensure_fork_sync_checks, widen_job_type_check
 
 revision: str = "20261101_1000_gv_fork_sync"
-down_revision: Union[str, None] = "20261030_1200_ds_fork_of"
+down_revision: Union[str, None] = "20261102_1000_feature_impact_on"
 branch_labels = None
 depends_on = None
 

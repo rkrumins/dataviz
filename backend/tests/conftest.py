@@ -311,6 +311,19 @@ def forks_on():
     yield
 
 
+@pytest.fixture()
+def residency_on():
+    """Turn graph residency ON for a test.
+
+    ``residencyEnabled`` is an experimental flag, so it ships OFF: no read is leased or noted, a
+    new graph is Standard, and nothing is admitted. Primed in the cache, like ``signup_enabled``
+    above — what the API and a projection pass read. The capacity pass reads the feature store
+    itself: ``integration/test_graph_residency.py`` turns it on there too, its grace long over."""
+    feature_flags._cache = {**(feature_flags._cache or {}), "residencyEnabled": True}
+    feature_flags._cache_ts = time.monotonic()
+    yield
+
+
 class _AnyOpenDraft:
     async def check_view_branch(self, **_):
         return None

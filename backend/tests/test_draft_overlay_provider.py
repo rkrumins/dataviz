@@ -638,8 +638,9 @@ def test_the_overlay_caches_default_holds_under_half_a_gigabyte():
     hold 1.2 GB. Its default keeps them under 512 MB."""
     import re
     from backend.app.services.versioning import config
-    default = int(re.search(r'"GRAPHVER_OVERLAY_CACHE_ENTRIES", "(\d+)"',
-                            open(config.__file__).read()).group(1))
+    with open(config.__file__) as f:
+        source = f.read()
+    default = int(re.search(r'"GRAPHVER_OVERLAY_CACHE_ENTRIES", "(\d+)"', source).group(1))
     assert default * 1_200 <= 512 * 2 ** 20, default
 
 

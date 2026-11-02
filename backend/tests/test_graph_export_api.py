@@ -70,7 +70,7 @@ async def source(test_client, db_session: AsyncSession, monkeypatch, tmp_path):
     app.dependency_overrides[get_graph_read_db_session] = _session
     provider = _Provider()
 
-    async def _for_workspace(ws_id, _manager, _session, *, data_source_id, actor):
+    async def _for_workspace(ws_id, _manager, _session, *, data_source_id, actor, viewer=None):
         return SimpleNamespace(provider=provider)
 
     monkeypatch.setattr(graph_export.ContextEngine, "for_workspace", staticmethod(_for_workspace))

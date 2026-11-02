@@ -26,7 +26,7 @@ from typing import Awaitable, Callable, List, Optional
 
 from sqlalchemy import select, func, update
 
-from . import config, db
+from . import config, db, residency_policy
 from .messaging import get_broker_redis
 from .models import GraphORM, ProjectionStateORM, _now
 from .service import bootstrap_unfinished
@@ -40,6 +40,25 @@ def _lock_key(graph_id: str) -> str:
 
 def _lease_key(graph_id: str) -> str:
     return f"versioning:lease:{graph_id}"
+
+
+async def _rollups_running(data_source_id: Optional[str]) -> bool:
+    """Whether a rollup job for the data source is pending or running; True when that cannot be
+    read (fail closed)."""
+    if not data_source_id:
+        return False
+    from backend.app.db.engine import get_readonly_session
+    from backend.app.services.aggregation.models import AggregationJobORM
+
+    try:
+        async with get_readonly_session() as s:
+            return (await s.execute(select(AggregationJobORM.id).where(
+                AggregationJobORM.data_source_id == data_source_id,
+                AggregationJobORM.status.in_(("pending", "running"))).limit(1))
+            ).scalar_one_or_none() is not None
+    except Exception:  # noqa: BLE001
+        logger.warning("could not ask whether rollups run for %s", data_source_id, exc_info=True)
+        return True
 
 
 def _evictable() -> tuple:
@@ -64,11 +83,12 @@ def _evictable() -> tuple:
 # Module-level lease helpers so a read path can pin a graph without holding a
 # CacheManager (which needs a projector). Best-effort: a broker outage must never
 # fail a read — it just means the lease isn't held for that request.
-async def acquire_lease(graph_id: str) -> bool:
+async def acquire_lease(graph_id: str, ttl: Optional[int] = None) -> bool:
     try:
-        r = get_broker_redis()
-        await r.incr(_lease_key(graph_id))
-        await r.expire(_lease_key(graph_id), config.LEASE_TTL)
+        async with get_broker_redis().pipeline(transaction=False) as p:     # one round trip
+            p.incr(_lease_key(graph_id))
+            p.expire(_lease_key(graph_id), ttl or config.LEASE_TTL)
+            await p.execute()
         return True
     except Exception:   # pragma: no cover - infra
         return False
@@ -105,13 +125,18 @@ class CacheManager:
         return await is_pinned(graph_id)
 
     # ---- eviction --------------------------------------------------------- #
-    async def evict(self, graph_id: str, *, drop_graph: Callable[..., Awaitable]) -> bool:
+    async def evict(self, graph_id: str, *, drop_graph: Callable[..., Awaitable],
+                    reason: Optional[str] = None) -> bool:
         """Evict a cold ``main`` from FalkorDB. Skips a pinned graph, any graph that is not
         :func:`_evictable`, and one whose key anything besides the graph's own data source reads
         (:func:`purge_worker.graph_key_readers`, as purge and move ask) or whose readers cannot be
         asked. Marks ``status=evicted`` + ``projected_commit_seq=0`` (so the worker
         rebuilds it) and drops the FalkorDB graph via ``drop_graph(name, provider_id)`` — routed
         to the graph's pinned provider instance. Returns whether it evicted.
+
+        The capacity loop passes its ``reason`` (residency, doc 17): it is recorded as
+        ``evicted_reason``, and an Always graph is never evicted, whatever its class was when the
+        pass planned.
 
         Runs under the projector's own per-graph lock (``project_graph``'s): a projection in
         flight means the graph is not cold, and nothing writes the key between the re-check and
@@ -133,13 +158,19 @@ class CacheManager:
             async with self._session() as s:
                 key = (await s.execute(
                     select(ProjectionStateORM.falkor_graph_name, ProjectionStateORM.falkor_provider,
-                           GraphORM.data_source_id)
+                           GraphORM.data_source_id, ProjectionStateORM.projected_commit_seq)
                     .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                     .where(ProjectionStateORM.graph_id == graph_id, *_evictable())
                 )).first()
             if key is None:
                 return False
-            name, provider_id, ds_id = key
+            name, provider_id, ds_id, projected = key
+            if reason and await _rollups_running(ds_id):
+                # A rollup job writes the key: evicted under it, the key would come back with a
+                # summaries stamp the next load would trust (residency, doc 17).
+                logger.info("not evicting graph %s: a rollup job for its data source is pending "
+                            "or running", graph_id)
+                return False
             if name:
                 # A key we minted can still be read by another data source or a catalog entry.
                 # An answer we cannot get keeps it: fail closed.
@@ -157,23 +188,37 @@ class CacheManager:
                 row = (await s.execute(
                     update(ProjectionStateORM)
                     .where(ProjectionStateORM.graph_id == graph_id, *_evictable(),
+                           ProjectionStateORM.residency != "always",
                            ProjectionStateORM.falkor_graph_name.is_not_distinct_from(name),
-                           ProjectionStateORM.falkor_provider.is_not_distinct_from(provider_id))
+                           ProjectionStateORM.falkor_provider.is_not_distinct_from(provider_id),
+                           # Liveness lowers it without the projection lock: the read's restore
+                           # (_read_since) must never put a watermark back that it lowered.
+                           ProjectionStateORM.projected_commit_seq == projected)
                     .values(status="evicted", projected_commit_seq=0, updated_at=_now(),
-                            epoch=ProjectionStateORM.epoch + 1)
+                            epoch=ProjectionStateORM.epoch + 1,
+                            **({"evicted_reason": reason} if reason else {}))
                     .returning(ProjectionStateORM.falkor_graph_name,
-                               ProjectionStateORM.falkor_provider)
+                               ProjectionStateORM.falkor_provider, ProjectionStateORM.epoch)
                     .execution_options(synchronize_session=False)
                 )).first()
             if row is None:
                 return False
-            name, provider_id = row
+            name, provider_id, epoch = row
+            if reason and await self._read_since(graph_id, epoch, projected):
+                return False
             if name:
                 try:
                     await drop_graph(name, provider_id)
-                except Exception:   # pragma: no cover - infra
-                    logger.warning("dropping FalkorDB graph %s failed (will be overwritten on rebuild)",
-                                   name)
+                except Exception:   # noqa: BLE001 - infra
+                    if not reason:
+                        logger.warning("dropping FalkorDB graph %s failed (will be overwritten on "
+                                       "rebuild)", name)
+                    else:
+                        # Under residency the graph stays evicted and nothing would write the key
+                        # again: the retire pass drops it later.
+                        logger.warning("dropping FalkorDB graph %s failed; the retire pass will",
+                                       name, exc_info=True)
+                        await self._retire_later(graph_id, name, provider_id)
             return True
         finally:
             try:
@@ -182,18 +227,62 @@ class CacheManager:
             finally:
                 await lock_scope.__aexit__(None, None, None)
 
+    async def _read_since(self, graph_id: str, epoch: int, projected: int) -> bool:
+        """A read holds its lease before it reads the graph's state: one whose lease came after the
+        first check reads the eviction's state only if it came after the compare-and-swap, which
+        this check, after it, sees. Then the graph is put back as it was (its key is still there)
+        and True; an answer that cannot be had counts as a read."""
+        try:
+            leased = await is_pinned(graph_id)
+        except Exception:   # noqa: BLE001 - fail closed
+            leased = True
+        if not leased:
+            return False
+        async with self._session() as s:
+            await s.execute(
+                update(ProjectionStateORM)
+                .where(ProjectionStateORM.graph_id == graph_id,
+                       ProjectionStateORM.status == "evicted", ProjectionStateORM.epoch == epoch)
+                .values(status="idle", projected_commit_seq=projected, evicted_reason=None,
+                        epoch=ProjectionStateORM.epoch + 1, updated_at=_now())
+                .execution_options(synchronize_session=False))
+        logger.info("not evicting graph %s: a read took its lease as it was being evicted",
+                    graph_id)
+        return True
+
+    async def _retire_later(self, graph_id: str, name: str, provider_id: Optional[str]) -> None:
+        """Put a key whose drop failed in the graph's ``retired_keys``, due now, for the retire
+        pass (``keymigrate.retire_moved_keys``) to drop."""
+        entry = {"name": name, "provider": provider_id, "retireAfter": _now(), "afterSeq": 0,
+                 "movedBy": "eviction"}
+        async with self._session() as s:
+            ps = (await s.execute(
+                select(ProjectionStateORM).where(ProjectionStateORM.graph_id == graph_id)
+                .with_for_update().execution_options(populate_existing=True)
+            )).scalar_one_or_none()
+            if ps is not None and not any(e.get("name") == name and e.get("provider") == provider_id
+                                          for e in ps.retired_keys or []):
+                ps.retired_keys = [*(ps.retired_keys or []), entry]
+
     # ---- single-flight rebuild ------------------------------------------- #
     async def ensure_rebuilt(self, graph_id: str) -> bool:
         """If the graph is evicted, rebuild it from Postgres under a single-flight
         lock. Returns ``True`` iff THIS caller performed the rebuild (concurrent
         callers return ``False`` while the holder rebuilds). Never a fork: it has no FalkorDB
-        copy to rebuild."""
+        copy to rebuild. With residency on, or the switch unreadable, an evicted graph (or one
+        waiting for room) is not rebuilt here: its load is asked for, for the capacity loop to
+        admit (``residency.request_load``)."""
         async with self._session() as s:
             ps = await s.get(ProjectionStateORM, graph_id)
-            if ps is None or ps.status != "evicted":
-                return False
             graph = await s.get(GraphORM, graph_id)
-            if graph is None or graph.fork_parent_graph_id:
+            if ps is None or graph is None or graph.fork_parent_graph_id:
+                return False
+            if await residency_policy.switch_state() is not False:
+                if ps.status in ("evicted", "waiting_capacity"):
+                    from .residency import request_load
+                    await request_load(graph_id)
+                return False
+            if ps.status != "evicted":
                 return False
         r = get_broker_redis()
         got = await r.set(_lock_key(graph_id), "1", nx=True, ex=config.REBUILD_LOCK_TTL)

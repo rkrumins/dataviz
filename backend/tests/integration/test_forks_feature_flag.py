@@ -101,7 +101,8 @@ def test_a_fork_stays_readable_and_goes_to_the_trash_and_back_while_forks_are_of
             state = await c.get(f"{V}/graphs/{fgid}/branches/{main}/state")
             assert state.status_code == 200, state.text
             assert {k: n["displayName"] for k, n in state.json()["nodes"].items()} == {"A": "A fork"}
-            assert (await c.delete(f"{V}/graphs/{fgid}")).status_code == 204
+            deleted = await c.delete(f"{V}/graphs/{fgid}")
+            assert deleted.status_code == 204
             assert (await _row(fork["dataSourceId"])).deleted_at is not None
             assert (await c.post(f"{V}/graphs/{fgid}/restore")).status_code == 204
             assert (await _row(fork["dataSourceId"])).deleted_at is None

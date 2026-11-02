@@ -421,8 +421,45 @@ async def test_a_flag_change_is_one_event_per_flag_that_moved(test_client, db_se
     )
     assert resp.status_code == 200, resp.text
     payload = await _only(db_session, "platform.feature_flag.changed")
-    _filed_under(payload, target=("feature_flag", "traceEnabled"), label="traceEnabled")
+    _filed_under(payload, target=("feature_flag", "traceEnabled"), label="Lineage trace")
     assert payload["details"] == {"key": "traceEnabled", "from": True, "value": False}
+    assert catalogue.summarize("platform.feature_flag.changed", payload)[1] == (
+        "Turned Lineage trace off"
+    )
+
+
+@pytest.mark.asyncio
+async def test_turning_graph_residency_on_and_off_is_audited_and_in_the_activity_log(
+    test_client, db_session, seeded_flags,
+):
+    """Who turned Graph residency on, and off, and when: a row each in the switch's history
+    (feature_flag_changes, from and to) and an event each in the activity log, which reads as
+    words."""
+    for on in (True, False):
+        current = (await test_client.get("/api/v1/admin/features")).json()
+        resp = await test_client.patch(
+            "/api/v1/admin/features",
+            json={"version": current["version"], **current["values"], "residencyEnabled": on},
+            headers=HEADERS,
+        )
+        assert resp.status_code == 200, resp.text
+
+    changes = (await test_client.get(
+        "/api/v1/admin/features/residencyEnabled/history")).json()["history"]
+    assert [(c["from"], c["to"]) for c in changes] == [(True, False), (False, True)]
+    assert all(c["actorId"] == ME and c["at"] for c in changes)
+
+    payloads = await _recorded(db_session, "platform.feature_flag.changed")
+    assert [p["details"] for p in payloads] == [
+        {"key": "residencyEnabled", "from": False, "value": True},
+        {"key": "residencyEnabled", "from": True, "value": False},
+    ]
+    for p in payloads:
+        _filed_under(p, target=("feature_flag", "residencyEnabled"), label="Graph residency")
+        assert p["actor_id"] == ME and p["stated_reason"] == WHY
+    assert [catalogue.summarize("platform.feature_flag.changed", p)[1] for p in payloads] == [
+        "Turned Graph residency on", "Turned Graph residency off",
+    ]
 
 
 @pytest.mark.asyncio

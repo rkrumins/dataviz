@@ -354,6 +354,26 @@ class ProjectionNotAdopted(_HttpMapped, RuntimeError):
                          {"type": "projection_not_adopted", "reason": reason, **extra})
 
 
+class ProjectionAlreadyAdopted(_HttpMapped, RuntimeError):
+    """Adopt (doc 17) reached a graph that already projects into a key the platform owns: there
+    is no customer's key to leave behind."""
+
+    def __init__(self, key: str):
+        self.key = key
+        super().__init__(f"this graph already projects into a platform key ({key})",
+                         {"type": "already_adopted", "key": key})
+
+
+class ProjectionPassInFlight(_HttpMapped, RuntimeError):
+    """Adopt (doc 17) reached a graph a projection pass is writing: the pass would go on writing
+    the customer's key after the pin swapped. 409 ``lock_busy``: adopt it once the pass is done."""
+
+    def __init__(self, graph_id: str):
+        self.graph_id = graph_id
+        super().__init__("a projection pass is writing this graph's key; try again once it is done",
+                         {"type": "lock_busy", "retryable": True})
+
+
 class ProjectionKeyInUse(_HttpMapped, RuntimeError):
     """The FalkorDB key a projection move targets already holds another graph's projection.
     Same type as ``BootstrapConflict``'s ``graph_key_in_use``."""
@@ -464,7 +484,8 @@ class ReviewRequired(_HttpMapped, RuntimeError):
 HTTP_MAPPED = (BranchNotOpen, MainWriteForbidden, NotDraftOwner, DraftRoleRequired, SelfReview,
                PersonRequired, GroupsUnavailable, IneligibleMember, ServiceAccountMember, HeadMoved,
                LockBusy, JobActive, CurationAtRisk, MassDeleteBlocked, ForkLimit, NotAFork, LiveForks,
-               ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionKeyInUse,
+               ForkNotRestorable, GraphMoved, ProjectionNotAdopted, ProjectionAlreadyAdopted,
+               ProjectionPassInFlight, ProjectionKeyInUse,
                ProjectionKeyInvalid, PublishRequired, GraphNotWritable, VersionConflict,
                AmbiguousSpelling, NotAnEdge, StagedChangesUnsaved, SelfMerge, ReviewRequired,
                IneligibleOwner, ForkUpdateConflicts, ResolutionsWithoutConflict, ForkNotUpToDate,

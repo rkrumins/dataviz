@@ -262,6 +262,19 @@ describe('DataHealthTab', () => {
     expect(screen.queryByText('12 versions behind')).not.toBeInTheDocument()
   })
 
+  it('says a graph being loaded is loading into memory, and one waiting for room is waiting', () => {
+    watermark = { committed: 12, projected: 12, fresh: false, status: 'rehydrating', target: 12 }
+    const { unmount } = renderTab()
+    expect(screen.getByRole('heading', { name: 'Loading into memory…' })).toBeInTheDocument()
+    expect(screen.queryByText('Out of sync')).not.toBeInTheDocument()
+    expect(screen.queryByText(/versions? behind/)).not.toBeInTheDocument()
+    unmount()
+    watermark = { committed: 12, projected: 0, fresh: false, status: 'waiting_capacity', target: 0 }
+    renderTab()
+    expect(screen.getByRole('heading', { name: 'Waiting for room in memory' })).toBeInTheDocument()
+    expect(screen.queryByText('12 versions behind')).not.toBeInTheDocument()
+  })
+
   it('shows where the graph lives, with the tab’s own Check sync and Rebuild as the actions', () => {
     renderTab()
     expect(screen.getByTestId('projection-health-card')).toHaveAttribute('data-actions', 'false')

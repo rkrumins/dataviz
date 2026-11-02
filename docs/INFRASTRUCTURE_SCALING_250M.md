@@ -300,7 +300,7 @@ Sizing rationale: `maxmemory 90gb` ≈ 70% of the 128 GB node — the remainder 
 | :--- | :--- | :--- |
 | `CACHE_REDIS_URL` | dedicated cache Redis (§5) | The provider's ancestor/idempotency cache needs cross-slot SCAN/pipelines a cluster can't serve; without it the provider runs cache-disabled and logs loudly |
 | `AGGREGATION_MAX_PAIRS_PER_PAGE` | `200000` (default) | Bounds high-fan-in hub pages |
-| `GRAPHVER_FALKOR_MAX_RESIDENT` / `GRAPHVER_FALKOR_BUDGETS` | set per provider ≈ shard `maxmemory` × 0.8 | Turns on cold-graph eviction so residency tracks the working set, not the full 250M corpus |
+| `GRAPHVER_FALKOR_MAX_RESIDENT` / `GRAPHVER_FALKOR_BUDGETS` | — | No longer acted on. Turn on **Graph residency** (Admin → Features) and give every shard a `maxmemory`, so FalkorDB keeps the working set, not the full 250M corpus ([17 §16](versioning/17-forks-and-residency.md#16-turning-residency-on)) |
 | `GRAPHVER_PROJECTION_CONCURRENCY` | `8` (default; raise with worker CPU) | Keeps hundreds of graphs' projections caught up |
 | `GRAPHVER_READ_MAX_LAG` | `0` (strict) — consider small >0 during bulk imports | Governs FalkorDB-vs-Postgres read freshness fallback |
 

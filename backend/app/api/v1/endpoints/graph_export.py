@@ -171,9 +171,13 @@ async def _provider(ws_id: str, data_source_id: str, session: AsyncSession, user
     row = await data_source_repo.get_data_source_orm(session, data_source_id)
     if row is None or row.workspace_id != ws_id:
         raise HTTPException(status_code=404, detail=f"Data source '{data_source_id}' not found")
+    from backend.app.services.versioning.service import Viewer
+
     try:
+        # A person's export: read, held and recorded as a canvas read is (residency, doc 17).
         engine = await ContextEngine.for_workspace(
-            ws_id, provider_manager, session, data_source_id=data_source_id, actor=user.id)
+            ws_id, provider_manager, session, data_source_id=data_source_id, actor=user.id,
+            viewer=Viewer(actor=user.id, can_read=True))
     except KeyError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     return engine.provider

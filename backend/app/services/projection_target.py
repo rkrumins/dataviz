@@ -25,9 +25,10 @@ async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: 
     projected window. The level map lets the projector emit the same CANONICAL
     level-bridged pairs as the aggregation worker; without it the projector's full
     ancestor cross-product writes leaf/mixed cells the canonical boundary excludes,
-    which the on-demand reader then double-counts. ``None`` on any failure or when
-    the ontology defines no lineage types (the projector then skips rollup
-    maintenance for that window).
+    which the on-demand reader then double-counts. ``None`` when the ontology
+    defines no lineage types, and ``UNRESOLVED`` (falsy too) on any failure: the
+    projector then skips rollup maintenance for that window either way, but a
+    load's summaries gate waits on a failure (``FalkorProjector.summaries_built``).
 
     A data source in dedicated mode answers ``(containment, lineage, {}, "dedicated")``:
     the projector maintains none of its rollups, so it needs no level map; the types only
@@ -42,12 +43,15 @@ async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: 
         # reads; leave dedicated-mode rollups entirely to the aggregation job.
         dedicated = await _projection_mode(str(meta["data_source_id"])) == "dedicated"
         from backend.app.ontology.adapters.sqlalchemy_repo import SQLAlchemyOntologyRepository
-        from backend.app.ontology.service import LocalOntologyService
-        async with get_async_session() as s:
-            ont = LocalOntologyService(SQLAlchemyOntologyRepository(s))
-            resolved = await ont.resolve(
-                workspace_id=meta.get("workspace_id"),
-                data_source_id=str(meta["data_source_id"]))
+        from backend.app.ontology.resolver import resolve_ontology
+        # The assigned ontology is read here, not through LocalOntologyService.resolve, which
+        # resolves a failed read as no ontology at all — no lineage — where it must be UNRESOLVED.
+        assigned = None
+        if meta.get("workspace_id"):
+            async with get_async_session() as s:
+                assigned = await SQLAlchemyOntologyRepository(s).get_for_data_source(
+                    meta.get("workspace_id"), str(meta["data_source_id"]))
+        resolved = resolve_ontology(system_default=None, assigned=assigned)
         cont = list(getattr(resolved, "containment_edge_types", None) or [])
         lin = list(getattr(resolved, "lineage_edge_types", None) or [])
         if not lin:
@@ -61,8 +65,10 @@ async def resolve_aggregation_edge_types(svc: GraphVersioningService, graph_id: 
             levels = {}
         return (cont, lin, levels)
     except Exception as exc:
+        from backend.app.services.versioning.projection import UNRESOLVED
+
         logger.warning("aggregation edge-type resolution for %s skipped: %s", graph_id, exc)
-        return None
+        return UNRESOLVED
 
 
 async def _projection_mode(data_source_id: str) -> str:
@@ -89,7 +95,7 @@ def make_rollup_rebuild_hook(get_aggregation_service):
     handed over here, since the projector maintains none of its rollups: its summaries are
     marked stale (``source_changed``, which the job's completion clears) and the rebuild is
     queued in dedicated mode."""
-    async def _hook(graph_id: str) -> None:
+    async def _hook(graph_id: str, idempotency_key: Optional[str] = None) -> None:
         svc = GraphVersioningService()
         meta = await svc.get_graph(graph_id)
         ds_id = meta.get("data_source_id") if meta else None
@@ -109,7 +115,7 @@ def make_rollup_rebuild_hook(get_aggregation_service):
             projected = (await svc.projection_watermark(graph_id) or {}).get("projected")
         except Exception:                                # pragma: no cover - infra
             projected = None
-        key = f"gv-rollup-rebuild:{graph_id}:{projected}"
+        key = idempotency_key or f"gv-rollup-rebuild:{graph_id}:{projected}"
         if agg is None:
             await _queue_on_control_plane(str(ds_id), key, mode)
             return

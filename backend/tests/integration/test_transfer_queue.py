@@ -2,12 +2,14 @@
 
 The API only queues a job, and transfer runners claim it through ``job_lease.claim``. Proven here:
 runners claiming at once never take the same job; a job is claimed only once its creator queued it,
-oldest first within a workspace and fairly across workspaces; a queued job reports how many are
+oldest first within a workspace and fairly across workspaces and the people in one, a publish
+before the rest; a queued job reports how many are
 ahead of it in its own slot, and package inspections have a slot of their own; two runners on one
 job — a zombie and its successor — never both land a write: the zombie's window rolls back and its
 finish is a no-op, while the successor runs at the next epoch; a job whose worker keeps dying fails
 as poison; an import staged before leases fails rather than resuming; the job reaper fails what no
-worker will run; a real import, then an export of its draft, run to completion through the transfer
+worker will run, and never a job that only waited behind busy workers; a real import, then an
+export of its draft, run to completion through the transfer
 lane; and a worker stopped mid-job hands the job back for the next one to finish. An export is
 cancelled by its creator or a manager, never by anyone else: cancelled queued, it is never claimed;
 cancelled running, its worker's next write is refused and its lease is lost at the next renewal;
@@ -28,6 +30,7 @@ from sqlalchemy.pool import NullPool
 from backend.app.services.storage.object_store import LocalFsObjectStore
 from backend.app.services.versioning import config, db, job_lease, models
 from backend.app.services.versioning.import_export import export_worker
+from backend.app.services.versioning.import_export.import_worker import lease_job
 from backend.app.services.versioning.import_export.runner import (
     INSPECT_TYPES,
     JOB_TYPES,
@@ -131,6 +134,32 @@ async def _fair_claims() -> None:
     order = [(await runner.claim_one()).job_id for _ in range(3)]
     assert order == [big[0], small, big[1]], "the second tenant doesn't wait behind the first's"
     await _tidy(graph_id)
+
+
+async def _fair_claims_per_person() -> None:
+    svc = GraphVersioningService()
+    ie = ImportExportService(versioning=svc, store=object())
+    gid = (await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1",
+                                  actor="ann"))["graph_id"]
+    imports = []
+    for _ in range(3):                  # one person queues three imports, each on a draft of hers...
+        job = await ie.create_import_job(workspace_id="ws1", data_source_id=gid, graph_id=gid,
+                                         actor="ann", import_format="ndjson")
+        await ie.start_import(job["job_id"])
+        imports.append(job["job_id"])
+    export = (await ie.create_export_job(workspace_id="ws1", data_source_id=gid, graph_id=gid,
+                                         actor="bob"))["job_id"]
+    await ie.start_export(export)       # ...and a colleague exports after them
+    runner = TransferRunner(lambda: ie)
+    order = [(await runner.claim_one()).job_id for _ in range(3)]
+    assert order == [imports[0], export, imports[1]], "her imports don't hold the workspace's share"
+
+    # A publish queued last runs next: someone waits on it, their draft closed until it lands.
+    draft = await svc.open_draft(graph_id=gid, owner="cat")
+    publish = (await ie.create_publish_job(workspace_id="ws1", data_source_id=gid, graph_id=gid,
+                                           branch_id=draft, actor="cat", message="m"))["job_id"]
+    assert (await runner.claim_one()).job_id == publish
+    await _tidy(gid)
 
 
 async def _a_zombie_and_its_successor() -> None:
@@ -251,22 +280,47 @@ async def _cancels() -> None:
     await _tidy(graph_id)
 
 
+async def _quiet_lane() -> None:
+    """Nothing on the transfer lane claimed or beating for the whole queue timeout, as when no
+    worker runs: earlier claims are moved back past it, and running jobs fall silent."""
+    long_ago = _ago(config.TRANSFER_QUEUE_TIMEOUT_SECS + 60)
+    lane = JobORM.job_type.in_(JOB_TYPES + INSPECT_TYPES)
+    async with db.graphver_session() as s:
+        await s.execute(update(JobORM).where(lane, JobORM.started_at >= long_ago)
+                        .values(started_at=long_ago))
+        await s.execute(update(JobORM).where(lane, JobORM.status == "running")
+                        .values(updated_at=long_ago))
+
+
 async def _the_reaper() -> None:
     ie = ImportExportService(versioning=GraphVersioningService(), store=object())
     graph_id = "g_" + os.urandom(4).hex()
     export_job = _export_jobs(ie, graph_id)
     timed_out, waiting, never_queued = await export_job(), await export_job(), await export_job()
-    for job_id in (timed_out, waiting):
+    busy = await export_job()
+    for job_id in (timed_out, waiting, busy):
         await ie.start_export(job_id)
     await _age(timed_out, config.TRANSFER_QUEUE_TIMEOUT_SECS + 60)
     async with db.graphver_session() as s:
         await s.execute(update(JobORM).where(JobORM.id == never_queued)
                         .values(created_at=_ago(2 * 3600)))
+    await _quiet_lane()
 
+    # Queued past the timeout behind a worker that is busy (running, beating): its turn comes.
+    lease = await lease_job(busy)
     tally = await JobReaper().run_once()
-    assert tally["timedOut"] >= 1 and tally["neverQueued"] >= 1
-    assert "No worker started the job" in (await ie.get_job(timed_out))["errorMessage"]
+    assert tally["timedOut"] == 0 and tally["neverQueued"] >= 1
     assert "upload never finished" in (await ie.get_job(never_queued))["errorMessage"]
+    assert (await ie.get_job(timed_out))["status"] == "pending"
+    # Nothing running, but a job claimed within the timeout: the lane is between jobs.
+    assert await lease.finish("completed") is True
+    assert (await JobReaper().run_once(job_id=timed_out))["timedOut"] == 0
+    assert (await ie.get_job(timed_out))["status"] == "pending"
+
+    # No job claimed or beating for the whole timeout: no worker is running.
+    await _quiet_lane()
+    assert (await JobReaper().run_once())["timedOut"] >= 1
+    assert "No worker started the job" in (await ie.get_job(timed_out))["errorMessage"]
     assert (await ie.get_job(waiting))["status"] == "pending"
     await _tidy(graph_id)
 
@@ -399,6 +453,7 @@ async def _run() -> None:
     await _clear_queue()
     await _claims()
     await _fair_claims()
+    await _fair_claims_per_person()
     await _a_zombie_and_its_successor()
     await _jobs_that_must_not_run_again()
     await _the_inspect_slot()
