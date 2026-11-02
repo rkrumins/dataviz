@@ -17,9 +17,9 @@ export interface DuplicateSourceNode {
   tags?: string[]
   properties?: Record<string, unknown>
   /**
-   * The entity's description. Stored top-level on the read model but persisted
-   * via `properties.description` (backend create_node reads it from there), so
-   * it is folded into the copy's properties to survive the duplicate.
+   * The entity's description — a node field. The plan carries it in the step's
+   * properties (one bag to snapshot); the staging hook lifts it back out into
+   * the node field, where the server keeps it (useDuplicateSubtree).
    */
   description?: string
   /**
@@ -29,6 +29,9 @@ export interface DuplicateSourceNode {
    * ontology fidelity.
    */
   containmentEdgeType?: string
+  /** The system it comes from — the copy describes the same thing. (Its
+   *  qualified name is an identifier, and is deliberately not copied.) */
+  sourceSystem?: string
 }
 
 export interface DuplicateLineageEdgeInput {
@@ -57,12 +60,33 @@ export interface DuplicateNodeStep {
    */
   parentOriginalId: string | null
   containmentEdgeType?: string
+  sourceSystem?: string
 }
 
 export interface DuplicateEdgeStep {
   sourceOriginalId: string
   targetOriginalId: string
   edgeType: string
+  /**
+   * A BOUNDARY edge: this end stays the original entity outside the copy, so
+   * the copy gains the same partner — `source` for an incoming edge (the
+   * original's source feeds the copy too), `target` for an outgoing one (the
+   * copy feeds what the original feeds). Absent for an edge inside the copy,
+   * whose both ends are copies.
+   */
+  keeps?: 'source' | 'target'
+}
+
+/** What a duplicate copies besides the entity itself. */
+export interface PlanDuplicateOptions {
+  /** Everything inside the entity too (the default), or the entity alone. */
+  includeDescendants?: boolean
+  /** Edges with both ends in the copy (the default). */
+  internal?: boolean
+  /** Edges into the copy from outside it: the original's sources feed the copy too. */
+  incoming?: boolean
+  /** Edges out of the copy: the copy feeds what the original feeds. */
+  outgoing?: boolean
 }
 
 export interface PlanDuplicateResult {
@@ -90,7 +114,9 @@ export function planDuplicate(
   childMap: Map<string, string[]>,
   nodeData: Map<string, DuplicateSourceNode>,
   lineageEdges: DuplicateLineageEdgeInput[],
+  options: PlanDuplicateOptions = {},
 ): PlanDuplicateResult {
+  const { includeDescendants = true, internal = true, incoming = false, outgoing = false } = options
   const nodes: DuplicateNodeStep[] = []
   const subtreeIds = new Set<string>()
   const visited = new Set<string>()
@@ -117,8 +143,10 @@ export function planDuplicate(
       },
       parentOriginalId,
       containmentEdgeType: source.containmentEdgeType,
+      ...(source.sourceSystem ? { sourceSystem: source.sourceSystem } : {}),
     })
 
+    if (!includeDescendants) return
     for (const childId of childMap.get(id) ?? []) {
       visit(childId, id, false)
     }
@@ -126,12 +154,44 @@ export function planDuplicate(
 
   visit(rootId, null, true)
 
+  // The same edge can arrive twice (loaded on the canvas AND read from the
+  // server); it is planned once.
+  const seen = new Set<string>()
   const edges: DuplicateEdgeStep[] = []
   for (const e of lineageEdges) {
-    if (subtreeIds.has(e.source) && subtreeIds.has(e.target)) {
-      edges.push({ sourceOriginalId: e.source, targetOriginalId: e.target, edgeType: e.edgeType })
+    const key = `${e.source}\u0000${e.target}\u0000${e.edgeType.toUpperCase()}`
+    if (seen.has(key)) continue
+    const inSource = subtreeIds.has(e.source)
+    const inTarget = subtreeIds.has(e.target)
+    let step: DuplicateEdgeStep | null = null
+    if (inSource && inTarget) {
+      if (internal) step = { sourceOriginalId: e.source, targetOriginalId: e.target, edgeType: e.edgeType }
+    } else if (inTarget) {
+      if (incoming) step = { sourceOriginalId: e.source, targetOriginalId: e.target, edgeType: e.edgeType, keeps: 'source' }
+    } else if (inSource) {
+      if (outgoing) step = { sourceOriginalId: e.source, targetOriginalId: e.target, edgeType: e.edgeType, keeps: 'target' }
     }
+    if (!step) continue
+    seen.add(key)
+    edges.push(step)
   }
 
   return { nodes, edges }
+}
+
+/**
+ * The entities a selection duplicates: each selected one, minus any that sits
+ * inside another selected one — copying the parent already copies it, and
+ * copying it again would make two copies of the same child.
+ */
+export function topmostOf(ids: readonly string[], parentOf: (id: string) => string | undefined): string[] {
+  const chosen = new Set(ids)
+  return ids.filter((id) => {
+    const guard = new Set<string>()
+    for (let p = parentOf(id); p && p !== id && !guard.has(p); p = parentOf(p)) {
+      if (chosen.has(p)) return false
+      guard.add(p)
+    }
+    return true
+  })
 }

@@ -70,6 +70,8 @@ export interface CanvasContextMenuProps {
     /** Node actions */
     onEditNode?: (id: string) => void
     onDuplicateNode?: (id: string) => void
+    /** Duplicate… — choose what comes with the copy (children, incoming, outgoing). */
+    onDuplicateWithOptions?: (id: string) => void
     onDeleteNode?: (id: string) => void
     onCreateChild?: (parentId: string) => void
     onTraceNode?: (id: string) => void
@@ -112,6 +114,7 @@ export function CanvasContextMenu({
     onClose,
     onEditNode,
     onDuplicateNode,
+    onDuplicateWithOptions,
     onDeleteNode,
     onCreateChild,
     onTraceNode,
@@ -254,6 +257,16 @@ export function CanvasContextMenu({
                     icon: 'Copy',
                     shortcut: '⌘D',
                     onClick: () => { onDuplicateNode(target.id); onClose() }
+                })
+            }
+
+            if (onDuplicateWithOptions) {
+                result.push({
+                    id: 'duplicate-options',
+                    label: 'Duplicate…',
+                    icon: 'CopyPlus',
+                    shortcut: '⇧⌘D',
+                    onClick: () => { onDuplicateWithOptions(target.id); onClose() }
                 })
             }
 
@@ -410,7 +423,7 @@ export function CanvasContextMenu({
         result.push(...customActions)
 
         return result
-    }, [target, onEditNode, onDuplicateNode, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections,
+    }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
         onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose])
 

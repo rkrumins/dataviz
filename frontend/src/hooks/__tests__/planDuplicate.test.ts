@@ -4,7 +4,7 @@
  * provenance, internal-only lineage). Pure + deterministic — no store mocking.
  */
 import { describe, it, expect } from 'vitest'
-import { planDuplicate, type DuplicateSourceNode, type DuplicateLineageEdgeInput } from '../planDuplicate'
+import { planDuplicate, topmostOf, type DuplicateSourceNode, type DuplicateLineageEdgeInput } from '../planDuplicate'
 
 const src = (overrides: Partial<DuplicateSourceNode> & { urn: string }): DuplicateSourceNode => ({
   entityType: 'dataset',
@@ -139,5 +139,82 @@ describe('planDuplicate', () => {
 
     expect(plan.nodes.find((n) => n.originalId === 'root')!.containmentEdgeType).toBe('PART_OF')
     expect(plan.nodes.find((n) => n.originalId === 'child')!.containmentEdgeType).toBe('CONTAINS')
+  })
+
+  // ── Options: what a duplicate copies besides the entity ───────────────
+
+  const family = () => {
+    const childMap = new Map([['root', ['a', 'b']]])
+    const nodeData = new Map([
+      ['root', src({ urn: 'root', displayName: 'Orders' })],
+      ['a', src({ urn: 'a' })],
+      ['b', src({ urn: 'b' })],
+    ])
+    const lineageEdges: DuplicateLineageEdgeInput[] = [
+      { source: 'a', target: 'b', edgeType: 'FLOWS_TO' },        // inside
+      { source: 'upstream', target: 'a', edgeType: 'FLOWS_TO' }, // into the copy
+      { source: 'b', target: 'report', edgeType: 'FEEDS' },      // out of the copy
+      { source: 'other', target: 'elsewhere', edgeType: 'FEEDS' }, // not touching it
+    ]
+    return { childMap, nodeData, lineageEdges }
+  }
+
+  it('the entity alone: no children, and only the edges touching it', () => {
+    const { childMap, nodeData, lineageEdges } = family()
+    const plan = planDuplicate('root', childMap, nodeData, lineageEdges, { includeDescendants: false, incoming: true, outgoing: true })
+    expect(plan.nodes.map((n) => n.originalId)).toEqual(['root'])
+    expect(plan.edges).toEqual([])
+  })
+
+  it('incoming: the original source feeds the copy too — that end stays the original', () => {
+    const { childMap, nodeData, lineageEdges } = family()
+    const plan = planDuplicate('root', childMap, nodeData, lineageEdges, { incoming: true })
+    expect(plan.edges).toContainEqual({ sourceOriginalId: 'upstream', targetOriginalId: 'a', edgeType: 'FLOWS_TO', keeps: 'source' })
+    expect(plan.edges.find((e) => e.keeps === 'target')).toBeUndefined()
+  })
+
+  it('outgoing: the copy feeds what the original feeds — that end stays the original', () => {
+    const { childMap, nodeData, lineageEdges } = family()
+    const plan = planDuplicate('root', childMap, nodeData, lineageEdges, { outgoing: true })
+    expect(plan.edges).toContainEqual({ sourceOriginalId: 'b', targetOriginalId: 'report', edgeType: 'FEEDS', keeps: 'target' })
+    expect(plan.edges.find((e) => e.keeps === 'source')).toBeUndefined()
+  })
+
+  it('never plans an edge that touches nothing copied, and can leave out the inside ones', () => {
+    const { childMap, nodeData, lineageEdges } = family()
+    const plan = planDuplicate('root', childMap, nodeData, lineageEdges, { internal: false, incoming: true, outgoing: true })
+    expect(plan.edges.map((e) => e.keeps)).toEqual(['source', 'target'])
+  })
+
+  it('plans an edge seen twice (on the canvas and from the server) once', () => {
+    const { childMap, nodeData, lineageEdges } = family()
+    const plan = planDuplicate('root', childMap, nodeData, [...lineageEdges, { source: 'a', target: 'b', edgeType: 'flows_to' }])
+    expect(plan.edges.filter((e) => e.sourceOriginalId === 'a' && e.targetOriginalId === 'b')).toHaveLength(1)
+  })
+
+  it('copies the source system, never the qualified name', () => {
+    const childMap = new Map<string, string[]>()
+    const nodeData = new Map([['root', src({ urn: 'root', sourceSystem: 'snowflake' })]])
+    const plan = planDuplicate('root', childMap, nodeData, [])
+    expect(plan.nodes[0].sourceSystem).toBe('snowflake')
+    expect(plan.nodes[0]).not.toHaveProperty('qualifiedName')
+  })
+})
+
+describe('topmostOf', () => {
+  const parent: Record<string, string> = { child: 'root', grandchild: 'child', sibling: 'root' }
+  const parentOf = (id: string) => parent[id]
+
+  it('drops a selected entity that sits inside another selected one', () => {
+    expect(topmostOf(['grandchild', 'root', 'other'], parentOf)).toEqual(['root', 'other'])
+  })
+
+  it('keeps siblings and unrelated entities, in selection order', () => {
+    expect(topmostOf(['sibling', 'child'], parentOf)).toEqual(['sibling', 'child'])
+  })
+
+  it('survives a containment loop', () => {
+    const loop: Record<string, string> = { a: 'b', b: 'a' }
+    expect(topmostOf(['a'], (id) => loop[id])).toEqual(['a'])
   })
 })

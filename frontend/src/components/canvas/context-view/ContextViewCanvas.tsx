@@ -134,6 +134,7 @@ import { FirstStepsChecklist } from './FirstStepsChecklist'
 import { useCanvasInteractions } from '@/hooks/useCanvasInteractions'
 import { useCanvasKeyboard } from '@/hooks/useCanvasKeyboard'
 import { useDuplicateSubtree } from '@/hooks/useDuplicateSubtree'
+import { DuplicateDialog } from './DuplicateDialog'
 
 import type { ViewLayerConfig, LayerNodeSortAlgo, LayerNodeSortMode } from '@/types/schema'
 
@@ -780,7 +781,41 @@ export function ContextViewCanvas({
   // its real urn on save — same as a create) and the optimistic session
   // assignment (immediate render feedback before the canonical write's
   // debounce/re-render lands).
-  const { duplicateSubtree } = useDuplicateSubtree({
+  // Duplicate… — the dialog's entity (null when closed).
+  const [duplicateFor, setDuplicateFor] = useState<string | null>(null)
+  // After a copy is staged (⌘D or Duplicate…): reveal it beside the original —
+  // expand the original's parent (shows the new sibling) and the copy (shows its
+  // just-staged children) — and say what was made, with Undo. Undo discards the
+  // root create, which cascades to everything staged under and onto it.
+  const revealCopy = (originalId: string, rootCopyUrn: string, summary?: string) => {
+    const wiring = duplicateWiringRef.current
+    if (wiring) {
+      const parentId = wiring.parentMap.get(originalId)
+      wiring.setExpandedNodes((prev) => {
+        const next = new Set(prev)
+        if (parentId) next.add(parentId)
+        next.add(rootCopyUrn)
+        return next
+      })
+    }
+    const original = useCanvasStore.getState().nodes.find((x) => x.id === originalId)
+    const name = (original?.data?.label as string) || originalId
+    useNotificationStore.getState().add({
+      type: 'success',
+      message: summary ? `Duplicated “${name}” — ${summary}.` : `Duplicated “${name}” with everything inside it.`,
+      action: {
+        label: 'Undo',
+        onClick: () => {
+          const staged = useStagedChangesStore.getState()
+          const change = staged.getChangesForTarget(rootCopyUrn).find((c) => c.type === 'create_entity')
+          if (change) staged.discard(change.id)
+        },
+      },
+      durationMs: 8000,
+    })
+  }
+
+  const { duplicateSubtree, prepareDuplicate, commitDuplicate } = useDuplicateSubtree({
     onNodeCopied: (originalId, _originalUrn, copyUrn) => {
       const wiring = duplicateWiringRef.current
       if (!wiring) return
@@ -796,20 +831,13 @@ export function ContextViewCanvas({
     onTraceNode: (nodeId) => startTraceRef.current(nodeId),
     onNodeCreated: (nodeId) => selectNode(nodeId),
     duplicateSubtree,
-    onNodeDuplicated: (originalId, rootCopyUrn) => {
-      // Reveal the copy: expand the original's parent (shows the new sibling)
-      // and the root copy itself (shows its just-staged children). Mirrors
-      // GraphCanvas's onNodeDuplicated, using this file's parentMap /
-      // setExpandedNodes (via the forward-ref).
-      const wiring = duplicateWiringRef.current
-      if (!wiring) return
-      const parentId = wiring.parentMap.get(originalId)
-      wiring.setExpandedNodes((prev) => {
-        const next = new Set(prev)
-        if (parentId) next.add(parentId)
-        next.add(rootCopyUrn)
-        return next
-      })
+    // Reveal the copy and offer Undo. Mirrors GraphCanvas's onNodeDuplicated,
+    // using this file's parentMap / setExpandedNodes (via the forward-ref).
+    onNodeDuplicated: (originalId, rootCopyUrn) => revealCopy(originalId, rootCopyUrn),
+    onDuplicateWithOptions: (nodeId) => {
+      // A copy is staged straight into the draft — never while a trace holds the canvas.
+      if (traceWriteLockedRef.current()) return
+      setDuplicateFor(nodeId)
     },
     onConnectMode: (nodeId) => {
       // Draft-gated on the SCOPED isDraft: on Published (or a draft open on a different data
@@ -1073,7 +1101,7 @@ export function ContextViewCanvas({
     enabled: true,
     handlers: isDraft
       ? { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onTrace: onTraceSelection }
-      : { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onTrace: onTraceSelection, onDelete: () => {}, onDuplicate: () => {}, onCreate: () => {} },
+      : { ...interactions.keyboardHandlers, ...zoomShortcutHandlers, onTrace: onTraceSelection, onDelete: () => {}, onDuplicate: () => {}, onDuplicateWithOptions: () => {}, onCreate: () => {} },
   })
 
   // ─── Canonical reference-layout persistence ─────────────────────────────────────────────────────
@@ -7604,6 +7632,7 @@ export function ContextViewCanvas({
         onClose={interactions.closeContextMenu}
         onEditNode={canvasWritable ? interactions.editNode : undefined}
         onDuplicateNode={canvasWritable ? interactions.duplicateNode : undefined}
+        onDuplicateWithOptions={canvasWritable ? (id) => setDuplicateFor(id) : undefined}
         onDeleteNode={canvasWritable ? interactions.deleteNode : undefined}
         onCreateChild={canvasWritable ? interactions.createChild : undefined}
         onConnect={canvasWritable ? (id) => armConnectGuarded(id, interactions.state.contextMenu.position) : undefined}
@@ -7670,6 +7699,24 @@ export function ContextViewCanvas({
           position={edgeConnect.state.pickerPos}
           onPick={edgeConnect.confirm}
           onCancel={edgeConnect.cancel}
+        />
+      )}
+
+      {/* Duplicate… — what comes with the copy, counted before anything is staged. */}
+      {duplicateFor && canvasWritable && (
+        <DuplicateDialog
+          nodeId={duplicateFor}
+          prepare={prepareDuplicate}
+          commit={commitDuplicate}
+          onDone={(originalId, rootCopyUrn, counts) => {
+            selectNode(rootCopyUrn)
+            const relationships = counts.internal + counts.incoming + counts.outgoing
+            revealCopy(originalId, rootCopyUrn, [
+              `${counts.entities.toLocaleString()} ${counts.entities === 1 ? 'entity' : 'entities'}`,
+              relationships > 0 ? `${relationships.toLocaleString()} ${relationships === 1 ? 'relationship' : 'relationships'}` : null,
+            ].filter(Boolean).join(' and '))
+          }}
+          onClose={() => setDuplicateFor(null)}
         />
       )}
 
