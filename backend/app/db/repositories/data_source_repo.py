@@ -81,9 +81,23 @@ def _to_response(row: WorkspaceDataSourceORM, identity=None) -> DataSourceRespon
         namePropertySource=_source(identity, "name_source", row, "name_property"),
         sourceMode=row.source_mode,
         writeBackEnabled=bool(row.write_back_enabled),
+        forkOf=fork_of(row),
         createdAt=row.created_at,
         updatedAt=row.updated_at,
     )
+
+
+def fork_of(row) -> Optional[dict]:
+    """What a fork's row was forked from — ``{dataSourceId, graphId}`` — or None for any other row.
+    The parent graph is the one its origin names (``fork_sources.fork_row``)."""
+    parent = getattr(row, "fork_of_data_source_id", None)
+    if not parent:
+        return None
+    try:
+        origin = (json.loads(row.extra_config) if row.extra_config else {}).get("origin") or {}
+    except (TypeError, ValueError):
+        origin = {}
+    return {"dataSourceId": parent, "graphId": origin.get("parentGraphId")}
 
 
 # ------------------------------------------------------------------ #
@@ -101,13 +115,24 @@ def _live():
     return WorkspaceDataSourceORM.deleted_at.is_(None)
 
 
+def not_a_fork():
+    """A data source with a graph of its own: not a fork's row. A fork reads its parent's through
+    version control and has no FalkorDB graph, so nothing that probes, polls, counts, aggregates
+    or falls back to a data source's own graph may reach one — and the lists leave them out
+    unless asked."""
+    return WorkspaceDataSourceORM.fork_of_data_source_id.is_(None)
+
+
 async def list_data_sources(
     session: AsyncSession, workspace_id: str, provider_id: Optional[str] = None,
+    include_forks: bool = False,
 ) -> List[DataSourceResponse]:
     query = select(WorkspaceDataSourceORM).where(
         WorkspaceDataSourceORM.workspace_id == workspace_id, _live())
     if provider_id is not None:
         query = query.where(WorkspaceDataSourceORM.provider_id == provider_id)
+    if not include_forks:
+        query = query.where(not_a_fork())
     result = await session.execute(query.order_by(WorkspaceDataSourceORM.created_at))
     rows = list(result.scalars().all())
     # Resolve each row's mapping so the list reports what is actually in force.
@@ -186,12 +211,13 @@ async def get_primary_data_source(
             WorkspaceDataSourceORM.is_primary == True,  # noqa: E712
             WorkspaceDataSourceORM.is_active == True,
             _live(),          # a deleted primary must not keep serving the whole workspace
+            not_a_fork(),
         )
     )
     row = result.scalar_one_or_none()
     if row:
         return row
-    # Fallback: first active data source
+    # Fallback: first active data source with a graph of its own
     result = await session.execute(
         select(WorkspaceDataSourceORM)
         .options(selectinload(WorkspaceDataSourceORM.catalog_item))
@@ -199,6 +225,7 @@ async def get_primary_data_source(
             WorkspaceDataSourceORM.workspace_id == workspace_id,
             WorkspaceDataSourceORM.is_active == True,  # noqa: E712
             _live(),
+            not_a_fork(),
         ).order_by(WorkspaceDataSourceORM.created_at)
         .limit(1)
     )
@@ -225,7 +252,7 @@ async def default_data_source_ids(
             WorkspaceDataSourceORM.id,
             WorkspaceDataSourceORM.is_primary,
         )
-        .where(WorkspaceDataSourceORM.is_active == True, _live())  # noqa: E712
+        .where(WorkspaceDataSourceORM.is_active == True, _live(), not_a_fork())  # noqa: E712
         .order_by(WorkspaceDataSourceORM.created_at)
     )
     if workspace_ids is not None:
@@ -334,7 +361,13 @@ async def update_data_source(
     if getattr(req, "is_restricted", None) is not None:
         row.is_restricted = req.is_restricted
     if req.extra_config is not None:
-        row.extra_config = json.dumps(req.extra_config) if req.extra_config else None
+        extra = req.extra_config
+        if row.fork_of_data_source_id and row.extra_config:
+            # What a fork was made from stays: its forkOf reads it.
+            origin = json.loads(row.extra_config).get("origin")
+            if origin is not None:
+                extra = {**(extra or {}), "origin": origin}
+        row.extra_config = json.dumps(extra) if extra else None
     if req.identity_property is not None:
         # Editable across the whole lifecycle. Empty string clears to NULL —
         # "unset", which falls through to the provider, then the workspace, then
@@ -388,11 +421,12 @@ async def restore_data_source(
 async def list_deleted_data_sources(
     session: AsyncSession, workspace_id: str
 ) -> List[WorkspaceDataSourceORM]:
-    """The trash, newest first."""
+    """The trash, newest first. A fork's row is not in it: it comes back with its graph, through
+    the fork endpoints."""
     result = await session.execute(
         select(WorkspaceDataSourceORM)
         .where(WorkspaceDataSourceORM.workspace_id == workspace_id,
-               WorkspaceDataSourceORM.deleted_at.isnot(None))
+               WorkspaceDataSourceORM.deleted_at.isnot(None), not_a_fork())
         .order_by(WorkspaceDataSourceORM.deleted_at.desc())
     )
     return list(result.scalars().all())
@@ -418,7 +452,8 @@ async def count_data_sources(
 
     The `deleted_at` filter is NOT optional here, and it is not redundant with `is_active`: a
     workspace holding one live source and one tombstone would otherwise count 2, and cheerfully
-    let the user delete the last source they actually have.
+    let the user delete the last source they actually have. Forks don't count either: they go
+    with their parent.
     """
     from sqlalchemy import func
     result = await session.execute(
@@ -426,6 +461,7 @@ async def count_data_sources(
             WorkspaceDataSourceORM.workspace_id == workspace_id,
             WorkspaceDataSourceORM.is_active == True,  # noqa: E712
             _live(),
+            not_a_fork(),
         )
     )
     return result.scalar() or 0

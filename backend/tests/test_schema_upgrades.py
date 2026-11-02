@@ -841,6 +841,92 @@ async def test_the_merged_source_seq_migration_round_trips(store):
             await trans.rollback()
 
 
+# ── fork_bases: the parent seq a fork reads from each fork seq on (20261030_1100_gv_fork_bases) ──
+_FORK_BASES = _VERSIONS / "20261030_1100_gv_fork_bases.py"
+_BASES = f'"{models._SCHEMA}"."fork_bases"'
+_FORKS = f'"{models._SCHEMA}"."graphs"'
+
+
+def test_the_fork_bases_are_declared_and_migrated():
+    """A store ``create_all`` builds must equal the migrated one; a fork's rows go with it."""
+    table = models.ForkBaseORM.__table__
+    assert [c.name for c in table.primary_key.columns] == ["fork_graph_id", "fork_seq"]
+    (fk,) = table.c.fork_graph_id.foreign_keys
+    assert fk.target_fullname == f"{models._SCHEMA}.graphs.id" and fk.ondelete == "CASCADE"
+    assert not table.c.parent_seq.nullable and table.c.created_by.nullable
+    assert table.c.created_at.type.timezone and str(table.c.created_at.server_default.arg) == "now()"
+    migration = _migration(_FORK_BASES)
+    assert migration.revision == _FORK_BASES.stem and len(migration.revision) <= 32
+    assert migration.down_revision == "20261030_1000_gv_mr_merged_seq"
+    assert "ensure_fork_bases" in _FORK_BASES.read_text()
+
+
+async def _seed_forks(conn) -> None:
+    """A graph, a fork of it at seq 7, one at 3, and one forked with no fork point."""
+    for gid, parent, base in (("g_fb_parent", None, None), ("g_fb_fork", "g_fb_parent", 7),
+                              ("g_fb_other", "g_fb_parent", 3), ("g_fb_legacy", "g_fb_parent", None)):
+        await conn.execute(text(
+            f"INSERT INTO {_FORKS} (id, data_source_id, workspace_id, kind, ontology_enforcement, "
+            "audit_tier, main_head_commit_seq, fork_parent_graph_id, fork_base_commit_seq, "
+            "created_at, updated_at, created_by) VALUES (:id, :id, 'ws_schema', 'manual', "
+            "'permissive', 'commit_only', 0, :parent, :base, '2026-10-30', '2026-10-30', 'bob')"),
+            {"id": gid, "parent": parent, "base": base})
+
+
+async def _bases(conn) -> list:
+    return [tuple(r) for r in (await conn.execute(text(
+        f"SELECT fork_graph_id, fork_seq, parent_seq, created_by FROM {_BASES} "
+        "WHERE fork_graph_id LIKE 'g_fb_%' ORDER BY 1, 2"))).all()]
+
+
+@e2e
+async def test_a_store_alembic_never_reached_gets_the_fork_bases(store):
+    """Each fork with a fork point gets its first row there; a fork with none gets none, and one
+    that has its rows keeps them as they are."""
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await conn.execute(text(f"DROP TABLE {_BASES}"))
+            await _seed_forks(conn)
+            await conn.run_sync(models._ensure_schema_upgrades)
+            assert await _bases(conn) == [("g_fb_fork", 7, 7, "bob"), ("g_fb_other", 3, 3, "bob")]
+            await conn.execute(text(f"DELETE FROM {_BASES} WHERE fork_graph_id = 'g_fb_fork'"))
+            await conn.execute(text(f"INSERT INTO {_BASES} (fork_graph_id, fork_seq, parent_seq) "
+                                    "VALUES ('g_fb_fork', 9, 12)"))
+            await conn.run_sync(models._ensure_schema_upgrades)        # and again: a no-op
+            assert await _bases(conn) == [("g_fb_fork", 9, 12, None), ("g_fb_other", 3, 3, "bob")]
+        finally:
+            await trans.rollback()
+
+
+@e2e
+async def test_the_fork_bases_migration_round_trips(store):
+    """Down drops the table; up builds and fills it again, once; a purged fork's rows go with it."""
+    migration = _migration(_FORK_BASES)
+
+    def run(step):
+        def apply(sync_conn):
+            migration.op = SimpleNamespace(get_bind=lambda: sync_conn,
+                                           execute=lambda sql: sync_conn.execute(text(sql)))
+            getattr(migration, step)()
+        return apply
+
+    async with store.connect() as conn:
+        trans = await conn.begin()
+        try:
+            await _seed_forks(conn)
+            await conn.run_sync(run("downgrade"))
+            assert (await conn.execute(text("SELECT to_regclass(:t)"), {"t": _BASES})).scalar() is None
+            await conn.run_sync(run("upgrade"))
+            assert await _bases(conn) == [("g_fb_fork", 7, 7, "bob"), ("g_fb_other", 3, 3, "bob")]
+            await conn.run_sync(run("upgrade"))                     # idempotent
+            assert len(await _bases(conn)) == 2
+            await conn.execute(text(f"DELETE FROM {_FORKS} WHERE id = 'g_fb_fork'"))
+            assert await _bases(conn) == [("g_fb_other", 3, 3, "bob")]
+        finally:
+            await trans.rollback()
+
+
 # ── projection_state.retired_keys: a moved graph's old keys (20261018_1100_gv_ps_retired) ──
 _PS_RETIRED = _VERSIONS / "20261018_1100_gv_ps_retired.py"
 

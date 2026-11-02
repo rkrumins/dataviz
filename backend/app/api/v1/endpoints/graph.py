@@ -48,7 +48,8 @@ from backend.common.models.search import (
 )
 from backend.common.property_patch import (
     InvalidPatch, lift_top_level_node_fields, normalize_update, strip_deletes)
-from backend.app.api.v1.versioning_gate import require_publish_for_main, require_versioning_enabled
+from backend.app.api.v1.versioning_gate import (require_forks_enabled, require_publish_for_main,
+                                                require_versioning_enabled)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.services.advanced_search_service import (
     SHARED_LINK_RELATIONSHIPS,
@@ -104,6 +105,7 @@ from backend.insights_service.enqueue import (
     enqueue_stats_job_force,
     enqueue_stats_job_safe,
     mark_stats_changed,
+    polls_stats,
 )
 from sqlalchemy.exc import OperationalError, SQLAlchemyError
 
@@ -221,8 +223,11 @@ async def require_main_writer(
     claims: PermissionClaims = Depends(get_permission_claims),
 ) -> None:
     """A write with no draft on a versioned data source commits to its main, and a person needs
-    publish for that (``require_publish_for_main``). A draft write, and any write to a data source
-    without version control, is left to the route's other gates."""
+    publish for that (``require_publish_for_main``). A write to a fork's data source, on its main or
+    a draft, needs forks on first. Any other draft write, and any write to a data source without
+    version control, is left to the route's other gates."""
+    if (engine._data_source_id or "").startswith("dsfork_"):
+        await require_forks_enabled()
     if engine._writes_main:
         require_publish_for_main(claims, ws_id)
 
@@ -590,7 +595,11 @@ async def resync_versioned_graph_endpoint(
     from backend.app.services.projection_target import make_rollup_rebuild_hook
     from backend.app.services.versioning.bootstrap_worker import BootstrapFailure
     from backend.app.services.versioning.errors import AmbiguousSpelling
+    from backend.app.services.fork_sources import ForkHasNoStore
     from backend.app.services.versioning.service import GraphVersioningService
+    if dataSourceId.startswith("dsfork_"):
+        # A fork has no FalkorDB graph of its own that anything else could have written (409).
+        raise ForkHasNoStore(dataSourceId)
     actor = user.id if user else "system"
     svc = GraphVersioningService()
     res = await svc.resolve_graph(
@@ -2311,6 +2320,14 @@ async def search_native(
             request_id, exc.status, "missing_permission" if exc.status == 403 else "not_found",
             exc.message, permission=permission,
         )
+    from backend.app.db.repositories.data_source_repo import get_data_source_orm
+    source = await get_data_source_orm(session, granted.data_source_id) if granted.data_source_id else None
+    if source is not None and source.fork_of_data_source_id:
+        raise _native_refusal(
+            request_id, 501, "native_query_unavailable",
+            "Native queries read a graph's own published store; a fork reads through its parent. "
+            "Run it on the parent, or open the fork's data in the canvas.",
+        )
     try:
         provider = await provider_manager.get_provider_for_workspace(
             ws_id, session, granted.data_source_id,
@@ -3727,14 +3744,15 @@ async def get_graph_schema(
     synthetic = await build_synthetic_schema(session, ds_id)
     if synthetic:
         logger.info("stats_cache.served_synthetic endpoint=/metadata/schema ds_id=%s", ds_id)
+        polled = polls_stats(ds_id)               # a fork's: no refresh comes to follow
         meta = build_meta(
             status="partial",
             source="ontology",
             data_source_id=ds_id,
             missing_fields=SYNTHETIC_SCHEMA_MISSING_FIELDS,
-            refreshing=True,
-            job_id=job_id,
-            poll_url=poll_url,
+            refreshing=polled,
+            job_id=job_id if polled else None,
+            poll_url=poll_url if polled else None,
         )
         return _schema_response(synthetic, request, meta=meta)
 
@@ -4292,6 +4310,8 @@ async def apply_graph_changes(
     g = await svc.get_graph_by_data_source(dataSourceId)
     if g is None or g.get("workspace_id") != ws_id:
         raise HTTPException(status_code=404, detail="no versioned graph for this data source")
+    if g.get("fork_parent_graph_id"):           # a fork's draft takes no change while forks are off
+        await require_forks_enabled()
     graph_id = g["graph_id"]
 
     from backend.app.ontology.urn import make_urn

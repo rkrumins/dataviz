@@ -154,8 +154,13 @@ def _client(perms: tuple):
 
 
 async def _parent(svc) -> str:
+    """A graph in ws1, with the data source a fork of it takes its own from."""
+    from backend.tests.integration.test_versioning_resolve import _seed_data_source
+
     await models.create_schema_and_partitions()
-    P = await svc.create_graph(data_source_id="ds_" + os.urandom(4).hex(), workspace_id="ws1", actor="alice")
+    ds_id = "ds_" + os.urandom(4).hex()
+    await _seed_data_source(ds_id)
+    P = await svc.create_graph(data_source_id=ds_id, workspace_id="ws1", actor="alice")
     return P["graph_id"]
 
 
@@ -164,7 +169,7 @@ async def _fork(c, gid, body=None):
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_fork_needs_manage_and_ignores_a_data_source_id_e2e():
+def test_fork_needs_manage_and_ignores_a_data_source_id_e2e(forks_on):
     async def go():
         svc = GraphVersioningService()
         gid = await _parent(svc)
@@ -182,7 +187,7 @@ def test_fork_needs_manage_and_ignores_a_data_source_id_e2e():
 
 
 @pytest.mark.skipif(not os.getenv("GRAPHVER_E2E"), reason="set GRAPHVER_E2E=1 + a live Postgres to run")
-def test_fork_cap_counts_live_forks_only_e2e(monkeypatch):
+def test_fork_cap_counts_live_forks_only_e2e(monkeypatch, forks_on):
     from backend.app.services.versioning import config
     from backend.app.services.versioning.purge_worker import tombstone_graphs_for_data_source
 

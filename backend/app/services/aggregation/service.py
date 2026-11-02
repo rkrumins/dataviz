@@ -762,6 +762,11 @@ class AggregationService:
                 f"invalid trigger_source {trigger_source!r}; expected one of "
                 f"{', '.join(API_TRIGGER_SOURCES)}"
             )
+        # A fork (its ``dsfork_…`` source) has no graph of its own to roll up: it reads its
+        # parent's (409 fork_has_no_store), so no run, and no aggregation state, is made for one.
+        if ds_id.startswith("dsfork_"):
+            from backend.app.services.fork_sources import ForkHasNoStore
+            raise ForkHasNoStore(ds_id)
         # A run started with an API key is a script's, not a person's click,
         # whatever the request left the source at.
         if trigger_source == "manual" and provenance is not None and provenance.api_key_id:
@@ -4546,6 +4551,7 @@ async def assemble_fleet_freshness(
     bounded SCAN of stale sources applied as a SQL id filter, so paging and
     ``total`` stay exact."""
     from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+    from backend.app.db.repositories.data_source_repo import not_a_fork
     from backend.app.services import graph_cache as _gc
     from backend.app.db.repositories.refresh_events_repo import (
         latest_refresh_event_map,
@@ -4573,6 +4579,7 @@ async def assemble_fleet_freshness(
             isouter=True,
         )
         .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+        .where(not_a_fork())                       # a fork has no rollups of its own
     )
     if workspace_id:
         base = base.where(WorkspaceDataSourceORM.workspace_id == workspace_id)
@@ -4715,6 +4722,7 @@ async def _assemble_fleet_summary(
     so that literal check would always read zero.
     """
     from backend.app.db.models import ProviderORM, WorkspaceDataSourceORM
+    from backend.app.db.repositories.data_source_repo import not_a_fork
     from backend.app.services import graph_cache as _gc
 
     page_is_full_set = (not stale_only) and (len(ds_list) == total)
@@ -4749,6 +4757,7 @@ async def _assemble_fleet_summary(
                 isouter=True,
             )
             .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+            .where(not_a_fork())
         )
         if workspace_id:
             query = query.where(WorkspaceDataSourceORM.workspace_id == workspace_id)

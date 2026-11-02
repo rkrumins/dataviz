@@ -2564,6 +2564,17 @@ for _cls in _VERSIONING_HTTP_MAPPED:
     app.add_exception_handler(_cls, _versioning_error_handler)
 
 
+from backend.app.services.fork_sources import ForkHasNoStore as _ForkHasNoStore
+
+
+@app.exception_handler(_ForkHasNoStore)
+async def _fork_has_no_store_handler(request, exc: _ForkHasNoStore):
+    """Something needed a data source's own graph store, and a fork has none: whichever route
+    reached it (a write through the registry's read-only provider, a rollup rebuild, a dedicated
+    rollup graph), the answer is the same 409."""
+    return JSONResponse(status_code=409, content={"detail": exc.detail})
+
+
 @app.exception_handler(_AccessDenied)
 async def _access_denied_handler(request, exc: _AccessDenied):
     """Backstop: a draft-access refusal no route mapped is a 403, never a 500. The mapped

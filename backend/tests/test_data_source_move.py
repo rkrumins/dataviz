@@ -183,6 +183,47 @@ async def test_a_source_with_a_view_takes_the_view_with_it(
     assert await _workspace_of(db_session, view.id) == dst
 
 
+async def test_a_sources_forks_and_the_views_on_them_move_with_it_and_back(
+    test_client: AsyncClient, db_session: AsyncSession, version_store,
+):
+    """A fork's data source lives where its parent's does: a move takes the parent's fork rows,
+    forks of forks and those in the trash too, and the views on them, in its own transaction,
+    with the parent's settings; its undo brings them back."""
+    from backend.app.services.fork_sources import fork_row
+
+    src = await _workspace(test_client, "Forked Home")
+    dst = await _workspace(test_client, "Forked Target")
+    ds = await _attach(test_client, src, await _catalog_item(test_client, "Forked"))
+    parent = await db_session.get(WorkspaceDataSourceORM, ds)
+    live = fork_row(parent, ds_id="dsfork_move_a", name="A", parent_graph_id="g_p", actor="u1")
+    db_session.add(live)
+    await db_session.flush()
+    db_session.add(fork_row(live, ds_id="dsfork_move_b", name="B", parent_graph_id="g_a",
+                            actor="u1"))
+    trashed = fork_row(parent, ds_id="dsfork_move_t", name="T", parent_graph_id="g_p", actor="u1")
+    trashed.deleted_at = "2026-10-30T00:00:00+00:00"
+    db_session.add(trashed)
+    await db_session.flush()
+    views = [await _view_on(db_session, src, fork, f"On {fork}")
+             for fork in ("dsfork_move_a", "dsfork_move_b", "dsfork_move_t")]
+    await db_session.commit()
+    forks = ("dsfork_move_a", "dsfork_move_b", "dsfork_move_t")
+
+    async def homes():
+        rows = (await db_session.execute(select(WorkspaceDataSourceORM.workspace_id).where(
+            WorkspaceDataSourceORM.id.in_(forks)).execution_options(populate_existing=True)))
+        return set(rows.scalars()) | {await _workspace_of(db_session, v.id) for v in views}
+
+    moved = await _move(test_client, src, ds, dst)
+    assert moved.status_code == 200, moved.text
+    assert moved.json()["viewCount"] == 3
+    assert await homes() == {dst}
+
+    undone = await test_client.post(f"/api/v1/admin/data-source-transfers/{moved.json()['id']}/undo")
+    assert undone.status_code == 200, undone.text
+    assert await homes() == {src}
+
+
 async def test_a_versioned_source_takes_its_history_with_it(
     test_client: AsyncClient, db_session: AsyncSession, version_store,
 ):

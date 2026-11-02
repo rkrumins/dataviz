@@ -45,6 +45,11 @@ _NO_DEEP_SEARCH = (
     "Search isn't available while the published graph is catching up — "
     "try again in a moment."
 )
+#: The same, for a fork's ``main``, which no FalkorDB graph of its own backs.
+FORK_NO_DEEP_SEARCH = (
+    "Search reads a graph's own published store, and a fork reads through its parent. "
+    "Search the parent, or browse the fork's data in the canvas."
+)
 
 
 def _by_label(counts: Dict[Optional[str], int], untyped: str) -> Dict[str, int]:
@@ -76,12 +81,15 @@ class VersionedBranchProvider:
     base + overlay, writes commit to the branch via ``apply_ops`` (as-of views are read-only)."""
 
     def __init__(self, svc, *, graph_id: str, branch_id: str,
-                 actor: Optional[str] = None, as_of_seq: Optional[int] = None):
+                 actor: Optional[str] = None, as_of_seq: Optional[int] = None,
+                 deep_search_gap: str = _NO_DEEP_SEARCH):
         self._svc = svc
         self._gid = graph_id
         self._branch = branch_id
         self._actor = actor or "system"
         self._as_of = as_of_seq
+        # Why deep search can't run here, as the 501 says it (a fork's main: FORK_NO_DEEP_SEARCH).
+        self._deep_search_gap = deep_search_gap
         # Containment edge types, pushed in by ContextEngine._resolve_ontology (the same
         # push-down FalkorDB uses) — the structural input for the top-level/orphan read.
         self._containment_types: List[str] = []
@@ -536,25 +544,25 @@ class VersionedBranchProvider:
 
         Only reached while the projection lags a commit — a fresh main,
         and every draft overlaid on one, searches FalkorDB directly."""
-        raise NotImplementedError(_NO_DEEP_SEARCH)
+        raise NotImplementedError(self._deep_search_gap)
 
     async def deep_search_explain(self, query):
         """Compile-only path — same gap as :meth:`deep_search`."""
-        raise NotImplementedError(_NO_DEEP_SEARCH)
+        raise NotImplementedError(self._deep_search_gap)
 
     async def deep_search_discover(self, *, sample_per_label: int = 200):
         """Schema discovery — same gap as :meth:`deep_search`."""
-        raise NotImplementedError(_NO_DEEP_SEARCH)
+        raise NotImplementedError(self._deep_search_gap)
 
     async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
         """Value suggestions — same gap as :meth:`deep_search`."""
-        raise NotImplementedError(_NO_DEEP_SEARCH)
+        raise NotImplementedError(self._deep_search_gap)
 
     async def deep_search_resolve_refs(self, scope, refs, *, context, confined=False,
                                        with_paths=False):
         """Name references — same gap as :meth:`deep_search`. A draft overlaid on this
         provider hands them here."""
-        raise NotImplementedError(_NO_DEEP_SEARCH)
+        raise NotImplementedError(self._deep_search_gap)
 
     # ---- stats: counts + schema summaries over the composed branch state - #
     async def get_stats(self, bypass_cache: bool = False) -> Dict[str, Any]:

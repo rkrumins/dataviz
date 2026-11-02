@@ -329,19 +329,16 @@ async def test_a_parent_purge_queues_its_trashed_forks():
 
 @pytest.mark.parametrize("head", [5, 1])
 async def test_a_permanent_purge_refuses_a_graph_that_forks_read(head):
+    """A graph with nothing past its genesis (an abandoned enablement) too: a fork reads through
+    its parent's graph whatever it holds, and every request on it failed once its parent was
+    purged under it."""
     graph = _graph(head=head)
     s = _PurgeSession(graph, forks=1)
-    if head > 1:
-        with pytest.raises(PurgeRefused) as exc:
-            await purge_worker.create_purge_job(graph_id="g1", workspace_id="ws1", actor="u",
-                                                session=s)
-        assert exc.value.code == "live_forks"
-        assert s.added == [] and graph.deleted_at is None
-    else:
-        # Regression guard: a graph with no history of its own (an abandoned enablement) gives
-        # its forks nothing, so abandoning it is never refused.
-        assert await purge_worker.create_purge_job(
-            graph_id="g1", workspace_id="ws1", actor="u", session=s) == "vjob_new"
+    with pytest.raises(PurgeRefused) as exc:
+        await purge_worker.create_purge_job(graph_id="g1", workspace_id="ws1", actor="u",
+                                            session=s)
+    assert exc.value.code == "live_forks"
+    assert s.added == [] and graph.deleted_at is None
 
 
 async def test_the_reaper_leaves_a_graph_that_forks_read_alone():

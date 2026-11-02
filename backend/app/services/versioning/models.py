@@ -134,6 +134,25 @@ class GraphORM(VersioningBase):
     )
 
 
+class ForkBaseORM(VersioningBase):
+    """The parent's ``main`` seq a fork's ``main`` reads from each fork seq on: one row at the fork
+    point, written by ``fork_graph``, and one per Update from parent. A read of the fork at seq S
+    composes its parent at the ``parent_seq`` of the latest row with ``fork_seq <= S``
+    (``service.fork_base_at``; 20261030_1100_gv_fork_bases)."""
+
+    __tablename__ = "fork_bases"
+
+    fork_graph_id = Column(Text, ForeignKey(_fk("graphs"), ondelete="CASCADE"), nullable=False)
+    fork_seq = Column(BigInteger, nullable=False)
+    parent_seq = Column(BigInteger, nullable=False)
+    created_at = Column(TIMESTAMP(timezone=True), nullable=False, server_default=text("now()"))
+    created_by = Column(Text, nullable=True)
+
+    __table_args__ = _plain(
+        PrimaryKeyConstraint("fork_graph_id", "fork_seq", name="pk_fork_bases"),
+    )
+
+
 class BranchORM(VersioningBase):
     """A draft/branch, or the reserved ``main`` branch, of a graph."""
 
@@ -788,6 +807,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261030_1000_gv_mr_merged_seq.
     _bounded_step(conn, "merge_requests.merged_source_seq was not added",
                   lambda: ensure_mr_merged_source_seq(conn), required=True)
+    # 20261030_1100_gv_fork_bases (``create_all`` makes the table; this fills it in).
+    _bounded_step(conn, "the forks' bases were not filled in",
+                  lambda: ensure_fork_bases(conn), required=True)
 
 
 def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
@@ -961,6 +983,34 @@ def ensure_mr_merged_source_seq(conn) -> None:
         "AND jsonb_typeof(sq.source_commit_ids) = 'array') "
         "WHERE mr.status = 'merged' AND mr.resulting_commit_id IS NOT NULL "
         "AND mr.graph_id <> mr.target_graph_id"))
+
+
+def ensure_fork_bases(conn) -> None:
+    """Create ``fork_bases``, the parent seq a fork reads from each fork seq on, and give every fork
+    with a fork point and no row its first: ``(fork, fork_base_commit_seq, fork_base_commit_seq)``,
+    as a fork's genesis commit sits at its fork point. A fork with no fork point keeps none, and
+    reads its parent at genesis as before. Safe to re-run: a fork that has a row is left alone, and
+    the table is created only when missing (creating it locks ``graphs`` for its foreign key).
+    ``conn`` is a synchronous connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    if not inspector.has_table("graphs", schema=_SCHEMA):
+        return                            # create_schema_and_partitions builds it from the models
+    graphs, bases = f'"{_SCHEMA}"."graphs"', f'"{_SCHEMA}"."fork_bases"'
+    if not inspector.has_table("fork_bases", schema=_SCHEMA):
+        conn.execute(text(
+            f"CREATE TABLE IF NOT EXISTS {bases} ("
+            f"fork_graph_id TEXT NOT NULL REFERENCES {graphs} (id) ON DELETE CASCADE, "
+            "fork_seq BIGINT NOT NULL, parent_seq BIGINT NOT NULL, "
+            "created_at TIMESTAMPTZ NOT NULL DEFAULT now(), created_by TEXT, "
+            "CONSTRAINT pk_fork_bases PRIMARY KEY (fork_graph_id, fork_seq))"))
+    filled = conn.execute(text(
+        f"INSERT INTO {bases} (fork_graph_id, fork_seq, parent_seq, created_by) "
+        f"SELECT g.id, g.fork_base_commit_seq, g.fork_base_commit_seq, g.created_by FROM {graphs} g "
+        "WHERE g.fork_parent_graph_id IS NOT NULL AND g.fork_base_commit_seq IS NOT NULL "
+        f"AND NOT EXISTS (SELECT 1 FROM {bases} b WHERE b.fork_graph_id = g.id) "
+        "ON CONFLICT DO NOTHING")).rowcount
+    if filled:
+        logger.info("fork_bases: gave %d fork(s) their fork point", filled)
 
 
 def ensure_graph_lifecycle_columns(conn) -> None:

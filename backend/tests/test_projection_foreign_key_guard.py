@@ -178,7 +178,7 @@ def _stub_reconcile(monkeypatch, proj, *, expected=({}, {}), actual=({}, {}, set
 
 
 def _reconcile(proj, client, **kw):
-    return asyncio.run(proj._reconcile_in_place(client, "g1", "main1", 2, False, {}, **kw))
+    return asyncio.run(proj._reconcile_in_place(client, "g1", "main1", 2, {}, **kw))
 
 
 # ── the in-place reconcile ──────────────────────────────────────────────
@@ -394,7 +394,7 @@ def test_heal_of_unowned_key_never_deletes(monkeypatch):
                              actual=({_key(1): 1, _key(2): 2, _key(3): 3}, {}, set(), [7]))
     _stub_counts(monkeypatch, proj, (3, 0), (1, 0))
     _stub_sweep(monkeypatch, proj)
-    err, healed = asyncio.run(proj._verify_and_heal(client, "g1", "main1", 1, 2, False, owned=False))
+    err, healed = asyncio.run(proj._verify_and_heal(client, "g1", "main1", 1, 2, owned=False))
     assert err.startswith("projection verify mismatch") and healed is False, err
     assert writes["node_deletes"] == []
     assert not any(_UNKEYED_DELETE in q for q in client.queries), client.queries
@@ -406,7 +406,7 @@ def test_a_customer_key_holding_more_is_kept_and_counted(monkeypatch):
     swept = _stub_sweep(monkeypatch, proj)
     outcome = {}
     err, healed = asyncio.run(proj._verify_and_heal(
-        client, "g1", "main1", 1, 2, False, owned=False, heal_outcome=outcome))
+        client, "g1", "main1", 1, 2, owned=False, heal_outcome=outcome))
     assert (err, healed, outcome) == (None, False, {"surplus": (2, 1)})
     assert swept == ["g1"], "a surplus not seen before is swept for history's deletes first"
 
@@ -419,7 +419,7 @@ def test_a_surplus_already_counted_is_not_swept_again(monkeypatch):
     swept = _stub_sweep(monkeypatch, proj)
     outcome = {}
     err, _ = asyncio.run(proj._verify_and_heal(
-        client, "g1", "main1", 1, 2, False, owned=False, heal_outcome=outcome,
+        client, "g1", "main1", 1, 2, owned=False, heal_outcome=outcome,
         drift={"nodes": 2, "edges": 1, "via": "verify"}))
     assert err is None and outcome == {"surplus": (2, 1)} and swept == []
 
@@ -428,7 +428,7 @@ def test_an_edge_of_the_pass_that_did_not_land_is_healed_whatever_the_surplus(mo
     proj, _, client = _projector()
     healed_with = []
 
-    async def reconcile(client, graph_id, main_id, to_seq, is_fork, level_map, **kw):
+    async def reconcile(client, graph_id, main_id, to_seq, level_map, **kw):
         healed_with.append(kw.get("owned"))
         return {"writes": 1, "rollups": "none"}
 
@@ -437,7 +437,7 @@ def test_an_edge_of_the_pass_that_did_not_land_is_healed_whatever_the_surplus(mo
     _stub_sweep(monkeypatch, proj)
     outcome = {}
     err, healed = asyncio.run(proj._verify_and_heal(
-        client, "g1", "main1", 1, 2, False, owned=False, heal_outcome=outcome, dropped=1))
+        client, "g1", "main1", 1, 2, owned=False, heal_outcome=outcome, dropped=1))
     assert (err, healed, healed_with) == (None, True, [False])
     assert outcome["surplus"] == (1, 1)
 

@@ -473,6 +473,10 @@ class ProjectionReconciler:
             base.update(kw)
             return DriftReport(**base)
 
+        # A fork has no FalkorDB copy to compare (a key an earlier release pinned for it is never
+        # written again): it reads through its parent's graph.
+        if graph is not None and graph.fork_parent_graph_id:
+            return _report(skipped_reason="a fork reads through its parent's graph")
         # No REAL FalkorDB target (unpinned: NULL or the synthetic ``gv_<id>`` placeholder nothing
         # reads) — nothing is cached; reads fall back to Postgres. Report PG counts, skip the scan.
         if not name or name == f"gv_{graph_id}":

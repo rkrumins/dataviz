@@ -154,9 +154,6 @@ class _FakeSvc:
     async def overlay_payloads(self, *, graph_id, branch_id, entity_ids):
         return []
 
-    async def aggregated_overlay_adjust(self, **kw):
-        return {}
-
 
 def _raw_node(urn, t="system"):
     return {"urn": urn, "entityType": t, "displayName": urn}

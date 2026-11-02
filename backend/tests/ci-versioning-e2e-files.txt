@@ -28,6 +28,14 @@ tests/integration/test_draft_transfer.py
 tests/integration/test_entity_summary_and_history.py
 tests/integration/test_export_roundtrip.py
 tests/integration/test_export_stream.py
+tests/integration/test_fork_data_sources.py
+tests/integration/test_fork_distance.py
+tests/integration/test_fork_no_copy.py
+tests/integration/test_fork_overlay_delta.py
+tests/integration/test_fork_overlay_property.py
+tests/integration/test_fork_overlay_reads.py
+tests/integration/test_fork_stats.py
+tests/integration/test_forks_feature_flag.py
 tests/integration/test_graph_changes_freshness.py
 tests/integration/test_graph_changes_idempotent.py
 tests/integration/test_graph_changes_name_identity.py
@@ -48,6 +56,8 @@ tests/integration/test_merged_draft_overlay.py
 tests/integration/test_move_op.py
 tests/integration/test_node_sort_desc_live.py
 tests/integration/test_nodes_type_paging_live.py
+tests/integration/test_overlay_edge_rewind.py
+tests/integration/test_overlay_rollups.py
 tests/integration/test_package_seed_job.py
 tests/integration/test_private_draft_owner.py
 tests/integration/test_private_draft_read.py
@@ -107,6 +117,7 @@ tests/integration/test_versioning_eviction.py
 tests/integration/test_versioning_falkor_live.py
 tests/integration/test_versioning_foreign_key_guards.py
 tests/integration/test_versioning_fork.py
+tests/integration/test_versioning_fork_bases.py
 tests/integration/test_versioning_fork_bounded.py
 tests/integration/test_versioning_fork_merge.py
 tests/integration/test_versioning_lost_update.py

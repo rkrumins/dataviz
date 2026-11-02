@@ -54,7 +54,7 @@ from backend.app.api.v1.endpoints.views import (
     authorize_view_create,
 )
 from backend.app.api.v1.feature_gate import ensure_view_mode_allowed, require_feature
-from backend.app.api.v1.versioning_gate import require_versioning_enabled
+from backend.app.api.v1.versioning_gate import require_forks_enabled, require_versioning_enabled
 from backend.app.auth.dependencies import get_optional_user, get_permission_claims, rbac_flag
 from backend.app.common.activity_context import provenance_for
 from backend.app.db.engine import get_db_session
@@ -1283,7 +1283,8 @@ _DRAFT_PERMISSION = "workspace:datasource:manage"
 
 
 async def _draft_graph(svc: GraphVersioningService, target: importing.Target, claims: PermissionClaims) -> dict:
-    """The versioned graph a staged import's draft is opened on, once the caller may open one."""
+    """The versioned graph a staged import's draft is opened on, once the caller may open one —
+    on a fork, only while forks are on."""
     graph = (await svc.get_graph_by_data_source(target.data_source_id)
              if target.data_source_id else None)
     if graph is None or graph.get("workspace_id") != target.workspace_id:
@@ -1293,6 +1294,8 @@ async def _draft_graph(svc: GraphVersioningService, target: importing.Target, cl
         })
     if not has_permission(claims, _DRAFT_PERMISSION, workspace_id=target.workspace_id):
         raise HTTPException(status_code=403, detail=f"Missing permission: {_DRAFT_PERMISSION}")
+    if graph.get("fork_parent_graph_id"):
+        await require_forks_enabled()
     return graph
 
 

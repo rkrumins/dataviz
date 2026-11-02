@@ -181,6 +181,11 @@ export interface Watermark {
   /** Which store serves reads, by the server's own routing rule: published from FalkorDB while the
    *  projection holds the head, else Postgres; a draft is always an overlay on whatever serves it. */
   readRoute?: { main: 'falkordb' | 'postgres'; drafts: 'overlay' }
+  /** A fork's: the root graph whose store its reads go through, and whose watermark this is. */
+  readsThrough?: string | null
+  /** A fork's: `overlay` (its changes laid over that store) or `postgres`, when it is too far from
+   *  its parent to lay over and its own reads in Postgres serve it (`readRoute.main` says so too). */
+  readsFrom?: 'overlay' | 'postgres' | null
   /** What the customer's own graph holds that history doesn't (another writer kept writing to it),
    *  kept, not deleted; null when there is none. Brought in with {@link bringIntoHistory}. */
   externalDrift?: ExternalDrift | null

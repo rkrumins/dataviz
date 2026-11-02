@@ -9,6 +9,152 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Versioning: forks you can work in
+
+A fork used to be a graph and nothing else: its data source id was minted for the graph and stored
+nowhere, so views, the canvas and the data-source routes could not name it. Forking now makes a data
+source as well, governed by its parent's settings, which goes to the trash, back and away with the
+fork and moves with its parent. It reads its root's published graph with its own changes laid over
+it, as a draft reads main's, and never has a FalkorDB graph of its own: the copies earlier releases
+made of forks can be dropped. Each of a fork's commits records which parent commit it reads, the base
+the next step — taking the parent's newer commits into a fork — builds on. See
+`docs/versioning/17-forks-and-residency.md`.
+
+### Added
+
+- **Forks are opt-in: Admin → Features → Forks** (`forksEnabled`, a preview in Lineage, needing
+  Version control). It ships off. While it is off no fork is made and a fork is read-only: a
+  change to its graph or its drafts, and opening, approving, editing or merging its reviews,
+  answer **403** `feature_disabled` ("Forks are turned off for this deployment. …"), and the job a
+  large publish or merge on a fork runs as refuses the same way. Listing and reading forks, moving
+  them to the trash and back, closing their reviews, and the purge, the reaper and the backfill
+  keep working; no parent graph is touched, and nothing is deleted.
+- **A fork is a data source of its own.** `POST /api/v1/{ws}/versioning/graphs/{gid}/forks` takes an
+  optional `{name}` (1–80 characters) and answers its `dataSourceId` too: a data source in the
+  parent's workspace, on its provider, labelled `"<parent label> · <name>"` (without a name, `Fork`
+  and the end of its id). Its graph name is always `null`. A fork that cannot be made takes its data
+  source with it. `GET …/forks` gives each fork's `dataSourceId` and `label`, and forking is recorded
+  in the workspace's activity (`workspace.versioning.fork_created`).
+- **Every data-source answer says what it was forked from**: `forkOf` `{dataSourceId, graphId}`, or
+  `null`. `GET /api/v1/admin/workspaces/{ws}/data-sources?includeForks=true` lists forks' data
+  sources too.
+- **Each commit of a fork records the parent commit it reads** (`graphver.fork_bases`; today the fork
+  point). Every as-of read of a fork follows it — its state, heads, bounded values, what changed in a
+  window, time travel, restore and export — so a fork can later take its parent's newer commits by
+  adding a row, and every earlier commit of the fork still reads what it read.
+- **A fork says how far it is from its parent.** Each live fork in `GET …/forks` carries `ahead` (the
+  entities it changed since its last merged review, or its fork point), `behind` (those its parent
+  changed that it has not taken in), `updateRecommended` (what Update from parent can fix: `behind`
+  reaches `GRAPHVER_FORK_REWIND_WARN`, default 50,000, or its reads are past the ceiling and taking
+  in its parent's changes would bring them back under), `readsFrom`
+  (`overlay` or `postgres`) and `countsCapped` (a count stopped at `GRAPHVER_FORK_REWIND_MAX`).
+
+### Changed
+
+- **A fork's settings are its parent's.** Its ontology, restriction, access level, identity and name
+  properties and draft policy are copied when it is made, and every change on the parent is made on
+  its forks, forks of forks too, in the same transaction. Changing one on the fork's own data source
+  is **409** `fork_settings_follow_parent` `{fields}`, and nothing of the request is kept; its label
+  stays its own. A view over a fork is restricted when its parent is.
+- **A fork's data source goes where its graph goes.** Trashing a fork tombstones its data source,
+  restoring it brings it back, and its purge deletes it. Moving a data source carries its forks'
+  data sources, trashed ones too, and the views on them, in the same transaction; undo brings them
+  back. A permanent delete purges the source's trashed forks first, and a live fork refuses it
+  (**409** `live_forks`) — now also when the source has nothing published. The versioning reaper
+  keeps each fork's data source in step with its graph, and deletes one left without a graph after
+  ten minutes (a fork whose making crashed). When a fork's data source is deleted, the views on it
+  go to its nearest live parent, losing the fork's draft they were pinned to.
+- **A fork reads through its root's published graph.** Its `main` is read as a draft's is: the
+  FalkorDB graph of the data source at the top of its fork chain, with a patch set of what either
+  side changed since they parted laid over it, classified from content hashes, its values loaded as
+  a read serves them, kept per fork head and extended when only the root moved. A root still catching up, evicted
+  or in the trash is read from Postgres instead, the same data more slowly, and so is a fork whose
+  patch set would pass `GRAPHVER_FORK_REWIND_MAX` (default 200,000) entities. Looking up an entity
+  the fork never changed by its URN finds it. Deep search on a fork runs in the root's graph, without
+  the fork's own changes, and its notes say so (**501** while the root catches up, or past the
+  ceiling); native queries are **501** `native_query_unavailable`: run them on the parent.
+- **No fork's data source reaches a FalkorDB graph of its own.** Its writes are commits; the provider
+  registry hands out its parent's graph read only. Anything that needs a data source's own store — an
+  aggregation trigger, a dedicated rollup graph or projection mode, a projection move, bringing
+  outside changes into history — is **409** `fork_has_no_store`, and making one the workspace's
+  default is **409** `fork_not_primary`. Probes, stats, silent-source alerts, the reconcile sweeper
+  and the capacity views leave forks out.
+- **A fork gets no FalkorDB copy.** Forking pins no key, and the projector never projects a fork: a
+  fork's rebuild is **409** (no target), and Check sync answers `skippedReason` for it. A fork's
+  watermark is its root's, the graph it reads through (`readsThrough`), and the fleet inventory no
+  longer shows a fork as behind; the liveness check leaves forks out.
+- **A fork has no stats.** Nothing polls them — they would compose the whole graph — and a stats read
+  of a fork's data source answers `status: "unavailable"` (`missing_fields:
+  ["not_available_for_a_fork"]`) instead of "computing" for a poll that never lands.
+
+### Fixed
+
+- **A managed data source that names no graph no longer reads its provider's default graph**: the
+  provider registry refuses it, where it used to hand out whatever graph the provider defaulted to.
+- **An edge a draft changed only in its properties is counted once.** The draft's overlay added it
+  where the published graph already had it, so rollups, degrees and its source's child count were one
+  too many. It now serves the draft's value and counts the edge where it runs.
+- **A node main moved since a draft branched is listed where the draft has it.** The draft took it
+  out of its new parent's count but still listed it there, as well as under its old parent; a
+  top-level node main put under a parent showed under it and nowhere at the top level.
+- **A flow a draft deleted comes off its rollups where main counted it**, also when the draft moved
+  one of its ends: it came off under the container the draft moved the end to, and main's cell
+  stayed.
+- **A draft no longer shows main's later edit of an edge's properties.** The draft reads main as it
+  was when the draft branched, but an edge main changed only in its properties since read as main
+  has it now.
+
+### Upgrading
+
+- **Run the migrations.** `20261030_1100_gv_fork_bases` (graphver: `fork_bases`, with each existing
+  fork's fork point) follows `20261030_1000_gv_mr_merged_seq`; with a separate `GRAPHVER_DB_URL` the
+  versioning worker adds it on start. `20261030_1200_ds_fork_of` (management:
+  `workspace_data_sources.fork_of_data_source_id`, its index, and `ck_ds_fork_no_key`, which keeps a
+  fork's data source from naming a graph) follows it. Both wait at most five seconds for their locks
+  and can be run again. The second will not downgrade while forks' data sources exist: the code before
+  it reads a data source that names no graph from its provider's default graph, so delete them first.
+- **Forks are off by default, also after the upgrade.** A system administrator turns them on under
+  **Admin → Features → Forks**. Until then existing forks stay readable and can be moved to the
+  trash and restored, but take no change.
+- **Existing forks get their data sources on the reaper's first pass** after the upgrade, labelled
+  `"<parent label> · Fork <end of its id>"`, while their parent's data source exists. A fork already
+  in the trash gets none, and is purged as before.
+- **The data-source routes refuse a fork's data source.** Delete, permanent delete, restore, move,
+  move preview and transfer requests on one are **409** `use_fork_endpoints`: trash and restore a fork
+  through `DELETE …/graphs/{fork}` and `POST …/graphs/{fork}/restore`, and move its parent. Its
+  settings change on the parent. Set-primary on one is **409** `fork_not_primary`.
+- **Data-source lists leave forks out unless asked**: the workspace's list (pass `includeForks=true`),
+  the data sources in workspace answers, the workspace's default source and its last-source count.
+  The trash always does: a fork comes back with its graph.
+- **Set `GRAPHVER_DROP_FORK_COPIES=true` after the rollout**, once every pod runs this release, to
+  free the memory of the FalkorDB copies earlier releases made of forks (`<parent key>__fork_<id>`).
+  The versioning worker's reaper then drops each copy that is the fork's own and that nothing else
+  projects into or reads, and clears the fork's pin. Until then the copies stay, neither read nor
+  projected; a pod on an earlier release still reads them, which is why it is off by default.
+- **New settings**: `GRAPHVER_FORK_REWIND_MAX` (200,000), `GRAPHVER_FORK_REWIND_WARN` (50,000) and
+  `GRAPHVER_OVERLAY_CACHE_ENTRIES` (400,000 entries for every overlay delta a process keeps, drafts'
+  included). An entry holds about 1.2 KB, so the default holds under 512 MB in each web process;
+  lower it where a process has less to spare. An evicted delta is built again on its next read, 2 to
+  6 s at 50,000 to 145,000 entries.
+
+### Known limitations
+
+- **A fork still reads its parent as of its fork point.** Taking the parent's newer commits into a
+  fork comes next, as a new base row.
+- **A fork's own changes are not searchable.** Deep search on a fork answers from its root's
+  published graph, and native queries are unavailable on it.
+- **A listing of a fork serves every node the fork created that it lists**, on its first page, as a
+  draft's does, loading each for every request: an unfiltered listing of a fork that created 12,500
+  nodes serves all of them, in 0.75 s each time, and so does the top level of a fork that created
+  many nodes there.
+- **Each root commit costs CPU in each process reading a fork**: its patch set is indexed again on
+  the next read, 1.3 to 2 s at 145,000 entries; each fork commit builds it again.
+- **A trace on a fork follows its root's later flows**, as a draft's follows main's.
+- **A customer key's outside changes show on a fork**, as on a draft (`externalDrift`).
+- **A fork far behind its parent reads from Postgres.** Past `GRAPHVER_FORK_REWIND_MAX` entities
+  changed on either side since they parted, its reads are slower and search does not reach it, until
+  it takes its parent's newer commits.
+
 ## [Unreleased] — Forks: merged right, and costing what changes in them
 
 A fork can be reviewed into its parent again and again, each review merging what the fork changed

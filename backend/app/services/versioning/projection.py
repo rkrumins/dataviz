@@ -13,8 +13,8 @@ Two invariants make it safe to run unattended:
   batch lands in FalkorDB, in a separate transaction (bounded staleness, never
   corruption).
 
-First pass (`projected==0`) seeds the full live state (fork-aware copy-on-write
-composition); later passes apply only the rows in `(projected, target]`.
+First pass (`projected==0`) seeds the full live state; later passes apply only the rows in
+`(projected, target]`. A fork is never projected: it reads through its root's store.
 """
 from __future__ import annotations
 
@@ -670,7 +670,6 @@ class FalkorProjector:
                 raise ValueError(f"unknown graph {graph_id}")
             data_source_id = graph.data_source_id
             workspace_id = graph.workspace_id
-            is_fork = graph.fork_parent_graph_id is not None
             # Up to the committed head, not only the target: a pass that failed leaves the target
             # where it was, and a target behind the head must never park the graph below it.
             from_seq = ps.projected_commit_seq
@@ -685,6 +684,10 @@ class FalkorProjector:
             # by ``project_graph``); a customer's graph that recorded none is read for it below.
             SPELLING.set(None if owned else spelling(ps.physical_types))
             unspelled = not owned and ps.physical_types is None
+            if graph.fork_parent_graph_id is not None:
+                # A fork has no FalkorDB copy: it reads through its root's store. A key an earlier
+                # release pinned for one is never written again (the reaper drops it, when asked).
+                return {"projected": from_seq, "applied": 0, "noop": True, "skipped": "fork"}
             if from_seq >= to_seq:
                 return {"projected": from_seq, "applied": 0, "noop": True}
             if name == self.default_graph_name(graph_id):
@@ -745,10 +748,8 @@ class FalkorProjector:
                                                               changes[0])
                 # Incremental :AGGREGATED rollup maintenance for a publish window. A full
                 # replay's rollups are moved by the reconcile's own diff instead.
-                # Skipped for forks: their containment chains span the parent graph's rows, so
-                # incremental chains would under-roll; a fork's rollups come from full rebuilds.
                 # A failure here must NEVER wedge raw-edge projection — degrade to the rebuild.
-                if from_seq > 0 and not is_fork and self._edge_types_resolver is not None:
+                if from_seq > 0 and self._edge_types_resolver is not None:
                     try:
                         rollup_pairs = await self._compute_rollup_deltas(
                             s, graph, main_id, from_seq, to_seq)
@@ -776,7 +777,7 @@ class FalkorProjector:
                 # took every :AGGREGATED rollup with it. On a fresh key the diff is simply
                 # "everything", so a first seed is the same code path.
                 reconciled = await self._reconcile_in_place(
-                    client, graph_id, main_id, to_seq, is_fork, level_map, track_progress=True,
+                    client, graph_id, main_id, to_seq, level_map, track_progress=True,
                     provider_id=provider_id, owned=owned)
             elif paged:
                 dropped, structural, paged_writes = await self._apply_paged(
@@ -813,7 +814,7 @@ class FalkorProjector:
                 logger.debug("rollup health unreadable for %s", graph_id, exc_info=True)
             heal_outcome: Dict[str, object] = {}
             verify_error, healed = (
-                await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq, is_fork,
+                await self._verify_and_heal(client, graph_id, main_id, from_seq, to_seq,
                                             level_map=level_map, heal_outcome=heal_outcome,
                                             rollups_moved=window_rollups_applied, owned=owned,
                                             provider_id=provider_id, dropped=dropped, drift=drift)
@@ -967,7 +968,9 @@ class FalkorProjector:
         """Lower the watermark of every idle graph whose FalkorDB key lost what the watermark says
         it holds (:func:`liveness_reset_to`), so the poll reseeds it or re-applies the lost window
         instead of reads being served from it. Graphs at genesis, tombstoned or still being
-        enabled for version control are not checked; a key that cannot be read is left alone.
+        enabled for version control are not checked, nor forks, which are never projected (a copy
+        an earlier release made of one is no store of theirs); a key that cannot be read is left
+        alone.
         Each reset is fenced like a pass: it lands only while the row's epoch and watermark are
         still the ones read. A key that holds what it should is also checked for a summaries
         build (:meth:`_ask_for_first_summaries`). Returns the resets."""
@@ -975,10 +978,11 @@ class FalkorProjector:
             rows = (await s.execute(
                 select(ProjectionStateORM.graph_id, ProjectionStateORM.falkor_graph_name,
                        ProjectionStateORM.falkor_provider, ProjectionStateORM.projected_commit_seq,
-                       ProjectionStateORM.epoch, GraphORM.fork_parent_graph_id)
+                       ProjectionStateORM.epoch)
                 .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
                 .where(
                     ProjectionStateORM.status == "idle",
+                    GraphORM.fork_parent_graph_id.is_(None),
                     # Past genesis (main's eviction rule): a key at genesis may be the data
                     # source's own graph, and a reseed from genesis would empty it.
                     ProjectionStateORM.projected_commit_seq > 1,
@@ -992,8 +996,7 @@ class FalkorProjector:
             )).all()
         sem = asyncio.Semaphore(config.PROJECTION_CONCURRENCY)
 
-        async def _one(gid, name, provider_id, projected, epoch,
-                       fork_of) -> Optional[Dict[str, object]]:
+        async def _one(gid, name, provider_id, projected, epoch) -> Optional[Dict[str, object]]:
             async with sem:
                 try:
                     client = await self._graph_client(name, provider_id)
@@ -1003,7 +1006,7 @@ class FalkorProjector:
                                    gid, name, exc)
                     return None
                 to_seq = liveness_reset_to(exists, seq, projected) if exists is not None else None
-                if exists and to_seq is None and fork_of is None:
+                if exists and to_seq is None:
                     await self._ask_for_first_summaries(gid, client, projected)
             if exists is None:
                 return None
@@ -1142,6 +1145,8 @@ class FalkorProjector:
                     != literal("gv_").concat(ProjectionStateORM.graph_id),
                     # A tombstoned graph keeps its pin for the undo window and must not reseed it.
                     GraphORM.deleted_at.is_(None),
+                    # A fork has no FalkorDB copy (project_graph skips one whatever its row says).
+                    GraphORM.fork_parent_graph_id.is_(None),
                 ).order_by(
                     (func.greatest(ProjectionStateORM.target_commit_seq,
                                    GraphORM.main_head_commit_seq)
@@ -1195,7 +1200,7 @@ class FalkorProjector:
         label_of: Dict[str, str] = {}
 
         if from_seq <= 0:
-            # Seed: the full live state (fork-aware copy-on-write composition).
+            # Seed: the full live state.
             state = await self._svc._state_as_of(s, graph.id, main_id, to_seq)
             for eid, p in state.items():
                 if p is None or _is_edge_payload(p):
@@ -1917,8 +1922,8 @@ class FalkorProjector:
     async def _urn_label_for(
         self, s, graph: GraphORM, main_id: str, entity_id: str,
     ) -> Tuple[str, str]:
-        """Latest committed (urn, entityType) for an entity on `main`
-        (fork-aware); ``(gv:<eid>, <its latest entityType>)`` for a node that
+        """Latest committed (urn, entityType) for an entity on `main`;
+        ``(gv:<eid>, <its latest entityType>)`` for a node that
         never had a urn, and ``(gv:<eid>, "Entity")`` when nothing resolves.
         The entityType is exactly what the node merge labeled the cache node
         with, so labeled anchors built from it always hit."""
@@ -1940,17 +1945,12 @@ class FalkorProjector:
         )).first()
         if row:
             return f"gv:{entity_id}", str(row[0] or "Entity")
-        if graph.fork_parent_graph_id:
-            parent = await s.get(GraphORM, graph.fork_parent_graph_id)
-            if parent is not None:
-                pmain = await self._svc._main_branch_id(s, parent.id)
-                return await self._urn_label_for(s, parent, pmain, entity_id)
         logger.warning("projection: no urn for node entity %s on %s; keying as gv:<entity_id>",
                        entity_id, graph.id)
         return f"gv:{entity_id}", "Entity"
 
     async def _urn_for(self, s, graph: GraphORM, main_id: str, entity_id: str) -> str:
-        """Latest non-null urn for an entity on `main` (fork-aware), else gv:<eid>."""
+        """Latest non-null urn for an entity on `main`, else gv:<eid>."""
         return (await self._urn_label_for(s, graph, main_id, entity_id))[0]
 
     async def _endpoint(
@@ -1975,8 +1975,8 @@ class FalkorProjector:
         """Fill the window caches with the (urn, label) :meth:`_urn_label_for` gives each of
         ``entity_ids`` not in them yet: the latest urn-bearing version row on ``main``, read for
         ``_ENDPOINT_CHUNK`` ids per statement instead of one statement per id — the per-endpoint
-        reads were a 100k-edge window's 100k round trips. An id this does not resolve (a fork's
-        parent rows, no urn at all) is left to :meth:`_endpoint`'s own fallback."""
+        reads were a 100k-edge window's 100k round trips. An id this does not resolve (no urn at
+        all) is left to :meth:`_endpoint`'s own fallback."""
         want = [e for e in dict.fromkeys(entity_ids) if e and (e not in urn_of or e not in label_of)]
         for chunk in _batches(want, _ENDPOINT_CHUNK):
             rows = (await s.execute(
@@ -1991,17 +1991,15 @@ class FalkorProjector:
                     urn_of.setdefault(eid, str(urn))
                     label_of.setdefault(eid, str(etype or "Entity"))
 
-    async def _pg_live_counts(self, graph_id, main_id, to_seq, is_fork):
+    async def _pg_live_counts(self, graph_id, main_id, to_seq):
         """Node count + the count a FAITHFUL FalkorDB projection should hold, from ``entity_heads``,
-        for a NON-fork main fully caught up (``main_head == to_seq``); ``None`` otherwise (a fork's
-        composed count is O(graph); a lagging head verifies on catch-up).
+        for a main fully caught up (``main_head == to_seq``); ``None`` otherwise (a lagging head
+        verifies on catch-up).
 
         Edges are counted as DISTINCT ``(source, type, target)`` TRIPLES, not raw ids: the projector
         MERGEs edges id-lessly, so parallel edges (same triple, different ids) collapse to one
         relationship in FalkorDB. Comparing against the raw edge count would flag that legitimate
         collapse as a shortfall and hold every parallel-edge graph back forever."""
-        if is_fork:
-            return None
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             if graph is None or graph.main_head_commit_seq != to_seq:
@@ -2080,8 +2078,8 @@ class FalkorProjector:
         return nodes, copies, edges, parallel, unkeyed
 
     async def _expected_projection(self, s, graph, main_id, to_seq, level_map):
-        """What FalkorDB should hold at ``to_seq``, NARROW: the winners a full seed replays
-        (fork-aware), keyed the way the projector writes them — (label, urn) per node, so
+        """What FalkorDB should hold at ``to_seq``, NARROW: the winners a full seed replays,
+        keyed the way the projector writes them — (label, urn) per node, so
         entities sharing a urn under different types are the separate nodes they have always
         been — each with its fingerprint and a reference to fetch its payload IF it must be
         written. No payload is read here. Where several entities share one key, entity id
@@ -2123,7 +2121,7 @@ class FalkorProjector:
         reading "Check sync" reports)."""
         return (await rollup_health(client)).trusted(actual_lineage)
 
-    async def _reconcile_in_place(self, client, graph_id, main_id, to_seq, is_fork,
+    async def _reconcile_in_place(self, client, graph_id, main_id, to_seq,
                                   level_map, track_progress: bool = False,
                                   rollups_moved_this_pass: bool = False,
                                   provider_id: Optional[str] = None,
@@ -2137,8 +2135,8 @@ class FalkorProjector:
         them: the change is too large to do inline, the stored rollups are not a trustworthy
         base, this pass already moved them from Postgres's window (``rollups_moved_this_pass``
         — a heal after a publish window; its deltas assumed raw writes that did not land, so a
-        second delta would double-count), rollup cells went with a node that had to be deleted
-        outright, or the graph is a fork (its chains span the parent's rows). For a data source
+        second delta would double-count), or rollup cells went with a node that had to be deleted
+        outright. For a data source
         whose rollups live in a dedicated key none is read or written here: ``"stale"`` when
         lineage or containment changed, else ``"none"``.
 
@@ -2150,16 +2148,14 @@ class FalkorProjector:
         would take out what stays.
 
         A graph of more than ``PROJECTION_RECONCILE_STREAMED_ABOVE`` live entities is reconciled a
-        page at a time instead (:meth:`_reconcile_streamed`); a fork, whose state composes its
-        parent's, always here."""
-        if not is_fork:
-            async with self._session() as s:
-                large = await self._live_count(s, graph_id, main_id) \
-                    > config.PROJECTION_RECONCILE_STREAMED_ABOVE
-            if large:
-                return await self._reconcile_streamed(
-                    client, graph_id, main_id, to_seq, level_map, track_progress=track_progress,
-                    provider_id=provider_id, owned=owned)
+        page at a time instead (:meth:`_reconcile_streamed`)."""
+        async with self._session() as s:
+            large = await self._live_count(s, graph_id, main_id) \
+                > config.PROJECTION_RECONCILE_STREAMED_ABOVE
+        if large:
+            return await self._reconcile_streamed(
+                client, graph_id, main_id, to_seq, level_map, track_progress=track_progress,
+                provider_id=provider_id, owned=owned)
         async with self._session() as s:
             graph = await s.get(GraphORM, graph_id)
             nodes, edges, types_by_urn = await self._expected_projection(
@@ -2197,9 +2193,7 @@ class FalkorProjector:
         # Rollup cells on a node deleted outright (a true duplicate, a urn-less stray) go with
         # its DETACH; no delta can say what they held.
         cells_lost = bool(duplicated or unkeyed)
-        if is_fork:
-            rollups = "stale" if (raw_edges_change or diff.relabels) else "none"
-        elif self._edge_types_resolver is not None:
+        if self._edge_types_resolver is not None:
             try:
                 sets = await self._edge_types_resolver(self._svc, graph_id)
             except Exception:                            # pragma: no cover - app-layer resolution
@@ -2231,7 +2225,7 @@ class FalkorProjector:
                     rollups, plan = "stale", None
                 elif plan.pairs:
                     rollups = "applied"
-        elif rollups == "none" and not is_fork and raw_edges_change:
+        elif rollups == "none" and raw_edges_change:
             # Edges changed but this projector cannot say which are lineage (no resolver, or
             # it resolved nothing): the batch job re-derives the rollups.
             rollups = "stale"
@@ -2640,7 +2634,7 @@ class FalkorProjector:
                     await progress(len(chunk))
 
     async def _verify_and_heal(
-        self, client, graph_id, main_id, from_seq, to_seq, is_fork, level_map=None,
+        self, client, graph_id, main_id, from_seq, to_seq, level_map=None,
         heal_outcome: Optional[Dict[str, object]] = None, rollups_moved: bool = False,
         owned: bool = True, provider_id: Optional[str] = None, dropped: int = 0,
         drift: Optional[dict] = None,
@@ -2670,9 +2664,9 @@ class FalkorProjector:
         ran; its outcome (writes, and whether the rollups were moved or must be handed
         to the aggregation batch job) is written into ``heal_outcome`` when given."""
         try:
-            pg = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)
+            pg = await self._pg_live_counts(graph_id, main_id, to_seq)
             if pg is None:
-                return None, False                       # fork / lagging head — not applicable
+                return None, False                       # a lagging head — not applicable
             fk = await self._falkor_counts(client, owned)
         except Exception:
             logger.debug("projection verify skipped for %s (count failed)", graph_id, exc_info=True)
@@ -2730,11 +2724,11 @@ class FalkorProjector:
                 # In place, like a full replay: write back only what is missing
                 # and move the rollups by the same difference.
                 healed = await self._reconcile_in_place(
-                    client, graph_id, main_id, to_seq, is_fork, level_map,
+                    client, graph_id, main_id, to_seq, level_map,
                     rollups_moved_this_pass=rollups_moved, provider_id=provider_id, owned=owned)
                 if heal_outcome is not None:
                     heal_outcome.update(healed)
-                pg2 = await self._pg_live_counts(graph_id, main_id, to_seq, is_fork)
+                pg2 = await self._pg_live_counts(graph_id, main_id, to_seq)
                 fk2 = await self._falkor_counts(client, owned)
                 if pg2 is None and heal_outcome is not None:
                     heal_outcome.pop("surplus", None)    # not re-counted: the flag stays as is

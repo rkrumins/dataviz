@@ -190,6 +190,7 @@ class ProbeScheduler:
         the case where being late costs the most.
         """
         from backend.app.db.models import DataSourceStatsORM, WorkspaceDataSourceORM
+        from backend.app.db.repositories.data_source_repo import not_a_fork
         from .models import AggregationDataSourceStateORM as S
 
         stmt = (
@@ -209,6 +210,7 @@ class ProbeScheduler:
             # is still flagged active would otherwise be probed forever.
             .where(WorkspaceDataSourceORM.is_active.is_(True))
             .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+            .where(not_a_fork())                     # a fork has no graph of its own to probe
             .where(
                 DataSourceStatsORM.last_probed_at.is_(None)
                 | (DataSourceStatsORM.last_probed_at < cutoff)

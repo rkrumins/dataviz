@@ -1398,12 +1398,10 @@ class AdvancedSearchService:
 
         if getattr(provider, "is_overlay", False):
             # A draft reads main ⊕ its delta, but searches main alone —
-            # the delta has no Cypher surface. Say so, or the user reads
-            # "no matches" as "my new table isn't there".
-            notes.append(
-                "draft-only changes are not searchable yet: results come "
-                "from the published graph",
-            )
+            # the delta has no Cypher surface; a fork searches its parent's
+            # published graph the same way. Say so, or the user reads "no
+            # matches" as "my new table isn't there".
+            notes.append(provider.search_scope_note)
 
         lineage: list[str] = []
         lineage_known = False

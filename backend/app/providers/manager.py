@@ -467,7 +467,7 @@ class ProviderManager:
 
         # A versioned graph's reads and rollups go to the key it projects into, which a move
         # leaves different from the data source's (doc 14 §6). The management DB is unchanged.
-        from ..services import versioned_sources
+        from ..services import fork_sources, versioned_sources
         try:
             provider_id, graph_name = await versioned_sources.physical_key(
                 ds.id, ds.provider_id, ds.graph_name)
@@ -476,6 +476,18 @@ class ProviderManager:
                 provider_name=f"{ds.provider_id}:{ds.graph_name}",
                 reason="versioned projection pin could not be read",
             ) from exc
+        # A fork's row reads its root parent's published key, never writing it; with no key to
+        # read, it and any managed source refuse rather than fall back to the provider's default
+        # graph, which is not theirs.
+        fork = bool(getattr(ds, "fork_of_data_source_id", None))
+        if not graph_name and (fork or getattr(ds, "source_mode", None) == "managed"):
+            if fork:
+                raise fork_sources.ForkHasNoStore(ds.id)
+            raise ProviderConfigurationError(
+                f"managed data source {ds.id} has no FalkorDB graph to read")
+
+        def served(provider):
+            return fork_sources.ForkReadOnlyProvider(provider, ds.id) if fork else provider
 
         cache_key = (provider_id, graph_name or "")
 
@@ -495,7 +507,7 @@ class ProviderManager:
             provider = self._providers[cache_key]
             self._last_used[cache_key] = time.monotonic()
             await self._ensure_reachable(cache_key, provider)
-            return provider
+            return served(provider)
 
         # P1.2 — Warmup-cache fast-fail gate.
         # Before consulting the breaker (which costs a lock acquisition) and
@@ -541,7 +553,7 @@ class ProviderManager:
             # Double-check after acquiring lock
             if cache_key in self._providers:
                 await breaker._record_success()
-                return self._providers[cache_key]
+                return served(self._providers[cache_key])
 
             logger.info(
                 "Instantiating provider for workspace=%s ds=%s provider=%s graph=%s",
@@ -598,7 +610,7 @@ class ProviderManager:
         provider = self._providers[cache_key]
         self._last_used[cache_key] = time.monotonic()
         await self._ensure_reachable(cache_key, provider)
-        return provider
+        return served(provider)
 
     # Alias for backward compatibility during migration. ContextEngine,
     # aggregation worker, and health-check endpoint call this name.

@@ -369,17 +369,21 @@ what a pull had pulled.
 the parent stored at its head (none when the parent is a fork itself; nothing is hashed). Divergence
 accrues only as the fork's own commits; reads compose parent@fork-base ⊕ own — `_state_as_of` for a whole
 state, the bounded reads for the ids a save, pull, preview, publish, revert, restore or diff touches
-(§3.4) — so working on a fork of a graph of millions costs what changes in it. The fork
-gets its own FalkorDB graph name **only if the parent is pinned** — an unpinned parent's fork stays
-unpinned so the projector doesn't materialize an orphan key nothing reads. Nothing in the product reads a
-pinned fork's key either (the canvas, search and exports reach a fork through Postgres), and its first
-projection reconciles its whole state in one pass: see [09 · Scale](09-scale-limits-and-roadmap.md) §4.1.
+(§3.4) — so working on a fork of a graph of millions costs what changes in it. A fork has **no
+FalkorDB graph of its own**: its `main` is read as a draft's is, through its root's published store
+with its patch set laid over it, and the projector never projects it: see
+[17 · Forks & Residency](17-forks-and-residency.md) §2 and §6.
+
+A fork is also a data source of its own, in its parent's workspace, governed by its parent's
+settings, and each of its commits reads its parent at a recorded base (`fork_bases`; the fork point
+until the fork takes a newer one): see [17 · Forks & Residency](17-forks-and-residency.md).
 
 Forking needs `workspace:datasource:manage`. It runs under the parent's `_lock_graph`, refuses a
 parent with `GRAPHVER_MAX_FORKS_PER_GRAPH` (default 10) live forks with **409** `fork_limit {limit}`
 (trashed forks do not count), and refuses a frozen parent with **409** `graph_not_writable`. A fork is
 deleted into the trash (`DELETE …/graphs/{forkId}`) and brought back (`POST …/graphs/{forkId}/restore`);
-the reaper purges it once `GRAPHVER_PURGE_GRACE_DAYS` have passed, dropping only its own key. See
+the reaper purges it once `GRAPHVER_PURGE_GRACE_DAYS` have passed, dropping a FalkorDB copy an earlier
+release made of it if that copy is its own, never its parent's key. See
 [06 · API Reference](06-api-reference.md) for the refusals.
 
 ```mermaid

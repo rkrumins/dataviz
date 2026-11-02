@@ -1091,6 +1091,7 @@ class ReconciliationSweeper:
             ProviderORM,
             WorkspaceDataSourceORM,
         )
+        from backend.app.db.repositories.data_source_repo import not_a_fork
         from .fingerprint import (
             counts_digest_from_counts, raw_fingerprint_from_counts,
         )
@@ -1115,6 +1116,8 @@ class ReconciliationSweeper:
                 ProviderORM.id == WorkspaceDataSourceORM.provider_id,
             )
             .where(WorkspaceDataSourceORM.id.in_(ds_ids))
+            # A fork has no graph of its own to reconcile: its row reads as gone.
+            .where(not_a_fork())
         )).all()
         seen = set()
         for (

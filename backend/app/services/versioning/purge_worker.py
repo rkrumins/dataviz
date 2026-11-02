@@ -51,7 +51,7 @@ import logging
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.orm import aliased
 
 from . import config, db, job_lease
@@ -138,12 +138,10 @@ def _minted(g):
 
 
 async def _forks_reading(s, graph: GraphORM) -> int:
-    """How many forks still read ``graph``'s history. A graph with nothing past its genesis
-    commit (an abandoned enablement) gives its forks nothing, so none hold it back. A trashed
-    minted fork stops holding its parent back unless a live fork, or one bound to a data source,
-    reads through it, at any depth (a fork's state composes its parent's, recursively)."""
-    if graph.main_head_commit_seq <= 1:
-        return 0
+    """How many forks still read ``graph``'s history — one with nothing past its genesis commit
+    too: a fork reads through its parent's graph whatever it holds, and fails without it. A
+    trashed minted fork stops holding its parent back unless a live fork, or one bound to a data
+    source, reads through it, at any depth (a fork's state composes its parent's, recursively)."""
     # Each fork of ``graph`` (top), and every fork under it reached through trashed minted forks.
     sub = select(GraphORM.id.label("top"), GraphORM.id, GraphORM.deleted_at,
                  GraphORM.data_source_id).where(
@@ -165,6 +163,102 @@ async def graph_key_readers(provider_id: Optional[str], graph_name: str,
 
     async with get_async_session() as s:
         return await graph_key_bindings(s, provider_id, graph_name, exclude_ds=exclude_ds)
+
+
+async def _drop_fork_row(ds_id: Optional[str]) -> None:
+    """After a fork's purge, its data-source row (``fork_sources``) goes too: the graph it named is
+    gone. Best effort, after the purge committed — a row left behind is the reaper's
+    (:meth:`Reaper.fork_rows`). The management database never commits on context exit."""
+    if not ds_id or not ds_id.startswith("dsfork_"):
+        return
+    from backend.app.db.engine import get_session_factory
+    from backend.app.db.models import WorkspaceDataSourceORM as DS
+    from backend.app.services import fork_sources
+    try:
+        async with get_session_factory()() as s:
+            if (await s.get(DS, ds_id)) is not None:
+                await fork_sources.views_to_parent(s, [ds_id])     # its views go to its parent
+            await s.execute(delete(DS).where(DS.id == ds_id, DS.fork_of_data_source_id.isnot(None)))
+            await s.commit()
+    except Exception:  # noqa: BLE001 — the reaper removes it on a later pass
+        logger.exception("purge: removing fork %s's data source failed; the reaper will", ds_id)
+
+
+async def drop_if_ours(session_factory, factory, key_in_use, *, graph_id: str,
+                       name: Optional[str], provider: Optional[str], owned: bool,
+                       ds_id: Optional[str], who: str, marked: bool = False) -> Tuple[bool, str]:
+    """Drop ``graph_id``'s FalkorDB key ``(provider, name)`` — if, and only if, it is ours to drop
+    and nothing else reads it — and say what became of it: ``(gone, verdict)``, ``gone`` when the
+    key was dropped or was already gone. ``marked``: a key we only vouch for while it carries the
+    projector's pass marker (or is one of the graph's own platform keys). ``who`` names the caller
+    in the log. The purge's rules, which nothing else may loosen (``PurgeRunner._phase_falkor``)."""
+    shared_with = 0
+    if name:
+        async with session_factory() as s:
+            # Belt and braces: even a graph we minted must not be dropped while another
+            # SURVIVING graph still projects into it. Ownership answers "did we make this?";
+            # this answers "is anyone still using it?".
+            shared_with = int(await s.scalar(text(
+                f'SELECT count(*) FROM "{_sch()}"."projection_state" p '
+                f'JOIN "{_sch()}"."graphs" g ON g.id = p.graph_id '
+                f'WHERE p.falkor_graph_name = :n AND p.graph_id <> :g '
+                f'  AND g.deleted_at IS NULL'
+            ), {"n": name, "g": graph_id}) or 0)
+
+    # Ownership says we made the key; it does not say nobody else reads it now — another
+    # data source bound to the same name, or a catalog entry publishing it. Asked last (only
+    # of a key we would otherwise drop), and an answer we cannot get keeps the key: fail
+    # closed.
+    readers: Optional[List[dict]] = []
+    if name and owned and not shared_with:
+        try:
+            readers = await key_in_use(provider, name, ds_id)
+        except Exception:                               # noqa: BLE001 — fail closed
+            logger.warning("%s: could not ask who reads '%s'", who, name, exc_info=True)
+            readers = None
+
+    if not name:
+        return False, "no projected graph"
+    if not owned:
+        return False, f"PROTECTED: '{name}' is not ours (we did not create it) — left untouched"
+    if shared_with:
+        return False, f"PROTECTED: '{name}' is still projected by {shared_with} live graph(s)"
+    if readers is None:
+        return False, f"PROTECTED: could not check what else reads '{name}' — left untouched"
+    if readers:
+        return False, (f"PROTECTED: '{name}' is still read by {len(readers)} data source(s) or "
+                       "catalog entr(ies) — left untouched")
+    if factory is None:
+        return False, f"skipped: no graph client configured — '{name}' left in place"
+    try:
+        client = factory(name, provider)
+        if inspect.isawaitable(client):
+            client = await client
+        if marked:
+            # A key the projector wrote carries its pass marker; one without it is not
+            # a key we can vouch for, unless it is one of the graph's own platform keys,
+            # which a reseed cut short leaves without one.
+            from . import keymigrate
+            from .projection import read_projection_marker
+            exists, seq = await read_projection_marker(client)
+            if exists is False:
+                return True, f"'{name}' was already gone"
+            if seq is None and not keymigrate.is_owned_key(graph_id, name):
+                return False, (f"PROTECTED: '{name}' holds no projection marker of ours — "
+                               "left untouched")
+        await client.delete()
+        logger.warning("%s DROPPED FalkorDB graph %s (we created it)", who, name)
+        # A graph later written under the same name gets a new id catalogue;
+        # every long-lived reader must drop its old one (graph_generation).
+        from backend.app.providers.graph_generation import bump_graph_generation
+        await bump_graph_generation(name, reason=who)
+        return True, f"dropped '{name}'"
+    except Exception as exc:                            # pragma: no cover - infra
+        # A leaked FalkorDB graph is recoverable (cleanup script). Failing the whole
+        # purge over it — and stranding millions of SQL rows — is not an improvement.
+        verdict = f"could not drop '{name}': {exc}"
+        logger.warning("%s: %s", who, verdict)
+        return False, verdict
 
 
 class PurgeRunner:
@@ -207,7 +301,7 @@ class PurgeRunner:
                     if job is None or job.status != "running" or job.retry_count != lease.epoch:
                         raise Superseded("the job was cancelled or taken over")
                     phase = job.current_phase or "count"
-                    graph_id, deleted = job.graph_id, job.processed
+                    graph_id, deleted, ds_id = job.graph_id, job.processed, job.data_source_id
                 # A Postgres failover or a dropped connection is waited out, not failed: every
                 # unit is idempotent (DELETEs, a count), so a retry re-runs one that rolled back
                 # or finds its rows already gone. A refusal is never retried.
@@ -220,6 +314,7 @@ class PurgeRunner:
                     if not await lease.finish("completed", current_phase=None, progress=100):
                         raise Superseded("the job was cancelled or taken over")
                     logger.info("purge %s completed (graph=%s, %s rows)", job_id, graph_id, deleted)
+                    await _drop_fork_row(ds_id)
                     return {"job_id": job_id, "status": "completed", "deleted": deleted}
                 async with self._session() as s:
                     await lease.checkpoint(s, current_phase=nxt, progress=_PHASE_FLOOR[nxt])
@@ -336,75 +431,10 @@ class PurgeRunner:
             ds_id = getattr(await s.get(JobORM, lease.job_id), "data_source_id", None)
 
         async def verdict_for(name, provider, owned, *, marked: bool = False) -> str:
-            shared_with = 0
-            if name:
-                async with self._session() as s:
-                    # Belt and braces: even a graph we minted must not be dropped while another
-                    # SURVIVING graph still projects into it. Ownership answers "did we make this?";
-                    # this answers "is anyone still using it?".
-                    shared_with = int(await s.scalar(text(
-                        f'SELECT count(*) FROM "{_sch()}"."projection_state" p '
-                        f'JOIN "{_sch()}"."graphs" g ON g.id = p.graph_id '
-                        f'WHERE p.falkor_graph_name = :n AND p.graph_id <> :g '
-                        f'  AND g.deleted_at IS NULL'
-                    ), {"n": name, "g": graph_id}) or 0)
-
-            # Ownership says we made the key; it does not say nobody else reads it now — another
-            # data source bound to the same name, or a catalog entry publishing it. Asked last (only
-            # of a key we would otherwise drop), and an answer we cannot get keeps the key: fail
-            # closed.
-            readers: Optional[List[dict]] = []
-            if name and owned and not shared_with:
-                try:
-                    readers = await self._key_in_use(provider, name, ds_id)
-                except Exception:                               # noqa: BLE001 — fail closed
-                    logger.warning("purge %s: could not ask who reads '%s'", lease.job_id, name,
-                                   exc_info=True)
-                    readers = None
-
-            if not name:
-                return "no projected graph"
-            if not owned:
-                return f"PROTECTED: '{name}' is not ours (we did not create it) — left untouched"
-            if shared_with:
-                return f"PROTECTED: '{name}' is still projected by {shared_with} live graph(s)"
-            if readers is None:
-                return f"PROTECTED: could not check what else reads '{name}' — left untouched"
-            if readers:
-                return (f"PROTECTED: '{name}' is still read by {len(readers)} data source(s) or "
-                        "catalog entr(ies) — left untouched")
-            if self._factory is None:
-                return f"skipped: no graph client configured — '{name}' left in place"
-            try:
-                client = self._factory(name, provider)
-                if inspect.isawaitable(client):
-                    client = await client
-                if marked:
-                    # A key the projector wrote carries its pass marker; one without it is not
-                    # a key we can vouch for, unless it is one of the graph's own platform keys,
-                    # which a reseed cut short leaves without one.
-                    from . import keymigrate
-                    from .projection import read_projection_marker
-                    exists, seq = await read_projection_marker(client)
-                    if exists is False:
-                        return f"'{name}' was already gone"
-                    if seq is None and not keymigrate.is_owned_key(graph_id, name):
-                        return (f"PROTECTED: '{name}' holds no projection marker of ours — "
-                                "left untouched")
-                await client.delete()
-                logger.warning("purge %s DROPPED FalkorDB graph %s (we created it)",
-                               lease.job_id, name)
-                # A graph later written under the same name gets a new id catalogue;
-                # every long-lived reader must drop its old one (graph_generation).
-                from backend.app.providers.graph_generation import bump_graph_generation
-                await bump_graph_generation(name, reason=f"purge {lease.job_id}")
-                return f"dropped '{name}'"
-            except Exception as exc:                            # pragma: no cover - infra
-                # A leaked FalkorDB graph is recoverable (cleanup script). Failing the whole
-                # purge over it — and stranding millions of SQL rows — is not an improvement.
-                verdict = f"could not drop '{name}': {exc}"
-                logger.warning("purge %s: %s", lease.job_id, verdict)
-                return verdict
+            return (await drop_if_ours(
+                self._session, self._factory, self._key_in_use, graph_id=graph_id, name=name,
+                provider=provider, owned=owned, ds_id=ds_id, marked=marked,
+                who=f"purge {lease.job_id}"))[1]
 
         verdict = await verdict_for(name, provider, owned)
         # Every key a move left is one we owned: the move refuses any other.
@@ -793,6 +823,10 @@ async def rehome_graph_for_data_source(*, data_source_id: str, to_workspace_id: 
 #: reaper tombstones it: the request that made it died before queueing the seed, and nobody retried.
 ORPHAN_PACKAGE_SOURCE_SECS = 3600
 
+#: How old a fork's data-source row with no graph must be before the reaper deletes it: the fork
+#: route commits the row before it makes the graph, so a younger one may be a fork being made.
+ORPHAN_FORK_ROW_SECS = 600
+
 #: Expired data sources whose graph the reaper left standing, so it says so once, not every pass.
 _LEFT_STANDING: set = set()
 
@@ -815,13 +849,18 @@ class Reaper:
     workspace where the two disagree (:meth:`_misplaced_graphs`), so the stages find the graphs
     they look for.
 
-    A trashed fork has no data-source row (its ``dsfork_`` id is minted, not stored), so its own
-    tombstone's age is its schedule (:meth:`_expired_forks`).
+    A trashed fork's own tombstone's age is its schedule (:meth:`_expired_forks`); its data-source
+    row, tombstoned with it, goes with its purge. :meth:`fork_rows`, run beside this, keeps each
+    fork's row in step with its graph.
     """
 
-    def __init__(self, *, app_session_factory=None, graphver_session_factory=None):
+    def __init__(self, *, app_session_factory=None, graphver_session_factory=None,
+                 graph_factory=None,
+                 key_in_use: Optional[Callable[..., Awaitable[List[dict]]]] = None):
         self._app = app_session_factory
         self._gv = graphver_session_factory or db.graphver_session
+        self._factory = graph_factory          # FalkorDB keys, for the forks' old copies
+        self._key_in_use = key_in_use or graph_key_readers
 
     def _app_sessions(self):
         if self._app is not None:
@@ -885,7 +924,23 @@ class Reaper:
                 # that lies about what it reclaimed is worse than one that does nothing.
                 async with Session() as s:
                     row = await s.get(WorkspaceDataSourceORM, ds_id)
+                    named = await s.scalar(select(WorkspaceDataSourceORM.id).where(
+                        WorkspaceDataSourceORM.fork_of_data_source_id == ds_id).limit(1))
+                    if named is not None:
+                        # Its forks' rows still name it (its graph gone all the same, as an
+                        # earlier release purged one under its forks): it waits for them to go,
+                        # as they will with their graphs.
+                        if ds_id not in _LEFT_STANDING:
+                            _LEFT_STANDING.add(ds_id)
+                            logger.warning("reaper: %s is past its grace period, but forks' data "
+                                           "sources still name it; it waits for them", ds_id)
+                        continue
                     if row is not None and row.deleted_at is not None:
+                        if getattr(row, "fork_of_data_source_id", None):
+                            # A fork's row whose purge did not take it (_drop_fork_row): its views
+                            # go to its parent all the same.
+                            from backend.app.services import fork_sources
+                            await fork_sources.views_to_parent(s, [ds_id])
                         await s.delete(row)
                         await s.commit()
                         reaped += 1
@@ -919,6 +974,166 @@ class Reaper:
                         revived, reaped, orphans, rehomed)
         return {"queued": queued, "reaped": reaped, "orphans": orphans, "revived": revived,
                 "rehomed": rehomed}
+
+    async def fork_rows(self) -> Dict[str, int]:
+        """Keep each fork's data-source row (``fork_sources``) in step with its graph.
+
+        The fork routes take the row along with the graph across two databases, with no
+        transaction between them: made before the graph, tombstoned and restored after it, deleted
+        after its purge. This puts right what a crash in between left, and what came before forks
+        had rows: a live fork graph with no row gets one, made from its parent's row as the fork
+        route makes one; a row whose graph is trashed is tombstoned, and one whose graph is live
+        is restored; a row whose graph is gone — never made, or purged — is deleted once it is
+        ``ORPHAN_FORK_ROW_SECS`` old (a younger one may be a fork still being made). Every step is
+        idempotent. Each row out of step is put right under its lock, from its graph as it is
+        then: a trash or a restore that lands meanwhile (graph first, then row) is only ever
+        carried forward, never undone. Orphans go one at a time, a fork's fork before its fork: a
+        row another still names is left, and the rest go."""
+        from sqlalchemy.exc import IntegrityError
+
+        from backend.app.db.models import WorkspaceDataSourceORM as DS
+        from backend.app.services import fork_sources
+
+        Session = self._app_sessions()
+        async with Session() as s:
+            rows = {r.id: r for r in (await s.execute(select(
+                DS.id, DS.deleted_at, DS.created_at, DS.fork_of_data_source_id).where(
+                DS.fork_of_data_source_id.isnot(None)))).all()}
+        parent = aliased(GraphORM)
+        async with self._gv() as gs:
+            graphs = {g.data_source_id: g for g in (await gs.execute(select(
+                GraphORM.data_source_id, GraphORM.fork_parent_graph_id, GraphORM.created_at,
+                GraphORM.created_by, GraphORM.deleted_at, GraphORM.deleted_by,
+                parent.data_source_id.label("parent_data_source_id"),
+            ).outerjoin(parent, parent.id == GraphORM.fork_parent_graph_id)
+                .where(_minted(GraphORM)))).all()}
+        out = {"created": 0, "trashed": 0, "restored": 0, "removed": 0}
+
+        # A fork is made after the graph it forks: oldest first, a fork's parent row comes first.
+        missing = sorted((g for ds_id, g in graphs.items() if ds_id not in rows
+                          and g.deleted_at is None and g.parent_data_source_id),
+                         key=lambda g: g.created_at)
+        for g in missing:
+            try:
+                async with Session() as s:
+                    # FOR SHARE, as the fork route reads it: a change of its settings in flight
+                    # commits first and is copied (fork_sources.follow_parent).
+                    parent_row = (await s.execute(
+                        select(DS).where(DS.id == g.parent_data_source_id)
+                        .with_for_update(read=True))).scalar_one_or_none()
+                    if parent_row is None:
+                        continue
+                    s.add(fork_sources.fork_row(
+                        parent_row, ds_id=g.data_source_id, name=f"Fork {g.data_source_id[-6:]}",
+                        parent_graph_id=g.fork_parent_graph_id, actor=g.created_by))
+                    await s.commit()
+                out["created"] += 1
+                logger.info("reaper: fork %s had no data source — made one", g.data_source_id)
+            except IntegrityError:
+                pass                                       # the fork route made it meanwhile
+            except Exception:
+                logger.exception("reaper: making fork %s's data source failed; carrying on",
+                                 g.data_source_id)
+
+        now = _now()
+        for ds_id, row in rows.items():
+            g = graphs.get(ds_id)
+            if g is None or (g.deleted_at is None) == (row.deleted_at is None):
+                continue                               # no graph, or in step
+            try:
+                async with Session() as s:
+                    held = (await s.execute(select(DS.deleted_at).where(DS.id == ds_id)
+                                            .with_for_update())).one_or_none()
+                    async with self._gv() as gs:
+                        g = (await gs.execute(select(GraphORM.deleted_at, GraphORM.deleted_by)
+                                              .where(GraphORM.data_source_id == ds_id))).one_or_none()
+                    if held is None or g is None:
+                        continue
+                    if g.deleted_at is not None and held.deleted_at is None:
+                        await s.execute(update(DS).where(DS.id == ds_id).values(
+                            deleted_at=g.deleted_at, deleted_by=g.deleted_by, updated_at=now))
+                        out["trashed"] += 1
+                    elif g.deleted_at is None and held.deleted_at is not None:
+                        await s.execute(update(DS).where(DS.id == ds_id).values(
+                            deleted_at=None, deleted_by=None, updated_at=now))
+                        out["restored"] += 1
+                    await s.commit()                   # the app session doesn't commit on exit
+            except Exception:
+                logger.exception("reaper: putting fork %s's data source in step failed; carrying "
+                                 "on", ds_id)
+
+        def depth(ds_id: str) -> int:
+            n = 0
+            while ds_id in rows and n <= len(rows):
+                ds_id, n = rows[ds_id].fork_of_data_source_id, n + 1
+            return n
+
+        cutoff = _now_minus(ORPHAN_FORK_ROW_SECS)
+        orphans = sorted((ds_id for ds_id, row in rows.items()
+                          if ds_id not in graphs and row.created_at < cutoff), key=depth, reverse=True)
+        for ds_id in orphans:
+            try:
+                async with Session() as s:
+                    await fork_sources.views_to_parent(s, [ds_id])  # its views go to its parent
+                    out["removed"] += (await s.execute(delete(DS).where(
+                        DS.id == ds_id, DS.fork_of_data_source_id.isnot(None),
+                        DS.created_at < cutoff))).rowcount
+                    await s.commit()
+            except IntegrityError:
+                logger.warning("reaper: fork %s's data source has no graph, but another fork's "
+                               "still names it; left for a later pass", ds_id)
+            except Exception:
+                logger.exception("reaper: removing fork %s's data source failed; carrying on",
+                                 ds_id)
+        if any(out.values()):
+            logger.info("reaper: fork data sources — %s made, %s trashed, %s restored, %s "
+                        "removed", out["created"], out["trashed"], out["restored"], out["removed"])
+        return out
+
+    async def fork_copies(self) -> int:
+        """Drop the FalkorDB copies earlier releases made of forks (``<parent key>__fork_<id>``),
+        which nothing reads now that a fork reads through its root's store — only once
+        ``GRAPHVER_DROP_FORK_COPIES`` says every process runs a release that neither reads nor
+        projects them. A copy goes by the purge's rules for a key (:func:`drop_if_ours`): ours,
+        the name minted for the fork, its projector's marker in it, nothing else projecting into
+        it or reading it; then the fork's pin is cleared. One kept is kept with its pin, and asked
+        about again on the next pass. Returns how many it dropped (or found gone)."""
+        if not config.DROP_FORK_COPIES:
+            return 0
+        async with self._gv() as gs:
+            copies = (await gs.execute(
+                select(ProjectionStateORM.graph_id, ProjectionStateORM.falkor_graph_name,
+                       ProjectionStateORM.falkor_provider, ProjectionStateORM.owns_falkor_graph,
+                       GraphORM.data_source_id)
+                .join(GraphORM, GraphORM.id == ProjectionStateORM.graph_id)
+                .where(GraphORM.fork_parent_graph_id.isnot(None),
+                       ProjectionStateORM.falkor_graph_name.isnot(None)))).all()
+        dropped = 0
+        for gid, name, provider, owned, ds_id in copies:
+            try:
+                gone, verdict = await drop_if_ours(
+                    self._gv, self._factory, self._key_in_use, graph_id=gid, name=name,
+                    provider=provider, owned=bool(owned) and name.endswith(f"__fork_{gid}"),
+                    ds_id=ds_id, marked=True, who="reaper")
+                if not gone:
+                    logger.info("reaper: fork %s's copy %s kept: %s", gid, name, verdict)
+                    continue
+                async with self._gv() as gs:
+                    await gs.execute(
+                        update(ProjectionStateORM)
+                        .where(ProjectionStateORM.graph_id == gid,
+                               ProjectionStateORM.falkor_graph_name == name)
+                        .values(falkor_graph_name=None, falkor_provider=None,
+                                owns_falkor_graph=False, projected_commit_seq=0, status="idle",
+                                epoch=ProjectionStateORM.epoch + 1, updated_at=_now())
+                        .execution_options(synchronize_session=False))
+                dropped += 1
+            except Exception:
+                logger.exception("reaper: dropping fork %s's copy %s failed; carrying on",
+                                 gid, name)
+        if dropped:
+            logger.info("reaper: dropped %d fork cop(ies) nothing reads", dropped)
+        return dropped
 
     async def _expired_forks(self, cutoff: str) -> int:
         """Queue the purge of each trashed fork whose grace ran out by ``cutoff``. One whose purge

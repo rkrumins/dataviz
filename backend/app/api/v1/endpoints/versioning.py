@@ -27,11 +27,11 @@ import inspect
 import json
 import logging
 from contextlib import contextmanager
-from typing import Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -42,8 +42,8 @@ from backend.app.services.versioning.entity_audit import (
     HISTORY_DEFAULT_LIMIT, HISTORY_MAX_LIMIT, InvalidCursor, entity_history_page, entity_summary)
 from backend.app.api.v1.feature_gate import require_feature
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
-from backend.app.api.v1.versioning_gate import (SyncOverrides, require_publish_for_main,
-                                                sync_override_gate)
+from backend.app.api.v1.versioning_gate import (SyncOverrides, fork_write_gate, require_forks_enabled,
+                                                require_publish_for_main, sync_override_gate)
 from backend.app.auth import api_key_auth
 from backend.app.auth.dependencies import get_current_user, get_permission_claims, requires
 from backend.app.db.engine import get_db_session
@@ -63,6 +63,7 @@ from backend.app.services.managed_sources import (
     same_server_providers,
 )
 from backend.app.services import permission_service
+from backend.app.services.feature_flags import FeatureDisabledError
 from backend.app.services.permission_service import PermissionClaims, has_permission
 from backend.app.services.projection_target import repair_projection_target
 from backend.app.services.versioning import config as vconfig
@@ -445,11 +446,14 @@ async def graph_in_workspace(
     A graph in the trash is gone too: deleting its data source hides it from every read at
     once, and one being purged is coming apart row by row.
 
-    An API key must also cover the data source behind the graph."""
+    An API key must also cover the data source behind the graph. A change to a fork needs forks
+    on (``fork_write_gate``)."""
     meta = await svc.get_graph(graph_id)
     if meta is None or meta.get("deleted_at") or meta["workspace_id"] != ws_id:
         raise HTTPException(status_code=404, detail="graph not found in workspace")
     await api_key_auth.hold_to_data_source(request, meta.get("data_source_id"), ws_id)
+    if meta.get("fork_parent_graph_id"):
+        await fork_write_gate(request)
     return meta
 
 
@@ -463,7 +467,8 @@ async def pr_in_workspace(
     """Resolve a PR and assert its **base** graph lives in ``ws_id`` (the merge is governed by the
     base owner's workspace) AND that the caller may see it: its author, an assigned reviewer, or,
     for a draft's review, whoever may read the draft; a fork's PR, a manager. Anyone else gets 404
-    (don't leak that the PR exists). An API key must also cover the base graph's data source."""
+    (don't leak that the PR exists). An API key must also cover the base graph's data source. A
+    change to a fork's review, or to a review into a fork, needs forks on (``fork_write_gate``)."""
     pr = await svc.get_pr(pr_id)
     if pr is None:
         raise HTTPException(status_code=404, detail="pull request not found")
@@ -473,6 +478,9 @@ async def pr_in_workspace(
     if not await _sees_pr(svc, pr, viewer):
         raise HTTPException(status_code=404, detail="pull request not found in workspace")
     await api_key_auth.hold_to_data_source(request, base.get("data_source_id"), ws_id)
+    from_fork = not (pr.get("source_graph_id") and pr["source_graph_id"] == pr.get("target_graph_id"))
+    if from_fork or base.get("fork_parent_graph_id"):
+        await fork_write_gate(request)
     return pr
 
 
@@ -542,6 +550,9 @@ def _domain_errors():
         raise HTTPException(status_code=409, detail={
             "type": "too_large_for_tree", "changed": exc.changed, "limit": exc.limit,
             "message": str(exc)})
+    except FeatureDisabledError as exc:   # as main.py answers it, so a queued publish keeps it too
+        raise HTTPException(status_code=403, detail={
+            "type": "feature_disabled", "feature": exc.feature, "message": exc.message})
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
@@ -976,6 +987,13 @@ class WatermarkModel(_ApiModel):
     # `verify`, or a change notification), null when there is none. Bring it into history with
     # POST /graph/resync.
     external_drift: Optional[Dict[str, Any]] = Field(default=None, alias="externalDrift")
+    # A fork has no projection: the root graph whose store it reads through, whose watermark this
+    # is (no key of its own). Null for a graph that is no fork.
+    reads_through: Optional[str] = Field(default=None, alias="readsThrough")
+    # A fork's: "overlay", its changes laid over that store, or "postgres" past the ceiling
+    # (GRAPHVER_FORK_REWIND_MAX), when readRoute.main says Postgres too. Null for a graph that is
+    # no fork.
+    reads_from: Optional[Literal["overlay", "postgres"]] = Field(default=None, alias="readsFrom")
 
 
 class SavedSinceModel(_ApiModel):
@@ -1228,19 +1246,41 @@ class ViewPrCountResponse(_ApiModel):
     on_data_source: int = Field(alias="onDataSource")
 
 
+class CreateForkRequest(_ApiModel):
+    """``name`` (1–80 characters once trimmed) names the fork's data source, labelled
+    ``"<parent label> · <name>"``; without it, ``Fork`` and the end of its id."""
+    name: Optional[Annotated[str, StringConstraints(strip_whitespace=True, min_length=1,
+                                                    max_length=80)]] = None
+
+
 class ForkResponse(_ApiModel):
     graph_id: str = Field(alias="graphId")
+    data_source_id: str = Field(alias="dataSourceId")
     main_branch_id: str = Field(alias="mainBranchId")
     fork_base_commit_seq: int = Field(alias="forkBaseCommitSeq")
 
 
 class ForkSummaryResponse(GraphResponse):
-    """One of a graph's forks, live or in the trash (``deletedAt`` set). ``purging``: its purge
-    is queued, so it can no longer be restored; ``purgeAfter``: the end of its undo window."""
+    """One of a graph's forks, live or in the trash (``deletedAt`` set), with its data source and
+    that source's label. ``purging``: its purge is queued, so it can no longer be restored;
+    ``purgeAfter``: the end of its undo window.
+
+    A live one says how far it is from this graph: ``ahead``, the entities it changed since its
+    last merged review (or its fork point); ``behind``, those this graph changed that it has not
+    taken in; ``updateRecommended``, past ``GRAPHVER_FORK_REWIND_WARN`` of those, or past the
+    ceiling its reads go to Postgres (``readsFrom``: ``overlay`` | ``postgres``). The counts stop at
+    ``GRAPHVER_FORK_REWIND_MAX`` (``countsCapped``: one is at least that). Null on a trashed one."""
+    data_source_id: Optional[str] = Field(default=None, alias="dataSourceId")
+    label: Optional[str] = None
     deleted_at: Optional[str] = Field(default=None, alias="deletedAt")
     deleted_by: Optional[str] = Field(default=None, alias="deletedBy")
     purging: bool = False
     purge_after: Optional[str] = Field(default=None, alias="purgeAfter")
+    ahead: Optional[int] = None
+    behind: Optional[int] = None
+    update_recommended: Optional[bool] = Field(default=None, alias="updateRecommended")
+    reads_from: Optional[Literal["overlay", "postgres"]] = Field(default=None, alias="readsFrom")
+    counts_capped: Optional[bool] = Field(default=None, alias="countsCapped")
 
 
 class OpenPrRequest(_ApiModel):
@@ -1618,7 +1658,9 @@ async def resolve_graph_open(
     session: AsyncSession = Depends(get_db_session),
 ):
     """Resolve and ensure the caller has an open draft to edit on (opens one if none, at the level
-    its data source's policy starts a draft at)."""
+    its data source's policy starts a draft at). None opens on a fork while forks are off."""
+    if body.data_source_id.startswith("dsfork_"):
+        await require_forks_enabled()
     res = await svc.resolve_graph(
         data_source_id=body.data_source_id, actor=user.id, workspace_id=ws_id,
         open_draft_if_absent=True, originating_view_id=body.originating_view_id,
@@ -2144,6 +2186,8 @@ async def _publish_from_job(job: dict) -> dict:
                 meta = await svc.get_graph(graph_id)
                 if meta is None:                        # trashed, or being purged, since queued
                     raise HTTPException(status_code=404, detail="graph not found")
+                if meta.get("fork_parent_graph_id"):    # forks turned off since it was queued
+                    await require_forks_enabled()
                 async with get_async_session() as session:
                     cset = await _live_containment_types(session, job["workspaceId"], (meta or {}).get("data_source_id"))
                     rules = await _rules_for_meta(session, job["workspaceId"], meta)
@@ -2268,8 +2312,13 @@ async def get_watermark(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised)."""
-    return await _watermark_model(session, await svc.projection_watermark(graph_id))
+    """Projection freshness for ``main`` — drives the "refreshing…" badge cheaply (no state materialised).
+    404 for a fork whose parent's graph is gone."""
+    try:
+        wm = await svc.projection_watermark(graph_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return await _watermark_model(session, wm)
 
 
 @router.get("/graphs/{graph_id}/branches/{branch_id}/freshness", response_model=BranchFreshnessModel)
@@ -2325,7 +2374,9 @@ async def _watermark_model(session: AsyncSession, wm: dict) -> WatermarkModel:
                           failed_attempts=wm.get("failed_attempts", 0),
                           next_retry_at=wm.get("next_retry_at"),
                           liveness_error=wm.get("liveness_error"),
-                          external_drift=wm.get("external_drift"))
+                          external_drift=wm.get("external_drift"),
+                          reads_through=wm.get("reads_through"),
+                          reads_from=wm.get("reads_from"))
 
 
 def _revision_model(rev: Optional[dict]) -> Optional[RevisionModel]:
@@ -2353,7 +2404,10 @@ async def rebuild_projection(
     worker-less deployment self-heals (``project_now`` is an idempotent catch-up, a no-op when the
     cache is already fresh)."""
     await _repair_projection_target(graph_id)            # self-heal: pin an unpinned graph when possible
-    wm = await svc.projection_watermark(graph_id)
+    try:
+        wm = await svc.projection_watermark(graph_id)
+    except ValueError as exc:                            # a fork whose parent's graph is gone
+        raise HTTPException(status_code=404, detail=str(exc))
     name = wm.get("falkor_graph_name")
     # No real target — NULL or the synthetic ``gv_<id>`` placeholder nothing reads (mirrors the
     # projector's unpinned skip). Nothing is cached, so there is nothing to rebuild.
@@ -2837,16 +2891,17 @@ async def graph_neighbors(
     return await _serve_neighbors(
         svc, read_factory, graph_id, urn=urn, depth=depth,
         direction=direction, edge_types=ets, limit=limit,
-        branch_id=branch_id, as_of_seq=as_of_seq,
+        branch_id=branch_id, as_of_seq=as_of_seq, fork=bool(_meta.get("fork_parent_graph_id")),
     )
 
 
 async def _serve_neighbors(svc, read_factory, graph_id, *, urn, depth, direction,
-                           edge_types, limit, branch_id=None, as_of_seq=None):
+                           edge_types, limit, branch_id=None, as_of_seq=None, fork=False):
     wm = await svc.projection_watermark(graph_id)
     wm_out = {"committed": wm["committed"], "projected": wm["projected"], "fresh": wm["fresh"]}
-    # FalkorDB projection is main@head only; drafts / as-of reads must use Postgres.
-    is_head_main = as_of_seq is None and (
+    # FalkorDB projection is main@head only; drafts / as-of reads must use Postgres, and so does a
+    # fork, which has no projection of its own (it reads through its parent's, with its changes).
+    is_head_main = as_of_seq is None and not fork and (
         branch_id is None or branch_id == await svc.main_branch_id(graph_id))
     can_falkor = bool(
         is_head_main and read_factory is not None and wm["status"] != "evicted" and wm["falkor_graph_name"]
@@ -3851,15 +3906,43 @@ async def cancel_export(
 @router.post("/graphs/{graph_id}/forks", response_model=ForkResponse, status_code=201)
 async def fork_graph(
     ws_id: str, graph_id: str,
+    body: Optional[CreateForkRequest] = None,
     user: User = Depends(requires(_MANAGE, workspace="ws_id")),
     meta: dict = Depends(graph_in_workspace),
     svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
 ):
+    """Fork a graph: a new versioned graph whose ``main`` starts as this one's, and a data source
+    of its own (``dataSourceId``) in this workspace, with this graph's data source's governing
+    settings. Management and graphver are separate databases (no 2PC), so the order is the
+    blank model's: what would refuse the fork is checked first, the data source commits, the
+    fork is made, and a fork that could not be made takes its data source with it. While forks
+    are off, none is made."""
+    from backend.app.services.fork_sources import fork_row
+    from backend.app.services.versioning.ids import prefixed_id
+
+    await require_forks_enabled()
     with _domain_errors():
-        return await svc.fork_graph(
-            parent_graph_id=graph_id, workspace_id=ws_id, actor=user.id,
-            tenant_id=meta.get("tenant_id"),
-        )
+        await svc.fork_preflight(parent_graph_id=graph_id, workspace_id=ws_id)
+    # FOR SHARE until the row commits: a move of the parent finishes first, and is seen.
+    parent = await data_source_repo.get_data_source_orm(session, meta["data_source_id"], lock="share")
+    if parent is None or parent.workspace_id != ws_id:
+        raise HTTPException(status_code=404, detail="data source not found in workspace")
+    ds_id = prefixed_id("dsfork")
+    name = body.name if body is not None and body.name else f"Fork {ds_id[-6:]}"
+    session.add(fork_row(parent, ds_id=ds_id, name=name, parent_graph_id=graph_id, actor=user.id))
+    await session.commit()
+    try:
+        with _domain_errors():
+            fork = await svc.fork_graph(
+                parent_graph_id=graph_id, workspace_id=ws_id, actor=user.id,
+                tenant_id=meta.get("tenant_id"), data_source_id=ds_id,
+            )
+    except Exception:
+        await drop_managed_data_source(session, ds_id)   # never a data source without its fork
+        raise
+    await _record_fork_event(session, "created", ws_id, fork["graph_id"], graph_id)
+    return fork
 
 
 @router.get("/graphs/{graph_id}/forks", response_model=List[ForkSummaryResponse])
@@ -3871,8 +3954,19 @@ async def list_forks(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """The graph's direct forks, newest first, those in the trash included."""
+    """The graph's direct forks, newest first, those in the trash included, each with the label
+    of its data source."""
+    from sqlalchemy import select
+
+    from backend.app.db.models import WorkspaceDataSourceORM
+
     forks = await svc.list_forks(graph_id=graph_id, workspace_id=ws_id, limit=limit)
+    ids = [f["data_source_id"] for f in forks]
+    labels = dict((await session.execute(
+        select(WorkspaceDataSourceORM.id, WorkspaceDataSourceORM.label)
+        .where(WorkspaceDataSourceORM.id.in_(ids)))).all()) if ids else {}
+    for f in forks:
+        f["label"] = labels.get(f["data_source_id"])
     await _attach_user_names(session, forks)
     return forks
 
@@ -3896,10 +3990,14 @@ async def delete_fork(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Move a fork to the trash, restorable until its purge is queued. Only a fork: a data
-    source's graph goes with its data source (409 ``not_a_fork``)."""
+    """Move a fork to the trash, restorable until its purge is queued, and its data source with
+    it, after the graph. Only a fork: a data source's graph goes with its data source (409
+    ``not_a_fork``)."""
+    from backend.app.services.fork_sources import trash_row
+
     with _domain_errors():
         parent_id = await svc.delete_fork(graph_id=graph_id, workspace_id=ws_id, actor=user.id)
+    await trash_row(session, _meta["data_source_id"], user.id)
     await _record_fork_event(session, "deleted", ws_id, graph_id, parent_id)
 
 
@@ -3911,9 +4009,15 @@ async def restore_fork(
     svc: GraphVersioningService = Depends(get_versioning_service),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Bring a trashed fork back. A fork that is not in the trash is left as it is."""
+    """Bring a trashed fork back, and its data source with it, after the graph. A fork that is not
+    in the trash is left as it is."""
+    from backend.app.services.fork_sources import restore_row
+
     with _domain_errors():
         parent_id = await svc.restore_fork(graph_id=graph_id, workspace_id=ws_id)
+    meta = await svc.get_graph(graph_id)
+    if meta is not None:
+        await restore_row(session, meta["data_source_id"])
     if parent_id is not None:
         await _record_fork_event(session, "restored", ws_id, graph_id, parent_id)
 
@@ -4417,10 +4521,13 @@ async def put_data_source_drafts_policy(
 ):
     """Override the workspace's drafts and reviews policy for one data source (workspace admins),
     field by field; ``"inherit"`` goes back to the workspace's. A change is recorded once."""
-    from backend.app.services import drafts_policy
+    from backend.app.services import drafts_policy, fork_sources
     from backend.app.services.activity import recorder
     ds = await _policy_source(session, ws_id, data_source_id)
+    governing = fork_sources.governing(ds)
     before, after = drafts_policy.apply(ds, drafts_policy.changes_from(body))
+    # A fork's policy is its parent's (409 here); a parent's forks take its new one.
+    await fork_sources.follow_parent(session, ds, governing)
     if after:
         await _record_policy_change(session, "data_source", before, after,
                                     **recorder.data_source_target(ds))

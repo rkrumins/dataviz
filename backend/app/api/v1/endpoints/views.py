@@ -356,11 +356,14 @@ async def _source_is_restricted(
     explicit source resolve to the workspace primary — the same source
     they would actually read.
     """
+    from backend.app.services.fork_sources import governing_row
+
     ds = None
     if data_source_id:
         ds = await data_source_repo.get_data_source_orm(session, data_source_id)
     if ds is None:
         ds = await data_source_repo.get_primary_data_source(session, workspace_id)
+    ds = await governing_row(session, ds)          # a fork is restricted as its parent is
     return bool(getattr(ds, "is_restricted", False)) if ds else False
 
 

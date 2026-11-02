@@ -584,5 +584,5 @@ async def _http(svc):
         G.provider_manager, G.get_graph_cache = orig_pm, orig_cache
 
 
-def test_http_frozen_graph_refuses_saves_publish_and_import_with_409(data_sources):
+def test_http_frozen_graph_refuses_saves_publish_and_import_with_409(data_sources, forks_on):
     _e2e(_http)

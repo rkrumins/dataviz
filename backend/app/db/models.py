@@ -797,6 +797,14 @@ class WorkspaceDataSourceORM(Base):
     # Federated only: push our overlay edits back to the external system (opt-in, and only
     # when the provider is write-capable). Ignored for managed sources.
     write_back_enabled = Column(Boolean, nullable=False, default=False)
+    # A fork's row: the data source it was forked from. Its id is the fork graph's own
+    # (``dsfork_…``), its governing settings follow the parent's, and it has no FalkorDB graph
+    # of its own (``ck_ds_fork_no_key``): it reads through versioning. NULL on every other row.
+    fork_of_data_source_id = Column(
+        Text,
+        ForeignKey("workspace_data_sources.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
     # ── Aggregation state ─────────────────────────────────────
     aggregation_status = Column(Text, nullable=False, default="none")  # none|pending|running|ready|failed|skipped
     last_aggregated_at = Column(Text, nullable=True)  # ISO timestamp of last successful aggregation
@@ -851,6 +859,11 @@ class WorkspaceDataSourceORM(Base):
         Index("idx_ds_catalog_item", "catalog_item_id"),
         Index("idx_ds_ontology", "ontology_id"),
         Index("idx_ds_deleted_at", "deleted_at"),
+        Index("idx_ds_fork_of", "fork_of_data_source_id"),
+        CheckConstraint(
+            "fork_of_data_source_id IS NULL OR graph_name IS NULL",
+            name="ck_ds_fork_no_key",
+        ),
         CheckConstraint(
             "draft_default_visibility IS NULL OR draft_default_visibility IN ('public', 'private')",
             name="ck_ds_draft_visibility",

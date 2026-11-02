@@ -235,6 +235,38 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "Background sync of already-versioned data keeps running",
         ),
     ),
+    # Preview: forks are still being built (taking a parent's newer work in, and the screens to work
+    # in one, come next), so it ships OFF, and every read passes default=False rather than
+    # fail_safe_default: a flag that cannot be found means forks are off, the answer a fresh
+    # deployment gives.
+    "forksEnabled": FeatureWiring(
+        key="forksEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "POST /graphs/{id}/forks — making a fork",
+            "Every write under /versioning to a fork's graph (graph_in_workspace) — its drafts, "
+            "saves, publishes, pulls, reverts, restores to a commit, imports and the reviews it opens",
+            "Approving, merging and editing a review from a fork or into one (pr_in_workspace), and "
+            "the job that publishes or merges a large draft on a fork",
+            "POST /resolve opening a draft on a fork, and every /graph write to one: /graph/changes, "
+            "node and edge writes, /save and /commands/batch",
+            "Importing a view or a view package into a draft on a fork",
+        ),
+        # No UI surface yet, and nothing is hidden: nothing in the app makes or changes a fork. The
+        # Forks list on a data source's Version control tab lists them and moves them to the trash
+        # and back, which stay allowed. The fork screens to come read this flag.
+        ui_surfaces=(),
+        still_allowed=(
+            "Listing a graph's forks, and reading a fork: its data, views, canvas and history",
+            "Moving a fork to the trash and restoring it, closing its review, exporting and "
+            "freezing it",
+            "The purge, the reaper, the backfill and every other background job",
+            "Admin views",
+            "Nothing is deleted — turning forks back on restores every fork as it was",
+        ),
+        depends_on=("versioningEnabled",),
+    ),
     # SECURITY: it decides whether a person's own query reaches a data source.
     # An unreadable value must refuse it, not guess.
     "nativeQueryEnabled": FeatureWiring(

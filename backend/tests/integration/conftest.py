@@ -94,13 +94,18 @@ def _keep_revocation_service():
 def data_sources(monkeypatch):
     """POST /graphs resolves its data source in the management DB and pins the new graph to that
     data source's FalkorDB graph. The harnesses post ids that exist nowhere: here every id answers
-    as a data source in ``ws1``, pinned to the graph name this dict maps it to (unpinned if none)."""
+    as a data source in ``ws1``, pinned to the graph name this dict maps it to (unpinned if none),
+    unless the test made a real row for it (a fork's data source is made from its parent's)."""
     from types import SimpleNamespace
     from backend.app.db.repositories import data_source_repo
 
     pins: dict = {}
+    real = data_source_repo.get_data_source_orm
 
-    async def get_data_source_orm(session, data_source_id, **_kw):
+    async def get_data_source_orm(session, data_source_id, **kw):
+        row = await real(session, data_source_id, **kw)
+        if row is not None:
+            return row
         return SimpleNamespace(id=data_source_id, workspace_id="ws1",
                                graph_name=pins.get(data_source_id), provider_id=None)
 

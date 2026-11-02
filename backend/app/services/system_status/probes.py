@@ -1032,21 +1032,25 @@ async def _resolve_data_sources(ds_ids: list[str]) -> dict[str, dict]:
 
 
 async def _present_data_source_ids(label_contains: Optional[str] = None) -> list[str]:
-    """The ids of data sources that are LIVE in the management DB.
+    """The ids of data sources that are LIVE in the management DB, forks' rows left out.
 
     Versioned-graph metrics are scoped to these so the numbers reflect live
     entities — the graphver store has no GC, so graphs for deleted sources
     (and dev/test seed graphs) accumulate and would otherwise dominate every
     count and the projection list. A soft-deleted source is exactly such an
-    orphaned graph, so tombstones are excluded. ``label_contains`` narrows
-    them to the sources whose label holds it (the fleet inventory's search).
+    orphaned graph, so tombstones are excluded; forks are counted as forks,
+    never as data sources (the fleet inventory marks them). ``label_contains``
+    narrows them to the sources whose label holds it (the fleet inventory's
+    search).
     """
     from sqlalchemy import select
 
     from backend.app.db.engine import PoolRole, get_session_factory
     from backend.app.db.models import WorkspaceDataSourceORM
+    from backend.app.db.repositories.data_source_repo import not_a_fork
 
-    stmt = select(WorkspaceDataSourceORM.id).where(WorkspaceDataSourceORM.deleted_at.is_(None))
+    stmt = select(WorkspaceDataSourceORM.id).where(WorkspaceDataSourceORM.deleted_at.is_(None),
+                                                    not_a_fork())
     if label_contains:
         stmt = stmt.where(WorkspaceDataSourceORM.label.icontains(label_contains, autoescape=True))
     async with asyncio.timeout(_BUDGET_DB):
@@ -1280,16 +1284,20 @@ async def probe_graph_providers(app_state) -> Optional[list]:
     return out or None
 
 
-def _projection_rows():
+def _projection_rows(forks: bool = False):
     """Every versioned graph's projection row — its FalkorDB key, watermark and how far behind it
     is — plus the status buckets the rollup counts (``{bucket: predicate}``). Shared by the lag
-    probe and the fleet inventory, so a graph reads the same in both."""
-    from sqlalchemy import and_, func, select
+    probe and the fleet inventory, so a graph reads the same in both. ``forks``: the rows include
+    forks, each behind on nothing: it reads through its root's store and is never projected, a
+    copy an earlier release made of it included."""
+    from sqlalchemy import and_, case, func, select
 
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
 
     lag = GraphORM.main_head_commit_seq - func.coalesce(
         ProjectionStateORM.projected_commit_seq, 0)
+    if forks:
+        lag = case((GraphORM.fork_parent_graph_id.isnot(None), 0), else_=lag)
     status = func.coalesce(ProjectionStateORM.status, "idle")
 
     err = ProjectionStateORM.last_error.isnot(None)
@@ -1417,8 +1425,8 @@ async def list_versioned_graphs(
     """One page of the fleet inventory (``GET /admin/versioning/graphs``): every live versioned
     graph with its FalkorDB provider, key, ownership and projection state, by graph id.
 
-    Unlike the probe it keeps forks (whose ``dsfork_`` data source is no management row) and
-    orphans (not a fork, and its data source is gone), and marks them. ``kind`` is ``main``,
+    Unlike the probe it keeps forks (whose ``dsfork_`` data source is a fork's row, never counted
+    as present) and orphans (not a fork, and its data source is gone), and marks them. ``kind`` is ``main``,
     ``fork`` or ``orphan``; ``status`` a rollup bucket; ``q`` matches the graph id, data source
     id, FalkorDB key or data-source label. Unlike a probe it raises rather than degrading."""
     from sqlalchemy import func, or_
@@ -1431,7 +1439,7 @@ async def list_versioned_graphs(
     present = GraphORM.data_source_id.in_(present_ids)
     is_fork = GraphORM.fork_parent_graph_id.isnot(None)
 
-    rows, _lag, buckets = _projection_rows()
+    rows, _lag, buckets = _projection_rows(forks=True)
     stmt = rows.where(GraphORM.deleted_at.is_(None))
     if provider:
         stmt = stmt.where(func.coalesce(func.nullif(ProjectionStateORM.falkor_provider, ""),

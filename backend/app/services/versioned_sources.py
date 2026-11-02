@@ -275,7 +275,9 @@ async def physical_key(ds_id: str, provider_id: str, graph_name: Optional[str]) 
     The management DB keeps naming the data source's logical key; a versioned graph's projection
     pin is where its content actually is once the graph has been moved. A source that is not
     versioned, or whose graph is unpinned (NULL, or the ``gv_<id>`` placeholder nothing reads),
-    keeps its own key. A pin on the default provider keeps the data source's provider.
+    keeps its own key. A pin on the default provider keeps the data source's provider. A fork has
+    no key of its own to read: its root parent's pin (up a fork of a fork), which the registry
+    hands out read only.
 
     Whether the source is versioned comes from the cached set, trashed graphs included: a graph
     stays versioned through the trash, so its restore is routed to the pin at once rather than
@@ -284,7 +286,9 @@ async def physical_key(ds_id: str, provider_id: str, graph_name: Optional[str]) 
     (``RETIRE_GRACE_SECS`` > ``CACHE_TTL_SECS``). With no set at all (graphver down and nothing
     cached) the source reads its own key. The pin read is uncached, and a failure raises."""
     try:
-        versioned = ds_id in await versioned_data_source_ids(include_trashed=True)
+        # A fork's ``dsfork_…`` source is versioned from its first moment: never waits for the set.
+        versioned = (ds_id.startswith("dsfork_")
+                     or ds_id in await versioned_data_source_ids(include_trashed=True))
     except VersionedLookupUnavailable as exc:
         logger.warning("versioned set unavailable, reading ds=%s from its own key: %s", ds_id, exc)
         return provider_id, graph_name
@@ -298,11 +302,20 @@ async def physical_key(ds_id: str, provider_id: str, graph_name: Optional[str]) 
     from backend.app.services.versioning.models import GraphORM, ProjectionStateORM
 
     async with get_session_factory()() as session:
+        of_source = GraphORM.data_source_id == ds_id
+        if ds_id.startswith("dsfork_"):
+            # A fork has no key of its own to read: its root parent's pin, up a fork of a fork.
+            root, parent = None, await session.scalar(select(GraphORM.fork_parent_graph_id).where(
+                of_source, GraphORM.deleted_at.is_(None)))
+            while parent:
+                root, parent = parent, await session.scalar(
+                    select(GraphORM.fork_parent_graph_id).where(GraphORM.id == parent))
+            of_source = GraphORM.id == root
         row = (await session.execute(
             select(GraphORM.id, ProjectionStateORM.falkor_provider,
                    ProjectionStateORM.falkor_graph_name)
             .join(ProjectionStateORM, ProjectionStateORM.graph_id == GraphORM.id)
-            .where(GraphORM.data_source_id == ds_id, GraphORM.deleted_at.is_(None))
+            .where(of_source, GraphORM.deleted_at.is_(None))
         )).first()
     if row is None or row[2] in (None, f"gv_{row[0]}"):
         return provider_id, graph_name

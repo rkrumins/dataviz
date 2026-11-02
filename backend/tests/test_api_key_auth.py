@@ -719,7 +719,7 @@ async def test_a_view_never_opens_the_routes_about_its_data_source(client, db_se
     assert covered.status_code == 418, covered.text
 
 
-async def test_a_forks_pull_request_needs_the_parents_data_source_too(client, db_session):
+async def test_a_forks_pull_request_needs_the_parents_data_source_too(client, db_session, forks_on):
     """A fork's pull request lands in its parent graph (g_fork renders ds_a;
     its parent g_a2 renders ds_a2)."""
     pulls = "/api/v1/ws_a/versioning/graphs/g_fork/pulls"

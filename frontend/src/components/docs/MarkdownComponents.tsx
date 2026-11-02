@@ -101,6 +101,7 @@ export const filenameMap: Record<string, string> = {
   'versioning/14-graph-lifecycle-v2.md': 'versioning-graph-lifecycle-v2',
   'versioning/15-shared-contracts.md': 'versioning-shared-contracts',
   'versioning/16-go-live-stages-1-2.md': 'versioning-go-live-stages-1-2',
+  'versioning/17-forks-and-residency.md': 'versioning-forks-and-residency',
   'README.md': 'versioning-guide',
   '02-data-model.md': 'versioning-data-model',
   '03-branching-commits-merge.md': 'versioning-branching-and-merge',
@@ -116,6 +117,7 @@ export const filenameMap: Record<string, string> = {
   '14-graph-lifecycle-v2.md': 'versioning-graph-lifecycle-v2',
   '15-shared-contracts.md': 'versioning-shared-contracts',
   '16-go-live-stages-1-2.md': 'versioning-go-live-stages-1-2',
+  '17-forks-and-residency.md': 'versioning-forks-and-residency',
   'VERSIONING_DRAFTS_LINEAGE_AND_MERGE.md': 'versioning-drafts-and-merge',
 }
 

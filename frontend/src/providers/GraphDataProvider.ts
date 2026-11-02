@@ -1070,13 +1070,13 @@ export interface GraphDataProvider {
     getTags(): Promise<string[]>
 
     /**
-     * Get graph statistics
+     * Get graph statistics; null when the data source keeps none (a fork's)
      */
     getStats(): Promise<{
         nodeCount: number
         edgeCount: number
         entityTypeCounts: Record<EntityType, number>
-    }>
+    } | null>
 
     /**
      * Get detailed graph schema statistics

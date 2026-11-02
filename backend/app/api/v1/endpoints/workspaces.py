@@ -9,13 +9,14 @@ caller's effective permissions so non-admins only see workspaces they
 have a binding into. The legacy "everyone sees everything" behaviour
 returns when ``RBAC_ENFORCE_WORKSPACES=false`` / ``RBAC_ENFORCE_DATASOURCES=false``.
 """
+import asyncio
 import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, Request, Response
 from fastapi.responses import JSONResponse
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -39,7 +40,7 @@ from backend.app.db.repositories import (
 )
 from backend.app.providers.manager import provider_manager as provider_registry  # alias during migration
 from backend.app.services import (
-    data_source_transfer, profiling_series, template_access, workspace_visibility,
+    data_source_transfer, fork_sources, profiling_series, template_access, workspace_visibility,
 )
 from backend.app.services.activity import recorder
 from backend.app.services.node_identity import (
@@ -76,7 +77,7 @@ from backend.common.models.management import (
     DataSourceMoveRequest,
     DataSourceTransferResponse,
 )
-from backend.insights_service.enqueue import enqueue_stats_job_safe
+from backend.insights_service.enqueue import enqueue_stats_job_safe, polls_stats
 
 from backend.app.services.versioning import config as gv_config
 from backend.app.services.versioning.errors import LockBusy
@@ -603,11 +604,15 @@ async def list_data_sources(
     include: Optional[str] = Query(None, pattern="^versioning$",
                                    description="`versioning`: each data source's version control — "
                                                "whether it is on, its graph, and the head of `main`"),
+    include_forks: bool = Query(False, alias="includeForks",
+                                description="Forks' data sources too (each names what it was "
+                                            "forked from, `forkOf`)"),
     _user: User = Depends(requires("workspace:datasource:read", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
     svc: GraphVersioningService = Depends(get_versioning_service),
 ):
-    """List all data sources for a workspace, or one provider's with ``providerId``.
+    """List all data sources for a workspace, or one provider's with ``providerId``. A fork's data
+    source is listed only with ``includeForks=true``: it is reached through its graph.
 
     ``include=versioning`` adds each one's version control from the version store. Its
     ``mainHeadCommitSeq`` is a change watermark: the graph's commit log has something new only
@@ -616,7 +621,8 @@ async def list_data_sources(
     ws = await workspace_repo.get_workspace_orm(session, workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail=f"Workspace '{workspace_id}' not found")
-    sources = await data_source_repo.list_data_sources(session, workspace_id, provider_id=provider_id)
+    sources = await data_source_repo.list_data_sources(session, workspace_id, provider_id=provider_id,
+                                                       include_forks=include_forks)
     if include != "versioning" or not sources:
         return sources
     try:
@@ -853,6 +859,8 @@ async def update_data_source(
     old_ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not old_ds or old_ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+    if req.projection_mode is not None or req.dedicated_graph_name is not None:
+        fork_sources.refuse_own_store(old_ds)  # a fork has no rollups to place (409)
     if (
         req.is_restricted is not None
         and req.is_restricted != bool(old_ds.is_restricted)
@@ -877,6 +885,7 @@ async def update_data_source(
     old_identity = await load_node_identity(session, old_ds)
     # Read before the write: the update below changes ``old_ds`` in place.
     old_ontology_id = old_ds.ontology_id
+    old_governing = fork_sources.governing(old_ds)
 
     # Evict old cache entry if provider/graph config changed
     if req.projection_mode is not None or req.dedicated_graph_name is not None:
@@ -885,6 +894,8 @@ async def update_data_source(
     ds = await data_source_repo.update_data_source(session, ds_id, req)
     if not ds:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found")
+    # A fork's governing settings are its parent's (409 here); a parent's forks take its new ones.
+    forks = await fork_sources.follow_parent(session, old_ds, old_governing)
     # Which fields were sent, never their values: an extraConfig can be large.
     await recorder.record_for_request(
         session, "workspace.data_source.updated", **recorder.data_source_target(ds),
@@ -921,15 +932,19 @@ async def update_data_source(
         await enqueue_stats_job_safe(ds_id, workspace_id)
         # Ontology (re)assignment / projection changes alter how reads
         # resolve — invalidate the process-wide resolved-ontology cache.
+        # The source and its forks side by side: in a broker outage each waits out its retries,
+        # and one after another a parent with forks outlived the request timeout.
         from backend.app.services.resolved_ontology_cache import bump_ontology_generation
-        await bump_ontology_generation(workspace_id, ds_id)
+        await asyncio.gather(*(bump_ontology_generation(workspace_id, changed_id)
+                               for changed_id in (ds_id, *forks)))
         # Cached hierarchy reads were answered under the old ontology / name
         # mapping (entity types, display names) — drop them. Only when one of
         # them really moved: the edit form re-sends the current ontologyId with
         # a rename. Never raises.
         if ds.ontology_id != old_ontology_id or mapping_changed:
             from backend.app.services.graph_cache import invalidate_hierarchy_reads
-            await invalidate_hierarchy_reads(workspace_id, ds_id)
+            await asyncio.gather(*(invalidate_hierarchy_reads(workspace_id, changed_id)
+                                   for changed_id in (ds_id, *forks)))
 
     # A mapping change makes the materialized AGGREGATED edges stale, and the
     # stamp's NULL-only fill means a re-run is required to rewrite them.
@@ -991,6 +1006,7 @@ async def remove_data_source(
     ds = await data_source_repo.get_data_source_orm(session, ds_id, lock="update")
     if not ds or ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+    fork_sources.refuse_lifecycle(ds)          # a fork goes with its graph (409)
 
     count = await data_source_repo.count_data_sources(session, workspace_id)
     if count <= 1:
@@ -999,6 +1015,16 @@ async def remove_data_source(
     from backend.app.services.versioning import purge_worker
 
     if permanent:
+        # A live fork holds it back, whatever its graph holds: the fork's row names this one as
+        # its parent. Nothing is queued or deleted.
+        forks = await fork_sources.forks_of(session, ds_id)
+        live = len((await session.execute(select(WorkspaceDataSourceORM.id).where(
+            WorkspaceDataSourceORM.id.in_(forks), WorkspaceDataSourceORM.deleted_at.is_(None)
+        ))).all()) if forks else 0
+        if live:
+            raise HTTPException(status_code=409, detail={
+                "type": "live_forks",
+                "message": f"{live} live fork(s) read this data source; delete them first"})
         try:
             jobs = await purge_worker.purge_graph_for_data_source(
                 data_source_id=ds_id, workspace_id=workspace_id, actor=_user.id)
@@ -1023,6 +1049,12 @@ async def remove_data_source(
         await data_source_transfer.cancel_open_for_source(
             session, ds_id, actor=_user.id, note="The data source was deleted.",
         )
+        # Its forks are all in the trash, and their purges are queued with its: their rows go
+        # with it, as its own does before its graph is gone, and the views on them as its own.
+        if forks:
+            await fork_sources.views_to_parent(session, forks, going=[ds_id])
+            await session.execute(
+                delete(WorkspaceDataSourceORM).where(WorkspaceDataSourceORM.id.in_(forks)))
         await data_source_repo.delete_data_source(session, ds_id)
         return
 
@@ -1069,6 +1101,7 @@ async def restore_data_source(
     # there is nothing left to restore, and we must not hand back a data source pointing at a
     # graph that is being dismantled.
     row = await data_source_repo.get_data_source_orm(session, ds_id, include_deleted=True)
+    fork_sources.refuse_lifecycle(row)         # a fork comes back with its graph (409)
     purge = await purge_worker.restore_graphs_for_data_source(
         data_source_id=ds_id, workspace_id=workspace_id,
         deleted_at=row.deleted_at if row is not None else None)
@@ -1144,7 +1177,8 @@ async def set_primary_data_source(
     _user: User = Depends(requires("workspace:datasource:manage", workspace="workspace_id")),
     session: AsyncSession = Depends(get_db_session),
 ):
-    """Promote a data source to primary within its workspace."""
+    """Promote a data source to primary within its workspace. Never a fork's (409)."""
+    fork_sources.refuse_primary(await data_source_repo.get_data_source_orm(session, ds_id))
     success = await data_source_repo.set_primary(session, workspace_id, ds_id)
     if not success:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
@@ -1175,6 +1209,7 @@ async def set_projection_mode(
     ds = await data_source_repo.get_data_source_orm(session, ds_id)
     if not ds or ds.workspace_id != workspace_id:
         raise HTTPException(status_code=404, detail=f"Data source '{ds_id}' not found in workspace")
+    fork_sources.refuse_own_store(ds)          # a fork has no rollups to place (409)
 
     # Guard: cannot change mode while an aggregation job is active
     from sqlalchemy import select
@@ -1489,11 +1524,13 @@ async def get_cached_schema(
 
     synthetic = await build_synthetic_schema(session, ds_id)
     if synthetic:
+        polled = polls_stats(ds_id)               # a fork's: no refresh comes to follow
         meta = build_meta(
             status="partial", source="ontology",
             data_source_id=ds_id,
             missing_fields=SYNTHETIC_SCHEMA_MISSING_FIELDS,
-            refreshing=True, job_id=job_id, poll_url=poll_url,
+            refreshing=polled, job_id=job_id if polled else None,
+            poll_url=poll_url if polled else None,
         )
         return JSONResponse(content=build_envelope(synthetic, meta))
 

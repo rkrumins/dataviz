@@ -43,6 +43,7 @@ from ..models import (
     WorkspaceDataSourceORM,
 )
 from . import stats_history_repo
+from .data_source_repo import not_a_fork
 
 logger = logging.getLogger(__name__)
 
@@ -554,6 +555,7 @@ async def evaluate_silent_sources(
             last_seen.c.last_at < cutoff,
             WorkspaceDataSourceORM.deleted_at.is_(None),
             WorkspaceDataSourceORM.is_active.is_(True),
+            not_a_fork(),                         # a fork has no graph of its own to fall silent
         )
         .order_by(last_seen.c.last_at.asc())
         .limit(_SOURCE_SCAN_CAP + 1)

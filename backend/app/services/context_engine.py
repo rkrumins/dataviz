@@ -141,7 +141,17 @@ class ContextEngine:
                 if primary is None:
                     raise KeyError(f"No data source for workspace: {workspace_id}")
                 data_source_id = primary.id
-            provider = await registry.get_provider_for_workspace(
+            # A fork's row has no FalkorDB graph of its own: no provider is built from the registry
+            # for it, and it reads through its root's store below. Its id is its graph's
+            # ``dsfork_…``, so every other source pays no lookup for this.
+            fork = False
+            if data_source_id.startswith("dsfork_"):
+                from ..db.models import WorkspaceDataSourceORM
+                fork_row = await session.get(WorkspaceDataSourceORM, data_source_id)
+                if fork_row is None or fork_row.deleted_at is not None:
+                    raise KeyError(f"Data source not found: {data_source_id}")
+                fork = fork_row.fork_of_data_source_id is not None
+            provider = None if fork else await registry.get_provider_for_workspace(
                 workspace_id, session, data_source_id
             )
         except ProviderUnavailable:
@@ -170,15 +180,25 @@ class ContextEngine:
             from .versioned_sources import serves_pin
             svc = GraphVersioningService()
             graph = await svc.get_graph_by_data_source(data_source_id)
+            if graph is None and fork:
+                raise KeyError(f"Data source not found: {data_source_id}")   # its graph is trashed
             if graph is not None:
                 gid = graph["graph_id"]
                 main_id = await svc.main_branch_id(gid)
                 is_draft = norm not in ("", "main", main_id)
-                wm = await svc.projection_watermark(gid)
-                # Main is served from FalkorDB only from the key the projection publishes.
-                main_fresh = wm["fresh"] and serves_pin(
-                    getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
-                    wm.get("falkor_graph_name"), gid)
+                main_reader = None
+                if fork:
+                    # A fork's main is its root's store with the fork's patch set over it, and a
+                    # draft on it overlays that.
+                    main_fresh = False
+                    main_reader = await cls._fork_main_reader(
+                        registry, session, workspace_id, svc, gid, main_id, actor)
+                else:
+                    wm = await svc.projection_watermark(gid)
+                    # Main is served from FalkorDB only from the key the projection publishes.
+                    main_fresh = wm["fresh"] and serves_pin(
+                        getattr(provider, "manager_cache_key", None), wm.get("falkor_provider"),
+                        wm.get("falkor_graph_name"), gid)
                 read_provider = None
                 read_branch: Optional[str] = None
                 if is_draft:
@@ -194,7 +214,7 @@ class ContextEngine:
                     # A no-change draft has an empty delta → pure pass-through → identical to main.
                     from ..providers.versioned_branch_provider import VersionedBranchProvider
                     from ..providers.draft_overlay_provider import DraftOverlayProvider
-                    base = provider if main_fresh else VersionedBranchProvider(
+                    base = provider if main_fresh else main_reader or VersionedBranchProvider(
                         svc, graph_id=gid, branch_id=main_id, actor=actor)
                     read_provider = DraftOverlayProvider(
                         base, svc=svc, graph_id=gid, branch_id=norm, actor=actor)
@@ -203,7 +223,8 @@ class ContextEngine:
                     # Stale main (e.g. right after a merge): serve from Postgres so the change shows
                     # immediately; once the projection catches up, the fresh-FalkorDB hot path is used.
                     from ..providers.versioned_branch_provider import VersionedBranchProvider
-                    read_provider = VersionedBranchProvider(svc, graph_id=gid, branch_id=main_id, actor=actor)
+                    read_provider = main_reader or VersionedBranchProvider(
+                        svc, graph_id=gid, branch_id=main_id, actor=actor)
                     read_branch = main_id
                 if read_provider is not None:
                     engine = cls(provider=read_provider, ontology_service=ontology_service)
@@ -274,6 +295,50 @@ class ContextEngine:
             )
 
         return engine
+
+    @staticmethod
+    async def _fork_main_reader(registry, session, workspace_id: str, svc, gid: str, main_id: str,
+                                actor: Optional[str]):
+        """What reads a fork's ``main``: its root's store — the root's FalkorDB provider, built from
+        the root's data source, while its projection holds its head in the key it publishes; else
+        the root's Postgres reader — with the fork's patch set over it (``DraftOverlayProvider``).
+        Past ``GRAPHVER_FORK_REWIND_MAX`` entities to classify (``fork_reads_from``), the fork's
+        own layered Postgres reads. Who may read is the fork's to decide, as it was decided: the
+        root's source is read on its behalf."""
+        from ..providers.draft_overlay_provider import DraftOverlayProvider
+        from ..providers.versioned_branch_provider import FORK_NO_DEEP_SEARCH, VersionedBranchProvider
+        from .versioned_sources import serves_pin
+
+        # One session reads the fork's version, its ceiling, its root and the root's store.
+        try:
+            plan = await svc.fork_read_plan(gid)
+        except ValueError as exc:                    # its parent is gone: a fork not found
+            raise KeyError(str(exc)) from exc
+        if plan["reads_from"] == "postgres":
+            return VersionedBranchProvider(svc, graph_id=gid, branch_id=main_id, actor=actor,
+                                           deep_search_gap=FORK_NO_DEEP_SEARCH)
+        root_id = plan["root_id"]
+        base = None
+        if plan["fresh"] and not plan["root_trashed"]:
+            try:
+                provider = await registry.get_provider_for_workspace(
+                    workspace_id, session, plan["root_data_source_id"])
+            except (KeyError, ProviderUnavailable, ConnectionError, OSError,
+                    asyncio.TimeoutError) as exc:
+                # Postgres holds what the root's store would have served: read it there.
+                logger.warning("fork %s reads its root %s from Postgres: %s", gid, root_id, exc)
+            else:
+                if serves_pin(getattr(provider, "manager_cache_key", None), plan["falkor_provider"],
+                              plan["falkor_graph_name"], root_id):
+                    base = provider
+        if base is None:
+            base = VersionedBranchProvider(svc, graph_id=root_id, branch_id=plan["root_main"],
+                                           actor=actor)
+        # Its cache keys carry the root store's version it reads against: the root's writes and
+        # projections bump only the root's cache (DraftOverlayProvider.physical_graph_id).
+        return DraftOverlayProvider(base, svc=svc, graph_id=gid, branch_id=main_id, actor=actor,
+                                    fork=True, version=plan["version"],
+                                    read_ns=f"{root_id}@{plan['committed']}:{plan['projected']}")
 
     # ------------------------------------------------------------------ #
     # Connection-aware factory (legacy compat)                             #

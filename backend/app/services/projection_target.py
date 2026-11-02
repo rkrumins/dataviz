@@ -93,8 +93,8 @@ def make_rollup_rebuild_hook(get_aggregation_service):
         svc = GraphVersioningService()
         meta = await svc.get_graph(graph_id)
         ds_id = meta.get("data_source_id") if meta else None
-        if not ds_id:
-            return
+        if not ds_id or meta.get("fork_parent_graph_id"):
+            return          # a fork's data source has no rollups of its own (fork_has_no_store)
         agg = get_aggregation_service()
         mode = await _projection_mode(str(ds_id))
         if mode == "dedicated":
@@ -205,6 +205,8 @@ async def nudge_stats_after_projection(data_source_id: str) -> None:
             ds_row = await data_source_repo.get_data_source_orm(s, data_source_id)
         if ds_row is None or not getattr(ds_row, "workspace_id", None):
             return
+        if getattr(ds_row, "fork_of_data_source_id", None):
+            return                                       # a fork's stats are not polled
         from backend.insights_service.enqueue import mark_stats_changed
         await mark_stats_changed(data_source_id, ds_row.workspace_id)
     except Exception as exc:                             # pragma: no cover - infra

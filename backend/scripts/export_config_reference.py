@@ -388,6 +388,23 @@ NOTES: dict[str, tuple[str, str | None]] = {
         "has covered yet. `0` turns the check off.",
         None,
     ),
+    "GRAPHVER_OVERLAY_CACHE_ENTRIES": (
+        "Entries the overlay deltas of drafts' and forks' reads may hold together in each process; "
+        "the least recently read go first, and the newest is kept whatever its size. An entry holds "
+        "about 1.2 KB (0.74 KB a draft's, 0.87 KB a fork's, measured, before allocator slack and the "
+        "chains a rollup read keeps), so the default, 400,000, holds under 512 MB in each web "
+        "process. An evicted delta is built again on its next read: 2 to 6 s at 50,000 to 145,000 "
+        "entries.",
+        None,
+    ),
+    "GRAPHVER_DROP_FORK_COPIES": (
+        "Set `true` once every pod runs a release whose forks read through their parent's graph: "
+        "the versioning worker then drops the FalkorDB copies earlier releases made of forks "
+        "(`<parent key>__fork_<id>`), each only if it is the fork's own and nothing else projects "
+        "into it or reads it. Off by default, because a pod on an earlier release still reads "
+        "them.",
+        None,
+    ),
 }
 
 #: What ``ENV=production`` turns on, from ``backend/app/main.py`` and the other places

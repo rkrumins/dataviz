@@ -32,6 +32,7 @@ from backend.app.db.models import (
     ProviderORM,
     WorkspaceDataSourceORM,
 )
+from backend.app.db.repositories.data_source_repo import not_a_fork
 
 from .config import StatsServiceConfig
 from .redis_streams import (
@@ -183,6 +184,8 @@ async def _tick(config: StatsServiceConfig) -> TickSummary:
             # re-materialising its polling config below (resurrection).
             .where(WorkspaceDataSourceORM.is_active.is_(True))
             .where(WorkspaceDataSourceORM.deleted_at.is_(None))
+            # A fork has no graph of its own to poll: it reads its parent's.
+            .where(not_a_fork())
         )
         rows = result.all()
         seen = len(rows)

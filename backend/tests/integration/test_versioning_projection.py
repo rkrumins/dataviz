@@ -400,13 +400,12 @@ async def _run() -> None:
     g = await _assert_matches_main(svc, fake, gid)
     assert g.entity_ids() == {"A", "C"} and set(g.edges) == {"E2"}   # converged, no dup/loss
 
-    # ── fork projects its copy-on-write composition into its OWN graph ───
+    # ── a fork has no graph of its own: it reads through its parent's, and is never projected ───
     F = await svc.fork_graph(parent_graph_id=gid, workspace_id="ws1", actor="bob")
     fr = await proj.project_graph(F["graph_id"])
-    assert not fr["noop"]
-    fg = await _assert_matches_main(svc, fake, F["graph_id"])
-    assert fg.entity_ids() == {"A", "C"} and set(fg.edges) == {"E2"}   # inherited base, nothing copied
-    assert "__fork_" in await _graph_name(F["graph_id"])               # fork has its own graph name
+    assert fr["noop"] and fr["skipped"] == "fork"
+    assert await _graph_name(F["graph_id"]) == FalkorProjector.default_graph_name(F["graph_id"])
+    assert FalkorProjector.default_graph_name(F["graph_id"]) not in fake.graphs
 
     # ── self-healing re-point: ensure_projection_target re-points a graph still on the gv_<id>
     # placeholder to the data source's real graph and resets the watermark; the next projection
@@ -436,9 +435,9 @@ async def _run() -> None:
         ps = await s.get(ProjectionStateORM, gid)
         assert (ps.falkor_graph_name, ps.epoch) == (real_name, epoch)
 
-    # a fork is left untouched — it legitimately owns its __fork_ graph (no re-point, returns None).
+    # a fork is left untouched — it has no graph of its own (no re-point, returns None).
     assert await svc.ensure_projection_target(graph_id=F["graph_id"], falkor_graph_name=real_name) is None
-    assert "__fork_" in await _graph_name(F["graph_id"])
+    assert await _graph_name(F["graph_id"]) == FalkorProjector.default_graph_name(F["graph_id"])
 
     await db.dispose_engine()
 
