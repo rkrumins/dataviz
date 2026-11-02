@@ -139,6 +139,11 @@ export interface ContextViewHeaderProps {
   onUndo?: () => void
   onRedo?: () => void
 
+  /** The Connect tool is on: clicks link one entity to another. */
+  connectToolOn?: boolean
+  /** Turns the Connect tool on or off; absent when links can't be drawn here. */
+  onToggleConnectTool?: () => void
+
   // Display settings — canvas zoom + density + chrome toggles
   canvasZoom: number
   onSetCanvasZoom: (n: number) => void
@@ -199,6 +204,8 @@ export function ContextViewHeader({
   canRedo = false,
   onUndo,
   onRedo,
+  connectToolOn = false,
+  onToggleConnectTool,
   canvasZoom,
   onSetCanvasZoom,
   canvasDensity,
@@ -379,6 +386,8 @@ export function ContextViewHeader({
                 pendingChangeCount={pendingChangeCount}
                 onOpenStagedChanges={onOpenStagedChanges}
                 onExitEdit={onExitEdit}
+                connectToolOn={connectToolOn}
+                onToggleConnectTool={onToggleConnectTool}
               />
             </motion.div>
           ) : (

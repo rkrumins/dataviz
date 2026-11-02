@@ -25,7 +25,7 @@ import { createContext, useCallback, useContext, useLayoutEffect, useRef, useSta
 /** Folded first to last. Done has no icon and never folds; Import / Export
  *  folds its words by itself below 2000px. */
 export const FOLD_ORDER = [
-    'undo', 'redo', 'select', 'lens', 'properties', 'display', 'lineage', 'trace', 'edit', 'review',
+    'undo', 'redo', 'select', 'connect', 'lens', 'properties', 'display', 'lineage', 'trace', 'edit', 'review',
 ] as const
 export type ToolbarItem = typeof FOLD_ORDER[number]
 

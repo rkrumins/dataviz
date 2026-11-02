@@ -51,7 +51,8 @@ import { VERSIONING_KEYS, useResolveGraph, useProjectionWatermark } from '@/feat
 import { useActiveDraftAccess } from '@/features/versioning/hooks/useActiveDraftAccess'
 import { useViewExecutionContext } from '@/providers/ViewExecutionContext'
 import { deriveViewCapabilities } from '@/lib/viewAccess'
-import { edgeTypeCopy } from '@/lib/relationshipLabel'
+import { edgeTypeCopy, relationshipLabel } from '@/lib/relationshipLabel'
+import { connectedEdgeTypes, deriveConnectableEdges } from '@/services/ontologyPreflightService'
 import { useGraphProvider } from '@/providers'
 import type { AggregatedEdgeInfo, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
 import { layerClaimedTypes, useGraphHydration } from '@/hooks/useGraphHydration'
@@ -123,6 +124,7 @@ import { InlineNodeEditor } from '../InlineNodeEditor'
 import { CommandPalette, type CommandItem } from '../CommandPalette'
 import { useEdgeConnect } from '../edge-create/useEdgeConnect'
 import { ConnectionDragLayer } from '../edge-create/ConnectionDragLayer'
+import { ConnectModePill } from '../edge-create/ConnectModePill'
 import { EdgeTypePickerPopover } from '../edge-create/EdgeTypePickerPopover'
 import { CreateLinkPopover } from '../edge-create/CreateLinkPopover'
 import { useCreateLinkStore } from '../edge-create/createLinkStore'
@@ -245,6 +247,8 @@ function makeConnectionTypeResolver(
  *  come from its own ledger, so the browse lineage has nothing to say and
  *  projecting it only produces noise (see the call site). */
 const EMPTY_EDGES: unknown[] = []
+/** No cards — a stable value, so a callback keyed on it isn't remade every render. */
+const EMPTY_IDS: string[] = []
 const EMPTY_AGG_EDGES: Map<string, unknown> = new Map()
 const NO_HOLDER_EDGES: ReadonlyMap<string, AggregatedEdgeInfo> = new Map()
 const NO_MATCHED_EDGES: readonly MatchedEdge[] = []
@@ -705,7 +709,10 @@ export function ContextViewCanvas({
   // UX-first Canvas Interactions (context menu, inline edit, quick create, command palette)
   // Forward ref so the keyboard 'C' handler (wired into useCanvasInteractions
   // before useEdgeConnect exists) can arm connect-mode on the selected node.
-  const edgeConnectRef = useRef<{ armConnect: (id: string) => void } | null>(null)
+  const edgeConnectRef = useRef<{
+    armConnect: (id: string, at?: { x: number; y: number }) => void
+    toggleTool: () => void
+  } | null>(null)
 
   // Forward ref to the TRACE OVERLAY (declared far below, after the layer
   // assignment it reads). Every interaction that would write the canvas —
@@ -814,6 +821,12 @@ export function ContextViewCanvas({
       if (traceWriteLockedRef.current()) return
       edgeConnectRef.current?.armConnect(nodeId)
     },
+    onConnectTool: () => {
+      // Same gates as arming: a draft, and never while a trace holds the canvas.
+      if (!isDraft) return
+      if (traceWriteLockedRef.current()) return
+      edgeConnectRef.current?.toggleTool()
+    },
     layers: layers,
     onMoveToLayer: (_nodeId, _layerId) => {
       // Implementation handled by the existing moveToLayer function
@@ -842,15 +855,60 @@ export function ContextViewCanvas({
   // A card that is part of a multi-selection drags the whole selection, and
   // one card dropped on a selected card links into the whole selection —
   // both open the bulk card at the drop (BulkLinkCard).
+  // Click-to-connect (no hold needed) arms the same machine: the toolbar's
+  // Connect tool, a click on a row's handle, 'C', or "Connect To…".
   const edgeConnect = useEdgeConnect({
-    onConnect: (sourceUrn, targetUrn, edgeType) =>
-      interactions.stageEdgeCreate(sourceUrn, targetUrn, edgeType),
+    onConnect: (sourceUrn, targetUrn, edgeType, how) => {
+      const stagedEdgeId = interactions.stageEdgeCreate(sourceUrn, targetUrn, edgeType)
+      // Made without asking (the only relationship that fits): say which, with a way back.
+      if (!stagedEdgeId || !how?.auto) return
+      const labelOf = (id: string) => {
+        const n = useCanvasStore.getState().nodes.find((x) => x.id === id || (x.data?.urn as string) === id)
+        return (n?.data?.label as string) || id
+      }
+      useNotificationStore.getState().add({
+        type: 'success',
+        message: `Linked ${labelOf(sourceUrn)} → ${labelOf(targetUrn)} · ${relationshipLabel(edgeType)}`,
+        action: {
+          label: 'Undo',
+          onClick: () => {
+            const staged = useStagedChangesStore.getState()
+            const change = staged.getChangesForTarget(stagedEdgeId)[0]
+            if (change) staged.discard(change.id)
+          },
+        },
+        durationMs: 8000,
+      })
+    },
     groupOf: (id) => {
       const sel = useCanvasStore.getState().selectedNodeIds.filter(isSelectableNode)
       return sel.length > 1 && sel.includes(id) ? sel : null
     },
     onBulkDrop: ({ direction, picked, at }) =>
       useBulkLinkStore.getState().openCard({ direction, picked, anchor: at }),
+    // Exactly one relationship fits → link at once. The same reading the picker
+    // makes (its schema, minus relationships these two already share), so
+    // "linked without asking" is only ever what the picker would have offered alone.
+    singleTypeFor: (sourceUrn, targetUrn) => {
+      const schemaNow = useSchemaStore.getState().schema
+      const { nodes: storeNodes, edges: storeEdges } = useCanvasStore.getState()
+      const typeOf = (id: string) => {
+        const n = storeNodes.find((x) => x.id === id || (x.data?.urn as string) === id)
+        return (n?.data?.type as string) || null
+      }
+      const already = connectedEdgeTypes(storeEdges, sourceUrn, targetUrn)
+      const fits = deriveConnectableEdges(
+        typeOf(sourceUrn), typeOf(targetUrn),
+        schemaNow?.relationshipTypes ?? [], schemaNow?.containmentEdgeTypes ?? [], schemaNow?.entityTypes ?? [],
+      ).filter((o) => o.allowed && !already.has(o.edgeType.toUpperCase()))
+      return fits.length === 1 ? fits[0].edgeType : null
+    },
+    // Several targets picked with ⌘/Ctrl-click: they become the selection, and
+    // the bulk card links the source into each — judged pair by pair.
+    onMultiTarget: ({ sourceId, targets, at }) => {
+      useCanvasStore.getState().setSelection(targets)
+      useBulkLinkStore.getState().openCard({ direction: 'feeds-selection', picked: [sourceId], anchor: at })
+    },
   })
   edgeConnectRef.current = edgeConnect
 
@@ -2163,6 +2221,13 @@ export function ContextViewCanvas({
   // columns still show browse and every authoring affordance on them still
   // looks (and, ungated, still is) live.
   const canvasWritable = canEditGraph && !traceActive
+  // Connect mode only makes sense on a writable canvas: leaving the draft or
+  // starting a trace ends it, rather than leaving a tool on that can't link.
+  const connectEngaged = edgeConnect.state.tool || edgeConnect.state.mode === 'armed'
+  const setConnectTool = edgeConnect.setTool
+  useEffect(() => {
+    if (connectEngaged && !canvasWritable) setConnectTool(false)
+  }, [connectEngaged, canvasWritable, setConnectTool])
   // Bulk links: the Link panel, the card a drag drops, picking on the canvas.
   const bulkLinkSurface = useBulkLinkStore((s) => s.surface)
   const bulkLinkPicked = useBulkLinkStore((s) => s.picked)
@@ -2229,6 +2294,28 @@ export function ContextViewCanvas({
       existingEdges: useCanvasStore.getState().edges,
     })
   }, [dragHoverId, dragSourceIds, relationshipTypes, containmentEdgeTypes, schemaEntityTypes])
+  // Armed (click-to-connect): the same verdict, asked by the overlay once per
+  // card hovered — the pointer itself never passes through the canvas's state.
+  const armedSourceIds = edgeConnect.state.mode === 'armed' ? edgeConnect.state.sourceIds : EMPTY_IDS
+  const connectHintFor = useCallback((hoverId: string) => {
+    if (armedSourceIds.length === 0) return null
+    const typeOf = new Map<string, string>()
+    for (const n of useCanvasStore.getState().nodes) {
+      const t = n.data?.type as string | undefined
+      if (t) typeOf.set(n.id, t)
+    }
+    const sel = useCanvasStore.getState().selectedNodeIds.filter(isSelectableNode)
+    const targets = armedSourceIds.length === 1 && sel.length > 1 && sel.includes(hoverId) && !sel.includes(armedSourceIds[0])
+      ? sel
+      : [hoverId]
+    return dropVerdict(armedSourceIds, targets, {
+      typeOf: (id) => typeOf.get(id) ?? null,
+      relationshipTypes,
+      containmentEdgeTypes,
+      entityTypes: schemaEntityTypes,
+      existingEdges: useCanvasStore.getState().edges,
+    })
+  }, [armedSourceIds, relationshipTypes, containmentEdgeTypes, schemaEntityTypes])
   const traceModel = canvasTrace.walkEntry?.model ?? null
   // A SHARED TRACE (`?trace=…`) — decoded once during the first render, so
   // the trace opens on the shared picture with no un-restored flash, and so
@@ -3693,9 +3780,9 @@ export function ContextViewCanvas({
   // resolves a target, the picker opens, and confirming writes a create_edge
   // into the store. One choke point for both entry points (the 'C' key and
   // the drawer's "Link to…"), so neither can start the flow while locked.
-  const armConnectGuarded = useCallback((nodeId: string) => {
+  const armConnectGuarded = useCallback((nodeId: string, at?: { x: number; y: number }) => {
     if (traceWriteLocked()) return
-    edgeConnectRef.current?.armConnect(nodeId)
+    edgeConnectRef.current?.armConnect(nodeId, at)
   }, [traceWriteLocked])
 
   // Fill the forward refs declared at the top of the component. In an effect,
@@ -6140,6 +6227,8 @@ export function ContextViewCanvas({
         canRedo={stagedRedoStack.length > 0}
         onUndo={undoStagedChange}
         onRedo={redoStagedChange}
+        connectToolOn={edgeConnect.state.tool}
+        onToggleConnectTool={canvasWritable ? edgeConnect.toggleTool : undefined}
         canvasZoom={canvasZoom}
         onSetCanvasZoom={setCanvasZoom}
         onFitToWidth={handleFitToWidth}
@@ -6210,6 +6299,40 @@ export function ContextViewCanvas({
             onCancel={exitCanvasTrace}
             onContinue={canvasTrace.continuePastCheckpoint}
             onRetry={canvasTrace.retryWalk}
+          />
+        )}
+
+        {/* Connect mode — what a click-to-connect is waiting for, and the way
+            out. Same top slot as the trace capsule: the two never coexist
+            (a trace makes the canvas read-only). */}
+        {canvasWritable && (edgeConnect.state.mode === 'armed' || (edgeConnect.state.mode === 'idle' && edgeConnect.state.tool)) && (
+          <ConnectModePill
+            phase={edgeConnect.state.mode === 'armed' ? 'armed' : 'tool'}
+            sourceLabel={(() => {
+              const id = edgeConnect.state.sourceId
+              if (!id) return null
+              const n = nodes.find((x) => x.id === id || (x.data?.urn as string) === id)
+              return (n?.data?.label as string) || null
+            })()}
+            sourceCount={edgeConnect.state.sourceIds.length}
+            targetCount={edgeConnect.state.targets.length}
+            nudge={edgeConnect.state.nudge}
+            tool={edgeConnect.state.tool}
+            onLinkTargets={() => edgeConnect.commitTargets()}
+            onClearTargets={edgeConnect.clearTargets}
+            onCancel={edgeConnect.cancel}
+            onExitTool={() => edgeConnect.setTool(false)}
+            onSearchTarget={() => {
+              // The keyboard path: the same link, its target chosen from a searchable list.
+              const id = edgeConnect.state.sourceId
+              if (!id) return
+              const n = nodes.find((x) => x.id === id || (x.data?.urn as string) === id)
+              edgeConnect.cancel()
+              useCreateLinkStore.getState().open({
+                sourceUrn: (n?.data?.urn as string) || id,
+                anchor: { x: Math.round(window.innerWidth / 2) - 150, y: 140 },
+              })
+            }}
           />
         )}
 
@@ -7000,9 +7123,14 @@ export function ContextViewCanvas({
           {/* In-progress edge while dragging a connection (shares the overlay
               coordinate space — absolute sibling inside the scroll container). */}
           <ConnectionDragLayer
-            sourceIds={edgeConnect.state.mode === 'dragging' ? edgeConnect.state.sourceIds : []}
+            sourceIds={edgeConnect.state.mode === 'dragging' || edgeConnect.state.mode === 'armed' ? edgeConnect.state.sourceIds : EMPTY_IDS}
             pointer={edgeConnect.state.pointer}
             hint={dragHint}
+            live={edgeConnect.state.mode === 'armed'
+              ? 'armed'
+              : edgeConnect.state.mode === 'idle' && edgeConnect.state.tool ? 'tool' : null}
+            hintFor={connectHintFor}
+            targetIds={edgeConnect.state.targets}
           />
 
           {/* Ghost-edge overlay — dashed pulsing connectors between ghost
@@ -7365,7 +7493,7 @@ export function ContextViewCanvas({
         onDuplicateNode={canvasWritable ? interactions.duplicateNode : undefined}
         onDeleteNode={canvasWritable ? interactions.deleteNode : undefined}
         onCreateChild={canvasWritable ? interactions.createChild : undefined}
-        onConnect={canvasWritable ? (id) => armConnectGuarded(id) : undefined}
+        onConnect={canvasWritable ? (id) => armConnectGuarded(id, interactions.state.contextMenu.position) : undefined}
         onLinkNode={canvasWritable ? (id) => {
           const node = nodes.find(n => n.id === id || (n.data?.urn as string) === id)
           useCreateLinkStore.getState().open({

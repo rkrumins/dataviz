@@ -84,6 +84,8 @@ export interface UseCanvasInteractionsOptions {
     onExitTrace?: () => boolean
     /** Arm edge connect-mode from the currently selected node (e.g. 'C' key). */
     onConnectMode?: (sourceNodeId: string) => void
+    /** 'C' with no single node selected: turn the Connect tool on or off. */
+    onConnectTool?: () => void
 }
 
 export interface UseCanvasInteractionsResult {
@@ -197,6 +199,7 @@ export function useCanvasInteractions(
         onCloseEntityDrawer,
         onExitTrace,
         onConnectMode,
+        onConnectTool,
     } = options
     
     const provider = useGraphProvider()
@@ -622,6 +625,7 @@ export function useCanvasInteractions(
         onConnectMode: () => {
             const { selectedNodeIds } = useCanvasStore.getState()
             if (selectedNodeIds.length === 1) onConnectMode?.(selectedNodeIds[0])
+            else onConnectTool?.()
         },
         onCommandPalette: openCommandPalette,
     }
