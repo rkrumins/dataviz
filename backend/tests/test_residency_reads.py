@@ -341,16 +341,27 @@ async def test_the_stats_probe_skips_a_graph_out_of_falkordb(monkeypatch):
 async def test_the_stats_probe_never_fails_on_residency_s_read(monkeypatch):
     """Review finding 13: the freshness read is documented never to fail; residency's question
     (``non_resident``, a graphver read) was asked outside the probe's try, and a graphver error
-    failed it. It degrades to no probe, as a slow or failing provider does."""
+    failed it. Since the switch, that question is asked of every source, so an unreadable answer
+    must not cost the probe either (CI's required suite: every probe skipped with graphver
+    unreachable). The probe goes ahead, as with residency never turned on; a versioned source's
+    own pin read then fails as every read of it does with graphver down."""
     from backend.app.services.aggregation.service import AggregationService
+
+    asked = []
+
+    class _Registry:
+        async def get_provider_for_workspace(self, *a, **kw):
+            asked.append("provider")
+            raise ConnectionError("FalkorDB unreachable")
 
     async def down(ds_id):
         raise ConnectionError("graphver unreachable")
 
     monkeypatch.setattr(residency, "non_resident", down)
-    probe = SimpleNamespace(_registry=None)
+    probe = SimpleNamespace(_registry=_Registry())
     assert await AggregationService._probe_live_stats(probe, "ws1", "ds1", None) == (
         None, None, None)
+    assert asked == ["provider"]
 
 
 async def test_a_pass_reads_each_lease_briefly_and_stops_asking_once_the_broker_fails(monkeypatch):

@@ -660,7 +660,8 @@ serves. A fork past the ceiling reads its own rows and calls nothing.
   null on a fork's, and its `status` filter takes `rehydrating` and `waiting_capacity`.
 - **The projection-lag probe** counts `rehydrating` and `waitingCapacity`, and leaves evicted
   graphs out of its worst list: they lag by design. The stats probe does not read a graph out of
-  FalkorDB (it would record 0 nodes and 0 edges), and never fails a freshness read over asking.
+  FalkorDB (it would record 0 nodes and 0 edges), and never fails a freshness read over asking:
+  when residency's state can't be read, it probes as with residency never on.
 - **Check sync** (`POST …/projection/reconcile`) has nothing to compare on a graph out of FalkorDB:
   `skippedReason` says it is out ("its reads are on Postgres until it is loaded again") or being
   loaded ("check again once it is").
