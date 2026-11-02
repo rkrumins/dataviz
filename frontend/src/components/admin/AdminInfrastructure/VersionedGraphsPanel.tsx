@@ -271,7 +271,8 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                         <tbody>
                             {rows.map(row => {
                                 const note = notes[row.graphId]
-                                const hasSource = !row.orphan && !row.forkParentGraphId
+                                // A fork has a data source of its own, which opens like any other.
+                                const hasSource = !row.orphan
                                 return (
                                     <tr key={row.graphId} className="border-t border-glass-border align-top">
                                         <td className="px-5 py-2.5">
@@ -327,7 +328,7 @@ export function VersionedGraphsPanel({ providers, onClose }: Props) {
                                                 <button
                                                     className={ACTION_CLS}
                                                     disabled={!hasSource}
-                                                    title={hasSource ? undefined : 'Forks and orphans have no data source to open'}
+                                                    title={hasSource ? undefined : 'Its data source no longer exists'}
                                                     onClick={() => navigate(`/workspaces/${row.workspaceId}?ds=${encodeURIComponent(row.dataSourceId)}&dstab=versioning`)}
                                                 >
                                                     Open source

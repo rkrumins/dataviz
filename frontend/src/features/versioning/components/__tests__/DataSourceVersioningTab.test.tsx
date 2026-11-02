@@ -8,7 +8,12 @@
  * Its Merge requests section reads the data source's open PRs, the inbox's read, so an older open PR
  * is not hidden behind newer merged or closed ones.
  * Its Forks section lists the graph's forks, those in the trash included, with Delete and Restore for
- * managers; a fork whose purge is queued can no longer be restored.
+ * managers; a fork whose purge is queued can no longer be restored. Each live fork shows its label,
+ * who made it and when, and how far it is from this graph (and when an update is recommended); it
+ * opens its own data source, and offers Update from parent (publishers) and Propose to parent. A
+ * manager forks the graph from the section's header. With forks turned off the section says so, and
+ * offers neither Fork, Update from parent nor Propose to parent; forks stay readable, and go to the
+ * trash and back. On a fork's own tab, the fork strip sits at the top.
  * Its header says when editing is paused, and someone who both publishes and manages pauses or
  * resumes it, naming the revision they saw.
  * Its Drafts and reviews section shows each setting as the workspace's, naming its value, or this
@@ -16,13 +21,14 @@
  * those are sent. Anyone else reads it.
  * The data hooks are stubbed; the card itself has its own spec.
  */
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { MemoryRouter, useLocation } from 'react-router-dom'
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 let canManage = true
 let canPublish = true
 let isAdmin = true
+let forksOn = true
 let resolved: Record<string, unknown> | undefined
 let resolveError: Error | null
 let branches: Array<Record<string, unknown>>
@@ -44,6 +50,24 @@ const policyPut = vi.fn()
 
 vi.mock('@/store/auth', () => ({
   usePermission: (p: string) => (p === 'workspace:admin' ? isAdmin : p.endsWith(':publish') ? canPublish : canManage),
+}))
+vi.mock('@/store/features', () => ({ useFeature: (key: string) => (key === 'forksEnabled' ? forksOn : true) }))
+vi.mock('../ForkDialog', () => ({
+  ForkDialog: ({ open, graphId }: { open: boolean; graphId: string }) =>
+    open ? <div data-testid="fork-dialog" data-graph={graphId} /> : null,
+}))
+vi.mock('../UpdateFromParentButton', () => ({
+  UpdateFromParentButton: ({ forkGraphId }: { forkGraphId: string }) =>
+    <button data-fork={forkGraphId}>Update from parent</button>,
+}))
+vi.mock('../ProposeToParentButton', () => ({
+  ProposeToParentButton: ({ forkGraphId, parentDataSourceId, behind }: {
+    forkGraphId: string; parentDataSourceId: string; behind: number
+  }) => <button data-fork={forkGraphId} data-parent={parentDataSourceId} data-behind={behind}>Propose to parent</button>,
+}))
+vi.mock('../ForkStrip', () => ({
+  ForkStrip: ({ dataSourceId, variant }: { dataSourceId: string; variant: string }) =>
+    <div data-testid="fork-strip" data-source={dataSourceId} data-variant={variant} />,
 }))
 vi.mock('@/hooks/useDataSourceProviderMap', () => ({
   useDataSourceProviderMap: () => ({
@@ -87,10 +111,16 @@ vi.mock('../ProjectionHealthCard', () => ({
 import { DataSourceVersioningTab } from '../DataSourceVersioningTab'
 import { PullRequestExistsError } from '@/services/versioningApiService'
 
-const renderTab = () =>
+function Where() {
+  const loc = useLocation()
+  return <span data-testid="where">{loc.pathname}{loc.search}</span>
+}
+
+const renderTab = (dataSourceId = 'ds1') =>
   render(
-    <MemoryRouter>
-      <DataSourceVersioningTab wsId="ws1" dataSourceId="ds1" />
+    <MemoryRouter initialEntries={['/workspaces/ws1?ds=ds1&dstab=versioning']}>
+      <DataSourceVersioningTab wsId="ws1" dataSourceId={dataSourceId} />
+      <Where />
     </MemoryRouter>,
   )
 
@@ -98,6 +128,7 @@ beforeEach(() => {
   canManage = true
   canPublish = true
   isAdmin = true
+  forksOn = true
   resolved = { graphId: 'g1', mainBranchId: 'b_main', mainHeadCommitSeq: 5, kind: 'bootstrap' }
   resolveError = null
   branches = []
@@ -273,23 +304,102 @@ describe('DataSourceVersioningTab — forks', () => {
   const fork = (id: string, extra: Record<string, unknown> = {}) => ({
     graphId: id, workspaceId: 'ws1', kind: 'fork', forkParentGraphId: 'g1', forkBaseCommitSeq: 3,
     mainHeadCommitSeq: 4, createdBy: 'u1', createdAt: '2026-10-01T00:00:00Z', purging: false,
-    userNames: { u1: 'Ada', u2: 'Bo' }, ...extra,
+    userNames: { u1: 'Ada', u2: 'Bo' }, dataSourceId: `dsfork_${id}`, label: `Sales · ${id}`,
+    ahead: 4, behind: 2, updateRecommended: false, readsFrom: 'overlay', countsCapped: false, ...extra,
   })
   const trashed = (id: string, extra: Record<string, unknown> = {}) => fork(id, {
-    deletedAt: '2026-10-10T00:00:00Z', deletedBy: 'u2', purgeAfter: '2026-11-09T00:00:00Z', ...extra,
+    deletedAt: '2026-10-10T00:00:00Z', deletedBy: 'u2', purgeAfter: '2026-11-09T00:00:00Z',
+    ahead: null, behind: null, updateRecommended: null, readsFrom: null, countsCapped: null, ...extra,
   })
+  const rowOf = (label: string) => screen.getByText(label).closest('[data-fork-row]') as HTMLElement
 
   it('shows a manager live and trashed forks, and moves a live one to the trash on confirm', async () => {
     forks = [fork('f1'), trashed('f2')]
     vi.spyOn(window, 'confirm').mockReturnValue(true)
     renderTab()
     expect(screen.getByText('Forks')).toBeInTheDocument()
-    expect(screen.getByText(/by Ada · from #3 · main #4/)).toBeInTheDocument()
+    expect(screen.getByText('Sales · f1')).toBeInTheDocument()
     expect(screen.getByText(/Deleted by Bo · restorable until/)).toBeInTheDocument()
     fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
     expect(window.confirm).toHaveBeenCalled()
     await waitFor(() => expect(refetchForks).toHaveBeenCalled())
     expect(deleteFork).toHaveBeenCalledWith('ws1', 'f1')
+  })
+
+  it('shows each fork by its label, who made it and when, and how far it is from this graph', () => {
+    forks = [fork('f1')]
+    renderTab()
+    const row = rowOf('Sales · f1')
+    expect(within(row).getByText(/by Ada/)).toBeInTheDocument()
+    expect(within(row).getByText('4 ahead · 2 behind')).toBeInTheDocument()
+    expect(within(row).queryByText('f1')).toBeNull()
+  })
+
+  it('marks a count that stopped at the ceiling', () => {
+    forks = [fork('f1', { ahead: 3, behind: 200000, countsCapped: true })]
+    renderTab()
+    expect(screen.getByText('3 ahead · 200,000+ behind')).toBeInTheDocument()
+  })
+
+  it('says when an update from parent is recommended, and why', () => {
+    forks = [fork('f1', { updateRecommended: true }), fork('f2', { updateRecommended: true, readsFrom: 'postgres' })]
+    renderTab()
+    expect(within(rowOf('Sales · f1')).getByText(/Update recommended: its parent has changed a lot/)).toBeInTheDocument()
+    expect(within(rowOf('Sales · f2')).getByText(/Update recommended: it is too far from its parent to read quickly/)).toBeInTheDocument()
+  })
+
+  it('opens a fork’s own data source, on its version control', () => {
+    forks = [fork('f1')]
+    renderTab()
+    fireEvent.click(within(rowOf('Sales · f1')).getByRole('button', { name: 'Open' }))
+    expect(screen.getByTestId('where')).toHaveTextContent('/workspaces/ws1?ds=dsfork_f1&dstab=versioning')
+  })
+
+  it('offers Update from parent to a publisher, and Propose to parent with how far behind it is', () => {
+    forks = [fork('f1'), trashed('f2')]
+    renderTab()
+    const row = rowOf('Sales · f1')
+    expect(within(row).getByRole('button', { name: 'Update from parent' })).toHaveAttribute('data-fork', 'f1')
+    expect(within(row).getByRole('button', { name: 'Propose to parent' })).toHaveAttribute('data-behind', '2')
+    expect(within(row).getByRole('button', { name: 'Propose to parent' })).toHaveAttribute('data-parent', 'ds1')
+    // A fork in the trash takes nothing and proposes nothing.
+    expect(screen.getAllByRole('button', { name: 'Update from parent' })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Open' })).toHaveLength(1)
+    cleanup()
+    canPublish = false
+    renderTab()
+    expect(screen.queryByRole('button', { name: 'Update from parent' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Propose to parent' })).toBeInTheDocument()
+  })
+
+  it('lets a manager fork the graph, from the section’s header', () => {
+    renderTab()
+    expect(screen.getByText('No forks yet.', { exact: false })).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Fork' }))
+    expect(screen.getByTestId('fork-dialog')).toHaveAttribute('data-graph', 'g1')
+  })
+
+  it('says forks are turned off, and offers no Fork, Update from parent or Propose to parent', () => {
+    forksOn = false
+    forks = [fork('f1', { updateRecommended: true }), trashed('f2')]
+    renderTab()
+    expect(screen.getByText(/Forks are turned off for this deployment/)).toBeInTheDocument()
+    expect(screen.getByText(/Admin → Features/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Fork' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Update from parent' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Propose to parent' })).toBeNull()
+    expect(screen.queryByText(/Update recommended/)).toBeNull()
+    // Reading a fork, and the trash, keep working.
+    expect(within(rowOf('Sales · f1')).getByText('4 ahead · 2 behind')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Open' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Delete' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Restore' })).toBeInTheDocument()
+  })
+
+  it('puts the fork strip at the top of a fork’s own tab', () => {
+    renderTab('dsfork_1')
+    expect(screen.getByTestId('fork-strip')).toHaveAttribute('data-source', 'dsfork_1')
+    expect(screen.getByTestId('fork-strip')).toHaveAttribute('data-variant', 'tab')
   })
 
   it('deletes nothing when the manager cancels', () => {
@@ -319,7 +429,13 @@ describe('DataSourceVersioningTab — forks', () => {
     expect(screen.queryByRole('button', { name: 'Restore' })).toBeNull()
   })
 
-  it('has no Forks section when the graph has no forks', () => {
+  it('has no Forks section when the graph has no forks and nobody here can fork it', () => {
+    forksOn = false
+    renderTab()
+    expect(screen.queryByText('Forks')).toBeNull()
+    cleanup()
+    forksOn = true
+    canManage = false
     renderTab()
     expect(screen.queryByText('Forks')).toBeNull()
   })

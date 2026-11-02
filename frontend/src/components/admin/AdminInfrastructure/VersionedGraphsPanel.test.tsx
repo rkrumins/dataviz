@@ -192,9 +192,16 @@ describe('VersionedGraphsPanel', () => {
         await screen.findByText('Customer 360')
 
         const open = screen.getAllByRole('button', { name: 'Open source' })
-        expect(open.map(b => (b as HTMLButtonElement).disabled)).toEqual([false, true, true])
+        expect(open.map(b => (b as HTMLButtonElement).disabled)).toEqual([false, false, true])
         await userEvent.click(open[0])
         expect(screen.getByTestId('where')).toHaveTextContent('/workspaces/ws1?ds=ds1&dstab=versioning')
+    })
+
+    it("opens a fork's own data source", async () => {
+        versionedGraphs.mockResolvedValue({ graphs: [FORK], nextCursor: null })
+        renderPanel()
+        await userEvent.click(await screen.findByRole('button', { name: 'Open source' }))
+        expect(screen.getByTestId('where')).toHaveTextContent('/workspaces/ws1?ds=dsfork_1&dstab=versioning')
     })
 
     it('moves a fork to the trash from its row on confirm, and offers it on forks only', async () => {

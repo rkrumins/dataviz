@@ -119,12 +119,43 @@ export interface Graph {
 }
 
 /** One of a graph's forks, live or in the trash (`deletedAt` set). `purging`: its purge is queued,
- *  so it can no longer be restored; `purgeAfter`: the end of its undo window. */
+ *  so it can no longer be restored; `purgeAfter`: the end of its undo window.
+ *
+ *  A live one says how far it is from this graph (null on one in the trash): `ahead`, the entities
+ *  it changed since its last merged review (or its fork point); `behind`, those this graph changed
+ *  that it has not taken in; `updateRecommended`, what Update from parent would fix (far behind, or
+ *  its reads past the ceiling, `readsFrom: 'postgres'`); `countsCapped`, a count stopped at the
+ *  ceiling: it is at least that. */
 export interface ForkSummary extends Graph {
+  /** The fork's own data source (`dsfork_…`), and that data source's label. */
+  dataSourceId?: string | null
+  label?: string | null
   deletedAt?: string | null
   deletedBy?: string | null
   purging: boolean
   purgeAfter?: string | null
+  ahead?: number | null
+  behind?: number | null
+  updateRecommended?: boolean | null
+  readsFrom?: 'overlay' | 'postgres' | null
+  countsCapped?: boolean | null
+}
+
+/** A fork just made: its graph, its own data source and its `main`. */
+export interface ForkCreated {
+  graphId: string
+  dataSourceId: string
+  mainBranchId: string
+  forkBaseCommitSeq: number
+}
+
+/** What an Update from parent did: its `sync_parent` commit (null when there was nothing to take),
+ *  the parent's head the fork reads from now on, and the rows it wrote. */
+export interface UpdateFromParentResult {
+  commitId: string | null
+  parentSeq: number
+  wrote: number
+  upToDate: boolean
 }
 
 /** One normalized op for the staging buffer — `entityKind`/`entityId` mirror the wire. */
@@ -553,6 +584,43 @@ export class OntologyViolationError extends Error {
   }
 }
 
+/** A fork's review merges only up to date with its parent: the parent has changed since the fork
+ *  last took its changes, so it updates from its parent first. `behind`: the entities the parent
+ *  changed that the fork has not taken in; `graphId`: the fork. Not a draft's NotUpToDateError: a
+ *  fork has no "pull latest". */
+export class ForkNotUpToDateError extends Error {
+  behind?: number
+  graphId?: string
+  constructor(detail: { behind?: number; graphId?: string; message?: string }) {
+    super(detail.message || 'The parent has changed since this fork last took its changes: update from parent first.')
+    this.name = 'ForkNotUpToDateError'
+    this.behind = detail.behind
+    this.graphId = detail.graphId
+  }
+}
+
+/** Update from parent found what both the fork and its parent changed, differently — field by field,
+ *  and what the two together would break of the fork's hierarchy (`kind: 'structure'`). Nothing was
+ *  written: settle them and update again with `resolutions`. `seeds`: the fork's own value of each
+ *  entity, to resolve from; `total`: how many there were, when a job kept only the first ones. */
+export class ForkUpdateConflictsError extends Error {
+  conflicts: Array<Record<string, unknown>>
+  seeds: Record<string, Record<string, unknown> | null>
+  total?: number
+  constructor(detail: {
+    conflicts?: Array<Record<string, unknown>>
+    seeds?: Record<string, Record<string, unknown> | null>
+    total?: number
+    message?: string
+  }) {
+    super(detail.message || 'The fork and its parent both changed some of the same things.')
+    this.name = 'ForkUpdateConflictsError'
+    this.conflicts = detail.conflicts ?? []
+    this.seeds = detail.seeds ?? {}
+    this.total = detail.total
+  }
+}
+
 /** A draft is behind main and must pull the latest changes before it can be merged. */
 export class NotUpToDateError extends Error {
   branchId?: string
@@ -748,10 +816,19 @@ type RefusalDetail = string | {
   prId?: string
   title?: string | null
   suggestion?: string | null
-  /** Why a fork cannot be restored (`fork_not_restorable`). */
+  /** Why a fork cannot be restored (`fork_not_restorable`), or why a fork's review cannot merge
+   *  (`not_up_to_date`: `parent_moved`). */
   reason?: string
   /** The fork cap (`fork_limit`). */
   limit?: number
+  /** A fork behind its parent: the entities the parent changed that it has not taken in, and the
+   *  fork (`not_up_to_date`, `parent_moved`). */
+  behind?: number
+  graphId?: string
+  /** An Update from parent's conflicts: the fork's own value of each entity, and how many there
+   *  were when a job kept only the first ones (`fork_update_conflicts`). */
+  seeds?: Record<string, Record<string, unknown> | null>
+  total?: number
   /** The draft's head now (`head_moved`). */
   headCommitId?: string | null
   /** Whose staged edits could not be saved first (`staged_changes_unsaved`). */
@@ -771,8 +848,14 @@ function versioningError(status: number, detail: RefusalDetail, fallback: string
   if (status === 422 && d?.type === 'ontology_violation') {
     return new OntologyViolationError(d.violations ?? [])
   }
+  if (status === 409 && d?.type === 'not_up_to_date' && d.reason === 'parent_moved') {
+    return new ForkNotUpToDateError(d)
+  }
   if (status === 409 && d?.type === 'not_up_to_date') {
     return new NotUpToDateError(d)
+  }
+  if (status === 409 && d?.type === 'fork_update_conflicts') {
+    return new ForkUpdateConflictsError(d)
   }
   if (status === 409 && d?.type === 'branch_closed') {
     return new BranchClosedError(d)
@@ -1354,6 +1437,14 @@ export function getBranchFreshness(
 /** A graph's direct forks, newest first, those in the trash included. */
 export function listForks(wsId: string, graphId: string): Promise<ForkSummary[]> {
   return vfetch<ForkSummary[]>(`${base(wsId)}/graphs/${graphId}/forks`)
+}
+
+/** Fork a graph: a graph of its own and a data source labelled "<this one's label> · <name>" (left
+ *  blank, the server names it). 409 {@link ForkRefusedError} at the fork cap,
+ *  {@link GraphNotWritableError} while editing is paused; 403 `feature_disabled` while forks are off. */
+export function createFork(wsId: string, graphId: string, data: { name?: string } = {}): Promise<ForkCreated> {
+  const name = data.name?.trim()
+  return vfetch<ForkCreated>(`${base(wsId)}/graphs/${graphId}/forks`, jsonBody(name ? { name } : {}))
 }
 
 /** Move a fork to the trash, restorable until its purge is queued. 409 {@link ForkRefusedError}
@@ -1952,6 +2043,50 @@ export async function mergeMergeRequest(
 ): Promise<CommitResponse> {
   return followPublish(wsId, await vfetch<CommitResponse | QueuedPublish>(
     `${base(wsId)}/merge-requests/${prId}/merge`, jsonBody(data)))
+}
+
+// ============================================
+// Forks — Update from parent, and the review into the parent
+// ============================================
+
+interface UpdateJob {
+  jobId: string
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled'
+  commitId: string | null
+  parentSeq?: number | null
+  wrote?: number | null
+  upToDate?: boolean | null
+  /** The refusal the update inside the request would have given (its conflicts). */
+  error: { status: number; detail: RefusalDetail } | null
+}
+
+/** Take the parent's changes into the fork (`forkGraphId`). A large update runs as a job (202),
+ *  followed to its end as a publish job is. {@link ForkUpdateConflictsError} for what both changed:
+ *  settle it and call again with `resolutions`, for those only. */
+export async function updateFromParent(
+  wsId: string, forkGraphId: string, data: { resolutions?: ResolutionMap } = {},
+): Promise<UpdateFromParentResult> {
+  const answer = await vfetch<UpdateFromParentResult | QueuedPublish>(
+    `${base(wsId)}/graphs/${forkGraphId}/update-from-parent`, jsonBody(data))
+  if (!('jobId' in answer)) return answer
+  const job = await pollJob(
+    () => vfetch<UpdateJob>(`${base(wsId)}/graphs/${answer.graphId}/update-jobs/${answer.jobId}`),
+    { patienceMs: PUBLISH_JOB_POLL.patienceMs },
+  )
+  if (job.status === 'completed') {
+    return { commitId: job.commitId, parentSeq: job.parentSeq ?? 0, wrote: job.wrote ?? 0, upToDate: !!job.upToDate }
+  }
+  throw versioningError(job.error?.status ?? 500, job.error?.detail, 'The update failed')
+}
+
+/** Propose a fork's changes to its parent: a review from the fork's `main` into the parent's
+ *  (anyone who can read the fork may). 409 {@link PullRequestExistsError} while it has one open. */
+export function openForkPullRequest(
+  wsId: string,
+  forkGraphId: string,
+  data: { title?: string; description?: string; reviewers?: string[] } = {},
+): Promise<{ prId: string }> {
+  return vfetch<{ prId: string }>(`${base(wsId)}/graphs/${forkGraphId}/pulls`, jsonBody(data))
 }
 
 /** Itemised "Files Changed" for a PR (draft MR or fork PR — the endpoint dispatches

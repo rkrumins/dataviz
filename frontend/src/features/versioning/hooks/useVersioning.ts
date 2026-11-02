@@ -7,6 +7,7 @@ import { useCallback } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import * as api from '@/services/versioningApiService'
 import type { BranchStatusFilter, DraftLevel, DraftRole, DraftsPolicyChange, PullRequest, ResolutionMap, StageOp, Watermark } from '@/services/versioningApiService'
+import { workspaceService } from '@/services/workspaceService'
 import { SYNC_STATUS_KEY } from '@/features/sync-status/useSyncStatus'
 import { invalidateAggregatedEdges } from '@/hooks/useAggregatedLineage'
 import { useBranchStore } from '@/store/branchStore'
@@ -45,6 +46,9 @@ export const VERSIONING_KEYS = {
     [...VERSIONING_KEYS.all, 'mrs', ws, gid] as const,
   forks: (ws?: string, gid?: string | null) =>
     [...VERSIONING_KEYS.all, 'forks', ws, gid] as const,
+  // The workspace's data sources, forks' included — which the workspace's own lists leave out.
+  forkSources: (ws?: string | null) =>
+    [...VERSIONING_KEYS.all, 'forkSources', ws] as const,
   mergeRequest: (ws?: string, prId?: string | null) =>
     [...VERSIONING_KEYS.all, 'mr', ws, prId] as const,
   prDiff: (ws?: string, prId?: string | null) =>
@@ -398,6 +402,17 @@ export function useForks(wsId?: string, graphId?: string | null) {
     enabled: !!wsId && !!graphId,
     staleTime: 15_000,
     retry: false,
+  })
+}
+
+/** Every data source in the workspace, forks' included: what a fork's screens read its `forkOf`,
+ *  and its parent's label, from. Read only when `enabled`. */
+export function useDataSourcesWithForks(wsId?: string | null, enabled = true) {
+  return useQuery({
+    queryKey: VERSIONING_KEYS.forkSources(wsId),
+    queryFn: () => workspaceService.listDataSources(wsId!, { includeForks: true }),
+    enabled: enabled && !!wsId,
+    staleTime: 60_000,
   })
 }
 
@@ -978,6 +993,56 @@ export function useOpenMergeRequest(wsId: string, graphId: string) {
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrs'] })
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'dataSourcePrs'] })
       qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewPrCounts'] })
+    },
+  })
+}
+
+/** Fork a graph. The new fork shows in the graph's Forks list, and among the data sources a fork's
+ *  screens read. */
+export function useCreateFork(wsId: string, graphId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { name?: string }) => api.createFork(wsId, graphId, v),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.forks(wsId, graphId) })
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.forkSources(wsId) })
+    },
+  })
+}
+
+/** Take the parent's changes into a fork. Throws {@link api.ForkUpdateConflictsError} for what both
+ *  changed (the caller resolves, then updates again with `resolutions`). Its distance on its
+ *  parent's Forks list is read again; an update that took changes in moved the fork's `main`, so
+ *  its history, its drafts (behind now), its review's approvals and its canvas are read again too,
+ *  as after a pull. */
+export function useUpdateFromParent(wsId: string, forkGraphId: string) {
+  const qc = useQueryClient()
+  const bumpMainEpoch = useBranchStore((s) => s.bumpMainEpoch)
+  return useMutation({
+    mutationFn: (v: { resolutions?: ResolutionMap } = {}) => api.updateFromParent(wsId, forkGraphId, v),
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'forks'] })
+      if (res.upToDate) return
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.branches(wsId, forkGraphId) })
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'commits'] })
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'viewCommits'] })
+      qc.invalidateQueries({ queryKey: VERSIONING_KEYS.resolve(wsId) })
+      invalidatePrScopes(qc, wsId)
+      bumpMainEpoch()
+      invalidateAggregatedEdges()
+    },
+  })
+}
+
+/** Propose a fork's changes to its parent as a review: every list of reviews is read again. */
+export function useOpenForkPullRequest(wsId: string, forkGraphId: string) {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (v: { title?: string; description?: string; reviewers?: string[] }) =>
+      api.openForkPullRequest(wsId, forkGraphId, v),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: [...VERSIONING_KEYS.all, 'mrs'] })
+      invalidatePrScopes(qc, wsId)
     },
   })
 }

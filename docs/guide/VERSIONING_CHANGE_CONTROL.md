@@ -155,6 +155,9 @@ Read these in order the first time; afterwards, jump to what you need.
 | **Merge** | Apply a reviewed request to **Published** |
 | **Get latest updates** / **Pull latest** | Bring newer published changes into a draft that has fallen behind |
 | Revision | One published change in the history |
+| **Fork** | A copy of a data source's graph to work in, with its own drafts and history |
+| **Update from parent** | Take the newer changes of the data source a fork came from into the fork |
+| **Propose to parent** | Open a review of a fork's changes into the data source it came from |
 
 More terms are in the [Glossary](/guide/glossary).
 
@@ -212,6 +215,75 @@ a draft that's wrong is simply discarded.
 > Restore only when you need to reset everything back to a specific point, or
 > when Undo tells you it can't apply cleanly.
 
+## Work in a fork
+
+*When your administrator has turned on **Administration → Features → Forks**
+(it is off unless they do).*
+
+A **fork** is a copy of a data source's graph to work in, with its own drafts
+and history. It reads the data source it came from — its **parent** — as it
+was when the fork was made, takes the parent's newer changes when you ask
+(**Update from parent**), and offers its own changes back as a review
+(**Propose to parent**). A fork is a data source of its own, in the same
+workspace, with its parent's settings.
+
+### Fork a data source
+
+*For people who can manage the workspace's data sources.*
+
+1. Open **Workspaces**, choose the workspace, select the data source on the
+   **Data Sources** tab, and open its **Versioning** tab.
+2. Under **Forks**, choose **Fork**.
+3. Give it a name and choose **Create fork**. Its data source is named after
+   its parent and the name — for example *Sales · Q3 restructure*.
+
+The fork appears in the list. If it can't be made — the data source already
+has as many forks as it may, or its editing is paused — the dialog says why.
+
+### See how far a fork is from its parent
+
+Each fork in the list shows who made it and when, and **ahead · behind**: the
+changes made on the fork since it last merged into its parent, and the
+parent's changes it hasn't taken in yet. *Update recommended* means the fork
+has fallen far behind, or so far that it reads more slowly; updating fixes it.
+
+**Open** shows the fork's own data source. At the top of its **Versioning**
+tab — and above the canvas of a View built on it — a strip says **Fork of**
+its parent (a link back), how far it is, and offers **Update from parent**
+and **Propose to parent**.
+
+### Take the parent's changes
+
+Choose **Update from parent**. Changes only the parent made simply show up in
+the fork; what the fork and its parent both changed is merged. Where they
+changed the same thing differently, the conflict dialog opens, as for
+**Get latest updates**: for each, keep **Your version** (the fork's) or take
+**Incoming** (the parent's), then choose **Merge with resolutions**. A large
+update runs in the background: the button says **Updating…** until it is done.
+
+Drafts on the fork then show as behind; bring them up to date with
+**Get latest updates**.
+
+### Offer the fork's changes back
+
+1. Choose **Propose to parent**.
+2. Give the review a title, a description and reviewers, and choose
+   **Open review**. It opens in the [Review Center](/guide/review-center).
+
+If the fork is behind its parent, **Propose to parent** says
+*Update from parent first*: its review merges only once the fork has taken its
+parent's changes. A fork has one open review at a time; proposing again opens
+that one. The fork lives on after its review merges — propose again whenever it
+has more.
+
+To remove a fork, choose **Delete** in the list; **Restore** brings it back for
+30 days. Close its open review, and delete any forks made from it, first.
+
+> **If you see "Forks are turned off for this deployment":** forks stay listed
+> and readable, and can still be deleted and restored, but nothing changes in
+> them — **Fork**, **Update from parent**, **Propose to parent**, and approving
+> or merging a fork's review, aren't offered. Ask your administrator.
+
 ## Who can do what
 
 Version-control actions follow the workspace's data-source permissions, not the
@@ -229,6 +301,9 @@ View's sharing.
 | **Dismiss** | People who can edit the data |
 | **Approve** | People who can edit the data, shown on requests that name them as reviewer — whoever opened the request too, unless the data source has someone else approve |
 | **Undo just this change**, **Restore graph to here**, **Revert this merge** | People who can publish |
+| **Fork** a data source; **Delete** and **Restore** a fork | People who can edit the workspace's data sources |
+| **Update from parent** | People who can publish |
+| **Propose to parent** | Anyone who can read the fork |
 | **Drafts and reviews** settings | **Workspace admins** |
 | Switch version control or edit mode off for everyone | Administrators, in **Administration → Features** |
 

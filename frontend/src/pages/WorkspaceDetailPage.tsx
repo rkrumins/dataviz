@@ -47,6 +47,8 @@ import { workspaceActivityScope } from '@/components/activity/activityMeta'
 import { useReasonPrompt } from '@/components/activity/useReasonPrompt'
 import { MoveDataSourceWizard, type MoveDataSourceWizardProps } from '@/features/data-source-transfer/MoveDataSourceWizard'
 import { TransferRequestsPanel } from '@/features/data-source-transfer/TransferRequestsPanel'
+import { useDataSourcesWithForks } from '@/features/versioning/hooks/useVersioning'
+import { isForkDataSourceId } from '@/features/versioning/model/forks'
 
 // ─────────────────────────────────────────────────────────────────────
 // WorkspaceDetailPage
@@ -143,23 +145,32 @@ export function WorkspaceDetailPage() {
         // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [activeSection])
 
+    // A fork's data source is not among the workspace's: its lists leave forks out. While the link
+    // or the panel names one, read the list that includes them.
+    const forkSources = useDataSourcesWithForks(
+        wsId, isForkDataSourceId(searchParams.get('ds')) || isForkDataSourceId(selectedDsId)).data
+
     // ``?ds=<id>`` deep-links straight into a data source's detail panel
     // (e.g. the Ontology page's Health tab "Full analysis" link). Applied
     // once the workspace has loaded so the id can be validated; kept in the
-    // URL while the panel is open, dropped when it closes.
+    // URL while the panel is open, dropped when it closes. A fork's opens the
+    // same way (its Open, its strip's parent link, Admin's Open source).
     useEffect(() => {
         const dsParam = searchParams.get('ds')
         if (!workspace) return
         if (dsParam && selectedDsId !== dsParam
-            && workspace.dataSources.some(ds => ds.id === dsParam)) {
+            && (workspace.dataSources.some(ds => ds.id === dsParam)
+                || !!forkSources?.some(ds => ds.id === dsParam && ds.forkOf))) {
             setSelectedDsId(dsParam)
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [workspace, searchParams])
+    }, [workspace, searchParams, forkSources])
     useEffect(() => {
         const current = searchParams.get('ds')
         const desired = selectedDsId
         if (current === desired || (!current && !desired)) return
+        // A fork's link waits for the list that includes forks, rather than being dropped as unknown.
+        if (!desired && isForkDataSourceId(current) && !forkSources) return
         const next = new URLSearchParams(searchParams)
         if (desired) next.set('ds', desired)
         else next.delete('ds')
@@ -201,8 +212,12 @@ export function WorkspaceDetailPage() {
 
     const selectedDs = useMemo(() => {
         if (!workspace || !selectedDsId) return null
-        return workspace.dataSources.find(ds => ds.id === selectedDsId) || null
-    }, [workspace, selectedDsId])
+        return workspace.dataSources.find(ds => ds.id === selectedDsId)
+            || forkSources?.find(ds => ds.id === selectedDsId && ds.forkOf) || null
+    }, [workspace, selectedDsId, forkSources])
+    // A fork's data source goes to the trash, back and away with the fork (and moves with its
+    // parent): the data-source routes refuse it, so its panel doesn't offer them.
+    const isFork = !!selectedDs?.forkOf
 
     const primaryOntologyName = useMemo(() => {
         if (!workspace) return undefined
@@ -841,16 +856,16 @@ export function WorkspaceDetailPage() {
                 readiness={selectedDsId ? readinessMap[selectedDsId] : undefined}
                 ontologies={ontologies}
                 onSaveEdit={handleEditDsSave}
-                onDelete={workspace.dataSources.length > 1 && selectedDs
+                onDelete={workspace.dataSources.length > 1 && selectedDs && !isFork
                     ? () => deletion.open(selectedDs.id, selectedDs.label || selectedDs.id)
                     : undefined}
-                onDeletePermanent={workspace.dataSources.length > 1 && selectedDs
+                onDeletePermanent={workspace.dataSources.length > 1 && selectedDs && !isFork
                     ? () => deletion.openPermanent(selectedDs.id, selectedDs.label || selectedDs.id)
                     : undefined}
                 // Moving its views is a workspace admin's call; a source with nothing
                 // built on it moves for whoever manages data sources in both places.
                 // The server decides either way, and the wizard says why when it won't.
-                onMove={selectedDs && wsId && (canManageMembers
+                onMove={selectedDs && !isFork && wsId && (canManageMembers
                     || (canManageDataSources && (viewsByDs[selectedDs.id] || []).length === 0))
                     ? () => {
                         setMoving({

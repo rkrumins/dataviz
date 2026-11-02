@@ -85,6 +85,9 @@ export interface DataSourceResponse {
     sourceMode?: 'managed' | 'federated' | null
     /** Federated only: overlay edits are pushed back to the external system. */
     writeBackEnabled?: boolean
+    /** A fork's data source: the data source and graph it was forked from. Null on every other
+     *  data source; lists leave forks out unless asked (`includeForks`). */
+    forkOf?: { dataSourceId: string; graphId: string | null } | null
     createdAt: string
     updatedAt: string
 
@@ -458,8 +461,10 @@ export const workspaceService = {
 
     // ── Data Source CRUD ──────────────────────────────────────
 
-    listDataSources(wsId: string): Promise<DataSourceResponse[]> {
-        return request<DataSourceResponse[]>(`${ADMIN_API}/${wsId}/data-sources`)
+    /** `includeForks`: forks' data sources too, which the list leaves out otherwise. */
+    listDataSources(wsId: string, opts: { includeForks?: boolean } = {}): Promise<DataSourceResponse[]> {
+        const q = opts.includeForks ? '?includeForks=true' : ''
+        return request<DataSourceResponse[]>(`${ADMIN_API}/${wsId}/data-sources${q}`)
     },
 
     async addDataSource(wsId: string, req: DataSourceCreateRequest): Promise<DataSourceResponse> {

@@ -2,17 +2,18 @@
  * DataSourceVersioningTab — the data-source-level versioning hub (a tab in
  * DataSourceDetailPanel). Shows whether version control is on, lets a manager enable
  * it, and surfaces the branch list, the graph's forks + recent commit history, and the data source's
- * drafts and reviews settings over its workspace's. Read-only overview apart from deleting and
- * restoring a fork, pausing editing and (workspace admins) those settings; the editing loop lives on
- * the canvas.
+ * drafts and reviews settings over its workspace's. Read-only overview apart from forking the graph,
+ * a fork's own actions (Update from parent, Propose to parent, the trash and back), pausing editing
+ * and (workspace admins) those settings; the editing loop lives on the canvas.
  */
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
-import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw, Pause, Play, ShieldCheck } from 'lucide-react'
+import { Link, useNavigate } from 'react-router-dom'
+import { GitBranch, GitCommitHorizontal, History, Loader2, Sparkles, GitMerge, User, GitPullRequestArrow, ChevronRight, RefreshCw, GitFork, Trash2, RotateCcw, Pause, Play, ShieldCheck, ArrowUpRight } from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/Button'
 import { DateTime } from '@/components/ui/DateTime'
 import { usePermission } from '@/store/auth'
+import { useFeature } from '@/store/features'
 import { useDataSourceProviderMap } from '@/hooks/useDataSourceProviderMap'
 import {
   useBranches, useCommitLog, useDataSourceDraftsPolicy, useDataSourcePullRequests, useForks, useResolveGraph,
@@ -25,7 +26,12 @@ import { PrDetailDrawer } from '@/features/reviews/components/PrDetailDrawer'
 import { BootstrapProgress } from './BootstrapProgress'
 import { DraftsPolicyFields } from './DraftsPolicyFields'
 import { EnableVersioningFlow } from './EnableVersioningFlow'
+import { ForkDialog } from './ForkDialog'
+import { ForkDistance, ForksOffNote, UpdateRecommendedHint } from './ForkStatusBits'
+import { ForkStrip } from './ForkStrip'
 import { ProjectionHealthCard } from './ProjectionHealthCard'
+import { ProposeToParentButton } from './ProposeToParentButton'
+import { UpdateFromParentButton } from './UpdateFromParentButton'
 import { kindMeta } from '../model/commitKind'
 import { ownerName } from '../model/branchVocab'
 
@@ -59,6 +65,9 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
   const canManage = usePermission('workspace:datasource:manage', wsId)
   const canPublish = usePermission('workspace:datasource:publish', wsId)
   const isAdmin = usePermission('workspace:admin', wsId)
+  // Off, a fork is read-only: it lists, reads, and goes to the trash and back; nothing is forked.
+  const forksOn = useFeature('forksEnabled')
+  const [forking, setForking] = useState(false)
   const resolve = useResolveGraph(wsId, dataSourceId)
   const graphId = resolve.data?.graphId ?? null
   const frozen = resolve.data?.lifecycleState === 'frozen'
@@ -184,6 +193,9 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
 
   return (
     <div className="space-y-6">
+      {/* A fork's own tab: what it was forked from, how far it is from it, and its two actions */}
+      <ForkStrip wsId={wsId} dataSourceId={dataSourceId} variant="tab" />
+
       {/* Status header */}
       <div className={cn('flex items-center gap-3 rounded-xl border px-4 py-3',
         frozen ? 'border-amber-500/30 bg-amber-500/[0.06]' : 'border-emerald-500/20 bg-emerald-500/5')}>
@@ -243,20 +255,35 @@ export function DataSourceVersioningTab({ wsId, dataSourceId, itemCount }: {
         </div>
       </section>
 
-      {/* Forks — only when there are any; a failed read (or an older server's 404) hides it */}
-      {forks.length > 0 && (
+      {/* Forks — when there are any, or someone here can fork the graph; a failed read (or an older
+          server's 404) lists none */}
+      {(forks.length > 0 || (canManage && forksOn)) && (
         <section>
-          <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider mb-2">
-            <GitFork className="w-3.5 h-3.5" /> Forks
-          </h4>
-          <div className="space-y-1.5">
-            {forks.map((f) => (
-              <ForkRow key={f.graphId} wsId={wsId} fork={f} canManage={canManage}
-                onChanged={() => { void forksQ.refetch() }} />
-            ))}
+          <div className="flex items-center justify-between gap-2 mb-2">
+            <h4 className="flex items-center gap-1.5 text-[11px] font-semibold text-ink-muted uppercase tracking-wider">
+              <GitFork className="w-3.5 h-3.5" /> Forks
+            </h4>
+            {canManage && forksOn && graphId && (
+              <Button size="sm" variant="secondary" leftIcon={GitFork} onClick={() => setForking(true)}>Fork</Button>
+            )}
           </div>
+          {!forksOn && <ForksOffNote className="mb-2 px-1" />}
+          {forks.length === 0 ? (
+            <p className="text-xs text-ink-muted px-1 py-2">
+              No forks yet. A fork is a copy of this graph to work in; it proposes its changes back as a review.
+            </p>
+          ) : (
+            <div className="space-y-1.5">
+              {forks.map((f) => (
+                <ForkRow key={f.graphId} wsId={wsId} fork={f} parentDataSourceId={dataSourceId}
+                  canManage={canManage} canPublish={canPublish} forksOn={forksOn}
+                  onChanged={() => { void forksQ.refetch() }} />
+              ))}
+            </div>
+          )}
         </section>
       )}
+      {graphId && <ForkDialog wsId={wsId} graphId={graphId} open={forking} onClose={() => setForking(false)} />}
 
       {/* Merge requests */}
       <section>
@@ -382,13 +409,20 @@ function BranchRow({ branch }: { branch: Branch }) {
 }
 
 /** A live fork, or one in the trash until its undo window ends. Managers delete a live fork and
- *  restore a trashed one; once its purge is queued it can no longer come back. */
-function ForkRow({ wsId, fork, canManage, onChanged }: {
+ *  restore a trashed one; once its purge is queued it can no longer come back. A live one opens its
+ *  own data source, takes this graph's changes (publishers) and proposes its own back — the last two
+ *  only while forks are on. */
+function ForkRow({ wsId, fork, parentDataSourceId, canManage, canPublish, forksOn, onChanged }: {
   wsId: string
   fork: ForkSummary
+  /** The data source it was forked from: this tab's. */
+  parentDataSourceId: string
   canManage: boolean
+  canPublish: boolean
+  forksOn: boolean
   onChanged: () => void
 }) {
+  const navigate = useNavigate()
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const trashed = !!fork.deletedAt
@@ -411,14 +445,17 @@ function ForkRow({ wsId, fork, canManage, onChanged }: {
   }
 
   return (
-    <div className="rounded-lg border border-glass-border bg-canvas-elevated/40 px-3 py-2">
+    <div className="rounded-lg border border-glass-border bg-canvas-elevated/40 px-3 py-2" data-fork-row>
       <div className="flex items-center gap-2.5">
         <GitFork className={cn('w-4 h-4 shrink-0', trashed ? 'text-ink-muted' : 'text-indigo-500')} />
         <div className="flex-1 min-w-0">
-          <p className={cn('text-sm font-mono truncate', trashed ? 'text-ink-muted' : 'text-ink')}>{fork.graphId}</p>
+          {/* Its data source's label; a fork that has none yet (the reaper gives it one) by its graph. */}
+          <p className={cn('text-sm truncate', !fork.label && 'font-mono', trashed ? 'text-ink-muted' : 'text-ink')}>
+            {fork.label || fork.graphId}
+          </p>
           <p className="text-[11px] text-ink-muted truncate">
             {!trashed
-              ? `by ${actorLabel(fork.createdBy, fork.userNames)} · from #${fork.forkBaseCommitSeq ?? 0} · main #${fork.mainHeadCommitSeq}`
+              ? <>by {actorLabel(fork.createdBy, fork.userNames)} · <DateTime at={fork.createdAt} />{fork.ahead != null && fork.behind != null && <> · <ForkDistance fork={fork} /></>}</>
               : fork.purging
               ? 'Being deleted'
               : <>Deleted by {actorLabel(fork.deletedBy, fork.userNames)} · restorable until <DateTime at={fork.purgeAfter} variant="calendar" /></>}
@@ -434,6 +471,22 @@ function ForkRow({ wsId, fork, canManage, onChanged }: {
           </Button>
         )}
       </div>
+      {!trashed && forksOn && <UpdateRecommendedHint fork={fork} className="mt-1.5" />}
+      {!trashed && (
+        <div className="mt-2 flex flex-wrap items-center gap-1.5">
+          {fork.dataSourceId && (
+            <Button size="sm" variant="ghost" leftIcon={ArrowUpRight}
+              onClick={() => navigate(`/workspaces/${wsId}?ds=${encodeURIComponent(fork.dataSourceId!)}&dstab=versioning`)}>
+              Open
+            </Button>
+          )}
+          {forksOn && canPublish && <UpdateFromParentButton wsId={wsId} forkGraphId={fork.graphId} />}
+          {forksOn && (
+            <ProposeToParentButton wsId={wsId} forkGraphId={fork.graphId} parentDataSourceId={parentDataSourceId}
+              behind={fork.behind ?? 0} />
+          )}
+        </div>
+      )}
       {error && <p className="mt-1.5 text-[11px] text-red-600 dark:text-red-400" role="alert">{error}</p>}
     </div>
   )

@@ -178,6 +178,12 @@ describe('fail-open seeds', () => {
     expect(DEFAULT_FEATURES.placementContractEnabled).toBe(false)
   })
 
+  it('seeds forks OFF, as the server reads an unreadable value', () => {
+    // Forks are opt-in: offering Fork or Update from parent before the served value lands would
+    // only earn a 403 on a deployment that never turned them on.
+    expect(DEFAULT_FEATURES.forksEnabled).toBe(false)
+  })
+
   it('seeds allowedViewModes as a list, not a boolean', () => {
     // It is a set of layouts, and a `useFeature()` boolean read of it would be meaningless.
     expect(DEFAULT_FEATURES.allowedViewModes).toEqual(

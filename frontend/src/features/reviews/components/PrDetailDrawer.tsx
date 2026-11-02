@@ -4,6 +4,11 @@
  * Approve / Merge / Close actions. Merge is conflict-aware: a conflict opens the
  * ConflictResolver, whose resolutions feed straight back into a re-merge.
  *
+ * A fork's review merges into the fork's parent: only up to date with it (a fork behind it is
+ * offered Update from parent, not a draft's Pull latest), by a job when it is large — `merging`
+ * until the job ends, which the drawer shows in progress — and, merged, the drawer stays on it:
+ * there is no view to go back to. While forks are off it can't be approved or merged.
+ *
  * Mounted only while a PR is selected (fresh queries per prId).
  */
 import { useEffect, useMemo, useRef, useState } from 'react'
@@ -20,7 +25,7 @@ import { Backdrop } from '@/components/ui/Backdrop'
 import { Badge } from '@/components/ui/Badge'
 import { timeAgo } from '@/lib/timeAgo'
 import {
-  HeadMovedError, MergeConflictError, NotUpToDateError,
+  ForkNotUpToDateError, HeadMovedError, MergeConflictError, NotUpToDateError,
   type IncomingChanges, type ResolutionMap,
 } from '@/services/versioningApiService'
 import {
@@ -34,6 +39,8 @@ import { ChangesPanel, ChangeCountChips } from '../../versioning/components/Chan
 import { CommitRow } from '../../versioning/components/CommitRow'
 import { RevertDialog } from '../../versioning/components/RollbackDialogs'
 import { IncomingChangesSheet } from '../../versioning/components/IncomingChangesSheet'
+import { ForksOffNote } from '../../versioning/components/ForkStatusBits'
+import { UpdateFromParentButton } from '../../versioning/components/UpdateFromParentButton'
 import { ownerName } from '../../versioning/model/branchVocab'
 import { isTerminalPr } from '../../versioning/model/prStatus'
 import { usePermission, useAuthStore } from '@/store/auth'
@@ -153,6 +160,14 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   // like any other main revision — the dialog owns the confirm + conflict UX.
   const versioningEnabled = useFeature('versioningEnabled')
   const [reverting, setReverting] = useState(false)
+  // A fork's review merges into its parent, the review's target graph (a draft's, into its own).
+  const forkReview = !!pr && !isDraftMr(pr)
+  const forksOn = useFeature('forksEnabled')
+  const forksOff = forkReview && !forksOn
+  // Merged by a job: nothing changes it until the job lands it or hands it back.
+  const merging = pr?.status === 'merging'
+  /** A fork behind its parent, as its merge said: how far (it merges only up to date). */
+  const [forkBehind, setForkBehind] = useState<number | null>(null)
 
   const terminal = isTerminalPr(pr?.status)
   // Who may approve and merge is the server's word (`viewerCan`): whoever opened a review approves
@@ -166,7 +181,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
   // Approve is asked of the requested reviewers. An approval gone stale is not in approvedBy, so
   // its reviewer is offered Approve again.
   const isRequested = !!user && (pr?.reviewers ?? []).includes(user.id)
-  const showApprove = canManage && !terminal && !alreadyApproved && isRequested
+  const showApprove = canManage && !terminal && !alreadyApproved && isRequested && !forksOff
     && (viewerCan ? viewerCan.approve : !isAuthor && !isOwner)
   const canMerge = viewerCan ? viewerCan.merge : canPublish
   const mergeBlockedWhy = MERGE_REFUSALS[viewerCan?.mergeReason ?? (canPublish ? '' : 'publish_required')]
@@ -181,15 +196,20 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
     if (!pr || unsaved > 0) return
     try {
       const res = await merge.mutateAsync({
-        prId, graphId: pr.graphId, message: `Merge: ${derivePrTitle(pr)}`, resolutions,
+        prId, graphId: pr.targetGraphId, message: `Merge: ${derivePrTitle(pr)}`, resolutions,
       })
       setConflicts(null)
       setResolverError(null)
+      setForkBehind(null)
       // The receipt is the confirmation, and it survives the navigation below — a notification would not.
+      // It is the graph's the merge landed in: a fork's parent, for a fork's review.
       setReceipt({
-        commitId: res.commitId, graphId: pr.graphId,
+        commitId: res.commitId, graphId: pr.targetGraphId,
         counts: changeSet?.counts ?? { added: 0, modified: 0, removed: 0 }, via: 'review',
       })
+      // A fork's review has no view to go back to, and its fork lives on: the drawer stays, and
+      // reads as merged once the review is read again.
+      if (forkReview) return
       // Land on the freshly-merged main; read-your-writes serves main even before the projection
       // catches up. The source branch is now `merged`, so useActiveBranchGuard would evict anyone
       // sitting on it anyway — this just gets there first for the person who pressed the button.
@@ -202,6 +222,12 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
         navigate(`/views/${pr.originatingViewId}`)
       }
     } catch (e) {
+      // A fork's merge that ran as a job hands the review back when it is refused: read it again.
+      if (forkReview) void prQ.refetch()
+      if (e instanceof ForkNotUpToDateError) {
+        setForkBehind(e.behind ?? 0)
+        return
+      }
       if (e instanceof NotUpToDateError) {
         setNeedsPull(true)
         notify('error', 'This draft is out of date — pull the latest changes before merging.')
@@ -500,6 +526,28 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           </div>
         )}
 
+        {pr && merging && (
+          <div role="status" className="mx-5 mb-1 flex items-start gap-2 px-3 py-2 rounded-lg bg-violet-500/10 border border-violet-500/20 text-violet-600 dark:text-violet-400 text-xs">
+            <Loader2 className="w-3.5 h-3.5 mt-0.5 shrink-0 animate-spin" />
+            <span>Merging in the background: a review this large merges as a job. Nothing can change it meanwhile; this shows how it ends once it has.</span>
+          </div>
+        )}
+
+        {pr && !terminal && forkBehind !== null && (
+          <div className="mx-5 mb-1 flex flex-wrap items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 text-xs">
+            <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+            <span className="flex-1 min-w-0">
+              This fork is behind its parent{forkBehind > 0 ? ` by ${forkBehind.toLocaleString()} change${forkBehind === 1 ? '' : 's'}` : ''}.
+              Update it from its parent first: it merges only up to date.
+            </span>
+            {forksOn && canPublish && (
+              <UpdateFromParentButton wsId={wsId} forkGraphId={pr.graphId} onUpdated={() => setForkBehind(null)} />
+            )}
+          </div>
+        )}
+
+        {pr && !terminal && forksOff && <ForksOffNote className="mx-5 mb-1 px-1" />}
+
         {pr && !terminal && unsaved > 0 && (
           <div className="mx-5 mb-1 flex items-start gap-2 px-3 py-2 rounded-lg bg-amber-500/10 border border-amber-500/20 text-amber-600 text-xs">
             <AlertTriangle className="w-3.5 h-3.5 mt-0.5 shrink-0" />
@@ -507,8 +555,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
           </div>
         )}
 
-        {/* Action bar */}
-        {pr && !terminal && canManage && !dismissing && (
+        {/* Action bar — none while a job merges it, which nothing may change meanwhile */}
+        {pr && !terminal && canManage && !dismissing && !merging && (
           <div className="px-5 py-3.5 border-t border-glass-border/60 flex items-center gap-2">
             {showApprove && (
               <button
@@ -537,7 +585,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
                 {pullLatest.isPending ? <Loader2 className="w-4 h-4 animate-spin" /> : <ArrowDownToLine className="w-4 h-4" />}
                 Pull latest
               </button>
-            ) : (
+            ) : !forksOff && (
               <button
                 onClick={() => runMerge()}
                 disabled={busy || unsaved > 0 || !canMerge}
@@ -560,7 +608,7 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
         )}
 
         {/* Dismiss confirmation — plain-language, so it's clear this rejects the changes. */}
-        {pr && !terminal && canManage && dismissing && (
+        {pr && !terminal && canManage && dismissing && !merging && (
           <div className="px-5 py-4 border-t border-rose-500/25 bg-rose-500/[0.04]">
             <div className="flex items-start gap-2.5 mb-3">
               <XCircle className="w-5 h-5 text-rose-500 mt-0.5 shrink-0" />
@@ -619,7 +667,8 @@ export function PrDetailDrawer({ wsId, prId, onClose }: { wsId: string; prId: st
               stats: {},
             }}
             wsId={wsId}
-            graphId={pr.graphId}
+            // The merge commit is on the graph the review merged into: a fork's parent.
+            graphId={pr.targetGraphId}
             userNames={pr.userNames}
             onClose={() => setReverting(false)}
           />
