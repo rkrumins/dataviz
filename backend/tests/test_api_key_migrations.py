@@ -109,6 +109,8 @@ _ON_LIVE_TABLES = {
     "20261030_1300_gv_ps_residency.py": ("upgrade", "downgrade"),
     # platform_settings again: the residency policy.
     "20261030_1400_residency_policy.py": ("upgrade", "downgrade"),
+    # feature_definitions, which every process's flag cache reads.
+    "20261102_1000_feature_impact_on.py": ("upgrade", "downgrade"),
 }
 
 

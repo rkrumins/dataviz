@@ -19,7 +19,7 @@
  * the server does without a CI guard failing.
  */
 import {
-    ArrowRight, Ban, Check, EyeOff, FlaskConical, Lock, ShieldAlert, ShieldCheck, Sparkles,
+    ArrowRight, Ban, BookOpen, Check, EyeOff, FlaskConical, Lock, ShieldAlert, ShieldCheck, Sparkles,
     Sunset, ZapOff,
 } from 'lucide-react'
 import { cn } from '@/lib/utils'
@@ -72,6 +72,17 @@ export function FeatureSpec({
                         <p className="mt-2 text-sm text-ink-secondary leading-relaxed max-w-2xl">
                             {feature.description}
                         </p>
+                        {feature.helpUrl && (
+                            <a
+                                href={feature.helpUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-accent-lineage hover:underline"
+                            >
+                                <BookOpen className="w-3.5 h-3.5" />
+                                Read more
+                            </a>
+                        )}
                     </div>
                 </div>
 
@@ -223,7 +234,7 @@ export function FeatureSpec({
                             heading="When it's on"
                             tone="emerald"
                             icon={Sparkles}
-                            lead="Available to everyone who has permission to use it."
+                            lead={feature.impactWhenOn ?? 'Available to everyone who has permission to use it.'}
                             items={feature.uiSurfaces ?? []}
                             itemsLabel="Your users get"
                         />

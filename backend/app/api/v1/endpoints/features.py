@@ -385,7 +385,7 @@ async def patch_definition(
     """
     Update a feature definition (metadata). Partial update: only provided fields are changed.
     Body can include: name, description, category, type, default, options, helpUrl,
-    adminHint, impactWhenOff, sortOrder, deprecated.
+    adminHint, impactWhenOff, impactWhenOn, sortOrder, deprecated.
 
     NOT "implemented" — that is a fact about the code, derived from config/feature_wiring.py.
     """
@@ -399,13 +399,15 @@ async def patch_definition(
         "helpUrl": "help_url",
         "adminHint": "admin_hint",
         "impactWhenOff": "impact_when_off",
+        "impactWhenOn": "impact_when_on",
         "sortOrder": "sort_order",
         "deprecated": "deprecated",
     }
     fields = {}
     for api_key, col in mapping.items():
         v = body.get(api_key)
-        if v is None and api_key in ("helpUrl", "adminHint", "impactWhenOff", "options"):
+        if v is None and api_key in ("helpUrl", "adminHint", "impactWhenOff", "impactWhenOn",
+                                     "options"):
             fields[col] = None
             continue
         if v is None:

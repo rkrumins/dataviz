@@ -372,6 +372,9 @@ class FeatureDefinitionORM(Base):
     # BEFORE flipping a switch that affects everybody. Seeded from app/config/features_seed.py
     # and editable from the admin UI, like the other prose columns.
     impact_when_off = Column(Text, nullable=True)
+    # "What does turning it on mean?" — for a switch whose ON is the consequential direction. Unset,
+    # the switch turns on at once; set, the page asks first. Seeded and editable like the above.
+    impact_when_on = Column(Text, nullable=True)
     sort_order = Column(Integer, nullable=False, default=0)
     deprecated = Column(Boolean, nullable=False, default=False)
     # DERIVED FROM CODE — reconciled from app/config/feature_wiring.py on every startup, and NOT

@@ -52,6 +52,7 @@ def main() -> None:
             "helpUrl": d.get("help_url"),
             "adminHint": d.get("admin_hint"),
             "impactWhenOff": d.get("impact_when_off"),
+            "impactWhenOn": d.get("impact_when_on"),
             "sortOrder": d["sort_order"],
             "deprecated": d["deprecated"],
             # The facts, from the same function the live API uses. This used to be

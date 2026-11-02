@@ -74,7 +74,7 @@ __all__ = [
 #: a UI, this needs provenance (a `content_edited_at`, set on PATCH and respected here) — until
 #: then, tracking provenance for an editor that does not exist is machinery for its own sake.
 _CODE_OWNED = (
-    "name", "description", "admin_hint", "impact_when_off", "help_url",
+    "name", "description", "admin_hint", "impact_when_off", "impact_when_on", "help_url",
     "category_id", "type", "options", "sort_order",
 )
 
