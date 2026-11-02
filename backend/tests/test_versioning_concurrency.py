@@ -246,7 +246,7 @@ def test_fork_merge_missing_base_raises():
     s = _FakeSession({(GraphORM, "parent1"): _Obj(id="parent1")})
 
     with pytest.raises(ValueError, match="fork_base_commit_seq"):
-        asyncio.run(svc._compute_fork_merge(s, fork, {}))
+        asyncio.run(svc._compute_fork_merge(s, fork))
 
 
 @pytest.mark.parametrize("job_status,expected", [

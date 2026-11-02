@@ -18,7 +18,7 @@ import { DataSourceReviewFeed, type ReviewItem } from './DataSourceReviewFeed'
 import { PrListRow } from './PrListRow'
 import { PrDetailDrawer } from './PrDetailDrawer'
 
-const OPEN_STATUSES = new Set(['open', 'mergeable', 'approved', 'conflicts'])
+const OPEN_STATUSES = new Set(['open', 'mergeable', 'approved', 'conflicts', 'merging'])
 const READY_STATUSES = new Set(['mergeable', 'approved'])
 const PAGE = 20
 type Scope = 'open' | 'mine' | 'all'
@@ -26,7 +26,7 @@ type Scope = 'open' | 'mine' | 'all'
 // Human labels for the status filter (mirrors PrStatusBadge's lifecycle states).
 const STATUS_LABELS: Record<string, string> = {
   open: 'Open', mergeable: 'Ready to merge', approved: 'Approved',
-  conflicts: 'Conflicts', merged: 'Merged', closed: 'Dismissed / closed',
+  conflicts: 'Conflicts', merging: 'Merging', merged: 'Merged', closed: 'Dismissed / closed',
 }
 
 // ── Compact filter dropdown (button + popover) ───────────────────────────────

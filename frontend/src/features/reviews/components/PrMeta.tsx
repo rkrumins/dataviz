@@ -1,5 +1,5 @@
 /**
- * Shared PR presentation: a status badge (the 6 lifecycle states), an approval pill
+ * Shared PR presentation: a status badge (the 7 lifecycle states), an approval pill
  * (x/y reviewers), and the small helpers for deriving a human title + the PR "kind"
  * (draft→main MR vs fork→parent PR) that the backend decides server-side but the UI
  * labels client-side.
@@ -16,6 +16,8 @@ const STATUS_META: Record<string, StatusMeta> = {
   mergeable: { label: 'Ready to merge', cls: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20', Icon: GitMerge },
   approved: { label: 'Approved', cls: 'bg-emerald-500/10 text-emerald-600 border-emerald-500/20', Icon: CheckCircle2 },
   conflicts: { label: 'Conflicts', cls: 'bg-amber-500/10 text-amber-600 border-amber-500/20', Icon: AlertTriangle },
+  // A fork's review a job is merging: in progress until the job lands it or hands it back.
+  merging: { label: 'Merging', cls: 'bg-violet-500/10 text-violet-500 border-violet-500/20', Icon: GitMerge },
   merged: { label: 'Merged', cls: 'bg-violet-500/10 text-violet-500 border-violet-500/20', Icon: GitMerge },
   closed: { label: 'Closed', cls: 'bg-ink/5 text-ink-muted border-glass-border', Icon: XCircle },
 }

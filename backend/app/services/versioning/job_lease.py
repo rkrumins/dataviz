@@ -1,7 +1,8 @@
 """One job contract for every worker lane: claim, lease, fence, heartbeat, release.
 
-``graphver.jobs`` is the durable queue for transfer jobs (import, export, publish, package
-inspect), bootstraps (graph and package seeds) and purges. This module is the ONE implementation
+``graphver.jobs`` is the durable queue for transfer jobs (import, export, publish, a fork's update
+from its parent and its review's merge, package inspect), bootstraps (graph and package seeds) and
+purges. This module is the ONE implementation
 of what used to be three slightly different copies (bootstrap_worker, purge_worker,
 import_export/runner):
 
@@ -67,7 +68,7 @@ QUEUED = "queued"
 AWAITING_DECISION = "awaiting_decision"
 
 # The transfer lane's general slots, and its dedicated inspect slot.
-TRANSFER_TYPES: Tuple[str, ...] = ("ingest", "export", "publish")
+TRANSFER_TYPES: Tuple[str, ...] = ("ingest", "export", "publish", "fork_update", "fork_merge")
 INSPECT_TYPES: Tuple[str, ...] = ("package_inspect",)
 BOOTSTRAP_TYPES: Tuple[str, ...] = ("bootstrap",)
 PURGE_TYPES: Tuple[str, ...] = ("purge",)

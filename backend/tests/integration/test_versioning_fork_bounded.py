@@ -11,9 +11,10 @@ Every other read of a fork's ``main`` went through the parent's whole state too 
 on the fork, its preview, pull, publish and diffs, and a revert or restore of the fork's ``main``;
 and every review of the fork: opening it, its preview, diff and summary, and the merge composed
 three whole states, the parent's under its lock. A review now merges what the fork changed since
-the last one, with the parent's edges on what it deletes and the ends of what it draws. Those paths
-run here with the whole-state reads refused, and must still give the right answer — on a fork, and
-on a fork of a fork, which reads and merges through both.
+the last one, with the parent's edges on what it deletes and the ends of what it draws, once the
+fork has taken its parent's changes in (Update from parent). Those paths run here with the
+whole-state reads refused, and must still give the right answer — on a fork, and on a fork of a
+fork, which reads and merges through both.
 """
 import asyncio
 import contextlib
@@ -160,13 +161,15 @@ async def _a_fork_review_reads_only_what_the_fork_changed(svc):
         await _publish(svc, fg, "bob", [_upd("N1", "one"), _node("X"), _edge("EX", "X", "N2"),
                                         _del("N50")], "fork work")
         # The parent moves on: an edge onto N50, which the fork deleted, and N3 deleted, which the
-        # fork then draws an edge to.
+        # fork then draws an edge to (it reads the parent from before).
         await _publish(svc, pg, "alice", [_upd("N100", "hundred"), _edge("EP", "N51", "N50"),
                                           _del("N3")], "parent work")
         await _publish(svc, fg, "bob", [_edge("EY", "X", "N3")], "fork edge")
+        # The fork takes the parent's changes in before it merges: EP goes with N50, EY with N3.
+        assert (await svc.update_fork_from_parent(fork_graph_id=fg, actor="bob"))["wrote"] == 2
 
         pr = await svc.open_pr(source_graph_id=fg, actor="bob")
-        # The merge's cascade, seen in its preview: EP goes with N50, EY with N3.
+        # The review proposes EP's going with N50, and nothing of EY, which never reached the parent.
         pv = await svc.preview_pr(pr_id=pr)
         assert pv["clean"] and pv["changes"] == {"create": 2, "update": 1, "delete": 4}, pv
         assert (await svc.preview_mr(mr_id=pr))["changes"] == pv["changes"]

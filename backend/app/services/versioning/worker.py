@@ -294,7 +294,8 @@ class ProjectionWorker:
 
     async def _job_reap_loop(self) -> None:
         """Fail the transfer jobs nothing will ever run (see ``runner.JobReaper``), then hand back
-        the drafts held ``publishing`` by a publish job that ended without landing."""
+        the drafts held ``publishing`` by a publish job that ended without landing, and the fork
+        reviews held ``merging`` by such a merge job."""
         while not self._stop.is_set():
             try:
                 await self._job_reaper.run_once()
@@ -305,6 +306,10 @@ class ProjectionWorker:
                 released = await GraphVersioningService().release_publishing()
                 if released:
                     logger.info("reopened %d draft(s) whose publish job ended", len(released))
+                handed_back = await GraphVersioningService().release_merging()
+                if handed_back:
+                    logger.info("handed back %d fork review(s) whose merge job ended",
+                                len(handed_back))
             except Exception:
                 logger.exception("publishing release error")
             try:

@@ -17,6 +17,7 @@ is resolved via the small, mutable :class:`EntityHeadORM` pointer table (plan
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import (
@@ -225,6 +226,11 @@ class BranchMemberORM(VersioningBase):
     )
 
 
+# Every status a review is stored with (``ck_mr_status``): ``merging`` while a job merges a fork's
+# review, handed back when the job ends without landing it. WIDEN-ONLY, as the commit kinds.
+MR_STATUSES = ("open", "conflicts", "mergeable", "approved", "merged", "closed", "merging")
+
+
 class MergeRequestORM(VersioningBase):
     """A PR: draft→main or fork→base. Squash to main is gated by maintainer +
     approval + checks (plan §12.5, §16.5 #6, §17 #5)."""
@@ -277,7 +283,9 @@ class MergeRequestORM(VersioningBase):
             postgresql_where=text("status NOT IN ('merged','closed')"),
         ),
         CheckConstraint(
-            "status IN ('open','conflicts','mergeable','approved','merged','closed')",
+            # Existing DBs get 'merging' via migration 20261101_1000_gv_fork_sync and, for a separate
+            # GRAPHVER_DB_URL alembic never reaches, _ensure_schema_upgrades.
+            "status IN (" + ",".join(f"'{v}'" for v in MR_STATUSES) + ")",
             name="ck_mr_status",
         ),
     )
@@ -381,7 +389,7 @@ class ProjectionStateORM(VersioningBase):
 # An import that holds its draft (``uq_jobs_ingest_active``).
 _INGEST_ACTIVE = "job_type = 'ingest' AND status IN ('pending','running')"
 JOB_TYPES = ("ingest", "projection", "rebuild", "export", "bootstrap", "publish", "purge",
-             "package_inspect")
+             "package_inspect", "fork_update", "fork_merge")
 
 
 class JobORM(VersioningBase):
@@ -466,9 +474,11 @@ class JobORM(VersioningBase):
             # 'ingest': that is the file-import worker's type, and a worker claims by
             # job_type — sharing one would have the two run each other's jobs. 'publish' = a
             # large draft's publish on the transfer runner; 'purge' = reclaiming a deleted graph
-            # (purge_worker); 'package_inspect' = checking an uploaded view package. Existing DBs
-            # are widened by migration (20261008_1000_jobs_check_widen) and, for a separate
-            # GRAPHVER_DB_URL alembic never reaches, by _ensure_schema_upgrades.
+            # (purge_worker); 'package_inspect' = checking an uploaded view package; 'fork_update'
+            # and 'fork_merge' = a large Update from parent and a large fork review's merge, on the
+            # transfer runner. Existing DBs are widened by migration (20261008_1000_jobs_check_widen,
+            # 20261101_1000_gv_fork_sync) and, for a separate GRAPHVER_DB_URL alembic never reaches,
+            # by _ensure_schema_upgrades.
             "job_type IN (" + ",".join(f"'{t}'" for t in JOB_TYPES) + ")",
             name="ck_jobs_type",
         ),
@@ -538,6 +548,12 @@ class BootstrapNodeORM(VersioningBase):
 # --------------------------------------------------------------------------- #
 # Versioned data (high cardinality, append-only, HASH-partitioned on graph_id) #
 # --------------------------------------------------------------------------- #
+# Every kind of commit the code writes (``ck_commits_kind``): ``sync_parent`` is a fork's Update
+# from parent.
+COMMIT_KINDS = ("genesis", "edit", "checkpoint", "squash_publish", "import", "sync", "revert",
+                "restore", "pull", "sync_parent")
+
+
 class CommitORM(VersioningBase):
     """Append-only commit log — linear per branch (squash-only on main)."""
 
@@ -579,12 +595,12 @@ class CommitORM(VersioningBase):
             postgresql_where=text("idempotency_key IS NOT NULL"),
         ),
         CheckConstraint(
-            # Existing DBs get 'restore' via migration 20260713_1200_restore_kind and 'pull' via
-            # 20260714_1600_pull_commit_kind (create_all never alters live tables); keep the sets in
-            # sync. WIDEN-ONLY: never drop a value from this list — a kind already written to a live
-            # table would make the constraint unaddable and wedge alembic.
-            "kind IN ('genesis','edit','checkpoint','squash_publish','import',"
-            "'sync','revert','restore','pull')",
+            # Existing DBs get 'restore' via migration 20260713_1200_restore_kind, 'pull' via
+            # 20260714_1600_pull_commit_kind and 'sync_parent' via 20261101_1000_gv_fork_sync
+            # (create_all never alters live tables); keep the sets in sync. WIDEN-ONLY: never drop a
+            # value from COMMIT_KINDS — a kind already written to a live table would make the
+            # constraint unaddable and wedge alembic.
+            "kind IN (" + ",".join(f"'{k}'" for k in COMMIT_KINDS) + ")",
             name="ck_commits_kind",
         ),
     )
@@ -841,6 +857,9 @@ def _ensure_schema_upgrades(conn) -> None:
     # 20261030_1300_gv_ps_residency.
     _bounded_step(conn, "the residency columns were not added",
                   lambda: ensure_ps_residency(conn), required=True)
+    # 20261101_1000_gv_fork_sync (its job types are the first step's).
+    _bounded_step(conn, "sync_parent and merging were not allowed",
+                  lambda: ensure_fork_sync_checks(conn), required=True)
 
 
 def _bounded_step(conn, failure: str, step, *, required: bool = False, tries: int = 1) -> None:
@@ -1086,6 +1105,33 @@ def ensure_ps_residency(conn) -> None:
         conn.execute(text(
             f"ALTER TABLE {ps} ADD CONSTRAINT ck_proj_status CHECK (status IN ('idle','projecting',"
             "'rebuilding','evicted','reseeding','rehydrating','waiting_capacity'))"))
+
+
+def ensure_fork_sync_checks(conn) -> None:
+    """Let ``ck_commits_kind`` allow ``sync_parent`` (a fork's Update from parent) and
+    ``ck_mr_status`` allow ``merging`` (a fork's review a job is merging). WIDEN-ONLY: each check
+    becomes what this code writes ∪ what it allows now. One is rebuilt only while it does not allow
+    its value yet: rebuilding takes the table's ACCESS EXCLUSIVE lock and checks every row again,
+    and every worker start runs this. A no-op without the tables. ``conn`` is a synchronous
+    connection (alembic's bind, or ``run_sync``'s)."""
+    inspector = sa_inspect(conn)
+    for table, name, column, values, new in (
+            ("commits", "ck_commits_kind", "kind", COMMIT_KINDS, "sync_parent"),
+            ("merge_requests", "ck_mr_status", "status", MR_STATUSES, "merging")):
+        if not inspector.has_table(table, schema=_SCHEMA):
+            continue                      # create_schema_and_partitions builds it from the models
+        qualified = f'"{_SCHEMA}"."{table}"'
+        current = conn.execute(text(
+            "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+            "WHERE conname = :name AND conrelid = CAST(:t AS regclass)"),
+            {"name": name, "t": qualified}).scalar()
+        if current is not None and f"'{new}'" in current:
+            continue
+        allowed = set(values) | set(re.findall(r"'([^']*)'", current or ""))
+        conn.execute(text(f"ALTER TABLE {qualified} DROP CONSTRAINT IF EXISTS {name}"))
+        conn.execute(text(
+            f"ALTER TABLE {qualified} ADD CONSTRAINT {name} CHECK ({column} IN ("
+            + ", ".join(f"'{v}'" for v in sorted(allowed)) + "))"))
 
 
 def ensure_graph_lifecycle_columns(conn) -> None:

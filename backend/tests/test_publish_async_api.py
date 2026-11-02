@@ -255,3 +255,43 @@ async def test_a_queued_publish_on_a_deleted_graph_is_refused(monkeypatch):
                                       "workspaceId": "ws1", "message": "m"})
     assert out["error"]["status"] == 404
     assert published == []
+
+
+async def test_a_refused_update_job_keeps_bounded_conflicts(monkeypatch, forks_on):
+    """An Update from parent job runs above 20,000 changes, and each conflict it finds carries the
+    fork's own value of its entity: kept whole, they fill the job and every poll of it. The job
+    keeps a hundred conflicts, the seeds of their entities, and the count."""
+    from contextlib import asynccontextmanager
+
+    from backend.app.api.v1.endpoints import versioning as ep
+    from backend.app.services.versioning.errors import ForkUpdateConflicts
+
+    conflicts = [{"entity_id": f"e{i:03d}", "path": ["displayName"], "base": "b", "ours": "o",
+                  "theirs": "t", "kind": "field"} for i in range(250)]
+    seeds = {c["entity_id"]: {"urn": c["entity_id"], "displayName": "o"} for c in conflicts}
+
+    class _Conflicting:
+        async def get_graph(self, graph_id):
+            return {"graph_id": graph_id, "workspace_id": "ws1", "data_source_id": "ds1"}
+
+        async def update_fork_from_parent(self, **kw):
+            raise ForkUpdateConflicts(conflicts, seeds)
+
+    @asynccontextmanager
+    async def _session():
+        yield None
+
+    async def _nothing(*_args):
+        return None
+
+    monkeypatch.setattr(ep, "get_versioning_service", lambda: _Conflicting())
+    monkeypatch.setattr("backend.app.db.engine.get_async_session", _session)
+    monkeypatch.setattr(ep, "_live_containment_types", _nothing)
+    monkeypatch.setattr(ep, "_rules_for_meta", _nothing)
+    out = await ep._fork_from_job({"jobType": "fork_update", "graphId": "f1", "actor": "a",
+                                   "workspaceId": "ws1", "parentSeq": 3})
+    assert out["error"]["status"] == 409
+    detail = out["error"]["detail"]
+    assert detail["type"] == "fork_update_conflicts" and detail["total"] == 250
+    kept = [c["entity_id"] for c in detail["conflicts"]]
+    assert kept == [f"e{i:03d}" for i in range(100)] and sorted(detail["seeds"]) == kept

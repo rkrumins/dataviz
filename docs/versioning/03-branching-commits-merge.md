@@ -9,7 +9,8 @@
 
 **TL;DR.** A **draft** is a branch off `main`. You **stage** edits into a durable buffer, **checkpoint**
 them into append-only version rows, then **publish** — a 3-way, *field-level* squash-merge onto `main`.
-The same merge engine powers rebase ("pull latest"), fork PRs, and conflict resolution. `main` advances
+The same merge engine powers rebase ("pull latest"), a fork's Update from parent, and conflict
+resolution; a fork's PR, once the fork is up to date, merges as a copy of its own changes. `main` advances
 only under a per-graph advisory lock with a `commit_seq` retry, so concurrent writers never lose data.
 An `update` is a **PATCH**, never a wholesale replace — the single most important correctness rule in
 the system.
@@ -64,10 +65,12 @@ erDiagram
 | `sync` | `sync_ingest` (authoritative re-sync — see [10](10-authoritative-sources-datahub-openmetadata.md)) | `main` |
 | `revert` | `revert_commit` | `main` |
 | `restore` | `restore_to_commit` — `main` set back to an earlier commit's state, recording that commit in `source_commit_ids` | `main` |
+| `sync_parent` | `update_fork_from_parent` — a fork takes its parent's newer changes; with a `fork_bases` row, and written with no rows too ([17](17-forks-and-residency.md) §8) | a fork's `main` |
 
 > **`ck_commits_kind` is WIDEN-ONLY.** Never drop a value from the allow-list: a kind already written to
 > a live table makes the constraint unaddable and wedges the whole upgrade chain. `pull` was added by
-> `20260714_1600_pull_kind`, enumerating every prior kind alongside it.
+> `20260714_1600_pull_kind`, enumerating every prior kind alongside it; `sync_parent` by
+> `20261101_1000_gv_fork_sync`, which keeps every kind the check allows already.
 
 > **Invariant.** Version tables are **append-only**; a commit never rewrites history. "Latest" is
 > resolved through the mutable `entity_heads` pointer, so the high-cardinality tables never churn
@@ -397,38 +400,47 @@ flowchart LR
     end
     PM -. fork_base_commit_seq = N .-> FM
     FM --> FC
+    PM -. "update_fork_from_parent (sync_parent + fork_bases row)" .-> FC
     FC -->|open_pr → _compute_fork_merge| PR{PR}
-    PR -->|reviewers approve| MERGE["merge_pr → squash into parent main"]
-    MERGE --> PM2["parent main @ N+1"]
+    PR -->|up to date, reviewers approve| MERGE["merge_pr → _squash_fork into parent main"]
+    MERGE --> PM2["parent main @ head+1"]
 ```
 
-`open_pr` opens a fork-main → parent-main PR, recording the current mergeability/conflict set; listed
-`reviewers` make approval a merge precondition. `merge_pr` locks the parent, reads the PR again under
-the lock (a second merge of it is refused), recomputes the fork merge, runs the ontology + approval
-gates, and squashes into the parent's `main` with the fork's contributors. A merge refused for
-conflicts leaves the PR marked `conflicts`; one that changes nothing is recorded as merged by whom and
-when. `merge_mr` is the unified entry: it dispatches a fork PR to `merge_pr` — with the parent's
-containment and ontology rules, as the fork route passes them — and a draft→main MR through the shared
-squash body, enforcing the reviewer-approval gate (`_require_approvals`) before the merge is computed.
-An approval counts until a content commit lands on the draft after it (§3.15).
+`open_pr` opens a fork-main → parent-main PR; listed `reviewers` make approval a merge precondition.
+A fork takes its parent's newer changes with **Update from parent** (`update_fork_from_parent`: one
+`sync_parent` commit and a `fork_bases` row, the 3-way merge and its conflicts on the fork's side —
+[17 · Forks & Residency](17-forks-and-residency.md) §8), and its PR merges only up to date with its
+parent. `merge_pr` locks the parent, reads the PR again under the lock (a second merge of it is
+refused), refuses a fork behind its parent (**409 `not_up_to_date`** `{reason: "parent_moved"}`),
+and squashes the fork's own changes into the parent's `main` with the fork's contributors, through
+the ontology and approval gates. One that changes nothing is recorded as merged by whom and when. A
+large one merges as a `fork_merge` job (17 §9). `merge_mr` is the unified entry: it dispatches a fork
+PR to `merge_pr` — with the parent's containment and ontology rules, as the fork route passes them —
+and a draft→main MR through the shared squash body, enforcing the reviewer-approval gate
+(`_require_approvals`) before the merge is computed. An approval counts until a content commit lands
+on the draft after it (§3.15); a fork's `sync_parent` commit that wrote no rows is not one.
 
 **The merge base.** A fork merges into its parent more than once, so like git it merges from the last
 merged commit: each merge records the fork's head it took (`merge_requests.merged_source_seq`), and the
-next PR's base is the fork's `main` there (`_fork_merge_base`), else the fork point. A change the parent
-took and then undid is not proposed again, and a field only the parent changed since is no conflict.
+next PR's base is the fork's `main` there (`_fork_merge_base`), else the fork point. Update from parent
+does not move it: an edit made before an update is still proposed after it. A change the parent took
+and then undid is not proposed again, and a field only the parent changed since is no conflict.
 
-**What a fork merge reads.** `_compute_fork_merge` merges what the fork changed since the base
-(`_changed_in_window` on its `main`), at the base, at the fork's head and at the parent's head: an
-entity the fork has not changed since is the same in ours as in base, so it merges to the parent's value
-and nets to nothing. Around it, `_fork_merge_neighborhood` adds what the cascade and integrity guards
-reason about, at its merged value: the parent's live edges on each node the merge deletes, and the ends
-of every live edge it writes, deleted ones too — so the parent's edges onto a node the fork deleted go
-with it, and so does a fork's edge onto a node the parent has deleted since. The preview, the diff and
-its summary run the same merge and cascade (`_fork_merge`), so they count what the merge writes. Opening,
-previewing, diffing and merging a fork's PR therefore costs what the fork changed, never the graph; the
-merge itself still runs in the request, holding those changes (§09). Proof: `test_versioning_fork.py`,
-`test_versioning_fork_merge.py`, `test_versioning_fork_bounded.py`, `test_versioning_pr_gate.py`,
-`test_versioning_draft_mr.py`.
+**What a fork merge reads.** Nothing is merged at the merge: the fork settled its parent's changes when
+it updated. `_compute_fork_merge` takes the fork's own changes since the base — its rows in
+`(merge base, head]` (`_own_window`), never the parent's window — each the fork's value at its head
+against the parent's at the base the fork agrees with (`_fork_agreed_base`: the base it reads, past
+the squashes of its own reviews; the parent's head, once it is up to date), every difference a
+change. Around it, `_fork_merge_neighborhood` adds what the cascade and integrity guards reason about,
+as the parent has it there: its live edges on each node the review deletes, and the ends of every
+live edge it writes, deleted ones too. The preview, the diff and its summary run the same
+(`_fork_merge`), so they count what the merge writes. The merge itself (`_squash_fork`) plans it from
+content hashes and copies the rows from the fork's version rows inside Postgres, as a draft's narrow
+squash does, a page at a time past `GRAPHVER_SQUASH_PAGED_ABOVE`. Opening, previewing, diffing and
+merging a fork's PR therefore costs what the fork changed, never the graph. Proof:
+`test_versioning_fork.py`, `test_versioning_fork_merge.py`, `test_versioning_fork_bounded.py`,
+`test_versioning_pr_gate.py`, `test_versioning_draft_mr.py`, `test_fork_merge_up_to_date.py`,
+`test_fork_sync_property.py`.
 
 ### Invariant — ONE LIVE PR PER SOURCE BRANCH
 

@@ -992,3 +992,12 @@ async def test_history_names_only_what_the_reader_may_see(test_client, db_sessio
     async with acting_as(db_session, "val"):                       # can open Finance, not Risk
         theirs = (await test_client.get(f"{_src()}/transfers")).json()
     assert (theirs[0]["fromWorkspace"]["name"], theirs[0]["toWorkspace"]["name"]) == ("Finance", None)
+
+
+def test_a_move_refused_for_a_job_names_every_kind_of_job_in_words():
+    """A move waits for the version store's jobs on the source's graph and its forks (graph_busy),
+    and says which in words: every job type the store writes has its own."""
+    from backend.app.services.data_source_transfer import _job_words
+    from backend.app.services.versioning.models import JOB_TYPES
+
+    assert [t for t in JOB_TYPES if _job_words([t]) == t] == []

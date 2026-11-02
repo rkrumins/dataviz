@@ -574,7 +574,8 @@ def _job_words(types: list[str]) -> str:
     words = {"bootstrap": "turning on version control", "export": "an export",
              "ingest": "an import", "publish": "a publish", "purge": "a purge",
              "projection": "a projection", "rebuild": "a rebuild",
-             "package_inspect": "a package check"}
+             "package_inspect": "a package check",
+             "fork_update": "a fork's update from its parent", "fork_merge": "a fork's merge"}
     return ", ".join(words.get(t, t) for t in types)
 
 

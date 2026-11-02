@@ -65,8 +65,8 @@ The lifecycle backfill (CONVERSION) also runs in this migration.
 
 ### 4. Enumerations (every CHECK is widen-only; the ORM equals the migration)
 **Commits and jobs**
-- `ck_commits_kind`: genesis, edit, checkpoint, squash_publish, import, sync, revert, restore, pull, ingest.
-- `ck_jobs_type`: ingest (file import), projection, rebuild, export, bootstrap, publish, purge, lifecycle, preflight, ingest_dryrun, ingest_replay, ingest_redrive, compaction.
+- `ck_commits_kind`: genesis, edit, checkpoint, squash_publish, import, sync, revert, restore, pull, sync_parent (a fork's Update from parent), ingest.
+- `ck_jobs_type`: ingest (file import), projection, rebuild, export, bootstrap, publish, purge, package_inspect, fork_update, fork_merge, lifecycle, preflight, ingest_dryrun, ingest_replay, ingest_redrive, compaction.
 - `jobs.op` (lifecycle only): convert, adopt, relocate, reseed, detach, release_source, drift_scan, drift_sync, history_export, history_restore.
 
 **Branches**
@@ -75,6 +75,7 @@ The lifecycle backfill (CONVERSION) also runs in this migration.
 - `abandon_reason` ∈ {user, ttl, graph_deleted, graph_detached, migration}.
 
 **Merge requests and reviews**
+- `merge_requests.status` ∈ {open, conflicts, mergeable, approved, merged, closed, merging}: `merging` while a `fork_merge` job merges a fork's review (`ck_mr_status`, migration `20261101_1000_gv_fork_sync`).
 - `merge_requests.close_reason` ∈ {user, draft_abandoned, migration, graph_detached}.
 - `approval_status` ∈ {not_required, pending, approved, changes_requested}.
 - `merged_via` ∈ {review, direct_publish, bypass}.
@@ -155,15 +156,17 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 | 409 | `head_moved` | `{type, prId, headCommitId, message}` | an approve whose `expectedHeadCommitId` is no longer the source branch's head |
 | 409 | `ineligible_member` | `{type, subjectId, reason:"service_account", message}` (class `ServiceAccountMember`) | adding a service account to a draft, or changing its role: a draft is never shared with one. Checked first, before the draft or the caller's role on it (the 422 reasons come after the caller) |
 | 409 | `not_up_to_date` | `{type, branchId, behindBy, message}` | a publish or merge of a draft behind `main`. The design's `{overlapIds, reason}` is not live |
+| 409 | `not_up_to_date` | `{type, reason:"parent_moved", behind, graphId, message}` (class `ForkNotUpToDate`) | a merge of a fork's review (in the request, queueing it, or its job) while the fork's parent has changes it has not taken in: Update from parent first. `behind` counts the entities, stopping at `GRAPHVER_FORK_REWIND_MAX` |
+| 409 | `fork_update_conflicts` | `{type, conflicts, seeds, message}` | Update from parent, in the request or its job, with fields both the fork and its parent changed: a pull's conflicts and the fork's own value of each entity; nothing is written |
 | 409 | `merge_conflict` | `{type, conflicts}`; `/graph/changes` adds `current` | a same-field clash in a merge or save |
 | 409 | `too_large_for_tree` | `{type, changed, limit, message}` | the Changes tree's `/children` past `GRAPHVER_DIFF_TREE_MAX_CHANGES` |
-| 409 | `job_active` | `{type, jobId, message}` | a second import on a draft; a publish, merge or publish job while an import runs on the draft; an admin projection move while a rollup rebuild runs |
+| 409 | `job_active` | `{type, jobId, message}` | a second import on a draft; a publish, merge or publish job while an import runs on the draft; an admin projection move while a rollup rebuild runs; a second Update from parent job of a fork while one is pending or running; a merge of a fork's review held `merging` by its job |
 | 409 | `curation_at_risk` | `{type, lastHumanCommit:{id, seq, kind, actor, createdAt}, message}` | a sync while `main` holds a person's commit from before its last import or sync. Not bringing a graph's changes into history (`/graph/resync`), which reads a key that holds main |
 | 409 | `mass_delete_blocked` | `{type, deletes, live, limit, message}` | a sync that deletes more than `max(GRAPHVER_SYNC_DELETE_MAX_ABS, GRAPHVER_SYNC_DELETE_MAX_FRACTION × live)`. Bringing a graph's changes into history deletes nothing |
 | 409 | `spelled_two_ways` | `{type, spelled:{<type>: [spellings]}, message}` (class `AmbiguousSpelling`) | bringing a customer graph's changes into history (`/graph/resync`) when it spells a type history holds more than one way, each holding nodes |
 | 409 | `platform_copy`, `not_ready` | `{type, message}`; `not_ready` adds `status` | bringing changes into history from a key the platform minted, which nothing else writes; or while the projection doesn't hold main (behind it, evicted, being rebuilt or moved) |
 | 409 | `fork_limit` | `{type, limit, message}` | a fork, or a fork restore, past `GRAPHVER_MAX_FORKS_PER_GRAPH` live forks |
-| 409 | `not_a_fork` | `{type, graphId, message}` | a fork delete or restore on a graph `fork_graph` did not mint |
+| 409 | `not_a_fork` | `{type, graphId, message}` | a fork delete or restore on a graph `fork_graph` did not mint; Update from parent on a graph with no parent |
 | 409 | `live_forks` | `{type, graphId, forks, message}` | deleting a fork that has live forks. A data source's permanent delete refused because forks read its graph, or because a fork's data source of it is live, answers `{type:"live_forks", message}`, without `graphId` or `forks` |
 | 409 | `use_fork_endpoints` | `{type, message}` | a data-source delete, permanent delete, restore, move, move preview or transfer request on a fork's data source, which goes with its graph through the fork routes and moves with its parent |
 | 409 | `fork_settings_follow_parent` | `{type, fields, message}` | a write to a fork's data source that would change a setting it takes from its parent (`ontology_id`, `is_restricted`, `access_level`, `identity_property`, `name_property`, the draft policy); nothing of the request is kept |
@@ -269,6 +272,8 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 - *Publish job creation*: `gvlifecycle` shared → `gvmove` shared and workspace → `_assert_writable` → branch lock → main (main_write_forbidden) → `_require_open` → `_require_publish`, except for a review's merge → no import on the draft (job_active) → for a merge, the request still live (404) and `_require_approvals` (approval_required) → the draft becomes `publishing`. *Export job creation* takes only `gvmove` shared and the workspace check.
 - *Publish*: staged edits folded by a checkpoint (its own draft-write gate) → `_lock_graph` → `_assert_writable` → branch lock → `_require_open` → no import (job_active) → edits staged since the fold re-run the attempt (no pending_changes refusal) → `_require_publish` (the draft's owner or a maintainer, at either level) → the policy (review_required where someone else merges) → not_up_to_date `{branchId, behindBy}` → merge_conflict → ontology → squash.
 - *Merge of a review* (`merge_mr`): fold → `_lock_graph` → the request merged or closed (404); its row is read without a lock → `_assert_writable` → branch lock → `_require_open` → no import (job_active) → staged re-run → `_require_approvals` (approval_required `{pending, stale}`) → not_up_to_date → merge_conflict → squash. The merger's right to the draft is not checked: `_MANAGE` and `_PUBLISH` on the route, and taking part in the request, are enough.
+- *Update from parent* (`update_fork_from_parent`): the fork's `_lock_graph` only (the parent's rows up to the head it reads never change) → unknown or trashed (404) → no parent (not_a_fork) → `_assert_writable` on the fork → the parent gone (404) → at the parent's head already (200 `upToDate`, nothing written) → its base row, then fork_update_conflicts → the cascades, and integrity (409) → the `sync_parent` commit. *Its job's creation*: `gvlifecycle` shared on the fork → `gvmove` shared and the workspace → `_assert_writable` → `gvforkupdate:<fork>` → another update of the fork pending or running (job_active).
+- *Merge of a fork's review* (`merge_pr`): self_merge → `_lock_graph` on the parent → the review's row FOR UPDATE → merged or closed (404) → held `merging` by a job, unless this is that job (job_active) → `_assert_writable` on the parent → the fork not up to date with it (not_up_to_date `{reason:"parent_moved"}`) → step by step, a strict ontology and the shared gate → `_require_approvals` before the first row → squash. *Its job's creation*: `gvlifecycle` shared on the parent → `gvmove` shared and the workspace → `_assert_writable` → the review's row FOR UPDATE → not open (404) → `merging` (job_active) → `_require_approvals` → not up to date → the review becomes `merging`.
 - *Freeze / unfreeze* (`set_frozen`): `gvlifecycle` exclusive → `_lock_graph` → `graphs` FOR UPDATE → unknown or trashed (404) → a state this code does not know (graph_not_writable) → freeze only: enablement unfinished (409 integrity) → already in that state (200, unchanged) → CAS on `lifecycle_rev` (version_conflict).
 - *Trash and restore of a data source's graphs*: `gvlifecycle` exclusive per graph, in id order → `graphs` FOR UPDATE. The reaper's re-filing of a graph an earlier move left behind, when it also trashes it: `gvlifecycle` exclusive on the graph → the move's `_lock_graph` and `gvmove` per graph (§8) → `graphs` FOR UPDATE. *Queueing a purge*: its job row FOR UPDATE → `gvlifecycle` exclusive → `graphs` FOR UPDATE → direct forks FOR KEY SHARE. Neither takes `_lock_graph`. *Fork delete and restore* take no lifecycle key: delete locks the fork's row FOR UPDATE; restore takes the parent's `_lock_graph`, the parent row FOR KEY SHARE, then the fork's row FOR UPDATE.
 
@@ -276,8 +281,8 @@ The ORM CHECKs and tables are updated in the same PR as each migration. `test_mi
 1. jobs row (claim)
 2. `gvproj:<gid>` session lock (projector, swap, evict)
 3. `gvcompact:<gid>`: exclusive for compaction; shared for seq pinners (restore, revert, export, fork, history_export, purge)
-4. `gvlifecycle:<gid>` (`_lock_lifecycle`): exclusive for transitions (freeze, trash, restore, purge queued); shared for draft writers and for creating an import or publish job
-5. `pg_advisory_xact_lock(graph)` (`_lock_graph`): main writers, publish, merge, ingest, policy, transitions; then `gvmove:<gid>` (`_lock_move`): exclusive for a data-source move, shared for creating an import, export or publish job (which takes no `_lock_graph`)
+4. `gvlifecycle:<gid>` (`_lock_lifecycle`): exclusive for transitions (freeze, trash, restore, purge queued); shared for draft writers and for creating an import, publish, `fork_update` or `fork_merge` job
+5. `pg_advisory_xact_lock(graph)` (`_lock_graph`): main writers, publish, merge, ingest, policy, transitions, a fork's Update from parent (the fork's only); then `gvmove:<gid>` (`_lock_move`): exclusive for a data-source move, shared for creating an import, export, publish or fork job (which takes no `_lock_graph`). A path that holds a parent's and a fork's `_lock_graph` takes the parent's first
 6. `graphs` row: FOR UPDATE for transitions and policy; FOR KEY SHARE for draft writers and reviews; plain UPDATE for main commits
 7. `branches`: FOR UPDATE for writers; FOR SHARE for reviews
 8. `merge_requests`
@@ -368,7 +373,7 @@ The frontend copy for every code lives in `features/versioning/model/accessCopy.
 
 | Runner | Claims job types |
 |---|---|
-| transfer | ingest (file import), export, publish |
+| transfer | ingest (file import), export, publish, fork_update, fork_merge (and package_inspect, in a slot of its own) |
 | lifecycle | lifecycle, preflight, bootstrap |
 | purge | purge |
 | compaction (also hosts storage_guard and ingest_retention loops) | compaction |
