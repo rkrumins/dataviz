@@ -6,7 +6,7 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { DuplicateDialog } from '../DuplicateDialog'
-import type { DuplicateChoice, PreparedDuplicate } from '@/hooks/useDuplicateSubtree'
+import { QUICK_DUPLICATE, type DuplicateChoice, type PreparedDuplicate } from '@/hooks/useDuplicateSubtree'
 
 function prepared(over: Partial<PreparedDuplicate> = {}): PreparedDuplicate {
   return {
@@ -96,5 +96,37 @@ describe('DuplicateDialog', () => {
     await screen.findByText(/Creates 13 entities/)
     act(() => { window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })) })
     expect(onClose).toHaveBeenCalled()
+  })
+
+  it('opens on the quick copy with its name in hand: Enter makes the copy ⌘D would', async () => {
+    const { commit, onDone } = setup()
+    await screen.findByText(/Creates 13 entities/)
+    const nameInput = screen.getByRole('textbox', { name: 'Name of the copy' }) as HTMLInputElement
+    await waitFor(() => expect(document.activeElement).toBe(nameInput))
+    expect([nameInput.selectionStart, nameInput.selectionEnd]).toEqual([0, 'Orders (Copy)'.length])
+    await act(async () => { fireEvent.keyDown(nameInput, { key: 'Enter' }) })
+    expect(commit).toHaveBeenCalledWith(expect.anything(), { ...QUICK_DUPLICATE, name: 'Orders (Copy)' })
+    expect(onDone).toHaveBeenCalled()
+  })
+
+  it('leaves focus on a choice made while it reads', async () => {
+    let resolve!: (p: PreparedDuplicate) => void
+    const prepare = vi.fn(() => new Promise<PreparedDuplicate | null>((r) => { resolve = r }))
+    render(<DuplicateDialog nodeId="orders" prepare={prepare} commit={vi.fn(() => 'urn:staged:copy')} onDone={vi.fn()} onClose={vi.fn()} />)
+    const alone = screen.getByRole('radio', { name: /Just this entity/ })
+    act(() => { alone.focus() })
+    await act(async () => { resolve(prepared()) })
+    await screen.findByText(/Creates 13 entities/)
+    expect(document.activeElement).toBe(alone)
+  })
+
+  it('keeps Tab inside, and says ⌘D copies without asking', async () => {
+    setup()
+    await screen.findByText(/Creates 13 entities/)
+    expect(screen.getByText(/quick copy, without asking/)).toBeInTheDocument()
+    const duplicate = screen.getByRole('button', { name: /^Duplicate/ })
+    act(() => { duplicate.focus() })
+    act(() => { fireEvent.keyDown(document, { key: 'Tab' }) })
+    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Close' }))
   })
 })
