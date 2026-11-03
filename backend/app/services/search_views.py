@@ -145,7 +145,6 @@ def layers_of(config: Optional[Dict[str, Any]], *, add_rest: bool) -> List[Subse
                                rest=layer["id"] == rest_id))
     if rest_id is None and add_rest:
         out.append(SubsetLayer(id=REST_LAYER_ID, name=REST_LAYER_NAME, rest=True))
-        rest_id = REST_LAYER_ID
     claimed = _claimed(out)
     return [layer.model_copy(update={"excluded_types": [
         t for t in claimed if fold_case(t) not in {fold_case(o) for o in layer.entity_types}]})

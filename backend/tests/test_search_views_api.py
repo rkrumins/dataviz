@@ -173,7 +173,8 @@ class TestCreate:
         resp = await test_client.post(URL, json=body(ws, bare, predicate=word))
         assert resp.status_code == 422 and "every entity" in resp.text
         typed = await base_view(test_client, ws)
-        assert (await test_client.post(URL, json=body(ws, typed, predicate=word))).status_code == 201
+        made = await test_client.post(URL, json=body(ws, typed, predicate=word))
+        assert made.status_code == 201
 
     async def test_writing_a_search_needs_data_source_read(self, test_client, on, monkeypatch):
         ws = await workspace(test_client)
@@ -213,7 +214,8 @@ class TestReadAndEdit:
         ws = await workspace(test_client)
         base = await base_view(test_client, ws)
         sub = (await make(test_client, ws, base))["view"]["id"]
-        assert (await test_client.delete(f"/api/v1/views/{base}")).status_code in (200, 204)
+        deleted = await test_client.delete(f"/api/v1/views/{base}")
+        assert deleted.status_code in (200, 204)
         status = (await test_client.get(f"/api/v1/views/{sub}/search")).json()
         assert status["status"] == "base_missing" and status["layers"] == []
         assert status["base"]["available"] is False
