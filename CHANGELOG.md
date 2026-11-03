@@ -49,6 +49,13 @@ ask for. A preview, off by default. See *Tracing Lineage on the Canvas* in the U
 - A short answer (out of time, or a part of the graph that didn't answer) is kept for seconds and never
   as last known good. A capped answer is the answer, and keeps the full time.
 
+### Fixed
+
+- **Right-click menus always fit the window.** On every canvas, an entity's menu opened low on the screen
+  ran off its bottom edge, and the actions below could not be reached. The menu now opens above the
+  pointer (or to its left) where it would run off. When the window is too short for it, its actions scroll
+  under its header, with a fade while more are below. The wheel scrolls the menu, not the canvas behind it.
+
 ### Upgrading
 
 - No migration. `GRAPH_CACHE_ENABLED_MEMBERS` (default `true`) turns the shared answer off.

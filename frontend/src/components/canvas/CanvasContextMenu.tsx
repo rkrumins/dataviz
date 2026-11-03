@@ -8,11 +8,13 @@
  * - Visual feedback and keyboard shortcut hints
  */
 
-import React, { useCallback, useEffect, useRef } from 'react'
+import React, { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
+import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { LAYER_COLORS } from '@/components/views/ViewWizard/layerColors'
+import { placeMenu } from './menuPlacement'
 
 // ============================================
 // Types
@@ -141,6 +143,7 @@ export function CanvasContextMenu({
     narrowActions = [],
 }: CanvasContextMenuProps) {
     const menuRef = useRef<HTMLDivElement>(null)
+    const listRef = useRef<HTMLDivElement>(null)
     const [submenu, setSubmenu] = React.useState<'layer' | 'narrow' | null>(null)
     const showLayerSubmenu = submenu === 'layer'
     const showNarrowSubmenu = submenu === 'narrow'
@@ -459,13 +462,39 @@ export function CanvasContextMenu({
         return IconComponent ? <IconComponent className="w-4 h-4" /> : null
     }
 
-    // Adjust position to keep menu in viewport
-    const adjustedPosition = {
-        x: Math.min(position.x, window.innerWidth - 220),
-        y: Math.min(position.y, window.innerHeight - 300)
+    // Fit the menu in the window — measured before it paints, and again when its
+    // contents change (a submenu opens) or the window is resized. Written straight
+    // to the element: a measurement is not state, and the next paint needs it now.
+    const { x, y } = position
+    useLayoutEffect(() => {
+        if (!isOpen || !target) return
+        const place = () => {
+            const menu = menuRef.current
+            const list = listRef.current
+            if (!menu || !list) return
+            // Its natural height, whatever height it is held to now.
+            const natural = menu.offsetHeight - list.clientHeight + list.scrollHeight
+            const at = placeMenu({ x, y }, { width: menu.offsetWidth, height: natural },
+                { width: window.innerWidth, height: window.innerHeight })
+            menu.style.left = `${at.left}px`
+            menu.style.top = `${at.top}px`
+            menu.style.maxHeight = `${at.maxHeight}px`
+            list.dataset.more = String(list.scrollTop + list.clientHeight < list.scrollHeight - 1)
+        }
+        place()
+        window.addEventListener('resize', place)
+        return () => window.removeEventListener('resize', place)
+    }, [isOpen, target, x, y, submenu])
+
+    // A fade at the bottom edge while there is more below.
+    const onListScroll = (e: React.UIEvent<HTMLDivElement>) => {
+        const list = e.currentTarget
+        list.dataset.more = String(list.scrollTop + list.clientHeight < list.scrollHeight - 1)
     }
 
-    return (
+    // In the document's body, not the canvas: no canvas transform shifts where it
+    // sits, and no canvas pan or zoom takes the wheel that should scroll it.
+    return createPortal(
         <AnimatePresence>
             {isOpen && target && (
                 <motion.div
@@ -475,19 +504,19 @@ export function CanvasContextMenu({
                     exit={{ opacity: 0, scale: 0.95, y: -5 }}
                     transition={{ duration: 0.1 }}
                     className={cn(
-                        "fixed z-[100] min-w-[200px] py-1.5",
+                        "fixed z-[100] min-w-[200px] py-1.5 flex flex-col",
                         "bg-canvas-elevated/98 backdrop-blur-xl",
                         "border border-glass-border rounded-xl shadow-lg",
                         "overflow-hidden"
                     )}
-                    style={{
-                        left: adjustedPosition.x,
-                        top: adjustedPosition.y,
-                    }}
+                    style={{ left: x, top: y }}
+                    // The wheel scrolls the menu, never the canvas behind it (React
+                    // passes events up the component tree, portal or not).
+                    onWheel={(e) => e.stopPropagation()}
                 >
                     {/* Menu Header */}
                     {target.type === 'layer' && layerMenu ? (
-                        <div className="px-3 pt-2 pb-2 border-b border-glass-border bg-black/5 dark:bg-white/5">
+                        <div className="flex-none px-3 pt-2 pb-2 border-b border-glass-border bg-black/5 dark:bg-white/5">
                             <span className="flex items-center gap-2 min-w-0">
                                 <span className="w-2.5 h-2.5 rounded-full flex-none ring-2 ring-white/40 dark:ring-black/30" style={{ backgroundColor: layerMenu.color }} />
                                 <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted flex-none">Layer</span>
@@ -525,7 +554,7 @@ export function CanvasContextMenu({
                             )}
                         </div>
                     ) : (
-                        <div className="px-3 py-1.5 border-b border-glass-border bg-black/5 dark:bg-white/5">
+                        <div className="flex-none px-3 py-1.5 border-b border-glass-border bg-black/5 dark:bg-white/5">
                             <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
                                 {showNarrowSubmenu && target.type === 'node' ? 'Narrow to this — how far?' :
                                     target.type === 'node' ? 'Node Actions' :
@@ -534,6 +563,15 @@ export function CanvasContextMenu({
                         </div>
                     )}
 
+                    {/* The items scroll under the header when the window is too short for them. */}
+                    <div
+                        ref={listRef}
+                        onScroll={onListScroll}
+                        className={cn(
+                            "min-h-0 flex-1 overflow-y-auto overscroll-contain custom-scrollbar",
+                            "data-[more=true]:[mask-image:linear-gradient(to_bottom,black_calc(100%-28px),transparent)]",
+                        )}
+                    >
                     {/* Narrow submenu: one entry per reach */}
                     {showNarrowSubmenu && target.type === 'node' ? (
                         <div className="py-1" role="menu" aria-label="Narrow to this">
@@ -625,9 +663,11 @@ export function CanvasContextMenu({
                             ))}
                         </div>
                     )}
+                    </div>
                 </motion.div>
             )}
-        </AnimatePresence>
+        </AnimatePresence>,
+        document.body,
     )
 }
 
