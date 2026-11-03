@@ -266,6 +266,13 @@ the query it was made from. Its header says so:
 - **Auto-updating · 1,234** when it keeps itself up to date;
 - **Snapshot · 3 Nov** when it keeps the members it had.
 
+**How it stays up to date.** When anyone opens an auto-updating view after its data
+changed, it brings itself up to date first: the chip says **Updating…**, then the
+canvas shows the new members, with a note such as *Brought up to date · 3 new, 1 left*.
+Opening it when nothing changed costs nothing, and when many people open it at once,
+one of them brings it up to date for everyone. A view nobody opens catches up the next
+time it is opened.
+
 Choose the chip to see:
 
 - what the view is made from, and the view its search runs in (**Searches
@@ -278,7 +285,7 @@ If you can edit the view, the chip also offers:
 
 | To… | Do this |
 | --- | --- |
-| Catch up with the data now | **Refresh now**, at most every 30 seconds |
+| Catch up with the data now, without reopening it | **Refresh now**, at most every 30 seconds |
 | Stop it changing | **Freeze as it is** — it becomes a snapshot. **Resume updates** brings it back in step with the data |
 | Keep an entity out, whatever the query finds | Right-click it on the canvas → **Keep out of this view**. Bring it back from **Kept out** in the chip |
 | Keep an entity, even if the query stops finding it | Right-click it → **Always include**. Stop from **Always included** in the chip |

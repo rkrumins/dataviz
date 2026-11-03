@@ -361,7 +361,7 @@ class MembershipPlan(_Base):
 
 
 Status = Literal["pending", "updating", "ok", "partial", "over_cap", "held", "failed",
-                 "paused", "source_missing", "frozen"]
+                 "source_missing", "frozen"]
 
 
 class ReadInView(_Base):
@@ -413,15 +413,17 @@ class MemberOps(_Base):
     uninclude: List[str] = Field(default_factory=list, max_length=EXCLUDE_MAX)
 
 
-RefreshOutcome = Literal["applied", "unchanged", "held", "over_cap", "deferred", "busy", "fenced",
-                         "source_missing", "failed"]
+RefreshOutcome = Literal["applied", "unchanged", "current", "held", "over_cap", "deferred", "busy",
+                         "fenced", "source_missing", "failed"]
 
 
 class RefreshResult(_Base):
     """``POST /views/{id}/membership/refresh`` — what the update did, and how
     keeping the view up to date stands after it. ``held``: a large removal waits
     for ``?confirmRemovals=true``; ``deferred``: the graph answered short, so the
-    view kept its members; ``busy``: another update is working on it."""
+    view kept its members; ``busy``: another update is working on it;
+    ``current``: opened, and nothing to do (``detail.reason``: ``up_to_date``,
+    ``recent``, ``held`` or ``snapshot``)."""
     outcome: RefreshOutcome
     detail: Dict[str, Any] = Field(default_factory=dict)
     diff: Optional[Dict[str, Any]] = None

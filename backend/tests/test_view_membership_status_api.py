@@ -60,6 +60,31 @@ async def refresh(client: AsyncClient, view_id: str, *, confirm: bool = False):
     return await client.post(url(view_id, "/refresh"), params={"confirmRemovals": "true"} if confirm else None)
 
 
+async def open_view(client: AsyncClient, view_id: str):
+    """What the view page asks for when the view is opened."""
+    return await client.post(url(view_id, "/refresh"), params={"trigger": "open"})
+
+
+@pytest.fixture()
+def data(monkeypatch):
+    """The graph's data version, as the pipeline reads it: change ``data.version``
+    to say new data was loaded. Requested before ``saved``, so the view is made on it."""
+    class Data:
+        version = "v1"
+
+    async def version(engine):
+        return Data.version
+
+    monkeypatch.setattr(pipeline, "search_data_version", version)
+    return Data
+
+
+async def state_of(db_session: AsyncSession, view_id: str) -> ViewMembershipStateORM:
+    return (await db_session.execute(
+        select(ViewMembershipStateORM).where(ViewMembershipStateORM.view_id == view_id)
+        .execution_options(populate_existing=True))).scalar_one()
+
+
 async def settle(db_session: AsyncSession, view_id: str) -> None:
     """Let the next *Refresh now* through, as if the last one was a while ago."""
     state = (await db_session.execute(
@@ -299,3 +324,77 @@ async def test_over_the_limit_keeps_the_last_good_members(
     assert resp.json()["membership"]["status"] == "over_cap"
     assert resp.json()["membership"]["detail"]["limit"] == 3
     assert await entries(db_session, view_id) == held
+
+
+# ── Opened: brought up to date ──────────────────────────────────────────────
+
+async def test_opening_after_new_data_brings_it_up_to_date_for_any_reader(
+    test_client: AsyncClient, db_session, data, saved, graph,
+):
+    view_id = saved["id"]
+    await settle(db_session, view_id)
+    graph.engine = TypedEngine(gone={"col_b1"})
+    data.version = "v2"
+    reader = _user("usr_reader")
+    claims = PermissionClaims(sid="s_reader", ws_perms={saved["ws"]: ("workspace:view:read",)})
+    with _as(reader, claims):
+        resp = await open_view(test_client, view_id)
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["outcome"] == "applied" and resp.json()["diff"]["removed"] == 1
+        assert (await refresh(test_client, view_id)).status_code == 403, "Refresh now stays an editor's"
+    assert "col_b1" not in await entries(db_session, view_id)
+
+
+async def test_opening_with_nothing_changed_reads_no_graph_and_claims_nothing(
+    test_client: AsyncClient, db_session, data, saved, graph,
+):
+    view_id = saved["id"]
+    await settle(db_session, view_id)
+    epoch = (await state_of(db_session, view_id)).epoch
+    resp = await open_view(test_client, view_id)
+    assert resp.status_code == 200, resp.text
+    assert (resp.json()["outcome"], resp.json()["detail"]) == ("current", {"reason": "up_to_date"})
+    state = await state_of(db_session, view_id)
+    assert state.epoch == epoch and state.status == "ok", "not claimed: nobody saw it updating"
+
+
+async def test_opened_again_soon_after_an_update_it_answers_current_not_429(
+    test_client: AsyncClient, db_session, data, saved, graph,
+):
+    view_id = saved["id"]
+    await settle(db_session, view_id)
+    graph.engine = TypedEngine(gone={"col_b1"})
+    data.version = "v2"
+    assert (await open_view(test_client, view_id)).json()["outcome"] == "applied"
+    data.version = "v3"
+    again = await open_view(test_client, view_id)
+    assert again.status_code == 200
+    assert (again.json()["outcome"], again.json()["detail"]) == ("current", {"reason": "recent"})
+
+
+async def test_opening_leaves_a_held_removal_held(
+    test_client: AsyncClient, db_session, data, saved, graph, monkeypatch,
+):
+    monkeypatch.setattr(pipeline, "MASS_REMOVAL_MIN", 3)
+    view_id = saved["id"]
+    await settle(db_session, view_id)
+    graph.engine = TypedEngine(gone={"tbl_a", "col_a1", "col_a2", "tbl_b", "col_b1"})
+    data.version = "v2"
+    assert (await open_view(test_client, view_id)).json()["outcome"] == "held"
+    await settle(db_session, view_id)
+    again = await open_view(test_client, view_id)
+    assert (again.json()["outcome"], again.json()["detail"]) == ("current", {"reason": "held"})
+    assert len(await entries(db_session, view_id)) == 6, "only an editor's Apply removes them"
+
+
+async def test_opening_a_snapshot_changes_nothing(test_client: AsyncClient, db_session, data, saved, graph):
+    view_id = saved["id"]
+    current = await status(test_client, view_id)
+    put = await test_client.put(url(view_id), json={"ifDefinitionHash": current["definitionHash"], "mode": "snapshot"})
+    assert put.status_code == 200, put.text
+    await settle(db_session, view_id)
+    graph.engine = TypedEngine(gone={"col_b1"})
+    data.version = "v2"
+    resp = await open_view(test_client, view_id)
+    assert (resp.json()["outcome"], resp.json()["detail"]) == ("current", {"reason": "snapshot"})
+    assert "col_b1" in await entries(db_session, view_id)
