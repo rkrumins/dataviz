@@ -151,6 +151,17 @@ def test_the_fallback_layer_is_counted():
     assert (p.assignments["x"]["layerId"], p.fallback) == ("L_dbs", 1)
 
 
+def test_an_entry_waiting_in_the_fallback_layer_is_placed_again():
+    cands = candidates([(SOURCE, result([("col_a1", "seed", None)]))], nest=False)
+    layers = [*LAYERS, {"id": "O", "name": "Other", "order": 3, "entityTypes": []}]
+    waiting = {"col_a1": {"layerId": "O", "inheritsChildren": False, "assignedBy": MACHINE}}
+    kw = dict(placer=rules_placer(layers, FACTS), layer_ids=[*IDS, "O"], fallback="O")
+    p = planned(cands, assignments=waiting, **kw)
+    assert (p.assignments["col_a1"]["layerId"], p.moved) == ("L_cols", ["col_a1"])
+    put_there = planned(cands, assignments=waiting, overrides={"col_a1": {"layerId": "O"}}, **kw)
+    assert put_there.assignments["col_a1"]["layerId"] == "O", "one a person put there stays"
+
+
 def test_over_the_limit_says_so():
     cands = candidates([(SOURCE, result([("col_a1", "seed", None)]))], nest=True)
     assert planned(cands, limit=3).over_cap

@@ -11,9 +11,11 @@ members:
 
 Where each entry goes is decided, in order, by: where a person put it
 (``overrides``) > the layer its source names > where it already is (unless the
-layout re-stages) > the layout's own rule (the placer) > for a member, its nearest
-drawn container's layer, then the fallback layer. A container nothing places is
-left out — its members are drawn without it.
+layout re-stages, or it waits in the fallback layer) > the layout's own rule (the
+placer) > for a member, its nearest drawn container's layer, then the fallback
+layer. A container nothing places is left out — its members are drawn without it.
+The fallback layer is a waiting room: an entry there (one whose layer was deleted,
+or that nothing could place) is offered to the placer again at every update.
 
 Pure and deterministic: the same inputs give the same entries, and planning again
 over its own answer changes nothing. Entries people placed themselves ("Always
@@ -248,6 +250,8 @@ def plan(
         layer = _valid(override.get("layerId"), layers) or _valid(c.source_layer, layers)
         if layer is None and prev is not None and not restage:
             layer = _valid(prev.get("layerId"), layers)
+            if layer == fallback_layer:
+                layer = None        # waiting to be placed: the placer has another go
         if layer is None:
             layer = _valid(placed.get(urn), layers)
         if layer is None:

@@ -47,7 +47,13 @@ from backend.app.services.graph_cache import ENDPOINT_TRACE_CLOSURE, get_graph_c
 from backend.app.services.view_membership import resolve_cached
 from backend.app.services.view_membership_search import make_seed_search, seed_query_for
 from backend.common.models.search import SearchQuery
-from backend.common.models.view_membership import MembershipRequest, MembershipResult
+from backend.common.models.view_membership import (
+    MembershipDefinition,
+    MembershipPlan,
+    MembershipRequest,
+    MembershipResult,
+    PlanRequest,
+)
 
 router = APIRouter()
 
@@ -149,3 +155,68 @@ async def resolve_members(
         raise _map_not_implemented(engine, exc) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post(
+    "/members/plan",
+    response_model=MembershipPlan,
+    response_model_by_alias=True,
+    dependencies=[Depends(require_membership)],
+)
+async def plan_members(
+    request: Request,
+    response: Response,
+    body: PlanRequest = Body(...),
+    ws_id: Optional[str] = None,
+    viewId: str = Query(..., description="The view the plan is previewed from."),
+    dataSourceId: Optional[str] = Query(None),
+    engine: ContextEngine = Depends(get_context_engine),
+    session: AsyncSession = Depends(get_engine_session),
+    can_read_view=Depends(_view_reader),
+) -> MembershipPlan:
+    """What saving these sources as a view would make — nothing is saved.
+
+    The entries it would hold against the limit (its members, the containers drawn
+    around them, and the entities always included), and each layer it would start
+    with: its count, and whether it is kept (``keep``: ``withResults`` keeps only the
+    layers that hold something). An answer that is short of the truth (out of time,
+    part of the graph not answering) says so in ``truncated``.
+    """
+    from sqlalchemy import select
+
+    from backend.app.db.models import ViewORM, view_is_live
+    from backend.app.services.live_views import pipeline
+
+    if any(s.spec.expand.upstream or s.spec.expand.downstream for s in body.sources) and not (
+        await feature_flags.is_enabled_self_session("traceEnabled", default=fail_safe_default("traceEnabled"))
+    ):
+        raise feature_disabled("traceEnabled")
+    for source in body.sources:
+        if source.spec.seeds.query is not None:
+            _guard_capability_scope(request, seed_query_for(source.spec, source.read_in))
+    copied_from = None
+    if body.layout.kind == "source":
+        source_view = (await session.execute(select(ViewORM).where(
+            ViewORM.id == (body.layout.source_view_id or viewId), view_is_live()))).scalar_one_or_none()
+        if source_view is None or source_view.workspace_id != ws_id or not await can_read_view(source_view):
+            raise HTTPException(status_code=404, detail="View not found")
+        copied_from = pipeline.config_of(source_view)
+
+    await _enforce_fair_share(engine, ENDPOINT_TRACE_CLOSURE)
+    response.headers["X-Provider-Health"] = _provider_health_header(engine)
+    definition = MembershipDefinition(sources=body.sources, layout=body.layout, exclude=body.exclude)
+    limit = pipeline.entry_limit()
+    try:
+        resolved = await pipeline.gather(
+            engine, definition.sources, definition.layout, definition.exclude,
+            workspace_id=ws_id, data_source_id=dataSourceId, budget_s=_budget_s(), limit=limit,
+            can_read_view=can_read_view,
+        )
+        draft = pipeline.draft_view(definition, resolved, source_config=copied_from, client_layers=body.layers,
+                                    keep=body.keep, limit=limit)
+    except pipeline.PipelineError as exc:
+        raise HTTPException(status_code=404 if exc.kind == "source_missing" else 422,
+                            detail={"reason": exc.kind, "message": str(exc)}) from exc
+    except NotImplementedError as exc:
+        raise _map_not_implemented(engine, exc) from exc
+    return pipeline.plan_answer(draft)

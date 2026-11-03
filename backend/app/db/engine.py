@@ -391,6 +391,16 @@ async def get_jobs_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 @asynccontextmanager
+async def get_graph_read_session() -> AsyncGenerator[AsyncSession, None]:
+    """Context-manager GRAPH_READ-pool session — for code outside a FastAPI
+    dependency that holds a session across graph calls (a context engine's), so
+    a slow provider pins this pool rather than the WEB pool. See
+    :func:`get_graph_read_db_session`."""
+    async with _session_scope(PoolRole.GRAPH_READ) as session:
+        yield session
+
+
+@asynccontextmanager
 async def get_readonly_session() -> AsyncGenerator[AsyncSession, None]:
     """Context-manager READONLY-pool session — readiness probes, drift
     checks, stats endpoints, provider status scans.

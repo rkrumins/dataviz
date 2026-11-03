@@ -109,6 +109,15 @@ SURFACE: dict[tuple[str, str], Rule] = {
         "list_versions", "save_version", "compare_versions", "version_status",
         "get_version", "restore_version",
     ),
+    # Views made from a query. Making one names its workspace in the body, as
+    # ``create_view`` does, and the views its queries are searched in are each held
+    # to ``can_read_view``; the rest act on the view in the path.
+    **_entries("view_membership", WORKSPACE, "create_view_from_members"),
+    **_entries(
+        "view_membership", RESOURCE,
+        "get_view_membership", "update_view_membership", "change_view_members",
+        "refresh_view_membership",
+    ),
     # Exporting view definitions to a file. Not the import side, nor view
     # packages: those write into graphs and data sources named only in the
     # body, which nothing here could hold to the key's selection.
@@ -151,7 +160,7 @@ SURFACE: dict[tuple[str, str], Rule] = {
         reads_only=True,
     ),
     **_entries("canvas", RESOURCE, "canvas_bootstrap", "canvas_expand", reads_only=True),
-    **_entries("graph_members", RESOURCE, "resolve_members", reads_only=True),
+    **_entries("graph_members", RESOURCE, "resolve_members", "plan_members", reads_only=True),
     **_entries("assignments", RESOURCE, "compute_assignments", reads_only=True),
     **_entries("graph_export", DATA_SOURCE, "plan_live_export", "stream_live_export"),
     # Workspace metadata read through the capability gate; changing it is

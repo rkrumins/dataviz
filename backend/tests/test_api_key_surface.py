@@ -41,6 +41,7 @@ _FENCING_DEPENDENCIES = {"graph_in_workspace", "pr_in_workspace", "view_in_works
 #: against the key in the handler (``authorize_view_create``).
 _WORKSPACE_CHECKED_IN_HANDLER = {
     ("backend.app.api.v1.endpoints.views", "create_view"),
+    ("backend.app.api.v1.endpoints.view_membership", "create_view_from_members"),
 }
 
 

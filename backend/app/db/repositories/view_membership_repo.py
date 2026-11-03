@@ -44,8 +44,11 @@ def loads(text: Optional[str]) -> Any:
 
 
 async def get(session: AsyncSession, view_id: str) -> Optional[ViewMembershipStateORM]:
+    """The row as it is now. The claim and its release write with bulk UPDATEs, which
+    a session's copy of the row does not see: every read refreshes it."""
     return (await session.execute(
         select(ViewMembershipStateORM).where(ViewMembershipStateORM.view_id == view_id)
+        .execution_options(populate_existing=True)
     )).scalar_one_or_none()
 
 

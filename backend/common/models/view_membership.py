@@ -411,3 +411,18 @@ class MemberOps(_Base):
     unexclude: List[str] = Field(default_factory=list, max_length=EXCLUDE_MAX)
     include: List[IncludeMember] = Field(default_factory=list, max_length=EXCLUDE_MAX)
     uninclude: List[str] = Field(default_factory=list, max_length=EXCLUDE_MAX)
+
+
+RefreshOutcome = Literal["applied", "unchanged", "held", "over_cap", "deferred", "busy", "fenced",
+                         "source_missing", "failed"]
+
+
+class RefreshResult(_Base):
+    """``POST /views/{id}/membership/refresh`` — what the update did, and how
+    keeping the view up to date stands after it. ``held``: a large removal waits
+    for ``?confirmRemovals=true``; ``deferred``: the graph answered short, so the
+    view kept its members; ``busy``: another update is working on it."""
+    outcome: RefreshOutcome
+    detail: Dict[str, Any] = Field(default_factory=dict)
+    diff: Optional[Dict[str, Any]] = None
+    membership: MembershipStatus

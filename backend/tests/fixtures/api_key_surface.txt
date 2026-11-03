@@ -38,6 +38,7 @@ GET /api/v1/views/{view_id} resource
 GET /api/v1/views/{view_id}/activity resource
 GET /api/v1/views/{view_id}/library resource
 GET /api/v1/views/{view_id}/library/export resource
+GET /api/v1/views/{view_id}/membership resource
 GET /api/v1/views/{view_id}/versions resource
 GET /api/v1/views/{view_id}/versions/compare resource
 GET /api/v1/views/{view_id}/versions/status resource
@@ -138,9 +139,12 @@ POST /api/v1/admin/data-sources/{ds_id}/aggregation-jobs/{job_id}/resume resourc
 POST /api/v1/admin/data-sources/{ds_id}/refresh resource
 POST /api/v1/admin/data-sources/{ds_id}/source-changed resource
 POST /api/v1/views/ workspace
+POST /api/v1/views/from-members workspace
 POST /api/v1/views/transfer/export filtered reads-only
 POST /api/v1/views/transfer/export/preview filtered reads-only
 POST /api/v1/views/{view_id}/library/import resource
+POST /api/v1/views/{view_id}/membership/members resource
+POST /api/v1/views/{view_id}/membership/refresh resource
 POST /api/v1/views/{view_id}/publish-request resource
 POST /api/v1/views/{view_id}/restore resource
 POST /api/v1/views/{view_id}/versions resource
@@ -158,6 +162,7 @@ POST /api/v1/{ws_id}/graph/edges/between resource reads-only
 POST /api/v1/{ws_id}/graph/edges/query resource reads-only
 POST /api/v1/{ws_id}/graph/introspection/refresh resource
 POST /api/v1/{ws_id}/graph/members resource reads-only
+POST /api/v1/{ws_id}/graph/members/plan resource reads-only
 POST /api/v1/{ws_id}/graph/nodes/ancestor-chains resource reads-only
 POST /api/v1/{ws_id}/graph/nodes/create resource
 POST /api/v1/{ws_id}/graph/nodes/degree resource reads-only
@@ -202,5 +207,6 @@ PUT /api/v1/views/{view_id}/library/queries resource
 PUT /api/v1/views/{view_id}/library/queries/{query_id} resource
 PUT /api/v1/views/{view_id}/library/rules resource
 PUT /api/v1/views/{view_id}/library/rules/{rule_id} resource
+PUT /api/v1/views/{view_id}/membership resource
 PUT /api/v1/views/{view_id}/visibility resource
 PUT /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id}/parts/{part} resource
