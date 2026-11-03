@@ -32,7 +32,7 @@ import logging
 import math
 import time
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, AsyncContextManager, Callable, Dict, List, Optional, Tuple
 
 from backend.app.providers.falkordb_deep_search import (
     _RESERVED_NODE_KEYS,
@@ -231,7 +231,7 @@ async def execute_session_search(
                                settings)
 
     session = await _advance(session, created, store, _SearchWork(session, ctx, run),
-                             deadline, settings)
+                             deadline, settings, slot=context.slot)
     if session.status == FAILED:
         raise SearchFailed(f"search failed: {session.error}")
     if session.status == COMPLETE and session.after is None and context.reuse_s > 0:
@@ -459,11 +459,17 @@ def request_deadline(started: float, wait_s: float, unit_s: float) -> float:
 
 async def _advance(session: Session, created: bool, store: SessionStore, work,
                    deadline: float, settings, ttl_s: Optional[int] = None,
-                   unit_s: Optional[float] = None) -> Session:
+                   unit_s: Optional[float] = None,
+                   slot: Optional[Callable[[], AsyncContextManager[bool]]] = None) -> Session:
     """This request's share of the scan: under the session's lease, run
     what is pending until ``deadline`` — each unit by ``work``, within
     ``unit_s`` (``unit_budget``) — and commit it; or, when another request
-    holds the lease, answer with its next commit."""
+    holds the lease, answer with its next commit.
+
+    ``slot`` (``SearchRunContext.slot``) is taken only here, by the request
+    that holds the lease: a request waiting on another's commit holds none.
+    With none free, the lease goes straight back and the scan stands where it
+    is — saved, when it is new, so whoever continues it finds it."""
     ttl_s = ttl_s or settings.session_ttl_seconds
     unit_s = unit_s or unit_budget(settings)
     if session.status != RUNNING:
@@ -479,30 +485,38 @@ async def _advance(session: Session, created: bool, store: SessionStore, work,
     token = await store.lease(session.sid, lease_ms)
     if token is None:
         return await wait_for_commit(store, session.sid, session, deadline) or session
-    # The lease is ours: carry on from the latest commit, not from what was
-    # read before taking it — another request may have committed and let go
-    # in between, and running its units again would count them twice. A
-    # search planned afresh replaces the failed session it shares an id with.
-    latest = await store.load(session.sid)
-    if latest is not None and not (created and latest.status == FAILED):
-        session.adopt(latest)
-    await work.begin(store)
     try:
-        await _hop(session, work, deadline, settings, unit_s, last_tries=last_tries)
-    finally:
-        try:
-            if session.status == FAILED:
-                await store.save(session, token, FAILED_TTL_S)
-            else:
-                await store.save(session, token, ttl_s, **work.commit())
-        finally:
-            # Given back even when the commit failed: held to its expiry, the
-            # next request found the session busy and only waited on it.
+        async with (slot() if slot is not None else contextlib.nullcontext(True)) as moving:
+            if not moving:
+                # No slot free: the scan stands as it is, for this request or
+                # another to move on — not held while its readers wait.
+                if created:
+                    await store.save(session, token, ttl_s)
+                return session
+            # The lease is ours: carry on from the latest commit, not from what
+            # was read before taking it — another request may have committed and
+            # let go in between, and running its units again would count them
+            # twice. A search planned afresh replaces the failed session it
+            # shares an id with.
+            latest = await store.load(session.sid)
+            if latest is not None and not (created and latest.status == FAILED):
+                session.adopt(latest)
+            await work.begin(store)
             try:
-                await store.release(session.sid, token)
-            except SessionStoreUnavailable:
-                _release_later(store, session.sid, token, lease_ms / 1000.0)
-                raise
+                await _hop(session, work, deadline, settings, unit_s, last_tries=last_tries)
+            finally:
+                if session.status == FAILED:
+                    await store.save(session, token, FAILED_TTL_S)
+                else:
+                    await store.save(session, token, ttl_s, **work.commit())
+    finally:
+        # Given back even when the commit failed: held to its expiry, the next
+        # request found the session busy and only waited on it.
+        try:
+            await store.release(session.sid, token)
+        except SessionStoreUnavailable:
+            _release_later(store, session.sid, token, lease_ms / 1000.0)
+            raise
     return session
 
 

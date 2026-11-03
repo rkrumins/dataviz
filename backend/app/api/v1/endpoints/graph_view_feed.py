@@ -17,10 +17,12 @@ Built to be read by many while its graph is written to:
   answers, marked stale and as of when it was read, for a window
   (``DEEP_SEARCH_VIEW_FEED_REUSE``, spread per feed): a hot feed on a busy graph
   is scanned at most once a window, however often the graph is written.
-* **Its own lane.** Only a scan takes a slot of this process's feed lane
-  (``DEEP_SEARCH_VIEW_FEED_LANE``) and a token of the workspace's ``view-feed``
-  fair share; an answer from what is already there takes neither. When the lane
-  is full, any recent answer is served; only with nothing to show is it a 429.
+* **Its own lane.** Only the request moving a scan on takes a slot of this
+  process's feed lane (``DEEP_SEARCH_VIEW_FEED_LANE``) and a token of the
+  workspace's ``view-feed`` fair share, while it holds the scan's lease; an
+  answer from what is already there, or a wait on another request's scan, takes
+  neither. When the lane is full a first page serves any recent answer (only
+  with nothing to show is it a 429), and a scan in flight answers as it stands.
 * **Bounded.** A layer lists at most ``DEEP_SEARCH_VIEW_FEED_MAX_ROWS`` rows on
   the canvas; past them the page says ``capped``, and the layer is searched or
   exported instead.
@@ -29,6 +31,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import time
 from datetime import datetime
@@ -206,40 +209,53 @@ async def view_feed(
     data_version = await _search_data_version(engine)
     admit = _statement_admission(engine)
 
-    async def search(*, scan: bool, reuse: float) -> SearchResultPage:
-        page, _eff = await svc.search(query, run_context=SearchRunContext(
-            data_version=data_version, admit=admit, reuse_s=reuse, scan=scan))
-        return page
-
-    async def scanned() -> SearchResultPage:
+    @contextlib.asynccontextmanager
+    async def feed_slot():
+        """One of this process's feed-scan slots and a token of the workspace's
+        fair share, taken by the engine for the request that moves a scan on,
+        while it does (``SearchRunContext.slot``) — never by one waiting on
+        another's scan. None free: no progress this time, and the scan stands."""
         lane = _lane()
         if lane.locked():
-            # Every slot is scanning: anything recent at all, before a 429.
-            try:
-                page = await search(scan=False, reuse=settings.session_ttl_seconds)
-                increment("view_feed_answers_total", outcome="busy_recent")
-                return page
-            except NothingReusable:
-                increment("view_feed_answers_total", outcome="busy")
-                raise ProviderBusy(provider_name="view-feed",
-                                   reason="every feed scan of this process is running",
-                                   retry_after_seconds=_BUSY_RETRY_S) from None
+            increment("view_feed_answers_total", outcome="no_slot")
+            yield False
+            return
         async with lane:
             await _enforce_fair_share(engine, ENDPOINT_VIEW_FEED)
             increment("view_feed_answers_total", outcome="scan")
-            return await search(scan=True, reuse=reuse_s)
+            yield True
+
+    async def search(*, scan: bool, reuse: float) -> SearchResultPage:
+        page, _eff = await svc.search(query, run_context=SearchRunContext(
+            data_version=data_version, admit=admit, reuse_s=reuse, scan=scan, slot=feed_slot))
+        return page
+
+    async def busy() -> SearchResultPage:
+        """Every slot is scanning and nothing answers yet: anything recent at
+        all, before a 429."""
+        try:
+            page = await search(scan=False, reuse=settings.session_ttl_seconds)
+            increment("view_feed_answers_total", outcome="busy_recent")
+            return page
+        except NothingReusable:
+            increment("view_feed_answers_total", outcome="busy")
+            raise ProviderBusy(provider_name="view-feed",
+                               reason="every feed scan of this process is running",
+                               retry_after_seconds=_BUSY_RETRY_S) from None
 
     async def compute() -> ViewFeedPage:
         if body.session_id:
-            # Continuing a running scan moves it on: that takes the lane.
-            page = await scanned()
+            # Continuing a running scan: the request holding its lease moves it
+            # on, in a slot; the others wait on that one's commit and hold none.
+            # With no slot free, it answers as it stands and is asked again.
+            page = await search(scan=True, reuse=reuse_s)
         else:
             try:
                 page = await search(scan=False, reuse=reuse_s)
                 increment("view_feed_answers_total",
                           outcome="stale" if page.stale else page.status or "complete")
             except NothingReusable:
-                page = await scanned()
+                page = await (busy() if _lane().locked() else search(scan=True, reuse=reuse_s))
         return _feed_page(layer.id, page, cursor["d"], max_rows, settings.view_feed_reuse_seconds)
 
     scope = _cache_scope(engine)

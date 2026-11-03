@@ -1119,6 +1119,79 @@ class TestUnitBudget:
         assert leases and leases[0] >= (2 + 30) * 1000
 
 
+class TestScanSlot:
+    """``SearchRunContext.slot``: taken by the request that moves a scan on,
+    once it holds the lease — never by one waiting on another's commit. With
+    none free, the lease goes back at once and the scan stands, so hundreds
+    reading a scan in flight hold none of the slots scans need."""
+
+    class _Work:
+        def __init__(self):
+            self.ran = []
+
+        async def begin(self, store):
+            pass
+
+        async def unit(self, unit, timeout_s):
+            self.ran.append(unit.label)
+            return 1
+
+        def fold(self, unit, result):
+            pass
+
+        def commit(self):
+            return {}
+
+    @staticmethod
+    def _slot(free=True):
+        import contextlib
+        taken = []
+
+        @contextlib.asynccontextmanager
+        async def slot():
+            taken.append("in")
+            yield free
+            taken.append("out")
+        return slot, taken
+
+    @staticmethod
+    def _session():
+        return Session("s1", "q", "1", None, 0, [Unit("range", "A", size=1)], [], 1)
+
+    async def test_the_request_moving_a_scan_on_takes_a_slot_while_it_does(self, fresh_memory_store):
+        from backend.app.services.deep_search import get_deep_search_settings
+        store, work = fresh_memory_store, self._Work()
+        session = self._session()
+        await store.save(session, None, 60)
+        slot, taken = self._slot()
+        await engine_mod._advance(session, False, store, work, time.monotonic() + 2,
+                                  get_deep_search_settings(), slot=slot)
+        assert taken == ["in", "out"] and work.ran == ["A"]
+        assert await store.lease("s1", 1_000), "the lease is given back"
+
+    async def test_a_request_waiting_on_another_takes_no_slot(self, fresh_memory_store):
+        from backend.app.services.deep_search import get_deep_search_settings
+        store, work = fresh_memory_store, self._Work()
+        session = self._session()
+        await store.save(session, None, 60)
+        assert await store.lease("s1", 10_000), "another request is moving it on"
+        slot, taken = self._slot()
+        await engine_mod._advance(session, False, store, work, time.monotonic() + 0.3,
+                                  get_deep_search_settings(), slot=slot)
+        assert taken == [] and work.ran == []
+
+    async def test_with_no_slot_free_the_lease_goes_back_and_the_scan_stands(self, fresh_memory_store):
+        from backend.app.services.deep_search import get_deep_search_settings
+        store, work = fresh_memory_store, self._Work()
+        session = self._session()
+        slot, taken = self._slot(free=False)
+        after = await engine_mod._advance(session, True, store, work, time.monotonic() + 2,
+                                          get_deep_search_settings(), slot=slot)
+        assert work.ran == [] and after.pending, "nothing run: the scan stands"
+        assert await store.load("s1") is not None, "a new scan is kept, for whoever continues it"
+        assert await store.lease("s1", 1_000), "and its lease given straight back"
+
+
 class _TreeProvider(_Provider):
     """A provider over a small containment tree — ``children`` — answering
     the statements the engine runs itself: whether anything is kept raw,
