@@ -23,6 +23,7 @@ import { formatUnitCount, unitMeaning } from './connections/connectionUnits'
 import { portView, type NodePorts } from './lineagePorts'
 import { LineagePortGlyph } from './LineagePortGlyph'
 import { SearchMatchBadge } from '../search/SearchMatchBadge'
+import { NarrowRowMark } from '@/features/narrow/NarrowRowMark'
 import { useSearchHighlight } from '../search/useSearchHighlight'
 import { DisplayRuleTagChips } from '../property-manager/DisplayRuleTagChips'
 import { NodeConnectionHandle } from './NodeConnectionHandle'
@@ -877,6 +878,8 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
           ``right-[3.125rem]`` when a badge is present so it lands
           to the LEFT of the badge, never on top of it. */}
       <div className="flex items-center gap-1.5 flex-shrink-0 relative z-[5]">
+        {/* On a narrowed canvas: why this row is there (nothing otherwise). */}
+        {!isTracing && <NarrowRowMark urn={urnOrId} collapsed={!isExpanded && hasChildren} />}
         {(descendantCount > 0 || traceApprox > 0) && (
           <span className={cn(
             "text-[11px] px-2 py-1 rounded-lg flex-shrink-0",

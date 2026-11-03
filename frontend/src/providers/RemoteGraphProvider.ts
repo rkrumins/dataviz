@@ -76,6 +76,7 @@ import type {
     NativeQueryResponse,
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
+import type { MembershipRequest, MembershipResult } from '@/types/membership'
 
 // Wire shape from POST /trace/v2 — `upstreamUrns`/`downstreamUrns` arrive as
 // JSON arrays (Pydantic serializes Set as list); we re-hydrate to Set on read.
@@ -540,6 +541,21 @@ export class RemoteGraphProvider implements GraphDataProvider {
             timeoutMs: TIMEOUTS.ANCESTOR_CHAINS_MS,
         })
         return res.chains
+    }
+
+    async resolveMembers(
+        viewId: string,
+        request: MembershipRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<MembershipResult> {
+        // A resolution walks lineage as a trace does, and is budgeted like one.
+        return await this.fetch<MembershipResult>('/members', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            extraParams: { viewId },
+            timeoutMs: TIMEOUTS.TRACE_MS,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
+        })
     }
 
     async searchNodes(query: string, limit = 10): Promise<GraphNode[]> {

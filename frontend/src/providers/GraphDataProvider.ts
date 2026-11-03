@@ -8,6 +8,7 @@
 
 import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition, ScopeFilterConfig, EntityAssignmentConfig } from '../types/schema'
 import type { TraceMeta } from '@/services/traceApi'
+import type { MembershipRequest, MembershipResult } from '@/types/membership'
 
 // ============================================
 // URN Types (DataHub Compatible)
@@ -838,6 +839,18 @@ export interface GraphDataProvider {
      * a root maps to `[]`.
      */
     getAncestorChains?(urns: URN[]): Promise<Record<string, string[]>>
+
+    /**
+     * Resolve a membership spec — seeds and how far they reach — into the
+     * entities in scope (`POST /members`), read in `viewId`. Optional
+     * capability: the server resolves, caches and shares the answer, so a
+     * provider without the route has no way to give it.
+     */
+    resolveMembers?(
+        viewId: string,
+        request: MembershipRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<MembershipResult>
 
     /**
      * Search nodes by text query

@@ -157,6 +157,7 @@ POST /api/v1/{ws_id}/graph/edges/beneath resource reads-only
 POST /api/v1/{ws_id}/graph/edges/between resource reads-only
 POST /api/v1/{ws_id}/graph/edges/query resource reads-only
 POST /api/v1/{ws_id}/graph/introspection/refresh resource
+POST /api/v1/{ws_id}/graph/members resource reads-only
 POST /api/v1/{ws_id}/graph/nodes/ancestor-chains resource reads-only
 POST /api/v1/{ws_id}/graph/nodes/create resource
 POST /api/v1/{ws_id}/graph/nodes/degree resource reads-only

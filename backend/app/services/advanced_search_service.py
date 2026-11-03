@@ -1517,6 +1517,15 @@ class AdvancedSearchService:
             "being searched."
         )
 
+    async def resolve_scope(self, requested: SearchScope) -> EffectiveViewScope:
+        """The scope a search would run in, after the checks it makes: the view
+        exists in this workspace, the caller can read it, and it is of the data
+        source searched. Its ``scope_hash`` is the boundary's identity — what a
+        caller caching an answer drawn from the scope keys it by."""
+        eff_scope = await self._resolve_scope(requested)
+        await self._guard_view_data_source(eff_scope)
+        return eff_scope
+
     async def _resolve_scope(self, requested: SearchScope) -> EffectiveViewScope:
         """Run the ViewScopeResolver and map known failure modes to HTTP."""
         if self._session is None or self._workspace_id is None:

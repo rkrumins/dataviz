@@ -689,6 +689,19 @@ Your administrator has turned off **Export graph data**.) Every match is in the
 file however the graph store is set up: no read asks for more rows than it
 sends in one reply.
 
+### Narrowing the canvas to the matches
+
+On a Context View, **Narrow…** on the results bar opens the canvas's Narrow
+window with the search's matches as the starting points. There, choose how far
+they reach: what is inside them, or what they feed and are fed by. Choose too
+whether to look for matches **In this view** or across the **Whole data
+source**. The canvas then shows only those entities. **Isolate** shows only the
+matches and their containers; Narrow can take in what the matches reach as well.
+A link to the narrowing carries the search, so whoever opens it sees the
+matches as they are then. See
+[Show only some entities and what they reach](/guide/exploring-graph#show-only-some-entities-and-what-they-reach).
+Narrow is a preview your administrator turns on.
+
 ### Questions from the canvas
 
 Right-click an entity in a Context View to ask about it without building

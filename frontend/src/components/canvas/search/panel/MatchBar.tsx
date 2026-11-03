@@ -26,7 +26,7 @@
 import { motion } from 'framer-motion'
 import {
     AlertTriangle, ChevronLeft, ChevronRight,
-    Crosshair, EyeOff, FileDown, Filter, Maximize2, Sparkles, X,
+    Crosshair, EyeOff, FileDown, Filter, Maximize2, ScanSearch, Sparkles, X,
 } from 'lucide-react'
 import {
     type FC, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState,
@@ -92,6 +92,9 @@ export interface MatchBarProps {
     onClear?: () => void
     /** Export every match to a file. Shown only when there are matches. */
     onExport?: () => void
+    /** Narrow the canvas to the matches and what they reach (the Context
+     *  View's Narrow). Absent where the canvas cannot. */
+    onNarrow?: () => void
     /** What ``count`` counts: a search's matches, a path search's routes
      *  — which stop at the path limit, not the candidate cap, and say so
      *  beside the paths themselves — or a Connections search's edges. */
@@ -109,7 +112,7 @@ export const MatchBar: FC<MatchBarProps> = ({
     count, elapsedMs, isRunning, errorMessage, truncated, countIsExact,
     deadlineExceeded, candidateCount, scanning, progress, startedAt, halted, onStop,
     onResume, countIsFloor, notes, onFrame,
-    onShowFocusedOnCanvas, onClear, onExport, unit = 'match', viewId,
+    onShowFocusedOnCanvas, onClear, onExport, onNarrow, unit = 'match', viewId,
 }) => {
     // What the stepper walks: the matches, or a Connections search's edges.
     const stepCount = useStepCount()
@@ -161,6 +164,7 @@ export const MatchBar: FC<MatchBarProps> = ({
                 floor={Boolean(countIsFloor && !isRunning && !isError)}
                 onClear={onClear}
                 onExport={!isRunning && !isError && (count ?? 0) > 0 ? onExport : undefined}
+                onNarrow={!isRunning && !isError && (count ?? 0) > 0 && unit === 'match' ? onNarrow : undefined}
                 onStop={live ? onStop : undefined}
                 unit={unit}
             />
@@ -357,7 +361,7 @@ function FloorNote({ notes, unit }: { notes: string[]; unit: MatchUnit }) {
 
 function SummaryStrip({
     isRunning, isError, errorMessage, count, elapsedMs,
-    showPlus, scannedPercent: scanned, clock, floor, onClear, onExport, onStop, unit,
+    showPlus, scannedPercent: scanned, clock, floor, onClear, onExport, onNarrow, onStop, unit,
 }: {
     isRunning: boolean
     isError: boolean
@@ -373,6 +377,7 @@ function SummaryStrip({
     floor: boolean
     onClear?: () => void
     onExport?: () => void
+    onNarrow?: () => void
     onStop?: () => void
     unit: MatchUnit
 }) {
@@ -406,6 +411,21 @@ function SummaryStrip({
                         )}
                     >
                         Stop
+                    </button>
+                )}
+                {onNarrow && (
+                    <button
+                        type="button"
+                        onClick={onNarrow}
+                        title="Show only the matches on the canvas — and, if you choose, what is inside them and what they feed or are fed by"
+                        className={cn(
+                            'inline-flex items-center gap-1 px-2 h-7 rounded-md shrink-0',
+                            'text-[11px] font-medium text-ink-secondary transition-colors',
+                            'hover:text-accent-lineage hover:bg-accent-lineage/10',
+                        )}
+                    >
+                        <ScanSearch className="w-3 h-3" />
+                        Narrow…
                     </button>
                 )}
                 {onExport && (

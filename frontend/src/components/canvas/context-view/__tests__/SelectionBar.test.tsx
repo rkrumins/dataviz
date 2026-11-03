@@ -142,4 +142,15 @@ describe('SelectionBar', () => {
       expect(within(bar).getByText('⇧').tagName).toBe('KBD')
     })
   })
+
+  it('narrows the canvas to the selection, when the preview is on', async () => {
+    const props = renderBar(['a', 'b'], { onNarrow: vi.fn() })
+    await userEvent.click(screen.getByRole('button', { name: /Narrow…/ }))
+    expect(props.onNarrow).toHaveBeenCalledOnce()
+  })
+
+  it('offers no Narrow while the preview is off', () => {
+    renderBar(['a', 'b'])
+    expect(screen.queryByRole('button', { name: /Narrow…/ })).not.toBeInTheDocument()
+  })
 })

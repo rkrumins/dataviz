@@ -40,6 +40,14 @@ import { useReparentNode } from './useReparentNode'
 import { useWorkspacesStore } from '@/store/workspaces'
 import { usePreferencesStore } from '@/store/preferences'
 import { useFeature } from '@/store/features'
+import { NarrowChip } from '@/features/narrow/NarrowChip'
+import { NarrowComposer } from '@/features/narrow/NarrowComposer'
+import { PRESETS as NARROW_PRESETS, seedsLabel as narrowSeedsLabel, specFor, specKey, type PresetId } from '@/features/narrow/model'
+import { canShareNarrow, decodeNarrowShare, narrowLink } from '@/features/narrow/narrowShareCodec'
+import { useNarrowStore, type NarrowDraft } from '@/features/narrow/narrowStore'
+import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
+import type { MembershipExpand } from '@/types/membership'
+import type { SearchQuery } from '@/types/search'
 import { useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
 import { Link } from 'react-router-dom'
@@ -262,6 +270,15 @@ const SEARCH_LINE_CAP = 1000
  *  a fresh array literal per render defeated that memo for every EMPTY column —
  *  so the columns with nothing in them re-rendered on every canvas render. */
 const EMPTY_LAYER_NODES: HierarchyNode[] = []
+/** The right-click Narrow entries' icons, one per reach. */
+const NARROW_PRESET_ICONS: Record<PresetId, ContextMenuAction['icon']> = {
+  just: 'Crosshair',
+  'one-level': 'ListTree',
+  'two-levels': 'FolderTree',
+  neighbours: 'ArrowLeftRight',
+  upstream: 'ArrowUpLeft',
+  downstream: 'ArrowDownRight',
+}
 const NO_URNS: readonly string[] = []
 
 /** Flag-on write policy for a NEW root entity (One Placement Contract): the layer to pin it to with
@@ -4413,6 +4430,97 @@ export function ContextViewCanvas({
     lastFailedCountRef.current = count
   }, [failedNodes, notify])
 
+  // ── NARROW (features/narrow) — the canvas shows chosen entities and what
+  // they reach: what is inside them, their sources and consumers, and what is
+  // inside those, resolved on the server and shared by everyone asking the same
+  // thing. A preview switch (`viewMembershipEnabled`); nothing is saved.
+  const narrowEnabled = useFeature('viewMembershipEnabled')
+  const narrowViewId = activeView?.id ?? null
+  const narrowComposer = useNarrowStore((s) => s.composer)
+  const narrowApplied = useNarrowStore((s) => (s.viewId === narrowViewId ? s.applied : null))
+  const narrowDraftFor = useCallback((urns: string[], expand?: Partial<MembershipExpand>): NarrowDraft => {
+    const seedNames = Object.fromEntries(urns.map((u) => [u, canvasDisplayName(u)]))
+    return { spec: specFor({ urns }, expand), seedsLabel: narrowSeedsLabel(urns, (u) => seedNames[u]), seedNames }
+  }, [])
+  const openNarrow = useCallback((draft: NarrowDraft) => {
+    if (narrowViewId) useNarrowStore.getState().openComposer(narrowViewId, draft)
+  }, [narrowViewId])
+  // Apply without the composer (a preset from the right-click menu, a shared
+  // link, Try again): resolve, then narrow — or say why not.
+  const narrowNow = useCallback(async (draft: NarrowDraft) => {
+    if (!narrowViewId || !provider.resolveMembers) return
+    try {
+      const result = await provider.resolveMembers(narrowViewId, { spec: draft.spec })
+      if (result.counts.total === 0) {
+        notify('warning', 'Nothing to narrow to — none of the starting points exist any more.')
+        return
+      }
+      useNarrowStore.getState().apply(narrowViewId, draft, result)
+    } catch (err) {
+      notify('error', narrowErrorText(err))
+    }
+  }, [narrowViewId, provider, notify])
+  const clearNarrow = useCallback(() => useNarrowStore.getState().clear(), [])
+  // One narrowing per view: leaving the view (or this canvas) puts it away.
+  useEffect(() => () => useNarrowStore.getState().clear(), [narrowViewId])
+  // A SHARED NARROWING (`?narrow=…`): decoded once, applied once the preview is
+  // known to be on, and the param stripped so a refresh or a copied URL stays
+  // clean. A malformed token decodes to null and the view opens normally.
+  const [initialNarrowShare] = useState(() => {
+    const raw = new URLSearchParams(window.location.search).get('narrow')
+    return raw ? decodeNarrowShare(raw) : null
+  })
+  const narrowShareUsed = useRef(false)
+  useEffect(() => {
+    if (!initialNarrowShare || narrowShareUsed.current || !narrowEnabled || !narrowViewId) return
+    narrowShareUsed.current = true
+    const params = new URLSearchParams(window.location.search)
+    params.delete('narrow')
+    const qs = params.toString()
+    window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
+    void narrowNow({ spec: initialNarrowShare.spec, seedsLabel: initialNarrowShare.label ?? 'the shared starting points' })
+  }, [initialNarrowShare, narrowEnabled, narrowViewId, narrowNow])
+  const narrowFromSearch = useCallback((query: SearchQuery) => {
+    openNarrow({
+      spec: specFor({ query: query.predicate }, {}, query.scope?.scopeMode === 'data_source' ? 'dataSource' : 'view'),
+      seedsLabel: 'the matches of your search',
+    })
+  }, [openNarrow])
+  const narrowLayers = useMemo(
+    () => sortedLayers.map((l) => ({ id: l.id, name: l.name, color: l.color ?? '#94a3b8' })),
+    [sortedLayers],
+  )
+  const narrowLayerOf = useCallback(
+    (urn: string) => nodeLayerMap.get(urnToIdMap.get(urn) ?? urn),
+    [nodeLayerMap, urnToIdMap],
+  )
+  // Right-click → Narrow to this: one entry per reach, applied at once; or
+  // choose in the composer. The selection the entity is part of narrows together.
+  const narrowMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const target = interactions.state.contextMenu.target
+    if (!narrowEnabled || !target || target.type !== 'node' || !isSelectableNode(target.id)) return []
+    const selection = selectedNodeIds.filter(isSelectableNode)
+    const urns = selection.length > 1 && selection.includes(target.id) ? selection : [target.id]
+    const close = interactions.closeContextMenu
+    return [
+      ...NARROW_PRESETS.map((p, i): ContextMenuAction => ({
+        id: `narrow-${p.id}`,
+        label: p.label,
+        icon: NARROW_PRESET_ICONS[p.id],
+        disabled: p.lineage && !traceEnabled,
+        dividerAfter: i === NARROW_PRESETS.length - 1,
+        onClick: () => { close(); void narrowNow(narrowDraftFor(urns, p.expand)) },
+      })),
+      {
+        id: 'narrow-choose',
+        label: 'Choose how far…',
+        icon: 'SlidersHorizontal',
+        onClick: () => { close(); openNarrow(narrowDraftFor(urns)) },
+      },
+    ]
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.state.contextMenu.target, selectedNodeIds, narrowEnabled, traceEnabled, narrowDraftFor, narrowNow, openNarrow])
+
   // View/Edit mode transitions (header Edit / Done). Entering edit =
   // opening/resuming a draft; the versioning bar tints amber and the header
   // morphs — that IS the success feedback, so no notification on the happy path.
@@ -5275,10 +5383,17 @@ export function ContextViewCanvas({
         : undefined,
       onDelete: () => deleteLayerWithUndo(layer.id),
       onStartEditing: !isDraft && canEnterEdit ? handleEnterEdit : undefined,
+      // Everything the view places in this layer, found as search's Layer filter finds it.
+      onNarrow: narrowEnabled
+        ? () => openNarrow({
+          spec: specFor({ query: { kind: 'layer', layerAssignment: layer.id } as SearchQuery['predicate'] }),
+          seedsLabel: `everything in ${layer.name}`,
+        })
+        : undefined,
     }
   }, [menuLayerId, sortedLayers, layerFold, layerEditsAllowed, insertLayerBeside, requestLayerRename,
     recolorLayer, reorderLayer, layerFoldOffered, foldLayersEnabled, deleteLayerWithUndo, isDraft,
-    canEnterEdit, handleEnterEdit])
+    canEnterEdit, handleEnterEdit, narrowEnabled, openNarrow])
 
   // What each folded layer holds of the lineage on screen:
   //   * `ports` — its rows with a line to an OPEN layer, which LayerColumn
@@ -6310,6 +6425,7 @@ export function ContextViewCanvas({
         onClear={search.clearQuery}
         onRevealNode={revealSearchHit}
         onFrameMatches={handleFrameMatches}
+        onNarrowMatches={narrowEnabled ? narrowFromSearch : undefined}
       />
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
       <ContextViewHeader
@@ -6434,6 +6550,21 @@ export function ContextViewCanvas({
             onCancel={exitCanvasTrace}
             onContinue={canvasTrace.continuePastCheckpoint}
             onRetry={canvasTrace.retryWalk}
+          />
+        )}
+
+        {/* Narrowed — the canvas shows part of the view, and says so for as
+            long as it does. Same top slot as the trace capsule and the connect
+            pill, which win it while they are up: a trace is then what is read,
+            and connecting is a moment. */}
+        {narrowEnabled && narrowApplied && !traceActive && narrowViewId
+          && !(canvasWritable && (edgeConnect.state.mode === 'armed' || (edgeConnect.state.mode === 'idle' && edgeConnect.state.tool))) && (
+          <NarrowChip
+            applied={narrowApplied}
+            onEdit={() => openNarrow({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel, seedNames: narrowApplied.seedNames })}
+            onClear={clearNarrow}
+            link={canShareNarrow(narrowApplied.spec) ? () => narrowLink(narrowApplied.spec, narrowApplied.seedsLabel) : undefined}
+            onRetry={() => { void narrowNow(narrowApplied) }}
           />
         )}
 
@@ -6857,6 +6988,7 @@ export function ContextViewCanvas({
             onTrace={traceEnabled ? () => startCanvasTrace(bulkSelection) : undefined}
             onOpenLens={traceEnabled ? () => openLensForSelection(bulkSelection) : undefined}
             onLink={canvasWritable ? () => useBulkLinkStore.getState().openPanel() : undefined}
+            onNarrow={narrowEnabled ? () => openNarrow(narrowDraftFor(bulkSelection)) : undefined}
             lineage={selectionLineage}
           />
         )}
@@ -7659,6 +7791,7 @@ export function ContextViewCanvas({
         onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
         customActions={reorderMenuActions}
         queryActions={queryMenuActions}
+        narrowActions={narrowMenuActions}
         layerMenu={layerMenu}
       />
 
@@ -7717,6 +7850,21 @@ export function ContextViewCanvas({
             ].filter(Boolean).join(' and '))
           }}
           onClose={() => setDuplicateFor(null)}
+        />
+      )}
+
+      {/* Narrow… — choose what the canvas shows, previewed before it is applied.
+          Keyed on the draft, so a new one opens fresh. */}
+      {narrowEnabled && narrowComposer && narrowViewId && (
+        <NarrowComposer
+          key={specKey(narrowComposer.spec)}
+          viewId={narrowViewId}
+          draft={narrowComposer}
+          lineageEnabled={traceEnabled}
+          layers={narrowLayers}
+          layerOf={narrowLayerOf}
+          onApply={(draft, result) => useNarrowStore.getState().apply(narrowViewId, draft, result)}
+          onClose={() => useNarrowStore.getState().closeComposer()}
         />
       )}
 

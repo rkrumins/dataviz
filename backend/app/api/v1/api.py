@@ -8,7 +8,7 @@ from backend.app.auth.dependencies import requires
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
     metrics as metrics_endpoint,
-    graph, graph_export, canvas, assignments, providers, ontologies, workspaces,
+    graph, graph_export, graph_members, canvas, assignments, providers, ontologies, workspaces,
     assets, catalog, views, features, layout_templates,
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
@@ -480,6 +480,12 @@ api_router.include_router(
 # workspace:datasource:read itself: a whole data source is more than a view's reach.
 api_router.include_router(
     graph_export.router, prefix="/{ws_id}/graph/export", tags=["graph:workspace"],
+)
+# Membership (POST /{ws_id}/graph/members): a scope's seeds and reach, resolved. Behind the
+# same data-source-or-view gate as every graph read.
+api_router.include_router(
+    graph_members.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
+    dependencies=[Depends(require_ds_read_or_view)],
 )
 api_router.include_router(
     graph.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],

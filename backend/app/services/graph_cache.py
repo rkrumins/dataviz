@@ -265,6 +265,8 @@ ENDPOINT_CANVAS_EXPAND = "canvas-expand"
 ENDPOINT_EDGES_BETWEEN = "edges-between"
 ENDPOINT_NODES_QUERY = "nodes-query"
 ENDPOINT_NODES_DEGREE = "nodes-degree"
+# A resolved membership (POST /graph/members): seeds + expansion → the entities in scope.
+ENDPOINT_MEMBERS = "members"
 
 _ENABLED_ENDPOINTS = {
     ENDPOINT_CHILDREN: _flag("GRAPH_CACHE_ENABLED_CHILDREN", default=True),
@@ -279,6 +281,7 @@ _ENABLED_ENDPOINTS = {
     ENDPOINT_EDGES_BETWEEN: _flag("GRAPH_CACHE_ENABLED_EDGES_BETWEEN", default=True),
     ENDPOINT_NODES_QUERY: _flag("GRAPH_CACHE_ENABLED_NODES_QUERY", default=True),
     ENDPOINT_NODES_DEGREE: _flag("GRAPH_CACHE_ENABLED_NODES_DEGREE", default=True),
+    ENDPOINT_MEMBERS: _flag("GRAPH_CACHE_ENABLED_MEMBERS", default=True),
 }
 
 #: The endpoints whose answer is read out of the ``:AGGREGATED`` rollup layer,
@@ -1520,7 +1523,8 @@ def _resolve_ttl(explicit: Optional[int], endpoint: str) -> int:
         return _DEFAULT_TRACE_TTL
     if endpoint == ENDPOINT_TRACE_EXPAND:
         return _DEFAULT_TRACE_EXPAND_TTL
-    if endpoint == ENDPOINT_TRACE_CLOSURE:
+    if endpoint in (ENDPOINT_TRACE_CLOSURE, ENDPOINT_MEMBERS):
+        # A membership is built from closure steps: it ages as they do.
         return _DEFAULT_TRACE_CLOSURE_TTL
     if endpoint == ENDPOINT_TOP_LEVEL:
         return _DEFAULT_TOP_LEVEL_TTL

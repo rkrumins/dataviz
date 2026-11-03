@@ -852,6 +852,50 @@ is enough.
 entity type id such as `"dataset"`. The full request models are in the explorer under
 `graph:workspace`.
 
+### Find everything a set of entities reaches
+
+**Needs:** what [Run a lineage trace](#run-a-lineage-trace) needs, and the
+**Narrow: chosen entities and what they reach** switch on (`viewMembershipEnabled`, a preview
+that ships off). Starting points by search, or sources and consumers, also need **Lineage
+trace**. With a key, **Data: read** is enough.
+
+`POST /api/v1/{ws_id}/graph/members?viewId=…` answers the question the Context View's
+**Narrow** asks: given these starting points, what is in scope? It is read in a view
+(`viewId` is required). The answer is cached and shared by everyone asking the same question.
+
+1. Name the starting points by URN, and say how far they reach:
+
+   ```bash
+   api POST "/api/v1/$WS/graph/members?viewId=$VIEW&dataSourceId=$DS" -d '{
+     "spec": {"seeds": {"urns": ["urn:li:dataset:orders"]},
+              "expand": {"children": "all", "upstream": "all"}}}' > members.json
+   jq '{counts, truncated, wholeSubtree}' members.json
+   ```
+
+   Or start from what a search finds: `"seeds": {"query": <a SearchQuery predicate>}`, with
+   `"within": "view"` (the default: inside the view) or `"dataSource"` (the whole source).
+
+2. Read the answer:
+
+   | Field | What it holds |
+   |---|---|
+   | `members` | Every entity in scope, with `via` (`seed`, `inside`, `upstream`, `downstream`, `partnerInside`) and, for a source or consumer, `hops` from the starting points |
+   | `wholeSubtree` | Members whose whole inside is in scope without being listed (`"children": "all"`) |
+   | `chains` | Each member's containers, parent first, top level last |
+   | `counts` | How many each part added; `null` for "everything inside", which is not enumerated |
+   | `missingSeeds` | Starting points that name no entity |
+   | `truncated` | Every limit reached, as `{reason, seen, limit}`: `seed_cap`, `member_cap`, `trace_cap`, `chains_cap` (the same answer every time), or `deadline`, `incomplete` (asking again may answer more) |
+   | `specHash` | The question's identity: the same spec, written in any order, has the same hash |
+
+   `"includeMembers": false` answers the counts alone. A limit never fails the request: it
+   answers `200` with what it found.
+
+| Part of `expand` | Takes |
+|---|---|
+| `children` | `0`, `1`, `2` or `"all"`: levels inside the starting points |
+| `upstream`, `downstream` | `0`–`25` or `"all"`: lineage steps, walked as `trace/closure` walks them |
+| `partnerChildren` | `0`, `1` or `"all"`: levels inside the sources and consumers found |
+
 ### Integrate single sign-on over a back channel
 
 **For:** the team that owns your organisation's sign-in service.

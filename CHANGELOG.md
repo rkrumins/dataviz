@@ -9,6 +9,59 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Context View: Narrow the canvas to some entities and what they reach
+
+A large view is read a corner at a time: one table and everything inside it, a dashboard and everything
+that feeds it. Until now the canvas could only show the whole view, or a search's matches with their
+containers. **Narrow** keeps the canvas to the entities you choose and as much of their surroundings as you
+ask for. A preview, off by default. See *Tracing Lineage on the Canvas* in the User Guide.
+
+### Added
+
+- **Narrow** on a Context View, from an entity's right-click menu (**Narrow to this…**), the selection bar
+  and the search panel's results. Reaches:
+  - one or two levels inside;
+  - sources and consumers one step out, with what is inside those;
+  - the entire upstream or the entire downstream;
+  - or each part set by hand, up to 25 steps or all the way.
+- The **Narrow** window shows how many entities each part adds as it changes, a preview spread over the
+  view's layers in their colours, and every limit the answer reached, in words.
+- A narrowed canvas says so in a bar at the top, with **Edit**, **Link** and **Show everything**.
+  - A collapsed entity shows how many of the narrowing are inside it.
+  - A source or consumer shows how many steps it is from the starting points.
+- **A narrowing travels as a link** (`?narrow=`). One that starts from a search carries the search, so it
+  opens on the matches as they are then.
+- `POST /api/v1/{ws_id}/graph/members` answers the same question for any caller, an API key included:
+  - given starting points (URNs, or a search) and how far they reach, it returns each entity in scope with
+    why it is in scope and how many steps away;
+  - it also returns the containers each entity sits in, counts for each part, and every limit reached.
+  - It is the one resolver behind Narrow, and later behind views made from queries and targeted exports.
+  - Recipe in the API Guide.
+- **Switch: Narrow: chosen entities and what they reach** (`viewMembershipEnabled`, Experimental). It is
+  off by default. Sources and consumers also need **Lineage trace**.
+
+### Changed
+
+- A narrowing is worked out once on the server and shared by everyone asking the same question. It is
+  cached under the question's hash and the data's generation, so a data change makes the next answer
+  fresh. It goes through the same load shedding as a trace: one fair-share token, and each graph
+  statement takes its own slot.
+- A short answer (out of time, or a part of the graph that didn't answer) is kept for seconds and never
+  as last known good. A capped answer is the answer, and keeps the full time.
+
+### Fixed
+
+- **Right-click menus always fit the window.** On every canvas, an entity's menu opened low on the screen
+  ran off its bottom edge, and the actions below could not be reached. The menu now opens above the
+  pointer (or to its left) where it would run off. When the window is too short for it, its actions scroll
+  under its header, with a fade while more are below. The wheel scrolls the menu, not the canvas behind it.
+
+### Upgrading
+
+- No migration. `GRAPH_CACHE_ENABLED_MEMBERS` (default `true`) turns the shared answer off.
+
+---
+
 ## [Unreleased] — Context View editing: connect by clicking, layers anywhere, Duplicate…
 
 Three everyday edits on a wide Context View were harder than they had to be: a link had to be dragged

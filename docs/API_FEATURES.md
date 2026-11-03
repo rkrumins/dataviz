@@ -286,6 +286,7 @@ feature open to anyone who knows the URL.
 | Fold distant layers | `canvasLayerFoldEnabled` | Off | Nothing on the server — the Context View offers no **Fold** button | Experimental, in the app only |
 | Roll up lineage to unloaded entities | `canvasLineageRollupEnabled` | Off | Nothing: the switch is retired and nothing reads it | Deprecated; to be removed |
 | One placement rule for every view surface | `placementContractEnabled` | Off | While it is **on**: `POST /{ws_id}/graph/assignments/compute` places entities with one shared rule; a view-scoped import pins a new top-level entity to a layer only where that rule would place it elsewhere; `POST /views` and `PUT /views/{view_id}/layout` refuse a new or changed layer rule that can never match | Experimental. Read with "off" as the fallback |
+| Narrow: chosen entities and what they reach | `viewMembershipEnabled` | Off | `POST /{ws_id}/graph/members` | Experimental. An unreadable value counts as off. Sources and consumers also need Lineage trace |
 
 ## How a switch is enforced
 
