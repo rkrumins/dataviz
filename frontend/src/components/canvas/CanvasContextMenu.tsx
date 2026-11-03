@@ -10,7 +10,7 @@
 
 import React, { useCallback, useEffect, useLayoutEffect, useRef } from 'react'
 import { createPortal } from 'react-dom'
-import { motion, AnimatePresence } from 'framer-motion'
+import { motion } from 'framer-motion'
 import * as LucideIcons from 'lucide-react'
 import { cn } from '@/lib/utils'
 import { LAYER_COLORS } from '@/components/views/ViewWizard/layerColors'
@@ -493,15 +493,17 @@ export function CanvasContextMenu({
     }
 
     // In the document's body, not the canvas: no canvas transform shifts where it
-    // sits, and no canvas pan or zoom takes the wheel that should scroll it.
+    // sits, and no canvas pan or zoom takes the wheel that should scroll it. No
+    // <AnimatePresence>: a portaled node must never outlive an interrupted exit
+    // (src/__tests__/noStrandedPortalOverlays.test.ts) — it animates in, and is
+    // gone the moment it closes.
     return createPortal(
-        <AnimatePresence>
+        <>
             {isOpen && target && (
                 <motion.div
                     ref={menuRef}
                     initial={{ opacity: 0, scale: 0.95, y: -5 }}
                     animate={{ opacity: 1, scale: 1, y: 0 }}
-                    exit={{ opacity: 0, scale: 0.95, y: -5 }}
                     transition={{ duration: 0.1 }}
                     className={cn(
                         "fixed z-[100] min-w-[200px] py-1.5 flex flex-col",
@@ -666,7 +668,7 @@ export function CanvasContextMenu({
                     </div>
                 </motion.div>
             )}
-        </AnimatePresence>,
+        </>,
         document.body,
     )
 }
