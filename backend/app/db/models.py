@@ -1195,6 +1195,10 @@ class ViewORM(Base):
     # stays private. A logical ref to a graph-versioning branch, with no cross-schema FK (as
     # ``view_layout_overlays.branch_id``).
     draft_branch_id = Column(Text, nullable=True)
+    # A subset view (``config.search``): the view it is a subset of, set when it is made and
+    # never by a client — how a base finds its subsets without reading every view's config.
+    # A logical ref (a base is soft-deleted and may be restored; its subsets wait for it).
+    subset_of = Column(Text, nullable=True)
     created_at = Column(Text, nullable=False, default=_now)
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
     deleted_at = Column(Text, nullable=True, default=None)
@@ -1213,6 +1217,9 @@ class ViewORM(Base):
         Index("idx_view_deleted_at", "deleted_at"),
         Index("idx_view_portable", "portable_id"),
         Index("idx_view_draft_branch", "draft_branch_id"),
+        Index("idx_view_subset_of", "subset_of",
+              postgresql_where=text("subset_of IS NOT NULL"),
+              sqlite_where=text("subset_of IS NOT NULL")),
         CheckConstraint(
             "visibility IN ('private', 'workspace', 'enterprise')",
             name="ck_views_visibility",

@@ -31,7 +31,8 @@ import json
 import logging
 import math
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, AsyncContextManager, Callable, Dict, List, Optional, Tuple
 
 from backend.app.providers.falkordb_deep_search import (
     _RESERVED_NODE_KEYS,
@@ -82,6 +83,7 @@ from backend.app.providers.falkordb_search.session import (
 )
 from backend.app.services.deep_search import (
     CompileError,
+    NothingReusable,
     SearchFailed,
     SearchRunContext,
     SessionStoreUnavailable,
@@ -196,6 +198,25 @@ async def execute_session_search(
                                  progressive=progressive, facets=None, wants_facets=False)
 
     after = cursor.get("after") if cursor is not None else None
+    # A first page this query already has — this data's, or a recent one
+    # inside the reuse window — answers without a scan.
+    if after is None and not options.session_id and context.reuse_s > 0:
+        reused = await _reusable(store, query_id, context)
+        if reused is not None:
+            return await _answer(provider, query, reused, 0, context, started, deadline,
+                                 total=None, cache_hit=True, progressive=progressive,
+                                 facets=None, wants_facets=False)
+    if not context.scan:
+        # Only what is there: a scan another request runs answers with how far
+        # it has got; anything else is the caller's to decide.
+        there = (await _find(store, options.session_id, query_id, after)
+                 or await store.load(session_id(query_id, context.data_version, after)))
+        if there is None or there.status == FAILED:
+            raise NothingReusable(query_id)
+        return await _answer(provider, query, there, 0, context, started, deadline,
+                             total=cursor.get("t") if cursor else None,
+                             cache_hit=there.status == COMPLETE, progressive=progressive,
+                             facets=None, wants_facets=False)
     session, created = await _session_for(provider, query, compiler, store, run, query_id,
                                           k, after, context, deadline, settings)
 
@@ -210,14 +231,47 @@ async def execute_session_search(
                                settings)
 
     session = await _advance(session, created, store, _SearchWork(session, ctx, run),
-                             deadline, settings)
+                             deadline, settings, slot=context.slot)
     if session.status == FAILED:
         raise SearchFailed(f"search failed: {session.error}")
+    if session.status == COMPLETE and session.after is None and context.reuse_s > 0:
+        # The latest complete first page: what answers, marked stale, while
+        # the data changes under it (``_reusable``).
+        await store.point(_latest(query_id), session.sid, settings.session_ttl_seconds)
     if wants_facets and capped_specs and facets is None:
         facets = await _await_facets(store, session.sid, deadline)
     return await _answer(provider, query, session, 0, context, started, deadline,
                          total=cursor.get("t") if cursor else None, cache_hit=False,
                          progressive=progressive, facets=facets, wants_facets=wants_facets)
+
+
+def _latest(query_id: str) -> str:
+    return f"latest:{query_id}"
+
+
+def reuse_window(query_id: str, reuse_s: float) -> float:
+    """``reuse_s``, spread ±20 % by query, so the windows of feeds read
+    together don't all close together and send them to scan at once."""
+    return reuse_s * (0.8 + 0.4 * (int(query_id[:8], 16) / 0xFFFFFFFF))
+
+
+async def _reusable(store: SessionStore, query_id: str,
+                    context: SearchRunContext) -> Optional[Session]:
+    """A complete first page of this query: this data's, else the latest one
+    while it is inside the reuse window — read before the data last changed,
+    so answered stale and as of when it was read. None: it must be scanned."""
+    current = await store.load(session_id(query_id, context.data_version, None))
+    if current is not None and current.status == COMPLETE:
+        return current
+    latest_sid = await store.pointed(_latest(query_id))
+    if not latest_sid or (current is not None and latest_sid == current.sid):
+        return None
+    latest = await store.load(latest_sid)
+    if (latest is not None and latest.status == COMPLETE and latest.query_id == query_id
+            and latest.after is None
+            and time.time() - latest.created < reuse_window(query_id, context.reuse_s)):
+        return latest
+    return None
 
 
 async def execute_count_session(
@@ -405,11 +459,17 @@ def request_deadline(started: float, wait_s: float, unit_s: float) -> float:
 
 async def _advance(session: Session, created: bool, store: SessionStore, work,
                    deadline: float, settings, ttl_s: Optional[int] = None,
-                   unit_s: Optional[float] = None) -> Session:
+                   unit_s: Optional[float] = None,
+                   slot: Optional[Callable[[], AsyncContextManager[bool]]] = None) -> Session:
     """This request's share of the scan: under the session's lease, run
     what is pending until ``deadline`` — each unit by ``work``, within
     ``unit_s`` (``unit_budget``) — and commit it; or, when another request
-    holds the lease, answer with its next commit."""
+    holds the lease, answer with its next commit.
+
+    ``slot`` (``SearchRunContext.slot``) is taken only here, by the request
+    that holds the lease: a request waiting on another's commit holds none.
+    With none free, the lease goes straight back and the scan stands where it
+    is — saved, when it is new, so whoever continues it finds it."""
     ttl_s = ttl_s or settings.session_ttl_seconds
     unit_s = unit_s or unit_budget(settings)
     if session.status != RUNNING:
@@ -425,30 +485,38 @@ async def _advance(session: Session, created: bool, store: SessionStore, work,
     token = await store.lease(session.sid, lease_ms)
     if token is None:
         return await wait_for_commit(store, session.sid, session, deadline) or session
-    # The lease is ours: carry on from the latest commit, not from what was
-    # read before taking it — another request may have committed and let go
-    # in between, and running its units again would count them twice. A
-    # search planned afresh replaces the failed session it shares an id with.
-    latest = await store.load(session.sid)
-    if latest is not None and not (created and latest.status == FAILED):
-        session.adopt(latest)
-    await work.begin(store)
     try:
-        await _hop(session, work, deadline, settings, unit_s, last_tries=last_tries)
-    finally:
-        try:
-            if session.status == FAILED:
-                await store.save(session, token, FAILED_TTL_S)
-            else:
-                await store.save(session, token, ttl_s, **work.commit())
-        finally:
-            # Given back even when the commit failed: held to its expiry, the
-            # next request found the session busy and only waited on it.
+        async with (slot() if slot is not None else contextlib.nullcontext(True)) as moving:
+            if not moving:
+                # No slot free: the scan stands as it is, for this request or
+                # another to move on — not held while its readers wait.
+                if created:
+                    await store.save(session, token, ttl_s)
+                return session
+            # The lease is ours: carry on from the latest commit, not from what
+            # was read before taking it — another request may have committed and
+            # let go in between, and running its units again would count them
+            # twice. A search planned afresh replaces the failed session it
+            # shares an id with.
+            latest = await store.load(session.sid)
+            if latest is not None and not (created and latest.status == FAILED):
+                session.adopt(latest)
+            await work.begin(store)
             try:
-                await store.release(session.sid, token)
-            except SessionStoreUnavailable:
-                _release_later(store, session.sid, token, lease_ms / 1000.0)
-                raise
+                await _hop(session, work, deadline, settings, unit_s, last_tries=last_tries)
+            finally:
+                if session.status == FAILED:
+                    await store.save(session, token, FAILED_TTL_S)
+                else:
+                    await store.save(session, token, ttl_s, **work.commit())
+    finally:
+        # Given back even when the commit failed: held to its expiry, the next
+        # request found the session busy and only waited on it.
+        try:
+            await store.release(session.sid, token)
+        except SessionStoreUnavailable:
+            _release_later(store, session.sid, token, lease_ms / 1000.0)
+            raise
     return session
 
 
@@ -993,6 +1061,7 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
             })
 
     running = not complete
+    stale = bool(context.data_version) and session.data_version != context.data_version
     notes = list(session.notes) + facet_notes + path_notes
     page = SearchResultPage(
         hits=hits,
@@ -1011,7 +1080,8 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
         progress=SearchProgress(scanned=session.scanned, total=max(session.total, session.scanned),
                                 matched=session.count),
         data_version=session.data_version,
-        stale=bool(context.data_version) and session.data_version != context.data_version,
+        stale=stale,
+        as_of=datetime.fromtimestamp(session.created, tz=timezone.utc).isoformat() if stale else None,
     )
     if notes:
         # Carried to the service, which builds the response's diagnostics

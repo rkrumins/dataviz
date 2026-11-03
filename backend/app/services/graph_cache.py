@@ -267,6 +267,8 @@ ENDPOINT_NODES_QUERY = "nodes-query"
 ENDPOINT_NODES_DEGREE = "nodes-degree"
 # A resolved membership (POST /graph/members): seeds + expansion → the entities in scope.
 ENDPOINT_MEMBERS = "members"
+# A page of one layer of a subset view (POST /graph/search/view-feed): its matches, as nodes.
+ENDPOINT_VIEW_FEED = "view-feed"
 
 _ENABLED_ENDPOINTS = {
     ENDPOINT_CHILDREN: _flag("GRAPH_CACHE_ENABLED_CHILDREN", default=True),
@@ -282,6 +284,7 @@ _ENABLED_ENDPOINTS = {
     ENDPOINT_NODES_QUERY: _flag("GRAPH_CACHE_ENABLED_NODES_QUERY", default=True),
     ENDPOINT_NODES_DEGREE: _flag("GRAPH_CACHE_ENABLED_NODES_DEGREE", default=True),
     ENDPOINT_MEMBERS: _flag("GRAPH_CACHE_ENABLED_MEMBERS", default=True),
+    ENDPOINT_VIEW_FEED: _flag("GRAPH_CACHE_ENABLED_VIEW_FEED", default=True),
 }
 
 #: The endpoints whose answer is read out of the ``:AGGREGATED`` rollup layer,
@@ -1136,6 +1139,11 @@ class GraphCache:
         ttl = _resolve_ttl(ttl_seconds, endpoint)
         if _is_incomplete_result(result):
             ttl = _NEGATIVE_TTL
+        # An answer that knows when it stops being right (a recent page served
+        # while the data changes) is kept no longer than that.
+        hint = getattr(result, "cache_ttl_s", None)
+        if isinstance(hint, int) and not isinstance(hint, bool) and hint > 0:
+            ttl = min(ttl, hint)
         try:
             if payload is None:
                 payload = result.model_dump_json(by_alias=True)
@@ -1197,6 +1205,10 @@ class GraphCache:
         if _LKG_TTL <= 0:
             return
         if _is_empty_result(result):
+            return
+        # An answer that says it is no current one (a recent page served while
+        # the data changes) must never be promoted as current later.
+        if getattr(result, "lkg", True) is False:
             return
         if _is_incomplete_result(result):
             return

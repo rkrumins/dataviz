@@ -49,6 +49,7 @@ ENDPOINT_AGGREGATED = "aggregated"
 ENDPOINT_CANVAS_BOOTSTRAP = "canvas-bootstrap"
 ENDPOINT_CANVAS_EXPAND = "canvas-expand"
 ENDPOINT_TRACE_CLOSURE = "trace-closure"
+ENDPOINT_VIEW_FEED = "view-feed"
 
 
 @dataclass(frozen=True)
@@ -100,6 +101,10 @@ _CONFIGS: dict[str, BucketConfig] = {
     # rate-limited at all (see `take`), so the closure endpoint's own
     # enforcement call did nothing until it was listed here.
     ENDPOINT_TRACE_CLOSURE: _load_config("TRACE_CLOSURE", 10.0, 20),
+    # A subset view's feed scans — charged only when a feed is scanned, never
+    # when a recent answer serves it: one scan is a search's unit walk, as
+    # heavy as an aggregated read.
+    ENDPOINT_VIEW_FEED: _load_config("VIEW_FEED", _AGGREGATED_RATE, _AGGREGATED_BURST),
 }
 
 

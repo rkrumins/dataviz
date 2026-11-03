@@ -65,8 +65,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.app.db.models import ViewORM
 from backend.app.db.repositories.view_repo import effective_view_config
 from backend.app.services.layout_config import derive_entity_scope, parse_reference_layout
+from backend.app.services.search_views import boundary_hash, is_subset, subset_layers
 from backend.app.services.view_placement import PlacementSpec, _num
 from backend.common.models.search import SearchScope
+from backend.common.models.search_view import read_search_definition
 
 logger = logging.getLogger(__name__)
 
@@ -137,6 +139,19 @@ class EffectiveViewScope:
     placement_digest: str = ""
     """Identifies the placement's inputs; folded into ``scope_hash``, so a
     layout edit — a draft's too — never serves a result placed the old way."""
+    search: Any = None
+    """A subset view's search (``config.search``): what every search in the view
+    must also meet. Its roots, types and depth above are its base's, read as the
+    system, and ``scope_hash`` is the base's scope and this search — never when
+    either view was last saved."""
+    read_in_view_id: Optional[str] = None
+    """The base view a subset's matches are looked for in, if any."""
+    redact_roots: bool = False
+    """The caller can't open the base view: what its scope holds isn't theirs to
+    see, only what the subset shows."""
+    subset_layers: Tuple[Any, ...] = ()
+    """A subset view's layers (``search_views.SubsetLayer``): what a layer filter in
+    it means — the types the layer holds."""
 
 
 # --------------------------------------------------------------------------- #
@@ -390,6 +405,9 @@ class ViewScopeResolver:
         # Branch-effective read: base config when no branch/overlay, else
         # base ⊕ the branch's layout overlay (see view_repo).
         config = await effective_view_config(self._session, view, branch_id)
+        if is_subset(config):
+            return await self._resolve_subset(view, config, requested,
+                                              data_source_id=data_source_id, can_read=can_read)
         canvas_kind = _classify_canvas(view.view_type, config)
 
         # Per-canvas root + entity-type + layer extraction.
@@ -450,6 +468,72 @@ class ViewScopeResolver:
             placement=placement,
             layers=layers,
             placement_digest=placement_digest,
+        )
+
+    async def _resolve_subset(
+        self,
+        view: ViewORM,
+        config: Dict[str, Any],
+        requested: SearchScope,
+        *,
+        data_source_id: Optional[str],
+        can_read: Optional[Callable[[Any], Awaitable[bool]]],
+    ) -> EffectiveViewScope:
+        """A subset view's scope: its base's, read as the system — the base's
+        published roots, types and depth, whoever is asking — and its search,
+        which the service adds to every search in the view. A subset of the whole
+        data source has no roots and no types. A base gone, moved, or a subset
+        itself leaves nothing to look in: never a widened search."""
+        definition = read_search_definition(config)
+        if definition is None:
+            raise ViewScopeError("subset_unreadable",
+                                 "This view's search was saved in a form this server can't read.")
+        base: Optional[ViewORM] = None
+        base_config: Optional[Dict[str, Any]] = None
+        allowed_roots: List[str] = []
+        allowed_types: FrozenSet[str] = frozenset()
+        depth_hint = 0
+        if definition.within == "view":
+            base = await self._load_view(definition.read_in)
+            base_config = _parse_view_config(base.config) if base is not None else None
+            if (base is None or base.id == view.id or base.workspace_id != view.workspace_id
+                    or base.deleted_at is not None or base.draft_branch_id is not None
+                    or base.data_source_id != view.data_source_id or is_subset(base_config)):
+                raise ViewScopeError("base_missing",
+                                     "This subset view's base view is no longer available.")
+            ref_roots, ref_types, _layers = _collect_reference_roots(base_config)
+            cnt_roots, cnt_types, depth_hint = _collect_content_scope(base_config)
+            allowed_roots = sorted(set(ref_roots) | set(cnt_roots))
+            allowed_types = ref_types | cnt_types
+
+        view_max_depth = depth_hint if depth_hint > 0 else _DEFAULT_MAX_DEPTH
+        effective_max_depth = max(1, min(view_max_depth, requested.max_depth or _DEFAULT_MAX_DEPTH,
+                                         _HARD_MAX_DEPTH))
+        effective_root_urns, dropped = _intersect_root_urns(requested.root_urns, allowed_roots)
+        effective_entity_types = _intersect_entity_types(requested.entity_types, allowed_types)
+        layers = subset_layers(definition, config, base_config)
+        return EffectiveViewScope(
+            view_id=view.id,
+            workspace_id=view.workspace_id,
+            data_source_id=data_source_id or view.data_source_id,
+            view_data_source_id=view.data_source_id,
+            canvas_kind="reference",
+            root_urns=tuple(effective_root_urns),
+            entity_type_allow_list=effective_entity_types,
+            layer_allow_list=frozenset(layer.id for layer in layers),
+            max_depth=effective_max_depth,
+            scope_hash=boundary_hash(
+                view_id=base.id if base is not None else None,
+                data_source_id=view.data_source_id, root_urns=effective_root_urns,
+                entity_types=effective_entity_types, max_depth=effective_max_depth,
+                predicate_hash=definition.predicate_hash()),
+            dropped_urns=tuple(dropped),
+            layers=tuple((layer.id, layer.name) for layer in layers),
+            search=definition.predicate,
+            read_in_view_id=base.id if base is not None else None,
+            redact_roots=bool(base is not None and can_read is not None
+                              and not await can_read(base)),
+            subset_layers=tuple(layers),
         )
 
     async def _load_view(self, view_id: str) -> Optional[ViewORM]:

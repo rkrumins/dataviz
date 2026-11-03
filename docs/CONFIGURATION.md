@@ -297,6 +297,9 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `DEEP_SEARCH_SESSION_TTL` | `900` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_SOFT_DEADLINE_MS` | `60000` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_SUBAGG_PARENT_CAP` | `24` | `backend/app/services/deep_search/settings.py` |
+| `DEEP_SEARCH_VIEW_FEED_LANE` | `2` | `backend/app/services/deep_search/settings.py` |
+| `DEEP_SEARCH_VIEW_FEED_MAX_ROWS` | `2000` | `backend/app/services/deep_search/settings.py` |
+| `DEEP_SEARCH_VIEW_FEED_REUSE` | `300` | `backend/app/services/deep_search/settings.py` |
 | `DEEP_SEARCH_WALK_MAX` | `300000` | `backend/app/services/deep_search/settings.py` |
 | `FALKORDB_ANCESTOR_CACHE_TTL_S` | `604800` | `backend/app/providers/falkordb_provider.py` |
 | `FALKORDB_ANCESTOR_CHUNK_SIZE` | `2000` | `backend/app/providers/falkordb_provider.py` |
@@ -356,6 +359,7 @@ The FalkorDB graph store, the other graph providers, and the reads built on them
 | `GRAPH_CACHE_ENABLED_TRACE` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_TRACE_CLOSURE` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_ENABLED_TRACE_EXPAND` | `true` | `backend/app/services/graph_cache.py` |
+| `GRAPH_CACHE_ENABLED_VIEW_FEED` | `true` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_LEADER_TTL_S` | `15` | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_LEADER_WAIT_S` | `10` / — *(differs by call site)* | `backend/app/services/graph_cache.py` |
 | `GRAPH_CACHE_PROMOTE_UNCHANGED` | `1` | `backend/app/services/graph_cache.py` |
@@ -766,6 +770,8 @@ Timeouts, circuit breakers, per-workspace fair share and other safety limits.
 | `FAIR_SHARE_ENABLED` | `false` | `backend/app/services/fair_share.py` |
 | `FAIR_SHARE_TRACE_CLOSURE_BURST` | `20` | `backend/app/services/fair_share.py` |
 | `FAIR_SHARE_TRACE_CLOSURE_RATE` | `10.0` | `backend/app/services/fair_share.py` |
+| `FAIR_SHARE_VIEW_FEED_BURST` | `10` | `backend/app/services/fair_share.py` |
+| `FAIR_SHARE_VIEW_FEED_RATE` | `5.0` | `backend/app/services/fair_share.py` |
 | `FALKORDB_AGGREGATED_READ_BUDGET_SECS` | `0` | `backend/app/config/resilience.py` |
 | `FALKORDB_AGGREGATED_READ_MIN_ATTEMPT_SECS` | `2` | `backend/app/config/resilience.py` |
 | `FALKORDB_HEALTH_CHECK_INTERVAL` | `30` | `backend/app/config/resilience.py` |

@@ -136,11 +136,12 @@ def _seeds(source: dict) -> dict:
 
 
 def _each_predicate_node(definition: Any) -> Iterable[dict]:
-    """Every dict node in every display rule's predicate tree, and every membership
-    source's query."""
+    """Every dict node in every display rule's predicate tree, every membership
+    source's query, and a subset view's search."""
     rl = reference_layout(definition)
     stack = [r.get("predicate") for r in _list(rl.get("displayRules") if rl else None) if isinstance(r, dict)]
     stack.extend(_seeds(s).get("query") for s in _membership_sources(definition))
+    stack.append((_dict((_dict(definition) or {}).get("search")) or {}).get("predicate"))
     while stack:
         node = stack.pop()
         if isinstance(node, dict):

@@ -9,6 +9,84 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Subset views: a search's matches inside a view, as a view of their own (API)
+
+A search's matches inside a view can now be kept as a view of their own, a **subset view**. It
+stores the search and the view it came from (its *base*), never the matches. So it is made at once
+however many there are, holds any number of them, and is current whenever it is opened. This
+release is the server side and the API. The canvas, and **Save as view** on search results, come
+next. A preview, off by default (**Subset views**, `searchViewsEnabled`). See *Make a view of a
+search's matches inside another view* in the API Guide.
+
+### Added
+
+- `POST /api/v1/views/from-search` (with `Idempotency-Key`) makes one.
+  - **Layers:** by default it takes its base's layers, read live and placed by type, plus
+    **Other matches**. When the base's layers change, the subset's do too. It can also have type
+    layers of its own.
+  - **Sharing:** shared like any view. Its readers need no access to the base, whose name they see
+    only if they can open it.
+- `POST /api/v1/{ws_id}/graph/search/view-feed` reads one layer's matches, page by page, with an
+  exact count. The view's own search decides what matches; nothing a client sends can widen it.
+- `GET` and `PUT /api/v1/views/{id}/search` read and change the search, or where its layers come
+  from, against the hash it was read at. Each change is recorded as a version.
+- `GET /api/v1/views/{id}/subsets` lists the subset views made from a view. Its count says what
+  changing or deleting the view reaches.
+- **Switch: Subset views: a search's matches as a view** (`searchViewsEnabled`, Experimental). Off
+  by default.
+
+### Changed
+
+- **Searches stay fast while the data changes.** A layer's last complete page still answers for a
+  few minutes after the data changes (`DEEP_SEARCH_VIEW_FEED_REUSE`, default 300 s), marked
+  *as of* when it was read. Each feed's window is spread so they don't all close together. Draft
+  saves change the data, so without this every busy feed would be rescanned on every save; now
+  each one is scanned at most once a window.
+- **Feed scans have their own lane.** Only the request moving a scan on takes one of this server's
+  feed slots (`DEEP_SEARCH_VIEW_FEED_LANE`, default 2) and a token of the workspace's `view-feed`
+  fair share, and only while it holds the scan. An answer from what is already there, or a wait on
+  a scan another request is moving, takes neither: hundreds reading a scan in flight hold no slots.
+  With every slot busy, a first page serves a recent answer (with none to give, a 429 with
+  `Retry-After`), and a scan in flight answers as it stands.
+- **Feeds are shared.** A page is cached under where its matches are looked for and the layer's
+  types, not under the view. Every view and viewer asking the same question share it.
+- **A search inside a subset view stays inside it.** Advanced Search, rule counts, exports and
+  Narrow in a subset view all meet its search, in its base's scope. Readers who can't open the
+  base don't see what the base holds: its roots aren't listed, and a shared link can't list its
+  properties, look names up across it, or show the statement a search runs.
+- **A view's search is the server's to write.** `POST /api/v1/views` drops a `search` or a
+  `membership` sent with it. A settings save keeps the stored search, and a layout save holds a
+  subset's layers to type layers. A file can't bring in a search this server wouldn't keep, or
+  replace a subset view with an ordinary one, or the other way round.
+- **A data export of a subset view is refused.** It places nothing, so it would have been the
+  whole data source. Its matches are exported from its search.
+
+### Upgrading
+
+- One migration, `20261103_1200_subset_views`, adds `views.subset_of` with a partial index. It is
+  additive.
+- New settings: `DEEP_SEARCH_VIEW_FEED_REUSE`, `DEEP_SEARCH_VIEW_FEED_LANE`,
+  `DEEP_SEARCH_VIEW_FEED_MAX_ROWS`, `GRAPH_CACHE_ENABLED_VIEW_FEED`, `FAIR_SHARE_VIEW_FEED_RATE`
+  and `FAIR_SHARE_VIEW_FEED_BURST`. Turn the switch on once the web app that ships with it is
+  deployed.
+
+### Known limitations
+
+- **Placed by type.** A match goes to the layer that claims its own type, or to **Other matches**.
+  A base that places by tag or property rules, or by hand, isn't followed in those placements. So
+  are entities that sit in their container's layer in the base, such as a table's columns: in a
+  subset they are in **Other matches**.
+- **Published data only.** Subset views read the published graph: entities created in a draft
+  appear once it is published.
+- **Up to 2,000 rows a layer** are listed (`DEEP_SEARCH_VIEW_FEED_MAX_ROWS`). Past them, a layer
+  says so; search in it, or export, for the rest.
+- **When the cache Redis is down,** feeds answer busy until it is back.
+- **A deleted base** leaves its subsets without layers until it is restored.
+- **Moving between environments.** A subset imported into another environment names its base by
+  its id there too: until it can be matched there, it waits as if its base were deleted.
+
+---
+
 ## [Unreleased] — Context View: keep a narrowing as a view that keeps itself up to date
 
 A narrowing showed one corner of a large view, for one person, until they put it away. Now it can

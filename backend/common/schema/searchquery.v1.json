@@ -4180,6 +4180,19 @@
           "default": null,
           "title": "Aggregates"
         },
+        "asOf": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When a stale page was read (ISO 8601): a recent answer served while the data changes, never older than the reuse window.",
+          "title": "Asof"
+        },
         "cacheHit": {
           "default": false,
           "title": "Cachehit",

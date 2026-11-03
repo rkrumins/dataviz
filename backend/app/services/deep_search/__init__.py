@@ -15,6 +15,7 @@ and call into this package for shared types.
 from backend.app.services.deep_search.contracts import (
     CompileError,
     DeepSearchProvider,
+    NothingReusable,
     SearchFailed,
     SearchRunContext,
     SessionStoreUnavailable,
@@ -28,6 +29,7 @@ __all__ = [
     "CompileError",
     "DeepSearchProvider",
     "DeepSearchSettings",
+    "NothingReusable",
     "SearchFailed",
     "SearchRunContext",
     "SessionStoreUnavailable",

@@ -1119,6 +1119,82 @@ class TestUnitBudget:
         assert leases and leases[0] >= (2 + 30) * 1000
 
 
+class TestScanSlot:
+    """``SearchRunContext.slot``: taken by the request that moves a scan on,
+    once it holds the lease — never by one waiting on another's commit. With
+    none free, the lease goes back at once and the scan stands, so hundreds
+    reading a scan in flight hold none of the slots scans need."""
+
+    class _Work:
+        def __init__(self):
+            self.ran = []
+
+        async def begin(self, store):
+            pass
+
+        async def unit(self, unit, timeout_s):
+            self.ran.append(unit.label)
+            return 1
+
+        def fold(self, unit, result):
+            pass
+
+        def commit(self):
+            return {}
+
+    @staticmethod
+    def _slot(free=True):
+        import contextlib
+        taken = []
+
+        @contextlib.asynccontextmanager
+        async def slot():
+            taken.append("in")
+            yield free
+            taken.append("out")
+        return slot, taken
+
+    @staticmethod
+    def _session():
+        return Session("s1", "q", "1", None, 0, [Unit("range", "A", size=1)], [], 1)
+
+    async def test_the_request_moving_a_scan_on_takes_a_slot_while_it_does(self, fresh_memory_store):
+        from backend.app.services.deep_search import get_deep_search_settings
+        store, work = fresh_memory_store, self._Work()
+        session = self._session()
+        await store.save(session, None, 60)
+        slot, taken = self._slot()
+        await engine_mod._advance(session, False, store, work, time.monotonic() + 2,
+                                  get_deep_search_settings(), slot=slot)
+        assert taken == ["in", "out"] and work.ran == ["A"]
+        leased = await store.lease("s1", 1_000)
+        assert leased, "the lease is given back"
+
+    async def test_a_request_waiting_on_another_takes_no_slot(self, fresh_memory_store):
+        from backend.app.services.deep_search import get_deep_search_settings
+        store, work = fresh_memory_store, self._Work()
+        session = self._session()
+        await store.save(session, None, 60)
+        leased = await store.lease("s1", 10_000)
+        assert leased, "another request is moving it on"
+        slot, taken = self._slot()
+        await engine_mod._advance(session, False, store, work, time.monotonic() + 0.3,
+                                  get_deep_search_settings(), slot=slot)
+        assert taken == [] and work.ran == []
+
+    async def test_with_no_slot_free_the_lease_goes_back_and_the_scan_stands(self, fresh_memory_store):
+        from backend.app.services.deep_search import get_deep_search_settings
+        store, work = fresh_memory_store, self._Work()
+        session = self._session()
+        slot, taken = self._slot(free=False)
+        after = await engine_mod._advance(session, True, store, work, time.monotonic() + 2,
+                                          get_deep_search_settings(), slot=slot)
+        assert work.ran == [] and after.pending, "nothing run: the scan stands"
+        assert await store.load("s1") is not None, "a new scan is kept, for whoever continues it"
+        leased = await store.lease("s1", 1_000)
+        assert leased, "and its lease given straight back"
+
+
 class _TreeProvider(_Provider):
     """A provider over a small containment tree — ``children`` — answering
     the statements the engine runs itself: whether anything is kept raw,
@@ -1674,3 +1750,81 @@ def test_a_statement_stays_inside_the_cluster_window(monkeypatch):
     assert engine_mod.statement_s(settings) == pytest.approx(10.0)
     assert engine_mod._last_try_s() == pytest.approx(10.0)
     assert engine_mod.unit_budget(settings, passes=2) == pytest.approx(20.0)
+
+
+# ---------------------------------------------------------------------------
+# Reuse: a recent complete first page answers while the data changes
+# ---------------------------------------------------------------------------
+
+async def _feed(provider, *, data_version="1", reuse_s=300.0, scan=True, **options):
+    return await engine_mod.execute_session_search(
+        provider, _query(**{"pageSize": 5, "sort": "displayName", "sortDir": "asc", **options}),
+        context=SearchRunContext(data_version=data_version, scope_hash="h", reuse_s=reuse_s,
+                                 scan=scan),
+    )
+
+
+class TestReuse:
+    async def test_new_data_is_answered_by_the_last_page_marked_as_of(self, scan):
+        s = scan({"A": _rows("a", 7)})
+        provider = _Provider()
+        first = await _feed(provider)
+        assert first.status == "complete" and not first.stale and first.as_of is None
+        again = await _feed(provider, data_version="2")
+        assert len(s.runs) == 1                         # no second scan
+        assert again.session_id == first.session_id and again.stale and again.cache_hit
+        assert again.as_of and again.total_count == 7
+        assert [h.node.urn for h in again.hits] == [h.node.urn for h in first.hits]
+
+    async def test_past_the_window_it_scans(self, scan):
+        s = scan({"A": _rows("a", 3)})
+        provider = _Provider()
+        await _feed(provider, reuse_s=1e-9)
+        page = await _feed(provider, data_version="2", reuse_s=1e-9)
+        assert len(s.runs) == 2 and not page.stale
+
+    async def test_without_reuse_new_data_scans_as_ever(self, scan):
+        s = scan({"A": _rows("a", 3)})
+        provider = _Provider()
+        await _feed(provider, reuse_s=0)
+        page = await _feed(provider, data_version="2", reuse_s=0)
+        assert len(s.runs) == 2 and not page.stale
+
+    async def test_a_page_this_data_has_is_fresh_before_any_recent_one(self, scan):
+        s = scan({"A": _rows("a", 3)})
+        provider = _Provider()
+        await _feed(provider)
+        await _feed(provider, data_version="2", reuse_s=1e-9)      # a fresh scan
+        page = await _feed(provider, data_version="2")
+        assert len(s.runs) == 2 and not page.stale
+
+    async def test_without_scanning_nothing_there_is_nothing_reusable(self, scan):
+        from backend.app.services.deep_search import NothingReusable
+        s = scan({"A": _rows("a", 3)})
+        with pytest.raises(NothingReusable):
+            await _feed(_Provider(), scan=False)
+        assert s.runs == []
+
+    async def test_without_scanning_a_running_scan_answers_how_far_it_got(self, scan):
+        s = scan({f"L{i}": _rows(f"n{i}_", 1) for i in range(4)}, delay=0.05)
+        provider = _Provider()
+        started = await _feed(provider, waitMs=40)
+        assert started.status == "running"
+        runs = len(s.runs)
+        probe = await _feed(provider, scan=False)
+        assert probe.status == "running" and probe.session_id == started.session_id
+        assert len(s.runs) == runs                      # it ran nothing itself
+
+    async def test_a_later_page_of_a_recent_answer_continues_on_it(self, scan):
+        s = scan({"A": _rows("a", 12)})
+        provider = _Provider()
+        await _feed(provider)
+        stale = await _feed(provider, data_version="2")
+        later = await _feed(provider, data_version="2", cursor=stale.cursor)
+        assert len(s.runs) == 1 and later.session_id == stale.session_id
+        assert [h.node.urn for h in later.hits][0] == "urn:a005"
+
+    def test_windows_are_spread_per_query(self):
+        windows = {engine_mod.reuse_window(q, 100.0) for q in ("00000000aa", "ffffffffbb", "80000000cc")}
+        assert min(windows) == pytest.approx(80.0) and max(windows) == pytest.approx(120.0)
+        assert engine_mod.reuse_window("80000000cc", 100.0) == engine_mod.reuse_window("80000000dd", 100.0)

@@ -97,6 +97,17 @@ class DeepSearchSettings:
     # ``OBJECT_STORE_TTL_HOURS`` from when it began, as the object store's
     # sweep takes its parts that long after they were written.
     export_ttl_seconds: int
+    # A subset view's layer feed (``POST /graph/search/view-feed``): how long
+    # after the data changes its last complete page still answers, marked as
+    # of when it was read (each feed's window is spread ±20 %) — so a busy
+    # graph rescans a hot feed at most once a window ...
+    view_feed_reuse_seconds: int
+    # ... how many feed scans one process runs at once (the rest are answered
+    # from a recent page, or told to come back) ...
+    view_feed_lane: int
+    # ... and the most rows one layer lists on the canvas; past them, a layer
+    # is searched or exported.
+    view_feed_max_rows: int
 
     @classmethod
     def from_env(cls) -> "DeepSearchSettings":
@@ -153,6 +164,9 @@ class DeepSearchSettings:
             catalog_ttl_seconds=max(60, _read_int("DEEP_SEARCH_CATALOG_TTL", 3600)),
             catalog_reuse_seconds=max(0, _read_int("DEEP_SEARCH_CATALOG_REUSE", 600)),
             export_ttl_seconds=max(600, min(86400, _read_int("DEEP_SEARCH_EXPORT_TTL", 86400))),
+            view_feed_reuse_seconds=max(0, _read_int("DEEP_SEARCH_VIEW_FEED_REUSE", 300)),
+            view_feed_lane=max(1, _read_int("DEEP_SEARCH_VIEW_FEED_LANE", 2)),
+            view_feed_max_rows=max(200, _read_int("DEEP_SEARCH_VIEW_FEED_MAX_ROWS", 2000)),
         )
 
 

@@ -1486,6 +1486,12 @@ class SearchResultPage(_Base):
         description="The graph changed after this session started; run "
                     "the search again for an answer on the current data.",
     )
+    as_of: Optional[str] = Field(
+        None, alias="asOf",
+        description="When a stale page was read (ISO 8601): a recent answer "
+                    "served while the data changes, never older than the "
+                    "reuse window.",
+    )
 
 
 # ---------------------------------------------------------------------------

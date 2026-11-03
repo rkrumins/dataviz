@@ -408,6 +408,8 @@ async def _to_enriched_response(
     fav_count = await _get_favourite_count(session, row.id)
     fav = await _is_favourited(session, row.id, user_id)
     facts = (await _scope_facts_for(session, [row]))[row.id]
+    followed = await followed_configs(session, [row], {row.id: config_override} if config_override else None)
+    config_override = followed.get(row.id, config_override)
     return _to_response(
         row,
         health=_health_for(row, facts),
@@ -551,6 +553,8 @@ async def _batch_enrich_rows(
         )
         fav_set = {vid for (vid,) in res.all()}
 
+    followed = await followed_configs(session, rows)
+
     responses: List[ViewResponse] = []
     for row in rows:
         creator = user_map.get(row.created_by or "", (None, None, None))
@@ -558,6 +562,7 @@ async def _batch_enrich_rows(
         publisher = user_map.get(getattr(row, 'data_updated_by', None) or "", (None, None, None))
         responses.append(_to_response(
             row,
+            config_override=followed.get(row.id),
             workspace_name=ws_map.get(row.workspace_id) if row.workspace_id else None,
             data_source_name=ds_map.get(row.data_source_id) if row.data_source_id else None,
             context_model_name=cm_map.get(row.context_model_id) if row.context_model_id else None,
@@ -802,10 +807,28 @@ def _keep_config_layout(new_config: Any, stored_config: dict) -> None:
         content.pop("entityScope", None)
     # A view made from a query keeps its definition: it changes through PUT
     # /views/{id}/membership only, never a settings save built from an older copy.
-    if "membership" in stored_config:
-        new_config["membership"] = stored_config["membership"]
-    else:
-        new_config.pop("membership", None)
+    # A subset view's search likewise, through PUT /views/{id}/search.
+    for key in ("membership", "search"):
+        if key in stored_config:
+            new_config[key] = stored_config[key]
+        else:
+            new_config.pop(key, None)
+
+
+def _subset_layout(config: dict, reference_layout: dict) -> bool:
+    """Whether ``config`` is a subset view's — and if so, refuse a layout it can't
+    hold (``ValueError``, a 422): one that follows its base stores no layers, an
+    own one only layers of types (``search_views.layout_problems``)."""
+    from backend.app.services.search_views import is_subset, layout_problems
+    if not is_subset(config):
+        return False
+    candidate = {**config, "layout": {**(config.get("layout") if isinstance(config.get("layout"), dict)
+                                         else {}), "referenceLayout": reference_layout}}
+    candidate.pop("referenceLayout", None)
+    problem = layout_problems(candidate)
+    if problem:
+        raise ValueError(problem)
+    return True
 
 
 async def _gate_node_ordering(session: AsyncSession, reference_layout: dict) -> dict:
@@ -924,6 +947,8 @@ async def update_view_layout(
         _remember_overrides(config, reconciled.overrides)
         if reconciled.replace_needed:
             await view_membership_repo.mark_pending(session, row, reason="layer_removed")
+    if _subset_layout(config, reference_layout):
+        entity_scope = "all"          # a subset holds every match of its layers' types
     await check_layer_rules(session, reference_layout, previous_layout)
     layout = config.get("layout")
     if not isinstance(layout, dict):
@@ -998,6 +1023,42 @@ def _base_reference_layout(config: dict) -> dict:
 def _load_config(row: ViewORM) -> dict:
     config = json.loads(row.config or "{}")
     return config if isinstance(config, dict) else {}
+
+
+async def followed_configs(
+    session: AsyncSession, rows: Sequence[ViewORM], configs: Optional[Dict[str, dict]] = None,
+) -> Dict[str, dict]:
+    """Each subset view in ``rows`` that follows its base (``config.search`` with
+    ``layout: inherit``), with its config as it is read: the base's layers, entity
+    styles and drawn relationships composed in (``search_views.served_config``). Its
+    layers are never stored, so a subset is always its base's as the base is now.
+
+    The bases are read in one query, as the system: a subset's readers see the layers
+    it shows, not the base. A base gone, or out of the subset's workspace, leaves the
+    subset no layers — never anyone else's. ``configs`` gives a row's config where it
+    is not the stored one (a draft's)."""
+    from backend.app.services.search_views import served_config
+    from backend.common.models.search_view import read_search_definition
+
+    wanted: Dict[str, tuple] = {}
+    for row in rows:
+        if not getattr(row, "subset_of", None):
+            continue
+        config = (configs or {}).get(row.id) or _load_config(row)
+        definition = read_search_definition(config)
+        if definition is not None and definition.layout == "inherit" and definition.read_in:
+            wanted[row.id] = (row, config, definition.read_in)
+    if not wanted:
+        return {}
+    base_ids = {base_id for _, _, base_id in wanted.values()}
+    bases = {b.id: b for b in (await session.execute(
+        select(ViewORM).where(ViewORM.id.in_(base_ids), view_is_live()))).scalars()}
+    out: Dict[str, dict] = {}
+    for view_id, (row, config, base_id) in wanted.items():
+        base = bases.get(base_id)
+        usable = base is not None and base.workspace_id == row.workspace_id and base.id != row.id
+        out[view_id] = served_config(config, _load_config(base) if usable else None)
+    return out
 
 
 async def get_overlay(
@@ -1112,6 +1173,7 @@ async def update_overlay_layout(
         requested = {**requested, "assignments": reconciled.assignments}
 
     # Validate BEFORE any write so a bad request never mutates the overlay.
+    subset = _subset_layout(config, requested)
     _validate_layer_refs(requested)
     await check_layer_rules(
         session, requested,
@@ -1129,7 +1191,9 @@ async def update_overlay_layout(
     ))
     _keep_display_rules(reference_layout, json.loads(overlay.reference_layout or "{}"))
     overlay.reference_layout = json.dumps(reference_layout)
-    if req.entity_scope is not None:
+    if subset:
+        overlay.entity_scope = "all"
+    elif req.entity_scope is not None:
         overlay.entity_scope = "curated" if kept is not None else req.entity_scope
     await session.flush()  # onupdate stamps overlay.updated_at
 
@@ -1268,6 +1332,15 @@ async def promote_overlay(
         _remember_overrides(config, reconciled.overrides)
         if reconciled.replace_needed:
             await view_membership_repo.mark_pending(session, row, reason="layer_removed")
+
+    try:
+        if _subset_layout(config, merged_layout):
+            merged_scope = "all"
+    except ValueError:
+        # Promote never raises: a merge a subset can't hold (the published view
+        # changed under the draft) keeps the published layers.
+        logger.warning("promote: subset view %s kept its layers; the draft's merge can't hold", row.id)
+        merged_layout, merged_scope = published, "all"
 
     layout = config.get("layout")
     if not isinstance(layout, dict):
@@ -2570,6 +2643,7 @@ async def list_popular_views(
 
     # Legacy fallback (kill-switch path)
     responses = []
+    followed = await followed_configs(session, rows)
     for row_tuple in tuples:
         row = row_tuple[0]
         fav_count = row_tuple[1] or 0
@@ -2591,6 +2665,7 @@ async def list_popular_views(
         is_fav = await _is_favourited(session, row.id, user_id)
         responses.append(_to_response(
             row,
+            config_override=followed.get(row.id),
             workspace_name=ws_name,
             data_source_name=ds_name,
             context_model_name=cm_name,
