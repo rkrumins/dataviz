@@ -24,7 +24,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.app.db.models import ViewORM
-from backend.app.db.repositories import view_activity_repo, view_repo, view_version_repo
+from backend.app.db.repositories import view_activity_repo, view_membership_repo, view_repo, view_version_repo
+from backend.app.services.live_views.ownership import carry_into_config
 from backend.app.services.layout_config import sanitize_node_ordering
 from backend.app.services.view_transfer.canonical import (
     config_from_definition, content_hash, portable_definition, split_definition,
@@ -35,6 +36,7 @@ from backend.app.services.view_transfer.merge import DIVERGED, merge_definitions
 from backend.app.services.view_transfer.reconcile import Policy, TargetTypes, aggregate, reconcile_view
 from backend.app.services.view_transfer.references import Rewrite, collect, reference_layout, rewrite
 from backend.app.services.view_transfer.sources import engine_for
+from backend.common.models.view_membership import read_definition
 from backend.common.models.management import ViewCreateRequest
 
 logger = logging.getLogger(__name__)
@@ -423,12 +425,20 @@ async def import_item(
         row.portable_id = portable_id
         if forked_from:
             item.provenance = {**item.provenance, "forkedFrom": forked_from}
+        arrived = read_definition(json.loads(row.config or "{}"))
+        if arrived is not None and arrived.mode == "live":
+            # A view made from a query arrives with no members (they are data, not
+            # design): it works them out against the data here.
+            await view_membership_repo.mark_pending(session, row, reason="imported")
     else:
         row = await _locked_target(session, item)
         await view_version_repo.snapshot_if_dirty(session, row, actor=actor,
                                                   message="Saved automatically before importing")
-        row.config = await asyncio.to_thread(
-            lambda: json.dumps(config_from_definition(definition, icon=item.metadata.get("icon"))))
+        imported = await asyncio.to_thread(config_from_definition, definition, icon=item.metadata.get("icon"))
+        # A view kept up to date keeps its members until they are worked out again.
+        if carry_into_config(imported, json.loads(row.config or "{}")):
+            await view_membership_repo.mark_pending(session, row, reason="design_replaced")
+        row.config = await asyncio.to_thread(json.dumps, imported)
         row.name = item.metadata["name"]
         row.description = item.metadata.get("description")
         row.tags = json.dumps(item.metadata["tags"]) if item.metadata.get("tags") else None

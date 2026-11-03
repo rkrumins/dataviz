@@ -422,8 +422,20 @@ async def restore(
     if gate_layout is not None and isinstance(layout, dict) and isinstance(layout.get("referenceLayout"), dict):
         layout["referenceLayout"] = await gate_layout(session, layout["referenceLayout"])
     label = label_of(target)
-    row.config = await asyncio.to_thread(
-        lambda: json.dumps(config_from_definition(definition, icon=label["icon"])))
+    restored = await asyncio.to_thread(config_from_definition, definition, icon=label["icon"])
+    # Members are data, not design: a version holds none, so a view kept up to date
+    # keeps its members until they are worked out again.
+    from backend.app.services.live_views.ownership import carry_into_config
+
+    try:
+        previous = json.loads(row.config or "{}")
+    except ValueError:
+        previous = {}
+    if carry_into_config(restored, previous if isinstance(previous, dict) else {}):
+        from backend.app.db.repositories import view_membership_repo
+
+        await view_membership_repo.mark_pending(session, row, reason="design_replaced")
+    row.config = await asyncio.to_thread(json.dumps, restored)
     row.name = label["name"]
     row.description = label["description"]
     row.tags = json.dumps(label["tags"]) if label["tags"] else None

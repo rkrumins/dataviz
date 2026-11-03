@@ -215,3 +215,48 @@ def apply_member_ops(
         if isinstance(out.get(urn), Mapping) and not is_machine(out[urn]):
             out.pop(urn)
     return out, left_out
+
+
+def _layout(config: dict) -> dict:
+    layout = config.get("layout")
+    if not isinstance(layout, dict):
+        layout = config["layout"] = {}
+    ref = layout.get("referenceLayout")
+    if not isinstance(ref, dict):
+        ref = layout["referenceLayout"] = {}
+    return ref
+
+
+def layer_ids_of(reference_layout: Mapping) -> List[str]:
+    return [
+        layer["id"] for layer in (reference_layout.get("layers") or [])
+        if isinstance(layer, Mapping) and isinstance(layer.get("id"), str)
+    ]
+
+
+def carry_into_config(new_config: dict, old_config: Mapping) -> bool:
+    """A view's design replaced wholesale (a version restored, a file imported over
+    it): if it is kept up to date, keep the members it had in the new layers, until
+    they are worked out again. Returns True when they must be — the caller marks
+    the view pending. Edits ``new_config`` in place."""
+    from backend.common.models.view_membership import read_definition
+
+    definition = read_definition(new_config)
+    if definition is None or definition.mode != "live":
+        return False
+    ref = _layout(new_config)
+    old = old_config.get("layout") if isinstance(old_config, Mapping) else None
+    old_ref = old.get("referenceLayout") if isinstance(old, Mapping) else None
+    old_assignments = old_ref.get("assignments") if isinstance(old_ref, Mapping) else None
+    carried = carry_machine_entries(
+        ref.get("assignments") or {},
+        old_assignments or {},
+        layer_ids=layer_ids_of(ref),
+        fallback_layer_id=definition.layout.fallback_layer_id,
+    )
+    ref["assignments"] = carried.assignments
+    content = new_config.get("content")
+    if not isinstance(content, dict):
+        content = new_config["content"] = {}
+    content["entityScope"] = "curated"
+    return True
