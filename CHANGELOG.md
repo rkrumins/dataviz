@@ -128,6 +128,9 @@ the User Guide.
   people put members is kept, and remembered for the next update.
 - **An update is data, not an edit.** It stamps the view's data freshness, not its "last edited",
   and writes no version.
+- **A view package carries the members.** An auto-updating view's versions leave its members out,
+  so its package takes the members it holds when it is packaged. A snapshot's package takes the
+  members its version holds.
 - **Large removals wait.** An update that would remove at least half of a view (and at least 50
   entities) waits for an editor to confirm it.
 - **Short answers are never applied.** When the graph answers short, the view keeps its last
