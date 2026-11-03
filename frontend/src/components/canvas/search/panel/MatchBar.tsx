@@ -26,7 +26,7 @@
 import { motion } from 'framer-motion'
 import {
     AlertTriangle, ChevronLeft, ChevronRight,
-    Crosshair, EyeOff, FileDown, Filter, Maximize2, ScanSearch, Sparkles, X,
+    BookmarkPlus, Crosshair, EyeOff, FileDown, Filter, Maximize2, ScanSearch, Sparkles, X,
 } from 'lucide-react'
 import {
     type FC, type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState,
@@ -95,6 +95,13 @@ export interface MatchBarProps {
     /** Narrow the canvas to the matches and what they reach (the Context
      *  View's Narrow). Absent where the canvas cannot. */
     onNarrow?: () => void
+    /** Keep the matches as a view of their own — a subset view. Absent where
+     *  the canvas cannot. */
+    onSaveAsView?: () => void
+    /** Its label, when it does something else ("Update “PII”…"). */
+    saveAsViewLabel?: string
+    /** Why this search can't be kept as a view; the button says so, disabled. */
+    saveAsViewBlocked?: string | null
     /** What ``count`` counts: a search's matches, a path search's routes
      *  — which stop at the path limit, not the candidate cap, and say so
      *  beside the paths themselves — or a Connections search's edges. */
@@ -112,7 +119,8 @@ export const MatchBar: FC<MatchBarProps> = ({
     count, elapsedMs, isRunning, errorMessage, truncated, countIsExact,
     deadlineExceeded, candidateCount, scanning, progress, startedAt, halted, onStop,
     onResume, countIsFloor, notes, onFrame,
-    onShowFocusedOnCanvas, onClear, onExport, onNarrow, unit = 'match', viewId,
+    onShowFocusedOnCanvas, onClear, onExport, onNarrow, onSaveAsView, saveAsViewLabel, saveAsViewBlocked,
+    unit = 'match', viewId,
 }) => {
     // What the stepper walks: the matches, or a Connections search's edges.
     const stepCount = useStepCount()
@@ -165,6 +173,9 @@ export const MatchBar: FC<MatchBarProps> = ({
                 onClear={onClear}
                 onExport={!isRunning && !isError && (count ?? 0) > 0 ? onExport : undefined}
                 onNarrow={!isRunning && !isError && (count ?? 0) > 0 && unit === 'match' ? onNarrow : undefined}
+                onSaveAsView={!isRunning && !isError && (count ?? 0) > 0 && unit === 'match' ? onSaveAsView : undefined}
+                saveAsViewLabel={saveAsViewLabel}
+                saveAsViewBlocked={saveAsViewBlocked ?? null}
                 onStop={live ? onStop : undefined}
                 unit={unit}
             />
@@ -361,7 +372,8 @@ function FloorNote({ notes, unit }: { notes: string[]; unit: MatchUnit }) {
 
 function SummaryStrip({
     isRunning, isError, errorMessage, count, elapsedMs,
-    showPlus, scannedPercent: scanned, clock, floor, onClear, onExport, onNarrow, onStop, unit,
+    showPlus, scannedPercent: scanned, clock, floor, onClear, onExport, onNarrow, onSaveAsView,
+    saveAsViewLabel, saveAsViewBlocked, onStop, unit,
 }: {
     isRunning: boolean
     isError: boolean
@@ -378,6 +390,9 @@ function SummaryStrip({
     onClear?: () => void
     onExport?: () => void
     onNarrow?: () => void
+    onSaveAsView?: () => void
+    saveAsViewLabel?: string
+    saveAsViewBlocked: string | null
     onStop?: () => void
     unit: MatchUnit
 }) {
@@ -426,6 +441,25 @@ function SummaryStrip({
                     >
                         <ScanSearch className="w-3 h-3" />
                         Narrow…
+                    </button>
+                )}
+                {onSaveAsView && (
+                    <button
+                        type="button"
+                        onClick={saveAsViewBlocked ? undefined : onSaveAsView}
+                        aria-disabled={saveAsViewBlocked ? true : undefined}
+                        title={saveAsViewBlocked
+                            ?? 'Keep these matches as a view of their own — always current, any size, shared like any view'}
+                        className={cn(
+                            'inline-flex items-center gap-1 px-2 h-7 rounded-md shrink-0',
+                            'text-[11px] font-medium transition-colors',
+                            saveAsViewBlocked
+                                ? 'text-ink-muted/60 cursor-not-allowed'
+                                : 'text-ink-secondary hover:text-accent-lineage hover:bg-accent-lineage/10',
+                        )}
+                    >
+                        <BookmarkPlus className="w-3 h-3" />
+                        {saveAsViewLabel ?? 'Save as view…'}
                     </button>
                 )}
                 {onExport && (

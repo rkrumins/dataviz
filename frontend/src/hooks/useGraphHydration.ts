@@ -1,5 +1,8 @@
 import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { useCanvasStore, type ChildPageState, type LineageEdge, type LineageNode, type TypeFeedState } from '@/store/canvas'
+import { featureEnabled } from '@/store/features'
+import type { ViewFeedPage } from '@/types/searchView'
+import { httpStatusOf } from '@/services/graphRequestFailure'
 import { primeLineageFor } from '@/lib/primeLineageFor'
 import { useGraphProvider, useGraphProviderContext } from '@/providers/GraphProviderContext'
 import {
@@ -42,6 +45,48 @@ const FEED_WALK_MAX_PAGES = 5
 /** Where a type feed stands after `page` — the SERVER's position: a client
  *  count of the rows returned is wrong under a draft overlay (see NodePage).
  *  The server counts a feed with its first page; later pages keep `total`. */
+/** The feed key of a subset view's layer. */
+export const subsetFeedKey = (layerId: string) => `layer:${layerId}`
+
+/** How long a subset layer's page lets the server scan before it answers with what
+ *  it has found so far (the first page, and each continuation of a running one). */
+const SUBSET_WAIT_MS = 2500
+
+/** Following a running scan: a round that moves nothing on (the server's scan
+ *  slots were all busy, or the scan is slow) waits before the next — this long,
+ *  doubling up to the most — so a cold feed read by hundreds is not asked in a
+ *  loop. Jittered, so those readers don't ask in step. */
+export const SUBSET_FOLLOW_MIN_MS = 1000
+export const SUBSET_FOLLOW_MAX_MS = 8000
+
+/** Where a subset view's layer stands after a page of its matches. */
+export function subsetFeedAfter(layerId: string, page: ViewFeedPage): TypeFeedState {
+    const running = page.status === 'running' && !!page.sessionId
+    return {
+        entityTypes: [],
+        offset: page.delivered,
+        hasMore: running || !!page.cursor,
+        total: page.totalCount ?? null,
+        search: {
+            layerId,
+            cursor: page.cursor ?? null,
+            sessionId: running ? (page.sessionId ?? null) : null,
+            status: page.status,
+            countStatus: page.countStatus,
+            stale: page.stale,
+            asOf: page.asOf ?? null,
+            capped: page.capped,
+            delivered: page.delivered,
+        },
+    }
+}
+
+/** A subset view whose base view is gone answers 409 `base_missing`. */
+function isBaseMissing(err: unknown): boolean {
+    const detail = (err as { detail?: { reason?: unknown } } | null)?.detail
+    return httpStatusOf(err) === 409 && !!detail && typeof detail === 'object' && detail.reason === 'base_missing'
+}
+
 export function feedAfter(entityTypes: string[], page: NodePage, offset = 0, total?: number | null): TypeFeedState {
     // "More" from a page that did not move the position can make no progress.
     return { entityTypes, offset: page.nextOffset, hasMore: page.hasMore && page.nextOffset > offset, total: page.totalCount ?? total }
@@ -475,10 +520,20 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     const activeLayout = activeView?.layout
     const claimedTypesKey = useMemo(() => {
         const layout = normalizeReferenceLayout(activeLayout?.referenceLayout)
-        // Curated never feeds by type.
-        if (activeLayout?.type !== 'reference' || deriveEntityScope(activeView?.content, layout) === 'curated') return ''
+        // Curated never feeds by type; nor does a subset view, whose layers list its search's matches.
+        if (activeLayout?.type !== 'reference' || activeView?.search
+            || deriveEntityScope(activeView?.content, layout) === 'curated') return ''
         return claimedFeedTypes(layout.layers, schemaEntityTypes).join('|')
-    }, [activeLayout, activeView?.content, schemaEntityTypes])
+    }, [activeLayout, activeView?.content, activeView?.search, schemaEntityTypes])
+    // A subset view's search, and how many times someone has asked its layers for
+    // answers on the current data: either re-reads the layers.
+    const subsetNonce = useCanvasStore(s => s.subsetRefreshNonce)
+    const subsetKey = activeView?.search ? `|subset:${JSON.stringify(activeView.search)}#${subsetNonce}` : ''
+    const lastSubsetNonceRef = useRef(0)
+    // The view a subset feed's next page is asked for, read when the page is
+    // fetched (after commit), so it is set in an effect, not during render.
+    const activeViewIdRef = useRef<string | null>(null)
+    useEffect(() => { activeViewIdRef.current = activeView?.id ?? null }, [activeView?.id])
 
     const [loadingNodes, setLoadingNodes] = useState<Set<string>>(new Set())
     const [failedNodes, setFailedNodes] = useState<Set<string>>(new Set())
@@ -558,7 +613,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         // scope (its wsId/dsId are fixed at construction), so we don't need to
         // include workspace/datasource IDs in the key — changing the view's
         // scope changes the provider, which changes providerVersion.
-        const initKey = `${providerVersion}:${activeView?.id ?? 'default'}:${layoutType}`
+        // A subset view also re-reads its layers when its search changes or someone asks
+        // for answers on the current data (subsetRefreshNonce).
+        const initKey = `${providerVersion}:${activeView?.id ?? 'default'}:${layoutType}${subsetKey}`
 
         if (initializedKeyRef.current === initKey) return
         initializedKeyRef.current = initKey
@@ -654,6 +711,10 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         useCanvasStore.getState().setEdgesTruncated(false)
         useCanvasStore.getState().clearNodeFetchFailures()
         useCanvasStore.getState().setPlacementsNotFound(null)
+        useCanvasStore.getState().setSubsetIssue(null)
+        // A refresh asks each layer for an answer on the current data, not a recent one.
+        const refreshSubset = subsetNonce > 0 && subsetNonce !== lastSubsetNonceRef.current
+        lastSubsetNonceRef.current = subsetNonce
 
         const controller = new AbortController()
 
@@ -738,7 +799,39 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                     // This attempt's progress, kept for a retry if it ends partial.
                     let nextCarry: HydrationCarry | null = null
 
-                    if (loadByUrn) {
+                    const subsetSearch = activeView?.search
+                    if (subsetSearch) {
+                        // ── A subset view: each layer lists its search's matches ──
+                        // Paged by the server from the view's stored search — never by
+                        // type, which would list every entity of the layer's types. With
+                        // the preview off it lists nothing and says why.
+                        const viewFeed = provider.viewFeedPage?.bind(provider)
+                        if (!featureEnabled('searchViewsEnabled') || !viewFeed || !activeView?.id) {
+                            useCanvasStore.getState().setSubsetIssue(
+                                featureEnabled('searchViewsEnabled') ? 'unsupported' : 'off')
+                        } else {
+                            const viewId = activeView.id
+                            const layerIds = normLayout.layers
+                                .map(l => l?.id).filter((id): id is string => typeof id === 'string' && !!id)
+                            const settled = await mapWithConcurrency(layerIds, HYDRATION_CONCURRENCY, layerId => viewFeed(
+                                viewId, { layerId, waitMs: SUBSET_WAIT_MS, ...(refreshSubset ? { refresh: true } : {}) }))
+                            if (controller.signal.aborted) return
+                            const seen = new Set<string>()
+                            settled.forEach((outcome, i) => {
+                                if (outcome.status !== 'fulfilled') {
+                                    if (isBaseMissing(outcome.reason)) useCanvasStore.getState().setSubsetIssue('base_missing')
+                                    else batchErrors.push(outcome.reason)
+                                    return
+                                }
+                                for (const node of outcome.value.nodes) {
+                                    if (seen.has(node.urn)) continue
+                                    seen.add(node.urn)
+                                    allNodes.push(node)
+                                }
+                                typeFeedSeeds.push([subsetFeedKey(layerIds[i]), subsetFeedAfter(layerIds[i], outcome.value)])
+                            })
+                        }
+                    } else if (loadByUrn) {
                         // ── Assignment-driven loading (by placement) ──
                         // Load the specific entities assigned to layers by URN
                         // (∪ the branch's created roots, see urnArray above).
@@ -1176,7 +1269,7 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
             }
         }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey, retryEpoch])
+    }, [enableHydration, provider, providerVersion, activeView?.id, activeView?.layout.type, rootTypesKey, schemaTypesKey, isSchemaReady, committedDeltaKey, retryEpoch, subsetKey])
 
     // Explicit, user-triggered retry (the overlay's "Retry" button, or when a
     // background tab is brought back to the foreground). Re-arms a fresh round
@@ -1395,6 +1488,56 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
      * parent's). An edge is kept only once both ends are loaded.
      */
     const loadMoreFeeds = useCallback(async (feedKeys: string[]) => {
+        /** A page's edges: its incoming containment, lineage touching it, and containment
+         *  to loaded orphans of a type ``entityTypes`` can contain — each kept once both
+         *  ends are loaded. Null: a new graph was set meanwhile. */
+        const edgesForPage = async (
+            pageUrns: string[], entityTypes: string[], stale: () => boolean,
+        ): Promise<GraphEdge[] | null> => {
+            const before = useCanvasStore.getState()
+            const childTypes = new Set(entityTypes.flatMap(t =>
+                schemaEntityTypes.find(e => e.id === t)?.hierarchy?.canContain ?? []))
+            let orphans: string[] = []
+            if (childTypes.size > 0 && containmentEdgeTypes.length > 0) {
+                const parented = new Set<string>()
+                for (const e of before.edges) {
+                    if (isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) parented.add(e.target)
+                }
+                orphans = before.nodes
+                    .filter(n => childTypes.has(n.data.type) && !parented.has(n.id))
+                    .map(n => n.id)
+            }
+            const noteFailure = (err: unknown): GraphEdge[] => {
+                useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
+                return []
+            }
+            // Lineage out of and into the page as two ANCHORED reads: the
+            // one-query `anyUrns` form has no index-friendly shape and scans
+            // every lineage edge of the graph for each page. Flows only,
+            // never the stored :AGGREGATED cells, as /edges/between.
+            const none = Promise.resolve([] as GraphEdge[])
+            const lineage = lineageOnly(lineageEdgeTypes)
+            const [incoming, lineageOut, lineageIn, adopted] = pageUrns.length === 0 ? [[], [], [], []] : await Promise.all([
+                containmentEdgeTypes.length > 0
+                    ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: containmentEdgeTypes, limit: pageUrns.length * 4 + 100 }).catch(noteFailure)
+                    : none,
+                lineage.length > 0
+                    ? provider.getEdges({ sourceUrns: pageUrns, edgeTypes: lineage, limit: 200_000 }).catch(noteFailure)
+                    : none,
+                lineage.length > 0
+                    ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: lineage, limit: 200_000 }).catch(noteFailure)
+                    : none,
+                orphans.length > 0
+                    ? provider.getEdgesBetween([...pageUrns, ...orphans], containmentEdgeTypes).catch(noteFailure)
+                    : none,
+            ])
+            if (stale()) return null
+            const held = useCanvasStore.getState()._nodeIndex
+            const onPage = new Set(pageUrns)
+            const isLoaded = (u: string) => held.has(u) || onPage.has(u)
+            return [...incoming, ...lineageOut, ...lineageIn, ...adopted]
+                .filter(e => !isAggregatedEdge(e) && isLoaded(e.sourceUrn) && isLoaded(e.targetUrn))
+        }
         const feeds = useCanvasStore.getState().typeFeeds
         const due = [...new Set(feedKeys)].filter(k => feeds[k]?.hasMore)
         await Promise.all(due.map(feedKey => {
@@ -1408,6 +1551,33 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                 // A new graph was set while the page was in flight: it belongs to the old one.
                 const stale = () => signal.aborted || useCanvasStore.getState().graphGeneration !== generation
                 try {
+                    if (feed.search) {
+                        // A subset view's layer: its next page of matches, or more of a
+                        // scan still running — the server's search, never a type's page.
+                        const viewFeed = provider.viewFeedPage?.bind(provider)
+                        const viewId = activeViewIdRef.current
+                        if (!viewFeed || !viewId) return
+                        const s = feed.search
+                        const result = await viewFeed(viewId, s.status === 'running' && s.sessionId
+                            ? { layerId: s.layerId, sessionId: s.sessionId, waitMs: SUBSET_WAIT_MS }
+                            : { layerId: s.layerId, ...(s.cursor ? { cursor: s.cursor } : {}), waitMs: SUBSET_WAIT_MS })
+                        if (stale()) return
+                        const pageUrns = result.nodes.map(n => n.urn)
+                        const edges = await edgesForPage(pageUrns, [], stale)
+                        if (edges === null) return
+                        const held = useCanvasStore.getState()._nodeIndex
+                        const fresh = result.nodes.filter((n, i) => !held.has(n.urn) && pageUrns.indexOf(n.urn) === i)
+                        const store = useCanvasStore.getState()
+                        const now = store.typeFeeds[feedKey]?.search
+                        if (now && (now.delivered !== s.delivered || now.sessionId !== s.sessionId)) {
+                            // Another instance moved this layer on meanwhile: the rows land, its position stands.
+                            store.addGraph(fresh.map(n => toCanvasNode(n)), edges.map(e => toCanvasEdge(e)))
+                            return
+                        }
+                        store.addFeedPage(feedKey, subsetFeedAfter(s.layerId, result),
+                            fresh.map(n => toCanvasNode(n)), edges.map(e => toCanvasEdge(e)))
+                        return
+                    }
                     // One ask makes progress or proves there is none: a page whose
                     // rows are all held already would otherwise look like a click
                     // that did nothing. Bounded, as a feed can be long.
@@ -1422,50 +1592,9 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
                         if (stale()) return
                         const page = result.nodes
                         const pageUrns = page.map(n => n.urn)
-                        const before = useCanvasStore.getState()
-                        const childTypes = new Set(feed.entityTypes.flatMap(t =>
-                            schemaEntityTypes.find(e => e.id === t)?.hierarchy?.canContain ?? []))
-                        let orphans: string[] = []
-                        if (childTypes.size > 0 && containmentEdgeTypes.length > 0) {
-                            const parented = new Set<string>()
-                            for (const e of before.edges) {
-                                if (isContainmentEdgeType(normalizeEdgeType(e), containmentEdgeTypes)) parented.add(e.target)
-                            }
-                            orphans = before.nodes
-                                .filter(n => childTypes.has(n.data.type) && !parented.has(n.id))
-                                .map(n => n.id)
-                        }
-                        const noteFailure = (err: unknown): GraphEdge[] => {
-                            useCanvasStore.getState().noteEdgeFetchFailure(err instanceof Error ? err.message : undefined)
-                            return []
-                        }
-                        // Lineage out of and into the page as two ANCHORED reads: the
-                        // one-query `anyUrns` form has no index-friendly shape and scans
-                        // every lineage edge of the graph for each page. Flows only,
-                        // never the stored :AGGREGATED cells, as /edges/between.
-                        const none = Promise.resolve([] as GraphEdge[])
-                        const lineage = lineageOnly(lineageEdgeTypes)
-                        const [incoming, lineageOut, lineageIn, adopted] = pageUrns.length === 0 ? [[], [], [], []] : await Promise.all([
-                            containmentEdgeTypes.length > 0
-                                ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: containmentEdgeTypes, limit: pageUrns.length * 4 + 100 }).catch(noteFailure)
-                                : none,
-                            lineage.length > 0
-                                ? provider.getEdges({ sourceUrns: pageUrns, edgeTypes: lineage, limit: 200_000 }).catch(noteFailure)
-                                : none,
-                            lineage.length > 0
-                                ? provider.getEdges({ targetUrns: pageUrns, edgeTypes: lineage, limit: 200_000 }).catch(noteFailure)
-                                : none,
-                            orphans.length > 0
-                                ? provider.getEdgesBetween([...pageUrns, ...orphans], containmentEdgeTypes).catch(noteFailure)
-                                : none,
-                        ])
-                        if (stale()) return
-
+                        const edges = await edgesForPage(pageUrns, feed.entityTypes, stale)
+                        if (edges === null) return
                         const held = useCanvasStore.getState()._nodeIndex
-                        const onPage = new Set(pageUrns)
-                        const isLoaded = (u: string) => held.has(u) || onPage.has(u)
-                        const edges = [...incoming, ...lineageOut, ...lineageIn, ...adopted]
-                            .filter(e => !isAggregatedEdge(e) && isLoaded(e.sourceUrn) && isLoaded(e.targetUrn))
                         const fresh = page.filter((n, i) => !held.has(n.urn) && pageUrns.indexOf(n.urn) === i)
                         // ONE store update: nodes, edges and the feed's position —
                         // unless another instance of this hook moved the feed on
@@ -1504,6 +1633,60 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
         useCanvasStore.getState().seedPositions({}, Object.fromEntries(
             unfed.map(t => [t, { entityTypes: [t], offset: 0, hasMore: true }])))
     }, [enableHydration, hydrationStatus, claimedTypesKey, providerVersion, activeView?.id])
+
+    // A subset view's layer whose scan is still running is followed to the end — its
+    // count reads "so far" until then. Paced by the server while the scan moves on:
+    // each ask waits on it up to SUBSET_WAIT_MS. A round that moves nothing on waits
+    // before the next (SUBSET_FOLLOW_MIN_MS, doubling), and a tab out of sight asks
+    // nothing until it is seen again. Only the hydrating instance follows; a layer
+    // whose last ask failed waits for its Retry.
+    const runningSubsetKeys = useCanvasStore(s => Object.entries(s.typeFeeds)
+        .filter(([, f]) => f.search?.status === 'running' && !!f.search.sessionId)
+        .map(([k]) => k).sort().join('|'))
+    const [subsetRound, setSubsetRound] = useState(0)
+    const followIdleRef = useRef(0)
+    useEffect(() => {
+        if (!runningSubsetKeys) followIdleRef.current = 0
+        if (!enableHydration || hydrationStatus !== 'ready' || !runningSubsetKeys) return
+        const keys = runningSubsetKeys.split('|').filter(k => !failedNodes.has(`TYPE:${k}`))
+        if (!keys.length) return
+        let cancelled = false
+        let timer: ReturnType<typeof setTimeout> | undefined
+        let onShow: (() => void) | undefined
+        // Where the followed layers stand: a round that leaves it unchanged moved nothing on.
+        const standing = () => keys.map(k => {
+            const f = useCanvasStore.getState().typeFeeds[k]
+            return `${f?.search?.delivered ?? 0}/${f?.total ?? ''}/${f?.search?.status ?? ''}`
+        }).join('|')
+        const ask = () => {
+            if (cancelled) return
+            if (document.visibilityState === 'hidden') {
+                onShow = () => {
+                    if (document.visibilityState !== 'visible') return
+                    document.removeEventListener('visibilitychange', onShow!)
+                    onShow = undefined
+                    ask()
+                }
+                document.addEventListener('visibilitychange', onShow)
+                return
+            }
+            const before = standing()
+            // Each round ends when its asks answer; the next starts from there.
+            void loadMoreFeeds(keys).then(() => {
+                if (cancelled) return
+                followIdleRef.current = standing() === before ? followIdleRef.current + 1 : 0
+                setSubsetRound(r => r + 1)
+            })
+        }
+        const idle = followIdleRef.current
+        if (idle === 0) ask()
+        else timer = setTimeout(ask, withJitter(Math.min(SUBSET_FOLLOW_MAX_MS, SUBSET_FOLLOW_MIN_MS * 2 ** (idle - 1))))
+        return () => {
+            cancelled = true
+            if (timer) clearTimeout(timer)
+            if (onShow) document.removeEventListener('visibilitychange', onShow)
+        }
+    }, [enableHydration, hydrationStatus, runningSubsetKeys, failedNodes, loadMoreFeeds, subsetRound])
 
     // ─── loadChildren ───────────────────────────────────────────────────
 

@@ -52,6 +52,7 @@ import { useFeaturesStore } from '@/store/features'
 import type { GraphDataProvider, GraphNode, NodeDegree, TraceV2Result, LensClosureExtras } from '@/providers/GraphDataProvider'
 import type { LensWalkModel } from '@/components/canvas/context-view/lens/closure-adapter'
 import type { ViewLayerConfig } from '@/types/schema'
+import type { SearchViewDefinition } from '@/types/searchView'
 
 /** What `src/test/fixtures/traceEstates.ts` hands back. */
 export interface TraceEstate {
@@ -571,6 +572,7 @@ function seedView(
   entityTypes: readonly unknown[] = [],
   dataSourceId?: string,
   entityScope: 'all' | 'curated' = 'curated',
+  search?: SearchViewDefinition,
 ): void {
   useSchemaStore.setState({
     activeViewId: 'harness-view',
@@ -582,6 +584,7 @@ function seedView(
       views: [{
         id: 'harness-view', name: 'Harness View', workspaceId: 'harness-ws',
         ...(dataSourceId ? { dataSourceId } : {}),
+        ...(search ? { search } : {}),
         content: {
           visibleEntityTypes: [], visibleRelationshipTypes: [],
           defaultDepth: 3, maxDepth: 10, rootEntityTypes: [], entityScope,
@@ -652,6 +655,8 @@ export async function renderCanvasWithTrace(
     /** Mount with the One Placement Contract on (`placementContractEnabled`).
      *  Off by default, as it ships. */
     placementContract?: boolean
+    /** Make the seeded view a subset view: a search's matches inside another view. */
+    subset?: SearchViewDefinition
   },
 ): Promise<TraceCanvasHarness> {
   installJsdomLayout()
@@ -687,7 +692,7 @@ export async function renderCanvasWithTrace(
   // A recipient opens a link: the canvas must find it in the URL at mount.
   window.history.replaceState(null, '', `/views/harness-view${opts.search ?? ''}`)
   seedBrowse(estate, opts.browseHolds)
-  seedView(estate, opts.entityTypes, opts.dataSourceId, opts.entityScope)
+  seedView(estate, opts.entityTypes, opts.dataSourceId, opts.entityScope, opts.subset)
 
   // Every swallowed failure, made loud. See the file header.
   const errors: string[] = []

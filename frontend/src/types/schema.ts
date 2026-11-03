@@ -194,6 +194,10 @@ export interface ViewConfiguration {
    *  on every other view. */
   membership?: import('./membership').MembershipDefinition;
 
+  /** A subset view's search (`config.search`): the matches of this search inside
+   *  its base are what it shows. Written only by the server; absent on every other view. */
+  search?: import('./searchView').SearchViewDefinition;
+
   // Permissions
   isDefault: boolean;
   /** The full visibility tier ('private' | 'workspace' | 'enterprise').
