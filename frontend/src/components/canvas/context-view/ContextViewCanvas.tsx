@@ -3589,7 +3589,7 @@ export function ContextViewCanvas({
       : undefined
     const parentEntry = parentUrn ? before.assignments[parentUrn] : undefined
     if (parentEntry?.assignedBy === 'query' && parentEntry.inheritsChildren) {
-      notifyLayoutSave('info', 'What’s inside comes with it as a whole, in its own order — move the entity it’s inside instead.')
+      notifyLayoutSave('info', 'Everything inside comes with it as a whole, in its own order — move what it sits in instead.')
       return
     }
 
