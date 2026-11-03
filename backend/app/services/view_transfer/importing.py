@@ -273,6 +273,7 @@ async def _prepared(session: AsyncSession, item: ImportItem) -> Tuple[str, dict,
         return definition, submitted_hash, origin_definition, rl
 
     definition, submitted_hash, origin_definition, rl = await asyncio.to_thread(canonical)
+    _check_search(definition)
     adjustments: List[str] = []
     if rl is not None:
         sanitized = await view_repo._gate_node_ordering(
@@ -281,6 +282,43 @@ async def _prepared(session: AsyncSession, item: ImportItem) -> Tuple[str, dict,
             adjustments.append("Custom node order was dropped: node sorting is turned off here.")
             definition["layout"]["referenceLayout"] = sanitized
     return view_type, definition, submitted_hash, origin_definition, adjustments
+
+
+def _check_search(definition: dict) -> None:
+    """A subset view's search, held to what ``POST /views/from-search`` holds one to:
+    a file is no way round it. 422 for one this server can't keep."""
+    from backend.app.services.search_views import SubsetError, check_predicate, is_subset, layout_problems
+    from backend.common.models.search_view import read_search_definition
+    if not is_subset(definition):
+        return
+    if read_search_definition(definition) is None:
+        raise HTTPException(status_code=422, detail=(
+            "This file's subset view has a search this server can't read."))
+    try:
+        check_predicate(definition["search"].get("predicate"))
+    except SubsetError as exc:
+        raise HTTPException(status_code=422, detail=f"This file's subset view can't be used here: {exc.detail}") \
+            from exc
+    problem = layout_problems(definition)
+    if problem:
+        raise HTTPException(status_code=422, detail=problem)
+
+
+def _same_kind(row: ViewORM, definition: dict) -> None:
+    """A subset view is replaced only by a subset view, and an ordinary view only by an
+    ordinary one: what a view is made of decides how every screen reads it."""
+    from backend.app.services.search_views import is_subset
+    if is_subset(json.loads(row.config or "{}")) != is_subset(definition):
+        raise HTTPException(status_code=422, detail=(
+            f"'{row.name}' is {'a subset view' if is_subset(json.loads(row.config or '{}')) else 'an ordinary view'} "
+            "and this file's view isn't: import it as a new view instead."))
+
+
+def _subset_of(definition: dict) -> Optional[str]:
+    """The base a subset view's definition names, if any."""
+    from backend.common.models.search_view import read_search_definition
+    found = read_search_definition(definition)
+    return found.read_in if found is not None else None
 
 
 async def _locked_target(session: AsyncSession, item: ImportItem) -> ViewORM:
@@ -423,6 +461,7 @@ async def import_item(
         )
         row = (await session.execute(select(ViewORM).where(ViewORM.id == created.id))).scalar_one()
         row.portable_id = portable_id
+        row.subset_of = _subset_of(definition)
         if forked_from:
             item.provenance = {**item.provenance, "forkedFrom": forked_from}
         arrived = read_definition(json.loads(row.config or "{}"))
@@ -432,6 +471,8 @@ async def import_item(
             await view_membership_repo.mark_pending(session, row, reason="imported")
     else:
         row = await _locked_target(session, item)
+        _same_kind(row, definition)
+        row.subset_of = _subset_of(definition)
         await view_version_repo.snapshot_if_dirty(session, row, actor=actor,
                                                   message="Saved automatically before importing")
         imported = await asyncio.to_thread(config_from_definition, definition, icon=item.metadata.get("icon"))
@@ -532,6 +573,7 @@ async def stage_update(
     facts = await _facts_for(session, item, definition, view_type)
     # Opened before the view is locked, as the lookup is: it talks to the version store. It is the
     # importer's own draft of this view, found again (not made again) on a retry.
+    _same_kind(item.target.view, definition)
     branch_id = await open_draft(item.target.view)
     row = await _locked_target(session, item)
     overlay = await view_repo.ensure_overlay(session, row.id, branch_id)

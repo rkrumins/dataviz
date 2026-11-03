@@ -37,6 +37,7 @@ from backend.app.services.deep_search import (
 )
 from backend.app.services.native_query.cypher_text import inline_params
 from backend.app.services.search_downloads import mint_download_token
+from backend.app.services.search_views import layer_filter_as_types, with_boundary
 from backend.app.services.view_placement import LayerTarget, PlacementSpec
 from backend.app.services.view_scope import (
     EffectiveViewScope,
@@ -498,6 +499,16 @@ SHARED_LINK_RELATIONSHIPS = (
 )
 _ROUTE_KINDS = frozenset({"path", "withinHops", "related", "edges"})
 
+def _subset_search(eff_scope):
+    """A subset view's search, or None for any other scope."""
+    return getattr(eff_scope, "search", None)
+
+
+#: What a reader who can't open a subset view's base is told instead of its
+#: roots: where the matches were looked for, not what that view holds.
+SUBSET_BASE_HIDDEN = ("Looked for inside this subset view's base view, which you can't open — "
+                      "its contents aren't listed here.")
+
 
 def follows_relationships(predicate) -> bool:
     """Whether any condition in the tree walks the graph's edges (one
@@ -860,6 +871,9 @@ class AdvancedSearchService:
         #: The caller came through a share link, so the view is its whole
         #: world: a rule that leads outside it is refused on its own.
         self._confined = confined
+        #: A subset view's search with its names resolved, per scope: resolved
+        #: once per request, however many searches the request makes.
+        self._boundaries: dict = {}
 
     @classmethod
     def for_diagnostics(cls, engine: ContextEngine) -> "AdvancedSearchService":
@@ -925,6 +939,10 @@ class AdvancedSearchService:
             )
             return page, eff_scope
 
+        # A subset view's search bounds every search in it — after the
+        # caller's predicate was validated and refused what a share link may
+        # not ask, so the view's own search is never held to those.
+        query = await self._subset_query(query, eff_scope, run_context)
         # Runs on the resolved scope, and below the short-circuit above:
         # a client whose roots were all dropped has an out-of-view
         # problem, not an unbounded-scan one, and telling them the view
@@ -1004,7 +1022,9 @@ class AdvancedSearchService:
             [item for item in request.items if item.id not in refused], scope, context)
         items, unplaced = _resolve_item_layers(items, _eff)
         refused = {**refused, **unusable, **unplaced}
-        out = await op(scope, [(item.id, item.predicate) for item in items],
+        boundary = await self._scope_boundary(scope, _eff, context)
+        out = await op(scope, [(item.id, self._in_subset(item.predicate, _eff, boundary))
+                               for item in items],
                        request.urns, context=context)
         return SearchMembershipResult(
             matches={**{item_id: [] for item_id in refused}, **out["matches"]},
@@ -1054,7 +1074,8 @@ class AdvancedSearchService:
         resolved, unplaced = _resolve_item_layers(resolved, eff)
         errors.update(unusable)
         errors.update(unplaced)
-        predicates = {item.id: item.predicate for item in resolved}
+        boundary = await self._scope_boundary(scope, eff, context)
+        predicates = {item.id: self._in_subset(item.predicate, eff, boundary) for item in resolved}
         for item in request.items:
             if item.id in errors:
                 continue
@@ -1120,6 +1141,7 @@ class AdvancedSearchService:
         """Every property the view's entities carry, exactly — in the view's
         scope, resolved here as a search's is."""
         scope, eff = await self._rule_scope(request.scope)
+        self._refuse_outside_subset(eff, "list the properties of what this view searches in")
         if scope is None:
             return SearchCatalogResult(session_id="", status="complete")
         op = self._provider_op("deep_search_catalog")
@@ -1156,6 +1178,7 @@ class AdvancedSearchService:
         predicate, _resolved = await self._resolve_predicate_refs(
             request.predicate, scope, context, at="$.predicate")
         predicate = _with_resolved_layers(predicate, eff, [])
+        predicate = self._in_subset(predicate, eff, await self._scope_boundary(scope, eff, context))
         query = SearchQuery(predicate=predicate, scope=scope,
                             options=SearchOptions(results="hits"))
         out = await op(query, context=context, fmt=request.format, columns=request.columns,
@@ -1206,6 +1229,7 @@ class AdvancedSearchService:
         started = time.monotonic()
         context = run_context or SearchRunContext()
         scope, _eff = await self._rule_scope(request.scope)
+        self._refuse_outside_subset(_eff, "look entities up by name")
         if scope is None:
             return SearchResolveResult(results=[SearchRefResolution(count=0)
                                                 for _ in request.refs])
@@ -1292,7 +1316,10 @@ class AdvancedSearchService:
         _count_and_validate(query)
         eff_scope = await self._resolve_scope(query.scope)
         await self._guard_view_data_source(eff_scope)
+        self._refuse_outside_subset(eff_scope, "show the statement a search in this view runs",
+                                    based_only=True)
         query, entity_types_note = _stamp_resolved_scope(query, eff_scope)
+        query = await self._subset_query(query, eff_scope, None)
         _reject_unbounded_text_any(
             query, entity_types_capped=entity_types_note is not None,
         )
@@ -1325,18 +1352,25 @@ class AdvancedSearchService:
             result["resolvedScope"] = {
                 "viewId": eff_scope.view_id,
                 "canvasKind": eff_scope.canvas_kind,
-                "rootUrns": list(eff_scope.root_urns),
+                "rootUrns": [] if eff_scope.redact_roots else list(eff_scope.root_urns),
                 "entityTypes": sorted(eff_scope.entity_type_allow_list),
                 "layerIds": sorted(eff_scope.layer_allow_list),
                 "maxDepth": eff_scope.max_depth,
                 "scopeHash": eff_scope.scope_hash,
                 "droppedUrns": list(eff_scope.dropped_urns),
             }
-            # The statement to copy or edit: values written in.
-            result["inlinedCypher"] = inline_params(
-                result.get("hits_cypher") or result.get("cypher") or "",
-                result.get("params") or {},
-            )
+            if eff_scope.redact_roots:
+                # The statement names what the base view holds, and the
+                # caller can't open it: say how it searched, not where.
+                for key in ("cypher", "hits_cypher", "params"):
+                    result.pop(key, None)
+                result.setdefault("notes", []).append(SUBSET_BASE_HIDDEN)
+            else:
+                # The statement to copy or edit: values written in.
+                result["inlinedCypher"] = inline_params(
+                    result.get("hits_cypher") or result.get("cypher") or "",
+                    result.get("params") or {},
+                )
         return result
 
     async def discover(self, *, sample_per_label: int = 200):
@@ -1438,7 +1472,10 @@ class AdvancedSearchService:
         except AttributeError:
             pass
 
-        if not eff_scope.root_urns:
+        redact = getattr(eff_scope, "redact_roots", False)
+        if redact:
+            notes.append(SUBSET_BASE_HIDDEN)
+        elif not eff_scope.root_urns:
             notes.append(
                 f"View '{eff_scope.view_id}' has no rootUrns configured "
                 "and the client supplied none — search ran across the "
@@ -1446,7 +1483,7 @@ class AdvancedSearchService:
             )
 
         return ScopeDiagnostics(
-            effective_root_urns=list(eff_scope.root_urns),
+            effective_root_urns=[] if redact else list(eff_scope.root_urns),
             effective_max_depth=eff_scope.max_depth,
             effective_entity_types=(
                 sorted(eff_scope.entity_type_allow_list)
@@ -1516,6 +1553,70 @@ class AdvancedSearchService:
             "This view belongs to a different data source than the one "
             "being searched."
         )
+
+    async def _boundary(self, eff_scope: EffectiveViewScope,
+                        run_context: Optional[SearchRunContext]):
+        """A subset view's search with its name references resolved where its
+        matches are looked for — its base's scope, with no type filter and not
+        confined to the caller's view: the search names entities of every type
+        there, whoever runs it. Resolved once per scope per request."""
+        if eff_scope.scope_hash in self._boundaries:
+            return self._boundaries[eff_scope.scope_hash]
+        predicate = eff_scope.search
+        found = _path_refs(predicate)
+        if found:
+            scope = SearchScope(view_id=eff_scope.view_id, scope_mode="view",
+                                root_urns=list(eff_scope.root_urns) or None,
+                                max_depth=eff_scope.max_depth)
+            answers = await self._provider_op("deep_search_resolve_refs")(
+                scope, [ref for _, ref in found], context=run_context or SearchRunContext(),
+                confined=False)
+            named = {}
+            for (_where, ref), answer in zip(found, answers):
+                if answer.get("error"):
+                    raise ValidationError(f"This view's search can't be run: {answer['error']}")
+                named[id(ref)] = answer["urns"]
+            predicate = _with_resolved_refs(predicate, named)
+        self._boundaries[eff_scope.scope_hash] = predicate
+        return predicate
+
+    async def _scope_boundary(self, scope: SearchScope, eff_scope: EffectiveViewScope,
+                              run_context: Optional[SearchRunContext]):
+        """The subset's search, when ``scope`` is the view's own — not the canvas's
+        visible entities, nor the whole data source, which the caller chose."""
+        if _subset_search(eff_scope) is None or scope.scope_mode != "view":
+            return None
+        return await self._boundary(eff_scope, run_context)
+
+    @staticmethod
+    def _in_subset(predicate, eff_scope: EffectiveViewScope, boundary):
+        """``predicate`` as it runs in a subset view: each layer filter as the types
+        the subset's layer holds, and — in the view's own scope — the subset's
+        search added."""
+        if _subset_search(eff_scope) is None:
+            return predicate
+        predicate = layer_filter_as_types(predicate, eff_scope.subset_layers)
+        return predicate if boundary is None else with_boundary(predicate, boundary)
+
+    async def _subset_query(self, query: SearchQuery, eff_scope: EffectiveViewScope,
+                            run_context: Optional[SearchRunContext]) -> SearchQuery:
+        if _subset_search(eff_scope) is None:
+            return query
+        boundary = await self._scope_boundary(query.scope, eff_scope, run_context)
+        return query.model_copy(update={
+            "predicate": self._in_subset(query.predicate, eff_scope, boundary)})
+
+    def _refuse_outside_subset(self, eff_scope: Optional[EffectiveViewScope], what: str, *,
+                               based_only: bool = False) -> None:
+        """A share link opens a subset view's matches, not what its base holds:
+        what would reach past them is refused. ``based_only``: only for a subset
+        of a view (a whole data source's subset has no base to keep private)."""
+        if not self._confined or _subset_search(eff_scope) is None:
+            return
+        if based_only and eff_scope.read_in_view_id is None:
+            return
+        raise ValidationError(f"shared_link_subset: A shared link can't {what}: "
+                              "it opens this view's matches, not what they are found in.")
 
     async def resolve_scope(self, requested: SearchScope) -> EffectiveViewScope:
         """The scope a search would run in, after the checks it makes: the view

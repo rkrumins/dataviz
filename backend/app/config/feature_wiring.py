@@ -808,6 +808,25 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "and saves nothing",
         ),
     ),
+    "searchViewsEnabled": FeatureWiring(
+        key="searchViewsEnabled",
+        posture="capability",
+        # Preview: ships OFF, and every read passes default=False — a flag that cannot be read
+        # means no subset views, the same answer the browser's seed gives.
+        stage="experimental",
+        server_gates=(
+            "POST /graph/search/view-feed — a page of one layer of a subset view",
+            "POST /views/from-search and PUT /views/{id}/search — making and editing subset views",
+        ),
+        ui_surfaces=(
+            "Advanced Search: Save as view… on a search's matches",
+            "Context View: a subset view's layers and its Subset of chip",
+        ),
+        still_allowed=(
+            "Every other view, search and export works as before; subset views already saved "
+            "keep their definition, and say the preview is off instead of listing matches",
+        ),
+    ),
 }
 
 

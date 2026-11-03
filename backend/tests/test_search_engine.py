@@ -1674,3 +1674,81 @@ def test_a_statement_stays_inside_the_cluster_window(monkeypatch):
     assert engine_mod.statement_s(settings) == pytest.approx(10.0)
     assert engine_mod._last_try_s() == pytest.approx(10.0)
     assert engine_mod.unit_budget(settings, passes=2) == pytest.approx(20.0)
+
+
+# ---------------------------------------------------------------------------
+# Reuse: a recent complete first page answers while the data changes
+# ---------------------------------------------------------------------------
+
+async def _feed(provider, *, data_version="1", reuse_s=300.0, scan=True, **options):
+    return await engine_mod.execute_session_search(
+        provider, _query(**{"pageSize": 5, "sort": "displayName", "sortDir": "asc", **options}),
+        context=SearchRunContext(data_version=data_version, scope_hash="h", reuse_s=reuse_s,
+                                 scan=scan),
+    )
+
+
+class TestReuse:
+    async def test_new_data_is_answered_by_the_last_page_marked_as_of(self, scan):
+        s = scan({"A": _rows("a", 7)})
+        provider = _Provider()
+        first = await _feed(provider)
+        assert first.status == "complete" and not first.stale and first.as_of is None
+        again = await _feed(provider, data_version="2")
+        assert len(s.runs) == 1                         # no second scan
+        assert again.session_id == first.session_id and again.stale and again.cache_hit
+        assert again.as_of and again.total_count == 7
+        assert [h.node.urn for h in again.hits] == [h.node.urn for h in first.hits]
+
+    async def test_past_the_window_it_scans(self, scan):
+        s = scan({"A": _rows("a", 3)})
+        provider = _Provider()
+        await _feed(provider, reuse_s=1e-9)
+        page = await _feed(provider, data_version="2", reuse_s=1e-9)
+        assert len(s.runs) == 2 and not page.stale
+
+    async def test_without_reuse_new_data_scans_as_ever(self, scan):
+        s = scan({"A": _rows("a", 3)})
+        provider = _Provider()
+        await _feed(provider, reuse_s=0)
+        page = await _feed(provider, data_version="2", reuse_s=0)
+        assert len(s.runs) == 2 and not page.stale
+
+    async def test_a_page_this_data_has_is_fresh_before_any_recent_one(self, scan):
+        s = scan({"A": _rows("a", 3)})
+        provider = _Provider()
+        await _feed(provider)
+        await _feed(provider, data_version="2", reuse_s=1e-9)      # a fresh scan
+        page = await _feed(provider, data_version="2")
+        assert len(s.runs) == 2 and not page.stale
+
+    async def test_without_scanning_nothing_there_is_nothing_reusable(self, scan):
+        from backend.app.services.deep_search import NothingReusable
+        s = scan({"A": _rows("a", 3)})
+        with pytest.raises(NothingReusable):
+            await _feed(_Provider(), scan=False)
+        assert s.runs == []
+
+    async def test_without_scanning_a_running_scan_answers_how_far_it_got(self, scan):
+        s = scan({f"L{i}": _rows(f"n{i}_", 1) for i in range(4)}, delay=0.05)
+        provider = _Provider()
+        started = await _feed(provider, waitMs=40)
+        assert started.status == "running"
+        runs = len(s.runs)
+        probe = await _feed(provider, scan=False)
+        assert probe.status == "running" and probe.session_id == started.session_id
+        assert len(s.runs) == runs                      # it ran nothing itself
+
+    async def test_a_later_page_of_a_recent_answer_continues_on_it(self, scan):
+        s = scan({"A": _rows("a", 12)})
+        provider = _Provider()
+        await _feed(provider)
+        stale = await _feed(provider, data_version="2")
+        later = await _feed(provider, data_version="2", cursor=stale.cursor)
+        assert len(s.runs) == 1 and later.session_id == stale.session_id
+        assert [h.node.urn for h in later.hits][0] == "urn:a005"
+
+    def test_windows_are_spread_per_query(self):
+        windows = {engine_mod.reuse_window(q, 100.0) for q in ("00000000aa", "ffffffffbb", "80000000cc")}
+        assert min(windows) == pytest.approx(80.0) and max(windows) == pytest.approx(120.0)
+        assert engine_mod.reuse_window("80000000cc", 100.0) == engine_mod.reuse_window("80000000dd", 100.0)

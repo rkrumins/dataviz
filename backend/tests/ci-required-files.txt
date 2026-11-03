@@ -254,6 +254,10 @@ tests/test_search_schema_endpoint.py
 tests/test_search_semantics.py
 tests/test_search_session_store_outage.py
 tests/test_search_values.py
+tests/test_search_view_model.py
+tests/test_search_view_scope.py
+tests/test_search_view_writes.py
+tests/test_search_views_api.py
 tests/test_seed_memory.py
 tests/test_seed_templates.py
 tests/test_service_account_keys.py
@@ -311,6 +315,7 @@ tests/test_view_avatar_ids.py
 tests/test_view_branch_scope.py
 tests/test_view_bundle_schema.py
 tests/test_view_facets_live.py
+tests/test_view_feed_api.py
 tests/test_view_filters_api.py
 tests/test_view_histogram.py
 tests/test_view_layer_rule_validation.py

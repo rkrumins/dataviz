@@ -73,6 +73,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "viewMembershipEnabled":
         "Narrow — showing a view's chosen entities and what they reach — is a preview that "
         "is turned off for this deployment. An administrator can turn it on under Admin → Features.",
+    "searchViewsEnabled":
+        "Subset views — a view of a search's matches inside another view — are a preview that "
+        "is turned off for this deployment. An administrator can turn them on under Admin → Features.",
     "nativeQueryEnabled":
         "Running your own queries on a data source is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
@@ -1243,6 +1246,35 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "fair-share bucket when fair share is on."
         ),
         "sort_order": 4,
+        "deprecated": False,
+    },
+    {
+        "key": "searchViewsEnabled",
+        "name": "Subset views: a search's matches as a view",
+        "description": (
+            "Save an Advanced Search's matches inside a view as a view of their own — always "
+            "current, any size, created at once — laid out like the view it came from and "
+            "shared like any other view."
+        ),
+        "impact_when_off": (
+            "Save as view is not offered on search results, subset views can't be made or "
+            "edited, and their layers say the preview is off instead of listing matches. Nothing "
+            "saved changes, and every other view works as before. This is a preview; it ships off "
+            "until you switch it on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn it on once the web app that ships with it is deployed. Each layer of a subset "
+            "view is one search, shared by every view and viewer asking the same question, served "
+            "from its last complete answer for a few minutes after the data changes "
+            "(DEEP_SEARCH_VIEW_FEED_REUSE), and scanned in a lane of its own "
+            "(DEEP_SEARCH_VIEW_FEED_LANE) paced by the view-feed fair-share bucket."
+        ),
+        "sort_order": 5,
         "deprecated": False,
     },
 ]

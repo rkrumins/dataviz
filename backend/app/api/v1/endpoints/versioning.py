@@ -3753,6 +3753,14 @@ async def _check_export_access(
         row = await readable_view(session, view_id, user, claims)
         if row.workspace_id != ws_id or row.data_source_id != meta.get("data_source_id"):
             raise HTTPException(status_code=404, detail=f"View '{view_id}' not found")
+        from backend.app.services.search_views import is_subset
+        if is_subset(json.loads(row.config or "{}")):
+            # A subset view places nothing, so a view-scoped data export of it would be
+            # the whole data source. Its matches are exported from its search.
+            raise HTTPException(status_code=422, detail={
+                "reason": "subset_view",
+                "message": "A subset view's matches are exported from its search: use Export on "
+                           "one of its layers."})
 
 
 async def _export_selection(

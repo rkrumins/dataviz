@@ -8,13 +8,13 @@ from backend.app.auth.dependencies import requires
 from .versioning_gate import versioning_write_gate
 from .endpoints import (
     metrics as metrics_endpoint,
-    graph, graph_export, graph_members, canvas, assignments, providers, ontologies, workspaces,
+    graph, graph_export, graph_members, graph_view_feed, canvas, assignments, providers, ontologies, workspaces,
     assets, catalog, views, features, layout_templates,
     auth, users, announcements, aggregation, freshness, stats_admin,
     insights, me, system_status, redis_config, platform_settings, profiling,
     graph_store,
     groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
-    view_membership,
+    view_membership, search_views,
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
     workspace_directory, data_source_transfers,
@@ -216,6 +216,13 @@ api_router.include_router(
     view_membership.router,
     prefix="/views",
     tags=["views:membership"],
+)
+# Subset views: `/views/from-search`, `/views/{view_id}/search` and `/views/{view_id}/subsets`.
+# Before views.router for the same reason.
+api_router.include_router(
+    search_views.router,
+    prefix="/views",
+    tags=["views:subsets"],
 )
 # The bell — every route is scoped to the calling user by construction.
 api_router.include_router(
@@ -493,6 +500,12 @@ api_router.include_router(
 # same data-source-or-view gate as every graph read.
 api_router.include_router(
     graph_members.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
+    dependencies=[Depends(require_ds_read_or_view)],
+)
+# A subset view's layer feed (POST /{ws_id}/graph/search/view-feed): its stored search's
+# matches, page by page. Behind the same gate; the view's own search decides what matches.
+api_router.include_router(
+    graph_view_feed.router, prefix="/{ws_id}/graph", tags=["graph:workspace"],
     dependencies=[Depends(require_ds_read_or_view)],
 )
 api_router.include_router(

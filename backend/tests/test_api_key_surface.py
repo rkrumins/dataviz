@@ -42,6 +42,7 @@ _FENCING_DEPENDENCIES = {"graph_in_workspace", "pr_in_workspace", "view_in_works
 _WORKSPACE_CHECKED_IN_HANDLER = {
     ("backend.app.api.v1.endpoints.views", "create_view"),
     ("backend.app.api.v1.endpoints.view_membership", "create_view_from_members"),
+    ("backend.app.api.v1.endpoints.search_views", "create_view_from_search"),
 }
 
 

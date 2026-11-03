@@ -845,6 +845,12 @@ async def create_view(
         claims, session, workspace_id=req.workspace_id,
         data_source_id=req.data_source_id, visibility=req.visibility,
     )
+    # What a view is made from — a query's members (``membership``), a search
+    # (``search``) — is the server's to write, checked by the routes that make
+    # such views: a client's copy here would be stored unchecked.
+    if isinstance(req.config, dict):
+        req.config.pop("membership", None)
+        req.config.pop("search", None)
 
     # Admin → Features → View modes. The admin picks which layouts this deployment offers; the
     # wizard hides the rest. Enforced here too, because a hidden button is not a rule.

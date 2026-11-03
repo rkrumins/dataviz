@@ -969,6 +969,78 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
    An update stamps the view's data freshness, not its "last edited". It writes no version: for
    an auto-updating view, the members are data, not design.
 
+### Make a view of a search's matches inside another view
+
+**Needs:** **Views: create** in the workspace, read access to the data source, and read access
+to the view the search is run in. Changing a subset view's search afterwards needs edit access to
+it, and read access to the data source. With a key, the key must cover the whole workspace to
+create one. Switch: **Subset views** (`searchViewsEnabled`).
+
+`POST /api/v1/views/from-search` keeps a search's matches inside a view (its *base*) as a view of
+their own: a *subset view*. Nothing about the matches is stored, so it is made at once whatever
+they number, and it is current whenever it is read. Its readers need no access to the base: they
+see the matches, and the base's name only if they can open it.
+
+1. Make it. Send an `Idempotency-Key`, so that a retry answers with the view the first attempt
+   made:
+
+   ```bash
+   api POST /api/v1/views/from-search -H "Idempotency-Key: $(uuidgen)" -d '{
+     "name": "PII in sales", "workspaceId": "'"$WS"'", "visibility": "workspace",
+     "predicate": {"kind": "tag", "values": ["pii"]},
+     "readIn": "'"$VIEW"'"}' | jq '{id: .view.id, layers: [.search.layers[].name]}'
+   ```
+
+   - `predicate` is an Advanced Search predicate asked of one entity at a time: no path, no
+     *within hops*, no Connections search, and no layer filter (a subset's layers are its base's).
+   - `"layout": "inherit"` (the default): its layers are the base's, read live and placed by type,
+     plus **Other matches** for every match whose type no layer claims. When the base's layers
+     change, the subset's do too. `placedByType: true` in the answer says the base places by more
+     than type (tag or property rules, entities placed by hand), which a subset doesn't follow.
+   - `"layout": "own"` with `"layers": [{"name", "color"?, "entityTypes": [...]}]` (at most 12)
+     and `"rest"` (the name of the layer for the other matches, or `null` for none).
+   - `"within": "dataSource"` (with `"layout": "own"` and no `readIn`) looks for the matches in
+     the whole data source instead.
+
+   | Answer | Meaning |
+   |---|---|
+   | `201` | Made: `{view, search}`. A replay of the same key answers `200` |
+   | `422` | A search a subset view can't keep, a base that is itself a subset view, a base in another workspace or of another data source, or a word on its own with nothing to bound it |
+   | `404` | The base doesn't exist, or you can't read it |
+
+2. Read a layer's matches, page by page. The view's own search decides what matches: nothing you
+   send can widen it.
+
+   ```bash
+   api POST "/api/v1/$WS/graph/search/view-feed?viewId=$SUBSET" -d '{
+     "layerId": "'"$LAYER"'", "waitMs": 2500}' | jq '{status, totalCount, countStatus, stale, asOf, capped, cursor, n: (.nodes | length)}'
+   ```
+
+   - `status: running`: the scan isn't finished. The matches so far are already in order; send the
+     same body with `sessionId` until it reads `complete`.
+   - `cursor`: send it back for the next page, 200 rows at a time.
+   - `stale: true` with `asOf`: a recent answer, read before the data last changed. It answers for a
+     few minutes after a change (`DEEP_SEARCH_VIEW_FEED_REUSE`) rather than rescanning on every
+     write. `"refresh": true` asks for one on the current data.
+   - `capped: true`: the layer has more matches than are listed (`DEEP_SEARCH_VIEW_FEED_MAX_ROWS`,
+     2,000). Search in the layer, or export, for the rest.
+   - `409`, `reason: base_missing`: the base was deleted. The subset waits for it to be restored.
+   - `429` with `Retry-After`: every feed scan this server runs is busy and there was no recent
+     answer to give.
+
+3. Keep it:
+
+   | Route | Does |
+   |---|---|
+   | `GET /api/v1/views/{id}/search` | The search, its base (`viewId`, `name`, `available`), the layers it shows and `status` (`ok` or `base_missing`). Sends an `ETag`; a matching `If-None-Match` gets `304` |
+   | `PUT /api/v1/views/{id}/search` | Change the `predicate`, or `layout`: `own` copies the base's layers as they are now, `inherit` follows the base again. Sent with `ifDefinitionHash`; a stale hash gets `409` with the current definition. Recorded as a version |
+   | `GET /api/v1/views/{id}/subsets` | The subset views made from a view: `count` (what changing or deleting it reaches) and the ones you can open |
+
+   A subset view's search is written only through these routes. `POST /api/v1/views` drops a
+   `search` sent with it, a settings save keeps the stored one, and a layout save holds a
+   subset's layers to type layers. A data export of a subset view is refused: export its matches
+   from its search instead.
+
 ### Integrate single sign-on over a back channel
 
 **For:** the team that owns your organisation's sign-in service.

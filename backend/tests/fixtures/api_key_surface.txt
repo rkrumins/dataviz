@@ -39,6 +39,8 @@ GET /api/v1/views/{view_id}/activity resource
 GET /api/v1/views/{view_id}/library resource
 GET /api/v1/views/{view_id}/library/export resource
 GET /api/v1/views/{view_id}/membership resource
+GET /api/v1/views/{view_id}/search resource
+GET /api/v1/views/{view_id}/subsets resource
 GET /api/v1/views/{view_id}/versions resource
 GET /api/v1/views/{view_id}/versions/compare resource
 GET /api/v1/views/{view_id}/versions/status resource
@@ -140,6 +142,7 @@ POST /api/v1/admin/data-sources/{ds_id}/refresh resource
 POST /api/v1/admin/data-sources/{ds_id}/source-changed resource
 POST /api/v1/views/ workspace
 POST /api/v1/views/from-members workspace
+POST /api/v1/views/from-search workspace
 POST /api/v1/views/transfer/export filtered reads-only
 POST /api/v1/views/transfer/export/preview filtered reads-only
 POST /api/v1/views/{view_id}/library/import resource
@@ -178,6 +181,7 @@ POST /api/v1/{ws_id}/graph/search/explain resource reads-only
 POST /api/v1/{ws_id}/graph/search/exports resource reads-only
 POST /api/v1/{ws_id}/graph/search/membership resource reads-only
 POST /api/v1/{ws_id}/graph/search/resolve resource reads-only
+POST /api/v1/{ws_id}/graph/search/view-feed resource reads-only
 POST /api/v1/{ws_id}/graph/trace resource reads-only
 POST /api/v1/{ws_id}/graph/trace/closure resource reads-only
 POST /api/v1/{ws_id}/graph/trace/expand resource reads-only
@@ -208,5 +212,6 @@ PUT /api/v1/views/{view_id}/library/queries/{query_id} resource
 PUT /api/v1/views/{view_id}/library/rules resource
 PUT /api/v1/views/{view_id}/library/rules/{rule_id} resource
 PUT /api/v1/views/{view_id}/membership resource
+PUT /api/v1/views/{view_id}/search resource
 PUT /api/v1/views/{view_id}/visibility resource
 PUT /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/uploads/{upload_id}/parts/{part} resource

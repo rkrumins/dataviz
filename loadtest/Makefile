@@ -75,7 +75,7 @@ SMOKE_LOCUST_ARGS = --headless \
         smoke smoke-announcements smoke-views smoke-cached-stats \
         smoke-aggregation-jobs smoke-graph-schema \
         smoke-graph-lineage smoke-graph-walks smoke-graph-children \
-        smoke-canvas-open smoke-mixed smoke-versioning-collab smoke-clean \
+        smoke-canvas-open smoke-search-views smoke-mixed smoke-versioning-collab smoke-clean \
         sweep sweep-clean \
         stress stress-trace stress-walks stress-children stress-canvas stress-clean
 
@@ -93,6 +93,8 @@ help:
 	@echo "    make smoke-graph-walks         — Tier-1 heavy: ancestors/descendants"
 	@echo "    make smoke-graph-children      — Tier-1 heavy: children/+edges"
 	@echo "    make smoke-canvas-open         — the view open: nodes/query batches + edges/between"
+	@echo "    make smoke-search-views        — subset views: layer feeds, shared and paged;"
+	@echo "                                     needs searchViewsEnabled on (not in 'make smoke')"
 	@echo "    make smoke-mixed"
 	@echo "    make smoke-versioning-collab   — drafts edited together; needs versioned graphs,"
 	@echo "                                     and edits and publishes (not in 'make smoke')"
@@ -176,6 +178,12 @@ smoke-canvas-open:
 	@mkdir -p $(SMOKE_DIR)/canvas_open
 	$(LOCUST) -f runners/canvas_open.py $(SMOKE_LOCUST_ARGS) --csv $(SMOKE_DIR)/canvas_open/run
 	$(PYTHON) -m lib.slo --smoke $(SMOKE_DIR)/canvas_open/run_stats.csv
+
+# Not in `smoke`: it makes a subset view in each workspace (see the scenario's docstring).
+smoke-search-views:
+	@mkdir -p $(SMOKE_DIR)/search_views
+	$(LOCUST) -f runners/search_views.py $(SMOKE_LOCUST_ARGS) --csv $(SMOKE_DIR)/search_views/run
+	$(PYTHON) -m lib.slo --smoke $(SMOKE_DIR)/search_views/run_stats.csv
 
 smoke-mixed:
 	@mkdir -p $(SMOKE_DIR)/mixed

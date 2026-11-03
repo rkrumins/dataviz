@@ -31,6 +31,7 @@ import json
 import logging
 import math
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from backend.app.providers.falkordb_deep_search import (
@@ -82,6 +83,7 @@ from backend.app.providers.falkordb_search.session import (
 )
 from backend.app.services.deep_search import (
     CompileError,
+    NothingReusable,
     SearchFailed,
     SearchRunContext,
     SessionStoreUnavailable,
@@ -196,6 +198,25 @@ async def execute_session_search(
                                  progressive=progressive, facets=None, wants_facets=False)
 
     after = cursor.get("after") if cursor is not None else None
+    # A first page this query already has — this data's, or a recent one
+    # inside the reuse window — answers without a scan.
+    if after is None and not options.session_id and context.reuse_s > 0:
+        reused = await _reusable(store, query_id, context)
+        if reused is not None:
+            return await _answer(provider, query, reused, 0, context, started, deadline,
+                                 total=None, cache_hit=True, progressive=progressive,
+                                 facets=None, wants_facets=False)
+    if not context.scan:
+        # Only what is there: a scan another request runs answers with how far
+        # it has got; anything else is the caller's to decide.
+        there = (await _find(store, options.session_id, query_id, after)
+                 or await store.load(session_id(query_id, context.data_version, after)))
+        if there is None or there.status == FAILED:
+            raise NothingReusable(query_id)
+        return await _answer(provider, query, there, 0, context, started, deadline,
+                             total=cursor.get("t") if cursor else None,
+                             cache_hit=there.status == COMPLETE, progressive=progressive,
+                             facets=None, wants_facets=False)
     session, created = await _session_for(provider, query, compiler, store, run, query_id,
                                           k, after, context, deadline, settings)
 
@@ -213,11 +234,44 @@ async def execute_session_search(
                              deadline, settings)
     if session.status == FAILED:
         raise SearchFailed(f"search failed: {session.error}")
+    if session.status == COMPLETE and session.after is None and context.reuse_s > 0:
+        # The latest complete first page: what answers, marked stale, while
+        # the data changes under it (``_reusable``).
+        await store.point(_latest(query_id), session.sid, settings.session_ttl_seconds)
     if wants_facets and capped_specs and facets is None:
         facets = await _await_facets(store, session.sid, deadline)
     return await _answer(provider, query, session, 0, context, started, deadline,
                          total=cursor.get("t") if cursor else None, cache_hit=False,
                          progressive=progressive, facets=facets, wants_facets=wants_facets)
+
+
+def _latest(query_id: str) -> str:
+    return f"latest:{query_id}"
+
+
+def reuse_window(query_id: str, reuse_s: float) -> float:
+    """``reuse_s``, spread ±20 % by query, so the windows of feeds read
+    together don't all close together and send them to scan at once."""
+    return reuse_s * (0.8 + 0.4 * (int(query_id[:8], 16) / 0xFFFFFFFF))
+
+
+async def _reusable(store: SessionStore, query_id: str,
+                    context: SearchRunContext) -> Optional[Session]:
+    """A complete first page of this query: this data's, else the latest one
+    while it is inside the reuse window — read before the data last changed,
+    so answered stale and as of when it was read. None: it must be scanned."""
+    current = await store.load(session_id(query_id, context.data_version, None))
+    if current is not None and current.status == COMPLETE:
+        return current
+    latest_sid = await store.pointed(_latest(query_id))
+    if not latest_sid or (current is not None and latest_sid == current.sid):
+        return None
+    latest = await store.load(latest_sid)
+    if (latest is not None and latest.status == COMPLETE and latest.query_id == query_id
+            and latest.after is None
+            and time.time() - latest.created < reuse_window(query_id, context.reuse_s)):
+        return latest
+    return None
 
 
 async def execute_count_session(
@@ -993,6 +1047,7 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
             })
 
     running = not complete
+    stale = bool(context.data_version) and session.data_version != context.data_version
     notes = list(session.notes) + facet_notes + path_notes
     page = SearchResultPage(
         hits=hits,
@@ -1011,7 +1066,8 @@ async def _answer(provider, query: SearchQuery, session: Session, pos: int,
         progress=SearchProgress(scanned=session.scanned, total=max(session.total, session.scanned),
                                 matched=session.count),
         data_version=session.data_version,
-        stale=bool(context.data_version) and session.data_version != context.data_version,
+        stale=stale,
+        as_of=datetime.fromtimestamp(session.created, tz=timezone.utc).isoformat() if stale else None,
     )
     if notes:
         # Carried to the service, which builds the response's diagnostics

@@ -1944,6 +1944,11 @@ def _map_validation_error(detail: str) -> HTTPException:
     """
     if detail.startswith("view_not_found:"):
         return HTTPException(status_code=404, detail=detail)
+    if detail.startswith("shared_link_subset:"):
+        return HTTPException(status_code=403, detail=detail)
+    if detail.startswith("base_missing:"):
+        # A subset view whose base is gone: nothing to search in, never wider.
+        return HTTPException(status_code=409, detail=detail)
     return HTTPException(status_code=400, detail=detail)
 
 
