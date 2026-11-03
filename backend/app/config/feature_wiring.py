@@ -793,18 +793,18 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
         key="viewMembershipEnabled",
         posture="capability",
         # Preview: ships OFF, and every read passes default=False — a flag that cannot be read
-        # means no Focus, the same answer the browser's seed gives.
+        # means no Narrow, the same answer the browser's seed gives.
         stage="experimental",
         server_gates=(
             "POST /graph/members — resolves a scope: seeds, what is inside them, their sources "
             "and consumers",
         ),
         ui_surfaces=(
-            "Context View: Focus… on a selection, Focus on this in an entity's right-click "
-            "menu, Focus on matches in Advanced Search, and the Focus chip",
+            "Context View: Narrow… on a selection, Narrow to this in an entity's right-click "
+            "menu, Narrow… on Advanced Search's matches, and the Narrowed chip",
         ),
         still_allowed=(
-            "Views, searches, Isolate and traces work as before — Focus only filters the canvas "
+            "Views, searches, Isolate and traces work as before — Narrow only filters the canvas "
             "and saves nothing",
         ),
     ),

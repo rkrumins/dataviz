@@ -49,6 +49,9 @@ export interface SelectionBarProps {
   /** Link the selection to other entities in one go. Only in a draft being
    *  edited — absent, the action is not offered. */
   onLink?: () => void
+  /** Narrow the canvas to the selection and what it reaches. Absent — the
+   *  preview is switched off — not offered. */
+  onNarrow?: () => void
   /** The selection's combined lineage on the canvas: how many entities feed
    *  it and how many it feeds. Absent, or none either way, nothing is said. */
   lineage?: { upstream: number; downstream: number }
@@ -62,6 +65,7 @@ export function SelectionBar({
   onTrace,
   onOpenLens,
   onLink,
+  onNarrow,
   lineage,
 }: SelectionBarProps) {
   const ref = useRef<HTMLDivElement>(null)
@@ -201,6 +205,23 @@ export function SelectionBar({
               >
                 <LucideIcons.Link2 className="w-3.5 h-3.5" strokeWidth={2.2} />
                 Link…
+              </button>
+            )}
+            {onNarrow && (
+              <button
+                type="button"
+                onClick={onNarrow}
+                title="Show only these on the canvas, and what they reach"
+                className={cn(
+                  'flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-[12.5px] font-medium',
+                  'text-ink bg-black/[0.04] border border-glass-border dark:bg-white/[0.06]',
+                  'hover:border-accent-lineage/45 hover:text-accent-lineage',
+                  'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40',
+                  'transition-colors duration-150',
+                )}
+              >
+                <LucideIcons.ScanSearch className="w-3.5 h-3.5" strokeWidth={2.2} />
+                Narrow…
               </button>
             )}
             {onOpenLens && (

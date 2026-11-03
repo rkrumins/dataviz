@@ -71,7 +71,7 @@ REFUSAL_MESSAGES: dict[str, str] = {
         "Lineage tracing is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
     "viewMembershipEnabled":
-        "Focus — narrowing a view to chosen entities and what they reach — is a preview that "
+        "Narrow — showing a view's chosen entities and what they reach — is a preview that "
         "is turned off for this deployment. An administrator can turn it on under Admin → Features.",
     "nativeQueryEnabled":
         "Running your own queries on a data source is turned off for this deployment. "
@@ -1221,14 +1221,14 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "key": "viewMembershipEnabled",
-        "name": "Focus: chosen entities and what they reach",
+        "name": "Narrow: chosen entities and what they reach",
         "description": (
             "Narrow a Context View to the entities you choose and what they reach — what is "
             "inside them, their sources and consumers one step out or the whole way — worked "
             "out on the server, so it is the same answer for everyone and for any script."
         ),
         "impact_when_off": (
-            "Focus is not offered on the canvas and POST /graph/members is refused. Nothing "
+            "Narrow is not offered on the canvas and POST /graph/members is refused. Nothing "
             "saved changes: views, searches, Isolate and traces work exactly as before. This is "
             "a preview; it ships off until you switch it on."
         ),
@@ -1238,7 +1238,7 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
         "options": None,
         "help_url": None,
         "admin_hint": (
-            "Sources and consumers also need Lineage trace on. Each Focus is one resolution, "
+            "Sources and consumers also need Lineage trace on. Each narrowing is one resolution, "
             "cached and shared by everyone who asks the same question, and paced by the trace's "
             "fair-share bucket when fair share is on."
         ),

@@ -1,7 +1,7 @@
 """Resolve a membership spec into the entities it names.
 
 The one resolver behind every surface that asks "what is in scope" — the Context
-View's Focus filter today; saving a view from a query, keeping it live, exporting a
+View's Narrow filter today; saving a view from a query, keeping it live, exporting a
 chosen subset and the API next (see ``backend/common/models/view_membership.py``).
 
 It reads the graph only through the ``ContextEngine`` — and, for a query seed, a

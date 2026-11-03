@@ -1,7 +1,7 @@
 """``POST /{ws_id}/graph/members`` — resolve a membership spec.
 
 Seeds and how far they reach in, the entities that names out: the Context View's
-Focus filter asks it today, and so will saving a view from a query, keeping it live,
+Narrow filter asks it today, and so will saving a view from a query, keeping it live,
 a targeted export and any script with an API key (``backend/common/models/view_membership.py``
 is the contract, ``backend/app/services/view_membership.py`` the resolver).
 

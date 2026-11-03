@@ -1,7 +1,7 @@
 """Membership — which entities a set of seeds and an expansion name.
 
 ONE contract behind every surface that asks "what is in scope": the Context View's
-Focus filter today; saving a view from a query, keeping it live as the data
+Narrow filter today; saving a view from a query, keeping it live as the data
 changes, exporting a chosen subset and the public API next. It is deliberately
 small, versioned and portable:
 
@@ -16,7 +16,7 @@ small, versioned and portable:
 
 A spec has one canonical form, and its hash (``specHash``) is its identity —
 the cache key every user asking the same question shares, the share link a
-focus travels as, and (later) the definition a live view keeps.
+narrowing travels as, and (later) the definition a live view keeps.
 """
 from __future__ import annotations
 

@@ -27,6 +27,8 @@ import {
   useCanvasFilterMode,
   useMatchUrnSet,
 } from '@/store/searchStore'
+import { narrowRows } from '@/features/narrow/narrowRows'
+import { useNarrowVisibility } from '@/features/narrow/narrowStore'
 import type { LayerNodeSortAlgo, LayerNodeSortMode, ViewLayerConfig } from '@/types/schema'
 import type { HierarchyNode, FlatTreeNode, ColumnGeometryApi } from './types'
 import { FlatTreeItem, type GroupActions, type RowSelectModifiers } from './FlatTreeItem'
@@ -597,6 +599,8 @@ export const LayerColumn = React.memo(function LayerColumn({
   const matchUrnSet = useMatchUrnSet()
   const ancestorMatchCounts = useAncestorMatchCounts()
   const canvasFilterMode = useCanvasFilterMode()
+  // The canvas's narrowing (features/narrow), or null for the whole view.
+  const narrow = useNarrowVisibility()
 
   // Build flat tree from hierarchy (visible items only)
   const rawFlatTree = useMemo(() => {
@@ -847,11 +851,17 @@ export const LayerColumn = React.memo(function LayerColumn({
   // invisible rows. Search-aux rows (load-more, skeletons, search
   // boxes) ride along with their parent node's visibility.
   const flatTree = useMemo(() => {
+    // A NARROWED canvas keeps its members and the way to them, before any
+    // search filter — a search inside a narrowing still works. Not while a
+    // trace is drawn: the trace is then what is being read.
+    const narrowed = narrow && !isTracing
+      ? narrowRows(rawFlatTree, narrow, (id) => selectedNodeId === id || !!selectedNodeIds?.has(id))
+      : rawFlatTree
     // Fast path: no active search OR plain highlight mode — return
     // raw tree by reference so downstream memos don't invalidate on
     // search-state changes that don't affect visibility.
-    if (matchUrnSet.size === 0) return rawFlatTree
-    if (canvasFilterMode === 'highlight') return rawFlatTree
+    if (matchUrnSet.size === 0) return narrowed
+    if (canvasFilterMode === 'highlight') return narrowed
 
     const isVisibleNode = (n: HierarchyNode): boolean => {
       // Selection always wins so the user can never accidentally
@@ -867,7 +877,7 @@ export const LayerColumn = React.memo(function LayerColumn({
       return !isMatch
     }
 
-    return rawFlatTree.filter((item) => {
+    return narrowed.filter((item) => {
       // An inline hit row IS a match, but its `node` is the container it
       // hangs under — so `isVisibleNode` would answer for the wrong entity
       // and keep the row in Hide mode, which exists to take matches away.
@@ -875,7 +885,7 @@ export const LayerColumn = React.memo(function LayerColumn({
       return isVisibleNode(item.node)
     })
   }, [
-    rawFlatTree, matchUrnSet, ancestorMatchCounts, canvasFilterMode,
+    rawFlatTree, narrow, isTracing, matchUrnSet, ancestorMatchCounts, canvasFilterMode,
     selectedNodeId, selectedNodeIds,
   ])
 
@@ -3013,7 +3023,9 @@ export const LayerColumn = React.memo(function LayerColumn({
                         // would drain the parent (the historical pump);
                         // and OFF for a level a reveal opened, which the
                         // reader was carried to rather than scrolled to.
+                        // A narrowed canvas filters the same way: off there too.
                         autoLoad={(matchUrnSet.size === 0 || canvasFilterMode === 'highlight')
+                          && !(narrow && !isTracing)
                           && !holdsOnlyRevealedChildren(item.node)}
                       />
                     </div>

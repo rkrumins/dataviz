@@ -108,7 +108,8 @@ export type EndpointClass = 'trace' | 'aggregated' | 'children' | 'canvas' | 'de
 
 /** Derive the endpoint class from a request URL. */
 export function classifyEndpoint(url: string): EndpointClass {
-  if (url.includes('/trace')) return 'trace'
+  // A membership resolution is closure walks: it fails as a trace does.
+  if (url.includes('/trace') || url.includes('/graph/members')) return 'trace'
   if (url.includes('/canvas/')) return 'canvas'
   if (url.includes('/edges/aggregated')) return 'aggregated'
   if (url.includes('/children-with-edges') || url.includes('/edges/between')) return 'children'

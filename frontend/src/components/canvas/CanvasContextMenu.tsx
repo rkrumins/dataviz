@@ -45,6 +45,8 @@ export interface LayerMenuModel {
     onDelete: () => void
     /** Outside a draft: open one, to change the layers. */
     onStartEditing?: () => void
+    /** Narrow the canvas to what is in this layer (and what that reaches). */
+    onNarrow?: () => void
 }
 
 export interface ContextMenuAction {
@@ -101,6 +103,9 @@ export interface CanvasContextMenuProps {
     onMoveToLayer?: (nodeId: string, layerId: string) => void
     /** The right-clicked layer's menu (target type `layer`). */
     layerMenu?: LayerMenuModel | null
+    /** Narrow the canvas to the right-clicked entity (or the selection it is
+     *  part of): one entry per reach, shown in a "Narrow to this" submenu. */
+    narrowActions?: ContextMenuAction[]
 }
 
 // ============================================
@@ -133,9 +138,12 @@ export function CanvasContextMenu({
     layers = [],
     onMoveToLayer,
     layerMenu = null,
+    narrowActions = [],
 }: CanvasContextMenuProps) {
     const menuRef = useRef<HTMLDivElement>(null)
-    const [showLayerSubmenu, setShowLayerSubmenu] = React.useState(false)
+    const [submenu, setSubmenu] = React.useState<'layer' | 'narrow' | null>(null)
+    const showLayerSubmenu = submenu === 'layer'
+    const showNarrowSubmenu = submenu === 'narrow'
 
     // Close on click outside
     useEffect(() => {
@@ -167,7 +175,7 @@ export function CanvasContextMenu({
 
     // Reset submenu when menu closes
     useEffect(() => {
-        if (!isOpen) setShowLayerSubmenu(false)
+        if (!isOpen) setSubmenu(null)
     }, [isOpen])
 
     // Build actions based on target type
@@ -205,6 +213,15 @@ export function CanvasContextMenu({
                     icon: 'Focus',
                     shortcut: 'F',
                     onClick: () => { onFocusConnections(target.id); onClose() }
+                })
+            }
+
+            if (narrowActions.length > 0) {
+                result.push({
+                    id: 'narrow',
+                    label: 'Narrow to this…',
+                    icon: 'ScanSearch',
+                    onClick: () => setSubmenu('narrow')
                 })
             }
 
@@ -276,7 +293,7 @@ export function CanvasContextMenu({
                     label: 'Move to Layer',
                     icon: 'Layers',
                     dividerAfter: true,
-                    onClick: () => setShowLayerSubmenu(true)
+                    onClick: () => setSubmenu('layer')
                 })
             }
 
@@ -354,6 +371,15 @@ export function CanvasContextMenu({
             }
         } else if (target.type === 'layer' && layerMenu) {
             const m = layerMenu
+            if (m.onNarrow) {
+                result.push({
+                    id: 'narrow-layer',
+                    label: 'Narrow to this layer…',
+                    icon: 'ScanSearch',
+                    dividerAfter: true,
+                    onClick: () => { m.onNarrow?.(); onClose() },
+                })
+            }
             if (m.canEdit) {
                 result.push(
                     {
@@ -425,7 +451,7 @@ export function CanvasContextMenu({
         return result
     }, [target, onEditNode, onDuplicateNode, onDuplicateWithOptions, onDeleteNode, onCreateChild, onTraceNode, onFocusConnections,
         onCopyUrn, onConnect, onLinkNode, onEditEdge, onDeleteEdge, onReverseEdge, onCreateNode, onPaste,
-        onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose])
+        onSelectAll, customActions, queryActions, layers, onMoveToLayer, layerMenu, onClose, narrowActions.length])
 
     // Get icon component
     const getIcon = (iconName: keyof typeof LucideIcons) => {
@@ -501,17 +527,48 @@ export function CanvasContextMenu({
                     ) : (
                         <div className="px-3 py-1.5 border-b border-glass-border bg-black/5 dark:bg-white/5">
                             <span className="text-[10px] font-semibold uppercase tracking-wider text-ink-muted">
-                                {target.type === 'node' ? 'Node Actions' :
+                                {showNarrowSubmenu && target.type === 'node' ? 'Narrow to this — how far?' :
+                                    target.type === 'node' ? 'Node Actions' :
                                     target.type === 'edge' ? 'Edge Actions' : 'Canvas Actions'}
                             </span>
                         </div>
                     )}
 
-                    {/* Layer Submenu */}
-                    {showLayerSubmenu && target.type === 'node' ? (
+                    {/* Narrow submenu: one entry per reach */}
+                    {showNarrowSubmenu && target.type === 'node' ? (
+                        <div className="py-1" role="menu" aria-label="Narrow to this">
+                            <button
+                                onClick={() => setSubmenu(null)}
+                                className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-ink-muted hover:bg-black/5 dark:hover:bg-white/5"
+                            >
+                                <LucideIcons.ChevronLeft className="w-3 h-3" />
+                                Back
+                            </button>
+                            <div className="border-t border-glass-border my-1" />
+                            {narrowActions.map((action) => (
+                                <React.Fragment key={action.id}>
+                                    <button
+                                        role="menuitem"
+                                        onClick={action.onClick}
+                                        disabled={action.disabled}
+                                        className={cn(
+                                            "w-full flex items-center gap-2.5 px-3 py-2 text-sm transition-colors",
+                                            action.disabled
+                                                ? "text-ink-muted cursor-not-allowed opacity-50"
+                                                : "text-ink hover:bg-accent-lineage/10 hover:text-accent-lineage"
+                                        )}
+                                    >
+                                        {getIcon(action.icon)}
+                                        {action.label}
+                                    </button>
+                                    {action.dividerAfter && <div className="border-t border-glass-border my-1" />}
+                                </React.Fragment>
+                            ))}
+                        </div>
+                    ) : showLayerSubmenu && target.type === 'node' ? (
                         <div className="py-1">
                             <button
-                                onClick={() => setShowLayerSubmenu(false)}
+                                onClick={() => setSubmenu(null)}
                                 className="w-full flex items-center gap-2 px-3 py-1.5 text-xs text-ink-muted hover:bg-black/5 dark:hover:bg-white/5"
                             >
                                 <LucideIcons.ChevronLeft className="w-3 h-3" />
