@@ -104,7 +104,11 @@ class SearchViewDefinition(_Base):
     def search_predicate(self):
         """What the view's entities are found by: its search, or its search and
         what it includes — the matches, everything inside one, what contains
-        one, and what is one lineage step from one."""
+        one, and what is one lineage step from one.
+
+        A lineage step is taken from a match or anything inside it, as a trace
+        walks a container — a dataset's lineage runs through its columns — so
+        a narrowing kept live reaches what it reached."""
         if not self.include.any():
             return self.predicate
         matches = self.predicate
@@ -113,10 +117,12 @@ class SearchViewDefinition(_Base):
             parts.append(RelatedPredicate(axis="ancestor", where=matches))
         if self.include.containers:
             parts.append(RelatedPredicate(axis="descendant", where=matches))
-        if self.include.upstream:
-            parts.append(RelatedPredicate(axis="downstream", where=matches))
-        if self.include.downstream:
-            parts.append(RelatedPredicate(axis="upstream", where=matches))
+        if self.include.upstream or self.include.downstream:
+            reach = GroupPredicate(op="or", children=[matches, RelatedPredicate(axis="ancestor", where=matches)])
+            if self.include.upstream:
+                parts.append(RelatedPredicate(axis="downstream", where=reach))
+            if self.include.downstream:
+                parts.append(RelatedPredicate(axis="upstream", where=reach))
         return GroupPredicate(op="or", children=parts)
 
     def predicate_json(self) -> Dict[str, Any]:

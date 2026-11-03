@@ -324,7 +324,9 @@ class TestIncludeAndFewerLayers:
             ViewVersionORM.view_id == sub).order_by(ViewVersionORM.version))).scalars().all()
         assert sources == ["create", "wizard"]
 
-    async def test_its_own_layout_is_the_layers_it_shows(self, test_client, on, db_session):
+    async def test_its_own_layout_takes_every_layer_back(self, test_client, on, db_session):
+        # An own layout leaves nothing out: copying only the layers it showed would leave
+        # the left-out layer's type to no layer, and its matches in "Other matches".
         ws = await workspace(test_client)
         made = await make(test_client, ws, await base_view(test_client, ws), hiddenLayers=["d"])
         sub = made["view"]["id"]
@@ -333,8 +335,24 @@ class TestIncludeAndFewerLayers:
         assert own["definition"]["layout"] == "own" and own["definition"]["hiddenLayers"] == []
         row = (await db_session.execute(select(ViewORM).where(ViewORM.id == sub))).scalar_one()
         await db_session.refresh(row)
-        assert [l["id"] for l in json.loads(row.config)["layout"]["referenceLayout"]["layers"]] == [
-            "t", REST_LAYER_ID]
+        stored = json.loads(row.config)["layout"]["referenceLayout"]["layers"]
+        assert [l["id"] for l in stored] == ["t", "d", REST_LAYER_ID]
+        assert [(l["id"], l["hidden"]) for l in own["layers"]] == [
+            ("t", False), ("d", False), (REST_LAYER_ID, False)]
+
+    async def test_undoing_its_own_layout_leaves_the_same_layers_out(self, test_client, on):
+        ws = await workspace(test_client)
+        made = await make(test_client, ws, await base_view(test_client, ws), hiddenLayers=["d"])
+        sub = made["view"]["id"]
+        own = (await test_client.put(f"/api/v1/views/{sub}/search", json={
+            "ifDefinitionHash": made["search"]["definitionHash"], "layout": "own"})).json()
+        back = await test_client.put(f"/api/v1/views/{sub}/search", json={
+            "ifDefinitionHash": own["definitionHash"], "layout": "inherit", "hiddenLayers": ["d"]})
+        assert back.status_code == 200, back.text
+        out = back.json()
+        assert out["definition"]["layout"] == "inherit" and out["definition"]["hiddenLayers"] == ["d"]
+        assert [(l["id"], l["hidden"]) for l in out["layers"]] == [
+            ("t", False), ("d", True), (REST_LAYER_ID, False)]
 
     async def test_an_own_layout_hides_nothing(self, test_client, on):
         ws = await workspace(test_client)

@@ -11,6 +11,7 @@ from backend.common.models.search import (
     MatchAllPredicate,
     PathPredicate,
     Predicate,
+    RelatedPredicate,
     TagPredicate,
 )
 from backend.common.models.search_view import (
@@ -280,7 +281,13 @@ class TestIncludeAndHiddenLayers:
         matches, *related = found.children
         assert matches == definition.predicate
         assert [r.axis for r in related] == ["ancestor", "descendant", "downstream", "upstream"]
-        assert all(r.where == definition.predicate and r.max_hops is None for r in related)
+        assert all(r.max_hops is None for r in related)
+        inside, contains, feeds, fed = related
+        assert inside.where == contains.where == definition.predicate
+        # A lineage step is taken from a match or anything inside it, as a trace walks a container.
+        reach = GroupPredicate(op="or", children=[definition.predicate,
+                                                  RelatedPredicate(axis="ancestor", where=definition.predicate)])
+        assert feeds.where == fed.where == reach
 
     def test_what_it_includes_is_part_of_what_it_shares_scans_by(self):
         plain = SearchViewDefinition.model_validate(_search())

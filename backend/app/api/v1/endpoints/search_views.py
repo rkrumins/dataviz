@@ -453,11 +453,11 @@ async def update_view_search(
                 raise HTTPException(status_code=409, detail={
                     "reason": "base_missing",
                     "message": "Its base view is no longer available, so there are no layers to copy."})
-            # The layers it shows become its own; the ones it hid aren't copied.
-            left_out = set(updated.hidden_layers)
-            ref["referenceLayout"] = {"layers": own_layers([
-                layer for layer in layers_of(config_of(base), add_rest=True) if layer.id not in left_out]),
-                "assignments": {}}
+            # Every layer of the base becomes its own, the ones it left out too: an own
+            # layout leaves nothing out, and a type no layer holds would land in "Other
+            # matches" — a left-out layer's matches back, under another name.
+            ref["referenceLayout"] = {"layers": own_layers(layers_of(config_of(base), add_rest=True)),
+                                      "assignments": {}}
             updated = updated.model_copy(update={"hidden_layers": []})
             summary.append("Gave it a layout of its own")
         else:
