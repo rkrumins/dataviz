@@ -185,6 +185,72 @@ A trace draws the lineage in the view's own columns; the Lens gives one entity
 the whole screen. Full walkthrough:
 [The Lineage Lens & Context View](/guide/lineage-lens).
 
+## Show only some entities and what they reach
+
+**Narrow** keeps the canvas to the entities you choose and as much of their
+surroundings as you ask for. Everything else is set aside until you bring it
+back. It changes nothing in the view, and nothing is saved. Use it to read one
+corner of a large view: a table and everything inside it, or a dashboard and
+everything that feeds it.
+
+> **Note:** Narrow is a preview your administrator turns on, as
+> **Narrow: chosen entities and what they reach** in **Administration →
+> Features**. Sources and consumers also need **Lineage trace**.
+
+Start it from any of these:
+
+- **Right-click an entity → Narrow to this…** and pick how far it reaches. The
+  canvas narrows straight away. If the entity is part of a selection, the whole
+  selection narrows together.
+- **Narrow…** on the bar that appears when several entities are selected.
+- **Right-click a layer's header → Narrow to this layer…**, to start from
+  everything the view places in that layer.
+- **Narrow…** on the search panel's results, to start from every match of the
+  search (see [Advanced Search](/guide/advanced-search#narrowing-the-canvas-to-the-matches)).
+
+Each way offers the same reaches:
+
+| Choose | The canvas keeps |
+| --- | --- |
+| **Nothing more** | Only the entities you started from |
+| **One level in** | The entities and what sits directly inside them |
+| **Two levels in** | Their children, and their children's children |
+| **Sources & consumers** | One step upstream and downstream, with what sits directly inside those |
+| **Entire upstream** | Everything that feeds them, the whole way back: root cause |
+| **Entire downstream** | Everything they feed, the whole way forward: impact |
+
+**Choose how far…** (and **Narrow…**) opens a window where you can set each part
+yourself:
+- levels inside them;
+- steps upstream and steps downstream, from 0 to 25 or **All the way**;
+- what is inside the sources and consumers.
+
+Each part shows how many entities it adds as you change it. The preview gives
+the total and spreads it over the view's layers in their colours. Press
+**Narrow** (or `⌘`/`Ctrl` + `Enter`) when it looks right.
+
+While the canvas is narrowed:
+
+- A bar at the top says **Narrowed to N entities** and what they are. Hover it
+  for how many each part added.
+- A collapsed entity with something of the narrowing inside it shows how many.
+  Expand it to see them. A source or consumer shows how many steps it is from
+  where you started.
+- What you have selected stays on the canvas, and a search inside the
+  narrowing still works.
+- A trace still traces the whole view; the narrowing is back when the trace
+  ends.
+- **Edit** changes the narrowing and **Link** copies a link that opens the view
+  narrowed the same way. A narrowing that starts from a search travels as the
+  search, so any number of matches can be shared. One started from chosen
+  entities can be shared with up to 200 of them.
+- **Show everything** puts the narrowing away. So does leaving the view.
+
+The answer is worked out on the server, and everyone asking the same question
+shares it. When something stopped it short, the bar says so, for example *It
+reaches more than 50,000 entities — the first 50,000 are shown*, and offers
+**Try again** where asking again could reach more.
+
 ## Change how lines are drawn
 
 **Display** in the header changes how the canvas is drawn, for you only — never
