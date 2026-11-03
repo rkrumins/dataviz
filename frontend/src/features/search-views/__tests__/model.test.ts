@@ -17,9 +17,12 @@ import {
   layersLike,
   nameFrom,
   ownLayersFrom,
+  includeWords,
+  liveFromNarrowing,
   perTypeLayers,
   requestOf,
   unsaveableReason,
+  withInclude,
 } from '../model'
 
 const P = { kind: 'tag', values: ['pii'] } as unknown as Predicate
@@ -158,5 +161,69 @@ describe('describePredicate', () => {
       .toBe('not with no lineage')
     expect(describePredicate({ kind: 'mystery' } as unknown as Predicate)).toBe('a search')
     expect(describePredicate(null)).toBe('a search')
+  })
+})
+
+
+describe('what a subset keeps beside its matches', () => {
+  it('is composed as the server composes it', () => {
+    const REACH = { kind: 'group', op: 'or', children: [P, { kind: 'related', axis: 'ancestor', where: P }] }
+    expect(withInclude(P, null)).toBe(P)
+    expect(withInclude(P, { contents: true, containers: true, upstream: true, downstream: true })).toEqual({
+      kind: 'group', op: 'or', children: [
+        P,
+        { kind: 'related', axis: 'ancestor', where: P },
+        { kind: 'related', axis: 'descendant', where: P },
+        // A lineage step from a match or anything inside it, as a trace walks a container.
+        { kind: 'related', axis: 'downstream', where: REACH },
+        { kind: 'related', axis: 'upstream', where: REACH },
+      ],
+    })
+  })
+  it('says it in words', () => {
+    expect(includeWords(null)).toBe('')
+    expect(includeWords({ contents: true, containers: false, upstream: false, downstream: false })).toBe('everything inside them')
+    expect(includeWords({ contents: true, containers: true, upstream: true, downstream: false }))
+      .toBe('everything inside them, what contains them and what feeds them')
+  })
+  it('goes with the request, as do the layers left out', () => {
+    const ctx = { workspaceId: 'ws', viewId: 'base', predicate: P, baseLayers: BOARD, typeCounts: [
+      { type: 'table', count: 3 }, { type: 'column', count: 9 }] }
+    const include = { contents: true, containers: false, upstream: false, downstream: false }
+    const following = requestOf({ name: 'x', visibility: 'private', within: 'view', choice: 'like', include,
+      hidden: ['s', REST_LAYER_ID] }, ctx)
+    expect(following).toMatchObject({ layout: 'inherit', include, hiddenLayers: ['s', REST_LAYER_ID] })
+    // An own layout leaves nothing out: a left-out type would land in "Other matches".
+    const perType = requestOf({ name: 'x', visibility: 'private', within: 'view', choice: 'perType',
+      hidden: ['layer-1', REST_LAYER_ID] }, ctx)
+    expect(perType).toMatchObject({ layout: 'own', rest: 'Other matches' })
+    expect(perType.layers?.flatMap((l) => l.entityTypes)).toEqual(['column', 'table'])
+    expect(perType).not.toHaveProperty('hiddenLayers')
+    const copied = requestOf({ name: 'x', visibility: 'private', within: 'dataSource', choice: 'like', hidden: ['b'] }, ctx)
+    expect(copied.layers?.map((l) => l.name)).toEqual(['Bronze', 'Silver'])
+    expect(copied).not.toHaveProperty('hiddenLayers')
+  })
+})
+
+describe('a narrowing kept live', () => {
+  const spec = (over: Record<string, unknown> = {}, expand: Record<string, unknown> = {}) => ({
+    v: 1 as const, seeds: { query: P }, within: 'view' as const,
+    expand: { children: 0, upstream: 0, downstream: 0, partnerChildren: 0, ...expand }, ...over,
+  }) as never
+
+  it('is its search and what it reaches, when a live view can reach it', () => {
+    expect(liveFromNarrowing(spec({}, { children: 'all', upstream: 1 }))).toEqual({
+      predicate: P, within: 'view',
+      include: { contents: true, containers: false, upstream: true, downstream: false },
+    })
+  })
+  it.each([
+    ['chosen entities', spec({ seeds: { urns: ['u'] } }), 'chosen entities'],
+    ['a number of levels inside', spec({}, { children: 1 }), 'levels'],
+    ['two steps of lineage', spec({}, { downstream: 2 }), 'more than one step'],
+    ['what is inside its sources', spec({}, { upstream: 1, partnerChildren: 1 }), 'sources and consumers'],
+  ])('is kept as a list for %s, and says why', (_what, s, words) => {
+    const out = liveFromNarrowing(s)
+    expect('reason' in out && out.reason).toContain(words)
   })
 })

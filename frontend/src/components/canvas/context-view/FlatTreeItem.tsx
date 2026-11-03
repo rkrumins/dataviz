@@ -846,6 +846,12 @@ export const FlatTreeItem = React.memo(function FlatTreeItem({
             {isLogical ? `${node.typeId.charAt(0).toUpperCase()}${node.typeId.slice(1)} (group)` : (entityType?.name ?? node.typeId)}
           </span>
         )}
+        {/* Where a subset view's match sits, its containers named rather than loaded. */}
+        {!placement && Array.isArray(node.data?.ancestorPath) && (node.data.ancestorPath as string[]).length > 0 && (
+          <span className="text-[10px] text-ink-muted/55 truncate mt-0.5" title={(node.data.ancestorPath as string[]).join(' › ')}>
+            in {(node.data.ancestorPath as string[]).join(' › ')}
+          </span>
+        )}
         {placement && (
           <PlacementPath
             placement={placement}

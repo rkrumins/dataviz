@@ -9,6 +9,61 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Subset views keep what their matches reach, in fewer layers; one Save as view
+
+A subset view can now keep more than its matches: everything inside them, what contains them,
+and one lineage step either way. It can also leave some of its base's layers out. Both are part of
+its search, so it stays current at any size, and its layers, counts, search and export all follow
+them. **Save as view** is now one sheet. A narrowing is kept live when what it reaches can be, and
+as a list of its members when it can't. Behind the same preview switch, **Subset views**
+(`searchViewsEnabled`). See *Subset views: a search's matches as a view* in Managing Views.
+
+### Added
+
+- **Keep with them.** Beside its matches, a subset view can keep:
+  - everything inside them, however deep;
+  - what contains them, up to the top;
+  - what feeds them, and what they feed, one step.
+
+  A lineage step is taken from a match or anything inside it, as a trace walks a table through its
+  columns. Chosen in **Save as view…**, and changed from the **Subset of** chip with **Undo**. In
+  the API, this is `include` on `POST /views/from-search` and `PUT /views/{id}/search`.
+- **Fewer layers.** In a subset that follows its base, untick a layer in the sheet's preview to
+  leave it out, with its matches.
+  - It keeps following the base, so a layer the base adds later still arrives.
+  - Editors leave a layer out, or bring it back, from the chip.
+  - **Make its own layout** copies every base layer, the left-out ones too: an own layout leaves
+    nothing out. The message says so, and **Undo** leaves them out again.
+  - In the API, this is `hiddenLayers`. The view feed answers `404` for a layer the view leaves
+    out.
+- **Where each match sits.** A row in a subset view names its containers (*in warehouse ›
+  sales*) without loading them.
+
+### Changed
+
+- **One Save as view**, from search results or from a narrowing.
+  - **A narrowing is kept live** as a subset view of any size when what it reaches can be kept
+    that way, with that reach already chosen. Otherwise it is kept as a list of its members, up to
+    5,000.
+  - **Keep it** switches between the two, and when live isn't possible the sheet says why.
+  - **From search results**, **Narrow first** leads to more reach: two or more lineage steps, or
+    chosen entities.
+- **A layer per type found** asks the server for the kinds of entity the view holds, where it
+  looks, including what it keeps with the matches. Before, it counted the first page of results.
+  It is offered when saving a narrowing too.
+
+### Known limitations
+
+- **A layer per type found** ranks kinds by sampling the search's capped candidates (10,000 by
+  default) on a very large result. The rarer kinds land in **Other matches**.
+- What a subset keeps with its matches reaches one lineage step. Two or more steps, or what is
+  inside the sources and consumers, are kept as a list of members, up to 5,000.
+- Only a subset that follows its base leaves layers out. In an own layout (a layer per type, or
+  a copy of the base's layers), a type no layer holds lands in **Other matches**. To leave a kind
+  of entity out there, refine the search.
+
+---
+
 ## [Unreleased] — Subset views on the canvas: keep a search's matches as a view
 
 The canvas side of subset views. **Save as view…** on Advanced Search results keeps the

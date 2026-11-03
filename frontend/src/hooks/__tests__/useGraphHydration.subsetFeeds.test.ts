@@ -181,6 +181,20 @@ describe('subset view feeds', () => {
     }
   })
 
+  it('a row carries where its match sits, its containers named rather than loaded', async () => {
+    const placed = { ...node('urn:t1'), ancestorPath: [
+      { urn: 'urn:wh', displayName: 'warehouse', entityType: 'database' },
+      { urn: 'urn:sales', displayName: 'sales', entityType: 'schema' }] } as unknown as ReturnType<typeof node>
+    serve({
+      L1: () => page('L1', { nodes: [placed], delivered: 1, totalCount: 1 }),
+      'other-matches': () => page('other-matches', {}),
+    })
+    await hydrate()
+    const row = useCanvasStore.getState().nodes.find((n) => n.id === 'urn:t1')
+    expect(row?.data.ancestorPath).toEqual(['warehouse', 'sales'])
+    expect(urns()).toEqual(['urn:t1'])
+  })
+
   it('pages a complete layer on by the server cursor', async () => {
     serve({
       L1: (req) => req.cursor === 'c-1'

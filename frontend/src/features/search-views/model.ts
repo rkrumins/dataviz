@@ -6,17 +6,19 @@
  * Pure: no React, no store. The wire types are `@/types/searchView`; the layer
  * rules mirror `backend/app/services/search_views.py`, which is the authority.
  */
+import type { MembershipSpec } from '@/types/membership'
 import type { Predicate } from '@/types/search'
 import type {
   FromSearchRequest,
   SearchViewDefinition,
   SearchViewStatus,
+  SubsetInclude,
   SubsetLayer,
   SubsetLayerSpec,
   SubsetLayout,
   SubsetWithin,
 } from '@/types/searchView'
-import { REST_LAYER_ID } from '@/types/searchView'
+import { NO_INCLUDE, REST_LAYER_ID } from '@/types/searchView'
 
 /** Layers of types a subset's own layout may have, and the types one may name. */
 export const LAYERS_MAX = 12
@@ -162,6 +164,67 @@ export function perTypeLayers(found: Array<{ type: string; count: number }>, lab
   }
 }
 
+// ── What it keeps beside the matches ───────────────────────────────────────
+
+export function anyIncluded(include: SubsetInclude | null | undefined): boolean {
+  return !!include && (include.contents || include.containers || include.upstream || include.downstream)
+}
+
+/** What a subset's entities are found by: its search, or its search and what it
+ *  includes — composed as the server composes it (`search_predicate`), so a
+ *  preview counts what the view will hold. A lineage step is taken from a match
+ *  or anything inside it, as a trace walks a container. */
+export function withInclude(predicate: Predicate, include: SubsetInclude | null | undefined): Predicate {
+  if (!include || !anyIncluded(include)) return predicate
+  const parts: Node[] = [predicate as unknown as Node]
+  if (include.contents) parts.push({ kind: 'related', axis: 'ancestor', where: predicate })
+  if (include.containers) parts.push({ kind: 'related', axis: 'descendant', where: predicate })
+  const reach = { kind: 'group', op: 'or', children: [predicate, { kind: 'related', axis: 'ancestor', where: predicate }] }
+  if (include.upstream) parts.push({ kind: 'related', axis: 'downstream', where: reach })
+  if (include.downstream) parts.push({ kind: 'related', axis: 'upstream', where: reach })
+  return { kind: 'group', op: 'or', children: parts } as unknown as Predicate
+}
+
+/** "everything inside them and what feeds them" — what a subset keeps beside its
+ *  matches, in words; '' for just the matches. */
+export function includeWords(include: SubsetInclude | null | undefined): string {
+  if (!include) return ''
+  const words = [
+    include.contents && 'everything inside them',
+    include.containers && 'what contains them',
+    include.upstream && 'what feeds them',
+    include.downstream && 'what they feed',
+  ].filter((w): w is string => !!w)
+  if (words.length <= 1) return words[0] ?? ''
+  return `${words.slice(0, -1).join(', ')} and ${words[words.length - 1]}`
+}
+
+/** A narrowing kept live, as a subset view: its search, where it looks, and what it
+ *  includes — or why it can only be kept as a list of members. A live view keeps
+ *  everything inside the matches or nothing, and one lineage step either way. */
+export function liveFromNarrowing(spec: MembershipSpec):
+  { predicate: Predicate; within: SubsetWithin; include: SubsetInclude } | { reason: string } {
+  const query = spec.seeds.query
+  if (!query) return { reason: 'It starts from chosen entities, not a search, so it is kept as a list of them.' }
+  const blocked = unsaveableReason(query)
+  if (blocked) return { reason: blocked }
+  const { children, upstream, downstream, partnerChildren } = spec.expand
+  if (children !== 0 && children !== 'all') {
+    return { reason: 'It keeps a number of levels inside them. Kept live, it keeps everything inside them, or nothing.' }
+  }
+  if ((upstream !== 0 && upstream !== 1) || (downstream !== 0 && downstream !== 1)) {
+    return { reason: 'It reaches more than one step of lineage. Kept live, it reaches one step either way.' }
+  }
+  if (partnerChildren !== 0) {
+    return { reason: 'It keeps what is inside its sources and consumers, which only a list of them can.' }
+  }
+  return {
+    predicate: query,
+    within: spec.within,
+    include: { ...NO_INCLUDE, contents: children === 'all', upstream: upstream === 1, downstream: downstream === 1 },
+  }
+}
+
 // ── The request a search becomes ───────────────────────────────────────────
 
 export type LayoutChoice = 'like' | 'perType' | 'one'
@@ -171,6 +234,11 @@ export interface SaveSearchChoices {
   visibility: FromSearchRequest['visibility']
   within: SubsetWithin
   choice: LayoutChoice
+  /** What it keeps beside the matches. */
+  include?: SubsetInclude
+  /** The base layers a subset that follows its base leaves out, with their matches
+   *  (their ids, or `other-matches`). */
+  hidden?: string[]
 }
 
 export interface SaveSearchContext {
@@ -193,6 +261,7 @@ export function requestOf(choices: SaveSearchChoices, ctx: SaveSearchContext): F
   let layers: SubsetLayerSpec[] | undefined
   let rest: string | null | undefined
   if (choices.choice === 'like' && inView) {
+    // It follows its base: what it leaves out is named, so new base layers still arrive.
     layout = 'inherit'
   } else if (choices.choice === 'like') {
     ({ layers, rest } = ownLayersFrom(layersLike(ctx.baseLayers)))
@@ -202,6 +271,9 @@ export function requestOf(choices: SaveSearchChoices, ctx: SaveSearchContext): F
     layers = []
     rest = 'Matches'
   }
+  // Only a subset that follows its base leaves layers out: an own layout's left-out
+  // type would belong to no layer, and its matches would land in "Other matches".
+  const hidden = layout === 'inherit' ? [...new Set(choices.hidden ?? [])] : []
   return {
     name: choices.name.trim(),
     visibility: choices.visibility,
@@ -212,6 +284,8 @@ export function requestOf(choices: SaveSearchChoices, ctx: SaveSearchContext): F
     ...(inView ? { readIn: ctx.viewId } : {}),
     layout,
     ...(layout === 'own' ? { layers, rest } : {}),
+    ...(hidden.length ? { hiddenLayers: hidden } : {}),
+    ...(anyIncluded(choices.include) ? { include: choices.include } : {}),
     provenance: { origin: 'search', viewId: ctx.viewId },
   }
 }
