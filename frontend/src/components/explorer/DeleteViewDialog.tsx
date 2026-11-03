@@ -5,9 +5,13 @@
 import { useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Trash2, Heart, AlertCircle } from 'lucide-react'
+import { X, Trash2, Heart, AlertCircle, ListFilter } from 'lucide-react'
+import { useQuery } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
 import { deleteView } from '@/services/viewApiService'
+import { listSubsets, SUBSETS_QUERY_KEY } from '@/services/searchViewsApi'
+import { subsetsWarning } from '@/features/search-views/model'
+import { useFeature } from '@/store/features'
 import { Backdrop } from '@/components/ui/Backdrop'
 
 interface DeleteViewDialogProps {
@@ -35,6 +39,15 @@ export function DeleteViewDialog({
   const [error, setError] = useState<string | null>(null)
 
   const canDelete = confirmText === viewName
+  // Subset views made from this one show nothing once it's gone: say how many first.
+  const searchViewsOn = useFeature('searchViewsEnabled')
+  const { data: subsets } = useQuery({
+    queryKey: [SUBSETS_QUERY_KEY, viewId],
+    queryFn: () => listSubsets(viewId),
+    enabled: isOpen && searchViewsOn,
+    staleTime: 30_000,
+  })
+  const subsetsNote = subsetsWarning(subsets?.count ?? 0, permanent ? 'deletePermanently' : 'delete')
 
   const handleDelete = useCallback(async () => {
     if (!canDelete) return
@@ -117,6 +130,12 @@ export function DeleteViewDialog({
                 <span className="text-xs font-medium text-amber-700 dark:text-amber-400">
                   This view has {favouriteCount} favourite{favouriteCount !== 1 ? 's' : ''} across the organization
                 </span>
+              </div>
+            )}
+            {subsetsNote && (
+              <div className="flex items-start gap-2.5 px-4 py-3 rounded-xl bg-amber-50 dark:bg-amber-500/[0.08] border border-amber-200 dark:border-amber-500/20">
+                <ListFilter className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" aria-hidden />
+                <span className="text-xs font-medium text-amber-700 dark:text-amber-400">{subsetsNote}</span>
               </div>
             )}
 

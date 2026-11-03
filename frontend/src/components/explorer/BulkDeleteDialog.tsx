@@ -5,9 +5,12 @@
 import { useState, useCallback } from 'react'
 import { createPortal } from 'react-dom'
 import { motion, AnimatePresence } from 'framer-motion'
-import { X, Trash2, AlertCircle } from 'lucide-react'
+import { X, Trash2, AlertCircle, ListFilter } from 'lucide-react'
+import { useQueries } from '@tanstack/react-query'
 import { cn } from '@/lib/utils'
 import { deleteView } from '@/services/viewApiService'
+import { listSubsets, SUBSETS_QUERY_KEY } from '@/services/searchViewsApi'
+import { useFeature } from '@/store/features'
 import { Backdrop } from '@/components/ui/Backdrop'
 
 interface BulkDeleteDialogProps {
@@ -18,6 +21,9 @@ interface BulkDeleteDialogProps {
   /** When true, permanently removes from DB instead of soft-delete. */
   permanent?: boolean
 }
+
+/** The most views whose subsets the dialog asks about, one request each. */
+const SUBSET_CHECK_MAX = 50
 
 export function BulkDeleteDialog({
   viewIds,
@@ -33,6 +39,23 @@ export function BulkDeleteDialog({
   const count = viewIds.length
   const confirmPhrase = `delete ${count}`
   const canDelete = confirmText.toLowerCase() === confirmPhrase
+  // Subset views made from these show nothing once they're gone: say how many first.
+  // Asked per view, so only for a selection small enough to ask about.
+  const searchViewsOn = useFeature('searchViewsEnabled')
+  const askSubsets = isOpen && searchViewsOn && count <= SUBSET_CHECK_MAX
+  const subsetLists = useQueries({
+    queries: viewIds.map((id) => ({
+      queryKey: [SUBSETS_QUERY_KEY, id],
+      queryFn: () => listSubsets(id),
+      enabled: askSubsets,
+      staleTime: 30_000,
+    })),
+  })
+  // Subsets deleted along with their base aren't left behind.
+  const leftBehind = askSubsets
+    ? subsetLists.reduce((sum, q) => sum + (q.data
+      ? q.data.count - q.data.items.filter((item) => viewIds.includes(item.viewId)).length : 0), 0)
+    : 0
 
   const handleDelete = useCallback(async () => {
     if (!canDelete) return
@@ -103,6 +126,15 @@ export function BulkDeleteDialog({
                 )}
               </p>
             </div>
+            {leftBehind > 0 && (
+              <div className="flex items-start gap-2.5 px-4 py-3 rounded-xl bg-amber-50 dark:bg-amber-500/[0.08] border border-amber-200 dark:border-amber-500/20">
+                <ListFilter className="w-4 h-4 text-amber-500 shrink-0 mt-0.5" aria-hidden />
+                <span className="text-xs font-medium text-amber-700 dark:text-amber-400">
+                  {leftBehind.toLocaleString()} subset {leftBehind === 1 ? 'view is' : 'views are'} made from these views.{' '}
+                  {permanent ? 'Once they’re gone' : 'Until they’re restored'}, {leftBehind === 1 ? 'it shows' : 'those show'} nothing.
+                </span>
+              </div>
+            )}
 
             {/* Type to confirm */}
             <div>

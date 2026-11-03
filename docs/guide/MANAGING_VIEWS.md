@@ -313,6 +313,78 @@ over itself, keeps the members it has until it next updates.
 > administrator turns on in **Administration → Features**. With the preview
 > off, these views stay as they are.
 
+## Subset views: a search's matches as a view
+
+A *subset view* shows the entities in another view (its **base**) that match a
+search. It stores the search and its base, never the matches. So it is made at
+once, holds any number of them, and lists what matches each time it opens.
+
+**Make one.** Run an Advanced Search in a Context View, then choose **Save as
+view…** on the results bar. Choose:
+
+- its **name**;
+- where to **look for them**: in this view, or in the **whole data source**;
+- its **layout**:
+  - **Like *Sales overview***: the base's layers, followed as they change;
+  - **A layer per type found**;
+  - **One layer**.
+
+  Over the whole data source, *Like* takes a copy of the layers instead.
+- **who can see it**.
+
+The sheet counts what each layer would hold. **Save view** (⌘/Ctrl+Enter) makes
+it and opens it. Saving from inside a subset view keeps both searches, against
+the same base.
+
+**What its layers show.** Each layer lists the matches of the types it holds.
+**Other matches** holds every other type. A layer's header reads what it lists,
+of how many:
+
+- **so far** while the count is still rising;
+- **as of 10:42** while it shows a recent answer, because the data has just
+  changed.
+
+The canvas lists up to 2,000 rows a layer. Past that, the layer says how many it
+shows, and **Search in this layer** finds the rest. Matches are placed by type:
+nothing is placed by hand, grouped or reordered in a subset view.
+
+**Its header chip** reads **Subset of *Sales overview***. It says what the view
+shows and where its layers come from. If you can edit the view, it also offers:
+
+| To… | Do this |
+| --- | --- |
+| Change the search | **Edit search…** opens the search in the base view, with this view's search in it. Run it, then choose **Update *name*…** on the results bar. It shows what the change adds to and takes from each layer (**+120 −35**), and offers **Undo** |
+| Ask each layer for a fresh answer | **Refresh** |
+| Change its layers yourself | **Make its own layout**: it keeps the base's current layers as its own |
+| Take its layers from the base again | **Follow *Sales overview* again** |
+
+Each change is recorded as a version of the view.
+
+**On the base view**, **Subsets · 3** lists the subset views made from it.
+Before you save changes to its layers in the view editor, or delete it, you're
+told how many subset views that reaches:
+
+- **changed layers** change the layers of the subsets that follow it;
+- **a deleted base** leaves its subsets showing nothing until it is restored.
+
+**Who sees what.** A subset view is shared like any view. Its readers see its
+matches without needing to open the base, and see the base's name only if they
+can open it.
+
+**Limits.**
+- It reads the published data: entities created in a draft appear once the draft
+  is published.
+- It places by type. When the base places entities by rules on tags or
+  properties, or by hand, the sheet and the chip say so. Entities shown inside
+  their container in the base, such as a table's columns, are in **Other
+  matches** in the subset.
+- A search that follows lineage can take one step at most.
+
+> **If you don't see it:** subset views are a preview, **Subset views: a
+> search's matches as a view**, which your administrator turns on in
+> **Administration → Features**. With it off, a subset view says so instead of
+> listing matches.
+
 ## See who uses a View
 
 Under the View's name, a line says how many **people** opened it and how many

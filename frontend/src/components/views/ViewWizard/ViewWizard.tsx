@@ -106,6 +106,7 @@ import { BasicsStep } from './steps/BasicsStep'
 import { LayoutStep } from './steps/LayoutStep'
 import { EntitiesStep } from './steps/EntitiesStep'
 import { PreviewStep } from './steps/PreviewStep'
+import { SubsetsChangeNote } from '@/features/search-views/SubsetsChangeNote'
 import { AssignmentStep } from './steps/AssignmentStep'
 import { ScopeStep, ScopeModeToggle } from './steps/ScopeStep'
 import { viewTypeLabel } from '@/lib/domainLabels'
@@ -1340,6 +1341,14 @@ function ViewWizardBody({
                 withAssignments: formData.layoutType === 'reference',
             })
         }
+        // A subset view's layers and scope come from its search (and, while it follows its
+        // base, from the base): here it has only its details to edit.
+        if (mode === 'edit' && editingView?.search) {
+            return [
+                { id: 'basics', label: 'Basics', icon: <Sparkles className="w-4 h-4" /> },
+                { id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> },
+            ]
+        }
         const steps: StepDef[] = []
         // In create mode, scope is step 0 (handled externally) — include it for the stepper
         if (mode === 'create') {
@@ -1359,7 +1368,7 @@ function ViewWizardBody({
         }
         steps.push({ id: 'preview', label: 'Preview', icon: <Eye className="w-4 h-4" /> })
         return steps
-    }, [formData.layoutType, mode, isBlank, isImport, isImportUpdate, importWithData, importBuildable])
+    }, [formData.layoutType, mode, isBlank, isImport, isImportUpdate, importWithData, importBuildable, editingView?.search])
 
     const currentStepIndex = activeSteps.findIndex(s => s.id === currentStep)
     const isLastStep = currentStepIndex === activeSteps.length - 1
@@ -2168,6 +2177,12 @@ function ViewWizardBody({
                     }}
                 />
             )}
+            {currentStep === 'basics' && mode === 'edit' && editingView?.search && (
+                <p role="note" className="mb-4 rounded-xl border border-glass-border bg-black/[0.02] dark:bg-white/[0.03] px-4 py-3 text-[12.5px] leading-snug text-ink-muted">
+                    This is a subset view: its layers come from its search. Change the search, or where its
+                    layers come from, from the <span className="font-medium text-ink">Subset of</span> chip in its header.
+                </p>
+            )}
             {currentStep === 'basics' && (
                 <BasicsStep
                     formData={formData}
@@ -2255,11 +2270,15 @@ function ViewWizardBody({
                 </>
             )}
             {currentStep === 'preview' && (
-                <PreviewStep
-                    formData={formData}
-                    scopeContext={scopeContext}
-                    viewEntityScope={editingView?.content?.entityScope}
-                />
+                <>
+                    {/* Saving a view's layers or scope changes the subset views made from it. */}
+                    {mode === 'edit' && viewId && <SubsetsChangeNote viewId={viewId} className="mb-4" />}
+                    <PreviewStep
+                        formData={formData}
+                        scopeContext={scopeContext}
+                        viewEntityScope={editingView?.content?.entityScope}
+                    />
+                </>
             )}
             </>
             )}

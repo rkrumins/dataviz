@@ -127,6 +127,27 @@ export interface TypeFeedState {
   /** How many entities the feed's types hold, as the server counted them with
    *  its first page. null/absent = it did not say. */
   total?: number | null
+  /** A subset view's layer (key `layer:<id>`): its matches, paged by the server's
+   *  search of the view's own stored query — never by type. */
+  search?: SearchFeedState
+}
+
+/** Where one layer of a subset view stands, as its last page said. */
+export interface SearchFeedState {
+  layerId: string
+  /** The next page; null at the end, or past the rows the canvas lists. */
+  cursor: string | null
+  /** A scan still running: continued with this until its count is exact. */
+  sessionId: string | null
+  status: 'complete' | 'running'
+  countStatus: 'exact' | 'lowerBound'
+  /** A recent answer, read before the data last changed. */
+  stale: boolean
+  asOf: string | null
+  /** More matches than the canvas lists. */
+  capped: boolean
+  /** Rows listed so far. */
+  delivered: number
 }
 
 interface CanvasState {
@@ -216,6 +237,13 @@ interface CanvasState {
   // `null` = not checked yet.
   placementsNotFound: { viewId: string; urns: string[] } | null
   setPlacementsNotFound: (found: { viewId: string; urns: string[] } | null) => void
+  /** Why a subset view's layers list no matches: the preview is off, this data
+   *  source can't list them, or the view's base view is gone. */
+  subsetIssue: 'off' | 'unsupported' | 'base_missing' | null
+  setSubsetIssue: (issue: 'off' | 'unsupported' | 'base_missing' | null) => void
+  /** Bumped to ask a subset view's layers for answers on the current data. */
+  subsetRefreshNonce: number
+  refreshSubsetFeeds: () => void
 
   // One-shot pulse highlight — populated after a "jump to node" reveal so
   // the user sees a visible confirmation of where they landed. A Set
@@ -516,6 +544,10 @@ export const useCanvasStore = create<CanvasState>()(
       clearNodeFetchFailures: () => set({ nodeFetchFailures: 0, missingEntityCount: 0 }),
       placementsNotFound: null,
       setPlacementsNotFound: (placementsNotFound) => set({ placementsNotFound }),
+      subsetIssue: null,
+      setSubsetIssue: (subsetIssue) => set({ subsetIssue }),
+      subsetRefreshNonce: 0,
+      refreshSubsetFeeds: () => set((s) => ({ subsetRefreshNonce: s.subsetRefreshNonce + 1 })),
       pulseNodeIds: new Set(),
       pulseNode: (id) => {
         // Add to the pulsing set; each id auto-clears after the

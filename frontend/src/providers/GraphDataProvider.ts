@@ -9,6 +9,7 @@
 import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition, ScopeFilterConfig, EntityAssignmentConfig } from '../types/schema'
 import type { TraceMeta } from '@/services/traceApi'
 import type { MembershipPlan, MembershipRequest, MembershipResult, PlanRequest } from '@/types/membership'
+import type { ViewFeedPage, ViewFeedRequest } from '@/types/searchView'
 
 // ============================================
 // URN Types (DataHub Compatible)
@@ -862,6 +863,18 @@ export interface GraphDataProvider {
         request: PlanRequest,
         opts?: { signal?: AbortSignal },
     ): Promise<MembershipPlan>
+
+    /**
+     * One page of one layer of a subset view (`POST /search/view-feed`): the
+     * matches of the view's own stored search, in name order, with how many there
+     * are. Optional capability: the server runs and shares the search, so a
+     * provider without the route can't list a subset view's layers.
+     */
+    viewFeedPage?(
+        viewId: string,
+        request: ViewFeedRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<ViewFeedPage>
 
     /**
      * Search nodes by text query

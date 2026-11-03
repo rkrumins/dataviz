@@ -47,11 +47,16 @@ import { canShareNarrow, decodeNarrowShare, narrowLink } from '@/features/narrow
 import { useNarrowStore, type NarrowDraft } from '@/features/narrow/narrowStore'
 import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
 import { SaveAsViewSheet } from '@/features/live-views/SaveAsViewSheet'
+import { SaveSearchAsViewSheet } from '@/features/search-views/SaveSearchAsViewSheet'
+import { SubsetIssueBanner } from '@/features/search-views/SubsetIssueBanner'
+import { UpdateSubsetSearchDialog } from '@/features/search-views/UpdateSubsetSearchDialog'
+import { getSearchStatus, putSearch, SEARCH_VIEW_QUERY_KEY } from '@/services/searchViewsApi'
+import type { SearchViewStatus } from '@/types/searchView'
 import { memberActionsFor } from '@/features/live-views/model'
 import { memberOps } from '@/services/liveViewsApi'
 import type { MemberOps, MembershipExpand } from '@/types/membership'
-import type { SearchQuery } from '@/types/search'
-import { useQueryClient } from '@tanstack/react-query'
+import type { Predicate, SearchQuery, SearchResultPage } from '@/types/search'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
 import { Link, useNavigate } from 'react-router-dom'
 import { usePermission, useAuthStore } from '@/store/auth'
@@ -66,7 +71,7 @@ import { edgeTypeCopy, relationshipLabel } from '@/lib/relationshipLabel'
 import { connectedEdgeTypes, deriveConnectableEdges } from '@/services/ontologyPreflightService'
 import { useGraphProvider } from '@/providers'
 import type { AggregatedEdgeInfo, GraphNode, TraceV2Result } from '@/providers/GraphDataProvider'
-import { layerClaimedTypes, useGraphHydration } from '@/hooks/useGraphHydration'
+import { layerClaimedTypes, subsetFeedKey, useGraphHydration } from '@/hooks/useGraphHydration'
 import { Crosshair, X, History, Workflow, ChevronUp, ChevronDown } from 'lucide-react'
 import { LayerStrip } from './LayerStrip'
 import { CanvasEdgeFades } from './CanvasEdgeFades'
@@ -3835,8 +3840,17 @@ export function ContextViewCanvas({
   // (observed vs declared), and a missed match is a column that silently
   // never loads more.
   const typeFeeds = useCanvasStore(s => s.typeFeeds)
+  // A subset view's layer pages its own feed (`layer:<id>`): its search's matches.
+  const subsetView = !!activeView?.search
   const feedTypesByLayer = useMemo(() => {
     const out = new Map<string, string[]>()
+    if (subsetView) {
+      for (const layer of sortedLayers) {
+        const key = subsetFeedKey(layer.id)
+        if (typeFeeds[key]) out.set(layer.id, [key])
+      }
+      return out
+    }
     const feedTypes = Object.keys(typeFeeds)
     if (feedTypes.length === 0) return out
     const byFold = new Map(feedTypes.map(t => [t.toLowerCase(), t]))
@@ -3847,7 +3861,20 @@ export function ContextViewCanvas({
       if (types.length > 0) out.set(layer.id, types)
     }
     return out
-  }, [typeFeeds, sortedLayers])
+  }, [typeFeeds, sortedLayers, subsetView])
+  // A subset view's layers: what each has listed, of how many, and as of when.
+  const subsetFeedByLayer = useMemo(() => {
+    const out = new Map<string, NonNullable<React.ComponentProps<typeof LayerColumn>['subsetFeed']>>()
+    if (!subsetView) return out
+    for (const layer of sortedLayers) {
+      const feed = typeFeeds[subsetFeedKey(layer.id)]
+      if (feed?.search) {
+        const { delivered, status, countStatus, stale, asOf, capped } = feed.search
+        out.set(layer.id, { delivered, total: feed.total ?? null, status, countStatus, stale, asOf, capped })
+      }
+    }
+    return out
+  }, [subsetView, sortedLayers, typeFeeds])
   // Loaded entities per type, folded as the feeds are matched: what a type's
   // server total has already delivered, wherever its rows are drawn.
   const loadedByType = useMemo(() => {
@@ -3861,14 +3888,19 @@ export function ContextViewCanvas({
   const feedMoreByLayer = useMemo(() => {
     const out = new Map<string, { loading: boolean; failed: boolean; remaining: number | null; types: string[] }>()
     for (const [layerId, types] of feedTypesByLayer) {
-      const open = types.filter(t => typeFeeds[t]?.hasMore)
+      // A subset layer offers its next page; a scan still running is followed on its own.
+      const open = types.filter(t => typeFeeds[t]?.hasMore && typeFeeds[t]?.search?.status !== 'running')
       if (open.length === 0) continue
       const keys = open.map(t => `TYPE:${t}`)
+      const feedSearch = typeFeeds[types[0]]?.search
       out.set(layerId, {
         loading: keys.some(k => loadingNodes.has(k)),
         failed: keys.some(k => failedNodes.has(k)),
-        remaining: feedRemainder(types, typeFeeds, loadedByType),
-        types: open,
+        remaining: feedSearch
+          ? (feedSearch.countStatus === 'exact' && typeFeeds[types[0]].total != null
+            ? Math.max(0, (typeFeeds[types[0]].total ?? 0) - feedSearch.delivered) : null)
+          : feedRemainder(types, typeFeeds, loadedByType),
+        types: feedSearch ? [] : open,
       })
     }
     return out
@@ -4528,6 +4560,79 @@ export function ContextViewCanvas({
       },
     }, 8000)
   }, [narrowViewId, navigateTo, notify, setSaveAsDraft])
+
+  // SUBSET VIEWS (features/search-views) — a search's matches kept as a view of
+  // their own; in a subset view, its layers list them. A preview switch
+  // (`searchViewsEnabled`). A subset places by type alone: no entity is placed by
+  // hand, grouped or reordered in it, and while it follows its base its layers
+  // are the base's, changed there.
+  const searchViewsOn = useFeature('searchViewsEnabled')
+  const subsetFollows = activeView?.search?.layout === 'inherit'
+  const subsetIssue = useCanvasStore((s) => s.subsetIssue)
+  const canSaveSearchAsView = searchViewsOn && canCreateViews && !!narrowViewId && !!scopeWsId
+  const { data: subsetStatus } = useQuery({
+    queryKey: [SEARCH_VIEW_QUERY_KEY, narrowViewId],
+    queryFn: () => getSearchStatus(narrowViewId!),
+    enabled: searchViewsOn && subsetView && !!narrowViewId,
+    staleTime: 15_000,
+  })
+  const [saveSearch, setSaveSearch] = useState<{ query: SearchQuery; result: SearchResultPage } | null>(null)
+  const searchInLayer = useCallback((layerId: string) => {
+    // In a subset view the server reads a layer filter as the layer's types, inside the view's search.
+    useSearchStore.getState().requestSearchRun({ kind: 'layer', layerAssignment: layerId } as Predicate, 'header')
+    search.openPanel()
+  }, [search])
+  // EDITING A SUBSET'S SEARCH (`?editSubset=<id>`, from its header chip): the search
+  // opens here — where its matches are looked for — with the subset's search in it,
+  // and the results' save becomes "Update …".
+  const [editingSubset, setEditingSubset] = useState<{ viewId: string; name: string; status: SearchViewStatus } | null>(null)
+  const [updateSubsetQuery, setUpdateSubsetQuery] = useState<SearchQuery | null>(null)
+  const [initialEditSubset] = useState(() => new URLSearchParams(window.location.search).get('editSubset'))
+  const editSubsetUsed = useRef(false)
+  useEffect(() => {
+    if (!initialEditSubset || editSubsetUsed.current || !searchViewsOn || !narrowViewId) return
+    editSubsetUsed.current = true
+    const params = new URLSearchParams(window.location.search)
+    params.delete('editSubset')
+    const qs = params.toString()
+    window.history.replaceState(null, '', `${window.location.pathname}${qs ? `?${qs}` : ''}${window.location.hash}`)
+    void Promise.all([getSearchStatus(initialEditSubset), getView(initialEditSubset)])
+      .then(([status, subset]) => {
+        setEditingSubset({ viewId: initialEditSubset, name: subset.name, status })
+        if (status.definition.within === 'dataSource') useSearchStore.getState().setScopeMode('data_source')
+        useSearchStore.getState().requestSearchRun(status.definition.predicate, 'header')
+        search.openPanel()
+      })
+      .catch((err) => notify('error', narrowErrorText(err)))
+  }, [initialEditSubset, searchViewsOn, narrowViewId, search, notify])
+  const onSaveMatchesAsView = useCallback((query: SearchQuery, result: SearchResultPage) => {
+    if (editingSubset) setUpdateSubsetQuery(query)
+    else setSaveSearch({ query, result })
+  }, [editingSubset, setSaveSearch, setUpdateSubsetQuery])
+  const updateSubsetSearch = useCallback(async (query: SearchQuery) => {
+    if (!editingSubset) return
+    const { viewId, name, status } = editingSubset
+    const next = await putSearch(viewId, { ifDefinitionHash: status.definitionHash, predicate: query.predicate })
+    setUpdateSubsetQuery(null)
+    setEditingSubset(null)
+    navigateTo(`/views/${viewId}`)
+    notify('success', `Updated “${name}” — it shows the new search’s matches`, {
+      label: 'Undo',
+      onClick: () => {
+        void putSearch(viewId, { ifDefinitionHash: next.definitionHash, predicate: status.definition.predicate })
+          .catch((err) => notify('error', narrowErrorText(err)))
+      },
+    }, 8000)
+  }, [editingSubset, navigateTo, notify, setEditingSubset, setUpdateSubsetQuery])
+  // The types the search found, most common first, from its first page of hits.
+  const typeCountsOf = useCallback((result: SearchResultPage) => {
+    const counts = new Map<string, number>()
+    for (const hit of result.hits ?? []) {
+      const t = String(hit.node?.entityType ?? '')
+      if (t) counts.set(t, (counts.get(t) ?? 0) + 1)
+    }
+    return [...counts].map(([type, count]) => ({ type, count }))
+  }, [])
 
   // MEMBERS (features/live-views) — in a view made from a query, an editor keeps
   // an entity out whatever the query finds, always includes one, or hands one
@@ -6511,6 +6616,8 @@ export function ContextViewCanvas({
         onRevealNode={revealSearchHit}
         onFrameMatches={handleFrameMatches}
         onNarrowMatches={narrowEnabled ? narrowFromSearch : undefined}
+        onSaveMatchesAsView={(canSaveSearchAsView || editingSubset) ? onSaveMatchesAsView : undefined}
+        saveMatchesLabel={editingSubset ? `Update “${editingSubset.name}”…` : undefined}
       />
       <div className="flex-1 min-w-0 flex flex-col overflow-hidden relative">
       <ContextViewHeader
@@ -7402,6 +7509,9 @@ export function ContextViewCanvas({
         )}
 
 
+        {/* A subset view whose matches can't be listed says why, above its columns. */}
+        <SubsetIssueBanner issue={subsetView ? (searchViewsOn ? subsetIssue : 'off') : null} />
+
         {/* Layer Columns. The wrapper exists so the edge fades can be
             anchored to the SCROLLER's box rather than to canvas-body,
             whose in-flow banners would otherwise offset them. */}
@@ -7593,9 +7703,9 @@ export function ContextViewCanvas({
                 onDoubleClick={handleDoubleClick}
                 // Create affordances render only in draft (edit) mode —
                 // Published shows zero mutation entry points for anyone.
-                onAddChild={canvasWritable ? handleAddChildEntity : undefined}
-                onAddToLayer={canEditGraph ? openBuilderForLayer : undefined}
-                onBuildToLayer={canEditGraph ? openBuildForLayer : undefined}
+                onAddChild={canvasWritable && !subsetView ? handleAddChildEntity : undefined}
+                onAddToLayer={canEditGraph && !subsetView ? openBuilderForLayer : undefined}
+                onBuildToLayer={canEditGraph && !subsetView ? openBuildForLayer : undefined}
                 onBeginConnect={canvasWritable ? edgeConnect.beginDrag : undefined}
                 onLayerContextMenu={handleLayerContextMenuOpen}
                 traceFocusId={traceActive && canvasTrace.tracedUrn
@@ -7621,25 +7731,29 @@ export function ContextViewCanvas({
                 placedOut={placedOut}
                 onRevealPlacement={revealPlacementParent}
                 onReturnPlacement={returnToParent}
-                onCreateGroup={isDraft && !traceActive ? createGroup : undefined}
-                onRenameGroup={isDraft && !traceActive ? renameGroupInLayer : undefined}
-                onDeleteGroup={isDraft && !traceActive ? deleteGroupInLayer : undefined}
-                onPlaceInGroup={isDraft && !traceActive ? placeInGroup : undefined}
-                onMoveGroup={isDraft && !traceActive ? moveGroupInLayer : undefined}
+                onCreateGroup={isDraft && !traceActive && !subsetView ? createGroup : undefined}
+                onRenameGroup={isDraft && !traceActive && !subsetView ? renameGroupInLayer : undefined}
+                onDeleteGroup={isDraft && !traceActive && !subsetView ? deleteGroupInLayer : undefined}
+                onPlaceInGroup={isDraft && !traceActive && !subsetView ? placeInGroup : undefined}
+                onMoveGroup={isDraft && !traceActive && !subsetView ? moveGroupInLayer : undefined}
                 groupDestinations={groupDestinations}
-                onMoveGroupContents={isDraft && !traceActive ? moveGroupContentsInLayer : undefined}
-                onUngroup={isDraft && !traceActive ? ungroupInLayer : undefined}
+                onMoveGroupContents={isDraft && !traceActive && !subsetView ? moveGroupContentsInLayer : undefined}
+                onUngroup={isDraft && !traceActive && !subsetView ? ungroupInLayer : undefined}
                 feedMore={feedMoreByLayer.get(layer.id)}
                 onFeedMore={onFeedMore}
+                subsetFeed={subsetFeedByLayer.get(layer.id)}
+                emptyText={subsetView ? 'No matches' : undefined}
+                onSearchInLayer={subsetView ? searchInLayer : undefined}
                 onScroll={handleLayerScroll}
-                onAssignToLayer={handleAssignToLayer}
+                onAssignToLayer={subsetView ? undefined : handleAssignToLayer}
                 // Draft-only layer management (create lives in AddLayerColumn; these are per-column).
-                onRenameLayer={isDraft ? renameLayer : undefined}
-                onDeleteLayer={isDraft ? deleteLayer : undefined}
-                onReorderLayer={isDraft ? reorderLayer : undefined}
+                // A subset that follows its base takes its layers from there.
+                onRenameLayer={isDraft && !subsetFollows ? renameLayer : undefined}
+                onDeleteLayer={isDraft && !subsetFollows ? deleteLayer : undefined}
+                onReorderLayer={isDraft && !subsetFollows ? reorderLayer : undefined}
                 // The layer menu (right-click the header), and inserting a layer right here.
                 onHeaderContextMenu={openLayerMenu}
-                onInsertLayerBefore={layerEditsAllowed ? insertLayerBefore : undefined}
+                onInsertLayerBefore={layerEditsAllowed && !subsetFollows ? insertLayerBefore : undefined}
                 renameNonce={renameRequest?.layerId === layer.id ? renameRequest.nonce : 0}
                 isNew={newLayerId === layer.id}
                 // Node sorting — the menu is available to everyone (viewers get a
@@ -7657,7 +7771,7 @@ export function ContextViewCanvas({
                 // auto-adopts custom order, so the user never has to switch
                 // sort mode first. Off during trace (the tree is filtered there,
                 // so neighbor keys wouldn't match what's shown).
-                reorderEnabled={nodeSortingEnabled && isDraft && !traceActive}
+                reorderEnabled={nodeSortingEnabled && isDraft && !traceActive && !subsetView}
                 onReorderDrop={handleReorderNode}
                 onReorderNudge={nudgeReorder}
                 isHydratingInitial={isHydratingInitial}
@@ -7689,7 +7803,7 @@ export function ContextViewCanvas({
               />
             ))}
             {/* Draft-only: create your own layers (columns) to organise nodes into. */}
-            {isDraft && <AddLayerColumn onAdd={addLayer} />}
+            {isDraft && !subsetFollows && <AddLayerColumn onAdd={addLayer} />}
           </div>
 
 
@@ -7970,6 +8084,33 @@ export function ContextViewCanvas({
           sourceLayerCount={sortedLayers.length}
           onClose={() => setSaveAsDraft(null)}
           onSaved={onViewSaved}
+        />
+      )}
+
+      {/* Save as view — a search's matches kept as a subset view. */}
+      {canSaveSearchAsView && saveSearch && narrowViewId && scopeWsId && (
+        <SaveSearchAsViewSheet
+          viewId={narrowViewId}
+          viewName={activeView?.name ?? 'this view'}
+          workspaceId={scopeWsId}
+          dataSourceId={dataSourceId}
+          predicate={saveSearch.query.predicate}
+          boardLayers={sortedLayers}
+          boardConfig={activeView ? { layout: activeView.layout } : null}
+          subset={activeView?.search ? { definition: activeView.search, baseName: subsetStatus?.base?.name ?? null } : null}
+          typeCounts={typeCountsOf(saveSearch.result)}
+          onClose={() => setSaveSearch(null)}
+          onSaved={(view) => { setSaveSearch(null); onViewSaved(view) }}
+        />
+      )}
+      {editingSubset && updateSubsetQuery && (
+        <UpdateSubsetSearchDialog
+          subsetName={editingSubset.name}
+          status={editingSubset.status}
+          predicate={updateSubsetQuery.predicate}
+          countIn={editingSubset.status.definition.within === 'dataSource' ? editingSubset.viewId : (narrowViewId ?? editingSubset.viewId)}
+          onCancel={() => setUpdateSubsetQuery(null)}
+          onUpdate={() => updateSubsetSearch(updateSubsetQuery)}
         />
       )}
 

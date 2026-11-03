@@ -9,6 +9,63 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Subset views on the canvas: keep a search's matches as a view
+
+The canvas side of subset views. **Save as view…** on Advanced Search results keeps the
+matches inside a view as a view of their own. Its layers list the matches page by page and count
+them as the server does. Its header says what it shows and where its layers come from, and the
+view it was made from says how many subsets depend on it. Behind the same preview switch,
+**Subset views** (`searchViewsEnabled`), off by default. See *Subset views: a search's matches as
+a view* in Managing Views.
+
+### Added
+
+- **Save as view…** on the results bar, beside **Narrow…**. A side sheet sets:
+  - the name, drawn from the search;
+  - where the matches are looked for: this view, or the whole data source;
+  - the layout: like the view (following its layers), a layer per type found, or one layer;
+  - who can see it.
+
+  It counts what each layer would hold before saving, and a retried save answers with the view
+  the first attempt made. A search that can't be kept says why on the button.
+- **Layers that list a search's matches.** Each layer asks the view feed for its matches, follows
+  a scan still running to its end, and pages on by the server's cursor:
+  - its header reads what it lists of how many, **so far** while the count rises, and **as of**
+    while a recent answer is shown;
+  - an empty layer reads **No matches**;
+  - past 2,000 rows a layer says how many it shows, and offers **Search in this layer**.
+- **The Subset of chip** in a subset view's header: its search in words, its base, and where its
+  layers come from. Editors can:
+  - **Edit search…**: the search opens in the base view with the subset's search in it, and
+    **Update *name*…** shows what the change adds to and takes from each layer before it saves,
+    with **Undo**;
+  - **Refresh** each layer;
+  - **Make its own layout**, or **Follow *base* again**.
+- **Subsets · N** in a base view's header, listing the subset views made from it.
+- **Warnings before what reaches them.** Deleting a view, or several, says how many subset views
+  then show nothing until it's restored. The view editor says how many a save changes.
+
+### Changed
+
+- **No hand placement in a subset view.** Its entities are placed by type, so the canvas offers no
+  assigning, grouping, reordering, adding children, or adding entities to a layer. While it follows
+  its base, its layers can't be added, renamed, removed or reordered: they are the base's.
+- **The view editor edits a subset view's details only.** Its search and layers change from its
+  header chip.
+- **A subset view never lists every entity of its types.** With the preview off, or on a data
+  source whose search can't list them, or with its base deleted, its layers list nothing and the
+  canvas says why.
+
+### Known limitations
+
+- Publishing a draft that changes a base view's layers doesn't warn about its subsets. The view
+  editor and deleting do.
+- A capped layer offers **Search in this layer**, not yet an export of its matches. The search's
+  own **Export matches** works inside a subset view.
+- A search that follows lineage more than one step can't be kept as a subset view.
+
+---
+
 ## [Unreleased] — Subset views: a search's matches inside a view, as a view of their own (API)
 
 A search's matches inside a view can now be kept as a view of their own, a **subset view**. It
