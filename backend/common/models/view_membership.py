@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Dict, List, Literal, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -186,3 +186,228 @@ class MembershipResult(_Base):
         cache reads it as it reads every answer's: a degraded answer is kept for seconds,
         never as last-known-good — a cap is the answer, and keeps the full TTL."""
         return ", ".join(t.reason for t in self.truncated if t.reason in RETRYABLE) or None
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# A view made from a query — its definition (``config.membership``) and the
+# routes that create it, read its state and change it.
+#
+# The view is an ordinary curated view: its members are assignment entries the
+# server writes (``assignedBy: "query"``) and keeps in step with the data, beside
+# the entries people place themselves ("Always include"). The definition is the
+# portable part — it travels in view files and versions; the members do not
+# (they are data, not design: see ``view_transfer.canonical``).
+# ═══════════════════════════════════════════════════════════════════════════
+
+#: The assignment marker of an entry the server owns.
+MACHINE = "query"
+#: Sources one view may be made from: the main query, plus whole layers.
+SOURCES_MAX = 8
+#: Entities a view keeps out, and per-entity choices it remembers.
+EXCLUDE_MAX = 2000
+OVERRIDES_MAX = 2000
+
+Mode = Literal["live", "snapshot"]
+LayoutKind = Literal["source", "template", "auto", "stages", "custom"]
+Origin = Literal["narrow", "search", "savedQuery", "wizard", "api"]
+
+
+def _sha(value: object) -> str:
+    blob = json.dumps(value, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()[:32]
+
+
+class MembershipSource(_Base):
+    """One query the view's members come from. A query is searched IN a view —
+    ``readIn``, normally the view it was made from, never the view itself (a view's
+    own type allow-list would hold its search to the types it already shows).
+    ``layerId`` places this source's members in one of the view's layers (a whole
+    source layer brought in as is)."""
+    spec: MembershipSpec
+    read_in: Optional[str] = Field(None, alias="readIn")
+    layer_id: Optional[str] = Field(None, alias="layerId")
+    label: Optional[str] = Field(None, max_length=200)
+
+    @model_validator(mode="after")
+    def _searched_somewhere(self) -> "MembershipSource":
+        if self.spec.seeds.query is not None and not self.read_in:
+            raise ValueError("a query source names the view it is searched in (readIn)")
+        return self
+
+
+class MembershipLayout(_Base):
+    """How members are arranged: like the view it was made from (``source``), by a
+    template's rules, by top-level type (``auto``), by lineage distance
+    (``stages``), or in layers the client sent (``custom``). ``nest`` draws each
+    member inside its containers."""
+    kind: LayoutKind = "source"
+    nest: bool = True
+    source_view_id: Optional[str] = Field(None, alias="sourceViewId")
+    template_id: Optional[str] = Field(None, alias="templateId")
+    fallback_layer_id: Optional[str] = Field(None, alias="fallbackLayerId")
+    link: Optional[Dict[str, Any]] = None
+
+
+class MembershipOverride(_Base):
+    """Where a person put a member, kept across every update."""
+    layer_id: Optional[str] = Field(None, alias="layerId")
+    order_key: Optional[str] = Field(None, alias="orderKey", max_length=256)
+    logical_node_id: Optional[str] = Field(None, alias="logicalNodeId")
+    at: Optional[str] = None
+
+
+class MembershipProvenance(_Base):
+    origin: Origin = "api"
+    view_id: Optional[str] = Field(None, alias="viewId")
+    saved_query_id: Optional[str] = Field(None, alias="savedQueryId")
+    created_at: Optional[str] = Field(None, alias="createdAt")
+    created_by: Optional[str] = Field(None, alias="createdBy")
+
+
+class MembershipDefinition(_Base):
+    """``config.membership``: what the view's members are, and how they are kept.
+
+    ``mode`` ``live`` keeps the members in step with the data; ``snapshot`` leaves
+    them as they were (and can be resumed). ``exclude`` keeps entities out whatever
+    the query finds; ``overrides`` remembers where people put members."""
+    version: Literal[1] = Field(1, alias="v")
+    mode: Mode = "live"
+    sources: List[MembershipSource] = Field(..., min_length=1, max_length=SOURCES_MAX)
+    layout: MembershipLayout = Field(default_factory=MembershipLayout)
+    exclude: List[str] = Field(default_factory=list, max_length=EXCLUDE_MAX)
+    overrides: Dict[str, MembershipOverride] = Field(default_factory=dict)
+    provenance: MembershipProvenance = Field(default_factory=MembershipProvenance)
+
+    def resolution_hash(self) -> str:
+        """The identity of the expensive part — what the sources resolve to. A
+        refresh that finds it changed under it throws its answer away."""
+        return _sha([[s.spec.spec_hash(), s.read_in or "", s.layer_id or ""] for s in self.sources])
+
+    def definition_hash(self) -> str:
+        """The identity of the whole definition — the compare-and-swap token of an edit."""
+        body = self.model_dump(mode="json", by_alias=True, exclude_none=True)
+        body["exclude"] = sorted(set(body.get("exclude", [])))
+        return _sha(body)
+
+
+def read_definition(config: Dict[str, Any]) -> Optional[MembershipDefinition]:
+    """The view's definition, or None when it has none — or one this server cannot
+    read (a hand-edited file, a newer format): such a view is left as it is."""
+    raw = (config or {}).get("membership")
+    if not isinstance(raw, dict):
+        return None
+    try:
+        return MembershipDefinition.model_validate(raw)
+    except ValueError:
+        return None
+
+
+class FromMembersRequest(_Base):
+    """``POST /views/from-members`` — make a view from one or more queries.
+
+    The label fields are a view's own (``ViewCreateRequest``). ``layers`` are the
+    client's for a ``template``/``custom`` layout; ``keep`` decides, for a
+    ``source`` layout, whether layers that hold no member are kept."""
+    name: str = Field(..., min_length=1, max_length=200)
+    description: Optional[str] = Field(None, max_length=2000)
+    icon: Optional[str] = Field(None, max_length=64)
+    tags: Optional[List[str]] = None
+    visibility: str = "private"
+    workspace_id: str = Field(alias="workspaceId")
+    data_source_id: Optional[str] = Field(None, alias="dataSourceId")
+    mode: Mode = "live"
+    sources: List[MembershipSource] = Field(..., min_length=1, max_length=SOURCES_MAX)
+    layout: MembershipLayout = Field(default_factory=MembershipLayout)
+    layers: Optional[List[Dict[str, Any]]] = None
+    keep: Literal["withResults", "all"] = "withResults"
+    exclude: List[str] = Field(default_factory=list, max_length=EXCLUDE_MAX)
+    provenance: MembershipProvenance = Field(default_factory=MembershipProvenance)
+    context_model_id: Optional[str] = Field(None, alias="contextModelId")
+    context_model_version: Optional[int] = Field(None, alias="contextModelVersion")
+
+
+class PlanRequest(_Base):
+    """``POST /{ws}/graph/members/plan`` — what saving would make, nothing saved."""
+    sources: List[MembershipSource] = Field(..., min_length=1, max_length=SOURCES_MAX)
+    layout: MembershipLayout = Field(default_factory=MembershipLayout)
+    layers: Optional[List[Dict[str, Any]]] = None
+    keep: Literal["withResults", "all"] = "withResults"
+    exclude: List[str] = Field(default_factory=list, max_length=EXCLUDE_MAX)
+
+
+class PlanLayer(_Base):
+    id: str
+    name: str
+    color: Optional[str] = None
+    count: int = 0
+    link_layer_id: Optional[str] = Field(None, alias="linkLayerId")
+    kept: bool = True
+
+
+class MembershipPlan(_Base):
+    """What a view made from these sources would hold: entries against the limit
+    (members + the containers drawn around them + always-included), per layer."""
+    keys: int
+    members: int
+    containers: int
+    included: int = 0
+    limit: int
+    over_cap: bool = Field(False, alias="overCap")
+    layers: List[PlanLayer] = Field(default_factory=list)
+    fallback: int = 0
+    truncated: List[MembershipTruncation] = Field(default_factory=list)
+    missing_seeds: int = Field(0, alias="missingSeeds")
+    data_version: str = Field("", alias="dataVersion")
+
+
+Status = Literal["pending", "updating", "ok", "partial", "over_cap", "held", "failed",
+                 "paused", "source_missing", "frozen"]
+
+
+class ReadInView(_Base):
+    view_id: str = Field(alias="viewId")
+    name: Optional[str] = None
+    available: bool = True
+
+
+class MembershipStatus(_Base):
+    """``GET /views/{id}/membership`` — the definition, and how keeping it is going."""
+    mode: Mode
+    status: Status
+    detail: Optional[Dict[str, Any]] = None
+    revision: int = 0
+    definition: MembershipDefinition
+    definition_hash: str = Field(alias="definitionHash")
+    counts: Optional[Dict[str, Any]] = None
+    keys: int = 0
+    limit: int = 0
+    last_applied_at: Optional[str] = Field(None, alias="lastAppliedAt")
+    last_diff: Optional[Dict[str, Any]] = Field(None, alias="lastDiff")
+    truncated: List[MembershipTruncation] = Field(default_factory=list)
+    read_in: List[ReadInView] = Field(default_factory=list, alias="readIn")
+    always_included: List[str] = Field(default_factory=list, alias="alwaysIncluded")
+    excluded: List[str] = Field(default_factory=list)
+
+
+class MembershipUpdate(_Base):
+    """``PUT /views/{id}/membership`` — change the definition, against the hash it
+    was read at."""
+    if_definition_hash: str = Field(alias="ifDefinitionHash")
+    mode: Optional[Mode] = None
+    sources: Optional[List[MembershipSource]] = Field(None, min_length=1, max_length=SOURCES_MAX)
+    layout: Optional[MembershipLayout] = None
+    exclude: Optional[List[str]] = Field(None, max_length=EXCLUDE_MAX)
+
+
+class IncludeMember(_Base):
+    urn: str = Field(..., min_length=1)
+    layer_id: str = Field(alias="layerId")
+
+
+class MemberOps(_Base):
+    """``POST /views/{id}/membership/members`` — keep entities out, bring them back,
+    always include them, or stop."""
+    exclude: List[str] = Field(default_factory=list, max_length=EXCLUDE_MAX)
+    unexclude: List[str] = Field(default_factory=list, max_length=EXCLUDE_MAX)
+    include: List[IncludeMember] = Field(default_factory=list, max_length=EXCLUDE_MAX)
+    uninclude: List[str] = Field(default_factory=list, max_length=EXCLUDE_MAX)

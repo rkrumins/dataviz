@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 
 SOURCES = frozenset({
     "baseline", "create", "wizard", "import", "restore", "promote", "export", "manual", "snapshot",
-    "template",
+    "template", "link",
 })
 
 #: The sources a client may claim when it asks for a checkpoint on a layout write. The rest are

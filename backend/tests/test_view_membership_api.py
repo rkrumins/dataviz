@@ -244,3 +244,18 @@ def test_one_walk_is_shared_by_everyone_asking():
     from backend.app.services.graph_cache import _ENABLED_ENDPOINTS, ENDPOINT_MEMBERS
 
     assert _ENABLED_ENDPOINTS.get(ENDPOINT_MEMBERS) is True
+
+
+async def test_urn_starting_points_share_one_answer_across_views(post, membership_on, cached):
+    """URN starting points are what they are wherever they are read: a narrowing in
+    one view and the refresh of a view saved from another share one cache entry."""
+    await post({"spec": {"seeds": {"urns": ["a"]}}}, _ScopedEngine())
+    await post({"spec": {"seeds": {"urns": ["a"]}}}, _ScopedEngine(), url="/api/v1/test-ws/graph/members?viewId=v2")
+    assert cached.params[0] == cached.params[1]
+    assert cached.params[0]["viewId"] is None
+
+
+async def test_query_starting_points_are_keyed_by_the_view_they_are_read_in(post, membership_on, search, cached):
+    await post({"spec": {"seeds": {"query": QUERY}}}, _ScopedEngine())
+    await post({"spec": {"seeds": {"query": QUERY}}}, _ScopedEngine(), url="/api/v1/test-ws/graph/members?viewId=v2")
+    assert [p["viewId"] for p in cached.params] == ["v1", "v2"]

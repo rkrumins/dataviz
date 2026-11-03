@@ -28,6 +28,7 @@ import time
 from contextlib import nullcontext
 from typing import Awaitable, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
+from backend.app.services.graph_cache import ENDPOINT_MEMBERS
 from backend.common.models.graph import NodeQuery, TraceClosureRequest, TraceClosureResult
 from backend.common.models.search import Predicate
 from backend.common.models.view_membership import (
@@ -119,6 +120,56 @@ class _Run:
         prior = self.truncated.get(reason)
         if prior is None or seen > prior.seen:
             self.truncated[reason] = MembershipTruncation(reason=reason, seen=seen, limit=limit)
+
+
+async def resolve_cached(
+    engine,
+    spec: MembershipSpec,
+    *,
+    scope,
+    cache,
+    read_in: Optional[str],
+    boundary: str = "",
+    search: Optional[SeedSearch] = None,
+    admit: Admit = None,
+    budget_s: float = 30.0,
+    include_members: bool = True,
+    data_version: str = "",
+    on_stale: Optional[Callable[[], None]] = None,
+) -> MembershipResult:
+    """``resolve_membership`` through the graph cache — one walk per question, shared
+    by every caller asking it on the same graph data.
+
+    The key is the spec's hash, whether members are listed, and — for query seeds
+    only — the view the query is read in and that view's boundary (``boundary``,
+    the search's scope hash), because a query's answer depends on them. URN seeds
+    are what they are wherever they are read, so a narrowing in one view and the
+    refresh of a saved view share one entry. ``scope`` None (no workspace) skips
+    the cache.
+    """
+    async def compute() -> MembershipResult:
+        return await resolve_membership(
+            engine, spec, search=search, admit=admit, budget_s=budget_s,
+            include_members=include_members, data_version=data_version,
+        )
+
+    if scope is None:
+        return await compute()
+    query_seeded = spec.seeds.query is not None
+    return await cache.get_or_compute(
+        scope=scope,
+        endpoint=ENDPOINT_MEMBERS,
+        params={
+            "spec": spec.spec_hash(),
+            "viewId": read_in if query_seeded else None,
+            "boundary": boundary if query_seeded else "",
+            "members": include_members,
+        },
+        compute=compute,
+        model_cls=MembershipResult,
+        on_stale=on_stale,
+        expected_compute_s=budget_s,
+    )
 
 
 async def resolve_membership(

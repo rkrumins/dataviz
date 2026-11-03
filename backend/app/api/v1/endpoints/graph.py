@@ -6,8 +6,6 @@ import json
 import logging
 import os
 import re
-from contextlib import asynccontextmanager
-from dataclasses import replace
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Header, Query, Body, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
@@ -80,7 +78,7 @@ from backend.app.services.graph_cache import (
     ENDPOINT_TRACE_EXPAND,
     get_graph_cache,
     get_source_stale_reason,
-    graph_ns_hash,
+    graph_ns_hash,  # noqa: F401 — re-exported: callers read the cache scope's hash from here
     invalidate_aggregated_reads,
 )
 from backend.app.services.stats_cache import (
@@ -91,6 +89,7 @@ from backend.app.services.stats_cache import (
 from backend.app.auth.dependencies import requires
 from backend.app.db.engine import get_db_session, get_graph_read_db_session
 from backend.app.providers.manager import provider_manager
+from backend.app.services import graph_reads as _graph_reads
 from backend.app.auth.dependencies import (
     get_current_user,
     get_optional_user,
@@ -1009,64 +1008,14 @@ async def confirm_vocab_variant(
 # ------------------------------------------------------------------ #
 
 def _resolve_physical_graph_id(provider: Any, _depth: int = 0) -> Optional[str]:
-    """Best-effort resolution of the live (host, port, graph_name) identity
-    behind a possibly-wrapped provider.
-
-    ``CircuitBreakerProxy`` and ``VersionedWriteProvider`` both delegate
-    unknown attribute access to their wrapped provider via ``__getattr__``,
-    so ``provider.physical_graph_id`` already resolves through those layers
-    for free. ``DraftOverlayProvider`` does not implement ``__getattr__``,
-    so it's unwrapped explicitly via its ``_base``.
-
-    Returns None when unresolvable — notably a ``VersionedBranchProvider``
-    (draft-on-stale-main / stale-main reads), which wraps a
-    ``GraphVersioningService`` rather than a live graph adapter, so there is
-    no physical graph to identify. Callers treat None as "no physical
-    identity available" and the cache scope falls back to today's ds-only
-    behavior. Never raises.
-    """
-    if provider is None or _depth > 5:
-        return None
-    try:
-        get_id = getattr(provider, "physical_graph_id", None)
-        if callable(get_id):
-            return get_id()
-        base = getattr(provider, "_base", None)
-        if base is not None and base is not provider:
-            return _resolve_physical_graph_id(base, _depth + 1)
-    except Exception:
-        return None
-    return None
+    """See ``services.graph_reads.resolve_physical_graph_id``."""
+    return _graph_reads.resolve_physical_graph_id(provider, _depth)
 
 
 def _cache_scope(engine: ContextEngine) -> Optional[CacheScope]:
-    """Derive the (workspace, data source) scope for cache keys.
-
-    Returns None when the engine has no workspace context (legacy
-    connection-scoped path). Connection-scoped reads bypass the cache —
-    they're vanishingly rare in production and not worth the extra key
-    plumbing.
-
-    ``graph_ns`` is populated best-effort from the engine's live provider
-    identity (host:port:graph_name, hashed) so a data source re-pointed to
-    a different physical graph can never be served the old graph's cached
-    response — see CacheScope's docstring. Resolution failure (or a
-    provider shape we can't unwrap) degrades to graph_ns="", i.e. today's
-    ds-only scoping; this never raises.
-    """
-    ws = getattr(engine, "_workspace_id", None)
-    if not ws:
-        return None
-    ds = getattr(engine, "_data_source_id", None) or ""
-    branch = getattr(engine, "_branch_id", None) or ""
-    graph_ns = ""
-    try:
-        physical_id = _resolve_physical_graph_id(getattr(engine, "provider", None))
-        if physical_id:
-            graph_ns = graph_ns_hash(physical_id)
-    except Exception:
-        graph_ns = ""
-    return CacheScope(workspace_id=ws, data_source_id=ds, branch_id=branch, graph_ns=graph_ns)
+    """The (workspace, data source, branch, physical graph) cache scope of a
+    read — ``services.graph_reads.cache_scope``; None without a workspace."""
+    return _graph_reads.cache_scope(engine)
 
 
 def _compute_budget(endpoint: str) -> float:
@@ -2192,34 +2141,16 @@ async def search_advanced(
 
 def _statement_admission(engine: ContextEngine):
     """``_bounded_compute``'s two slots — this process's and the fleet's —
-    as a context manager held for ONE statement, or None when the engine's
-    provider has no slot key (``_bounded_compute`` degrades the same way)."""
-    key = getattr(getattr(engine, "provider", None), "manager_cache_key", None)
-    if key is None:
-        return None
-
-    @asynccontextmanager
-    async def admit():
-        sem = await provider_manager.acquire_provider_slot(*key)
-        try:
-            async with provider_manager.fleet_slot(*key):
-                yield
-        finally:
-            sem.release()
-
-    return admit
+    held for ONE statement, or None when the engine's provider has no slot
+    key: ``services.graph_reads.statement_admission`` on this module's
+    provider manager."""
+    return _graph_reads.statement_admission(engine, provider_manager)
 
 
 async def _search_data_version(engine: ContextEngine) -> str:
-    """The graph data a search reads: the published graph's content
-    generation (a draft searches the graph it is a draft of) and the
-    physical graph behind it. Never raises; "" when unknown."""
-    scope = _cache_scope(engine)
-    if scope is None:
-        return ""
-    published = replace(scope, branch_id="")
-    generation = await get_graph_cache().content_generation(published)
-    return f"{generation}.{published.graph_ns}"
+    """The graph data a search reads — ``services.graph_reads.data_version``
+    of this read's scope. Never raises; "" when unknown."""
+    return await _graph_reads.data_version(_cache_scope(engine), get_graph_cache())
 
 
 @router.post("/search/explain")

@@ -20,7 +20,7 @@ adding its own:
 """
 from __future__ import annotations
 
-from typing import List, Optional, Tuple
+from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -42,26 +42,35 @@ from backend.app.api.v1.feature_gate import feature_disabled, require_feature
 from backend.app.config import resilience
 from backend.app.config.feature_wiring import fail_safe_default
 from backend.app.services.context_engine import ContextEngine
-from backend.app.services.deep_search import SearchRunContext
 from backend.app.services.feature_flags import feature_flags
-from backend.app.services.graph_cache import ENDPOINT_MEMBERS, ENDPOINT_TRACE_CLOSURE, get_graph_cache
-from backend.app.services.view_membership import resolve_membership
-from backend.common.models.search import Predicate, SearchOptions, SearchQuery, SearchScope
-from backend.common.models.view_membership import SEEDS_MAX, MembershipRequest, MembershipResult
+from backend.app.services.graph_cache import ENDPOINT_TRACE_CLOSURE, get_graph_cache
+from backend.app.services.view_membership import resolve_cached
+from backend.app.services.view_membership_search import make_seed_search, seed_query_for
+from backend.common.models.search import SearchQuery
+from backend.common.models.view_membership import MembershipRequest, MembershipResult
 
 router = APIRouter()
 
 #: A preview: it ships off, and a flag that cannot be read means off — never the preview.
 require_membership = require_feature("viewMembershipEnabled", default=False)
 
-#: How many times one query seed's search may be continued while it is still running.
-_SEARCH_CONTINUATIONS = 10
-
-
 def _budget_s() -> float:
     """One resolution's wall clock on the web tier: the trace's own budget, so the
     answer arrives — truncated, and saying so — before the client stops waiting."""
     return max(5.0, resilience.TRACE_TIMEOUT_SECS - resilience.TRACE_ENGINE_HEADROOM_SECS)
+
+
+def _answered_as_search(search):
+    """The seed search, its refusals answered as the search route answers them."""
+    from backend.app.services.advanced_search_service import ValidationError
+
+    async def run(predicate):
+        try:
+            return await search(predicate)
+        except ValidationError as exc:
+            raise _map_validation_error(str(exc)) from exc
+
+    return run
 
 
 @router.post(
@@ -109,11 +118,7 @@ async def resolve_members(
     boundary = ""
     if spec.seeds.query is not None:
         from backend.app.services.advanced_search_service import AdvancedSearchService, ValidationError
-        seed_query = SearchQuery(
-            predicate=spec.seeds.query,
-            scope=SearchScope(view_id=viewId, scope_mode="view" if spec.within == "view" else "data_source"),
-            options=SearchOptions(results="hits", page_size=SEEDS_MAX),
-        )
+        seed_query = seed_query_for(spec, viewId)
         _guard_capability_scope(request, seed_query)
         svc = AdvancedSearchService(
             engine, session=session, workspace_id=ws_id, data_source_id=dataSourceId,
@@ -128,50 +133,17 @@ async def resolve_members(
     response.headers["X-Provider-Health"] = _provider_health_header(engine)
     admit = _statement_admission(engine)
     data_version = await _search_data_version(engine)
-
-    async def search(_predicate: Predicate) -> Tuple[List[str], bool]:
-        """The query seed's hits: every entity it finds in the view (or the whole data
-        source), up to the seed limit — the search panel's own search, continued while
-        it is still running."""
-        context = SearchRunContext(data_version=data_version, admit=admit)
-        try:
-            page, _scope = await svc.search(seed_query, run_context=context)
-            for _ in range(_SEARCH_CONTINUATIONS):
-                if page.status != "running" or not page.session_id:
-                    break
-                again = seed_query.model_copy(update={
-                    "options": seed_query.options.model_copy(update={"session_id": page.session_id})})
-                page, _scope = await svc.search(again, run_context=context)
-        except ValidationError as exc:
-            raise _map_validation_error(str(exc)) from exc
-        urns = [hit.node.urn for hit in (page.hits or [])]
-        more = (bool(page.cursor) or page.truncated or page.status == "running"
-                or (page.total_count or 0) > len(urns))
-        return urns, more
-
-    async def compute() -> MembershipResult:
-        return await resolve_membership(
-            engine, spec, search=search, admit=admit, budget_s=_budget_s(),
-            include_members=body.include_members, data_version=data_version,
-        )
+    search = None
+    if seed_query is not None:
+        search = _answered_as_search(make_seed_search(svc, seed_query, data_version=data_version, admit=admit))
 
     try:
-        scope = _cache_scope(engine)
-        if scope is None:
-            return await compute()
-        return await get_graph_cache().get_or_compute(
-            scope=scope,
-            endpoint=ENDPOINT_MEMBERS,
-            params={
-                "spec": spec.spec_hash(),
-                "viewId": viewId,
-                "boundary": boundary,
-                "members": body.include_members,
-            },
-            compute=compute,
-            model_cls=MembershipResult,
+        return await resolve_cached(
+            engine, spec,
+            scope=_cache_scope(engine), cache=get_graph_cache(),
+            read_in=viewId, boundary=boundary, search=search, admit=admit,
+            budget_s=_budget_s(), include_members=body.include_members, data_version=data_version,
             on_stale=lambda: response.headers.__setitem__("X-Cache-Status", "stale-fallback"),
-            expected_compute_s=_budget_s(),
         )
     except NotImplementedError as exc:
         raise _map_not_implemented(engine, exc) from exc
