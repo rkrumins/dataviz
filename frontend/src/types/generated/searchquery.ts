@@ -921,6 +921,10 @@ export type Subbuckets = SearchAggregateBucket[] | null
 export type Typecounts1 = {
     [k: string]: number
 } | null
+/**
+ * When a stale page was read (ISO 8601): a recent answer served while the data changes, never older than the reuse window.
+ */
+export type Asof1 = string | null
 export type Cachehit = boolean
 /**
  * Candidates that passed the predicate scan before the scope check and aggregation/limit. Useful for showing 'searching X nodes…' captions in the FE.
@@ -1918,6 +1922,7 @@ export interface ResolvedEntity {
  */
 export interface SearchResultPage {
     aggregates?: Aggregates
+    asOf?: Asof1
     cacheHit?: Cachehit
     candidateCount?: Candidatecount
     countStatus?: Countstatus
