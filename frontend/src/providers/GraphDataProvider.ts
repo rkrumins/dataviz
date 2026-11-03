@@ -8,7 +8,7 @@
 
 import { LogicalNodeConfig, LayerAssignmentRuleConfig, RuleCondition, ScopeFilterConfig, EntityAssignmentConfig } from '../types/schema'
 import type { TraceMeta } from '@/services/traceApi'
-import type { MembershipRequest, MembershipResult } from '@/types/membership'
+import type { MembershipPlan, MembershipRequest, MembershipResult, PlanRequest } from '@/types/membership'
 
 // ============================================
 // URN Types (DataHub Compatible)
@@ -851,6 +851,17 @@ export interface GraphDataProvider {
         request: MembershipRequest,
         opts?: { signal?: AbortSignal },
     ): Promise<MembershipResult>
+
+    /**
+     * What saving these sources as a view would make — entries against the
+     * limit, layer by layer — previewed from `viewId` (`POST /members/plan`).
+     * Nothing is saved.
+     */
+    planMembers?(
+        viewId: string,
+        request: PlanRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<MembershipPlan>
 
     /**
      * Search nodes by text query

@@ -251,6 +251,50 @@ shares it. When something stopped it short, the bar says so, for example *It
 reaches more than 50,000 entities — the first 50,000 are shown*, and offers
 **Try again** where asking again could reach more.
 
+### Keep a narrowing as a view
+
+A narrowing is yours, for as long as you keep it. To share it, or come back to
+it, keep it as a view of its own: **Save as view** on the **Narrowed to N
+entities** bar, or **Save as view…** in the Narrow window. You need permission
+to create views in the workspace.
+
+The **Save as a view** panel:
+
+1. **Name**, filled in from what the narrowing shows.
+2. **Keeps itself up to date** is on by default. As the data changes, what newly
+   matches arrives and what stops matching leaves. Turn it off for a
+   **snapshot**, which keeps the members it has now.
+3. **Layout** sets the layers the view starts with:
+   - **Like** the view you are in: its layers, each entity placed where that
+     view places it. **With results** keeps only the layers something lands
+     in; **All** keeps every layer.
+   - **From a template**: a layout template's layers, fitted to this data.
+   - **By type**: a layer for each kind of top-level entity.
+   - **Lineage stages**: Sources · Feeds · Starting points · Consumers ·
+     Impact. Offered when the narrowing reaches sources or consumers.
+
+   **Show where they sit** draws each entity inside the containers it lives in.
+4. **Preview** shows each layer the view would start with and how many entries
+   land in it, against the most a view can hold (5,000).
+5. **Who can see it**: only you, or the workspace. To share it with everyone,
+   publish it from the view once it's saved.
+
+Press **Save view** (or `⌘`/`Ctrl` + `Enter`). The new view opens, and
+**Undo** on the message deletes it again.
+
+**The limit.** A view keeps up to 5,000 entries: the entities, the containers
+drawn around them, and anything you always include. It is a limit on what the
+view lists, not on how big the graph is. A starting point with **everything
+inside** it is one entry, however much is inside. Over the limit, the panel
+says by how much and what would help, and nothing is saved. It might suggest:
+- turning off **Show where they sit**;
+- choosing **everything inside** instead of a number of levels;
+- narrowing the search.
+
+A narrowing that starts from a search uses the search's first 5,000 matches,
+and the panel says so before you save. Looking after the view once it exists
+is in [Managing Views](/guide/managing-views#views-made-from-a-query).
+
 ## Change how lines are drawn
 
 **Display** in the header changes how the canvas is drawn, for you only — never

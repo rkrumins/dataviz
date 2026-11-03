@@ -46,11 +46,14 @@ import { PRESETS as NARROW_PRESETS, seedsLabel as narrowSeedsLabel, specFor, spe
 import { canShareNarrow, decodeNarrowShare, narrowLink } from '@/features/narrow/narrowShareCodec'
 import { useNarrowStore, type NarrowDraft } from '@/features/narrow/narrowStore'
 import { narrowErrorText } from '@/features/narrow/useNarrowResolve'
-import type { MembershipExpand } from '@/types/membership'
+import { SaveAsViewSheet } from '@/features/live-views/SaveAsViewSheet'
+import { memberActionsFor } from '@/features/live-views/model'
+import { memberOps } from '@/services/liveViewsApi'
+import type { MemberOps, MembershipExpand } from '@/types/membership'
 import type { SearchQuery } from '@/types/search'
 import { useQueryClient } from '@tanstack/react-query'
 import { useBranchStore, useEffectiveBranchId, useGraphId } from '@/store/branchStore'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { usePermission, useAuthStore } from '@/store/auth'
 import { graphStoreLimitsPath } from '@/components/admin/shared/aggregationKnobs'
 import { canvasScopeWorkspaceId } from '@/lib/canvasScope'
@@ -322,7 +325,7 @@ import { zoomScalesPercentages } from '@/lib/cssZoom'
 import { GhostLineageOverlay } from './GhostLineageOverlay'
 import { ContextViewHeader } from './ContextViewHeader'
 import { resetAllCircuitBreakers } from '@/services/circuitBreaker'
-import { getView, updateViewLayout } from '@/services/viewApiService'
+import { deleteView, getView, updateViewLayout, viewToViewConfig } from '@/services/viewApiService'
 import { useSourceChangedRefresh } from '@/hooks/useSourceChangedRefresh'
 import { useFailoverRetry } from '@/hooks/useFailoverRetry'
 import { StaleDataBanner } from '@/components/insights/StaleDataBanner'
@@ -3577,6 +3580,18 @@ export function ContextViewCanvas({
     const layer = before.layers.find(l => l.id === layerId)
     if (!layer) return
     if (!siblings.includes(draggedId)) return // cross-set drop — not a reorder
+    // Inside a member a view made from a query holds whole, its contents come
+    // with it and keep their own order: keying them would pin each one as
+    // always included. Move the member itself instead.
+    const parentId = reorderTreeRef.current.parentMap.get(targetId)
+    const parentUrn = parentId
+      ? ((nodesRef.current.find(n => n.id === parentId)?.data?.urn as string | undefined) ?? parentId)
+      : undefined
+    const parentEntry = parentUrn ? before.assignments[parentUrn] : undefined
+    if (parentEntry?.assignedBy === 'query' && parentEntry.inheritsChildren) {
+      notifyLayoutSave('info', 'Everything inside comes with it as a whole, in its own order — move what it sits in instead.')
+      return
+    }
 
     // Multi-select: dragging a node that is part of the current selection moves
     // EVERY selected sibling as one contiguous block, preserving its visual
@@ -3640,7 +3655,7 @@ export function ContextViewCanvas({
         reapply: () => persistReferenceLayout(after),
       },
     )
-  }, [currentLayout, persistReferenceLayout, traceWriteLocked])
+  }, [currentLayout, persistReferenceLayout, traceWriteLocked, notifyLayoutSave])
 
   // Keyboard-and-mouse reorder nudge — the a11y sibling of the drag bands
   // (native HTML5 DnD is mouse-only). Resolves the node's sibling set (roots
@@ -4494,6 +4509,76 @@ export function ContextViewCanvas({
     (urn: string) => nodeLayerMap.get(urnToIdMap.get(urn) ?? urn),
     [nodeLayerMap, urnToIdMap],
   )
+  // SAVE AS VIEW (features/live-views) — a narrowing kept as a view of its own,
+  // on the same data. Offered to whoever may create views in this workspace.
+  const canCreateViews = usePermission('workspace:view:create', scopeWsId ?? undefined)
+  const canSaveAsView = narrowEnabled && canCreateViews && !!narrowViewId && !!scopeWsId
+  const [saveAsDraft, setSaveAsDraft] = useState<NarrowDraft | null>(null)
+  const navigateTo = useNavigate()
+  const onViewSaved = useCallback((view: { id: string; name: string }) => {
+    setSaveAsDraft(null)
+    const from = narrowViewId
+    navigateTo(`/views/${view.id}`)
+    notify('success', `Saved “${view.name}” as a view`, {
+      label: 'Undo',
+      onClick: () => {
+        void deleteView(view.id)
+          .then(() => { if (from) navigateTo(`/views/${from}`) })
+          .catch(() => notify('error', 'Couldn’t undo — the view is still saved. Delete it from its page.'))
+      },
+    }, 8000)
+  }, [narrowViewId, navigateTo, notify, setSaveAsDraft])
+
+  // MEMBERS (features/live-views) — in a view made from a query, an editor keeps
+  // an entity out whatever the query finds, always includes one, or hands one
+  // back to the query. They change what the view is made of, so they apply to the
+  // published view at once (never through a draft), each with an Undo.
+  const membersEditable = narrowEnabled && !!activeView?.membership && viewCaps.canEdit && !isDraft && !traceActive
+  const applyMemberOps = useCallback(async (ops: MemberOps): Promise<boolean> => {
+    if (!narrowViewId) return false
+    try {
+      const out = await memberOps(narrowViewId, ops)
+      useSchemaStore.getState().addOrUpdateView(viewToViewConfig(out.view))
+      return true
+    } catch (err) {
+      notify('error', narrowErrorText(err))
+      return false
+    }
+  }, [narrowViewId, notify])
+  const memberMenuActions = useMemo<ContextMenuAction[]>(() => {
+    const target = interactions.state.contextMenu.target
+    if (!membersEditable || !target || target.type !== 'node') return []
+    const urn = (displayMap.get(target.id)?.data?.urn as string | undefined) ?? target.id
+    const entry = currentLayout().assignments[urn]
+    if (!entry) return []
+    const name = canvasDisplayName(urn)
+    const run = (ops: MemberOps, done: string, undo: MemberOps) => () => {
+      interactions.closeContextMenu()
+      void applyMemberOps(ops).then((ok) => {
+        if (!ok) return
+        notify('success', done, {
+          label: 'Undo',
+          onClick: () => { void applyMemberOps(undo).then((back) => { if (back) notify('info', 'Undone') }) },
+        }, 8000)
+      })
+    }
+    const actions = memberActionsFor(entry).map((action): ContextMenuAction => {
+      if (action === 'exclude') {
+        return { id: 'member-exclude', label: 'Keep out of this view', icon: 'EyeOff',
+          onClick: run({ exclude: [urn] }, `“${name}” is kept out of this view, whatever its query finds`, { unexclude: [urn] }) }
+      }
+      if (action === 'include') {
+        return { id: 'member-include', label: 'Always include', icon: 'Pin',
+          onClick: run({ include: [{ urn, layerId: entry.layerId }] }, `“${name}” is always included`, { uninclude: [urn] }) }
+      }
+      return { id: 'member-uninclude', label: 'Stop always including', icon: 'PinOff',
+        onClick: run({ uninclude: [urn] }, `“${name}” follows the query again`, { include: [{ urn, layerId: entry.layerId }] }) }
+    })
+    if (actions.length) actions[actions.length - 1] = { ...actions[actions.length - 1], dividerAfter: true }
+    return actions
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [interactions.state.contextMenu.target, membersEditable, displayMap, applyMemberOps, notify])
+  const nodeCustomActions = useMemo(() => [...memberMenuActions, ...reorderMenuActions], [memberMenuActions, reorderMenuActions])
   // Right-click → Narrow to this: one entry per reach, applied at once; or
   // choose in the composer. The selection the entity is part of narrows together.
   const narrowMenuActions = useMemo<ContextMenuAction[]>(() => {
@@ -6565,6 +6650,9 @@ export function ContextViewCanvas({
             onClear={clearNarrow}
             link={canShareNarrow(narrowApplied.spec) ? () => narrowLink(narrowApplied.spec, narrowApplied.seedsLabel) : undefined}
             onRetry={() => { void narrowNow(narrowApplied) }}
+            onSaveAsView={canSaveAsView
+              ? () => setSaveAsDraft({ spec: narrowApplied.spec, seedsLabel: narrowApplied.seedsLabel, seedNames: narrowApplied.seedNames })
+              : undefined}
           />
         )}
 
@@ -7789,7 +7877,7 @@ export function ContextViewCanvas({
         onSelectAll={interactions.selectAll}
         layers={sortedLayers}
         onMoveToLayer={isDraft ? (nodeId, layerId) => moveToLayer(nodeId, layerId) : undefined}
-        customActions={reorderMenuActions}
+        customActions={nodeCustomActions}
         queryActions={queryMenuActions}
         narrowActions={narrowMenuActions}
         layerMenu={layerMenu}
@@ -7865,6 +7953,23 @@ export function ContextViewCanvas({
           layerOf={narrowLayerOf}
           onApply={(draft, result) => useNarrowStore.getState().apply(narrowViewId, draft, result)}
           onClose={() => useNarrowStore.getState().closeComposer()}
+          onSaveAsView={canSaveAsView
+            ? (draft) => { useNarrowStore.getState().closeComposer(); setSaveAsDraft(draft) }
+            : undefined}
+        />
+      )}
+
+      {/* Save as view — the narrowing kept as a view of its own. */}
+      {canSaveAsView && saveAsDraft && narrowViewId && scopeWsId && (
+        <SaveAsViewSheet
+          viewId={narrowViewId}
+          viewName={activeView?.name ?? 'this view'}
+          workspaceId={scopeWsId}
+          dataSourceId={dataSourceId ?? undefined}
+          draft={saveAsDraft}
+          sourceLayerCount={sortedLayers.length}
+          onClose={() => setSaveAsDraft(null)}
+          onSaved={onViewSaved}
         />
       )}
 

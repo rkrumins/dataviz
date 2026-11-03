@@ -14,6 +14,7 @@ from .endpoints import (
     insights, me, system_status, redis_config, platform_settings, profiling,
     graph_store,
     groups, workspace_members, view_grants, view_versions, view_transfer, view_saved_filters,
+    view_membership,
     role_bindings,
     permissions_admin, access_requests, access_reviews, rbac_search, directory, notifications,
     workspace_directory, data_source_transfers,
@@ -208,6 +209,13 @@ api_router.include_router(
     view_saved_filters.router,
     prefix="/views/saved-filters",
     tags=["views:saved-filters"],
+)
+# Views made from a query: `/views/from-members` and `/views/{view_id}/membership/...`.
+# Before views.router for the same reason as the routes above.
+api_router.include_router(
+    view_membership.router,
+    prefix="/views",
+    tags=["views:membership"],
 )
 # The bell — every route is scoped to the calling user by construction.
 api_router.include_router(

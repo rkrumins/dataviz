@@ -9,6 +9,74 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — Context View: keep a narrowing as a view that keeps itself up to date
+
+A narrowing showed one corner of a large view, for one person, until they put it away. Now it can
+be **saved as a view** of its own on the same data, with its own layers, sharing and versions.
+It keeps itself up to date: opened after its data changed, it brings itself up to date first,
+so what newly matches arrives and what stops matching leaves. Or it stays a snapshot. Part of the
+Narrow preview, off by default. See *Keep a narrowing as a view* in the User Guide.
+
+### Added
+
+- **Save as view** on the Narrowed bar and in the Narrow window. The panel previews the layers the
+  view would start with and what lands in each. The layout can be:
+  - like the view you are in;
+  - from a layout template;
+  - by type;
+  - by lineage stage.
+
+  It counts the entries against the 5,000 a view can hold. Over the limit, it says what would
+  help, and nothing is saved.
+- **Auto-updating** and **Snapshot** chips in a view's header. The chip shows what the view is
+  made from and the view its search runs in. It also shows the last update and what that
+  changed. Editors can:
+  - **Refresh now**;
+  - **Freeze as it is**, or **Resume updates**;
+  - confirm or keep out an update that would remove a lot;
+  - bring back entities kept out, and stop always including entities.
+- **Keep out of this view**, **Always include** and **Stop always including** on a right-click
+  of a member, each with **Undo**.
+- API:
+  - `POST /api/v1/views/from-members` (with `Idempotency-Key`);
+  - `GET` and `PUT /api/v1/views/{id}/membership`;
+  - `POST …/membership/members` and `POST …/membership/refresh`;
+  - `POST /api/v1/{ws_id}/graph/members/plan` to preview.
+
+  All are open to API keys, and the recipe is in the API Guide.
+
+### Changed
+
+- **A layout save keeps a view's members.** A canvas save, a draft and its publishing, a restored
+  version and an import can no longer add or drop the members of a view made from a query. Where
+  people put members is kept, and remembered for the next update.
+- **An update is data, not an edit.** It stamps the view's data freshness, not its "last edited",
+  and writes no version.
+- **A view package carries the members.** An auto-updating view's versions leave its members out,
+  so its package takes the members it holds when it is packaged. A snapshot's package takes the
+  members its version holds.
+- **Large removals wait.** An update that would remove at least half of a view (and at least 50
+  entities) waits for an editor to confirm it.
+- **Short answers are never applied.** When the graph answers short, the view keeps its last
+  members.
+- **Brought up to date when opened.** No background worker: opening an auto-updating view asks
+  `POST /api/v1/views/{id}/membership/refresh?trigger=open`, which anyone who can read the view
+  may. Nothing is read from the graph unless the data or the view's query changed since it was
+  last worked out; one opener works it out while others wait on it; at most once every 30 seconds
+  per view; and a large removal still waits for an editor.
+
+### Upgrading
+
+- One migration, `20261103_1000_live_views`: a `view_membership_state` table. It is additive.
+
+### Known limitations
+
+- A view made from a query lists at most 5,000 entries. Large, scattered result sets are what
+  subset views are for.
+- An auto-updating view nobody opens isn't updated: it catches up the next time it is opened.
+
+---
+
 ## [Unreleased] — Context View: Narrow the canvas to some entities and what they reach
 
 A large view is read a corner at a time: one table and everything inside it, a dashboard and everything

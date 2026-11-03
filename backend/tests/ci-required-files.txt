@@ -158,6 +158,9 @@ tests/test_layout_template_versions.py
 tests/test_layout_templates.py
 tests/test_layout_templates_switch.py
 tests/test_lease_keeper.py
+tests/test_live_views_ownership.py
+tests/test_live_views_plan.py
+tests/test_live_views_writes.py
 tests/test_loadtest_manifests.py
 tests/test_loadtest_protection_gate.py
 tests/test_loadtest_retry_model.py
@@ -318,6 +321,7 @@ tests/test_view_library_schema.py
 tests/test_view_live_filter.py
 tests/test_view_membership_api.py
 tests/test_view_membership_resolver.py
+tests/test_view_membership_status_api.py
 tests/test_view_placement.py
 tests/test_view_portability_switch.py
 tests/test_view_source_kinds.py
@@ -330,6 +334,7 @@ tests/test_view_transfer_reconcile_merge.py
 tests/test_view_transfer_references.py
 tests/test_view_transfer_staging.py
 tests/test_view_versions.py
+tests/test_views_from_members_api.py
 tests/test_worker_lanes.py
 tests/test_workspace_access_hardening.py
 tests/test_workspace_access_lifecycle.py

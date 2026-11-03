@@ -80,6 +80,9 @@ function buildViewConfig(
     // the overlay rather than the base. Absent on create (no base).
     const baseEntityScope = (base?.content as { entityScope?: unknown } | undefined)?.entityScope
     return {
+        // Keys this builder doesn't own — a view's `membership` (what a view made
+        // from a query is made of), and whatever comes next — ride along unchanged.
+        ...(base ?? {}),
         icon: request.icon ?? 'Layout',
         content: {
             visibleEntityTypes: request.visibleEntityTypes ?? [],

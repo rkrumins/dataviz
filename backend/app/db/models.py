@@ -1441,6 +1441,74 @@ class ViewVersionORM(Base):
 
 
 # ------------------------------------------------------------------ #
+# view_membership_state (views made from a query)                     #
+# ------------------------------------------------------------------ #
+
+#: What keeping a view made from a query is doing. See ``services/live_views``.
+MEMBERSHIP_STATUSES = (
+    "pending", "updating", "ok", "partial", "over_cap", "held", "failed",
+    "source_missing", "frozen",
+)
+
+
+class ViewMembershipStateORM(Base):
+    """How keeping one view made from a query in step with its data is going.
+
+    RUNTIME state, never design: it is not exported, not versioned and not part of
+    the view's content hash — the definition is ``config.membership``, and the
+    members themselves are the view's ``assignedBy: "query"`` entries. One row per
+    such view, gone with the view.
+
+    The refresh is fenced: a run claims the row (``lease_owner``/``lease_until``,
+    ``epoch + 1``) and may apply only while the epoch is still its own, so a run
+    that lost its lease — or was overtaken by an edit — can never write over a
+    newer answer. Timestamps are ISO text, as everywhere in this schema.
+    """
+    __tablename__ = "view_membership_state"
+
+    view_id = Column(Text, ForeignKey("views.id", ondelete="CASCADE"), primary_key=True)
+    workspace_id = Column(Text, nullable=False)
+    data_source_id = Column(Text, nullable=True)
+    # What was asked, and what the members on the view answer.
+    resolution_hash = Column(Text, nullable=True)
+    applied_resolution_hash = Column(Text, nullable=True)
+    data_version = Column(Text, nullable=True)
+    status = Column(Text, nullable=False, default="pending")
+    status_detail = Column(Text, nullable=True)                   # JSON
+    # The fence.
+    lease_owner = Column(Text, nullable=True)
+    lease_until = Column(Text, nullable=True)
+    epoch = Column(Integer, nullable=False, default=0)
+    attempts = Column(Integer, nullable=False, default=0)
+    revision = Column(Integer, nullable=False, default=0)
+    # The last answer.
+    member_count = Column(Integer, nullable=False, default=0)
+    key_count = Column(Integer, nullable=False, default=0)
+    counts = Column(Text, nullable=True)                          # JSON
+    truncated = Column(Text, nullable=True)                       # JSON
+    last_diff = Column(Text, nullable=True)                       # JSON
+    held = Column(Text, nullable=True)                            # JSON: a removal waiting to be confirmed
+    last_started_at = Column(Text, nullable=True)
+    last_finished_at = Column(Text, nullable=True)
+    last_applied_at = Column(Text, nullable=True)
+    last_read_at = Column(Text, nullable=True)
+    last_error = Column(Text, nullable=True)
+    created_at = Column(Text, nullable=False, default=_now)
+    updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        Index("idx_vms_source", "workspace_id", "data_source_id"),
+        CheckConstraint(
+            "status IN (" + ", ".join(f"'{s}'" for s in MEMBERSHIP_STATUSES) + ")",
+            name="ck_vms_status",
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<ViewMembershipState view_id={self.view_id!r} {self.status} r{self.revision}>"
+
+
+# ------------------------------------------------------------------ #
 # object_store_objects / object_store_chunks (import/export artifacts) #
 # ------------------------------------------------------------------ #
 

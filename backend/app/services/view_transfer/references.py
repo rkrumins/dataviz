@@ -11,7 +11,9 @@ Locations (``RL`` = ``layout.referenceLayout``):
 
 * URNs: ``RL.assignments`` keys; ``RL.layers[].anchorUrn``; exact ``urnPattern`` on layer and
   logical-node rules; ``content.rootUrns``; display-rule predicate URN lists (``urns``,
-  ``sourceUrns``, ``targetUrns``).
+  ``sourceUrns``, ``targetUrns``); a view made from a query's ``membership``: its sources'
+  starting URNs (``sources[].spec.seeds.urns``), ``exclude`` and ``overrides`` keys — and its
+  sources' query predicates, walked like display rules'.
 * Entity types: ``RL.layers[].entityTypes``; ``rules[].entityTypes``;
   ``content.visibleEntityTypes`` and ``rootEntityTypes``; ``filters.entityTypeFilters``;
   ``layout.lod.levels[].visibleEntityTypes``; ``layout.projection.targetGranularityType`` and
@@ -23,7 +25,9 @@ Locations (``RL`` = ``layout.referenceLayout``):
 
 Display-rule predicates are remapped but never pruned: every predicate URN or type list has a
 minimum length of one, so emptying one would turn a rule that matches nothing into a rule that
-fails validation.
+fails validation. A membership source's starting URNs are remapped but never pruned either: one
+the target does not hold is reported as missing when the view is worked out, never an empty
+source.
 """
 from __future__ import annotations
 
@@ -36,6 +40,7 @@ URN_KIND_ANCHOR = "anchor"
 URN_KIND_RULE = "rule"
 URN_KIND_ROOT = "root"
 URN_KIND_PREDICATE = "predicate"
+URN_KIND_MEMBERSHIP = "membership"
 
 _PREDICATE_URN_KEYS = ("urns", "sourceUrns", "source_urns", "targetUrns", "target_urns")
 # Name references: a URN in one is remapped like any predicate URN, and its
@@ -121,10 +126,21 @@ def _count_logical_nodes(nodes: Any) -> int:
     return sum(1 + _count_logical_nodes(n.get("children")) for n in _list(nodes) if isinstance(n, dict))
 
 
+def _membership_sources(definition: Any) -> List[dict]:
+    membership = _dict((_dict(definition) or {}).get("membership")) or {}
+    return [s for s in _list(membership.get("sources")) if isinstance(s, dict)]
+
+
+def _seeds(source: dict) -> dict:
+    return _dict((_dict(source.get("spec")) or {}).get("seeds")) or {}
+
+
 def _each_predicate_node(definition: Any) -> Iterable[dict]:
-    """Every dict node in every display rule's predicate tree."""
+    """Every dict node in every display rule's predicate tree, and every membership
+    source's query."""
     rl = reference_layout(definition)
     stack = [r.get("predicate") for r in _list(rl.get("displayRules") if rl else None) if isinstance(r, dict)]
+    stack.extend(_seeds(s).get("query") for s in _membership_sources(definition))
     while stack:
         node = stack.pop()
         if isinstance(node, dict):
@@ -190,6 +206,15 @@ def collect(definition: Any) -> References:
         t for t in _list(projection.get("containmentEdgeTypes")) if isinstance(t, str) and t)
 
     refs.entity_types.update(k for k in (_dict(d.get("entityOverrides")) or {}) if isinstance(k, str) and k)
+
+    membership = _dict(d.get("membership")) or {}
+    for source in _membership_sources(d):
+        for urn in _list(_seeds(source).get("urns")):
+            refs.add_urn(urn, URN_KIND_MEMBERSHIP)
+    for urn in _list(membership.get("exclude")):
+        refs.add_urn(urn, URN_KIND_MEMBERSHIP)
+    for urn in _dict(membership.get("overrides")) or {}:
+        refs.add_urn(urn, URN_KIND_MEMBERSHIP)
 
     for node in _each_predicate_node(d):
         for key in _PREDICATE_URN_KEYS:
@@ -333,6 +358,18 @@ def rewrite(definition: Any, rw: Rewrite) -> dict:
                 remapped.setdefault(rw.type_map[key], value)
         d["entityOverrides"] = remapped
 
+    membership = _dict(d.get("membership"))
+    if membership is not None:
+        for source in _membership_sources(d):
+            _map_predicate_list(_seeds(source), "urns", rw.urn_map)
+        _map_in_place(membership, "exclude", rw.urn_map, rw.drop_urns)
+        overrides_by_urn = _dict(membership.get("overrides"))
+        if overrides_by_urn is not None:
+            membership["overrides"] = {
+                rw.urn_map.get(urn, urn): value for urn, value in overrides_by_urn.items()
+                if urn not in rw.drop_urns
+            }
+
     for node in _each_predicate_node(d):
         for key in _PREDICATE_URN_KEYS:
             _map_predicate_list(node, key, rw.urn_map)
@@ -377,6 +414,6 @@ def urns_of_kind(refs: References, *kinds: str) -> List[str]:
 __all__: List[str] = [
     "References", "Rewrite", "collect", "rewrite", "definition_stats", "reference_layout",
     "urns_of_kind", "URN_KIND_ASSIGNMENT", "URN_KIND_ANCHOR", "URN_KIND_RULE", "URN_KIND_ROOT",
-    "URN_KIND_PREDICATE",
+    "URN_KIND_PREDICATE", "URN_KIND_MEMBERSHIP",
 ]
 

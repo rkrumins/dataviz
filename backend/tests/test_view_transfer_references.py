@@ -25,6 +25,18 @@ GOLDEN = {
     },
     "filters": {"entityTypeFilters": ["column"], "fieldFilters": []},
     "entityOverrides": {"dashboard": {"color": "#fff"}},
+    "membership": {
+        "v": 1, "mode": "live",
+        "sources": [
+            {"spec": {"seeds": {"urns": ["urn:seed"]}}},
+            {"spec": {"seeds": {"query": {"kind": "group", "op": "and", "children": [
+                {"kind": "entityType", "op": "in", "values": ["metric"]},
+                {"kind": "is", "refs": [{"urn": "urn:mq"}]},
+            ]}}}, "readIn": "v-source"},
+        ],
+        "exclude": ["urn:out"],
+        "overrides": {"urn:moved": {"layerId": "l1"}},
+    },
     "layout": {
         "type": "reference",
         "lod": {"enabled": True, "levels": [{"name": "far", "visibleEntityTypes": ["system"]}]},
@@ -74,7 +86,10 @@ def test_collect_finds_every_location():
     assert set(refs.urns) == {
         "urn:a", "urn:b", "urn:anchor", "urn:exact-rule", "urn:node-rule", "urn:root",
         "urn:pred-desc", "urn:pred-hops", "urn:pred-src", "urn:pred-dst", "urn:pred-is",
+        "urn:seed", "urn:mq", "urn:out", "urn:moved",
     }
+    assert refs.urns["urn:seed"] == refs.urns["urn:out"] == refs.urns["urn:moved"] == {"membership"}
+    assert refs.urns["urn:mq"] == {"predicate"}
     assert refs.urns["urn:anchor"] == {"anchor"}
     assert refs.urns["urn:exact-rule"] == {"rule"}
     assert refs.urns["urn:root"] == {"root"}
@@ -82,7 +97,7 @@ def test_collect_finds_every_location():
     assert refs.urn_patterns == {"urn:li:*"}
     assert refs.entity_types == {
         "domain", "dataset", "column", "dashboard", "system", "table", "schema", "platform",
-        "job", "pipeline", "task", "report", "region",
+        "job", "pipeline", "task", "report", "region", "metric",
     }
     assert refs.relationship_types == {"CONTAINS", "PRODUCES", "BELONGS_TO", "HAS_CHILD", "SKIP", "FEEDS"}
     assert urns_of_kind(refs, "assignment") == ["urn:a", "urn:b"]
@@ -171,7 +186,7 @@ def test_stats():
     stats = definition_stats(GOLDEN)
     assert stats == {
         "layers": 1, "assignments": 2, "anchors": 1, "rules": 4, "logicalNodes": 2,
-        "displayRules": 1, "entityTypes": 13, "relationshipTypes": 6,
+        "displayRules": 1, "entityTypes": 14, "relationshipTypes": 6,
     }
 
 
@@ -181,3 +196,11 @@ def test_malformed_definitions_are_tolerated():
         assert refs.urns == {} and refs.entity_types == set()
         assert isinstance(rewrite(bad, Rewrite(drop_urns={"u"})), dict)
         assert definition_stats(bad)["layers"] == 0
+
+
+def test_a_view_made_from_a_query_keeps_its_starting_points_and_drops_the_rest():
+    out = rewrite(GOLDEN, Rewrite(drop_urns={"urn:seed", "urn:out", "urn:moved"}))
+    membership = out["membership"]
+    assert membership["sources"][0]["spec"]["seeds"]["urns"] == ["urn:seed"], (
+        "a starting point the target lacks is reported missing when the view is worked out")
+    assert membership["exclude"] == [] and membership["overrides"] == {}

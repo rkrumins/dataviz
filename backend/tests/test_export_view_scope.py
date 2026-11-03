@@ -232,6 +232,38 @@ class TestPackageScope:
                                 "assignments": {"urn:moved-on": {"layerId": "source"}}}}})
         assert scope["assigned_urns"] == ["urn:sealed"] and scope["containment_types"] == ["CONTAINS"]
 
+    async def test_an_auto_updating_view_packages_the_members_it_holds_now(self, monkeypatch, db_session):
+        # Its versions hold its design, not its members (those follow its query), so its package's
+        # data is the members it holds now, beside what the version itself places.
+        live = {"membership": {"v": 1, "mode": "live"}}
+        always = {"urn:always": {"layerId": "source", "inheritsChildren": False}}
+        sealed = {**live, "layout": {"referenceLayout": {"layers": [{"id": "source"}], "assignments": always}}}
+        current = {**live, "layout": {"referenceLayout": {"layers": [{"id": "source"}], "assignments": {
+            **always,
+            "urn:member": {"layerId": "source", "inheritsChildren": False, "assignedBy": "query"},
+            "urn:whole": {"layerId": "source", "inheritsChildren": True, "assignedBy": "query"}}}}}
+        scope = await self._build(monkeypatch, db_session, sealed, current_config=current)
+        assert sorted(scope["assigned_urns"]) == ["urn:always", "urn:member", "urn:whole"]
+        assert scope["inherit_urns"] == ["urn:whole"]
+
+    async def test_an_auto_updating_view_with_only_members_is_not_refused(self, monkeypatch, db_session):
+        live = {"membership": {"v": 1, "mode": "live"}}
+        sealed = {**live, "layout": {"referenceLayout": {"layers": [{"id": "source"}], "assignments": {}}}}
+        current = {**live, "layout": {"referenceLayout": {"layers": [{"id": "source"}], "assignments": {
+            "urn:member": {"layerId": "source", "inheritsChildren": False, "assignedBy": "query"}}}}}
+        scope = await self._build(monkeypatch, db_session, sealed, current_config=current)
+        assert scope["assigned_urns"] == ["urn:member"]
+
+    async def test_a_snapshot_packages_the_members_its_version_holds(self, monkeypatch, db_session):
+        # A snapshot's members are its design: they are in its versions, and the package follows those.
+        snapshot = {"membership": {"v": 1, "mode": "snapshot"}}
+        sealed = {**snapshot, "layout": {"referenceLayout": {"layers": [{"id": "source"}], "assignments": {
+            "urn:sealed": {"layerId": "source", "inheritsChildren": False, "assignedBy": "query"}}}}}
+        current = {**snapshot, "layout": {"referenceLayout": {"layers": [{"id": "source"}], "assignments": {
+            "urn:moved-on": {"layerId": "source", "inheritsChildren": False, "assignedBy": "query"}}}}}
+        scope = await self._build(monkeypatch, db_session, sealed, current_config=current)
+        assert scope["assigned_urns"] == ["urn:sealed"]
+
     async def test_a_version_that_places_nothing_fails_closed(self, monkeypatch, db_session):
         from backend.app.services.view_transfer.package import NO_PLACEMENTS
 

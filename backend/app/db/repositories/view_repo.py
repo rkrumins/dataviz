@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Dict, List, NamedTuple, Optional, Sequence, Set
 
 from sqlalchemy import and_, case, false, literal_column, select, delete, func, or_, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from pydantic import BaseModel
@@ -799,6 +800,12 @@ def _keep_config_layout(new_config: Any, stored_config: dict) -> None:
         content["entityScope"] = stored_content["entityScope"]
     elif isinstance(content, dict):
         content.pop("entityScope", None)
+    # A view made from a query keeps its definition: it changes through PUT
+    # /views/{id}/membership only, never a settings save built from an older copy.
+    if "membership" in stored_config:
+        new_config["membership"] = stored_config["membership"]
+    else:
+        new_config.pop("membership", None)
 
 
 async def _gate_node_ordering(session: AsyncSession, reference_layout: dict) -> dict:
@@ -843,6 +850,30 @@ async def check_layer_rules(
         raise ValueError("; ".join(errors))
 
 
+async def _kept_up_to_date(session: AsyncSession, config: dict):
+    """The view's membership definition when it is kept in step with its data (and
+    the preview is on), else None. With the preview off, a view made from a query
+    is frozen as it is: its entries are taken as they are written."""
+    from backend.common.models.view_membership import read_definition
+
+    definition = read_definition(config)
+    if definition is None or definition.mode != "live":
+        return None
+    from backend.app.services.feature_flags import feature_flags
+
+    if not await feature_flags.is_enabled("viewMembershipEnabled", session, default=False):
+        return None
+    return definition
+
+
+def _remember_overrides(config: dict, overrides: Dict[str, dict]) -> None:
+    from backend.app.services.live_views.ownership import remember
+
+    membership = config.get("membership")
+    if isinstance(membership, dict) and overrides:
+        membership["overrides"] = remember(membership.get("overrides") or {}, overrides)
+
+
 async def update_view_layout(
     session: AsyncSession,
     view_id: str,
@@ -874,7 +905,26 @@ async def update_view_layout(
     if not isinstance(config, dict):
         config = {}
     previous_layout = _base_reference_layout(config)
-    await check_layer_rules(session, req.reference_layout, previous_layout)
+    reference_layout = req.reference_layout
+    entity_scope = req.entity_scope
+    kept = await _kept_up_to_date(session, config)
+    if kept is not None:
+        # The server's entries follow the data, whatever this copy of the layout
+        # says; where people put them is remembered (live_views.ownership).
+        from backend.app.db.repositories import view_membership_repo
+        from backend.app.services.live_views.ownership import layer_ids_of, reconcile_layout_write
+
+        reconciled = reconcile_layout_write(
+            previous_layout.get("assignments") or {}, reference_layout.get("assignments") or {},
+            layer_ids=layer_ids_of(reference_layout), fallback_layer_id=kept.layout.fallback_layer_id,
+            record_overrides=True, now=datetime.now(timezone.utc).isoformat(),
+        )
+        reference_layout = {**reference_layout, "assignments": reconciled.assignments}
+        entity_scope = "curated"
+        _remember_overrides(config, reconciled.overrides)
+        if reconciled.replace_needed:
+            await view_membership_repo.mark_pending(session, row, reason="layer_removed")
+    await check_layer_rules(session, reference_layout, previous_layout)
     layout = config.get("layout")
     if not isinstance(layout, dict):
         layout = {}
@@ -882,24 +932,24 @@ async def update_view_layout(
     # sanitize_node_ordering) before the wholesale write, then apply the
     # nodeSortingEnabled kill switch.
     layout["referenceLayout"] = await _gate_node_ordering(
-        session, sanitize_node_ordering(req.reference_layout),
+        session, sanitize_node_ordering(reference_layout),
     )
     config["layout"] = layout
 
-    if req.entity_scope is not None:
+    if entity_scope is not None:
         content = config.get("content")
         if not isinstance(content, dict):
             content = {}
-        content["entityScope"] = req.entity_scope
+        content["entityScope"] = entity_scope
         config["content"] = content
 
     _keep_display_rules(layout["referenceLayout"], previous_layout)
 
     layer_ids = {
-        layer.get("id") for layer in req.reference_layout.get("layers", [])
+        layer.get("id") for layer in reference_layout.get("layers", [])
         if isinstance(layer, dict)
     }
-    for urn, assignment in req.reference_layout.get("assignments", {}).items():
+    for urn, assignment in reference_layout.get("assignments", {}).items():
         layer_id = assignment.get("layerId") if isinstance(assignment, dict) else None
         if layer_id not in layer_ids:
             raise ValueError(
@@ -995,8 +1045,16 @@ async def ensure_overlay(
         fork_base_layout=json.dumps(base_layout),
         fork_base_entity_scope=base_scope,
     )
-    session.add(overlay)
-    await session.flush()
+    # Two first writes to one draft race on the primary key: the loser reads the
+    # winner's overlay rather than failing the save.
+    try:
+        async with session.begin_nested():
+            session.add(overlay)
+    except IntegrityError:
+        existing = await get_overlay(session, view_id, branch_id)
+        if existing is None:
+            raise
+        return existing
     return overlay
 
 
@@ -1034,24 +1092,45 @@ async def update_overlay_layout(
     if not row:
         return None
 
-    # Validate BEFORE any write so a bad request never mutates the overlay.
-    _validate_layer_refs(req.reference_layout)
+    requested = req.reference_layout
     existing = await get_overlay(session, view_id, branch_id)
+    config = _load_config(row)
+    kept = await _kept_up_to_date(session, config)
+    if kept is not None:
+        # The draft's copy of the server's entries is what the published view had
+        # when the draft opened; a save cannot add to or drop from it. Where people
+        # put them is remembered when the draft is published, not before.
+        from backend.app.services.live_views.ownership import layer_ids_of, reconcile_layout_write
+
+        stored = (json.loads(existing.reference_layout or "{}") if existing is not None
+                  else _base_reference_layout(config))
+        reconciled = reconcile_layout_write(
+            stored.get("assignments") or {}, requested.get("assignments") or {},
+            layer_ids=layer_ids_of(requested), fallback_layer_id=kept.layout.fallback_layer_id,
+            record_overrides=False,
+        )
+        requested = {**requested, "assignments": reconciled.assignments}
+
+    # Validate BEFORE any write so a bad request never mutates the overlay.
+    _validate_layer_refs(requested)
     await check_layer_rules(
-        session, req.reference_layout,
+        session, requested,
         json.loads(existing.reference_layout or "{}") if existing is not None
-        else _base_reference_layout(_load_config(row)),
+        else _base_reference_layout(config),
     )
 
     overlay = await ensure_overlay(session, view_id, branch_id)
+    # Read-modify-write under the overlay's own lock: two saves to one draft at
+    # once each keep the display rules the other just wrote.
+    await session.refresh(overlay, with_for_update=True)
 
     reference_layout = dict(await _gate_node_ordering(
-        session, sanitize_node_ordering(req.reference_layout),
+        session, sanitize_node_ordering(requested),
     ))
     _keep_display_rules(reference_layout, json.loads(overlay.reference_layout or "{}"))
     overlay.reference_layout = json.dumps(reference_layout)
     if req.entity_scope is not None:
-        overlay.entity_scope = req.entity_scope
+        overlay.entity_scope = "curated" if kept is not None else req.entity_scope
     await session.flush()  # onupdate stamps overlay.updated_at
 
     return await get_view_enriched(session, view_id, branch_id=branch_id)
@@ -1171,6 +1250,24 @@ async def promote_overlay(
         derive_entity_scope(config),
         overlay.entity_scope,
     )
+    kept = await _kept_up_to_date(session, config)
+    if kept is not None:
+        # The data moved on while the draft was open: the published view's server
+        # entries are the truth, and the draft's moves of them are kept.
+        from backend.app.db.repositories import view_membership_repo
+        from backend.app.services.live_views.ownership import layer_ids_of, reconcile_promote
+
+        reconciled = reconcile_promote(
+            merged_layout.get("assignments") or {},
+            fork=fork_base.get("assignments") or {}, published=published.get("assignments") or {},
+            draft=draft.get("assignments") or {}, layer_ids=layer_ids_of(merged_layout),
+            fallback_layer_id=kept.layout.fallback_layer_id, now=datetime.now(timezone.utc).isoformat(),
+        )
+        merged_layout["assignments"] = reconciled.assignments
+        merged_scope = "curated"
+        _remember_overrides(config, reconciled.overrides)
+        if reconciled.replace_needed:
+            await view_membership_repo.mark_pending(session, row, reason="layer_removed")
 
     layout = config.get("layout")
     if not isinstance(layout, dict):
@@ -1238,7 +1335,19 @@ async def _promote_staged_import(
         merged = merge_definitions(base, published.definition, proposed)
         return merged, json.dumps(config_from_definition(merged.definition, icon=label.get("icon")))
 
-    merged, row.config = await asyncio.to_thread(merge)
+    previous_config = _load_config(row)
+    merged, merged_config = await asyncio.to_thread(merge)
+    # Members are data, not design: a file holds none, so keep the view's until
+    # they are worked out again.
+    from backend.app.services.live_views.ownership import carry_into_config
+
+    config_dict = json.loads(merged_config)
+    if carry_into_config(config_dict, previous_config):
+        from backend.app.db.repositories import view_membership_repo
+
+        await view_membership_repo.mark_pending(session, row, reason="design_replaced")
+        merged_config = json.dumps(config_dict)
+    row.config = merged_config
     row.name = label.get("name") or row.name
     row.description = label.get("description") or None
     row.tags = json.dumps(label["tags"]) if label.get("tags") else None

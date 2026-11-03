@@ -896,6 +896,81 @@ trace**. With a key, **Data: read** is enough.
 | `upstream`, `downstream` | `0`–`25` or `"all"`: lineage steps, walked as `trace/closure` walks them |
 | `partnerChildren` | `0`, `1` or `"all"`: levels inside the sources and consumers found |
 
+### Save what a set of entities reaches as a view of its own
+
+**Needs:** what [Find everything a set of entities reaches](#find-everything-a-set-of-entities-reaches)
+needs, plus **Views: create** in the workspace. Changing a saved view afterwards needs edit access
+to it. With a key, the key must cover the whole workspace to create one.
+
+`POST /api/v1/views/from-members` keeps the answer to a members question as a whole view on the
+same data source. The view gets its own layers, sharing and versions. By default it keeps itself
+up to date (`"mode": "live"`): what newly matches arrives, and what stops matching leaves.
+`"mode": "snapshot"` keeps the members it has now.
+
+1. Preview what it would hold. Nothing is saved:
+
+   ```bash
+   api POST "/api/v1/$WS/graph/members/plan?viewId=$VIEW&dataSourceId=$DS" -d '{
+     "sources": [{"spec": {"seeds": {"urns": ["urn:li:dataset:orders"]}, "expand": {"children": 1}}}],
+     "layout": {"kind": "source", "sourceViewId": "'"$VIEW"'"},
+     "keep": "withResults"}' | jq '{keys, members, containers, limit, overCap, layers}'
+   ```
+
+   `layout.kind` sets the layers it starts with:
+   - `source`: the layers of the view in `sourceViewId`, placed as that view places them;
+   - `auto`: one layer per top-level type;
+   - `stages`: by lineage distance;
+   - `template` or `custom`: the `layers` you send.
+
+   A view holds at most `limit` entries (5,000): its members, the containers drawn around them
+   (`"nest": false` leaves those out), and anything always included. A starting point whose
+   whole inside is in scope (`"children": "all"`) is one entry, however much is inside it.
+
+2. Save it. Send an `Idempotency-Key`, so that a retry answers with the view the first attempt
+   made:
+
+   ```bash
+   api POST /api/v1/views/from-members -H "Idempotency-Key: $(uuidgen)" -d '{
+     "name": "Orders and its tables", "workspaceId": "'"$WS"'", "dataSourceId": "'"$DS"'",
+     "visibility": "workspace", "mode": "live",
+     "sources": [{"spec": {"seeds": {"urns": ["urn:li:dataset:orders"]}, "expand": {"children": 1}}}],
+     "layout": {"kind": "source", "sourceViewId": "'"$VIEW"'"}}' | jq '{id: .view.id, membership: .membership.status}'
+   ```
+
+   A search as the starting point names the view it is searched in:
+   `{"spec": {"seeds": {"query": <predicate>}}, "readIn": "<view id>"}`. It searches in another
+   view, never in itself.
+
+   | Answer | Meaning |
+   |---|---|
+   | `201` | Saved: `{view, membership}`. A replay of the same key answers `200` |
+   | `422`, `reason: over_cap` | More entries than a view holds: `keys`, `members`, `containers` and `limit` say by how much. Nothing is saved |
+   | `503` + `Retry-After` | The graph couldn't answer in full in time. Nothing is saved |
+   | `404` | A view it names doesn't exist, or you can't read it |
+
+3. Keep it. Each route works on the view in the path:
+
+   | Route | Does |
+   |---|---|
+   | `GET /api/v1/views/{id}/membership` | The definition and how keeping it is going: `status`, `counts`, `lastDiff`, `excluded`, `alwaysIncluded`. Sends an `ETag`; a matching `If-None-Match` gets `304` |
+   | `PUT /api/v1/views/{id}/membership` | Change the queries, or freeze and resume (`mode`), sent with `ifDefinitionHash`. A stale hash gets `409` with the current definition |
+   | `POST /api/v1/views/{id}/membership/members` | `exclude`, `unexclude`, `include: [{urn, layerId}]`, `uninclude` |
+   | `POST /api/v1/views/{id}/membership/refresh` | Work the members out again now: at most once every 30 seconds per view. With `?trigger=open`, bring it up to date the way opening it does: anyone who can read the view may, and nothing is read from the graph unless its data or query changed |
+
+   A refresh answers an `outcome`:
+   - `applied`: with its `diff`;
+   - `unchanged`;
+   - `current` (`trigger=open` only): nothing to do — `detail.reason` is `up_to_date`, `recent`,
+     `held` or `snapshot`;
+   - `held`: it would remove at least half the view's members, and at least 50. Send
+     `?confirmRemovals=true` to apply it;
+   - `over_cap`;
+   - `deferred`: the graph answered short, and the view kept its members;
+   - `busy`: another update is working on it.
+
+   An update stamps the view's data freshness, not its "last edited". It writes no version: for
+   an auto-updating view, the members are data, not design.
+
 ### Integrate single sign-on over a back channel
 
 **For:** the team that owns your organisation's sign-in service.

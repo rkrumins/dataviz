@@ -258,6 +258,68 @@ next version.
 > administrator turns them on in **Administration → Features → View versions,
 > import and export**.
 
+## Views made from a query
+
+A view saved from a narrowing ([Keep a narrowing as a view](/guide/exploring-graph#keep-a-narrowing-as-a-view))
+is a whole view: its own layers, sharing and versions. Its members come from
+the query it was made from. Its header says so:
+- **Auto-updating · 1,234** when it keeps itself up to date;
+- **Snapshot · 3 Nov** when it keeps the members it had.
+
+**How it stays up to date.** When anyone opens an auto-updating view after its data
+changed, it brings itself up to date first: the chip says **Updating…**, then the
+canvas shows the new members, with a note such as *Brought up to date · 3 new, 1 left*.
+Opening it when nothing changed costs nothing, and when many people open it at once,
+one of them brings it up to date for everyone. A view nobody opens catches up the next
+time it is opened.
+
+Choose the chip to see:
+
+- what the view is made from, and the view its search runs in (**Searches
+  in**). Readers who can't open that view see that it exists, not its name;
+- how many entities and containers it holds, against the 5,000 it can;
+- when it last updated, and what that changed: **3 new, 1 left**;
+- how keeping it up to date is going, and what to do about it.
+
+If you can edit the view, the chip also offers:
+
+| To… | Do this |
+| --- | --- |
+| Catch up with the data now, without reopening it | **Refresh now**, at most every 30 seconds |
+| Stop it changing | **Freeze as it is** — it becomes a snapshot. **Resume updates** brings it back in step with the data |
+| Keep an entity out, whatever the query finds | Right-click it on the canvas → **Keep out of this view**. Bring it back from **Kept out** in the chip |
+| Keep an entity, even if the query stops finding it | Right-click it → **Always include**. Stop from **Always included** in the chip |
+
+Each of these changes the view straight away, and the message offers **Undo**.
+Moves you make to its entities, and the order you give them, stay through every
+update.
+
+**When an update would remove a lot.** An update that would take away at least
+half of the view (and at least 50 entities) waits for you: *An update would
+remove 812 of 1,020*. Check that the query is still what you want, then choose
+**Apply** or **Keep as is** (which freezes the view).
+
+What the chip can say:
+
+| It says | What it means |
+| --- | --- |
+| **Up to date** | The members follow the data |
+| **Up to date, within limits** | The last update reached a limit; what it reached is shown |
+| **Waiting to update** | A change waits to be worked out, or the graph didn't answer in full last time. **Refresh now** |
+| **Too many to keep** | The query now reaches more than 5,000 entries. The view keeps its last members until the query is narrowed |
+| **Couldn't update** | The graph couldn't be read. The view keeps its last members |
+| **Can't search** | The view its search runs in has gone. The view keeps its last members |
+| **Snapshot** | Its members stay as they are |
+
+An update changes the view's data, not its design: it doesn't count as an edit,
+and doesn't add a version. Restoring a version of the view, or importing it
+over itself, keeps the members it has until it next updates.
+
+> **If you don't see it:** views made from a query are part of the
+> **Narrow: chosen entities and what they reach** preview, which your
+> administrator turns on in **Administration → Features**. With the preview
+> off, these views stay as they are.
+
 ## See who uses a View
 
 Under the View's name, a line says how many **people** opened it and how many
