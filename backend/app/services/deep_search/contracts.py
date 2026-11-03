@@ -108,13 +108,20 @@ class SearchRunContext:
       is scanned at most once a window, not on every write;
     * ``scan`` — False answers only from what is already there (a complete
       or recent first page, a held later page, a scan another request is
-      running) and raises ``NothingReusable`` otherwise.
+      running) and raises ``NothingReusable`` otherwise;
+    * ``slot`` — taken by the request that moves a scan on, once it holds the
+      scan's lease and for as long as it runs it; entering it says whether one
+      was free. A request waiting on another's scan takes none, and one that
+      finds none free gives the lease straight back and answers with the scan
+      as it stands — so readers of a scan in flight never hold the slots that
+      scans need.
     """
     data_version: str = ""
     scope_hash: str = ""
     admit: Optional[Callable[[], AsyncContextManager]] = None
     reuse_s: float = 0.0
     scan: bool = True
+    slot: Optional[Callable[[], AsyncContextManager[bool]]] = None
 
 
 @runtime_checkable

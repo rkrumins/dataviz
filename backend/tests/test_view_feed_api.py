@@ -63,6 +63,10 @@ class FeedProvider:
         self.there = None
         self.scanned = SearchResultPage(hits=_hits(3), total_count=3, candidate_count=3,
                                         status="complete", session_id="s1", elapsed_ms=1)
+        # A scan in flight, as it stands: what answers when no slot is free.
+        self.standing = SearchResultPage(hits=_hits(1), total_count=1, candidate_count=1,
+                                         status="running", session_id="s1", elapsed_ms=1)
+        self.waiting = None
 
     async def deep_search_session(self, query, *, context):
         self.calls.append((query, context))
@@ -70,7 +74,14 @@ class FeedProvider:
             if self.there is None:
                 raise NothingReusable("q")
             return self.there
-        return self.scanned
+        if self.waiting:
+            # Another request holds the scan's lease: this one waits on its commit.
+            return self.waiting
+        # As the engine does: the request moving the scan on takes the slot.
+        async with context.slot() as moving:
+            if not moving:
+                return self.standing
+            return self.scanned
 
 
 class FeedEngine:
@@ -207,6 +218,30 @@ class TestAnswers:
         await post(ws, sub.id, {"layerId": "t", "sessionId": "s1"}, engine)
         assert [c.scan for _q, c in engine.provider.calls] == [True]
         assert engine.provider.calls[0][0].options.session_id == "s1"
+        assert charged == ["view-feed"], "moving a scan on takes a slot and a token"
+
+    async def test_waiting_on_another_requests_scan_holds_no_slot(self, on, views, post, charged):
+        # Hundreds reading a scan in flight: only the one holding its lease is in a slot.
+        ws, _base, sub, _plain = await views()
+        engine = FeedEngine()
+        engine.provider.waiting = engine.provider.standing
+        page = (await post(ws, sub.id, {"layerId": "t", "sessionId": "s1"}, engine)).json()
+        assert page["status"] == "running" and charged == []
+
+    async def test_a_scan_in_flight_with_no_slot_free_answers_as_it_stands(self, on, views, post,
+                                                                          charged, monkeypatch):
+        ws, _base, sub, _plain = await views()
+
+        class Full:
+            def locked(self):
+                return True
+
+        monkeypatch.setattr(feed, "_lane", lambda: Full())
+        engine = FeedEngine()
+        resp = await post(ws, sub.id, {"layerId": "t", "sessionId": "s1"}, engine)
+        assert resp.status_code == 200, "never a 429 for a scan already under way"
+        assert resp.json()["status"] == "running" and len(resp.json()["nodes"]) == 1
+        assert charged == []
 
     async def test_refresh_asks_for_this_data(self, on, views, post, charged):
         ws, _base, sub, _plain = await views()

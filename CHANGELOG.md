@@ -42,10 +42,12 @@ search's matches inside another view* in the API Guide.
   *as of* when it was read. Each feed's window is spread so they don't all close together. Draft
   saves change the data, so without this every busy feed would be rescanned on every save; now
   each one is scanned at most once a window.
-- **Feed scans have their own lane.** Only a scan takes one of this server's feed slots
-  (`DEEP_SEARCH_VIEW_FEED_LANE`, default 2) and a token of the workspace's `view-feed` fair share.
-  An answer from what is already there takes neither. With every slot busy, a recent answer is
-  served; with none to give, a 429 with `Retry-After`.
+- **Feed scans have their own lane.** Only the request moving a scan on takes one of this server's
+  feed slots (`DEEP_SEARCH_VIEW_FEED_LANE`, default 2) and a token of the workspace's `view-feed`
+  fair share, and only while it holds the scan. An answer from what is already there, or a wait on
+  a scan another request is moving, takes neither: hundreds reading a scan in flight hold no slots.
+  With every slot busy, a first page serves a recent answer (with none to give, a 429 with
+  `Retry-After`), and a scan in flight answers as it stands.
 - **Feeds are shared.** A page is cached under where its matches are looked for and the layer's
   types, not under the view. Every view and viewer asking the same question share it.
 - **A search inside a subset view stays inside it.** Advanced Search, rule counts, exports and
