@@ -96,10 +96,10 @@ def _read_cursor(raw: Optional[str]) -> Dict[str, Any]:
         return {"c": None, "d": 0}
     try:
         state = json.loads(base64.urlsafe_b64decode(raw.encode() + b"=" * (-len(raw) % 4)))
-        if isinstance(state, dict) and isinstance(state.get("c"), str) and isinstance(state.get("d"), int):
-            return state
     except (ValueError, TypeError):
-        pass
+        state = None  # not base64, or not JSON: malformed, answered below
+    if isinstance(state, dict) and isinstance(state.get("c"), str) and isinstance(state.get("d"), int):
+        return state
     raise HTTPException(status_code=400, detail="cursor is malformed — start from the first page")
 
 

@@ -1167,14 +1167,16 @@ class TestScanSlot:
         await engine_mod._advance(session, False, store, work, time.monotonic() + 2,
                                   get_deep_search_settings(), slot=slot)
         assert taken == ["in", "out"] and work.ran == ["A"]
-        assert await store.lease("s1", 1_000), "the lease is given back"
+        leased = await store.lease("s1", 1_000)
+        assert leased, "the lease is given back"
 
     async def test_a_request_waiting_on_another_takes_no_slot(self, fresh_memory_store):
         from backend.app.services.deep_search import get_deep_search_settings
         store, work = fresh_memory_store, self._Work()
         session = self._session()
         await store.save(session, None, 60)
-        assert await store.lease("s1", 10_000), "another request is moving it on"
+        leased = await store.lease("s1", 10_000)
+        assert leased, "another request is moving it on"
         slot, taken = self._slot()
         await engine_mod._advance(session, False, store, work, time.monotonic() + 0.3,
                                   get_deep_search_settings(), slot=slot)
@@ -1189,7 +1191,8 @@ class TestScanSlot:
                                           get_deep_search_settings(), slot=slot)
         assert work.ran == [] and after.pending, "nothing run: the scan stands"
         assert await store.load("s1") is not None, "a new scan is kept, for whoever continues it"
-        assert await store.lease("s1", 1_000), "and its lease given straight back"
+        leased = await store.lease("s1", 1_000)
+        assert leased, "and its lease given straight back"
 
 
 class _TreeProvider(_Provider):
