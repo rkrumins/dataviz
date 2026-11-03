@@ -69,3 +69,17 @@ describe('viewService.updateView', () => {
         expect(stored().content.entityScope).toBe('curated')
     })
 })
+
+describe('a settings save keeps what it does not own', () => {
+    it('sends the view’s membership back as it was', async () => {
+        const membership = { v: 1, mode: 'live', sources: [{ spec: { seeds: { urns: ['urn:a'] } } }] }
+        await viewService.updateView('v1', { name: 'Renamed', layoutType: 'reference' }, {
+            layout: { type: 'reference', referenceLayout: BASE_LAYOUT },
+            content: { entityScope: 'curated' },
+            membership,
+        })
+        const sent = updateViewMock.mock.calls[0][1] as { config: Record<string, unknown> }
+        expect(sent.config.membership).toEqual(membership)
+        expect((sent.config.layout as { referenceLayout: unknown }).referenceLayout).toEqual(BASE_LAYOUT)
+    })
+})

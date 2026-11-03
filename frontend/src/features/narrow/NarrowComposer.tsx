@@ -55,6 +55,9 @@ export interface NarrowComposerProps {
   layerOf: (urn: string) => string | undefined
   onApply: (draft: NarrowDraft, result: MembershipResult) => void
   onClose: () => void
+  /** Keep what is chosen as a view of its own, without narrowing first; absent
+   *  when it can't be (the preview is off, or views can't be created here). */
+  onSaveAsView?: (draft: NarrowDraft) => void
 }
 
 const PRESET_ICONS: Record<PresetId, keyof typeof LucideIcons> = {
@@ -69,7 +72,7 @@ const PRESET_ICONS: Record<PresetId, keyof typeof LucideIcons> = {
 const n = (count: number, one: string, many = `${one}s`) =>
   `${count.toLocaleString()} ${count === 1 ? one : many}`
 
-export function NarrowComposer({ viewId, draft, lineageEnabled, layers, layerOf, onApply, onClose }: NarrowComposerProps) {
+export function NarrowComposer({ viewId, draft, lineageEnabled, layers, layerOf, onApply, onClose, onSaveAsView }: NarrowComposerProps) {
   const [spec, setSpec] = useState<MembershipSpec>(draft.spec)
   // Sources and consumers with the Lineage trace off would only be refused: not asked.
   const lineageBlocked = !lineageEnabled && (spec.expand.upstream !== 0 || spec.expand.downstream !== 0)
@@ -283,6 +286,18 @@ export function NarrowComposer({ viewId, draft, lineageEnabled, layers, layerOf,
               <button type="button" onClick={onClose} className="h-9 px-4 rounded-xl text-[13px] font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 transition-colors">
                 Cancel
               </button>
+              {onSaveAsView && (
+                <button
+                  type="button"
+                  onClick={() => { if (ready) onSaveAsView({ ...draft, spec, seedsLabel: label }) }}
+                  disabled={!ready}
+                  title="Keep this as a view of its own, on the same data"
+                  className="h-9 px-3.5 rounded-xl inline-flex items-center gap-1.5 text-[13px] font-semibold text-ink-secondary border border-glass-border hover:text-ink hover:border-accent-lineage/40 transition-colors disabled:opacity-40 disabled:pointer-events-none"
+                >
+                  <LucideIcons.BookmarkPlus className="w-4 h-4 text-accent-lineage" />
+                  Save as view…
+                </button>
+              )}
               <button
                 type="button"
                 onClick={apply}

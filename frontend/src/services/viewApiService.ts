@@ -898,6 +898,7 @@ export function viewToViewConfig(view: View): ViewConfiguration {
         },
         entityOverrides: cfg.entityOverrides ?? {},
         grouping: cfg.grouping,
+        ...(cfg.membership ? { membership: cfg.membership } : {}),
         isDefault: false,
         // The full tier — carried so the canvas can seed the Share dialog
         // without a re-fetch. `isPublic` survives as a deprecated

@@ -190,6 +190,10 @@ export interface ViewConfiguration {
   // Grouping configuration
   grouping?: ViewGroupingConfig;
 
+  /** What a view made from a query is made of (`config.membership`); absent
+   *  on every other view. */
+  membership?: import('./membership').MembershipDefinition;
+
   // Permissions
   isDefault: boolean;
   /** The full visibility tier ('private' | 'workspace' | 'enterprise').
@@ -277,7 +281,9 @@ export interface LayerAssignmentEntry {
   logicalNodeId?: string
   /** default true — descendants resolve via containment at read time */
   inheritsChildren: boolean
-  assignedBy?: 'user' | 'rule' | 'import'
+  /** `query`: the server's own entry in a view made from a query — it follows
+   *  the data (see `types/membership.ts`); where it sits is the person's. */
+  assignedBy?: 'user' | 'rule' | 'import' | 'query'
   assignedAt?: string
   /**
    * Fractional (LexoRank-style) position key for layers in 'custom' sort

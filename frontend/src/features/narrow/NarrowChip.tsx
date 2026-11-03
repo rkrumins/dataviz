@@ -25,6 +25,9 @@ export interface NarrowChipProps {
   link?: () => string
   /** Ask again — offered when the answer was cut short. */
   onRetry?: () => void
+  /** Keep the narrowing as a view of its own; absent when it can't be (the
+   *  preview is off, or the reader may not create views here). */
+  onSaveAsView?: () => void
 }
 
 const quiet = cn(
@@ -45,7 +48,7 @@ function breakdown(applied: AppliedNarrow): string {
   return parts.filter(Boolean).join(' · ')
 }
 
-export function NarrowChip({ applied, onEdit, onClear, link, onRetry }: NarrowChipProps) {
+export function NarrowChip({ applied, onEdit, onClear, link, onRetry, onSaveAsView }: NarrowChipProps) {
   const [copied, setCopied] = useState(false)
   const total = applied.result.counts.total
   const notes = truncationNotes(applied.result)
@@ -107,6 +110,14 @@ export function NarrowChip({ applied, onEdit, onClear, link, onRetry }: NarrowCh
             <LucideIcons.SlidersHorizontal className="w-3 h-3" aria-hidden="true" />
             Edit
           </button>
+          {onSaveAsView && (
+            <HoverTip className="flex" label="Save as a view" detail="Keep this as a view of its own on the same data, to share — kept up to date, or as it is now.">
+              <button type="button" onClick={onSaveAsView} className={quiet}>
+                <LucideIcons.BookmarkPlus className="w-3 h-3 text-accent-lineage" aria-hidden="true" />
+                Save as view
+              </button>
+            </HoverTip>
+          )}
           <HoverTip
             className="flex"
             label={link ? 'Copy a link to this narrowing' : 'Too many starting points for a link'}

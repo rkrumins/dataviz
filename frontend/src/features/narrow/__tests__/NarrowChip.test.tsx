@@ -70,3 +70,14 @@ describe('NarrowChip', () => {
     expect(onRetry).toHaveBeenCalledOnce()
   })
 })
+
+describe('NarrowChip — Save as view', () => {
+  it('offers to keep the narrowing as a view only when it can be', () => {
+    const onSaveAsView = vi.fn()
+    const { rerender } = render(<NarrowChip applied={applied()} onEdit={vi.fn()} onClear={vi.fn()} />)
+    expect(screen.queryByRole('button', { name: /Save as view/ })).toBeNull()
+    rerender(<NarrowChip applied={applied()} onEdit={vi.fn()} onClear={vi.fn()} onSaveAsView={onSaveAsView} />)
+    fireEvent.click(screen.getByRole('button', { name: /Save as view/ }))
+    expect(onSaveAsView).toHaveBeenCalledOnce()
+  })
+})

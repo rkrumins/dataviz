@@ -87,6 +87,10 @@ starting points:
 - **Import a view** — bring in a View exported from another environment. See
   [Moving views between environments](/guide/import-export#moving-views-between-environments).
 
+To make a view from a narrowing of another view (some entities, and what they
+reach), narrow the canvas and choose **Save as view**. See
+[Keep a narrowing as a view](/guide/exploring-graph#keep-a-narrowing-as-a-view).
+
 To start from a [layout template](#layout-templates) instead, choose **Use template** on its card
 in **Templates**, in its details, or in the Dashboard's **Layout templates**. The wizard opens with
 the template's layers already applied on the **Layout** step.

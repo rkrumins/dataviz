@@ -138,7 +138,7 @@ export function seedsLabel(urns: readonly string[], nameOf: (urn: string) => str
 }
 
 /** Each limit a result reached, in words — said, never silent. */
-export function truncationNotes(result: MembershipResult): string[] {
+export function truncationNotes(result: Pick<MembershipResult, 'truncated'>): string[] {
   return result.truncated.map((t) => {
     switch (t.reason) {
       case 'seed_cap': return `The search found more than ${t.limit.toLocaleString()} matches — the first ${t.limit.toLocaleString()} are the starting points.`
