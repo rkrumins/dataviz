@@ -111,13 +111,16 @@ async def held_client(test_client: AsyncClient, db_session: AsyncSession):
     # under test.
     for dep in (get_current_user, get_optional_user, get_permission_claims):
         app.dependency_overrides.pop(dep, None)
-    # The view transfer and version routes answer to these before anything
-    # else; switched on so the request reaches the sign-in check.
+    # The view transfer and version routes, views made from a query and subset
+    # views answer to these before anything else; switched on so the request
+    # reaches the sign-in check.
     feature_flags._cache = {
         **(feature_flags._cache or {}),
         "viewPortabilityEnabled": True,
         "viewExportEnabled": True,
         "viewImportEnabled": True,
+        "viewMembershipEnabled": True,
+        "searchViewsEnabled": True,
     }
     feature_flags._cache_ts = time.monotonic()
 
