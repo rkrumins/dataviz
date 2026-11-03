@@ -28,7 +28,7 @@ import json
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional, Set
+from typing import List, Literal, Optional, Set
 
 from fastapi import APIRouter, Body, Depends, Header, HTTPException, Path, Query, Request, Response
 from pydantic import BaseModel, ConfigDict
@@ -519,12 +519,10 @@ async def update_view_membership(
         updated.resolution_hash() != definition.resolution_hash() or definition.mode != "live"
         or updated.layout != definition.layout or bool(set(definition.exclude) - set(updated.exclude)))
     if updated.mode != "live":
-        state.status, state.status_detail, state.due_at, state.held = "frozen", None, None, None
+        state.status, state.status_detail, state.held = "frozen", None, None
     elif work_out:
         state.status = "pending"
         state.status_detail = dumps({"reason": "definition_changed"})
-        state.dirty_since = state.dirty_since or now_iso()
-        state.due_at = now_iso()
     await view_activity_repo.record_view_activity(
         session, view_id=row.id, workspace_id=row.workspace_id, action="updated", actor=actor,
         summary=_definition_summary(definition, updated), changes={"membership": sorted(changes)},
@@ -621,6 +619,9 @@ async def refresh_view_membership(
     response: Response,
     view_id: str = Path(...),
     confirm_removals: bool = Query(False, alias="confirmRemovals"),
+    trigger: Literal["manual", "open"] = Query(
+        "manual", description="``open``: the view was opened. Brings it up to date if its data "
+                              "changed since it last was; anyone who can read the view may."),
     user=Depends(get_optional_user),
     claims: PermissionClaims = Depends(get_permission_claims),
     session: AsyncSession = Depends(get_db_session),
@@ -633,14 +634,30 @@ async def refresh_view_membership(
     50), so it waits; send ``confirmRemovals=true`` to apply it — ``over_cap``,
     ``deferred`` (the graph answered short; the view kept its members), or ``busy``
     (another update is working on it: 202). At most once every 30 seconds per view;
-    a 429 says when."""
+    a 429 says when.
+
+    ``trigger=open`` — the view was opened. It applies the view's own query and
+    changes nothing about the view, so anyone who can read it may ask: nothing is
+    read from the graph unless the data or the query changed since it was last
+    worked out, a held removal stays held, and within 30 seconds of the last update
+    it answers ``current`` rather than a 429."""
     actor = _user_id(user)
-    row, ctx = await _view(session, view_id, user, claims, edit=True)
+    opened = trigger == "open"
+    row, ctx = await _view(session, view_id, user, claims, edit=not opened)
     definition = _definition_of(row)
     state = await view_membership_repo.get(session, view_id)
+    if opened:
+        confirm_removals = False
+        reason = ("snapshot" if definition.mode != "live"
+                  else "recent" if state is not None and not _older_than(state.last_started_at,
+                                                                         REFRESH_MIN_INTERVAL_SECS)
+                  else None)
+        if reason:
+            return RefreshResult(outcome="current", detail={"reason": reason},
+                                 membership=await membership_status(session, row, definition, ctx))
     # A change waiting to be worked out, or a held update being confirmed, goes straight
     # ahead; one already running answers busy below.
-    if state is not None and not _older_than(state.last_started_at, REFRESH_MIN_INTERVAL_SECS) and not (
+    elif state is not None and not _older_than(state.last_started_at, REFRESH_MIN_INTERVAL_SECS) and not (
             state.status in ("pending", "updating") or (state.status == "held" and confirm_removals)):
         wait = REFRESH_MIN_INTERVAL_SECS
         try:
@@ -658,6 +675,7 @@ async def refresh_view_membership(
         outcome = await pipeline.refresh(
             view_id, session=session, engine_scope=engine_scope, owner=f"web:{uuid.uuid4().hex[:12]}",
             budget_s=_budget_s(), confirm_removals=confirm_removals, actor=actor,
+            only_if_changed=opened,
         )
     except PipelineError as exc:
         raise _refused(exc) from exc

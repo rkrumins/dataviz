@@ -61,9 +61,21 @@ export async function memberOps(viewId: string, ops: MemberOps): Promise<ViewWit
 }
 
 /** Work the members out again now. A large removal waits for `confirmRemovals`. */
-export async function refreshMembership(viewId: string, confirmRemovals = false): Promise<RefreshResult> {
-  const qs = confirmRemovals ? '?confirmRemovals=true' : ''
+/** Work the view's members out again. `trigger: 'open'` — the view was opened: anyone who can
+ *  read it may ask, and nothing is read unless its data or query changed (`current` otherwise). */
+export async function refreshMembership(
+  viewId: string, confirmRemovals = false, trigger: 'manual' | 'open' = 'manual',
+): Promise<RefreshResult> {
+  const params = new URLSearchParams()
+  if (confirmRemovals) params.set('confirmRemovals', 'true')
+  if (trigger === 'open') params.set('trigger', 'open')
+  const qs = params.toString() ? `?${params}` : ''
   const out = await authFetch<RefreshResult>(`${base(viewId)}/refresh${qs}`, { method: 'POST' })
-  invalidate(viewId)
+  if (trigger === 'open' && out.outcome !== 'applied') {
+    // Nothing moved: the status it answers with is the chip's, without asking again.
+    queryClient.setQueryData([MEMBERSHIP_QUERY_KEY, viewId], out.membership)
+  } else {
+    invalidate(viewId)
+  }
   return out
 }

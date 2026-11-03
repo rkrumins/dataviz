@@ -955,11 +955,13 @@ up to date (`"mode": "live"`): what newly matches arrives, and what stops matchi
    | `GET /api/v1/views/{id}/membership` | The definition and how keeping it is going: `status`, `counts`, `lastDiff`, `excluded`, `alwaysIncluded`. Sends an `ETag`; a matching `If-None-Match` gets `304` |
    | `PUT /api/v1/views/{id}/membership` | Change the queries, or freeze and resume (`mode`), sent with `ifDefinitionHash`. A stale hash gets `409` with the current definition |
    | `POST /api/v1/views/{id}/membership/members` | `exclude`, `unexclude`, `include: [{urn, layerId}]`, `uninclude` |
-   | `POST /api/v1/views/{id}/membership/refresh` | Work the members out again now: at most once every 30 seconds per view |
+   | `POST /api/v1/views/{id}/membership/refresh` | Work the members out again now: at most once every 30 seconds per view. With `?trigger=open`, bring it up to date the way opening it does: anyone who can read the view may, and nothing is read from the graph unless its data or query changed |
 
    A refresh answers an `outcome`:
    - `applied`: with its `diff`;
    - `unchanged`;
+   - `current` (`trigger=open` only): nothing to do — `detail.reason` is `up_to_date`, `recent`,
+     `held` or `snapshot`;
    - `held`: it would remove at least half the view's members, and at least 50. Send
      `?confirmRemovals=true` to apply it;
    - `over_cap`;

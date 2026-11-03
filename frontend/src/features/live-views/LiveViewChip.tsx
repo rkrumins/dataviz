@@ -9,7 +9,7 @@
  * or resume, and the entities kept out or always included. Renders nothing for
  * any other view.
  */
-import { useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import * as Popover from '@radix-ui/react-popover'
 import { useQuery } from '@tanstack/react-query'
 import * as LucideIcons from 'lucide-react'
@@ -26,12 +26,13 @@ import {
   putMembership,
   refreshMembership,
 } from '@/services/liveViewsApi'
-import { getView, viewToViewConfig, type View } from '@/services/viewApiService'
+import { viewToViewConfig, type View } from '@/services/viewApiService'
 import { useFeature } from '@/store/features'
 import { useSchemaStore } from '@/store/schema'
 import type { MembershipStatus, RefreshResult } from '@/types/membership'
 
 import { chipText, diffText, statusWords, type StatusTone } from './model'
+import { showLatest, useRefreshOnOpen } from './useRefreshOnOpen'
 
 const DOT: Record<StatusTone, string> = {
   ok: 'bg-emerald-500',
@@ -39,12 +40,6 @@ const DOT: Record<StatusTone, string> = {
   attention: 'bg-amber-500',
   problem: 'bg-red-500',
   quiet: 'bg-slate-400',
-}
-
-/** The canvas reads the view from the schema store: hand it the view as it now is. */
-async function showLatest(viewId: string) {
-  const fresh = await getView(viewId).catch(() => null)
-  if (fresh) useSchemaStore.getState().addOrUpdateView(viewToViewConfig(fresh))
 }
 
 function madeFrom(status: MembershipStatus): string {
@@ -59,12 +54,24 @@ function madeFrom(status: MembershipStatus): string {
 export function LiveViewChip({ view, canEdit }: { view: View; canEdit: boolean }) {
   const enabled = useFeature('viewMembershipEnabled')
   const madeFromQuery = !!view.config?.membership && !view.draftBranchId
+  // Opened: brought up to date when its data changed since it last was.
+  useRefreshOnOpen(view)
   const { data: status } = useQuery({
     queryKey: [MEMBERSHIP_QUERY_KEY, view.id],
     queryFn: () => getMembershipStatus(view.id),
     enabled: enabled && madeFromQuery,
     staleTime: 15_000,
+    // While another reader's opening brings it up to date, watch for the answer.
+    refetchInterval: (query) => (query.state.data?.status === 'updating' ? 3_000 : false),
   })
+  // Members moved under this page (someone else's opening, an editor's refresh): read the view again.
+  const revision = status?.revision
+  const seenRevision = useRef<number | undefined>(undefined)
+  useEffect(() => {
+    if (revision === undefined) return
+    if (seenRevision.current !== undefined && revision > seenRevision.current) void showLatest(view.id)
+    seenRevision.current = revision
+  }, [revision, view.id])
   if (!enabled || !madeFromQuery || !status) return null
   const words = statusWords(status)
 

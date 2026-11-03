@@ -23,6 +23,8 @@ vi.mock('@/services/liveViewsApi', () => ({
 }))
 vi.mock('@/services/viewApiService', () => ({ getView: vi.fn().mockResolvedValue(null), viewToViewConfig: (v: unknown) => v }))
 vi.mock('@/store/features', () => ({ useFeature: () => true }))
+// Opening's own refresh is pinned in useRefreshOnOpen.test; here the chip's actions are.
+vi.mock('../useRefreshOnOpen', () => ({ useRefreshOnOpen: () => {}, showLatest: async () => {} }))
 
 import { LiveViewChip } from '../LiveViewChip'
 

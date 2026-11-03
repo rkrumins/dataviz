@@ -1,14 +1,13 @@
-"""Views made from a query: their runtime state, and the ``link`` version source.
+"""Views made from a query: their runtime state.
 
-* ``view_membership_state``: how keeping one view made from a query in step with
-  its data is going — status, the fence (``lease_*``, ``epoch``), scheduling
-  (``due_at``) and the last answer. Runtime state only: a view's definition lives
-  in its ``config.membership``, and its members are its own assignment entries.
-* ``view_versions.source`` accepts ``'link'``: taking a linked layout's update into
-  a view records a version of the view, as applying a template's update does.
+``view_membership_state``: how keeping one view made from a query in step with its
+data is going — status, the fence (``lease_*``, ``epoch``) and the last answer. A
+view is brought up to date when it is opened after its data changed: there is no
+schedule to keep. Runtime state only: a view's definition lives in its
+``config.membership``, and its members are its own assignment entries.
 
-``views`` and ``view_versions`` are busy tables, so the revision bounds its wait
-for locks. Guarded DDL (a ``create_all`` baseline already has all of it).
+Its foreign key locks ``views``, a busy table, so the revision bounds its wait for
+locks. Guarded DDL (a ``create_all`` baseline already has all of it).
 Revision id is kept <=32 chars (alembic_version.version_num is VARCHAR(32)).
 
 Revision ID: 20261103_1000_live_views
@@ -27,13 +26,9 @@ down_revision: Union[str, None] = "20261101_1000_gv_fork_sync"
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
-_SOURCES = (
-    "'baseline', 'create', 'wizard', 'import', 'restore', 'promote', 'export', "
-    "'manual', 'snapshot', 'template'"
-)
 _STATUSES = (
     "'pending', 'updating', 'ok', 'partial', 'over_cap', 'held', 'failed', "
-    "'paused', 'source_missing', 'frozen'"
+    "'source_missing', 'frozen'"
 )
 
 
@@ -58,12 +53,8 @@ def upgrade() -> None:
             sa.Column("resolution_hash", sa.Text(), nullable=True),
             sa.Column("applied_resolution_hash", sa.Text(), nullable=True),
             sa.Column("data_version", sa.Text(), nullable=True),
-            sa.Column("seen_signal", sa.Text(), nullable=True),
-            sa.Column("read_in_token", sa.Text(), nullable=True),
             sa.Column("status", sa.Text(), nullable=False),
             sa.Column("status_detail", sa.Text(), nullable=True),
-            sa.Column("dirty_since", sa.Text(), nullable=True),
-            sa.Column("due_at", sa.Text(), nullable=True),
             sa.Column("lease_owner", sa.Text(), nullable=True),
             sa.Column("lease_until", sa.Text(), nullable=True),
             sa.Column("epoch", sa.Integer(), nullable=False),
@@ -74,7 +65,6 @@ def upgrade() -> None:
             sa.Column("counts", sa.Text(), nullable=True),
             sa.Column("truncated", sa.Text(), nullable=True),
             sa.Column("last_diff", sa.Text(), nullable=True),
-            sa.Column("pending_activity", sa.Text(), nullable=True),
             sa.Column("held", sa.Text(), nullable=True),
             sa.Column("last_started_at", sa.Text(), nullable=True),
             sa.Column("last_finished_at", sa.Text(), nullable=True),
@@ -86,30 +76,12 @@ def upgrade() -> None:
             sa.CheckConstraint(f"status IN ({_STATUSES})", name="ck_vms_status"),
         )
     op.create_index(
-        "idx_vms_due", "view_membership_state", ["due_at"],
-        postgresql_where=sa.text("due_at IS NOT NULL"), sqlite_where=sa.text("due_at IS NOT NULL"),
-        if_not_exists=True,
-    )
-    op.create_index(
         "idx_vms_source", "view_membership_state", ["workspace_id", "data_source_id"],
         if_not_exists=True,
-    )
-
-    op.execute("ALTER TABLE view_versions DROP CONSTRAINT IF EXISTS ck_view_versions_source")
-    op.create_check_constraint(
-        "ck_view_versions_source", "view_versions", f"source IN ({_SOURCES}, 'link')",
     )
 
 
 def downgrade() -> None:
     _bound_lock_wait()
-    conn = op.get_bind()
-
-    # Keep the history: a version taken from a linked layout reads as a wizard save.
-    conn.execute(sa.text("UPDATE view_versions SET source = 'wizard' WHERE source = 'link'"))
-    op.execute("ALTER TABLE view_versions DROP CONSTRAINT IF EXISTS ck_view_versions_source")
-    op.create_check_constraint("ck_view_versions_source", "view_versions", f"source IN ({_SOURCES})")
-
     op.drop_index("idx_vms_source", table_name="view_membership_state", if_exists=True)
-    op.drop_index("idx_vms_due", table_name="view_membership_state", if_exists=True)
     op.drop_table("view_membership_state", if_exists=True)

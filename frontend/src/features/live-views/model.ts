@@ -196,8 +196,6 @@ export function statusWords(status: MembershipStatus): StatusWords {
     }
     case 'failed':
       return { label: 'Couldn’t update', tone: 'problem', detail: 'The graph couldn’t be read. The view keeps its last members. Try again.' }
-    case 'paused':
-      return { label: 'Paused', tone: 'quiet', detail: 'Updates are paused while the data loads.' }
     case 'source_missing':
       return { label: 'Can’t search', tone: 'problem', detail: 'The view its query is searched in is gone. The view keeps its last members.' }
     case 'frozen':

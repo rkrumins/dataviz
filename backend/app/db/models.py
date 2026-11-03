@@ -1431,7 +1431,7 @@ class ViewVersionORM(Base):
               sqlite_where=text("request_id IS NOT NULL")),
         CheckConstraint(
             "source IN ('baseline', 'create', 'wizard', 'import', 'restore', "
-            "'promote', 'export', 'manual', 'snapshot', 'template', 'link')",
+            "'promote', 'export', 'manual', 'snapshot', 'template')",
             name="ck_view_versions_source",
         ),
     )
@@ -1447,7 +1447,7 @@ class ViewVersionORM(Base):
 #: What keeping a view made from a query is doing. See ``services/live_views``.
 MEMBERSHIP_STATUSES = (
     "pending", "updating", "ok", "partial", "over_cap", "held", "failed",
-    "paused", "source_missing", "frozen",
+    "source_missing", "frozen",
 )
 
 
@@ -1473,13 +1473,9 @@ class ViewMembershipStateORM(Base):
     resolution_hash = Column(Text, nullable=True)
     applied_resolution_hash = Column(Text, nullable=True)
     data_version = Column(Text, nullable=True)
-    seen_signal = Column(Text, nullable=True)
-    read_in_token = Column(Text, nullable=True)
     status = Column(Text, nullable=False, default="pending")
     status_detail = Column(Text, nullable=True)                   # JSON
-    # Scheduling and the fence.
-    dirty_since = Column(Text, nullable=True)
-    due_at = Column(Text, nullable=True)
+    # The fence.
     lease_owner = Column(Text, nullable=True)
     lease_until = Column(Text, nullable=True)
     epoch = Column(Integer, nullable=False, default=0)
@@ -1491,7 +1487,6 @@ class ViewMembershipStateORM(Base):
     counts = Column(Text, nullable=True)                          # JSON
     truncated = Column(Text, nullable=True)                       # JSON
     last_diff = Column(Text, nullable=True)                       # JSON
-    pending_activity = Column(Text, nullable=True)                # JSON
     held = Column(Text, nullable=True)                            # JSON: a removal waiting to be confirmed
     last_started_at = Column(Text, nullable=True)
     last_finished_at = Column(Text, nullable=True)
@@ -1502,10 +1497,6 @@ class ViewMembershipStateORM(Base):
     updated_at = Column(Text, nullable=False, default=_now, onupdate=_now)
 
     __table_args__ = (
-        # Partial on both dialects (see uq_vv_request_id).
-        Index("idx_vms_due", "due_at",
-              postgresql_where=text("due_at IS NOT NULL"),
-              sqlite_where=text("due_at IS NOT NULL")),
         Index("idx_vms_source", "workspace_id", "data_source_id"),
         CheckConstraint(
             "status IN (" + ", ".join(f"'{s}'" for s in MEMBERSHIP_STATUSES) + ")",
