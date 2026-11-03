@@ -34,6 +34,9 @@ import { isSubsetConfig } from '@/types/searchView'
 
 import { chipLabel, describePredicate } from './model'
 
+/** The layers the chip names before it says how many more. */
+const LAYER_PILLS = 6
+
 /** The canvas reads the view from the schema store: hand it the view as it now is. */
 async function showLatest(viewId: string) {
   const fresh = await getView(viewId).catch(() => null)
@@ -166,9 +169,21 @@ function SearchViewPanel({ view, status, canEdit, onEditSearch, onRefresh }: {
               ? <>Its layers are {baseName ? <span className="font-medium">{baseName}</span> : 'its base view'}’s, followed as they change.</>
               : 'It has a layout of its own.'}
           </p>
-          <p className="text-[12px] text-ink-muted tabular-nums">
-            {status.layers.length.toLocaleString()} {status.layers.length === 1 ? 'layer' : 'layers'}, each holding the matches of its types.
-          </p>
+          {/* Its layers, as the canvas draws them: each holds the matches of its types. */}
+          <ul className="flex flex-wrap gap-1.5 pt-0.5" aria-label="Its layers">
+            {status.layers.slice(0, LAYER_PILLS).map((layer) => (
+              <li key={layer.id} title={layer.rest ? 'Every match of a type no other layer holds' : (layer.entityTypes ?? []).join(', ')}
+                className="inline-flex items-center gap-1.5 max-w-[160px] h-6 px-2 rounded-full border border-black/[0.06] dark:border-white/[0.08] bg-black/[0.02] dark:bg-white/[0.03] text-[11.5px] text-ink-secondary">
+                <span className="w-1.5 h-1.5 rounded-full flex-none" style={{ background: layer.color ?? '#94a3b8' }} aria-hidden />
+                <span className="truncate">{layer.name}</span>
+              </li>
+            ))}
+            {status.layers.length > LAYER_PILLS && (
+              <li className="inline-flex items-center h-6 px-2 text-[11.5px] text-ink-muted tabular-nums">
+                +{(status.layers.length - LAYER_PILLS).toLocaleString()} more
+              </li>
+            )}
+          </ul>
           {status.placedByType && (
             <p className="text-[12px] text-amber-700 dark:text-amber-400 leading-snug">
               Placed by type here: its base also places entities by rules on tags or properties, or by hand, which a subset doesn’t follow.
@@ -289,7 +304,7 @@ function ActionButton({ children, icon, onClick, busy, tone = 'quiet' }: {
         'h-8 px-3 rounded-lg inline-flex items-center gap-1.5 text-[12.5px] font-semibold transition disabled:opacity-60',
         tone === 'primary'
           ? 'bg-accent-lineage text-white hover:brightness-110'
-          : 'text-ink-secondary border border-glass-border hover:text-ink hover:border-accent-lineage/40',
+          : 'text-ink-secondary border border-black/[0.08] dark:border-white/[0.10] bg-black/[0.02] dark:bg-white/[0.03] hover:text-ink hover:border-accent-lineage/40',
       )}
     >
       <Icon className={cn('w-3.5 h-3.5', busy && 'animate-spin')} />

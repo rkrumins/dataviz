@@ -52,6 +52,13 @@ export const subsetFeedKey = (layerId: string) => `layer:${layerId}`
  *  it has found so far (the first page, and each continuation of a running one). */
 const SUBSET_WAIT_MS = 2500
 
+/** Following a running scan: a round that moves nothing on (the server's scan
+ *  slots were all busy, or the scan is slow) waits before the next — this long,
+ *  doubling up to the most — so a cold feed read by hundreds is not asked in a
+ *  loop. Jittered, so those readers don't ask in step. */
+export const SUBSET_FOLLOW_MIN_MS = 1000
+export const SUBSET_FOLLOW_MAX_MS = 8000
+
 /** Where a subset view's layer stands after a page of its matches. */
 export function subsetFeedAfter(layerId: string, page: ViewFeedPage): TypeFeedState {
     const running = page.status === 'running' && !!page.sessionId
@@ -1628,21 +1635,57 @@ export function useGraphHydration(options?: UseGraphHydrationOptions): UseGraphH
     }, [enableHydration, hydrationStatus, claimedTypesKey, providerVersion, activeView?.id])
 
     // A subset view's layer whose scan is still running is followed to the end — its
-    // count reads "so far" until then. Paced by the server: each ask waits on the
-    // scan up to SUBSET_WAIT_MS. Only the hydrating instance follows; a layer whose
-    // last ask failed waits for its Retry.
+    // count reads "so far" until then. Paced by the server while the scan moves on:
+    // each ask waits on it up to SUBSET_WAIT_MS. A round that moves nothing on waits
+    // before the next (SUBSET_FOLLOW_MIN_MS, doubling), and a tab out of sight asks
+    // nothing until it is seen again. Only the hydrating instance follows; a layer
+    // whose last ask failed waits for its Retry.
     const runningSubsetKeys = useCanvasStore(s => Object.entries(s.typeFeeds)
         .filter(([, f]) => f.search?.status === 'running' && !!f.search.sessionId)
         .map(([k]) => k).sort().join('|'))
     const [subsetRound, setSubsetRound] = useState(0)
+    const followIdleRef = useRef(0)
     useEffect(() => {
+        if (!runningSubsetKeys) followIdleRef.current = 0
         if (!enableHydration || hydrationStatus !== 'ready' || !runningSubsetKeys) return
         const keys = runningSubsetKeys.split('|').filter(k => !failedNodes.has(`TYPE:${k}`))
         if (!keys.length) return
         let cancelled = false
-        // Each round ends when its asks answer; the next starts from there.
-        void loadMoreFeeds(keys).then(() => { if (!cancelled) setSubsetRound(r => r + 1) })
-        return () => { cancelled = true }
+        let timer: ReturnType<typeof setTimeout> | undefined
+        let onShow: (() => void) | undefined
+        // Where the followed layers stand: a round that leaves it unchanged moved nothing on.
+        const standing = () => keys.map(k => {
+            const f = useCanvasStore.getState().typeFeeds[k]
+            return `${f?.search?.delivered ?? 0}/${f?.total ?? ''}/${f?.search?.status ?? ''}`
+        }).join('|')
+        const ask = () => {
+            if (cancelled) return
+            if (document.visibilityState === 'hidden') {
+                onShow = () => {
+                    if (document.visibilityState !== 'visible') return
+                    document.removeEventListener('visibilitychange', onShow!)
+                    onShow = undefined
+                    ask()
+                }
+                document.addEventListener('visibilitychange', onShow)
+                return
+            }
+            const before = standing()
+            // Each round ends when its asks answer; the next starts from there.
+            void loadMoreFeeds(keys).then(() => {
+                if (cancelled) return
+                followIdleRef.current = standing() === before ? followIdleRef.current + 1 : 0
+                setSubsetRound(r => r + 1)
+            })
+        }
+        const idle = followIdleRef.current
+        if (idle === 0) ask()
+        else timer = setTimeout(ask, withJitter(Math.min(SUBSET_FOLLOW_MAX_MS, SUBSET_FOLLOW_MIN_MS * 2 ** (idle - 1))))
+        return () => {
+            cancelled = true
+            if (timer) clearTimeout(timer)
+            if (onShow) document.removeEventListener('visibilitychange', onShow)
+        }
     }, [enableHydration, hydrationStatus, runningSubsetKeys, failedNodes, loadMoreFeeds, subsetRound])
 
     // ─── loadChildren ───────────────────────────────────────────────────

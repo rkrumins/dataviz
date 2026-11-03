@@ -64,7 +64,7 @@ describe('LayerColumn — a subset layer', () => {
 
   it('a count still rising is a floor, said so', () => {
     renderColumn({ subsetFeed: feed({ delivered: 2, total: null, status: 'running', countStatus: 'lowerBound' }) })
-    expect(pill().textContent).toBe('2/2+')
+    expect(pill().textContent).toBe('2+')
     expect(pill().getAttribute('title')).toBe('2 matches so far in this layer')
     expect(screen.getByLabelText('still counting')).toBeInTheDocument()
   })

@@ -41,11 +41,13 @@ export function UpdateSubsetSearchDialog({ subsetName, status, predicate, countI
   const was = status.definition.predicate
   const wholeDataSource = status.definition.within === 'dataSource'
 
-  // Per layer: what the new search adds (it matches, the old didn't) and takes away.
+  // Per layer: what it holds now, what the new search adds (it matches, the old
+  // didn't) and what it takes away.
   const rules = useMemo(() => status.layers.flatMap((layer) => {
     const condition = layerCondition(layer)
     if (condition === null) return []
     return [
+      { id: `${layer.id}::now`, predicate: and(condition, was as unknown as Record<string, unknown>) },
       { id: `${layer.id}::added`, predicate: and(condition, predicate as unknown as Record<string, unknown>, not(was)) },
       { id: `${layer.id}::removed`, predicate: and(condition, was as unknown as Record<string, unknown>, not(predicate)) },
     ]
@@ -81,25 +83,39 @@ export function UpdateSubsetSearchDialog({ subsetName, status, predicate, countI
           <p className="mt-4 text-[11px] font-semibold uppercase tracking-wider text-ink-muted/70">What changes in each layer</p>
           <ul className="mt-2 rounded-xl border border-glass-border/70 divide-y divide-glass-border/50">
             {status.layers.map((layer) => {
+              const now = read(`${layer.id}::now`)
               const added = read(`${layer.id}::added`)
               const removed = read(`${layer.id}::removed`)
               const held = layerCondition(layer) !== null
+              const floor = !!(now && !now.complete) || !!(added && !added.complete) || !!(removed && !removed.complete)
               return (
                 <li key={layer.id} className={cn('flex items-center justify-between gap-3 px-3.5 py-2', !held && 'opacity-50')}>
                   <span className="flex items-center gap-2 min-w-0">
                     <span className="w-2 h-2 rounded-full flex-none" style={{ background: layer.color ?? '#94a3b8' }} aria-hidden />
                     <span className="truncate text-[12.5px] text-ink">{layer.name}</span>
                   </span>
-                  <span className="flex-none text-[12px] tabular-nums">
+                  <span className="flex-none flex items-center gap-2.5 text-[12px] tabular-nums">
                     {!held ? <span className="text-ink-muted">holds nothing</span>
                       : added === undefined || removed === undefined ? <span className="text-ink-muted">…</span>
-                        : added.count === 0 && removed.count === 0 ? <span className="text-ink-muted">no change</span>
-                          : (
-                            <>
-                              <span className="text-emerald-600 dark:text-emerald-400">+{number.format(added.count)}{added.complete ? '' : '+'}</span>
-                              <span className="ml-2 text-red-600 dark:text-red-400">−{number.format(removed.count)}{removed.complete ? '' : '+'}</span>
-                            </>
-                          )}
+                        : (
+                          <>
+                            {now && (
+                              <span className="text-ink-muted" title={floor ? 'Counted so far' : undefined}>
+                                {number.format(now.count)}
+                                <span className="mx-1 text-ink-muted/60">→</span>
+                                <span className="font-semibold text-ink">{number.format(Math.max(0, now.count + added.count - removed.count))}{floor ? '+' : ''}</span>
+                              </span>
+                            )}
+                            {added.count === 0 && removed.count === 0
+                              ? <span className="text-ink-muted">no change</span>
+                              : (
+                                <span className="flex items-center gap-1">
+                                  <span className="px-1.5 py-0.5 rounded-md bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 font-semibold">+{number.format(added.count)}{added.complete ? '' : '+'}</span>
+                                  <span className="px-1.5 py-0.5 rounded-md bg-red-500/10 text-red-700 dark:text-red-400 font-semibold">−{number.format(removed.count)}{removed.complete ? '' : '+'}</span>
+                                </span>
+                              )}
+                          </>
+                        )}
                   </span>
                 </li>
               )
@@ -112,11 +128,11 @@ export function UpdateSubsetSearchDialog({ subsetName, status, predicate, countI
           )}
           <div className="mt-5 flex justify-end gap-2">
             <button type="button" onClick={onCancel} disabled={busy}
-              className="h-9 px-4 rounded-xl text-[13px] font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-40">
+              className="h-9 px-4 rounded-xl text-[13px] font-semibold text-ink-muted hover:text-ink hover:bg-black/5 dark:hover:bg-white/5 disabled:opacity-40 outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40">
               Cancel
             </button>
             <button type="button" onClick={() => { void update() }} disabled={busy}
-              className="h-9 px-4 rounded-xl inline-flex items-center gap-2 text-[13px] font-semibold bg-accent-lineage text-white hover:brightness-110 disabled:opacity-60">
+              className="h-9 px-4 rounded-xl inline-flex items-center gap-2 text-[13px] font-semibold bg-accent-lineage text-white shadow-sm hover:brightness-110 disabled:opacity-60 outline-none focus-visible:ring-2 focus-visible:ring-accent-lineage/40 focus-visible:ring-offset-2 focus-visible:ring-offset-canvas-elevated">
               {busy ? <LucideIcons.Loader2 className="w-4 h-4 animate-spin" /> : <LucideIcons.Check className="w-4 h-4" />}
               Update the view
             </button>

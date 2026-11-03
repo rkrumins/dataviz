@@ -137,6 +137,50 @@ describe('subset view feeds', () => {
     expect(feed('L1')).toMatchObject({ hasMore: false, total: 3, search: { delivered: 3, sessionId: null } })
   })
 
+  it('a round that moves nothing on waits before asking again — no loop', async () => {
+    let continued = 0
+    serve({
+      L1: (req) => {
+        if (!req.sessionId) return page('L1', { nodes: [node('urn:t1')], status: 'running', sessionId: 's-1', delivered: 1 })
+        continued += 1
+        // The server's slots were busy: the scan stands as it was, once.
+        return continued === 1
+          ? page('L1', { nodes: [node('urn:t1')], status: 'running', sessionId: 's-1', delivered: 1 })
+          : page('L1', { nodes: [node('urn:t1'), node('urn:t2')], delivered: 2, totalCount: 2 })
+      },
+      'other-matches': () => page('other-matches', {}),
+    })
+    await hydrate()
+    await waitFor(() => expect(continued).toBe(1))
+    await new Promise((r) => setTimeout(r, 400))
+    expect(continued).toBe(1)
+    await waitFor(() => expect(feed('L1')?.search?.status).toBe('complete'), { timeout: 3000 })
+    expect(continued).toBe(2)
+  })
+
+  it('a tab out of sight asks nothing until it is seen again', async () => {
+    let visibility: DocumentVisibilityState = 'hidden'
+    const real = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState')
+    Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility })
+    try {
+      serve({
+        L1: (req) => req.sessionId
+          ? page('L1', { nodes: [node('urn:t1'), node('urn:t2')], delivered: 2, totalCount: 2 })
+          : page('L1', { nodes: [node('urn:t1')], status: 'running', sessionId: 's-1', delivered: 1 }),
+        'other-matches': () => page('other-matches', {}),
+      })
+      await hydrate()
+      await new Promise((r) => setTimeout(r, 200))
+      expect(mockProvider.viewFeedPage.mock.calls.some(([, req]) => (req as ViewFeedRequest).sessionId)).toBe(false)
+      visibility = 'visible'
+      await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+      await waitFor(() => expect(feed('L1')?.search?.status).toBe('complete'))
+    } finally {
+      delete (document as unknown as Record<string, unknown>).visibilityState
+      if (real) Object.defineProperty(Document.prototype, 'visibilityState', real)
+    }
+  })
+
   it('pages a complete layer on by the server cursor', async () => {
     serve({
       L1: (req) => req.cursor === 'c-1'

@@ -125,6 +125,8 @@ export function SaveSearchAsViewSheet({
   const counts = useLayerCounts(kept.baseViewId, toCount, within === 'dataSource')
   const countOf = (id: string) => (counts.status === 'counting' || counts.status === 'done') ? counts.counts.get(id) : undefined
   const total = toCount.reduce((sum, l) => sum + (countOf(l.id)?.count ?? 0), 0)
+  // Each layer's share, drawn against the fullest one so a small layer still shows.
+  const most = Math.max(1, ...toCount.map((l) => countOf(l.id)?.count ?? 0))
   const exact = counts.status === 'done' && toCount.every((l) => countOf(l.id)?.complete)
 
   const placedByType = choice === 'like' && !!boardConfig && placesByMoreThanType(boardConfig)
@@ -252,7 +254,7 @@ export function SaveSearchAsViewSheet({
                     <span className={cn('w-7 h-7 rounded-lg grid place-items-center', on ? 'bg-accent-lineage/15 text-accent-lineage' : 'bg-black/[0.04] dark:bg-white/[0.06] text-ink-muted group-hover:text-accent-lineage')}>
                       <Icon className="w-4 h-4" />
                     </span>
-                    <span className="text-[13px] font-semibold text-ink leading-tight truncate max-w-full">{card.title(baseName)}</span>
+                    <span className="text-[13px] font-semibold text-ink leading-tight line-clamp-2 break-words max-w-full">{card.title(baseName)}</span>
                     <span className="text-[11.5px] text-ink-muted leading-snug">{offer.hint}</span>
                   </button>
                 )
@@ -273,13 +275,18 @@ export function SaveSearchAsViewSheet({
                 const counted = toCount.some((l) => l.id === layer.id)
                 const empty = counted && c?.complete && c.count === 0
                 return (
-                  <li key={layer.id} className={cn('flex items-center justify-between gap-3 px-3.5 py-2', (empty || !counted) && 'opacity-50')}>
-                    <span className="flex items-center gap-2 min-w-0">
+                  <li key={layer.id} className={cn('relative overflow-hidden flex items-center justify-between gap-3 px-3.5 py-2', (empty || !counted) && 'opacity-50')}>
+                    {/* Its share of the matches, in its colour, behind the row. */}
+                    {c && c.count > 0 && (
+                      <span aria-hidden className="absolute inset-y-0 left-0 opacity-[0.10] dark:opacity-[0.16] transition-[width] duration-500 ease-out"
+                        style={{ width: `${Math.max(2, (c.count / most) * 100)}%`, background: layer.color ?? '#94a3b8' }} />
+                    )}
+                    <span className="relative flex items-center gap-2 min-w-0">
                       <span className="w-2 h-2 rounded-full flex-none" style={{ background: layer.color ?? 'var(--color-ink-muted, #94a3b8)' }} aria-hidden />
                       <span className="truncate text-[12.5px] text-ink">{layer.name}</span>
                       {layer.rest && <span className="text-[11px] text-ink-muted">· every other type</span>}
                     </span>
-                    <span className="flex-none text-[12px] tabular-nums text-ink-muted">
+                    <span className="relative flex-none text-[12px] font-medium tabular-nums text-ink-secondary">
                       {!counted ? 'nothing to hold'
                         : c === undefined ? '…'
                           : empty ? 'no matches — hidden'
@@ -290,7 +297,7 @@ export function SaveSearchAsViewSheet({
               })}
             </ul>
             <p className="mt-2 text-[12px] text-ink-muted leading-snug">
-              Always current · any size · up to 2,000 a layer on the canvas — search in a layer, or export, for the rest.
+              Always current · any size · the canvas lists up to 2,000 a layer, and Search in this layer finds the rest.
             </p>
           </Section>
 

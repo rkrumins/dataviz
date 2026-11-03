@@ -950,6 +950,8 @@ export const LayerColumn = React.memo(function LayerColumn({
     ? `${(subsetFeed.total ?? subsetFeed.delivered).toLocaleString()}${totalIsFloor ? '+' : ''}`
     : `${layerTotal.toLocaleString()}${totalIsFloor ? '+' : ''}`
   const subsetAsOf = subsetFeed?.stale ? asOfText(subsetFeed.asOf) : null
+  // A count still rising with nothing known past what is listed reads "4+", not "4 / 4+".
+  const subsetShowsTotal = !!subsetFeed && (!totalIsFloor || (subsetFeed.total ?? 0) > subsetFeed.delivered)
 
   // TRACE HEADER: what this lane contributes to the LINEAGE — participants,
   // not rows. Each root carries the view model's own count of the
@@ -2143,10 +2145,14 @@ export const LayerColumn = React.memo(function LayerColumn({
                     ) : subsetFeed ? (
                       <>
                         <span className="text-[10px] font-semibold text-ink tabular-nums" style={{ color: layer.color }}>
-                          {subsetFeed.delivered.toLocaleString()}
+                          {subsetFeed.delivered.toLocaleString()}{subsetShowsTotal ? '' : '+'}
                         </span>
-                        <span className="text-[9px] text-ink-muted/60">/</span>
-                        <span className="text-[10px] text-ink-muted/60 tabular-nums">{totalLabel}</span>
+                        {subsetShowsTotal && (
+                          <>
+                            <span className="text-[9px] text-ink-muted/60">/</span>
+                            <span className="text-[10px] text-ink-muted/60 tabular-nums">{totalLabel}</span>
+                          </>
+                        )}
                         {subsetFeed.status === 'running' && (
                           <LucideIcons.Loader2 className="w-2.5 h-2.5 animate-spin text-ink-muted/60" aria-label="still counting" />
                         )}
