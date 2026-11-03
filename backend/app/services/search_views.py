@@ -179,10 +179,53 @@ def places_by_more_than_type(config: Optional[Dict[str, Any]]) -> bool:
 
 def subset_layers(definition: SearchViewDefinition, config: Dict[str, Any],
                   base_config: Optional[Dict[str, Any]]) -> List[SubsetLayer]:
-    """The layers a subset view shows: its base's when it follows it, else its own."""
+    """The layers of a subset view: its base's when it follows it, else its own —
+    each marked ``hidden`` when the subset leaves it out (``hiddenLayers``)."""
     if definition.layout == "inherit":
-        return layers_of(base_config, add_rest=True) if base_config is not None else []
+        if base_config is None:
+            return []
+        hidden = set(definition.hidden_layers)
+        return [layer.model_copy(update={"hidden": True}) if layer.id in hidden else layer
+                for layer in layers_of(base_config, add_rest=True)]
     return layers_of(config, add_rest=False)
+
+
+def shown_layers(layers: Sequence[SubsetLayer]) -> List[SubsetLayer]:
+    return [layer for layer in layers if not layer.hidden]
+
+
+def shown_search(search, layers: Sequence[SubsetLayer]):
+    """What a subset's entities are found by, held to what its columns show: a
+    hidden layer's types are left out, and with no column for every other type
+    (no shown fallback layer), only the types the shown columns hold. So a search
+    inside the view finds what it shows, and nothing it hides."""
+    shown = shown_layers(layers)
+    if any(layer.rest for layer in shown):
+        left_out = _claimed([layer for layer in layers if layer.hidden and not layer.rest])
+        return _and(search, types_not_in(left_out)) if left_out else search
+    kept = _claimed(shown)
+    return _and(search, types_in(kept)) if kept else NOTHING
+
+
+def search_hash(search) -> str:
+    """The identity of what a subset finds: two subsets of one base that find the
+    same share their scans."""
+    blob = json.dumps(search.model_dump(mode="json", by_alias=True, exclude_none=True),
+                      sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()[:32]
+
+
+def hidden_layer_problems(hidden: Sequence[str], layers: Sequence[SubsetLayer]) -> Optional[str]:
+    """Why ``hidden`` can't be left out of a subset whose layers are ``layers``
+    (all of them, hidden or not), or None."""
+    ids = {layer.id for layer in layers}
+    unknown = [h for h in hidden if h not in ids]
+    if unknown:
+        return f"Its base view has no layer {unknown[0]!r} to leave out."
+    shown = [layer for layer in layers if layer.id not in set(hidden)]
+    if not any(layer.rest or layer.entity_types for layer in shown):
+        return "Keep at least one layer that can hold matches."
+    return None
 
 
 def find_layer(layers: Sequence[SubsetLayer], value: str) -> Optional[SubsetLayer]:
@@ -211,13 +254,16 @@ def own_layers(layers: Sequence[SubsetLayer]) -> List[Dict[str, Any]]:
     return out
 
 
-def followed_reference_layout(base_config: Dict[str, Any]) -> Dict[str, Any]:
+def followed_reference_layout(base_config: Dict[str, Any],
+                              hidden: Iterable[str] = ()) -> Dict[str, Any]:
     """The ``referenceLayout`` a subset that follows ``base_config`` is served
     with: the base's layers as they look, holding the types they own, plus
-    "Other matches" — and the base's tag overlays and default order. Never
-    stored: the subset is served it on every read, so it is always the base's
-    as it is now."""
-    owned = {layer.id: layer for layer in layers_of(base_config, add_rest=True)}
+    "Other matches" — less the ``hidden`` ones — and the base's tag overlays and
+    default order. Never stored: the subset is served it on every read, so it is
+    always the base's as it is now."""
+    left_out = set(hidden)
+    owned = {layer.id: layer for layer in layers_of(base_config, add_rest=True)
+             if layer.id not in left_out}
     layers: List[Dict[str, Any]] = []
     for layer in _ordered_layers(base_config):
         shown = owned.get(layer["id"])
@@ -252,8 +298,8 @@ def served_config(config: Dict[str, Any], base_config: Optional[Dict[str, Any]])
         return config
     out = dict(config)
     layout = dict(out.get("layout") or {})
-    layout["referenceLayout"] = (followed_reference_layout(base_config) if base_config is not None
-                                 else {"layers": [], "assignments": {}})
+    layout["referenceLayout"] = (followed_reference_layout(base_config, definition.hidden_layers)
+                                 if base_config is not None else {"layers": [], "assignments": {}})
     out["layout"] = layout
     out.pop("referenceLayout", None)
     if base_config is not None:

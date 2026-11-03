@@ -261,3 +261,77 @@ class TestSearches:
         assert a == b and a.startswith("sv")
         assert a != sv.boundary_hash(view_id="v", data_source_id="d", root_urns=["a", "b"],
                                      entity_types=["s", "t"], max_depth=12, predicate_hash="q")
+
+
+
+class TestIncludeAndHiddenLayers:
+    """What a subset keeps beside its matches, as one search; and the base layers
+    a following subset leaves out, with their matches."""
+
+    def test_just_the_matches_is_the_search_itself(self):
+        definition = SearchViewDefinition.model_validate(_search())
+        assert definition.search_predicate() == definition.predicate
+
+    def test_each_inclusion_is_one_relationship_to_a_match(self):
+        definition = SearchViewDefinition.model_validate(_search(include={
+            "contents": True, "containers": True, "upstream": True, "downstream": True}))
+        found = definition.search_predicate()
+        assert isinstance(found, GroupPredicate) and found.op == "or"
+        matches, *related = found.children
+        assert matches == definition.predicate
+        assert [r.axis for r in related] == ["ancestor", "descendant", "downstream", "upstream"]
+        assert all(r.where == definition.predicate and r.max_hops is None for r in related)
+
+    def test_what_it_includes_is_part_of_what_it_shares_scans_by(self):
+        plain = SearchViewDefinition.model_validate(_search())
+        inside = SearchViewDefinition.model_validate(_search(include={"contents": True}))
+        assert plain.predicate_hash() != inside.predicate_hash()
+        assert plain.definition_hash() != inside.definition_hash()
+
+    def test_every_inclusion_is_a_search_a_subset_keeps(self):
+        definition = SearchViewDefinition.model_validate(_search(include={
+            "contents": True, "containers": True, "upstream": True, "downstream": True}))
+        sv.check_predicate(definition.search_predicate().model_dump(mode="json", by_alias=True, exclude_none=True))
+
+    def test_a_one_step_lineage_search_can_include_a_step_more(self):
+        # Each relationship is one step, asked of one entity: the rules a subset keeps allow the chain.
+        one_step = {"kind": "related", "axis": "upstream", "where": P}
+        definition = SearchViewDefinition.model_validate(_search(predicate=one_step, include={"downstream": True}))
+        sv.check_predicate(definition.search_predicate().model_dump(mode="json", by_alias=True, exclude_none=True))
+
+    def test_only_a_following_subset_hides_layers(self):
+        with pytest.raises(ValidationError, match="follows its base"):
+            SearchViewDefinition.model_validate(_search(within="dataSource", readIn=None, layout="own",
+                                                        hiddenLayers=["b"]))
+        with pytest.raises(ValidationError, match="leaving"):
+            FromSearchRequest.model_validate({"name": "x", "workspaceId": "w", "predicate": P, "readIn": "base",
+                                              "layout": "own", "layers": [{"name": "T", "entityTypes": ["table"]}],
+                                              "hiddenLayers": ["layer-1"]})
+
+    def test_hidden_layers_are_marked_and_left_out_of_what_it_shows(self):
+        definition = SearchViewDefinition.model_validate(_search(hiddenLayers=["s"]))
+        layers = sv.subset_layers(definition, {}, BASE)
+        assert [(l.id, l.hidden) for l in layers] == [
+            ("b", False), ("s", True), ("g", False), (REST_LAYER_ID, False)]
+        assert [l.id for l in sv.shown_layers(layers)] == ["b", "g", REST_LAYER_ID]
+        served = sv.followed_reference_layout(BASE, definition.hidden_layers)
+        assert [l["id"] for l in served["layers"]] == ["b", "g", REST_LAYER_ID]
+
+    def test_a_hidden_layers_matches_are_left_out_and_others_still_fall_to_the_rest(self):
+        definition = SearchViewDefinition.model_validate(_search(hiddenLayers=["s"]))
+        layers = sv.subset_layers(definition, {}, BASE)
+        found = sv.shown_search(definition.predicate, layers)
+        # Silver owns "dashboard" (Bronze owns dataset): its matches go; the rest still takes the others.
+        assert found == sv._and(definition.predicate, sv.types_not_in(["dashboard"]))
+
+    def test_with_the_rest_hidden_only_the_shown_columns_types_are_found(self):
+        definition = SearchViewDefinition.model_validate(_search(hiddenLayers=[REST_LAYER_ID]))
+        layers = sv.subset_layers(definition, {}, BASE)
+        found = sv.shown_search(definition.predicate, layers)
+        assert found == sv._and(definition.predicate, sv.types_in(["dataset", "table", "dashboard", "chart"]))
+
+    def test_what_can_be_hidden(self):
+        layers = sv.layers_of(BASE, add_rest=True)
+        assert sv.hidden_layer_problems(["s"], layers) is None
+        assert "no layer 'x'" in sv.hidden_layer_problems(["x"], layers)
+        assert "at least one" in sv.hidden_layer_problems(["b", "s", "g", REST_LAYER_ID], layers)

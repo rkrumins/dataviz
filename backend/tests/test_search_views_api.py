@@ -275,6 +275,75 @@ class TestReadAndEdit:
         assert resp.status_code == 409 and resp.json()["detail"]["reason"] == "base_missing"
 
 
+
+class TestIncludeAndFewerLayers:
+    """What a subset keeps beside its matches, and the base layers it leaves out:
+    stored in its definition, served without the hidden layers, and changed
+    against the hash, as a version."""
+
+    async def test_it_keeps_what_it_includes(self, test_client, on):
+        ws = await workspace(test_client)
+        made = await make(test_client, ws, await base_view(test_client, ws),
+                          include={"contents": True, "upstream": True})
+        assert made["search"]["definition"]["include"] == {
+            "contents": True, "containers": False, "upstream": True, "downstream": False}
+
+    async def test_a_hidden_layer_is_not_served_but_listed_as_hidden(self, test_client, on, db_session):
+        ws = await workspace(test_client)
+        made = await make(test_client, ws, await base_view(test_client, ws), hiddenLayers=["d"])
+        served = made["view"]["config"]["layout"]["referenceLayout"]["layers"]
+        assert [l["id"] for l in served] == ["t", REST_LAYER_ID]
+        assert [(l["id"], l["hidden"]) for l in made["search"]["layers"]] == [
+            ("t", False), ("d", True), (REST_LAYER_ID, False)]
+
+    async def test_what_cannot_be_hidden(self, test_client, on):
+        ws = await workspace(test_client)
+        base = await base_view(test_client, ws)
+        unknown = await test_client.post(URL, json=body(ws, base, hiddenLayers=["x"]))
+        assert unknown.status_code == 422 and "no layer" in unknown.text
+        every = await test_client.post(URL, json=body(ws, base, hiddenLayers=["t", "d", REST_LAYER_ID]))
+        assert every.status_code == 422 and "at least one" in every.text
+        own = await test_client.post(URL, json=body(ws, base, layout="own", hiddenLayers=["t"],
+                                                    layers=[{"name": "T", "entityTypes": ["table"]}]))
+        assert own.status_code == 422
+
+    async def test_what_it_includes_and_hides_change_as_a_version(self, test_client, on, db_session):
+        ws = await workspace(test_client)
+        made = await make(test_client, ws, await base_view(test_client, ws))
+        sub = made["view"]["id"]
+        changed = await test_client.put(f"/api/v1/views/{sub}/search", json={
+            "ifDefinitionHash": made["search"]["definitionHash"],
+            "include": {"containers": True}, "hiddenLayers": [REST_LAYER_ID]})
+        assert changed.status_code == 200, changed.text
+        out = changed.json()
+        assert out["definition"]["include"]["containers"] is True
+        assert out["definition"]["hiddenLayers"] == [REST_LAYER_ID]
+        served = (await test_client.get(f"/api/v1/views/{sub}")).json()
+        assert [l["id"] for l in served["config"]["layout"]["referenceLayout"]["layers"]] == ["t", "d"]
+        sources = (await db_session.execute(select(ViewVersionORM.source).where(
+            ViewVersionORM.view_id == sub).order_by(ViewVersionORM.version))).scalars().all()
+        assert sources == ["create", "wizard"]
+
+    async def test_its_own_layout_is_the_layers_it_shows(self, test_client, on, db_session):
+        ws = await workspace(test_client)
+        made = await make(test_client, ws, await base_view(test_client, ws), hiddenLayers=["d"])
+        sub = made["view"]["id"]
+        own = (await test_client.put(f"/api/v1/views/{sub}/search", json={
+            "ifDefinitionHash": made["search"]["definitionHash"], "layout": "own"})).json()
+        assert own["definition"]["layout"] == "own" and own["definition"]["hiddenLayers"] == []
+        row = (await db_session.execute(select(ViewORM).where(ViewORM.id == sub))).scalar_one()
+        await db_session.refresh(row)
+        assert [l["id"] for l in json.loads(row.config)["layout"]["referenceLayout"]["layers"]] == [
+            "t", REST_LAYER_ID]
+
+    async def test_an_own_layout_hides_nothing(self, test_client, on):
+        ws = await workspace(test_client)
+        made = await make(test_client, ws, await base_view(test_client, ws), layout="own",
+                          layers=[{"name": "T", "entityTypes": ["table"]}])
+        resp = await test_client.put(f"/api/v1/views/{made['view']['id']}/search", json={
+            "ifDefinitionHash": made["search"]["definitionHash"], "hiddenLayers": ["layer-1"]})
+        assert resp.status_code == 422 and "follows its base" in resp.text
+
 class TestSubsets:
     async def test_a_base_lists_its_subsets(self, test_client, on):
         ws = await workspace(test_client)
