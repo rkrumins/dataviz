@@ -34,7 +34,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from backend.app.db.models import ViewMembershipStateORM, ViewORM, view_is_live
 from backend.app.db.repositories import data_source_repo, view_membership_repo
-from backend.app.db.repositories.view_membership_repo import dumps, later_iso, now_iso
+from backend.app.db.repositories.view_membership_repo import dumps, now_iso
 from backend.app.services.graph_cache import get_graph_cache
 from backend.app.services.graph_reads import cache_scope, search_data_version, statement_admission
 from backend.app.services.layout_config import parse_reference_layout
@@ -78,7 +78,7 @@ MASS_REMOVAL_RATIO = 0.5
 MASS_REMOVAL_MIN = 50
 #: Lease on a view while one run works it out.
 LEASE_SECS = 300.0
-#: How soon a view whose graph was busy, or whose answer came back short, is due again.
+#: How long a caller is asked to wait when the graph was too busy to answer.
 RETRY_SECS = 30.0
 FACT_BATCH = 1000
 
@@ -411,8 +411,6 @@ def applied_values(p: Plan, resolved: Resolved, definition: MembershipDefinition
         last_applied_at=now,
         last_error=None,
         attempts=0,
-        dirty_since=None,
-        due_at=None,
         held=None,
     )
     if p.changed:
@@ -504,9 +502,15 @@ async def refresh(
     confirm_removals: bool = False,
     actor: Optional[str] = None,
     manager: Any = None,
+    only_if_changed: bool = False,
 ) -> Outcome:
     """Work out a view's members again and apply them — see the module docstring.
     ``session`` serves the two short SQL phases and is committed after each.
+
+    ``only_if_changed`` (the view being opened): nothing is worked out unless the
+    data or what the view is made of changed since it last was, and a held removal
+    stays held — told from its state and the data's version, before anything is
+    claimed (a claim shows the view as updating to everyone looking at it).
 
     Raises ``PipelineError`` for a view that is not one to refresh, and lets
     ``ProviderUnavailable`` (busy, failing over, down) through once the view is
@@ -528,6 +532,15 @@ async def refresh(
         await session.commit()
         return Outcome("source_missing", "source_missing")
     workspace_id, data_source_id = row.workspace_id, row.data_source_id
+    if only_if_changed:
+        if state.status == "held":
+            return Outcome("current", "held", {"reason": "held"})
+        if (state.status in ("ok", "partial") and state.data_version
+                and state.applied_resolution_hash == definition.resolution_hash()):
+            async with engine_scope(workspace_id, data_source_id, actor) as engine:
+                version = await search_data_version(engine)
+            if version and version == state.data_version:
+                return Outcome("current", state.status, {"reason": "up_to_date"})
     copied_from = await source_config(session, definition, workspace_id)
     epoch = await view_membership_repo.claim(session, view_id, owner=owner, lease_s=LEASE_SECS)
     await session.commit()
@@ -554,8 +567,7 @@ async def refresh(
     except ProviderUnavailable:
         # Busy, failing over or down: nothing about this view. It keeps its members
         # and is due again shortly; not counted against it.
-        await release(status="pending", status_detail=dumps({"reason": "graph_busy"}),
-                      due_at=later_iso(RETRY_SECS))
+        await release(status="pending", status_detail=dumps({"reason": "graph_busy"}))
         raise
     except Exception as exc:  # noqa: BLE001 — a failed run keeps the last good members
         logger.warning("live view %s: refresh failed: %s", view_id, exc, exc_info=True)
@@ -563,7 +575,7 @@ async def refresh(
         return Outcome("failed", "failed", {"reason": "The graph couldn't be read. Try again in a moment."})
 
     if resolved.retryable:
-        await release(status="pending", due_at=later_iso(RETRY_SECS),
+        await release(status="pending",
                       status_detail=dumps({"reason": "short_answer", "truncated": resolved.retryable}))
         return Outcome("deferred", "pending", {"truncated": resolved.retryable})
 
@@ -583,7 +595,7 @@ async def refresh(
         # The view went, or what it is made of changed while this run read the graph:
         # what was read answers a question nobody is asking any more.
         frozen = current is not None and current.mode != "live"
-        await release(status="frozen" if frozen else "pending", due_at=None if frozen or not live else now_iso())
+        await release(status="frozen" if frozen else "pending")
         return Outcome("fenced", "frozen" if frozen else "pending")
 
     layers, assignments = layout_of(config)

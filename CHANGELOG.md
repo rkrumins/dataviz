@@ -91,9 +91,9 @@ search's matches inside another view* in the API Guide.
 
 A narrowing showed one corner of a large view, for one person, until they put it away. Now it can
 be **saved as a view** of its own on the same data, with its own layers, sharing and versions.
-It keeps itself up to date: what newly matches arrives, and what stops matching leaves. Or it
-stays a snapshot. Part of the Narrow preview, off by default. See *Keep a narrowing as a view* in
-the User Guide.
+It keeps itself up to date: opened after its data changed, it brings itself up to date first,
+so what newly matches arrives and what stops matching leaves. Or it stays a snapshot. Part of the
+Narrow preview, off by default. See *Keep a narrowing as a view* in the User Guide.
 
 ### Added
 
@@ -137,18 +137,21 @@ the User Guide.
   entities) waits for an editor to confirm it.
 - **Short answers are never applied.** When the graph answers short, the view keeps its last
   members.
+- **Brought up to date when opened.** No background worker: opening an auto-updating view asks
+  `POST /api/v1/views/{id}/membership/refresh?trigger=open`, which anyone who can read the view
+  may. Nothing is read from the graph unless the data or the view's query changed since it was
+  last worked out; one opener works it out while others wait on it; at most once every 30 seconds
+  per view; and a large removal still waits for an editor.
 
 ### Upgrading
 
-- One migration, `20261103_1000_live_views`: a `view_membership_state` table, and `link` added to
-  the view-version sources. It is additive.
+- One migration, `20261103_1000_live_views`: a `view_membership_state` table. It is additive.
 
 ### Known limitations
 
-- A view made from a query lists at most 5,000 entries. Large, scattered result sets will be
-  served by search layers.
-- Views update when created, on **Refresh now**, and when what they are made of changes. Automatic
-  updates as the data changes come next.
+- A view made from a query lists at most 5,000 entries. Large, scattered result sets are what
+  subset views are for.
+- An auto-updating view nobody opens isn't updated: it catches up the next time it is opened.
 
 ---
 

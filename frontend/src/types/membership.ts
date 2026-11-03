@@ -174,7 +174,7 @@ export interface FromMembersRequest {
 }
 
 export type MembershipStatusKind =
-  | 'pending' | 'updating' | 'ok' | 'partial' | 'over_cap' | 'held' | 'failed' | 'paused' | 'source_missing' | 'frozen'
+  | 'pending' | 'updating' | 'ok' | 'partial' | 'over_cap' | 'held' | 'failed' | 'source_missing' | 'frozen'
 
 export interface ReadInView {
   viewId: string
@@ -217,7 +217,7 @@ export interface MemberOps {
 }
 
 export type RefreshOutcome =
-  | 'applied' | 'unchanged' | 'held' | 'over_cap' | 'deferred' | 'busy' | 'fenced' | 'source_missing' | 'failed'
+  | 'applied' | 'unchanged' | 'current' | 'held' | 'over_cap' | 'deferred' | 'busy' | 'fenced' | 'source_missing' | 'failed'
 
 export interface RefreshResult {
   outcome: RefreshOutcome

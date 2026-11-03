@@ -78,8 +78,6 @@ async def mark_pending(session: AsyncSession, row: ViewORM, *, reason: str) -> N
         return
     state.status = "pending"
     state.status_detail = dumps({"reason": reason})
-    state.dirty_since = state.dirty_since or now_iso()
-    state.due_at = now_iso()
 
 
 async def claim(session: AsyncSession, view_id: str, *, owner: str, lease_s: float) -> Optional[int]:
