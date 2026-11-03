@@ -702,6 +702,17 @@ matches as they are then. See
 [Show only some entities and what they reach](/guide/exploring-graph#show-only-some-entities-and-what-they-reach).
 Narrow is a preview your administrator turns on.
 
+### Keeping the matches as a view
+
+On a Context View, **Save as view…** on the results bar keeps the search's
+matches as a view of their own: a *subset view*. It stores the search, not the
+matches, so it is made at once, holds any number of them, and shows what
+matches each time it opens. It is shared like any view. A search that can't be
+kept says why on the button: for example, one that follows lineage more than one
+step. See
+[Subset views: a search's matches as a view](/guide/managing-views#subset-views-a-searchs-matches-as-a-view).
+Subset views are a preview your administrator turns on.
+
 ### Questions from the canvas
 
 Right-click an entity in a Context View to ask about it without building

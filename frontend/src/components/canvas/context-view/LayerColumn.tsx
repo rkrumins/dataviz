@@ -53,6 +53,7 @@ import { InfoTooltip } from '../search/panel/builder-atoms/InfoTooltip'
 import { useViewRowSearch } from '../search/session/ViewSearchSessionContext'
 import { matchesQuick } from '../search/session/quickPredicate'
 import type { AncestorRef } from '@/types/search'
+import { asOfText, cappedText, feedCountSentence } from '@/features/search-views/model'
 
 interface LayerColumnProps {
   layer: ViewLayerConfig
@@ -118,6 +119,22 @@ interface LayerColumnProps {
    *  a feed has no total). */
   feedMore?: { loading: boolean; failed: boolean; remaining?: number | null; types?: string[] }
   onFeedMore?: (layerId: string) => void
+  /** A subset view's layer: what its search has listed, of how many, and as of when.
+   *  Its header counts the matches, not the children loaded rows report. */
+  subsetFeed?: {
+    delivered: number
+    total: number | null
+    status: 'complete' | 'running'
+    countStatus: 'exact' | 'lowerBound'
+    stale: boolean
+    asOf: string | null
+    capped: boolean
+  }
+  /** What an empty layer says, in place of "No assigned entities yet". */
+  emptyText?: string
+  /** A capped subset layer's ways to the rest of its matches. */
+  onSearchInLayer?: (layerId: string) => void
+  onExportLayer?: (layerId: string) => void
   /** Parents the server says have no further pages, with the childCount that
    *  was said against: no load-more row while the parent still has that count,
    *  even when some of its children render in other columns. */
@@ -407,6 +424,10 @@ export const LayerColumn = React.memo(function LayerColumn({
   onResizeLayer,
   anchorMore,
   anchorIssue,
+  subsetFeed,
+  emptyText,
+  onSearchInLayer,
+  onExportLayer,
   isFolded = false,
   spineWidth = SPINE_MAX_WIDTH_PX,
   foldEpoch = '',
@@ -922,8 +943,15 @@ export const LayerColumn = React.memo(function LayerColumn({
     }
     return { loadedCount, layerTotal: loadedCount + unloaded }
   }, [nodes, anchorMore, feedMore, exhaustedParents, loadedChildren, viewEntityTypes])
-  const totalIsFloor = !!feedMore && feedMore.remaining == null  // a feed with more has no server total
-  const totalLabel = `${layerTotal.toLocaleString()}${totalIsFloor ? '+' : ''}`
+  const totalIsFloor = subsetFeed
+    ? subsetFeed.status === 'running' || subsetFeed.countStatus === 'lowerBound'
+    : !!feedMore && feedMore.remaining == null  // a feed with more has no server total
+  const totalLabel = subsetFeed
+    ? `${(subsetFeed.total ?? subsetFeed.delivered).toLocaleString()}${totalIsFloor ? '+' : ''}`
+    : `${layerTotal.toLocaleString()}${totalIsFloor ? '+' : ''}`
+  const subsetAsOf = subsetFeed?.stale ? asOfText(subsetFeed.asOf) : null
+  // A count still rising with nothing known past what is listed reads "4+", not "4 / 4+".
+  const subsetShowsTotal = !!subsetFeed && (!totalIsFloor || (subsetFeed.total ?? 0) > subsetFeed.delivered)
 
   // TRACE HEADER: what this lane contributes to the LINEAGE — participants,
   // not rows. Each root carries the view model's own count of the
@@ -2106,12 +2134,30 @@ export const LayerColumn = React.memo(function LayerColumn({
                     className="flex items-center gap-1 px-2 py-1 rounded-full bg-white/[0.06] dark:bg-white/[0.04] border border-white/[0.08]"
                     title={isTracing
                       ? onLineageLabel
-                      : `${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${loadedCount.toLocaleString()} loaded · ${totalLabel} in this layer (with the children the server reports for loaded rows${totalIsFloor ? '; some types have no count yet' : ''})`}
+                      : subsetFeed
+                        ? `${feedCountSentence(subsetFeed)} in this layer${subsetAsOf ? ` — ${subsetAsOf}, a fresh answer is on its way` : ''}`
+                        : `${visibleCount.toLocaleString()} entit${visibleCount === 1 ? 'y' : 'ies'} in the tree · ${loadedCount.toLocaleString()} loaded · ${totalLabel} in this layer (with the children the server reports for loaded rows${totalIsFloor ? '; some types have no count yet' : ''})`}
                   >
                     {isTracing ? (
                       <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
                         {onLineageCount}
                       </span>
+                    ) : subsetFeed ? (
+                      <>
+                        <span className="text-[10px] font-semibold text-ink tabular-nums" style={{ color: layer.color }}>
+                          {subsetFeed.delivered.toLocaleString()}{subsetShowsTotal ? '' : '+'}
+                        </span>
+                        {subsetShowsTotal && (
+                          <>
+                            <span className="text-[9px] text-ink-muted/60">/</span>
+                            <span className="text-[10px] text-ink-muted/60 tabular-nums">{totalLabel}</span>
+                          </>
+                        )}
+                        {subsetFeed.status === 'running' && (
+                          <LucideIcons.Loader2 className="w-2.5 h-2.5 animate-spin text-ink-muted/60" aria-label="still counting" />
+                        )}
+                        {subsetAsOf && <LucideIcons.Clock3 className="w-2.5 h-2.5 text-ink-muted/60" aria-label={subsetAsOf} />}
+                      </>
                     ) : (
                       <>
                         <span className="text-[10px] font-semibold text-ink" style={{ color: layer.color }}>
@@ -2798,7 +2844,7 @@ export const LayerColumn = React.memo(function LayerColumn({
                       ? 'This column\u2019s entity is gone'
                       : anchorIssue === 'duplicate'
                         ? 'Another column holds this entity'
-                        : isBlankModel ? 'No entities yet' : 'No assigned entities yet'}
+                        : emptyText ?? (isBlankModel ? 'No entities yet' : 'No assigned entities yet')}
                   </p>
                   {/* Plain token, not `/40`: an alpha suffix on a CSS-variable
                       token emits no CSS at all, so the neighbouring hint has been
@@ -3131,6 +3177,29 @@ export const LayerColumn = React.memo(function LayerColumn({
                   Move to end
                 </span>
               )}
+            </div>
+          )}
+
+          {/* A capped subset layer: the canvas lists its first rows; the rest are
+              found by searching in the layer, or exported. */}
+          {subsetFeed?.capped && (
+            <div className="mx-2 mt-1 mb-3 rounded-xl border border-glass-border/70 bg-black/[0.02] dark:bg-white/[0.03] px-3 py-2.5">
+              <p className="text-[11.5px] font-semibold text-ink tabular-nums">{cappedText(subsetFeed.delivered, subsetFeed.total)}</p>
+              <p className="mt-0.5 text-[11px] text-ink-muted leading-snug">The canvas lists the first {subsetFeed.delivered.toLocaleString()}. For the rest:</p>
+              <div className="mt-2 flex flex-wrap gap-1.5">
+                {onSearchInLayer && (
+                  <button type="button" onClick={() => onSearchInLayer(layer.id)}
+                    className="h-7 px-2.5 rounded-lg inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-ink-secondary border border-glass-border hover:text-ink hover:border-accent-lineage/40">
+                    <LucideIcons.Search className="w-3 h-3" /> Search in this layer
+                  </button>
+                )}
+                {onExportLayer && (
+                  <button type="button" onClick={() => onExportLayer(layer.id)}
+                    className="h-7 px-2.5 rounded-lg inline-flex items-center gap-1.5 text-[11.5px] font-semibold text-ink-secondary border border-glass-border hover:text-ink hover:border-accent-lineage/40">
+                    <LucideIcons.Download className="w-3 h-3" /> Export
+                  </button>
+                )}
+              </div>
             </div>
           )}
 

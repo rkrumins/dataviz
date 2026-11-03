@@ -77,6 +77,7 @@ import type {
 } from '@/types/search'
 import type { JsonSchemaDocument } from '@/types/jsonSchema'
 import type { MembershipPlan, MembershipRequest, MembershipResult, PlanRequest } from '@/types/membership'
+import type { ViewFeedPage, ViewFeedRequest } from '@/types/searchView'
 
 // Wire shape from POST /trace/v2 — `upstreamUrns`/`downstreamUrns` arrive as
 // JSON arrays (Pydantic serializes Set as list); we re-hydrate to Set on read.
@@ -565,6 +566,21 @@ export class RemoteGraphProvider implements GraphDataProvider {
     ): Promise<MembershipPlan> {
         // The plan resolves the sources first: budgeted like a trace.
         return await this.fetch<MembershipPlan>('/members/plan', {
+            method: 'POST',
+            body: JSON.stringify(request),
+            extraParams: { viewId },
+            timeoutMs: TIMEOUTS.TRACE_MS,
+            ...(opts?.signal ? { signal: opts.signal } : {}),
+        })
+    }
+
+    async viewFeedPage(
+        viewId: string,
+        request: ViewFeedRequest,
+        opts?: { signal?: AbortSignal },
+    ): Promise<ViewFeedPage> {
+        // A page waits at most its waitMs on the scan, plus hydration: a search's budget.
+        return await this.fetch<ViewFeedPage>('/search/view-feed', {
             method: 'POST',
             body: JSON.stringify(request),
             extraParams: { viewId },

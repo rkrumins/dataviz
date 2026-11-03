@@ -73,7 +73,7 @@
  * different edit forms for the same view.
  */
 import { useId, useState } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { ArrowUpRight, Boxes, Clock, Database, Eye, FileDown, GitPullRequestDraft, Milestone, History, Info, Pencil, Shapes, Share2, X } from 'lucide-react'
 import { ViewUsageBadge } from './ViewUsageBadge'
@@ -96,6 +96,7 @@ import { ExportViewDialog } from '@/features/view-transfer/ExportViewDialog'
 import { ViewVersionsDrawer } from '@/features/view-versions/ViewVersionsDrawer'
 import { TemplateUpdateChip } from '@/components/templates/TemplateUpdateChip'
 import { LiveViewChip } from '@/features/live-views/LiveViewChip'
+import { SearchViewChip, SubsetsChip } from '@/features/search-views/SearchViewChip'
 import { invalidateViewVersions, useViewVersionStatus } from '@/hooks/useViewVersions'
 import { useViewPortability } from '@/features/view-transfer/useViewPortability'
 import { VIEW_QUERY_KEY } from '@/hooks/useViewMetadata'
@@ -107,6 +108,7 @@ import {
 import { workspaceColor } from '@/lib/workspaceColor'
 import { getView, updateView, type View } from '@/services/viewApiService'
 import { useBrand } from '@/store/branding'
+import { useCanvasStore } from '@/store/canvas'
 import { useSchemaStore } from '@/store/schema'
 import { useWorkspacesStore } from '@/store/workspaces'
 
@@ -232,6 +234,7 @@ export function ViewPageHeader({ viewId, workspaceName }: {
     // open for this person?", so a shared/enterprise viewer gets the name as
     // plain text instead of a link into a page that would refuse them.
     const myWorkspaces = useWorkspacesStore(s => s.workspaces)
+    const navigate = useNavigate()
 
     // The canvas store holds a ViewConfiguration — the canvas's own shape, missing
     // visibility/tags/config that the edit form needs. So take the authoritative
@@ -474,6 +477,18 @@ export function ViewPageHeader({ viewId, workspaceName }: {
                         ))}
                         <TemplateUpdateChip view={view} canEdit={canEditDetails} />
                         <LiveViewChip view={view} canEdit={canEditDetails} />
+                        <SearchViewChip
+                            view={view}
+                            canEdit={canEditDetails}
+                            // A subset's search is edited where its matches are looked
+                            // for: its base view, or (a whole-data-source subset) here.
+                            onEditSearch={(status) => {
+                                const at = status.definition.within === 'view' ? status.base?.viewId : view.id
+                                if (at) navigate(`/views/${at}?editSubset=${encodeURIComponent(view.id)}`)
+                            }}
+                            onRefresh={() => useCanvasStore.getState().refreshSubsetFeeds()}
+                        />
+                        <SubsetsChip view={view} />
                     </div>
 
                     {/* 2 — where it lives. A KIND, a PLACE and a SOURCE are

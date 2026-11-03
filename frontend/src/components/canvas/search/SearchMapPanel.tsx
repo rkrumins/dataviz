@@ -72,7 +72,8 @@ import {
 } from '@/store/searchStore'
 import { useLibraryCanEdit, useViewLibraryStore } from '@/store/viewLibraryStore'
 import type { SavedViewQuery } from '@/services/viewLibraryService'
-import type { AncestorRef, Predicate, SearchQuery } from '@/types/search'
+import type { AncestorRef, Predicate, SearchQuery, SearchResultPage } from '@/types/search'
+import { unsaveableReason } from '@/features/search-views/model'
 
 import { AdvancedDrawer, type DrawerTab } from './panel/AdvancedDrawer'
 import { CreateRuleFromQuery } from './panel/CreateRuleModal'
@@ -156,11 +157,18 @@ export interface SearchMapPanelProps {
     /** Narrow the canvas to the matches of the search on screen (the
      *  Context View's Narrow). Omitted by canvases that cannot. */
     onNarrowMatches?: (query: SearchQuery) => void
+    /** Keep the matches of the search on screen as a view of their own (a
+     *  subset view), with the result's first hits for its layers by type.
+     *  Omitted by canvases that cannot. */
+    onSaveMatchesAsView?: (query: SearchQuery, result: SearchResultPage) => void
+    /** The button's label when it updates a subset view's search instead. */
+    saveMatchesLabel?: string
 }
 
 
 export const SearchMapPanel: FC<SearchMapPanelProps> = ({
     open, onClose, viewId, onRevealNode, onOpenNode, onFrameMatches, session, onClear, onNarrowMatches,
+    onSaveMatchesAsView, saveMatchesLabel,
 }) => {
     const [width, setWidth] = useState<number>(() => readPersistedWidth())
     const [dragging, setDragging] = useState(false)
@@ -209,6 +217,8 @@ export const SearchMapPanel: FC<SearchMapPanelProps> = ({
                                     onOpenNode={onOpenNode}
                                     onFrameMatches={onFrameMatches}
                                     onNarrowMatches={onNarrowMatches}
+                                    onSaveMatchesAsView={onSaveMatchesAsView}
+                                    saveMatchesLabel={saveMatchesLabel}
                                 />
                             ) : (
                                 <OwnedSessionPanel
@@ -251,6 +261,8 @@ interface PanelInnerProps {
     onOpenNode?: (urn: string) => void
     onFrameMatches?: (urns: string[]) => void
     onNarrowMatches?: (query: SearchQuery) => void
+    onSaveMatchesAsView?: (query: SearchQuery, result: SearchResultPage) => void
+    saveMatchesLabel?: string
 }
 
 
@@ -266,6 +278,7 @@ function OwnedSessionPanel(props: Omit<PanelInnerProps, 'session' | 'onClear'>) 
 
 function PanelInner({
     onClose, viewId, session, onClear, onRevealNode, onOpenNode, onFrameMatches, onNarrowMatches,
+    onSaveMatchesAsView, saveMatchesLabel,
 }: PanelInnerProps) {
     const {
         view, runState, runPredicate, cancel, stop, resume, run,
@@ -686,6 +699,11 @@ function PanelInner({
             onNarrow={onNarrowMatches && view.kind === 'results'
                 ? () => onNarrowMatches(view.query)
                 : undefined}
+            onSaveAsView={onSaveMatchesAsView && view.kind === 'results'
+                ? () => onSaveMatchesAsView(view.query, view.result)
+                : undefined}
+            saveAsViewLabel={saveMatchesLabel}
+            saveAsViewBlocked={view.kind === 'results' ? unsaveableReason(view.query.predicate) : null}
             unit={view.kind !== 'results' ? 'match'
                 : view.result.paths ? 'path' : view.result.edges ? 'connection' : 'match'}
             viewId={viewId}
