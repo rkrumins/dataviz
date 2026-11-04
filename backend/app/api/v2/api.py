@@ -11,6 +11,7 @@ import os
 from fastapi import APIRouter, Depends
 
 from backend.app.api.v1.capability_gate import require_ds_read_or_view
+from backend.app.api.v1.revision_gate import revision_gate
 
 from .endpoints import graph as graph_v2
 
@@ -30,12 +31,13 @@ def trace_v2_enabled() -> bool:
 # Always register the route definitions so the OpenAPI document reflects
 # them in environments with the flag on; gating happens at the mount in
 # main.py — that way disabled environments serve 404 cleanly without a
-# half-registered v2 surface.
+# half-registered v2 surface. A trace answers from the graph as it is now, so one that names a past
+# revision refuses (``revision_gate``).
 api_v2_router.include_router(
     graph_v2.router,
     prefix="/{ws_id}/graph",
     tags=["graph:v2"],
     # The read gate every v1 graph route has: mounting this router must never
     # open a data source to someone who can't read it, or past a share link.
-    dependencies=[Depends(require_ds_read_or_view)],
+    dependencies=[Depends(require_ds_read_or_view), Depends(revision_gate)],
 )

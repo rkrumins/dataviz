@@ -95,6 +95,7 @@ export const DEFAULT_FEATURES: Record<string, unknown> = {
     placementContractEnabled: false,      // experimental preview — ships OFF
     viewMembershipEnabled: false,         // experimental preview (Focus) — ships OFF
     searchViewsEnabled: false,            // experimental preview (subset views) — ships OFF
+    revisionViewerEnabled: false,         // experimental preview (past revisions) — ships OFF
 }
 
 /** Last served values, cached so a returning visitor's first paint reflects the

@@ -117,6 +117,7 @@ held the graph's publish lock, and how much Postgres and FalkorDB grew.
 | A fork's review (open, preview, diff, merge) | `O(changed)` since its last merged review; merged in the request | §4.1 |
 | Read a fork's `main` | `O(neighborhood)` in its root's store, over a patch set of `O(changed)` since the fork and its root parted (built once per fork head, then extended); past `GRAPHVER_FORK_REWIND_MAX`, composed in Postgres | §4.1 |
 | Read `main` (fresh) | `O(neighborhood)` in FalkorDB | hot path |
+| Read `main` at a past revision K (`?asOfSeq`, a preview) | `O(neighborhood)` in main's store, over a patch set of `O(changed since K)` built from content hashes — no payload, no FalkorDB copy — once per revision and head, then extended as the head moves; about 1.2 KB a changed entity in each web process that reads it | the machinery of a fork's `main` (§4.1, whose measurements apply); past `GRAPHVER_REVISION_REWIND_MAX` (100,000), refused with `409 revision_too_far` |
 | Read `main` (lagging) / draft / as-of | `O(neighborhood)` compose in Postgres | + `O(delta)` overlay for drafts |
 | Incremental projection window | `O(window)` MERGE/DELETE; a page at a time above `GRAPHVER_PROJECTION_PAGED_ABOVE` | idempotent |
 | **Full re-projection** | `O(N + E)` reads; a page of each side at a time above `GRAPHVER_PROJECTION_RECONCILE_STREAMED_ABOVE` | §4.2 |
@@ -181,7 +182,7 @@ not to the projector.) See [04](04-projection-and-cache.md).
 | Feature | State | Consequence |
 |---------|-------|-------------|
 | **Per-provider RAM-budget eviction** | Superseded: the worker no longer starts the loop, and `falkorMaxResident`, `GRAPHVER_FALKOR_MAX_RESIDENT`, `GRAPHVER_FALKOR_BUDGETS` and `GRAPHVER_EVICT_SECS` are not acted on | Graph residency replaces it once a system administrator turns it on: each graph kept by its class and each master's memory ([17 §16](17-forks-and-residency.md#16-turning-residency-on)). Off, FalkorDB caches are unbounded per provider. A later release removes the budget's settings. |
-| **Ephemeral time-travel pool** | `EPHEMERAL_POOL_MAX_GRAPHS`/`EPHEMERAL_TTL_SECS`/`TRACE_LEASE_TTL_SECS` exist with **zero call sites** | Time-travel is served from Postgres (`_state_as_of` / `materialize_state(as_of_seq=…)`), not a dedicated FalkorDB pool. The active read lease uses `LEASE_TTL`, not `TRACE_LEASE_TTL_SECS`. |
+| **Ephemeral time-travel pool** | `EPHEMERAL_POOL_MAX_GRAPHS`/`EPHEMERAL_TTL_SECS`/`TRACE_LEASE_TTL_SECS` exist with **zero call sites** | Time-travel is served from Postgres (`_state_as_of` / `materialize_state(as_of_seq=…)`), not a dedicated FalkorDB pool, and a past revision on the canvas as main's store with what changed since put back (`?asOfSeq`): a copy per revision would cost about 1 GB of FalkorDB memory per million nodes and edges, and minutes to build. The active read lease uses `LEASE_TTL`, not `TRACE_LEASE_TTL_SECS`. |
 
 ## 6. Correctness & operational gaps
 

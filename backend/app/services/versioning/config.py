@@ -299,6 +299,11 @@ MAX_FORKS_PER_GRAPH: int = int(os.getenv("GRAPHVER_MAX_FORKS_PER_GRAPH", "10"))
 # (layered reads) and the fork recommends an update from its parent; at the warning, the
 # parent's changes it has not taken in recommend one too.
 FORK_REWIND_MAX: int = int(os.getenv("GRAPHVER_FORK_REWIND_MAX", "200000"))
+# The canvas reads main as it was at a past revision as main's store with a patch set over it: every
+# entity main changed since then, at about 1.2 KB an entry in the overlay cache below. A revision more
+# than this many entities behind main's head is too far back to draw (409 revision_too_far); its
+# change list, a comparison and an export still reach it.
+REVISION_REWIND_MAX: int = int(os.getenv("GRAPHVER_REVISION_REWIND_MAX", "100000"))
 FORK_REWIND_WARN: int = int(os.getenv("GRAPHVER_FORK_REWIND_WARN", "50000"))
 # Drop the FalkorDB copies earlier releases made of forks (Reaper.fork_copies). Off by default:
 # pods still running such a release read and project them. Turn it on once every pod runs this one.

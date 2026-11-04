@@ -76,6 +76,9 @@ REFUSAL_MESSAGES: dict[str, str] = {
     "searchViewsEnabled":
         "Subset views — a view of a search's matches inside another view — are a preview that "
         "is turned off for this deployment. An administrator can turn them on under Admin → Features.",
+    "revisionViewerEnabled":
+        "Opening the graph as it was at a past revision is a preview that is turned off for this "
+        "deployment. An administrator can turn it on under Admin → Features.",
     "nativeQueryEnabled":
         "Running your own queries on a data source is turned off for this deployment. "
         "An administrator can enable it under Admin → Features.",
@@ -1280,6 +1283,34 @@ SEED_DEFINITIONS: list[dict[str, Any]] = [
             "(DEEP_SEARCH_VIEW_FEED_LANE) paced by the view-feed fair-share bucket."
         ),
         "sort_order": 5,
+        "deprecated": False,
+    },
+    {
+        "key": "revisionViewerEnabled",
+        "name": "Revision history viewer: the graph as it was",
+        "description": (
+            "Open a data source's published graph as it was at any past revision, or at the end "
+            "of a past month, read-only, with what changed since — and compare any two revisions. "
+            "Needs Version control."
+        ),
+        "impact_when_off": (
+            "The graph opens only as it is now: a view's History shows each revision's changes, "
+            "but no past revision can be opened on the canvas or compared with another. Nothing "
+            "is changed or deleted. This is a preview; it ships off until you switch it on."
+        ),
+        "category_id": "experimental",
+        "type": "boolean",
+        "default_value": json.dumps(False),
+        "options": None,
+        "help_url": None,
+        "admin_hint": (
+            "Turn it on once the web app that ships with it is deployed. A past revision is the "
+            "published graph with everything changed since put back: it costs what changed since, "
+            "never the whole graph — about 1.2 KB of memory per changed entity in each API "
+            "process while it is open — and one more than GRAPHVER_REVISION_REWIND_MAX changes "
+            "back (100,000 by default) can be compared and exported but not opened."
+        ),
+        "sort_order": 6,
         "deprecated": False,
     },
 ]

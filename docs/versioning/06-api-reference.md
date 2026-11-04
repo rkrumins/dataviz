@@ -147,6 +147,9 @@ that backs `dataSourceId`.
 | `JobActive` | **409** | `{type: "job_active", jobId, message}` — another import is pending or running on the draft (a second import, or a publish or merge of it); an Update from parent job is pending or running on the fork (a second one); a fork's review is held `merging` by its job (another merge of it, closing it, or changing its reviewers) |
 | `LockBusy` | **503** | `{type: "lock_busy", retryable: true, message}`, `Retry-After` — a graph, draft, lifecycle, move or PR lock was not granted within `GRAPHVER_GRAPH_LOCK_TIMEOUT_MS` (default 5,000; `Retry-After` is that in seconds), or every retry of a write lost to another writer (`Retry-After: 2`). Nothing was written; retry |
 | `ProjectionNotAdopted`, `ProjectionKeyInUse`, `ProjectionKeyInvalid` | **409**, **409**, **422** | `projection_not_adopted`, `graph_key_in_use` and `invalid_target_key` — refusals of the platform's projection move ([§2.14](#214-platform-administration)) |
+| `RevisionTooFar` | **409** | `{type: "revision_too_far", asOfSeq, headSeq, changed, limit, message}` — a graph read named a revision more than `GRAPHVER_REVISION_REWIND_MAX` entities behind `main`'s head ([§4](#asofseq--the-graph-as-it-was-at-a-past-revision)) |
+| `RevisionReadOnly` | **409** | `{type: "revision_read_only", message}` — a write, or a read that plans one, named a past revision |
+| `RevisionUnsupported` | **501** | `{type: "revision_unsupported", reason, message}` — a past revision this read can't answer as the graph was then: `reason` is `route` (it reads the graph as it is now), `fork`, `draft` or `unversioned` |
 | `NotUpToDate` | **409** | `{type: "not_up_to_date", branchId, behindBy, message}` — pull `main` in with `…/rebase`, then retry |
 | `ForkNotUpToDate` | **409** | `{type: "not_up_to_date", reason: "parent_moved", behind, graphId, message}` — a fork's review merges only up to date with its parent: `POST …/graphs/{fork}/update-from-parent`, then retry. `behind` counts the entities the parent changed since (to `GRAPHVER_FORK_REWIND_MAX`) |
 | `ForkUpdateConflicts` | **409** | `{type: "fork_update_conflicts", conflicts: […], seeds: {…}, message}` — Update from parent found fields both the fork and its parent changed: a pull's conflicts, and the fork's own value of each entity to resolve from. Nothing was written; send it again with `resolutions` |
@@ -309,6 +312,7 @@ See [04 · Projection & Cache](/docs/versioning-projection-and-cache) for what t
 | `GET …/diff/entries/{eid}` | `_READ` | One entity's value before and after for the same origin: `{entityId, kind, status, before, after}` — what a row shows when it is opened. Two point reads at any size |
 | `GET …/diff/index` | `_READ` | The whole list as short arrays for the canvas — `[entityId, "n", status, type]` for a node, `[entityId, "e", status, type, source, target]` for an edge; status `a` / `m` / `r` — about 70 bytes a change. Where a node's urn is not its entity id (an imported node's, or `gv:<id>` for one with none) it follows the type, and an edge's ends' urns follow its ends when either differs: the canvas names nodes by urn. `truncated` past `GRAPHVER_CHANGE_LIST_MAX`, with no entries |
 | `GET …/history/months` | `_READ` | `main`'s revisions by month and day in the reader's time zone: `?tz(IANA, default UTC)&originatingViewId` → `{headSeq, tz, months[{month, count, firstSeq, lastSeq, lastAt, days[{day, count, firstSeq, lastSeq}]}]}`, oldest first. A month's `lastSeq` is the graph as it was at that month's end. With `originatingViewId`, what that view's history lists (its publishes and the graph-wide revisions). One grouped read of `main`'s commits, kept per head. **404** for an unknown time zone |
+| `GET …/graphs/{gid}/revisions/{seq}` | `_READ` | One revision of `main` and what opening the graph as it was then takes: `{commit, userNames, headSeq, changedSince, limit, openable, reason}` — its commit as the log lists it; how many entities `main` changed since (counted no further than past `limit`, `GRAPHVER_REVISION_REWIND_MAX`); and whether the canvas can read it (`?asOfSeq`, [§4](#asofseq--the-graph-as-it-was-at-a-past-revision)), with `reason` `too_far` or `fork` when not. The count is kept per revision and head. **404** for a seq that isn't a revision of `main` |
 
 ### 2.7 Commit-log & squash drill-down
 
@@ -535,6 +539,33 @@ once one has landed, it answers **200**, the busy command's result reads
 with `fail_fast: false`. A graph that stops being live after a command landed is that command's
 failure, with its `graph_not_writable` message as `error`. The batch then goes on or stops as
 `fail_fast` says.
+
+### ?asOfSeq — the graph as it was at a past revision
+
+A `/graph` read can name a revision of `main` instead of a draft: `?asOfSeq=K` (a commit seq of
+`main`) reads the published graph **as it was at revision K**, read-only — the revision history
+viewer's canvas. It is a preview: with **`revisionViewerEnabled`** off (as it ships) a request that
+names a revision answers **403 `feature_disabled`**; version control must be on too. It needs read
+access to the data source itself (`workspace:datasource:read`): a view's share link reaches the
+graph as it is now, never its history (**403 `missing_permission`**).
+
+Which routes answer one is decided in one place, `api/v1/revision_gate.py`, a dependency of every
+`/{ws_id}/graph` router (v2's included):
+
+| Routes | With `?asOfSeq=K` |
+|---|---|
+| `GET /nodes`, `/nodes/{urn}`, `/nodes/top-level`, `/nodes/{urn}/children`, `/nodes/{urn}/children-with-edges`, `/nodes/{urn}/ancestors`, `/map/{urn}`, `GET /edges`; `POST /nodes/query`, `/nodes/page`, `/nodes/ancestor-chains`, `/nodes/degree`, `/edges/query`, `/edges/between`, `/edges/beneath`, `/edges/aggregated`, `/canvas/bootstrap`, `/canvas/expand`, `/assignments/compute` | Answered as the graph was at K: main's store with what changed since K put back (see [04 · Projection & Cache](/docs/versioning-projection-and-cache)). Layout, layers and the ontology are today's. A rollup under containment that moved since K says `stale: true`, `staleReason: "revision_structure_moved"` |
+| Every write (`/save`, `/nodes/create`, `/edges` writes, `/changes`, `/commands/batch`, `/edges/aggregated/materialize`, `/resync`, `/bootstrap…`, `/introspection/refresh`, `/vocab-alignment/confirm`) and what plans one (`/nodes/{urn}/delete-impact`, `/allowed-children`, `/allowed-edges`) | **409 `revision_read_only`** |
+| Everything else — search, traces, membership, subset-view feeds, metadata, statistics, introspection, exports — and any route added later until it is listed | **501 `revision_unsupported`** (`reason: "route"`): never answered from the graph as it is now |
+
+A revision more than `GRAPHVER_REVISION_REWIND_MAX` (100,000) entities behind main's head is
+**409 `revision_too_far`** `{asOfSeq, headSeq, changed, limit}`: its change list
+(`…/versioning/graphs/{gid}/diff/*?fromSeq&toSeq`), a comparison and an export as of it
+(`…/exports?asOfSeq`) still reach it. K at main's head reads `main` itself. A seq that isn't a
+revision of `main` is **404**. A fork, a draft (`?branchId` together with `?asOfSeq`) and a data
+source without version control are **501 `revision_unsupported`** with `reason` `fork`, `draft`
+or `unversioned`. Answers are cached per revision (the branch `main@K`), apart from the published
+graph's.
 
 ### Per-branch cache scoping
 

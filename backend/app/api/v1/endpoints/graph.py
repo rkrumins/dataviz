@@ -50,6 +50,7 @@ from backend.common.property_patch import (
 from backend.app.api.v1.versioning_gate import (require_forks_enabled, require_publish_for_main,
                                                 require_versioning_enabled)
 from backend.app.api.v1.feature_gate import require_feature
+from backend.app.api.v1.revision_gate import revision_gate
 from backend.app.services.advanced_search_service import (
     SHARED_LINK_RELATIONSHIPS,
     follows_relationships,
@@ -195,6 +196,8 @@ async def get_context_engine(
     dataSourceId: Optional[str] = Query(None, description="Target a specific data source within a workspace."),
     connectionId: Optional[str] = Query(None, description="Legacy connection ID. Prefer workspace-scoped routes."),
     branchId: Optional[str] = Query(None, description="Opaque draft id (br_...) or 'main'. Omit to target main. Reads and writes both honor it."),
+    # The past revision this read names (?asOfSeq=), held to the routes that read one.
+    asOfSeq: Optional[int] = Depends(revision_gate),
     # Admission FIRST — before the session, deliberately. See above.
     _admission: None = Depends(_admit_graph_request),
     # WS0.2 bulkhead: the ContextEngine holds this session for the whole
@@ -222,6 +225,10 @@ async def get_context_engine(
     A draft the caller can't read is a 404 too, like an unknown branch: the
     viewer is built as ``versioning.viewer_ctx`` builds it (under an API key,
     the key's owner with the key's narrowed claims).
+
+    ``asOfSeq`` reads the published graph as it was at that revision, read-only
+    (``revision_gate`` has held it to the routes that can): an unknown revision
+    is a 404 as well.
     """
     # Its session's connection goes back to the pool while it waits on another
     # request's work (``services/graph_waits``) — as its admission does.
@@ -234,6 +241,7 @@ async def get_context_engine(
             return await ContextEngine.for_workspace(
                 ws_id, provider_manager, session, data_source_id=dataSourceId,
                 actor=(user.id if user else None), branch_id=branchId, viewer=viewer,
+                as_of_seq=asOfSeq,
             )
         if connectionId:
             return await ContextEngine.for_connection(connectionId, provider_manager, session)
@@ -2714,8 +2722,8 @@ async def search_export_download(
     if not ws_id:
         raise HTTPException(status_code=400, detail="workspace_id is required (path param ws_id)")
     engine = await get_context_engine(ws_id=ws_id, dataSourceId=dataSourceId, connectionId=None,
-                                      branchId=branchId, _admission=None, session=session,
-                                      user=user, claims=claims)
+                                      branchId=branchId, asOfSeq=None, _admission=None,
+                                      session=session, user=user, claims=claims)
     svc = AdvancedSearchService(engine, session=session, workspace_id=ws_id,
                                 data_source_id=dataSourceId, branch_id=branchId)
     try:

@@ -9,6 +9,64 @@ limitations** — a changelog that only lists good news is not worth reading.
 
 ---
 
+## [Unreleased] — The published graph as it was at any past revision (API, preview)
+
+The server side of the revision history viewer. A graph read can name a past revision of a data
+source's published graph and get the graph as it was then, read-only. It is a preview behind
+**Revision history viewer: the graph as it was** (`revisionViewerEnabled`), which ships off; the
+screens that open a revision and compare two come next.
+
+### Added
+
+- **`?asOfSeq=K` on the `/{ws_id}/graph` reads.** The nodes, edges, children, ancestors, degrees,
+  rollups, the canvas's batched open and expand, and layer assignment answer as the graph was at
+  revision K.
+  - It costs what changed since K, never the graph: the published graph's store, with the
+    entities changed since put back as they were then, told apart from their content hashes and
+    loaded only for the page a read serves. No copy of the graph is made, in FalkorDB or anywhere.
+  - Opening the same revision again after the graph moved on adds what changed since, rather
+    than starting over.
+  - Its answers are cached per revision, apart from the graph as it is now.
+- **What a revision can't answer, it refuses.**
+  - A write, or a read that plans one, answers 409 `revision_read_only`.
+  - Search, traces, Narrow, subset-view layers, metadata and statistics read the graph as it is
+    now, so they answer 501 `revision_unsupported`. So does any graph route added later, until it
+    is checked and listed.
+  - A rollup under containment that moved since the revision says it may be stale
+    (`staleReason: "revision_structure_moved"`).
+- **A revision too far back is refused, not drawn.** More than `GRAPHVER_REVISION_REWIND_MAX`
+  (100,000) entities changed since: 409 `revision_too_far`, with how many changed. Its change list,
+  a comparison and an export still reach it.
+- **`GET …/versioning/graphs/{gid}/revisions/{seq}`**: one revision's commit and what opening it
+  takes, before anything is drawn — how many entities changed since, and whether it can be opened
+  (`openable`; `reason` `too_far` or `fork`).
+- **The preview switch** `revisionViewerEnabled` (Admin → Features → Experimental). Off, a request
+  that names a revision answers 403 `feature_disabled`, and one that names none is unaffected. It
+  needs Version control, and a reader of the data source itself: a view's share link reaches the
+  graph as it is now, not its history.
+
+### Fixed
+
+- **A draft still open while someone publishes a large change no longer stalls.** Its next read
+  put back everything published since it branched off, loading each changed entity's value twice:
+  after an import of 100,000 entities, 200,000 values, in the web process, for every draft still
+  open. It now tells what changed from content hashes, as a past revision does, and loads only
+  what a read shows.
+
+### Upgrading
+
+- Nothing to do: the switch ships off. Turn it on once the web app that ships with it is deployed.
+  Each revision open in a web process holds about 1.2 KB per entity changed since it, in the same
+  cache as drafts' and forks' reads (`GRAPHVER_OVERLAY_CACHE_ENTRIES`).
+
+### Known limitations
+
+- **Forks and drafts have no past revisions to open yet**, nor do data sources without version
+  control: 501 `revision_unsupported`, with `reason` saying which.
+- **At a past revision, layout, layers, display rules and the ontology are today's.**
+
+---
+
 ## [Unreleased] — A 100,000-change draft opens: every screen lists changes a page at a time
 
 The screens side of change lists. After an import of 100,000 entities into a draft, the canvas,

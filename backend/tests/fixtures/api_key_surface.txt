@@ -122,6 +122,7 @@ GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/imports/{job_id}/preview resour
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/merge-requests resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/publish-jobs/{job_id} resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/pulls resource
+GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/revisions/{seq} resource
 GET /api/v1/{ws_id}/versioning/graphs/{graph_id}/watermark resource
 GET /api/v1/{ws_id}/versioning/merge-requests/{pr_id} resource
 GET /api/v1/{ws_id}/versioning/merge-requests/{pr_id}/diff resource

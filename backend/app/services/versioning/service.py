@@ -6505,9 +6505,10 @@ class GraphVersioningService:
         qualifiedName; ``lazy``), all a reader lists, matches and searches it by — and an edge the
         draft added or changed likewise (id, edgeType, its ends; ``lazy``): a reader loads their
         payloads too for what it serves (``overlay_payloads``, ``kind='edge'``). One it removed
-        comes as its urn or, for an edge, its type and ends. So building the patch set reads no
-        payload, whatever the draft's size; only the rewind of main's post-fork advance (below)
-        carries whole values.
+        comes as its urn or, for an edge, its type and ends. The rewind of main's post-fork advance
+        comes the same way (:meth:`_rewound`): a draft's value of an entity it did not touch is
+        main's at its branch point, which is what a read loads for it. So building the patch set
+        reads no payload, whatever the draft's size or main's advance since it branched.
 
         A fork's ``main`` is read the same way over its root's store: its patch set is
         :meth:`_fork_overlay_delta`'s, and ``extend`` is one an earlier call returned for it."""
@@ -6552,56 +6553,28 @@ class GraphVersioningService:
             # then main at the branch point); the store's as main's head holds them.
             urns = await self._current_urns(s, graph_id, branch_id, _ends(heads), known=heads)
             held_urns = await self._current_urns(s, graph_id, main_id, _ends(held), as_of_seq=head_seq)
-            # For the rewind: each advanced entity's value at the fork point (base) vs main head.
-            rewind_base: Dict[str, Optional[dict]] = {}
-            rewind_head: Dict[str, Optional[dict]] = {}
-            base_urns: Dict[str, str] = {}
-            head_urns: Dict[str, str] = {}
-            if advanced:
-                # A fork's: its parent's at the fork point for what its main has no row of.
-                rewind_base = await self._values_at(s, graph_id, main_id, advanced, base_seq)
-                rewind_head = await self._values_at(s, graph_id, main_id, advanced, head_seq)
-                base_urns = await self._current_urns(s, graph_id, main_id, _payload_ends(rewind_base),
-                                                     as_of_seq=base_seq)
-                head_urns = await self._current_urns(s, graph_id, main_id, _payload_ends(rewind_head),
-                                                     as_of_seq=head_seq)
+            # ── Fork-point rewind ── undo main's post-fork advances so the read reflects main@base_seq
+            # ⊕ the draft (never live main), for each entity main changed after the fork that the
+            # draft did NOT touch: main-ADDED → removed from the read; main-DELETED → restored;
+            # main-MODIFIED → its fork-point value, loaded when a read serves it, and an edge main
+            # moved counted where it ran then (``was``), never twice. Bounded by main's advance,
+            # told from hashes: a 100k publish costs the drafts still open a classification of it,
+            # never its payloads. A fork's: its parent's at the fork point for what its main has no
+            # row of.
+            rewind = (await self._rewound(s, graph_id, main_id, advanced, base_seq, head_seq)
+                      if advanced else None)
         # One dict per entity the draft changed: built in a thread, as its head index was — on a
         # draft's first read this runs in the web process, and 200k of them are a stall of their own.
         nodes_upsert, nodes_modified, nodes_remove, edges_upsert, edges_remove, nodes_new = (
             await asyncio.to_thread(_overlay_patch, heads, node_ids, edge_ids, base_nodes, held,
                                     urns, held_urns))
-        # ── Fork-point rewind ── undo main's post-fork advances so the read reflects main@base_seq
-        # ⊕ the draft (never live main). For each entity main changed after the fork that the draft
-        # did NOT touch: main-ADDED (absent at base) → REMOVE it from the read; main-DELETED (absent
-        # at head) → restore its fork-point value; main-MODIFIED nodes → restore the fork-point value.
-        # Bounded by main's advance.
-        for eid in advanced:
-            bv = rewind_base.get(eid) or None
-            hv = rewind_head.get(eid) or None
-            if bv is None and hv is None:
-                continue
-            if _is_edge_payload(bv if bv is not None else hv):
-                # Edges: main ADDED → hide; main DELETED → restore; main CHANGED it (its properties,
-                # or where it runs) → its fork-point value, loaded when a read serves it, as the
-                # draft's own edit is, and counted where it runs at the fork point rather than
-                # where main's head counts it (``was``): never twice in a rollup or a child count.
-                if bv is None:                             # main ADDED after fork → hide from the read
-                    edges_remove.append(_graphedge_dict(eid, hv, head_urns))
-                elif hv is None:                           # main DELETED after fork → restore fork-point edge
-                    edges_upsert.append(_graphedge_dict(eid, bv, base_urns))
-                elif bv != hv:                             # main CHANGED it after fork → fork-point value
-                    at, now = _graphedge_dict(eid, bv, base_urns), _graphedge_dict(eid, hv, head_urns)
-                    edges_upsert.append({**{k: at[k] for k in ("id", "sourceUrn", "targetUrn",
-                                                               "edgeType")}, "lazy": True,
-                                         "was": {k: now[k] for k in ("sourceUrn", "targetUrn",
-                                                                     "edgeType")}})
-            elif bv is not None:                           # node existed at the fork point → restore its value
-                urn = bv.get("urn") or f"gv:{eid}"
-                nodes_upsert.append(_graphnode_dict(eid, urn, bv))
-                if hv is None:                             # main DELETED it → absent from live main; mark
-                    nodes_new.append(urn)                  # as "new" so the provider surfaces the restore
-            else:                                          # node absent at fork, present on head → main added → hide
-                nodes_remove.append(_graphnode_dict(eid, (hv or {}).get("urn") or f"gv:{eid}", hv))
+        if rewind is not None:
+            nodes_upsert += rewind["nodesUpsert"]
+            nodes_modified += rewind["nodesModified"]
+            nodes_remove += rewind["nodesRemove"]
+            edges_upsert += rewind["edgesUpsert"]
+            edges_remove += rewind["edgesRemove"]
+            nodes_new += rewind["nodesNew"]
         return {"nodesUpsert": nodes_upsert, "nodesModified": nodes_modified, "nodesRemove": nodes_remove,
                 "edgesUpsert": edges_upsert, "edgesRemove": edges_remove, "nodesNew": nodes_new}
 
@@ -6760,6 +6733,82 @@ class GraphVersioningService:
             n = await self._fork_candidates(s, graph, main_id, config.FORK_REWIND_MAX)
         return "postgres" if n > config.FORK_REWIND_MAX else "overlay"
 
+    async def revision_read_plan(self, graph_id: str, as_of_seq: int) -> Dict[str, object]:
+        """What reading ``main`` as it was at revision ``as_of_seq`` takes, read in one session:
+        main's id and head, the revision's commit, and how far behind the head it is — a count of
+        the entities main changed since, capped at ``REVISION_REWIND_MAX`` and kept per
+        (revision, head): history never changes, so neither does the count. ``too_far`` past the
+        cap; ``fork`` when the graph is a fork's, whose past is not opened yet. ``ValueError`` for
+        a seq that is not a revision of main's."""
+        async with self._session() as s:
+            graph = await s.get(GraphORM, graph_id)
+            if graph is None:
+                raise ValueError(f"unknown graph {graph_id}")
+            main_id = await self._main_branch_id(s, graph_id)
+            head = graph.main_head_commit_seq or 0
+            commit_id = None
+            if 0 <= as_of_seq <= head:
+                commit_id = await s.scalar(select(CommitORM.id).where(
+                    CommitORM.graph_id == graph_id, CommitORM.branch_id == main_id,
+                    CommitORM.commit_seq == as_of_seq))
+            if commit_id is None:
+                raise ValueError(f"no revision {as_of_seq} on this graph's main")
+            cap = config.REVISION_REWIND_MAX
+            key = ("rev", graph_id, as_of_seq, head, cap)
+            changed = _FORK_COUNTS.get(key)
+            if changed is None:
+                changed = await self._own_change_count(s, graph_id, main_id, as_of_seq, head, cap)
+                _FORK_COUNTS[key] = changed
+                while len(_FORK_COUNTS) > _FORK_COUNTS_KEPT:
+                    _FORK_COUNTS.popitem(last=False)
+            else:
+                _FORK_COUNTS.move_to_end(key)
+        return {"main_id": main_id, "head": head, "commit_id": commit_id, "changed": changed,
+                "too_far": changed > cap, "fork": bool(graph.fork_parent_graph_id)}
+
+    async def revision_overlay_delta(
+        self, *, graph_id: str, as_of_seq: int, head_seq: int,
+        extend: Optional[Mapping[str, object]] = None,
+    ) -> Dict[str, object]:
+        """``main`` as it was at revision ``as_of_seq``, as a patch set over ``main`` at
+        ``head_seq`` — the store a read goes through: a fork of main at that revision with no
+        changes of its own (:func:`_fork_patch`). For every entity main changed since, its value
+        then against its value at the head, told from content hashes and version-row columns,
+        never a payload; a read loads the values it serves (:meth:`overlay_payloads` with
+        ``as_of_seq``). Bounded by what changed since the revision, never by the graph.
+
+        ``head_seq`` is the head the caller keyed the delta by, so a delta is never built against
+        another head than its key names. ``extend`` — one an earlier call returned for the same
+        revision at an older head — is extended by what main changed since that head instead of
+        built again. Never :meth:`branch_overlay_delta` for ``main``: its head index is all of it."""
+        since = {"asOf": as_of_seq, "head": head_seq}
+        async with self._session() as s:
+            main_id = await self._main_branch_id(s, graph_id)
+            prev = (extend or {}).get("since") or {}
+            if prev.get("asOf") == as_of_seq and isinstance(prev.get("head"), int) \
+                    and prev["head"] <= head_seq:
+                ids = await self._changed_in_window(s, graph_id, main_id, prev["head"], head_seq)
+                window = await self._rewound(s, graph_id, main_id, ids, as_of_seq, head_seq)
+                return {**await asyncio.to_thread(_extended_patch, extend, window, ids), "since": since}
+            ids = await self._changed_in_window(s, graph_id, main_id, as_of_seq, head_seq)
+            patch = await self._rewound(s, graph_id, main_id, ids, as_of_seq, head_seq)
+        return {**patch, "since": since}
+
+    async def _rewound(self, s, graph_id: str, main_id: str, ids, at_seq: int,
+                       head_seq: int) -> Dict[str, list]:
+        """``ids`` as ``main`` held them at ``at_seq``, as a patch set over ``main`` at ``head_seq``
+        (:func:`_fork_patch`): what main made since is removed, what it deleted is back, and what
+        it changed is named — told from content hashes and version-row columns alone. A read loads
+        the values it serves: a revision's at ``at_seq``, a draft's at its branch point."""
+        ours = await self._hashes_at(s, graph_id, main_id, ids, at_seq)
+        theirs = await self._hashes_at(s, graph_id, main_id, ids, head_seq)
+        # Edge ends by urn, as main named them at each side's seq.
+        our_urns = await self._current_urns(s, graph_id, main_id, _ends(ours), as_of_seq=at_seq,
+                                            known=ours)
+        their_urns = await self._current_urns(s, graph_id, main_id, _ends(theirs), as_of_seq=head_seq,
+                                              known=theirs)
+        return await asyncio.to_thread(_fork_patch, ids, ours, theirs, our_urns, their_urns)
+
     async def overlay_version(self, *, graph_id: str, branch_id: str) -> tuple:
         """What a draft's :meth:`branch_overlay_delta` depends on: the draft's head and branch point,
         main's head, and the draft's status. Equal versions give equal deltas, so a reader may
@@ -6777,13 +6826,16 @@ class GraphVersioningService:
                     getattr(graph, "main_head_commit_seq", None), getattr(branch, "status", None))
 
     async def overlay_payloads(self, *, graph_id: str, branch_id: str, entity_ids: Sequence[str],
-                               kind: str = "node") -> List[dict]:
+                               kind: str = "node", as_of_seq: Optional[int] = None) -> List[dict]:
         """The draft's current value of each of ``entity_ids``, reader-shaped — the nodes
         (:meth:`branch_overlay_delta`'s ``nodesModified`` and created skeletons) or, with
-        ``kind='edge'``, the edges a read loads for the page it serves."""
+        ``kind='edge'``, the edges a read loads for the page it serves. ``as_of_seq``: ``main``'s
+        value at that revision (:meth:`revision_overlay_delta`'s patch set)."""
         async with self._session() as s:
-            values = await self._current_values(s, graph_id, branch_id, list(entity_ids))
-            urns = (await self._current_urns(s, graph_id, branch_id, _payload_ends(values))
+            values = await self._current_values(s, graph_id, branch_id, list(entity_ids),
+                                                as_of_seq=as_of_seq)
+            urns = (await self._current_urns(s, graph_id, branch_id, _payload_ends(values),
+                                             as_of_seq=as_of_seq)
                     if kind == "edge" else {})
         if kind == "edge":
             return [_graphedge_dict(eid, v, urns) for eid, v in values.items() if v]

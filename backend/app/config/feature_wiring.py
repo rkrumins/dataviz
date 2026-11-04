@@ -834,6 +834,26 @@ FEATURE_WIRING: dict[str, FeatureWiring] = {
             "keep their definition, and say the preview is off instead of listing matches",
         ),
     ),
+    # Preview: ships OFF, and the read passes default=False — a flag that cannot be read means
+    # no past revisions are opened. Only a read that names one (?asOfSeq=) reads the flag.
+    "revisionViewerEnabled": FeatureWiring(
+        key="revisionViewerEnabled",
+        posture="capability",
+        stage="experimental",
+        server_gates=(
+            "Every /graph read that names a past revision (?asOfSeq=) — the canvas, its nodes, "
+            "edges, children and rollups as they were then",
+        ),
+        # No UI surface yet: the screens that open a past revision and compare two come next,
+        # and read this flag.
+        ui_surfaces=(),
+        still_allowed=(
+            "Every read of the graph as it is now, and every draft",
+            "History: each revision's changes, and Undo and Restore for the people who can publish",
+            "The change lists of drafts, revisions and reviews",
+        ),
+        depends_on=("versioningEnabled",),
+    ),
 }
 
 

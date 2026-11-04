@@ -30,7 +30,7 @@ from contextlib import contextmanager
 from datetime import datetime
 from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Path, Query, Request, Response, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from sqlalchemy.exc import IntegrityError
@@ -1379,6 +1379,20 @@ class HistoryMonth(_ApiModel):
     last_seq: int = Field(alias="lastSeq")
     last_at: Optional[str] = Field(default=None, alias="lastAt")
     days: List[HistoryDay]
+
+
+class RevisionResponse(_ApiModel):
+    """One revision of ``main``, and what opening the graph as it was then takes."""
+    commit: CommitLogEntry
+    user_names: Dict[str, str] = Field(default_factory=dict, alias="userNames")
+    head_seq: int = Field(alias="headSeq")
+    # The entities main changed since, counted no further than past ``limit``.
+    changed_since: int = Field(alias="changedSince")
+    limit: int
+    # Whether the canvas can read the graph as it was then (``?asOfSeq``); if not, why:
+    # ``too_far`` (more than ``limit`` changes since) or ``fork``.
+    openable: bool
+    reason: Optional[str] = None
 
 
 class HistoryMonthsResponse(_ApiModel):
@@ -3232,6 +3246,36 @@ async def get_history_months(
     with _domain_errors():
         return await svc.history_months(graph_id=graph_id, tz=tz,
                                         originating_view_id=originating_view_id)
+
+
+@router.get("/graphs/{graph_id}/revisions/{seq}", response_model=RevisionResponse)
+async def get_revision(
+    ws_id: str, graph_id: str, seq: int = Path(..., ge=0),
+    _user: User = Depends(requires(_READ, workspace="ws_id")),
+    _meta: dict = Depends(graph_in_workspace),
+    viewer: Viewer = Depends(viewer_ctx),
+    svc: GraphVersioningService = Depends(get_versioning_service),
+    session: AsyncSession = Depends(get_db_session),
+):
+    """Revision ``seq`` of ``main`` — its commit — and what opening the graph as it was then
+    takes: how many entities main changed since (counted no further than past
+    ``GRAPHVER_REVISION_REWIND_MAX``) and whether the canvas can read it (``openable``; ``reason``
+    ``too_far`` or ``fork`` when not). The count is kept per revision and head. **404** for a seq
+    that isn't a revision of ``main``."""
+    with _domain_errors():
+        try:
+            plan = await svc.revision_read_plan(graph_id, seq)
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        commits, _more = await svc.commit_log_page(graph_id=graph_id, limit=1, before=seq + 1,
+                                                   viewer=viewer)
+    if not commits or commits[0]["commit_seq"] != seq:
+        raise HTTPException(status_code=404, detail=f"no revision {seq} on this graph's main")
+    reason = "fork" if plan["fork"] else "too_far" if plan["too_far"] else None
+    payload = {"commit": commits[0], "head_seq": plan["head"], "changed_since": plan["changed"],
+               "limit": vconfig.REVISION_REWIND_MAX, "openable": reason is None, "reason": reason}
+    await _attach_user_names(session, commits, wrapper=payload)
+    return payload
 
 
 @router.get("/graphs/{graph_id}/graph/neighbors", response_model=GraphReadResponse)

@@ -22,6 +22,7 @@ from collections import ChainMap, OrderedDict
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Tuple, TypeVar
 
 from backend.app.services.versioning import config as vconfig
+from backend.app.services.versioning.errors import RevisionReadOnly, RevisionUnsupported
 from backend.common.interfaces.provider import resolve_identities_by_query
 from backend.common.models.graph import (
     AggregatedEdgeInfo, AggregatedEdgeResult, ChildrenWithEdgesResult, EdgeQuery, GraphEdge,
@@ -182,6 +183,17 @@ class _OverlayDelta:
     def empty(self) -> bool:
         return not (self.node_upsert or self.node_modified or self.node_remove
                     or self.edge_upsert or self.edge_remove)
+
+    @property
+    def structure_moved(self) -> bool:
+        """Whether the patch set moves something between containers — gives a child a
+        containment link it also takes one from — so a rollup the store grouped by where it holds
+        things is grouped differently on the overlay's state. Computed once per patch set."""
+        hit = self.shared.get("structure-moved")
+        if hit is None:
+            given = {e.target_urn for e in self.cont_added}
+            hit = self.shared["structure-moved"] = any(e.target_urn in given for e in self.cont_removed)
+        return hit
 
     def for_request(self, loader: Callable[[List[str]], Awaitable[List[dict]]],
                     edge_loader: Optional[Callable[[List[str]], Awaitable[List[dict]]]] = None,
@@ -420,10 +432,19 @@ class DraftOverlayProvider:
     the fork's patch set; a draft on the fork overlays this one in turn. ``read_ns``: which version
     of its root's store a fork's reads were built against, carried in its cache keys
     (:meth:`physical_graph_id`). ``version``: its ``overlay_version`` when the caller has read it
-    already (``fork_read_plan``), so the first read does not read it again."""
+    already (``fork_read_plan``), so the first read does not read it again.
+
+    ``as_of_seq``: this is ``main`` as it was at that revision, over ``main``'s store at its head
+    (``base``) with the patch set of everything main changed since
+    (``GraphVersioningService.revision_overlay_delta``); ``version`` is then ``("rev", seq, head)``
+    and required. Read-only, and every read that would answer from the graph as it is now —
+    search, trace — refuses (``RevisionUnsupported``) rather than pass for the past."""
 
     def __init__(self, base, *, svc, graph_id: str, branch_id: str, actor: Optional[str] = None,
-                 fork: bool = False, read_ns: Optional[str] = None, version: Optional[tuple] = None):
+                 fork: bool = False, read_ns: Optional[str] = None, version: Optional[tuple] = None,
+                 as_of_seq: Optional[int] = None):
+        if as_of_seq is not None and (not version or version[0] != "rev"):
+            raise ValueError("a revision's overlay is keyed by its version: ('rev', seq, head)")
         self._base = base
         self._svc = svc
         self._gid = graph_id
@@ -432,10 +453,13 @@ class DraftOverlayProvider:
         self._fork = fork
         self._read_ns = read_ns
         self._version = version
+        self._as_of = as_of_seq
         self._containment_types: List[str] = []
         self._delta: Optional[_OverlayDelta] = None
         # Writes (and as-of-free branch ops) reuse the ordinary branch provider — no duplication.
-        self._writer = VersionedBranchProvider(svc, graph_id=graph_id, branch_id=branch_id, actor=self._actor)
+        # At a revision it reads (ancestor chains) as of then, and refuses to write.
+        self._writer = VersionedBranchProvider(svc, graph_id=graph_id, branch_id=branch_id,
+                                               actor=self._actor, as_of_seq=as_of_seq)
 
     # ---- lifecycle ----------------------------------------------------- #
     def set_containment_edge_types(self, edge_types, from_ontology: bool = False) -> None:
@@ -475,7 +499,8 @@ class DraftOverlayProvider:
         """A fork's reads of its root's FalkorDB store take that shard's admission slots, as the
         root's own do (``_bounded_compute``): its store's key. None for a draft, and over a
         Postgres reader, as before: those reads are Postgres-heavy, not FalkorDB fan-out."""
-        return getattr(self._base, "manager_cache_key", None) if self._fork else None
+        through = self._fork or self._as_of is not None     # main's store, read for the past too
+        return getattr(self._base, "manager_cache_key", None) if through else None
 
     def physical_graph_id(self) -> Optional[str]:
         """The physical graph behind this overlay's reads, which cached answers are keyed by: its
@@ -506,15 +531,23 @@ class DraftOverlayProvider:
             version = self._version or await self._svc.overlay_version(
                 graph_id=self._gid, branch_id=self._branch)
             cset = list(self._containment_types)
-            key = (self._gid, self._branch, version, tuple(cset))
+            # A revision's line is its own: readers of two revisions keep two deltas, not evict each
+            # other's (a delta replaces the older ones of its line).
+            line_branch = self._branch if self._as_of is None else f"{self._branch}@{self._as_of}"
+            key = (self._gid, line_branch, version, tuple(cset))
 
             async def build() -> _OverlayDelta:
-                # A fork's patch set as it was before its root moved, for the service to extend.
+                # A fork's (or a revision's) patch set as it was before its store moved, to extend.
                 prev = _DELTAS.latest(_line(key))
                 if prev is not None:
                     prev = await asyncio.to_thread(_unkept, prev)
-                raw = await self._svc.branch_overlay_delta(
-                    graph_id=self._gid, branch_id=self._branch, **({"extend": prev} if prev else {}))
+                extend = {"extend": prev} if prev else {}
+                if self._as_of is not None:
+                    raw = await self._svc.revision_overlay_delta(
+                        graph_id=self._gid, as_of_seq=self._as_of, head_seq=version[2], **extend)
+                else:
+                    raw = await self._svc.branch_overlay_delta(
+                        graph_id=self._gid, branch_id=self._branch, **extend)
                 # Indexing a large draft's patch set is pure CPU: off the event loop.
                 return await asyncio.to_thread(_OverlayDelta, raw, cset)
 
@@ -522,13 +555,29 @@ class DraftOverlayProvider:
             self._delta = shared.for_request(self._load_modified, self._load_edges)
         return self._delta
 
+    def _at(self) -> Dict[str, Any]:
+        """Where values load from: the branch's head, or main at the revision being read."""
+        return {} if self._as_of is None else {"as_of_seq": self._as_of}
+
     async def _load_modified(self, entity_ids: List[str]) -> List[dict]:
         return await self._svc.overlay_payloads(
-            graph_id=self._gid, branch_id=self._branch, entity_ids=entity_ids)
+            graph_id=self._gid, branch_id=self._branch, entity_ids=entity_ids, **self._at())
 
     async def _load_edges(self, entity_ids: List[str]) -> List[dict]:
         return await self._svc.overlay_payloads(
-            graph_id=self._gid, branch_id=self._branch, entity_ids=entity_ids, kind="edge")
+            graph_id=self._gid, branch_id=self._branch, entity_ids=entity_ids, kind="edge", **self._at())
+
+    def _now_only(self, what: str) -> None:
+        """Refuse, at a past revision, a read that answers from the published graph as it is now:
+        it would pass the present off as the past."""
+        if self._as_of is not None:
+            raise RevisionUnsupported(
+                what, f"{what} reads the published graph as it is now, not as it was at revision "
+                      f"{self._as_of}: go back to Published to use it")
+
+    def _no_writes(self) -> None:
+        if self._as_of is not None:
+            raise RevisionReadOnly()
 
     async def _chains(self, d: _OverlayDelta, kind: str, urns: List[str],
                       on: Any = None) -> Dict[str, List[str]]:
@@ -669,6 +718,7 @@ class DraftOverlayProvider:
         return NodePage(nodes=out, hasMore=has_more, nextOffset=next_offset)
 
     async def search_nodes(self, query: str, limit: int = 10, offset: int = 0) -> List[GraphNode]:
+        self._now_only("Search")
         d = await self._delta_()
         if d.empty:
             return await self._base.search_nodes(query, limit=limit, offset=offset)
@@ -968,6 +1018,16 @@ class DraftOverlayProvider:
         base = await self._base.get_aggregated_edges_between(
             source_urns, target_urns, granularity, containment_edges, lineage_edges, timeout=timeout)
         d = await self._delta_()
+        result = await self._rolled_up(d, base, source_urns, target_urns)
+        if self._as_of is not None and d.structure_moved:
+            # The overlay moves the flows it holds; flows unchanged since the revision stay grouped
+            # where the store holds their ends now. Containers moved since, so say it is not exact.
+            result = result.model_copy(update={"stale": True, "stale_reason": "revision_structure_moved"})
+        return result
+
+    async def _rolled_up(self, d: _OverlayDelta, base: AggregatedEdgeResult,
+                         source_urns: List[str], target_urns: Optional[List[str]]) -> AggregatedEdgeResult:
+        """``base``'s rollups moved by the patch set's own flows."""
         if not d.lineage_changed:
             return base                                      # no lineage delta ⇒ main's rollups verbatim
         # A flow the overlay added goes on where it runs, under its ends' containers on the
@@ -1078,6 +1138,7 @@ class DraftOverlayProvider:
         max_nodes: int, timeout_ms: int, include_containment_edges: bool = False,
         include_inherited_lineage: bool = True,
     ) -> TraceResult:
+        self._now_only("Lineage trace")
         base = await self._base.trace_at_level(
             urn, level, upstream_depth, downstream_depth, lineage_edge_types, containment_edge_types,
             max_nodes, timeout_ms, include_containment_edges=include_containment_edges,
@@ -1091,6 +1152,7 @@ class DraftOverlayProvider:
         include_containment_edges: bool = False,
         drill_anchor: Optional[str] = None,
     ) -> TraceResult:
+        self._now_only("Lineage trace")
         base = await self._base.expand_aggregated(
             source_urn, target_urn, next_level, lineage_edge_types, containment_edge_types,
             max_nodes, timeout_ms, use_raw_edges=use_raw_edges,
@@ -1105,6 +1167,7 @@ class DraftOverlayProvider:
         exclude_urns: Optional[List[str]] = None, after_cursor: Optional[str] = None,
         seed_cursor: Optional[str] = None,
     ) -> TraceClosureResult:
+        self._now_only("Lineage trace")
         # Overlay lineage deltas can make frontier totalCount advisory-stale —
         # acceptable (it is a cue, not a ledger).
         #
@@ -1186,6 +1249,7 @@ class DraftOverlayProvider:
         may legitimately be SHARED with a main-graph search: identical
         query against identical data is identical work.
         """
+        self._now_only("Search")
         return await self._base.deep_search(query, deadline_ms=deadline_ms)
 
     @property
@@ -1195,42 +1259,50 @@ class DraftOverlayProvider:
     async def deep_search_session(self, query, *, context):
         """The uncapped engine, on the base — the draft's edits are not
         searched, for the reason :meth:`deep_search` gives."""
+        self._now_only("Search")
         return await self._base.deep_search_session(query, context=context)
 
     async def deep_search_count(self, query, *, context, advance=True):
         """A rule's total — the base's, like :meth:`deep_search`."""
+        self._now_only("Search")
         return await self._base.deep_search_count(query, context=context, advance=advance)
 
     async def deep_search_membership(self, scope, items, urns, *, context):
         """Rule membership — the base's, like :meth:`deep_search`."""
+        self._now_only("Search")
         return await self._base.deep_search_membership(scope, items, urns, context=context)
 
     async def deep_search_catalog(self, scope, *, context, wait_ms, session_id=None,
                                   refresh=False):
         """The property catalog — the base's, like :meth:`deep_search_session`."""
+        self._now_only("Search")
         return await self._base.deep_search_catalog(scope, context=context, wait_ms=wait_ms,
                                                     session_id=session_id, refresh=refresh)
 
     async def deep_search_export(self, query, *, context, fmt, columns, wait_ms,
                                  session_id=None):
         """An export of every match — the base's, like :meth:`deep_search_session`."""
+        self._now_only("Search")
         return await self._base.deep_search_export(query, context=context, fmt=fmt,
                                                    columns=columns, wait_ms=wait_ms,
                                                    session_id=session_id)
 
     async def deep_search_export_open(self, session_id, *, context):
         """A complete export, to stream — the base's."""
+        self._now_only("Search")
         return await self._base.deep_search_export_open(session_id, context=context)
 
     async def deep_search_ancestor_counts(self, session_id, urns, *, context):
         """Container counts from a search session — the base's, like
         :meth:`deep_search_session`."""
+        self._now_only("Search")
         return await self._base.deep_search_ancestor_counts(session_id, urns, context=context)
 
     async def deep_search_resolve_refs(self, scope, refs, *, context, confined=False,
                                        with_paths=False):
         """Name references, on the base — names a draft adds or changes are
         not searched, like :meth:`deep_search`."""
+        self._now_only("Search")
         return await self._base.deep_search_resolve_refs(
             scope, refs, context=context, confined=confined, with_paths=with_paths)
 
@@ -1238,17 +1310,20 @@ class DraftOverlayProvider:
         """Compile-only path. Delegated for the same reason as
         :meth:`deep_search` — the Cypher explained is the one that would
         actually run, i.e. the base's."""
+        self._now_only("Search")
         return await self._base.deep_search_explain(query)
 
     async def deep_search_discover(self, *, sample_per_label: int = 200):
         """Schema discovery. Delegated like :meth:`deep_search`: what is
         queryable is a property of the base graph's storage."""
+        self._now_only("Search")
         return await self._base.deep_search_discover(
             sample_per_label=sample_per_label,
         )
 
     async def deep_search_values(self, *, key, entity_types=None, q="", limit=25):
         """Value suggestions — the base's values, like :meth:`deep_search`."""
+        self._now_only("Search")
         return await self._base.deep_search_values(
             key=key, entity_types=entity_types, q=q, limit=limit,
         )
@@ -1269,21 +1344,26 @@ class DraftOverlayProvider:
         return [by_urn[u] for u in chain if u in by_urn]
 
     async def create_node(self, node: GraphNode, containment_edge: Optional[GraphEdge] = None) -> bool:
+        self._no_writes()
         self._delta = self._version = None              # the write moves the draft's version
         return await self._writer.create_node(node, containment_edge)
 
     async def create_edge(self, edge: GraphEdge) -> bool:
+        self._no_writes()
         self._delta = self._version = None              # the write moves the draft's version
         return await self._writer.create_edge(edge)
 
     async def update_edge(self, edge_id: str, properties: Dict[str, Any]) -> Optional[GraphEdge]:
+        self._no_writes()
         self._delta = self._version = None              # the write moves the draft's version
         return await self._writer.update_edge(edge_id, properties)
 
     async def delete_edge(self, edge_id: str) -> bool:
+        self._no_writes()
         self._delta = self._version = None              # the write moves the draft's version
         return await self._writer.delete_edge(edge_id)
 
     async def save_custom_graph(self, nodes: List[GraphNode], edges: List[GraphEdge]) -> bool:
+        self._no_writes()
         self._delta = self._version = None              # the write moves the draft's version
         return await self._writer.save_custom_graph(nodes, edges)
