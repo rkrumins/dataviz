@@ -13,6 +13,7 @@ import type { ViewSearchSession } from '@/components/canvas/search/session/useVi
 import type { PanelView } from '@/hooks/useAdvancedSearch'
 import { ProviderOverride } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { usePersonaStore } from '@/store/persona'
 import { useSearchStore } from '@/store/searchStore'
 import type { EdgeHit, Predicate, SearchHit } from '@/types/search'
 import { stubAdvanced, stubSession } from '@/test/stubSearchSession'
@@ -162,6 +163,8 @@ describe('Search Studio', () => {
     })
 
     it('opens a Connections search out to its edges, and adds what the view holds to its From end', async () => {
+        // What the view holds opens on its Types in the Business view.
+        usePersonaStore.setState({ mode: 'business' })
         useSearchStore.getState().commitDraft({ kind: 'edges', sourceWhere: PII })
         const advanced = stubAdvanced({ view: CONNECTIONS })
         const { container } = render(

@@ -10,6 +10,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { ProviderOverride } from '@/providers/GraphProviderContext'
 import { RemoteGraphProvider } from '@/providers/RemoteGraphProvider'
+import { usePersonaStore } from '@/store/persona'
 import { useSearchStore } from '@/store/searchStore'
 import type { Predicate, SearchCountsRequest, SearchResolveRequest } from '@/types/search'
 
@@ -154,6 +155,7 @@ describe('AskBar', () => {
     })
 
     it('offers questions to try in the view\'s own words, plainer for Business', () => {
+        usePersonaStore.setState({ mode: 'business' })
         const { input } = setup(null, 'hero')
         expect(screen.getByRole('button', { name: 'datasets that feed dashboards' })).toBeInTheDocument()
         fireEvent.click(screen.getByRole('button', { name: 'datasets tagged PII' }))
@@ -162,6 +164,7 @@ describe('AskBar', () => {
     })
 
     it('offers questions to try beneath a compact bar when the card asks for them', () => {
+        usePersonaStore.setState({ mode: 'business' })
         setup(null, 'compact', true)
         expect(screen.getByText('Try')).toBeInTheDocument()
         expect(screen.getByRole('button', { name: 'datasets tagged PII' })).toBeInTheDocument()
